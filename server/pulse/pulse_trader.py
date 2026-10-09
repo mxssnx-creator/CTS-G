@@ -133,6 +133,25 @@ MAX_HOLD_S = 21600
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
+
+
+def pace_gap_s(cycle_started: float, now: float, scan_s: float) -> float:
+    """Seconds the trading loop waits after a cycle that began at cycle_started. The next cycle starts at least
+    scan_s after the last one. Ticks do not wake the loop, so the cadence cannot follow the tick rate."""
+    return max(0.0, cycle_started + scan_s - now)
+
+
+def leverage_settings(ov: Dict[str, Any]) -> Tuple[bool, int]:
+    """(max leverage on, pulse leverage) from the overlay. On: each contract runs at its exchange max. Off: the pulse
+    leverage, capped by each contract's max. The pulse leverage is also the fallback when a max is not known."""
+    use_max = bool(ov.get("useMaxLeverage", True))
+    try:
+        pulse = int(ov.get("leverage") or 150)
+    except (TypeError, ValueError):
+        pulse = 150
+    return use_max, max(1, min(500, pulse))
+
+
 KLINE_EVERY = 2.4
 KLINE_WORKERS = 4
 KLINE_LIMIT = 60
@@ -564,6 +583,7 @@ class Pulse:
         self.klines: Dict[str, List[List[float]]] = self.klines_tf["1m"]
         self.kline_ban = 0.0
         self.bar_min: Dict[str, List[float]] = {}
+        self.real_1m: Dict[str, int] = {}   # real 1m bars per symbol; seed_px_bars padding is not counted
         self.px: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
         self.open: Dict[str, Position] = {}
@@ -719,12 +739,19 @@ class Pulse:
         need = max(float(c.min_qty or 0), (float(c.min_usdt or 0) / px) if c.min_usdt else 0.0)
         return self.round_qty_up(c, need)
 
+    def target_leverage(self, mx: int) -> int:
+        """The leverage a contract runs at. Max leverage on: its exchange max. Off: the pulse leverage, capped by the
+        exchange max. With no known max, the pulse leverage."""
+        mx = int(mx or 0)
+        pulse = max(1, int(LEVERAGE or 150))
+        if mx <= 0:
+            return pulse
+        return mx if self.use_max_leverage else max(1, min(mx, pulse))
+
     def leverage_for(self, c: Optional[Contract]) -> int:
         sym = getattr(c, "symbol", "") if c is not None else ""
         mx = int(self.lev_max.get(sym) or getattr(c, "max_lev", 0) or 0)
-        if mx <= 0:
-            mx = int(LEVERAGE or 150)
-        return max(1, mx)
+        return self.target_leverage(mx)
 
     def _persist_lev(self) -> None:
         try:
@@ -764,11 +791,11 @@ class Pulse:
 
     def ensure_max_leverage(self, symbol: str, force: bool = False) -> int:
         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
-        self.use_max_leverage = True
         c = self.contracts.get(symbol)
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
+        tgt = self.target_leverage(mx)
         applied = int(self.lev_map.get(symbol) or 0)
-        if not force and mx > 0 and applied >= mx:
+        if not force and mx > 0 and applied >= tgt:
             if c is not None:
                 c.max_lev = mx
             return applied
@@ -781,14 +808,15 @@ class Pulse:
                 self.lev_max[symbol] = mx
                 if c is not None:
                     c.max_lev = mx
-                if cur_l == mx and cur_s == mx:
-                    self.lev_map[symbol] = mx
+                tgt = self.target_leverage(mx)
+                if cur_l == tgt and cur_s == tgt:
+                    self.lev_map[symbol] = tgt
                     self._persist_lev()
-                    return mx
+                    return tgt
                 # current can be 500 while pair max is 10 — must POST down
             elif applied >= mx > 0 and not force:
                 return applied
-        want = int(mx or 150)
+        want = tgt
         ok_both = True
         for side in ("LONG", "SHORT"):
             r = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
@@ -803,7 +831,7 @@ class Pulse:
                     self.lev_max[symbol] = mx
                     if c is not None:
                         c.max_lev = mx
-                    want = mx
+                    want = self.target_leverage(mx)
                     r2 = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
                     if not self.ok(r2):
                         return applied or cur_l or want
@@ -1536,6 +1564,11 @@ class Pulse:
                 break
         self.kline_ban = max(self.kline_ban, until or (time.time() + 45.0))
 
+    def ready_1m(self, s: str) -> int:
+        """Real 1m bars for a symbol. The padding seed_px_bars adds is not history and never counts toward readiness."""
+        have = len(self.klines_tf.get("1m", {}).get(s) or [])
+        return min(have, int(self.real_1m.get(s, 0)))
+
     def seed_px_bars(self) -> None:
         """Keep 1m OHLC from live WS/mark so all symbols can start without REST klines."""
         minute = int(time.time() // 60)
@@ -1548,6 +1581,7 @@ class Pulse:
                     bars = self.klines_tf["1m"].setdefault(s, [])
                     bars.append([rec[1], rec[2], rec[3], rec[4], 0.0])
                     del bars[:-KLINE_LIMIT]
+                    self.real_1m[s] = min(KLINE_LIMIT, self.real_1m.get(s, 0) + 1)
                 self.bar_min[s] = [float(minute), px, px, px, px]
             else:
                 rec[2] = max(rec[2], px)
@@ -1597,7 +1631,7 @@ class Pulse:
         self.rollup_tf()
         if now < self.kline_ban:
             return
-        ready1 = sum(1 for s in SYMBOLS if len(self.klines_tf.get("1m", {}).get(s) or []) >= 20)
+        ready1 = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
         need1 = len(SYMBOLS) if len(SYMBOLS) <= 48 else max(32, len(SYMBOLS) // 2)
         filling = ready1 < max(1, need1)
         reqs = []
@@ -1626,6 +1660,8 @@ class Pulse:
             if not s or len(bars) < 5:
                 return
             self.klines_tf.setdefault(tf, {})[s] = bars[-KLINE_LIMIT:]
+            if tf == "1m":
+                self.real_1m[s] = len(bars[-KLINE_LIMIT:])
             self.kline_ts_tf.setdefault(tf, {})[s] = now
             stored += 1
 
@@ -3049,11 +3085,8 @@ class Pulse:
             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
         except Exception:
             self.volume_factor = 1.0
-        self.use_max_leverage = True
-        USE_MAX_LEVERAGE = True
-        if ov.get("leverage"):
-            LEVERAGE = int(ov["leverage"])
-        LEVERAGE = max(150, max(self.lev_map.values()) if self.lev_map else 150)
+        self.use_max_leverage, LEVERAGE = leverage_settings(ov)
+        USE_MAX_LEVERAGE = self.use_max_leverage
         if ov.get("maxOpen") is not None:
             MAX_OPEN = int(ov["maxOpen"])
         if ov.get("maxPerGroup") is not None:
@@ -3263,7 +3296,7 @@ class Pulse:
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "leverage": LEVERAGE,
-            "useMaxLeverage": True,
+            "useMaxLeverage": bool(self.use_max_leverage),
             "leverageMap": dict(getattr(self, "lev_map", {})),
             "leverageMax": dict(getattr(self, "lev_max", {})),
             "maxOpen": MAX_OPEN,
@@ -3775,7 +3808,7 @@ class Pulse:
             self._ind_fp = fp_map
         for s in window:
             bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
-            if len(bars) < 20:
+            if self.ready_1m(s) < 20:
                 continue
             last_c = float(bars[-1][3]) if bars else 0.0
             px = self.px.get(s) or 0
@@ -4041,7 +4074,7 @@ class Pulse:
                 foreign.add(f"{sym}:{side}")
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
-            if live_lev and live_lev < int(self.lev_max.get(sym) or self.lev_map.get(sym) or 0):
+            if live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
                 self.ensure_max_leverage(sym, force=True)
             try:
                 liq = float(p.get("liquidationPrice") or p.get("liqPrice") or p.get("avgLiquidationPrice") or 0)
@@ -4205,16 +4238,12 @@ class Pulse:
             log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)
 
     def set_leverage(self) -> None:
-        """Actively keep every desk symbol at its own exchange max leverage."""
-        global LEVERAGE
-        self.use_max_leverage = True
+        """Actively keep every desk symbol at its target leverage (exchange max, or the pulse leverage when max is off)."""
         self._load_lev_file()
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
             return
-        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max]
+        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
         if not need:
-            if self.lev_map:
-                LEVERAGE = max(int(v) for v in self.lev_map.values() if v)
             now = time.time()
             if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
                 self._lev_rot_ts = now
@@ -4223,8 +4252,6 @@ class Pulse:
             return
         for s in need[:12]:
             self.ensure_max_leverage(s, force=s not in self.lev_max)
-        if self.lev_map:
-            LEVERAGE = max(int(v) for v in self.lev_map.values() if v)
 
     def run_self_tests(self) -> None:
         r = self.api.get("/openApi/swap/v3/user/balance")
@@ -4392,7 +4419,7 @@ class Pulse:
             "halted": self.halted,
             "haltReason": self.halt_reason,
             "leverage": LEVERAGE,
-            "useMaxLeverage": True,
+            "useMaxLeverage": bool(self.use_max_leverage),
             "leverageMap": dict(getattr(self, "lev_map", {})),
             "leverageMax": dict(getattr(self, "lev_max", {})),
             "slPct": SL_PCT * 100,
@@ -4826,7 +4853,7 @@ class Pulse:
         snap_ind = self.indications.snapshot()
         self.record_test("qa-ind-on", bool(snap_ind.get("enabled")), f"syms={snap_ind.get('symbols')} lanes={len(snap_ind.get('primary') or [])}")
         have = set(s for s, rows in (getattr(self.indications, "last", {}) or {}).items() if rows)
-        scored = [s for s in SYMBOLS if len((self.klines_tf.get("1m") or {}).get(s) or self.klines.get(s) or []) >= 20]
+        scored = [s for s in SYMBOLS if self.ready_1m(s) >= 20]
         miss = [s for s in scored if s not in have][:4]
         warm_ind = self.cycle < max(80, len(SYMBOLS))
         need = max(8, min(len(scored), max(8, len(scored) // 8))) if scored else 8
@@ -4907,7 +4934,6 @@ class Pulse:
             self.sets.progress.detail = f"fetch {i}/{len(reqs)}"
             self.sets.progress.pct = (i / max(1, len(reqs))) * 8.0
             batch = reqs[i : i + chunk]
-            sd_notify("WATCHDOG=1")
             rows = []
             if hasattr(self.api, "gather_public"):
                 rows = self.api.gather_public(batch, timeout=6.0)
@@ -4933,7 +4959,7 @@ class Pulse:
                         self.sets.ingest_bars(s, bars)
                 if self.sets.due():
                     have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
-                    live = sum(1 for s in SYMBOLS if len(self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []) >= 20)
+                    live = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
                     if live < min(80, max(12, len(SYMBOLS) // 8)):
                         pass
                     elif have < max(4, len(SYMBOLS) // 2):
@@ -4944,7 +4970,6 @@ class Pulse:
                     nbar = [0]
                     def _hist_step():
                         nbar[0] += 1
-                        sd_notify("WATCHDOG=1")
                         time.sleep(0)
                     try:
                         b = self._budget()
@@ -4984,7 +5009,6 @@ class Pulse:
                 if hasattr(self.api, "err"):
                     self.api.err.write("warm", msg=self.last_error[:220])
             self.warm_ms = (time.time() - t0) * 1000
-            sd_notify("WATCHDOG=1")
             remain = float(getattr(self.load.last_budget, "warm_s", 0.32) or 0.32) - (time.time() - t0)
             if remain > 0:
                 time.sleep(remain)
@@ -5153,12 +5177,12 @@ class Pulse:
                 pass
             sd_notify("WATCHDOG=1")
             wall = time.perf_counter() - t0
-            remain = SCAN_S - wall
-            self.cycle_wait_ms = max(0.0, remain) * 1000.0
+            gap = pace_gap_s(t0, time.perf_counter(), SCAN_S)
+            self.cycle_wait_ms = gap * 1000.0
             self.cycle_busy = False
-            if remain > 0:
-                self.wake_ev.clear()
-                self.wake_ev.wait(timeout=remain)
+            # a tick never starts a cycle early: the next one starts at least SCAN_S after this one began
+            if gap > 0:
+                time.sleep(gap)
             elif wall > SCAN_S:
                 self._stats_force = True
 

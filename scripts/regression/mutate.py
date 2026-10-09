@@ -98,16 +98,35 @@ MUTATIONS = [
      "pulse_http.py", '        "svcActive": state == "active",', '        "svcActive": state == "active",\n        "undeclaredKey": 1,'),
     ("contract: a closed row loses the lane that closed it",
      "pulse_http.py", '            q = dict(c)\n            q["connection"] = lane["id"]', "            q = dict(c)"),
+    ("trader: a tick wakes the main loop early",
+     "pulse_trader.py", "            if gap > 0:\n                time.sleep(gap)", "            if gap > 0:\n                self.wake_ev.wait(timeout=gap)"),
+    ("trader: the pacing gap is dropped",
+     "pulse_trader.py", "    return max(0.0, cycle_started + scan_s - now)", "    return 0.0"),
+    ("trader: the overlay's max-leverage toggle is ignored",
+     "pulse_trader.py", '    use_max = bool(ov.get("useMaxLeverage", True))', "    use_max = True"),
+    ("trader: the pulse leverage is never read",
+     "pulse_trader.py", '        pulse = int(ov.get("leverage") or 150)', "        pulse = 150"),
+    ("trader: max off does not cap the pulse leverage by the contract max",
+     "pulse_trader.py", "        return mx if self.use_max_leverage else max(1, min(mx, pulse))", "        return mx if self.use_max_leverage else pulse"),
+    ("trader: padded flat bars count as readiness",
+     "pulse_trader.py", "        return min(have, int(self.real_1m.get(s, 0)))", "        return have"),
+    ("trader: a background thread pings the watchdog",
+     "pulse_trader.py", '                        nbar[0] += 1\n                        time.sleep(0)',
+     '                        nbar[0] += 1\n                        sd_notify("WATCHDOG=1")\n                        time.sleep(0)'),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]
 
 
-def run_once(pulse_dir: str, fail_fast: bool = True) -> subprocess.CompletedProcess:
+def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subprocess.CompletedProcess:
     """One suite run against a pulse copy. A mutant run is serial and stops at its first FAIL: a caught mutant
-    needs only one failing check, and a survivor never fails, so it runs to the end either way."""
+    needs only one failing check, and a survivor never fails, so it runs to the end either way.
+    only: a suite prefix. Behaviour faults in the pinned trader run the trader suite alone, so the verdict comes from
+    the behaviour checks and not from the pin check, which any edit to that file trips."""
     env = dict(os.environ, CTSG_PULSE_DIR=pulse_dir, CTSG_JOBS="1" if fail_fast else (os.environ.get("CTSG_JOBS") or ""))
     args = [sys.executable, "-B", os.path.join(HERE, "run.py")] + (["--fail-fast"] if fail_fast else [])
+    if only:
+        args += ["--only", only]
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=1500)
 
 
@@ -128,7 +147,7 @@ def _mutant(item):
                 return name, "anchor", f"anchor found {count} times, mutation not applied"
             text = text.replace(old, new)
         open(path, "w", encoding="utf-8").write(text)
-        out = run_once(copy, fail_fast=True)
+        out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "")
     fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
     if out.returncode == 0:
         return name, "survived", ""
