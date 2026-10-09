@@ -183,7 +183,54 @@ def timeframe_1m_switch_removes_the_lane_from_the_set_pack():
     return ok, f"lanes on={sorted(seen_on)} with tf1m off={sorted(seen)}"
 
 
+def extra_book_fetches_a_key_once_while_in_flight():
+    """Two callers ask for the same venue key while the first fetch is still running. The venue must see one request,
+    and both callers must get the same result."""
+    import threading
+    import time as _time
+    from indication_engine import ExtraBook
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    class _Http:
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def get(self, url, *a, **k):
+            with self.lock:
+                self.calls += 1
+            self.entered.set()
+            self.release.wait(10)
+            return _Resp()
+
+    book = ExtraBook()
+    book.http = _Http()
+    out = {}
+    first = threading.Thread(target=lambda: out.__setitem__("a", book.get("binance-usdm", "BTC-USDT")), name="first")
+    first.start()
+    if not book.http.entered.wait(10):
+        return False, "the first fetch never started"
+    second = threading.Thread(target=lambda: out.__setitem__("b", book.get("binance-usdm", "BTC-USDT")), name="second")
+    second.start()
+    _time.sleep(0.2)                         # the second caller reaches get() while the first is still in flight
+    book.http.release.set()
+    first.join(10)
+    second.join(10)
+    calls = book.http.calls
+    ok = calls == 1 and not first.is_alive() and not second.is_alive() and "a" in out and "b" in out
+    return ok, f"venue requests for one in-flight key={calls}; both callers returned={'a' in out and 'b' in out}"
+
+
 CHECKS = [
+    ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),

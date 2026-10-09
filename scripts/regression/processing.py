@@ -306,7 +306,134 @@ def live_close_stays_counted_through_a_replay():
     return ok, f"n before={before} after live close={after_live} after replay={after_replay} live_n={st.live_n}"
 
 
+def rebuild_mid_pass_scores_no_partial_tape():
+    """The Set map is rebuilt between two symbols of one replay pass. The pass must not score a Set that appeared
+    during the pass on a tape missing the earlier symbols, and surviving Sets keep their last complete scores."""
+    b = _book(n_syms=3, bars=1200)
+    full_max = b.step_max
+    b.step_max = full_max - 3              # a smaller grid first, so the mid-pass rebuild adds Sets
+    b._rebuild_sets()
+    b.replay_all(now=T0)
+    before = {st.id: st.n for st in b.by_idx}
+    new_grid_ids = set()
+    orig = b._replay_symbol
+    calls = {"n": 0}
+
+    def hook(symbol, hist, now, on_step=None):
+        orig(symbol, hist, now, on_step=on_step)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            b.step_max = full_max
+            b._rebuild_sets()
+            new_grid_ids.update(sid for sid in b.sets if sid not in before)
+
+    b._replay_symbol = hook
+    try:
+        b.replay_all(now=T0)
+    finally:
+        b._replay_symbol = orig
+    new_unscored = all(b.sets[sid].n == 0 and b.sets[sid].gate_n == 0 for sid in new_grid_ids)
+    kept = all(b.sets[sid].n == before[sid] for sid in before if sid in b.sets)
+    ok = bool(new_grid_ids) and new_unscored and kept and b.progress.phase == "partial"
+    return ok, (f"new Sets={len(new_grid_ids)} unscored={new_unscored} survivors kept={kept} "
+                f"phase={b.progress.phase}")
+
+def snapshot_waits_for_a_writer_mid_update():
+    """A live close holds the Set lock while it scores. While the writer is held inside gate_reason, no other thread
+    may get into the gate, because a reader that got in would see the writer's half-updated Set. Observed without
+    timing: the reader either waits on the lock (never reaches the gate while held) or it reaches the gate and is
+    reported. After release the snapshot must complete."""
+    import threading
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    st = b.by_idx[0]
+    orig = b.gate_reason
+    entered = threading.Event()
+    release = threading.Event()
+    reader_inside = threading.Event()
+
+    def gated(s):
+        r = orig(s)
+        if threading.current_thread().name == "writer":
+            if s is st:
+                entered.set()
+                release.wait(10)
+        elif entered.is_set() and not release.is_set():
+            reader_inside.set()
+            release.wait(10)
+        return r
+
+    b.gate_reason = gated
+    out = {}
+    rec = {"set_id": st.id, "t": T0 + 7000, "symbol": "H-USDT", "side": "LONG", "pnl": 0.1, "pnl_pct": 0.001,
+           "hold_s": 60, "reason": "tp", "client_id": "cid-handshake-1"}
+    w = threading.Thread(target=b.on_live_close, args=(rec,), name="writer")
+    w.start()
+    try:
+        if not entered.wait(10):
+            return False, "the writer never reached the gate"
+        r = threading.Thread(target=lambda: out.setdefault("snap", b.snapshot()), name="reader")
+        r.start()
+        got_in = reader_inside.wait(2.0)     # a reader that is not blocked by the lock gets into the gate now
+        release.set()
+        w.join(10)
+        r.join(10)
+    finally:
+        b.gate_reason = orig
+        release.set()
+    finished = not r.is_alive() and "snap" in out
+    ok = (not got_in) and finished
+    return ok, f"reader got into the gate while the writer held the Set={got_in}; snapshot finished after release={finished}"
+
+def departed_symbols_leave_every_cache():
+    """A symbol that leaves the universe drops its replay rows and its signal memo at the next pass."""
+    b = _book(n_syms=3, bars=600)
+    b.replay_all(now=T0)
+    gone = sorted(b.bars)[0]
+    had_rows = gone in b._hist_rows
+    del b.bars[gone]
+    b.replay_all(now=T0)
+    ok = had_rows and gone not in b._hist_rows and gone not in b._sig_cache and len(b._sig_cache) > 0
+    return ok, f"{gone}: rows dropped={gone not in b._hist_rows} memo dropped={gone not in b._sig_cache} memo keys left={len(b._sig_cache)}"
+
+
+def pick_any_has_no_gap_between_lookups():
+    """pick_any decides from one lock acquisition. A probe wraps the public pick(): if the base lookup returns through
+    pick() (the two-call path), the lock is free before the trail lookup, and a thread that enters the book in that
+    gap can change the decision. The check fails when such a gap exists."""
+    import threading
+    from set_engine import SetBook
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    pack = b.by_idx[0].pack
+    seen = {"gap": False, "entered": False}
+    orig_pick = SetBook.pick
+
+    def probed(p, kind="base"):
+        r = orig_pick(b, p, kind)
+        if kind == "base" and not seen["gap"]:
+            seen["gap"] = True
+            done = threading.Event()
+            t = threading.Thread(target=lambda: (b.counts(), done.set()), name="gap-probe")
+            t.start()
+            seen["entered"] = done.wait(2.0)
+            t.join(5)
+        return r
+
+    b.pick = probed
+    try:
+        b.pick_any(pack)
+    finally:
+        del b.pick
+    ok = not (seen["gap"] and seen["entered"])
+    return ok, f"gap between base and trail lookups={seen['gap']} a thread entered it={seen['entered']}"
+
+
 CHECKS = [
+    ("processing.pick-any-no-gap-between-lookups", pick_any_has_no_gap_between_lookups),
+    ("processing.departed-symbols-leave-caches", departed_symbols_leave_every_cache),
+    ("processing.snapshot-waits-for-writer", snapshot_waits_for_a_writer_mid_update),
+    ("processing.rebuild-mid-pass-no-partial-tape", rebuild_mid_pass_scores_no_partial_tape),
     ("processing.live-close-stays-counted-through-replay", live_close_stays_counted_through_a_replay),
     ("processing.live-dedupe-and-history-bounded", live_dedupe_and_history_rows_stay_bounded),
     ("processing.all-sets-processed-full-grid", memo.memoized(every_set_processed_full_grid)),

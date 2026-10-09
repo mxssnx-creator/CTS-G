@@ -710,6 +710,8 @@ class SetBook:
         self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
         # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
         self._lock = threading.RLock()
+        # bumped whenever the Set map is rebuilt; a replay pass that straddles a rebuild must not score a partial tape
+        self._topo_gen = 0
         # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
         self._hist_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
@@ -822,7 +824,8 @@ class SetBook:
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
         }
-        self._rebuild_sets()
+        with self._lock:
+            self._rebuild_sets()
 
     def _step_grid(self) -> List[int]:
         lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
@@ -911,6 +914,7 @@ class SetBook:
         self.sets = next_sets
         self.by_idx = by_idx
         self.progress.sets_total = len(self.sets)
+        self._topo_gen += 1
 
     def adapt_from_live(self, closed: Sequence[Any]) -> None:
         with self._lock:
@@ -1098,6 +1102,8 @@ class SetBook:
                 detail=f"{len(names)} symbols · {len(self.sets)} sets",
             )
             errors: List[str] = []
+            with self._lock:
+                gen0 = self._topo_gen
             sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
@@ -1128,7 +1134,13 @@ class SetBook:
                 live = {s for s, b in self.bars.items() if len(b) >= self.min_bars}
                 for s in [s for s in self._hist_rows if s not in live]:
                     del self._hist_rows[s]          # symbols that left the universe drop their rows
-                for st in self.by_idx:
+                for s in [s for s in self._sig_cache if s not in live]:
+                    del self._sig_cache[s]          # and so do their signal memo entries
+                stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
+                if stale:
+                    aborted = True                  # keep each Set's last complete scores; the next pass redoes them
+                    self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
+                for st in ([] if stale else self.by_idx):
                     try:
                         rows = [
                             r
@@ -1292,9 +1304,10 @@ class SetBook:
         return "invalid", reason
 
     def get_idx(self, idx: int) -> Optional[SetState]:
-        if 0 <= idx < len(self.by_idx):
-            return self.by_idx[idx]
-        return None
+        with self._lock:
+            if 0 <= idx < len(self.by_idx):
+                return self.by_idx[idx]
+            return None
 
     def coord_vars(self, st: SetState) -> Dict[str, Any]:
         return {
@@ -1321,6 +1334,10 @@ class SetBook:
         }
 
     def coverage(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._coverage()
+
+    def _coverage(self) -> Dict[str, Any]:
         trails = [t[0] for t in (self.trails_built or self.trails or [])]
         trail_sets = [st for st in self.by_idx if st.kind == "trail"]
         base_sets = [st for st in self.by_idx if st.kind == "base"]
@@ -1376,9 +1393,12 @@ class SetBook:
     def valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
         """Every valid Set of this pack and kind, best first. No global gate: each Set stands on its own tape."""
         with self._lock:
-            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and self.is_eligible(s)]
-            rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
-            return rows
+            return self._valid_for(pack, kind)
+
+    def _valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and self.is_eligible(s)]
+        rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        return rows
 
     def _pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
         if self.use_historic_gate:
@@ -1396,15 +1416,22 @@ class SetBook:
         return self.pick(pack, kind="trail")
 
     def pick_any(self, pack: str) -> Optional[SetState]:
-        return self.pick(pack, "base") or self.pick(pack, "trail")
+        # one lock acquisition: a Set cannot change between the base and the trail lookup
+        with self._lock:
+            return self._pick(pack, "base") or self._pick(pack, "trail")
 
     def pack_open(self, pack: str) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
-        return bool(self.valid_for(pack, "base") or self.valid_for(pack, "trail"))
+        with self._lock:
+            return bool(self._valid_for(pack, "base") or self._valid_for(pack, "trail"))
 
     def counts(self) -> Dict[str, Any]:
         """Every configured Set is in exactly one of valid, invalid, locked, error. The retired Sets are counted apart."""
+        with self._lock:
+            return self._counts()
+
+    def _counts(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"valid": 0, "invalid": 0, "locked": 0, "error": 0, "reasons": {}}
         for st in self.by_idx:
             state, reason = self.state_of(st)
@@ -1418,8 +1445,13 @@ class SetBook:
         return out
 
     def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._snapshot()
+
+    def _snapshot(self) -> Dict[str, Any]:
         rows = []
         for st in sorted(self.sets.values(), key=lambda s: (not self.is_eligible(s), -s.gate_pf, s.max_dd_s)):
+            state_row, reason_row = self.state_of(st)   # one evaluation: state and reason always agree
             rows.append(
                 {
                     "kind": st.kind,
@@ -1473,8 +1505,8 @@ class SetBook:
                         "liveN": len(st.live),
                     },
                     "active": st.active,
-                    "state": self.state_of(st)[0],
-                    "stateReason": self.state_of(st)[1],
+                    "state": state_row,
+                    "stateReason": reason_row,
                     "evaluatedAt": round(st.evaluated_at, 1),
                     "deactReason": st.deact_reason,
                     "locked": st.locked,

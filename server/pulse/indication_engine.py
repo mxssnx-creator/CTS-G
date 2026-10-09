@@ -6,9 +6,11 @@ lowStopConsensus) plus the indication-stage RSI/MACD/EMA pack.
 """
 from __future__ import annotations
 
+import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -847,6 +849,9 @@ class ExtraBook:
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ind-x")
         self.cache_max = 48
+        # one fetch per key at a time: the owner registers a Future, later callers wait on it instead of refetching
+        self._lock = threading.Lock()
+        self._inflight: Dict[str, Future] = {}
 
     def prune(self, keep: Optional[set] = None, max_n: Optional[int] = None) -> int:
         now = time.time()
@@ -878,9 +883,13 @@ class ExtraBook:
         now = time.time()
         want = []
         for src, sym in pairs:
-            hit = self.cache.get(f"{src}:{sym}")
+            key = f"{src}:{sym}"
+            hit = self.cache.get(key)
             if hit and now - hit[0] < 30:
                 continue
+            with self._lock:
+                if key in self._inflight:
+                    continue
             want.append((src, sym))
         if not want:
             return
@@ -904,16 +913,34 @@ class ExtraBook:
             return hit[1]
         if self.cool.get(source, 0) > time.time():
             return hit[1] if hit else []
+        with self._lock:
+            fut = self._inflight.get(key)
+            owner = fut is None
+            if owner:
+                fut = Future()
+                self._inflight[key] = fut
+        if not owner:
+            # the same key is already being fetched: wait for that result instead of asking the venue again
+            try:
+                return fut.result(timeout=2.5)
+            except Exception:
+                return hit[1] if hit else []
+        result: List[Candle] = hit[1] if hit else []
         try:
             bars = self._fetch(source, symbol)
             self.cache[key] = (time.time(), bars)
             self.fail[source] = 0
-            return bars
+            result = bars
         except Exception:
             self.fail[source] = self.fail.get(source, 0) + 1
             if self.fail[source] >= 3:
                 self.cool[source] = time.time() + 120
-            return hit[1] if hit else []
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            if not fut.done():
+                fut.set_result(result)
+        return result
 
     def _fetch(self, source: str, symbol: str) -> List[Candle]:
         compact = symbol.replace("-", "")
