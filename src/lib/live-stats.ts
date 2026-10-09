@@ -297,6 +297,8 @@ export type LiveStats = {
   connType?: string;
   paused?: boolean;
   volumeFactor?: number;
+  /** The three exchange slots the desk lists; none is connected yet. */
+  slots?: Array<{ type: string; label: string; ready: boolean }>;
   lanes?: Array<{
     type: string;
     id: string;
@@ -341,6 +343,10 @@ export type LiveStats = {
     pfCost?: number;
     /** The lane's own PF block (null when the lane reports none). */
     pfDetail?: LanePfDetail | null;
+    pfUsdt?: number;
+    progressErrors?: number;
+    statsAgeS?: number;
+    svcActive?: boolean;
     /** null when the lane does not report it: never a fake zero. */
     usedMargin?: number | null;
     pnlPct?: number | null;

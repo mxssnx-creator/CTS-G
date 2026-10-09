@@ -94,6 +94,10 @@ MUTATIONS = [
      "set_engine.py", 'if closes and settings.get("typeDirection", True) else None', "if closes else None"),
     ("indications: the Set pack forces the 1m lane on",
      "set_engine.py", '"tf1m": bool(ov.get("tf1m", True)),', '"tf1m": True,'),
+    ("contract: the lane summary sends a key the desk type does not declare",
+     "pulse_http.py", '        "svcActive": state == "active",', '        "svcActive": state == "active",\n        "undeclaredKey": 1,'),
+    ("contract: a closed row loses the lane that closed it",
+     "pulse_http.py", '            q = dict(c)\n            q["connection"] = lane["id"]', "            q = dict(c)"),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]
