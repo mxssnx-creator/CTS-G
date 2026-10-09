@@ -1259,20 +1259,24 @@ class IndicationBook:
         return pick, conf, agree_n
 
     def snapshot(self) -> Dict[str, Any]:
+        # one copy of each live dict: the warm thread writes them while a reader runs, and a dict that changes size
+        # during iteration raises. Everything below reads the copies.
+        last = dict(self.last)
+        evals = dict(self.evals)
         primaries = []
-        for s, rows in self.last.items():
+        for s, rows in last.items():
             p = self.primary(s)
             if p:
                 rec = asdict(p)
                 primaries.append(rec)
         primaries.sort(key=lambda r: r["confidence"], reverse=True)
         types = {}
-        for rows in self.last.values():
+        for rows in last.values():
             for i in rows:
                 types[i.kind] = types.get(i.kind, 0) + 1
-        keys = sorted(self.last.keys())
-        eval_items = list(self.evals.items())
-        last_items = list(self.last.items())
+        keys = sorted(last.keys())
+        eval_items = list(evals.items())
+        last_items = list(last.items())
         if len(eval_items) > 24:
             eval_items = eval_items[:24]
         if len(last_items) > 24:

@@ -117,6 +117,74 @@ def config_save_is_atomic_and_leaves_no_temp_file():
     return ok, f"status={status} written={written} saved={saved} temp_leftovers={leftovers}"
 
 
+def stale_engine_is_not_running():
+    """A stats file that stopped moving (older than 20 s) reports running=false, in the stamp and in the lane
+    summary. A fresh file that says running keeps running=true."""
+    saved = (h.stats_age, h.unit_state, h.load_stats, h.DIR)
+    try:
+        h.unit_state = lambda conn, fresh=False: "active"
+        h.load_stats = lambda conn: {"running": True, "halted": False, "closed": []}
+        with tempfile.TemporaryDirectory() as td:
+            h.DIR = td
+            lane = dict(h.LANES[0])
+            h.stats_age = lambda conn: 60.0
+            stale_stamp = h.stamp_stats({"running": True, "closed": []}, lane["id"])
+            stale_lane = h.lane_summary(lane)
+            h.stats_age = lambda conn: 2.0
+            fresh_stamp = h.stamp_stats({"running": True, "closed": []}, lane["id"])
+            fresh_lane = h.lane_summary(lane)
+    finally:
+        h.stats_age, h.unit_state, h.load_stats, h.DIR = saved
+    ok = (stale_stamp["running"] is False and stale_stamp["stale"] is True
+          and stale_lane["running"] is False and stale_lane["stale"] is True
+          and fresh_stamp["running"] is True and fresh_lane["running"] is True and fresh_lane["stale"] is False)
+    return ok, (f"stale: stamp={stale_stamp['running']} lane={stale_lane['running']}; "
+                f"fresh: stamp={fresh_stamp['running']} lane={fresh_lane['running']}")
+
+
+def overall_view_has_no_fake_zeros():
+    """The overall view computes what the lanes report and says null for the rest. usedMargin is the sum only when
+    both lanes report it; pnlPct comes from the lanes' session PnL over their equity; drawdownPct and maxOpen have no
+    account-wide meaning and are null; symbols is the sorted set of open symbols across both lanes."""
+    saved = (h.stats_age, h.unit_state, h.load_stats, h.DIR)
+
+    def overall(stats_by_conn):
+        h.unit_state = lambda conn, fresh=False: "active"
+        h.stats_age = lambda conn: 1.0
+        h.load_stats = lambda conn: dict(stats_by_conn.get(conn) or {})
+        return h.merge_overall()
+
+    def pos(sym):
+        return {"symbol": sym, "side": "long", "connection": "x"}
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            h.DIR = td
+            both = overall({
+                "bingx-x01": {"running": True, "equity": 100.0, "sessionPnl": 2.0, "usedMargin": 10.0,
+                              "open": [pos("BTC-USDT")], "closed": []},
+                "bingx-x02": {"running": True, "equity": 300.0, "sessionPnl": -1.0, "usedMargin": 5.0,
+                              "open": [pos("ETH-USDT"), pos("BTC-USDT")], "closed": []},
+            })
+            one = overall({
+                "bingx-x01": {"running": True, "equity": 100.0, "sessionPnl": 2.0, "usedMargin": 10.0,
+                              "open": [], "closed": []},
+                "bingx-x02": {"running": True, "equity": 300.0, "sessionPnl": -1.0, "open": [], "closed": []},
+            })
+            empty = overall({})
+    finally:
+        h.stats_age, h.unit_state, h.load_stats, h.DIR = saved
+
+    ok = (both["usedMargin"] == 15.0
+          and both["pnlPct"] == 0.25
+          and both["drawdownPct"] is None and both["maxOpen"] is None
+          and both["symbols"] == ["BTC-USDT", "ETH-USDT"]
+          and one["usedMargin"] is None and one["pnlPct"] == 0.25
+          and empty["usedMargin"] is None and empty["pnlPct"] is None)
+    return ok, (f"both: usedMargin={both['usedMargin']} pnlPct={both['pnlPct']} symbols={both['symbols']}; "
+                f"one-lane: usedMargin={one['usedMargin']}; empty: pnlPct={empty['pnlPct']}")
+
+
 CHECKS = [
     ("sidecar.default-bind-is-loopback", default_bind_is_loopback),
     ("sidecar.control-refused-without-token", control_refused_without_token),
@@ -125,6 +193,8 @@ CHECKS = [
     ("sidecar.token-unset-refuses-every-post", token_unset_refuses_every_post),
     ("sidecar.cors-is-not-a-wildcard", cors_is_not_a_wildcard),
     ("sidecar.config-save-atomic", config_save_is_atomic_and_leaves_no_temp_file),
+    ("sidecar.stale-engine-is-not-running", stale_engine_is_not_running),
+    ("sidecar.overall-view-has-no-fake-zeros", overall_view_has_no_fake_zeros),
 ]
 
 

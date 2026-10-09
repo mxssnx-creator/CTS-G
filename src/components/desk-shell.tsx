@@ -9,6 +9,7 @@ export function DeskShell({
   live,
   mode,
   paused,
+  stale,
   statsType,
   statsId,
 }: {
@@ -16,6 +17,8 @@ export function DeskShell({
   live?: boolean;
   mode?: string;
   paused?: boolean;
+  /** The engine's stats file stopped moving: shown as STALE, never as LIVE. */
+  stale?: boolean;
   statsType?: string;
   statsId?: string;
 }) {
@@ -113,7 +116,7 @@ export function DeskShell({
               <span className={`live-dot size-2.5 rounded-full ${paused ? "bg-warn" : live ? "bg-primary" : "bg-danger"}`} />
               <div className="leading-tight">
                 <div className="font-mono text-xs text-muted">{paused ? "PAUSED" : mode ?? "CONNECTING"}</div>
-                <div className="text-sm font-medium">{paused ? "PAUSE" : live ? "LIVE" : "OFFLINE"}</div>
+                <div className="text-sm font-medium">{paused ? "PAUSE" : stale ? "STALE" : live ? "LIVE" : "OFFLINE"}</div>
               </div>
             </div>
           </div>

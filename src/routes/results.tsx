@@ -46,6 +46,7 @@ function ResultsPage() {
   return (
     <DeskShell
       live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
+      stale={Boolean(stats?.stale)}
       mode={stats?.paused ? "PAUSED" : stats?.mode}
       paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
       statsType={stats?.connType}

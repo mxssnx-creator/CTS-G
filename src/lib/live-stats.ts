@@ -32,6 +32,17 @@ export type LiveOpen = {
   indKind?: string;
 };
 
+export type LanePfDetail = {
+  n?: number;
+  count?: number;
+  avgR?: number;
+  ratio?: number;
+  pf?: number;
+  costPct?: number;
+  netPct?: number;
+  grossPct?: number;
+};
+
 export type LiveClosed = {
   t: number;
   symbol: string;
@@ -47,6 +58,10 @@ export type LiveClosed = {
   pack?: string;
   sl_ratio?: number;
   trail_key?: string;
+  /** Which lane closed it (bingx-x01 or bingx-x02). The overall snapshot sets it; a lane view filters on it. */
+  connection?: string;
+  connType?: string;
+  unit?: string;
 };
 
 export type LiveStats = {
@@ -60,17 +75,17 @@ export type LiveStats = {
   equity: number;
   startEquity: number;
   available: number;
-  usedMargin: number;
+  usedMargin: number | null;
   unrealized: number;
   realizedPnl: number;
   sessionPnl: number;
-  pnlPct: number;
-  drawdownPct: number;
+  pnlPct: number | null;
+  drawdownPct: number | null;
   wins: number;
   losses: number;
   winRate: number;
   openCount: number;
-  maxOpen: number;
+  maxOpen: number | null;
   symbols: string[];
   symbolCount?: number;
   symbolMax?: number;
@@ -324,6 +339,14 @@ export type LiveStats = {
     klinesReady?: number;
     hotMs?: number;
     pfCost?: number;
+    /** The lane's own PF block (null when the lane reports none). */
+    pfDetail?: LanePfDetail | null;
+    /** null when the lane does not report it: never a fake zero. */
+    usedMargin?: number | null;
+    pnlPct?: number | null;
+    drawdownPct?: number | null;
+    maxOpen?: number | null;
+    stale?: boolean;
     controlsOk?: number;
     controlsMissing?: number;
     controlsSecurity?: number;
@@ -547,6 +570,8 @@ export type LiveStats = {
   };
   klinesTf?: Record<string, number>;
   cts?: Record<string, unknown>;
+  /** The engine stats file has not moved for more than 20 s: the engine is not running. */
+  stale?: boolean;
 };
 
 
@@ -614,6 +639,16 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
     openCount: lane.openCount,
     open,
+    // everything the overall snapshot merges across lanes is taken from this lane only
+    closed: (s.closed ?? []).filter((c) => c.connection === lane.id),
+    symbols: Array.from(new Set(open.map((p) => String(p.symbol)))).sort(),
+    usedMargin: lane.usedMargin ?? null,
+    pnlPct: lane.pnlPct ?? null,
+    drawdownPct: lane.drawdownPct ?? null,
+    maxOpen: lane.maxOpen ?? null,
+    pfCost: lane.pfDetail ?? undefined,
+    profitFactor: lane.pf ?? undefined,
+    stale: Boolean(lane.stale),
     symbolCount: lane.symbolCount ?? s.symbolCount,
     scanMs: lane.scanMs ?? s.scanMs,
     lastError: lane.lastError ?? s.lastError,

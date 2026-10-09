@@ -63,6 +63,7 @@ function DeskPage() {
   return (
     <DeskShell
       live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
+      stale={Boolean(stats?.stale)}
       mode={stats?.paused ? "PAUSED" : stats?.mode}
       paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
       statsType={stats?.connType}
@@ -161,7 +162,7 @@ function DeskPage() {
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Open book</h2>
           <span className="font-mono text-xs text-muted">
-            {stats?.openCount ?? 0}/{stats?.maxOpen ? stats.maxOpen : "∞"} · {stats?.regime}
+            {stats?.openCount ?? 0}/{stats?.maxOpen === null ? "—" : stats?.maxOpen ? stats.maxOpen : "∞"} · {stats?.regime}
           </span>
         </div>
         {(stats?.open ?? []).length === 0 ? (

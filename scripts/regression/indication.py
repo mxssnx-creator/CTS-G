@@ -72,6 +72,46 @@ def match_names_kind_and_mode():
     return ok, f"named_short={getattr(short_row, 'direction', None)} named_long={getattr(long_row, 'direction', None)}"
 
 
+def snapshot_survives_concurrent_writes():
+    """The warm thread writes the book while the main thread takes snapshots: no reader may raise."""
+    import threading
+    from indication_engine import Indication, IndicationBook
+
+    def row(sym, kind):
+        return Indication(symbol=sym, direction="long", mode="tf_combined", confidence=0.7, strength=0.5, agreement=0.6,
+                          stop_loss_pct=0.01, take_profit_pct=0.02, reward_risk=2.0, last_price=1.0, sources=["a"],
+                          votes_long=1, votes_short=0, primary=True, t=T0, timeframe="1m", kind=kind)
+
+    book = IndicationBook()
+    errors, reads = [], []
+    stop = threading.Event()
+
+    def writer():
+        k = 0
+        while not stop.is_set() and k < 20000:
+            sym = f"S{k % 50}"
+            book.last[sym] = [row(sym, "state")]
+            book.last.pop(f"S{(k + 25) % 50}", None)
+            k += 1
+
+    def reader():
+        try:
+            for _ in range(1500):
+                book.snapshot()
+                reads.append(1)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+        finally:
+            stop.set()
+
+    w = threading.Thread(target=writer)
+    r = threading.Thread(target=reader)
+    w.start(); r.start()
+    r.join(60); w.join(60)
+    ok = not errors and not r.is_alive() and len(reads) > 0
+    return ok, f"reads={len(reads)} errors={errors[:1]}"
+
+
 def signal_is_deterministic():
     b = SetBook()
     b.load(overlay())
@@ -87,5 +127,6 @@ CHECKS = [
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),
     ("indication.match-names-kind-and-mode", match_names_kind_and_mode),
+    ("indication.snapshot-survives-concurrent-writes", snapshot_survives_concurrent_writes),
     ("indication.signal-deterministic", signal_is_deterministic),
 ]

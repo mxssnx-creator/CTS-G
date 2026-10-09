@@ -182,6 +182,13 @@ def slim_for_ui(st: dict) -> dict:
     return out
 
 
+def _sum_or_none(a: dict, b: dict, key: str):
+    """The sum of a field over two lanes, or None when either lane does not report it."""
+    if key not in a or key not in b or a.get(key) is None or b.get(key) is None:
+        return None
+    return round(float(a[key]) + float(b[key]), 4)
+
+
 def stamp_stats(st: dict, conn: str) -> dict:
     lane = ID_TO_LANE.get(conn) or {}
     out = slim_for_ui(st or {})
@@ -213,7 +220,12 @@ def stamp_stats(st: dict, conn: str) -> dict:
             out["halted"] = True
             out["haltReason"] = "service failed" if state == "failed" else "service inactive"
     elif out["statsAgeS"] > 20:
+        # a frozen engine is not running: the desk must not show LIVE for a stats file that stopped moving
         out["stale"] = True
+        out["running"] = False
+        if not out.get("halted"):
+            out["halted"] = True
+            out["haltReason"] = "stats stale"
     return out
 
 
@@ -388,11 +400,15 @@ def lane_summary(lane: dict) -> dict:
     pc = st.get("pfCost") or {}
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{lane['id']}")) or os.path.exists(STOP_ALL_PATH)
     state = unit_state(lane["id"])
-    running = bool(st.get("running")) and state == "active" and not stopped
-    halted = bool(st.get("halted")) or stopped or state != "active"
+    age = stats_age(lane["id"])
+    stale = age > 20
+    running = bool(st.get("running")) and state == "active" and not stopped and not stale
+    halted = bool(st.get("halted")) or stopped or state != "active" or stale
     halt_reason = st.get("haltReason")
     if stopped:
         halt_reason = "stopped"
+    elif stale and not halt_reason:
+        halt_reason = "stats stale"
     elif state != "active" and not halt_reason:
         halt_reason = "service failed" if state == "failed" else "service inactive"
     return {
@@ -406,9 +422,15 @@ def lane_summary(lane: dict) -> dict:
         "halted": halted,
         "haltReason": halt_reason,
         "svcActive": state == "active",
-        "statsAgeS": round(stats_age(lane["id"]), 1),
+        "statsAgeS": round(age, 1),
+        "stale": stale,
         "equity": st.get("equity") or 0,
         "available": st.get("available") or 0,
+        # None when the lane does not report margin: the overall view must not turn a missing field into 0
+        "usedMargin": st.get("usedMargin"),
+        "pnlPct": st.get("pnlPct"),
+        "drawdownPct": st.get("drawdownPct"),
+        "maxOpen": st.get("maxOpen"),
         "unrealized": st.get("unrealized") or 0,
         "openCount": st.get("openCount") or 0,
         "wins": st.get("wins") or 0,
@@ -441,6 +463,7 @@ def lane_summary(lane: dict) -> dict:
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
         "pfCost": pc.get("pf"),
+        "pfDetail": pc or None,   # the lane's own PF block: a lane view must not inherit the overall one
         "controlsOk": cov.get("ok") or 0,
         "controlsMissing": cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
@@ -516,25 +539,28 @@ def merge_overall() -> dict:
         "equityLive": live.get("equity") or 0,
         "equityVst": vst.get("equity") or 0,
         "available": live.get("available") or 0,
-        "usedMargin": 0,
+        "usedMargin": _sum_or_none(live, vst, "usedMargin"),
         "unrealized": (live.get("unrealized") or 0) + (vst.get("unrealized") or 0),
         "sessionPnl": (live.get("sessionPnl") or 0) + (vst.get("sessionPnl") or 0),
         "sessionPnlLive": live.get("sessionPnl") or 0,
         "sessionPnlVst": vst.get("sessionPnl") or 0,
-        "pnlPct": 0,
-        "drawdownPct": 0,
+        # computed from the lanes, or null when a lane does not report the value (never a fake zero)
+        "pnlPct": round(100.0 * ((live.get("sessionPnl") or 0) + (vst.get("sessionPnl") or 0))
+                        / ((live.get("equity") or 0) + (vst.get("equity") or 0)), 4)
+                  if ((live.get("equity") or 0) + (vst.get("equity") or 0)) > 0 else None,
+        "drawdownPct": None,
         "wins": wins,
         "losses": losses,
         "winRate": round(wr, 1),
         "openCount": len(opens),
-        "maxOpen": 0,
+        "maxOpen": None,   # no account-wide cap: each lane has its own
         "open": opens,
         "closed": closed[:80],
         "tests": tests[-24:],
         "errors": errors,
         "halted": not running_any,
         "paused": any(bool(x.get("paused")) for x in lanes),
-        "symbols": [],
+        "symbols": sorted({str(p.get("symbol")) for p in opens if p.get("symbol")}),
         "now": __import__("time").time(),
         "pfCost": pc,
         "profitFactor": pc.get("pf"),
