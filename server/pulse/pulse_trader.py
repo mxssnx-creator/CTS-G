@@ -234,6 +234,20 @@ def is_transient_api(msg: str) -> bool:
     return any(k in low for k in _TRANSIENT_API)
 
 
+def filled_qty(data: Any, requested: float) -> float:
+    """Quantity an order actually filled. executedQty is the filled amount; a partial fill is smaller than the request.
+    Before any fill is reported, the order's own quantity stands in, then the requested quantity."""
+    d = data if isinstance(data, dict) else {}
+    for key in ("executedQty", "quantity", "origQty"):
+        try:
+            v = float(d.get(key) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    return float(requested or 0)
+
+
 def extract_oid(r: Any) -> str:
     if not isinstance(r, dict):
         return real_oid(r)
@@ -1569,6 +1583,12 @@ class Pulse:
         have = len(self.klines_tf.get("1m", {}).get(s) or [])
         return min(have, int(self.real_1m.get(s, 0)))
 
+    def real_bars_1m(self, s: str) -> List[List[float]]:
+        """The newest real 1m bars: the indicators and the 5m/15m rollups read these, never the seed padding."""
+        n = self.ready_1m(s)
+        bars = self.klines_tf.get("1m", {}).get(s) or []
+        return bars[-n:] if n > 0 else []
+
     def seed_px_bars(self) -> None:
         """Keep 1m OHLC from live WS/mark so all symbols can start without REST klines."""
         minute = int(time.time() // 60)
@@ -1604,7 +1624,8 @@ class Pulse:
         src = self.klines_tf.get("1m") or {}
         for tf, n in (("5m", 5), ("15m", 15)):
             dest = self.klines_tf.setdefault(tf, {})
-            for s, bars in src.items():
+            for s in src:
+                bars = self.real_bars_1m(s)
                 if s in dest and len(dest[s] or []) >= 8:
                     continue
                 if len(bars) < n:
@@ -2723,7 +2744,7 @@ class Pulse:
         data = (r.get("data") or {}).get("order") or r.get("data") or {}
         self.last_error = ""
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
-        filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
+        filled = filled_qty(data, qty)
         attached_sl = extract_oid(data.get("stopLoss") if isinstance(data.get("stopLoss"), dict) else {"data": {"stopLoss": data.get("stopLoss")}}) if isinstance(data, dict) else ""
         attached_tp = extract_oid(data.get("takeProfit") if isinstance(data.get("takeProfit"), dict) else {"data": {"takeProfit": data.get("takeProfit")}}) if isinstance(data, dict) else ""
         ind = None
@@ -3586,7 +3607,7 @@ class Pulse:
                     continue
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
-            filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
+            filled = filled_qty(data, qty)
             oid = str(data.get("orderId") or "")
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
@@ -3693,7 +3714,7 @@ class Pulse:
                 continue
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
-            filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
+            filled = filled_qty(data, qty)
             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
             pos.qty += filled
             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
@@ -3807,7 +3828,7 @@ class Pulse:
             fp_map = {}
             self._ind_fp = fp_map
         for s in window:
-            bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
+            bars = self.real_bars_1m(s)
             if self.ready_1m(s) < 20:
                 continue
             last_c = float(bars[-1][3]) if bars else 0.0
@@ -3818,7 +3839,7 @@ class Pulse:
             fp_map[s] = fp
             d, _, conf = self.score(s)
             bars_by_tf = {
-                tf: (self.klines_tf.get(tf, {}).get(s) or [])
+                tf: (bars if tf == "1m" else (self.klines_tf.get(tf, {}).get(s) or []))
                 for tf in TIMEFRAMES
                 if self.tf_on.get(tf, True)
             }

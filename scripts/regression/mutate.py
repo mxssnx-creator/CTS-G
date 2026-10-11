@@ -130,6 +130,10 @@ MUTATIONS = [
      "indication_engine.py", "            owner = fut is None\n", "            owner = True\n"),
     ("topology: a pass that straddles a rebuild still scores its Sets",
      "set_engine.py", "                for st in ([] if stale else self.by_idx):", "                for st in self.by_idx:"),
+    ("trader: a partial fill is sized from the request, not the executed quantity",
+     "pulse_trader.py", '    for key in ("executedQty", "quantity", "origQty"):', '    for key in ("quantity", "origQty"):'),
+    ("trader: the indicator reads the padded series",
+     "pulse_trader.py", "        return bars[-n:] if n > 0 else []", "        return bars"),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]

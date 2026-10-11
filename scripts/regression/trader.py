@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import tempfile
 import types
 
 from common import PULSE, Skip  # noqa: F401
@@ -141,7 +142,137 @@ def only_the_main_loop_pings_the_watchdog():
     return bool(ok), f"functions that ping the watchdog: {sorted(owners)}"
 
 
+def partial_fill_is_sized_from_the_executed_quantity():
+    """A partial fill reports executedQty below the request. The position is sized from what filled; the request is
+    only the fallback when the venue reports no fill yet."""
+    cases = [
+        ({"executedQty": "0.4", "quantity": "1"}, 1.0, 0.4),
+        ({"quantity": "1"}, 2.0, 1.0),
+        ({"executedQty": "0", "origQty": "5"}, 9.0, 5.0),
+        ({}, 3.0, 3.0),
+    ]
+    got = [pt.filled_qty(d, req) for d, req, _ in cases]
+    ok = all(abs(g - w) < 1e-12 for g, (_, _, w) in zip(got, cases))
+    return ok, f"filled={got} want={[w for _, _, w in cases]}"
+
+
+def indicator_sees_only_real_bars():
+    """seed_px_bars pads a new symbol with flat rows so the indicator can start. The indicator path must get only the
+    real minutes: 20 real bars after 20 real minutes, not the 44 stored rows."""
+    import types
+    p = _bare_pulse()
+    p.px = {}
+    sym = "A-USDT"
+    for k in range(21):                       # the first call opens the minute, each later call rolls one real bar
+        p.px[sym] = 100.0 + k
+        p.seed_px_bars()
+        if sym in p.bar_min:
+            p.bar_min[sym][0] -= 1.0
+    captured = {}
+
+    class _Ind:
+        settings = {"enabled": True, "extraSources": False}
+        extra_cursor = 0
+        last = {}
+
+        def process(self, symbol, bars, **kw):
+            captured["bars"] = list(bars)
+            captured["by_tf"] = dict(kw.get("bars_by_tf") or {})
+
+    p.indications = _Ind()
+    p.load = types.SimpleNamespace(cursor_ind=0,
+                                   scan_window=lambda syms, open_syms, chunk, cursor, ranked: ([sym], 0))
+    p._budget = lambda: types.SimpleNamespace(scan_chunk=10, extra_n=0, extra_sources=False)
+    p.open = {}
+    p.universe = []
+    p.tf_on = {}
+    p.score = lambda s: (0, 0.0, 0.0)
+    p.process_indications()
+    stored = len(p.klines_tf["1m"][sym])
+    got = len(captured.get("bars") or [])
+    tf1 = len((captured.get("by_tf") or {}).get("1m") or [])
+    ok = p.ready_1m(sym) == 20 and got == 20 and tf1 == 20 and stored == 44
+    return ok, f"ready={p.ready_1m(sym)} indicator bars={got} 1m bars={tf1} stored={stored}"
+
+
+class _StubExchange:
+    """The venue's answers for one entry: the order reports a partial fill; the protective batch is accepted.
+    Nothing leaves the process."""
+
+    path_cd: dict = {}
+
+    def __init__(self, executed: str = "0.4", requested: str = "1") -> None:
+        self.posts: list = []
+        self.batches: list = []
+        self.executed = executed
+        self.requested = requested
+
+    def get(self, path, extra=None):
+        return {"code": 0, "data": {"balance": {"equity": "100", "availableMargin": "50"}, "maxLongLeverage": "150",
+                                    "maxShortLeverage": "150", "longLeverage": "150", "shortLeverage": "150"}}
+
+    def post(self, path, body):
+        self.posts.append((path, body))
+        if path.endswith("/trade/order"):
+            return {"code": 0, "data": {"order": {"orderId": "1", "avgPrice": "100", "executedQty": self.executed,
+                                                  "quantity": self.requested,
+                                                  "clientOrderID": body.get("clientOrderID", "")}}}
+        return {"code": 0, "data": {}}
+
+    def batch_place(self, orders):
+        self.batches.append(list(orders))
+        return {"code": 0, "data": {"orders": [{"orderId": "9", "type": o.get("type"),
+                                                "clientOrderID": o.get("clientOrderID", ""), "code": 0}
+                                               for o in orders]}}
+
+    def public(self, path, extra=None):
+        return {"code": 0, "data": []}
+
+    def delete(self, path, extra=None):
+        return {"code": 0}
+
+    def gather_public(self, *a, **k):
+        return []
+
+
+def entry_lifecycle_with_a_stub_exchange():
+    """One entry through place() against the stub venue, which reports a partial fill. The order is posted at the
+    requested size, the position is recorded at the executed size, and one protective batch goes out. The state files
+    are redirected to a temporary directory, and the settings dump and contract source are replaced."""
+    sym = "BTC-USDT"
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings)
+    orders: list = []
+    pos = None
+    api = None
+    with tempfile.TemporaryDirectory() as td:
+        pt.BLOCK_PATH = os.path.join(td, "block.json")
+        pt.LEV_PATH = os.path.join(td, "lev.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            api = _StubExchange(executed="0.4", requested="1")
+            contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0,
+                                          max_lev=150)}
+            p = pt.Pulse(api, contracts)
+            p.boot_ts = 0.0
+            p.px[sym] = 100.0
+            p.available = 50.0
+            p.halted = False
+            p.entry_sense = lambda *a, **k: None
+            p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+            pos = p.open.get(sym)
+            orders = [b for path, b in api.posts if path.endswith("/trade/order")]
+            ok = (len(orders) == 1 and pos is not None and abs(float(pos.qty) - 0.4) < 1e-12
+                  and len(api.batches) == 1 and len(api.batches[0]) == 2)
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings = saved
+    return ok, (f"entry orders={len(orders)} position qty={getattr(pos, 'qty', None)} "
+                f"protective batches={len(api.batches) if api else 0}")
+
+
 CHECKS = [
+    ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),
+    ("trader.partial-fill-sized-from-executed", partial_fill_is_sized_from_the_executed_quantity),
+    ("trader.indicator-sees-only-real-bars", indicator_sees_only_real_bars),
     ("trader.cycles-start-at-least-scan-apart", cycles_start_at_least_scan_apart),
     ("trader.slow-cycle-is-not-padded", slow_cycle_is_not_padded),
     ("trader.main-loop-does-not-wait-on-ticks", main_loop_does_not_wait_on_the_tick_event),
