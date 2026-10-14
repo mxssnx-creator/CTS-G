@@ -245,9 +245,14 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
   return Math.round(Math.min(gmax, Math.max(gmin, g)) * 100) / 100;
 }
 
+export type SizingMode = "balance" | "fixed";
+
 export type PulseOverlay = import("./system-settings").SystemSettings & {
   targetNotional: number;
   volumeFactor: number;
+  /** "balance": one order = targetNotionalPct % of the system's equity × volumeFactor; "fixed": targetNotional × volumeFactor */
+  sizingMode: SizingMode;
+  targetNotionalPct: number;
   orderSizing: "minQty" | "factor";
   htfEnabled: boolean;
   htfKinds: string[];
@@ -544,6 +549,9 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
+  volumeFactor: 1,
+  sizingMode: "balance",
+  targetNotionalPct: 1,
   volumeFactor: 0.1,
   orderSizing: "minQty",
   htfEnabled: false,
@@ -880,6 +888,8 @@ export type CtsSettings = {
   dcaPfWindow?: number;
   dcaDeactN?: number;
   volumeFactor?: number;
+  sizingMode?: string;
+  targetNotionalPct?: number;
   orderSizing?: string;
   htfEnabled?: boolean;
   htfKinds?: string[];
@@ -1130,6 +1140,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
+    volumeFactor: num(cts.volumeFactor, 1),
+    sizingMode: (live?.sizingMode ?? cts.sizingMode) === "fixed" ? "fixed" : "balance",
+    targetNotionalPct: Math.max(0.05, Math.min(20, num(live?.targetNotionalPct ?? cts.targetNotionalPct, 1))),
+    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     volumeFactor: num(cts.volumeFactor, 0.1),
     orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
     htfEnabled: bool(cts.htfEnabled, false),
@@ -1694,4 +1708,20 @@ export function loadLocalOverlay(conn = ""): Partial<PulseOverlay> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * One order's target notional before the per-symbol volatility and Set ratio adjustments, exactly as the engine
+ * sizes it (pulse_trader.base_notional): balance mode uses the system's own equity reported by the engine.
+ */
+export function effectiveNotional(
+  overlay: Pick<PulseOverlay, "sizingMode" | "targetNotionalPct" | "targetNotional" | "volumeFactor">,
+  sizingEquity?: number | null,
+): { value: number; source: "equity" | "fixed" } {
+  const vf = overlay.volumeFactor || 1;
+  const eq = Number(sizingEquity);
+  if (overlay.sizingMode !== "fixed" && Number.isFinite(eq) && eq > 0) {
+    return { value: Math.max(0.2, ((eq * overlay.targetNotionalPct) / 100) * vf), source: "equity" };
+  }
+  return { value: Math.max(0.2, overlay.targetNotional * vf), source: "fixed" };
 }

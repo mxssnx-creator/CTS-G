@@ -4,9 +4,17 @@ sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'server/pulse'
 from pulse_trader import Pulse
 
 class SystemDrawdown(unittest.TestCase):
+    def test_unconfirmed_local_closes_are_not_money(self):
+        p=Pulse.__new__(Pulse);p.start_eq=100;p.open={}
+        p.strategy_closes=lambda:[SimpleNamespace(t=0,pnl=5,qty=1,entry=100,exchange_confirmed=True),
+                                  SimpleNamespace(t=1,pnl=-40,qty=1,entry=100,exchange_confirmed=False)]
+        p.system_open_upnl=lambda:0
+        act=p.system_activity()
+        self.assertEqual((act['n'],act['realized'],act['loss']),(1,5,0))
+
     def measure(self,pnls,capital=100,upnl=0):
         p=Pulse.__new__(Pulse);p.start_eq=capital;p.open={}
-        p.strategy_closes=lambda:[SimpleNamespace(t=i,pnl=x,qty=1,entry=100) for i,x in enumerate(pnls)]
+        p.strategy_closes=lambda:[SimpleNamespace(t=i,pnl=x,qty=1,entry=100,exchange_confirmed=True) for i,x in enumerate(pnls)]
         p.system_open_upnl=lambda:upnl
         return p.system_activity()
 

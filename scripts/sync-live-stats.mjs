@@ -50,6 +50,18 @@ function applyCtsLane(lane, progression, engineStates, engRow) {
   return lane;
 }
 
+/** The kept snapshot's balances, PnL and positions are from the last sidecar read, not current. */
+function markStale(s, reason) {
+  const since = s.staleSince || s.now || Math.floor(Date.now() / 1000);
+  s.stale = true;
+  s.staleReason = reason;
+  s.staleSince = since;
+  for (const l of s.lanes || []) {
+    l.stale = true;
+    l.staleReason = reason;
+  }
+}
+
 async function fromCts() {
   const fs = await import("node:fs/promises");
   const s = JSON.parse(await fs.readFile(DEST, "utf8"));
@@ -88,7 +100,10 @@ async function fromCts() {
     s.progressReady = liveLane.progressReady;
     s.cycle = liveLane.cycle;
   }
-  s.now = Date.now();
+  // Engine status comes from CTS; every money and position field is still the
+  // last sidecar snapshot, so the desk must show it as not current. `now`
+  // keeps the snapshot's own epoch-seconds time.
+  markStale(s, "pulse sidecar unreachable; balances and positions are from the last snapshot");
   await writeSnapshot(JSON.stringify(s));
 }
 
@@ -115,6 +130,7 @@ async function markOffline(reason) {
       l.progressPhase = "offline";
       l.progressReady = false;
     }
+    markStale(s, err);
     await writeSnapshot(JSON.stringify(s));
   } catch {
     /* keep last snapshot if we cannot rewrite it */

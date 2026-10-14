@@ -38,6 +38,7 @@ import {
   isUnlimitedSymbolBook,
   DEFAULT_MIN_STEP,
   SL_MIN_PCT,
+  effectiveNotional,
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
@@ -848,6 +849,40 @@ function SettingsPage() {
                     />
                     <Slider
                       label="Volume factor"
+                      value={overlay.volumeFactor ?? 1}
+                      min={0.1}
+                      max={5}
+                      step={0.1}
+                      hint="Scales every order's notional. 1 = base. Independent per Live / VST."
+                      onChange={(v) => patch("volumeFactor", v)}
+                    />
+                    <Toggle
+                      label="Size from account balance"
+                      hint="On: one order = % of this connection's system equity × volume factor · Off: fixed USDT × volume factor"
+                      on={overlay.sizingMode !== "fixed"}
+                      onChange={(v) => patch("sizingMode", v ? "balance" : "fixed")}
+                    />
+                    {overlay.sizingMode !== "fixed" ? (
+                      <Num
+                        label="Order notional · % of equity"
+                        value={overlay.targetNotionalPct}
+                        min={0.05}
+                        max={20}
+                        step={0.05}
+                        unit="%"
+                        hint="Before volume factor, volatility and Set ratio"
+                        onChange={(v) => patch("targetNotionalPct", Math.max(0.05, Math.min(20, v)))}
+                      />
+                    ) : null}
+                    <KV k="Sizing equity" v={stats?.sizingEquity ? `${fmtNum(stats.sizingEquity, 2)} ${stats?.unit ?? ""}`.trim() : "— (waiting for balance)"} />
+                    <KV
+                      k="Effective notional"
+                      v={(() => {
+                        const e = effectiveNotional(overlay, stats?.sizingEquity);
+                        const engine = stats?.effectiveNotional != null ? ` · engine ${stats.effectiveNotional.toFixed(2)}` : "";
+                        return `${e.value.toFixed(2)} · ${e.source === "equity" ? "from equity" : "fixed"}${engine}`;
+                      })()}
+                    />
                       value={overlay.volumeFactor || 0.1}
                       min={0.05}
                       max={10}
@@ -2614,7 +2649,7 @@ function SettingsPage() {
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
-                  label="Pulse notional USDT"
+                  label={overlay.sizingMode === "fixed" ? "Pulse notional USDT" : "Fallback notional USDT (before the first balance)"}
                   value={overlay.targetNotional}
                   min={1}
                   max={20}
@@ -2623,6 +2658,10 @@ function SettingsPage() {
                 />
                 <KV
                   k="Effective notional"
+                  v={(() => {
+                    const e = effectiveNotional(overlay, stats?.sizingEquity);
+                    return `${e.value.toFixed(2)} · ${e.source === "equity" ? `${overlay.targetNotionalPct}% of equity` : "fixed"}`;
+                  })()}
                   v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)}
                 />
                 <Toggle

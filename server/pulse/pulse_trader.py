@@ -361,6 +361,12 @@ def rank_self_test() -> Tuple[bool, str]:
     return ok, f"got={got}"
 
 TARGET_NOTIONAL = 2.15
+# Order sizing. "balance": one order's target notional is TARGET_NOTIONAL_PCT
+# percent of the system's own equity (the wallet minus foreign positions),
+# times volumeFactor; TARGET_NOTIONAL is only the fallback before the first
+# balance read. "fixed": TARGET_NOTIONAL USDT times volumeFactor.
+SIZING_MODE = "balance"
+TARGET_NOTIONAL_PCT = 1.0
 # Shared with connection_profile and the desk; a missing or 0 factor means this.
 VOLUME_FACTOR_DEFAULT = 0.1
 LEVERAGE = 150
@@ -2582,7 +2588,36 @@ class Pulse:
             vf *= float(self.coord.size_mult(open_n))
         except Exception:
             pass
-        return max(0.2, float(TARGET_NOTIONAL) * vf * ratio_f)
+        return max(0.2, self.base_notional() * vf * ratio_f)
+
+    def sizing_equity(self) -> float:
+        """Real account capital the system may size from: the BingX wallet minus foreign positions.
+
+        Read from the exchange balance, so actual fees and funding are in it and
+        model PnL or simulated lanes are not. A balance older than three reads
+        (or none yet) returns 0, and sizing falls back to the fixed target.
+        """
+        if time.time() - float(getattr(self, "last_bal", 0.0) or 0.0) > 3 * BALANCE_EVERY:
+            return 0.0
+        wallet = _sf(getattr(self, "wallet_equity", 0.0))
+        own = wallet - _sf(getattr(self, "foreign_upnl", 0.0)) - _sf(getattr(self, "foreign_realized", 0.0))
+        return max(0.0, own)
+
+    def base_notional(self) -> float:
+        """One order's target before volume factor, volatility and Set ratio."""
+        if SIZING_MODE == "balance":
+            eq = self.sizing_equity()
+            if eq > 0:
+                return eq * TARGET_NOTIONAL_PCT / 100.0
+        return float(TARGET_NOTIONAL)
+
+    def sizing_snapshot(self) -> Dict[str, Any]:
+        vf = float(getattr(self, "volume_factor", 1.0) or 1.0)
+        base = self.base_notional()
+        return {"sizingMode": SIZING_MODE, "targetNotionalPct": TARGET_NOTIONAL_PCT, "sizingEquity": round(self.sizing_equity(), 6),
+                "baseNotional": round(base, 6), "effectiveNotional": round(max(0.2, base * vf), 6),
+                "sizingSource": "equity" if SIZING_MODE == "balance" and self.sizing_equity() > 0 else "fixed",
+                "balanceAt": float(getattr(self, "last_bal", 0.0) or 0.0)}
 
     def notional_cap(self, ratio: float = 1.0) -> float:
         return max(self.sized_notional(ratio=ratio), 2.0)
@@ -9273,6 +9308,8 @@ class Pulse:
                     self._apply_effective_position_cost(self.live_position_cost_pct, "live-exchange", rebuild=True)
 
     def apply_live_config(self, initial: bool = False) -> None:
+        global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
+        global SIZING_MODE, TARGET_NOTIONAL_PCT
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, MAX_LOTS_PER_SIDE, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         previous_symbols = tuple(SYMBOLS)
@@ -9339,6 +9376,13 @@ class Pulse:
         target_notional = finite_number(ov.get("targetNotional"), 0.0)
         if target_notional:
             TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
+        mode = str(ov.get("sizingMode") or "").strip().lower()
+        if mode in ("fixed", "balance"):
+            SIZING_MODE = mode
+        target_pct = finite_number(ov.get("targetNotionalPct"), 0.0)
+        if target_pct:
+            TARGET_NOTIONAL_PCT = max(0.05, min(20.0, target_pct))
+        self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
         self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), VOLUME_FACTOR_DEFAULT) or VOLUME_FACTOR_DEFAULT))
         sizing = str(ov.get("orderSizing", cts.get("orderSizing", ORDER_SIZING_DEFAULT)) or ORDER_SIZING_DEFAULT)
         self.order_sizing = sizing if sizing in ("minQty", "factor") else ORDER_SIZING_DEFAULT
@@ -9887,6 +9931,7 @@ class Pulse:
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            **self.sizing_snapshot(),
             "leverage": LEVERAGE,
             "useMaxLeverage": True,
             "leverageMap": self._intern_leverage_map(),
@@ -11538,12 +11583,35 @@ class Pulse:
             out.append(c)
         return out
 
+    def _on_exchange(self, p: Position) -> Optional[bool]:
+        keys = getattr(self, "live_pos_keys", None)
+        if keys is None or bool(getattr(self, "exchange_position_snapshot_pending", False)):
+            return None
+        return f"{p.symbol}:{p.side}" in keys
+
+    def _open_net_usdt(self, p: Position) -> float:
+        """One lot's mark-to-market in USDT, net of the round-trip position cost."""
+        px = float(self.px.get(p.symbol) or 0)
+        if px <= 0 or p.entry <= 0 or p.qty <= 0:
+            return 0.0
+        d = (px - p.entry) / p.entry
+        return net_pnl_usdt(d if p.side == "LONG" else -d, p.qty, p.entry, self.position_cost_pct)
+
     def system_open_upnl(self) -> float:
-        """Mark-to-market of this connection's system book only. Cost-net."""
+        """Mark-to-market of this connection's system book on the exchange. Cost-net.
+
+        Simulated lots (ours, but their symbol and side are flat on the last
+        complete exchange snapshot) are not money: they stay in sim_stats /
+        simUPnl and in Set evaluation, never in equity or unrealized PnL.
+        """
         tot = 0.0
         open_book = getattr(self, "open", {})
+        keys = getattr(self, "live_pos_keys", None)
+        known = keys is not None and not bool(getattr(self, "exchange_position_snapshot_pending", False))
         for p in open_book.values() if isinstance(open_book, dict) else ():
             if not self.position_is_ours(p):
+                continue
+            if known and f"{p.symbol}:{p.side}" not in keys:
                 continue
             px = float(self.px.get(p.symbol) or 0)
             if px <= 0 or p.entry <= 0 or p.qty <= 0:
@@ -11560,7 +11628,9 @@ class Pulse:
         Wallet deposits, withdrawals, and independent (untagged / other-bot)
         trades never enter this tape.
         """
-        closes = self.strategy_closes()
+        # Money comes from exchange-confirmed closes only. Local closes of
+        # simulated lots (exchange=False, ghost drops) stay in the Set tapes.
+        closes = [c for c in self.strategy_closes() if bool(getattr(c, "exchange_confirmed", False))]
         grow = sum(float(c.pnl) for c in closes if float(c.pnl) > 0)
         loss = abs(sum(float(c.pnl) for c in closes if float(c.pnl) < 0))
         realized = sum(float(c.pnl) for c in closes)
@@ -13499,8 +13569,18 @@ class Pulse:
     def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
         act = persistent_activity(act, getattr(getattr(self, "runtime", None), "snapshot", {}), getattr(self, "start_eq", 0))
-        system_start_equity = float(act.get("systemStartEquity") or self.start_eq or 0.0)
-        system_equity = float(act.get("systemEquity") or (system_start_equity + float(act.get("pnl") or 0.0)))
+        # The desk shows the engine's own session equity (the value its halts and
+        # guards use), measured from the current Start baseline. The persistent
+        # all-time totals start from the first-ever capital and stay available
+        # as allTime* fields.
+        all_time_start = float(act.get("systemStartEquity") or 0.0)
+        all_time_equity = float(act.get("systemEquity") or 0.0)
+        system_start_equity = float(self.start_eq or 0.0) or all_time_start
+        engine_equity = float(getattr(self, "system_equity", 0.0) or 0.0)
+        system_equity = engine_equity if engine_equity > 0 else (all_time_equity or (system_start_equity + float(act.get("pnl") or 0.0)))
+        balance_at = float(getattr(self, "last_bal", 0.0) or 0.0)
+        own_wallet = (float(getattr(self, "wallet_equity", 0.0) or 0.0)
+                      - float(getattr(self, "foreign_upnl", 0.0) or 0.0) - float(getattr(self, "foreign_realized", 0.0) or 0.0))
         realized = float(act["realized"])
         wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
         dd = float(act["drawdownPct"])
@@ -13781,6 +13861,18 @@ class Pulse:
             "systemStartEquity": round(system_start_equity, 4),
             "walletEquity": round(float(getattr(self, "wallet_equity", self.equity) or 0.0), 4),
             "startEquity": round(system_start_equity, 4),
+            "returnOnEquityPct": round((system_equity - system_start_equity) / system_start_equity * 100.0, 4) if system_start_equity > 0 else None,
+            "allTimeStartEquity": round(all_time_start, 4),
+            "allTimeSystemEquity": round(all_time_equity, 4),
+            "walletOwnEquity": round(max(0.0, own_wallet), 4),
+            # Account truth since the last Start: the wallet (minus foreign)
+            # now against the Start baseline. It holds actual fees and funding;
+            # its gap to the model systemPnl is the cost/funding drift.
+            # Deposits or withdrawals after Start also land here.
+            "accountNetSinceStart": round(own_wallet - system_start_equity, 4) if system_start_equity > 0 and balance_at > 0 else None,
+            "modelVsAccountGap": round(float(act["pnl"]) - (own_wallet - system_start_equity), 4) if system_start_equity > 0 and balance_at > 0 else None,
+            "balanceAt": balance_at,
+            "balanceAgeS": round(time.time() - balance_at, 1) if balance_at > 0 else None,
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
             "walletUnrealized": round(self.upnl, 4),
@@ -13802,6 +13894,7 @@ class Pulse:
             "pnlPct": round(float(act["pnlPct"]), 3),
             "tradedNotional": round(float(act.get("tradedNotional") or 0.0), 4),
             "drawdownPct": round(max(0, dd), 3),
+            "currentDrawdownPct": round(max(0.0, float(act.get("currentDrawdownPct", dd) or 0.0)), 3),
             "drawdownAmount": act["drawdownAmount"],
             "drawdownAvailable": act["drawdownAvailable"],
             "drawdownBasis": act["drawdownBasis"],
@@ -13841,6 +13934,7 @@ class Pulse:
             "tpPct": TP_PCT * 100,
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            **self.sizing_snapshot(),
             "paused": os.path.exists(PAUSE_PATH),
             "activityPerMin": round(per_min, 2),
             "consecLoss": self.consec_loss,
@@ -13917,6 +14011,9 @@ class Pulse:
                         else bool(getattr(p, "close_position", True))
                     ),
                     "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if exchange_own_open >= 0 else None,
+                    # Exchange truth for this lot's symbol+side (None = no complete snapshot yet).
+                    "onExchange": self._on_exchange(p),
+                    "uPnlUsdt": round(self._open_net_usdt(p), 6),
                     "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),

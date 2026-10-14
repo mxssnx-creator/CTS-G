@@ -668,6 +668,10 @@ class Sizer:
         self.coord = Coordinator()
         self.coord.load({}, overlay)
         P = pt.Pulse
+        # No balance read in the simulation (last_bal unset): base_notional
+        # takes the fixed targetNotional, as the account simulation models.
+        for name in ("round_qty_up", "min_order_qty", "raise_to_min_qty", "leverage_for", "sized_notional",
+                     "base_notional", "sizing_equity", "avail_notional", "size_qty"):
         # Exchange-accepted SL floor, same helper as the live entry path.
         self.sl_min = max(pt.SL_MIN_PCT / 100.0, float(overlay.get("slMinPct") or pt.SL_MIN_PCT) / 100.0)
         self.sl_max = max(self.sl_min, float(overlay.get("slMaxPct") or 3.0) / 100.0)

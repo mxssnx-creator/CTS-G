@@ -240,6 +240,50 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class BalanceSizing(unittest.TestCase):
+    """sizingMode=balance: the order target follows the system's own equity."""
+
+    def pulse(self, wallet=0.0, foreign=0.0, age=0.0):
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.wallet_equity, p.foreign_upnl, p.foreign_realized = wallet, foreign, 0.0
+        p.last_bal = time.time() - age
+        p.volume_factor = 1.0
+        p.vol1h = {}
+        p.open = {}
+        p.coord = NS(size_mult=lambda n: 1.0)
+        return p
+
+    def test_target_is_percent_of_own_wallet_capital_times_volume_factor(self):
+        with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 1.0), \
+                patch.object(pt, 'TARGET_NOTIONAL', 2.15):
+            p = self.pulse(wallet=520.0, foreign=20.0)
+            self.assertAlmostEqual(p.sized_notional(), 5.0)
+            p.volume_factor = 2.0
+            self.assertAlmostEqual(p.sized_notional(), 10.0)
+            self.assertAlmostEqual(p.sized_notional(ratio=0.5), 5.0)
+            snap = p.sizing_snapshot()
+            self.assertEqual((snap['sizingSource'], snap['baseNotional'], snap['effectiveNotional']), ('equity', 5.0, 10.0))
+
+    def test_stale_or_missing_balance_falls_back_to_fixed(self):
+        with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 2.0), \
+                patch.object(pt, 'TARGET_NOTIONAL', 2.15):
+            self.assertAlmostEqual(self.pulse(wallet=300.0).sized_notional(), 6.0)
+            self.assertAlmostEqual(self.pulse(wallet=300.0, age=60.0).sized_notional(), 2.15)
+            p = self.pulse()
+            self.assertAlmostEqual(p.sized_notional(), 2.15)
+            self.assertEqual(p.sizing_snapshot()['sizingSource'], 'fixed')
+        with patch.object(pt, 'SIZING_MODE', 'fixed'), patch.object(pt, 'TARGET_NOTIONAL', 3.0):
+            self.assertAlmostEqual(self.pulse(wallet=10_000.0).sized_notional(), 3.0)
+
+    def test_overlay_parses_mode_and_percent_within_bounds(self):
+        loader = VolumeFactorOverlayLoad()
+        with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 1.0):
+            loader.load({'sizingMode': 'fixed', 'targetNotionalPct': 99})
+            self.assertEqual((pt.SIZING_MODE, pt.TARGET_NOTIONAL_PCT), ('fixed', 20.0))
+            loader.load({'sizingMode': 'bogus', 'targetNotionalPct': 'nan'})
+            self.assertEqual((pt.SIZING_MODE, pt.TARGET_NOTIONAL_PCT), ('fixed', 20.0))
+            loader.load({'sizingMode': 'balance', 'targetNotionalPct': 0.5})
+            self.assertEqual((pt.SIZING_MODE, pt.TARGET_NOTIONAL_PCT), ('balance', 0.5))
 class MicroCapEntries(unittest.TestCase):
     """A Micro entry trades one venue-minimum lot, capped to microMaxShare x maxOpen."""
 
