@@ -382,6 +382,10 @@ class DcaBook:
         kind_d = len(cid) > 4 and cid[4:5].lower() == "d"
         if not used and "dca" not in why.lower() and not kind_d:
             return
+        if rec.get("exchange_confirmed") is False:
+            # Not a live exchange result: lifecycle only, no evidence sample.
+            self.drop(sym, side, group_key=group_key)
+            return
         self.closes.append(rec)
         if len(self.closes) > 80:
             self.closes = self.closes[-80:]

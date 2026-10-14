@@ -382,7 +382,7 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         stack = int(out["blockMaxStack"]) if out.get("blockMaxStack") is not None else 6
     except (TypeError, ValueError):
         stack = 6
-    out["blockMaxStack"] = max(0, min(6, stack))
+    out["blockMaxStack"] = max(1, min(6, stack or 6))  # 0 means the full 6, as in block_engine.clamp_stack
     raw = out.get("symbols")
     names = [str(s).strip().upper() for s in raw] if isinstance(raw, list) else []
     wild = bool(out.get("symbolsAll")) or any(s in ("*", "ALL", "UNLIMITED") for s in names)
@@ -720,7 +720,7 @@ def slim_for_ui(st: dict) -> dict:
                 c for c in coords
                 if isinstance(c, dict) and c.get("validated") is True
                 and str(c.get("strategy") or "") in ("normal", "trailing", "axis", "block", "dca")
-                and str(c.get("indication") or "") in ("general", "combined", "state", "signals", "active", "direction", "move", "common", "trend", "break")
+                and str(c.get("indication") or "") in ("general", "combined", "state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
                 and ":" in str(c.get("id") or c.get("setId") or "")
             ][:24]
         if isinstance(ht.get("comboMatrix"), list):
@@ -1652,6 +1652,103 @@ def _report_row_in_scope(row: dict, state: dict) -> bool:
     return bool(row_connection and row_connection == connection and not expected)
 
 
+def merge_indication_types(coverages) -> dict:
+    """Union every published kind; a kind is on when any desk runs it."""
+    coverages = [c for c in coverages if isinstance(c, dict)]
+    keys = {key for coverage in coverages for key in ((coverage.get("indicationTypes") or coverage.get("types") or {}))}
+    return {
+        key: any(bool((coverage.get("indicationTypes") or coverage.get("types") or {}).get(key)) for coverage in coverages)
+        for key in keys
+    }
+
+
+def _merge_kind_hits(blobs) -> dict:
+    out: dict = {}
+    for blob in blobs:
+        for key, value in (blob or {}).items():
+            out[key] = out.get(key, 0) + int(_report_number(value))
+    return out
+
+
+def _merge_kind_live(blobs) -> dict:
+    out: dict = {}
+    for blob in blobs:
+        for kind, live in (blob or {}).items():
+            if not isinstance(live, dict):
+                continue
+            row = out.setdefault(kind, {"hits": 0, "symbols": 0, "long": 0, "short": 0, "enabled": False})
+            for key in ("hits", "symbols", "long", "short"):
+                row[key] += int(_report_number(live.get(key)))
+            row["enabled"] = row["enabled"] or live.get("enabled", True) is not False
+    return out
+
+
+_UNIT_AMOUNT_KEYS = ("gp", "gl", "net", "gpNetCost", "glNetCost", "netAfterCost")
+
+
+def _split_unit_amounts(merged: dict, per_unit: dict) -> dict:
+    """USDT (live) and VST amounts are never summed: expose them per unit."""
+    units = [unit for unit, blobs in per_unit.items() if any(int((b or {}).get("n") or 0) for b in blobs.values())]
+    for key, blob in merged.items():
+        if not isinstance(blob, dict):
+            continue
+        blob["byUnit"] = {
+            unit: {"n": int((blobs.get(key) or {}).get("n") or 0),
+                   **{k: (blobs.get(key) or {}).get(k) for k in _UNIT_AMOUNT_KEYS}}
+            for unit, blobs in per_unit.items()
+        }
+        if len(units) > 1:
+            for k in _UNIT_AMOUNT_KEYS:
+                blob[k] = None
+            blob["unit"] = "MIXED"
+        elif units:
+            blob["unit"] = units[0]
+    return merged
+
+
+def overall_kind_strategy(stats_by_id: dict, lanes=None, *, cost: float = POSITION_COST_PCT_DEFAULT, detail_st: dict | None = None, sets_rows=None) -> tuple:
+    """Overall byIndication/byStrategy from every desk's full close tape.
+
+    n / pf / wr count every close of every desk (byIndication[k].n is the sum of
+    the per-desk values); hits/types are merged from both desks; money amounts
+    stay per unit because USDT and VST must not be added together."""
+    from stats_report import by_indication, by_strategy, merge_kind_stats, merge_strategy_stats
+    lanes = lanes or LANES
+    detail_st = detail_st or {}
+    closed: list = []
+    by_unit: dict = {}
+    states = []
+    for lane in lanes:
+        st = stats_by_id.get(lane["id"]) or {}
+        if not st:
+            continue
+        states.append(st)
+        rows = [{**c, "connection": lane["id"], "unit": lane["unit"]} for c in (st.get("closed") or []) if isinstance(c, dict)]
+        closed.extend(rows)
+        by_unit.setdefault(lane["unit"], []).extend(rows)
+    closed.sort(key=lambda r: r.get("t") or 0)
+    covs = [st.get("coverage") or {} for st in states]
+    inds = [st.get("indications") or {} for st in states]
+    types = merge_indication_types([
+        {"indicationTypes": {**(ind.get("types") or {}), **(cov.get("indicationTypes") or {})}}
+        for cov, ind in zip(covs, inds)
+    ])
+    hits = _merge_kind_hits([(cov.get("indicationHits") or ind.get("typeHits") or {}) for cov, ind in zip(covs, inds)])
+    by_ind = merge_kind_stats(closed, cost, gate={}, hits=hits, types=types,
+                              kind_live=_merge_kind_live(ind.get("kindStats") or {} for ind in inds))
+    by_strat = merge_strategy_stats(
+        closed, cost,
+        coverage=detail_st.get("coverage") or {},
+        block=detail_st.get("block") or {},
+        dca=detail_st.get("dca") or {},
+        exits=detail_st.get("exits") or {},
+        sets_rows=sets_rows or [],
+    )
+    _split_unit_amounts(by_ind, {u: by_indication(rows, cost) for u, rows in by_unit.items()})
+    _split_unit_amounts(by_strat, {u: by_strategy(rows, cost) for u, rows in by_unit.items()})
+    return by_ind, by_strat, closed
+
+
 def overall_pf_policy(states) -> dict:
     policies = [state.get("pfCost") or {} for state in states]
     pf_window = max(int(_report_number(policy.get("n"), LAST_N_DEFAULT)) for policy in policies)
@@ -1706,10 +1803,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         key: any(bool((coverage.get("strategies") or {}).get(key)) for coverage in coverages)
         for key in {key for coverage in coverages for key in (coverage.get("strategies") or {})}
     }
-    indication_types = {
-        key: any(bool((coverage.get("indicationTypes") or {}).get(key)) for coverage in coverages)
-        for key in {key for coverage in coverages for key in (coverage.get("indicationTypes") or {})}
-    }
+    indication_types = merge_indication_types(coverages)
     historic_states = [state.get("historic") or {} for state in states]
     selected_symbols = sorted({
         str(symbol)
@@ -2216,16 +2310,19 @@ def merge_overall() -> dict:
     tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
     policy = overall_pf_policy(stats_by_id.values())
-    closed = closed[:max(150, int(policy["n"] or 15))]
+    # PF / evaluation windows / kind+strategy stats read every desk's full
+    # close tape; only the displayed list is trimmed.
+    full_closed = list(reversed(closed))
+    closed = closed[:max(150, int(policy["n"] or LAST_N_DEFAULT))]
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
-    pc = last_n_cost_pf(list(reversed(closed)), policy["n"], policy["costPct"])
+    pc = last_n_cost_pf(full_closed, policy["n"], policy["costPct"])
     pc["minPf"] = policy["minPf"]
     pc["requiredSamples"] = policy["requiredSamples"]
     pc["pass"] = bool(pc["count"] >= pc["requiredSamples"] and clears_pf(pc["ratio"], pc["minPf"]))
     eval_need = max((int(_report_number((st.get("sets") or {}).get("enableNeed"))) for st in stats_by_id.values()), default=0)
-    pc["evaluationWindows"] = evaluation_windows(list(reversed(closed)), policy["costPct"], required_samples=eval_need or policy["requiredSamples"])
+    pc["evaluationWindows"] = evaluation_windows(full_closed, policy["costPct"], required_samples=eval_need or policy["requiredSamples"])
     detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     activity = merge_activity_summaries(activity_summaries)
@@ -2370,29 +2467,20 @@ def merge_overall() -> dict:
         "coord": {"axes": merge_axis_enablement(stats_by_id.values())},
     }
     try:
-        from stats_report import merge_kind_stats, merge_strategy_stats
         cost = float((detail_st.get("pfCost") or {}).get("costPct") or POSITION_COST_PCT_DEFAULT)
-        ind = detail_st.get("indications") or {}
-        cov = detail_st.get("coverage") or {}
-        out["byIndication"] = merge_kind_stats(
-            closed,
-            cost,
-            gate={},
-            hits=cov.get("indicationHits") or ind.get("typeHits") or {},
-            types=cov.get("indicationTypes") or ind.get("types") or {},
-            kind_live=ind.get("kindStats") or {},
-        )
-        out["byStrategy"] = merge_strategy_stats(
-            closed,
-            cost,
-            coverage=cov,
-            block=detail_st.get("block") or {},
-            dca=detail_st.get("dca") or {},
-            exits=detail_st.get("exits") or {},
-            sets_rows=sets.get("rows") or [],
+        out["byIndication"], out["byStrategy"], _ = overall_kind_strategy(
+            stats_by_id, cost=cost, detail_st=detail_st, sets_rows=sets.get("rows") or [],
         )
     except Exception:
         pass
+    # Per-desk lanes that never mix: the 1h lane and the live edge guard
+    # (each judged on its own connection's exchange results).
+    out["htfByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("htf") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("htf")}
+    out["liveEdgeByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("liveEdge") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("liveEdge")}
+    out["sizingByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("sizing") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("sizing")}
+    for k in ("htf", "liveEdge", "sizing"):
+        if detail_st.get(k) is not None:
+            out[k] = detail_st.get(k)
     for k in DETAIL_KEYS:
         if k in ("tests", "activity", "events"):
             continue
@@ -2681,7 +2769,11 @@ def _attach_overall_surfaces(out: dict, stats_by_id: dict, lanes: list) -> None:
                     strat[key] = bool(strat.get(key)) or bool(value)
             if strat:
                 base["strategies"] = strat
-            recs = [cov.get("recon") for cov in covs if isinstance(cov.get("recon"), dict)]
+            if any(isinstance(cov.get("indicationTypes"), dict) for cov in covs):
+                base["indicationTypes"] = merge_indication_types(covs)
+            if any(isinstance(cov.get("indicationHits"), dict) for cov in covs):
+                base["indicationHits"] = _merge_kind_hits(cov.get("indicationHits") or {} for cov in covs)
+            recs =[cov.get("recon") for cov in covs if isinstance(cov.get("recon"), dict)]
             if recs:
                 base["recon"] = {
                     "ok": all(rec.get("ok") is not False for rec in recs) and not any(rec.get("pending") for rec in recs),
@@ -2976,8 +3068,9 @@ class Handler(SimpleHTTPRequestHandler):
                 intern_syms = [str(s).strip().upper() for s in (view.get("internSymbols") or []) if str(s or "").strip()]
                 intern_keys = {s.upper() for s in intern_syms}
                 if intern_syms:
+                    # internSymbols is the engine's intern pool; "symbols" and
+                    # "positive" stay what this run evaluated and validated.
                     blob["internSymbols"] = intern_syms
-                    blob["symbols"] = intern_syms
                     raw_pos = blob.get("positive") or []
                     if isinstance(raw_pos, list):
                         kept = []
@@ -3274,7 +3367,13 @@ class Handler(SimpleHTTPRequestHandler):
                 elif action == "resume":
                     job = resume_test(body if isinstance(body, dict) else {})
                 else:
-                    job = start_test(body if isinstance(body, dict) else {})
+                    start_body = dict(body) if isinstance(body, dict) else {}
+                    if not start_body.get("connection") and qs(self.path).get("conn"):
+                        start_body["connection"] = conn
+                    job = start_test(start_body)
+                    if job.get("ok") is False:
+                        self._json({**job, "independent": True, "shared": False}, 200)
+                        return
                 job["ok"] = True
                 job["running"] = job_is_running(job)
                 job["paused"] = job_is_paused(job)

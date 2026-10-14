@@ -44,7 +44,9 @@ class MinSizeCooldownTests(unittest.TestCase):
         # Only the first form is attempted; the fallback forms would fail the
         # same way and each one counts against the endpoint error budget.
         self.assertEqual(len(calls), 1)
-        self.assertGreater(p.cooldown.get('X-USDT', 0.0), 0.0)
+        # Cooldowns are per symbol and side: the SHORT side stays tradable.
+        self.assertGreater(p.cooldown.get('X-USDT:LONG', 0.0), 0.0)
+        self.assertEqual(p.cooldown.get('X-USDT:SHORT', 0.0), 0.0)
 
     def test_min_size_messages_classify_as_qty(self):
         self.assertEqual(pt.ctrl_err_kind('The minimum size per order is 0 USDT.'), 'qty')

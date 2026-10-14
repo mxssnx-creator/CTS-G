@@ -1,0 +1,1538 @@
+{
+ "costPct": 0.04,
+ "days": [
+  "10-04 20:00",
+  "10-05 20:00",
+  "10-06 20:00"
+ ],
+ "configs": 18000,
+ "positiveDay1": 338,
+ "positiveDay1and2": 72,
+ "day3OfSurvivors": {
+  "n": 72,
+  "positive": 0,
+  "sumNetPct": -542.71,
+  "trades": 4915
+ },
+ "survivors": [
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.5|r0.5|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    1.941,
+    0.368,
+    -2.266
+   ],
+   "netPerTrade": [
+    0.0451,
+    0.0038,
+    -0.0298
+   ],
+   "grossPerTrade": [
+    0.0851,
+    0.0438,
+    0.0102
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r1.5|h10",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.245,
+    2.282,
+    -2.733
+   ],
+   "netPerTrade": [
+    0.0271,
+    0.0304,
+    -0.0607
+   ],
+   "grossPerTrade": [
+    0.0671,
+    0.0704,
+    -0.0207
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r1.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.823,
+    1.087,
+    -2.746
+   ],
+   "netPerTrade": [
+    0.0179,
+    0.0145,
+    -0.061
+   ],
+   "grossPerTrade": [
+    0.0579,
+    0.0545,
+    -0.021
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.8|r0.5|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    2.896,
+    0.049,
+    -2.764
+   ],
+   "netPerTrade": [
+    0.0673,
+    0.0005,
+    -0.0364
+   ],
+   "grossPerTrade": [
+    0.1073,
+    0.0405,
+    0.0036
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.1|r2.0|h10",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.427,
+    0.407,
+    -2.765
+   ],
+   "netPerTrade": [
+    0.0093,
+    0.0054,
+    -0.0615
+   ],
+   "grossPerTrade": [
+    0.0493,
+    0.0454,
+    -0.0215
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r1.5|h15",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.358,
+    1.736,
+    -2.818
+   ],
+   "netPerTrade": [
+    0.0295,
+    0.0232,
+    -0.0626
+   ],
+   "grossPerTrade": [
+    0.0695,
+    0.0632,
+    -0.0226
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r1.5|h30",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.177,
+    1.525,
+    -2.856
+   ],
+   "netPerTrade": [
+    0.0256,
+    0.0203,
+    -0.0635
+   ],
+   "grossPerTrade": [
+    0.0656,
+    0.0603,
+    -0.0235
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.1|r2.0|h15",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.417,
+    0.332,
+    -2.862
+   ],
+   "netPerTrade": [
+    0.0091,
+    0.0044,
+    -0.0636
+   ],
+   "grossPerTrade": [
+    0.0491,
+    0.0444,
+    -0.0236
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.2|r1.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.355,
+    2.039,
+    -3.149
+   ],
+   "netPerTrade": [
+    0.0077,
+    0.0272,
+    -0.07
+   ],
+   "grossPerTrade": [
+    0.0477,
+    0.0672,
+    -0.03
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r2.0|h15",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.508,
+    1.708,
+    -3.44
+   ],
+   "netPerTrade": [
+    0.0328,
+    0.0228,
+    -0.0764
+   ],
+   "grossPerTrade": [
+    0.0728,
+    0.0628,
+    -0.0364
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r2.0|h10",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.395,
+    2.265,
+    -3.532
+   ],
+   "netPerTrade": [
+    0.0303,
+    0.0302,
+    -0.0785
+   ],
+   "grossPerTrade": [
+    0.0703,
+    0.0702,
+    -0.0385
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r2.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.032,
+    0.768,
+    -3.642
+   ],
+   "netPerTrade": [
+    0.0224,
+    0.0102,
+    -0.0809
+   ],
+   "grossPerTrade": [
+    0.0624,
+    0.0502,
+    -0.0409
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r2.0|h30",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.519,
+    1.231,
+    -3.756
+   ],
+   "netPerTrade": [
+    0.033,
+    0.0164,
+    -0.0835
+   ],
+   "grossPerTrade": [
+    0.073,
+    0.0564,
+    -0.0435
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.3|r1.0|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    0.719,
+    0.295,
+    -3.846
+   ],
+   "netPerTrade": [
+    0.0167,
+    0.003,
+    -0.0506
+   ],
+   "grossPerTrade": [
+    0.0567,
+    0.043,
+    -0.0106
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.5|r0.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.41,
+    2.669,
+    -3.853
+   ],
+   "netPerTrade": [
+    0.0306,
+    0.0356,
+    -0.0856
+   ],
+   "grossPerTrade": [
+    0.0706,
+    0.0756,
+    -0.0456
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.8|r0.5|h15",
+   "trades": [
+    116,
+    128,
+    91
+   ],
+   "netPctSum": [
+    0.273,
+    0.042,
+    -4.124
+   ],
+   "netPerTrade": [
+    0.0024,
+    0.0003,
+    -0.0453
+   ],
+   "grossPerTrade": [
+    0.0424,
+    0.0403,
+    -0.0053
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z3.0|tp0.3|r1.5|h30",
+   "trades": [
+    53,
+    40,
+    45
+   ],
+   "netPctSum": [
+    0.321,
+    1.358,
+    -4.14
+   ],
+   "netPerTrade": [
+    0.0061,
+    0.034,
+    -0.092
+   ],
+   "grossPerTrade": [
+    0.0461,
+    0.074,
+    -0.052
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.2|r1.0|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    0.186,
+    0.826,
+    -4.312
+   ],
+   "netPerTrade": [
+    0.0043,
+    0.0084,
+    -0.0567
+   ],
+   "grossPerTrade": [
+    0.0443,
+    0.0484,
+    -0.0167
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.2|r1.5|h30",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.184,
+    2.808,
+    -4.34
+   ],
+   "netPerTrade": [
+    0.004,
+    0.0374,
+    -0.0964
+   ],
+   "grossPerTrade": [
+    0.044,
+    0.0774,
+    -0.0564
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.2|r1.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.414,
+    1.922,
+    -4.348
+   ],
+   "netPerTrade": [
+    0.009,
+    0.0256,
+    -0.0966
+   ],
+   "grossPerTrade": [
+    0.049,
+    0.0656,
+    -0.0566
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.3|r1.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.11,
+    2.357,
+    -4.809
+   ],
+   "netPerTrade": [
+    0.0241,
+    0.0314,
+    -0.1069
+   ],
+   "grossPerTrade": [
+    0.0641,
+    0.0714,
+    -0.0669
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.5|r1.0|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    1.986,
+    0.494,
+    -4.94
+   ],
+   "netPerTrade": [
+    0.0462,
+    0.005,
+    -0.065
+   ],
+   "grossPerTrade": [
+    0.0862,
+    0.045,
+    -0.025
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.8|r0.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.905,
+    2.596,
+    -4.951
+   ],
+   "netPerTrade": [
+    0.0414,
+    0.0346,
+    -0.11
+   ],
+   "grossPerTrade": [
+    0.0814,
+    0.0746,
+    -0.07
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r1.0|h15",
+   "trades": [
+    116,
+    128,
+    91
+   ],
+   "netPctSum": [
+    0.459,
+    2.375,
+    -4.984
+   ],
+   "netPerTrade": [
+    0.004,
+    0.0186,
+    -0.0548
+   ],
+   "grossPerTrade": [
+    0.044,
+    0.0586,
+    -0.0148
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.2|r2.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.114,
+    1.995,
+    -5.239
+   ],
+   "netPerTrade": [
+    0.0025,
+    0.0266,
+    -0.1164
+   ],
+   "grossPerTrade": [
+    0.0425,
+    0.0666,
+    -0.0764
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.3|r1.5|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    0.777,
+    0.568,
+    -5.587
+   ],
+   "netPerTrade": [
+    0.0181,
+    0.0058,
+    -0.0735
+   ],
+   "grossPerTrade": [
+    0.0581,
+    0.0458,
+    -0.0335
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.8|r1.0|h15",
+   "trades": [
+    116,
+    128,
+    91
+   ],
+   "netPctSum": [
+    3.659,
+    0.676,
+    -5.615
+   ],
+   "netPerTrade": [
+    0.0315,
+    0.0053,
+    -0.0617
+   ],
+   "grossPerTrade": [
+    0.0715,
+    0.0453,
+    -0.0217
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z3.0|tp0.5|r1.5|h30",
+   "trades": [
+    53,
+    40,
+    45
+   ],
+   "netPctSum": [
+    0.493,
+    0.284,
+    -5.776
+   ],
+   "netPerTrade": [
+    0.0093,
+    0.0071,
+    -0.1284
+   ],
+   "grossPerTrade": [
+    0.0493,
+    0.0471,
+    -0.0884
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.8|r1.0|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    2.906,
+    0.439,
+    -5.86
+   ],
+   "netPerTrade": [
+    0.0676,
+    0.0045,
+    -0.0771
+   ],
+   "grossPerTrade": [
+    0.1076,
+    0.0445,
+    -0.0371
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.8|r0.5|h30",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.168,
+    2.578,
+    -6.002
+   ],
+   "netPerTrade": [
+    0.0036,
+    0.0344,
+    -0.1334
+   ],
+   "grossPerTrade": [
+    0.0436,
+    0.0744,
+    -0.0934
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.3|r1.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.66,
+    2.379,
+    -6.277
+   ],
+   "netPerTrade": [
+    0.0144,
+    0.0317,
+    -0.1395
+   ],
+   "grossPerTrade": [
+    0.0544,
+    0.0717,
+    -0.0995
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.5|r1.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.365,
+    2.447,
+    -6.417
+   ],
+   "netPerTrade": [
+    0.0297,
+    0.0326,
+    -0.1426
+   ],
+   "grossPerTrade": [
+    0.0697,
+    0.0726,
+    -0.1026
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.8|r0.5|h10",
+   "trades": [
+    121,
+    138,
+    98
+   ],
+   "netPctSum": [
+    1.575,
+    1.467,
+    -6.433
+   ],
+   "netPerTrade": [
+    0.013,
+    0.0106,
+    -0.0656
+   ],
+   "grossPerTrade": [
+    0.053,
+    0.0506,
+    -0.0256
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r1.5|h15",
+   "trades": [
+    116,
+    128,
+    91
+   ],
+   "netPctSum": [
+    3.809,
+    1.917,
+    -6.504
+   ],
+   "netPerTrade": [
+    0.0328,
+    0.015,
+    -0.0715
+   ],
+   "grossPerTrade": [
+    0.0728,
+    0.055,
+    -0.0315
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.5|r1.5|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    1.405,
+    0.239,
+    -6.719
+   ],
+   "netPerTrade": [
+    0.0327,
+    0.0024,
+    -0.0884
+   ],
+   "grossPerTrade": [
+    0.0727,
+    0.0424,
+    -0.0484
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z3.0|tp0.5|r1.0|h30",
+   "trades": [
+    53,
+    40,
+    45
+   ],
+   "netPctSum": [
+    1.456,
+    0.734,
+    -6.745
+   ],
+   "netPerTrade": [
+    0.0275,
+    0.0183,
+    -0.1499
+   ],
+   "grossPerTrade": [
+    0.0675,
+    0.0583,
+    -0.1099
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.3|r2.0|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    1.129,
+    1.112,
+    -6.807
+   ],
+   "netPerTrade": [
+    0.0263,
+    0.0114,
+    -0.0896
+   ],
+   "grossPerTrade": [
+    0.0663,
+    0.0514,
+    -0.0496
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r0.5|h30",
+   "trades": [
+    97,
+    104,
+    79
+   ],
+   "netPctSum": [
+    0.271,
+    0.639,
+    -6.96
+   ],
+   "netPerTrade": [
+    0.0028,
+    0.0061,
+    -0.0881
+   ],
+   "grossPerTrade": [
+    0.0428,
+    0.0461,
+    -0.0481
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z3.0|tp0.8|r1.0|h15",
+   "trades": [
+    60,
+    42,
+    49
+   ],
+   "netPctSum": [
+    0.18,
+    1.169,
+    -7.209
+   ],
+   "netPerTrade": [
+    0.003,
+    0.0278,
+    -0.1471
+   ],
+   "grossPerTrade": [
+    0.043,
+    0.0678,
+    -0.1071
+   ]
+  },
+  {
+   "family": "squeeze-breakout",
+   "config": "tf5|L30k0.7|tp0.5|r1.0|h30",
+   "trades": [
+    66,
+    61,
+    82
+   ],
+   "netPctSum": [
+    0.558,
+    0.536,
+    -7.229
+   ],
+   "netPerTrade": [
+    0.0085,
+    0.0088,
+    -0.0882
+   ],
+   "grossPerTrade": [
+    0.0485,
+    0.0488,
+    -0.0482
+   ]
+  },
+  {
+   "family": "squeeze-breakout",
+   "config": "tf5|L30k0.7|tp0.5|r1.5|h30",
+   "trades": [
+    66,
+    61,
+    82
+   ],
+   "netPctSum": [
+    0.244,
+    0.961,
+    -7.25
+   ],
+   "netPerTrade": [
+    0.0037,
+    0.0158,
+    -0.0884
+   ],
+   "grossPerTrade": [
+    0.0437,
+    0.0558,
+    -0.0484
+   ]
+  },
+  {
+   "family": "squeeze-breakout",
+   "config": "tf5|L30k0.7|tp0.5|r2.0|h30",
+   "trades": [
+    66,
+    61,
+    82
+   ],
+   "netPctSum": [
+    0.214,
+    0.961,
+    -7.485
+   ],
+   "netPerTrade": [
+    0.0032,
+    0.0158,
+    -0.0913
+   ],
+   "grossPerTrade": [
+    0.0432,
+    0.0558,
+    -0.0513
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.3|r2.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.355,
+    2.292,
+    -7.917
+   ],
+   "netPerTrade": [
+    0.0077,
+    0.0306,
+    -0.1759
+   ],
+   "grossPerTrade": [
+    0.0477,
+    0.0706,
+    -0.1359
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.8|r1.5|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    2.485,
+    0.039,
+    -7.993
+   ],
+   "netPerTrade": [
+    0.0578,
+    0.0004,
+    -0.1052
+   ],
+   "grossPerTrade": [
+    0.0978,
+    0.0404,
+    -0.0652
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L720|tp0.5|r2.0|h5",
+   "trades": [
+    43,
+    98,
+    76
+   ],
+   "netPctSum": [
+    1.542,
+    0.239,
+    -8.152
+   ],
+   "netPerTrade": [
+    0.0359,
+    0.0024,
+    -0.1073
+   ],
+   "grossPerTrade": [
+    0.0759,
+    0.0424,
+    -0.0673
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r2.0|h15",
+   "trades": [
+    116,
+    128,
+    91
+   ],
+   "netPctSum": [
+    3.253,
+    1.672,
+    -8.171
+   ],
+   "netPerTrade": [
+    0.028,
+    0.0131,
+    -0.0898
+   ],
+   "grossPerTrade": [
+    0.068,
+    0.0531,
+    -0.0498
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z2.0|tp0.3|r2.0|h30",
+   "trades": [
+    86,
+    81,
+    70
+   ],
+   "netPctSum": [
+    2.362,
+    2.025,
+    -8.43
+   ],
+   "netPerTrade": [
+    0.0275,
+    0.025,
+    -0.1204
+   ],
+   "grossPerTrade": [
+    0.0675,
+    0.065,
+    -0.0804
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.8|r1.0|h10",
+   "trades": [
+    121,
+    138,
+    98
+   ],
+   "netPctSum": [
+    3.181,
+    1.942,
+    -8.602
+   ],
+   "netPerTrade": [
+    0.0263,
+    0.0141,
+    -0.0878
+   ],
+   "grossPerTrade": [
+    0.0663,
+    0.0541,
+    -0.0478
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.5|r1.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.865,
+    2.411,
+    -8.775
+   ],
+   "netPerTrade": [
+    0.0188,
+    0.0321,
+    -0.195
+   ],
+   "grossPerTrade": [
+    0.0588,
+    0.0721,
+    -0.155
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r1.5|h10",
+   "trades": [
+    121,
+    138,
+    98
+   ],
+   "netPctSum": [
+    2.213,
+    3.221,
+    -8.844
+   ],
+   "netPerTrade": [
+    0.0183,
+    0.0233,
+    -0.0902
+   ],
+   "grossPerTrade": [
+    0.0583,
+    0.0633,
+    -0.0502
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.8|r1.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    1.05,
+    2.459,
+    -8.928
+   ],
+   "netPerTrade": [
+    0.0228,
+    0.0328,
+    -0.1984
+   ],
+   "grossPerTrade": [
+    0.0628,
+    0.0728,
+    -0.1584
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r1.0|h30",
+   "trades": [
+    97,
+    104,
+    79
+   ],
+   "netPctSum": [
+    2.93,
+    3.084,
+    -9.161
+   ],
+   "netPerTrade": [
+    0.0302,
+    0.0297,
+    -0.116
+   ],
+   "grossPerTrade": [
+    0.0702,
+    0.0697,
+    -0.076
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.8|r1.5|h15",
+   "trades": [
+    116,
+    128,
+    91
+   ],
+   "netPctSum": [
+    3.063,
+    0.276,
+    -9.162
+   ],
+   "netPerTrade": [
+    0.0264,
+    0.0022,
+    -0.1007
+   ],
+   "grossPerTrade": [
+    0.0664,
+    0.0422,
+    -0.0607
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.3|r2.0|h30",
+   "trades": [
+    97,
+    104,
+    79
+   ],
+   "netPctSum": [
+    0.482,
+    2.808,
+    -9.611
+   ],
+   "netPerTrade": [
+    0.005,
+    0.027,
+    -0.1217
+   ],
+   "grossPerTrade": [
+    0.045,
+    0.067,
+    -0.0817
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r1.5|h30",
+   "trades": [
+    97,
+    104,
+    79
+   ],
+   "netPctSum": [
+    8.202,
+    2.478,
+    -9.762
+   ],
+   "netPerTrade": [
+    0.0846,
+    0.0238,
+    -0.1236
+   ],
+   "grossPerTrade": [
+    0.1246,
+    0.0638,
+    -0.0836
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf5|L60z1.5|tp0.5|r2.0|h10",
+   "trades": [
+    121,
+    138,
+    98
+   ],
+   "netPctSum": [
+    1.929,
+    2.971,
+    -10.031
+   ],
+   "netPerTrade": [
+    0.0159,
+    0.0215,
+    -0.1024
+   ],
+   "grossPerTrade": [
+    0.0559,
+    0.0615,
+    -0.0624
+   ]
+  },
+  {
+   "family": "fade-breakout",
+   "config": "tf1|L240|tp0.5|r1.0|h30",
+   "trades": [
+    124,
+    171,
+    116
+   ],
+   "netPctSum": [
+    3.967,
+    1.445,
+    -10.496
+   ],
+   "netPerTrade": [
+    0.032,
+    0.0084,
+    -0.0905
+   ],
+   "grossPerTrade": [
+    0.072,
+    0.0484,
+    -0.0505
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z2.0|tp0.8|r1.0|h30",
+   "trades": [
+    86,
+    81,
+    70
+   ],
+   "netPctSum": [
+    3.438,
+    2.225,
+    -10.625
+   ],
+   "netPerTrade": [
+    0.04,
+    0.0275,
+    -0.1518
+   ],
+   "grossPerTrade": [
+    0.08,
+    0.0675,
+    -0.1118
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.5|r2.0|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.535,
+    2.411,
+    -10.921
+   ],
+   "netPerTrade": [
+    0.0116,
+    0.0321,
+    -0.2427
+   ],
+   "grossPerTrade": [
+    0.0516,
+    0.0721,
+    -0.2027
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.8|r1.5|h30",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.745,
+    0.488,
+    -11.279
+   ],
+   "netPerTrade": [
+    0.0162,
+    0.0065,
+    -0.2506
+   ],
+   "grossPerTrade": [
+    0.0562,
+    0.0465,
+    -0.2106
+   ]
+  }
+ ],
+ "byFamily": {
+  "breakout": {
+   "configs": 1080,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "fade-breakout": {
+   "configs": 1080,
+   "day1": 117,
+   "day1and2": 15,
+   "day3Positive": 0,
+   "day3SumNet": -118.15
+  },
+  "momentum": {
+   "configs": 2520,
+   "day1": 27,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "reversion": {
+   "configs": 2520,
+   "day1": 63,
+   "day1and2": 45,
+   "day3Positive": 0,
+   "day3SumNet": -312.94
+  },
+  "reversion-btc-calm": {
+   "configs": 2280,
+   "day1": 16,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "reversion-confirm": {
+   "configs": 2520,
+   "day1": 6,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "reversion-with-trend": {
+   "configs": 1200,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "squeeze-breakout": {
+   "configs": 1200,
+   "day1": 8,
+   "day1and2": 3,
+   "day3Positive": 0,
+   "day3SumNet": -21.96
+  },
+  "trend-pullback": {
+   "configs": 720,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "volume-fade": {
+   "configs": 1440,
+   "day1": 101,
+   "day1and2": 9,
+   "day3Positive": 0,
+   "day3SumNet": -89.66
+  },
+  "volume-follow": {
+   "configs": 1440,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  }
+ }
+}

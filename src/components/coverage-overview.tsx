@@ -4,18 +4,63 @@ import { formatDuration } from "@/lib/analytics";
 import { HistTestStatus } from "@/components/hist-test-controls";
 import { histTestIsEnabled } from "@/lib/hist-test";
 import { PosOrdersLine } from "@/components/pos-orders";
+import { INDICATION_KINDS, mergeKindTypes } from "@/lib/indication-kinds";
+import { POSITIVE_PF } from "@/lib/config-model";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
-const TYPES = ["state", "direction", "move", "active", "common", "signals", "trend", "break"] as const;
+const TYPES = INDICATION_KINDS;
+const STAGE_ROWS = ["base", "main", "real"] as const;
+
+type StageBlob = { pf?: number; n?: number; open?: boolean; minPf?: number };
+
+/** `pf/n ≥ minPf` for one coordination stage. */
+export function stageLabel(stage?: StageBlob): string {
+  if (!stage) return "—";
+  const floor = stage.minPf != null ? ` ≥ ${Number(stage.minPf).toFixed(2)}` : "";
+  return `${Number(stage.pf ?? 0).toFixed(2)}/${Math.round(Number(stage.n ?? 0))}${floor}`;
+}
+
+function stageOk(stage?: StageBlob): boolean | undefined {
+  if (!stage || stage.minPf == null || !Number(stage.n ?? 0)) return undefined;
+  return Number(stage.pf ?? 0) >= Number(stage.minPf);
+}
+
+type CoverageExtras = {
+  microCount?: number;
+  microMinPf?: number;
+};
+
+type AxisAggregate = {
+  parentCount?: number;
+  parentSideCount?: number;
+  childCount?: number;
+  qualifiedChildren?: number;
+};
+
+function stageFlowLine(live: LiveStats | null): string {
+  const flow = live?.coverage?.stageFlow;
+  const stages = flow?.stages ?? {};
+  const order = flow?.stageOrder?.length ? flow.stageOrder : Object.keys(stages);
+  return order
+    .filter((name) => stages[name])
+    .map((name) => `${name} ${stages[name]?.qualified ?? 0}/${stages[name]?.evaluated ?? 0}`)
+    .join(" → ");
+}
+
+function axisLine(live: LiveStats | null): string {
+  const ax = (live?.coverage?.coord?.variants ?? {}) as AxisAggregate;
+  if (ax.parentCount == null && ax.childCount == null) return "";
+  return `parents ${ax.parentCount ?? 0} · set×side ${ax.parentSideCount ?? "—"} · children ${ax.childCount ?? 0}${ax.qualifiedChildren != null ? ` (${ax.qualifiedChildren} qualified)` : ""}`;
+}
 
 export function CoverageBar({ live }: { live: LiveStats | null }) {
   if (!live) return null;
   const cov = live.coverage;
   const scan = cov?.scan;
   const strat = cov?.strategies ?? {};
-  const types = cov?.indicationTypes ?? live.indications?.types ?? {};
+  const types = mergeKindTypes(live.indications?.types, cov?.indicationTypes);
   const hits = cov?.indicationHits ?? live.indications?.typeHits ?? {};
-  const sets = (cov?.sets ?? {}) as {
+  const sets = (cov?.sets ?? {}) as CoverageExtras & {
     setCount?: number;
     activeCount?: number;
     validatedCount?: number;
@@ -35,10 +80,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
   };
   const ctrl = cov?.controls;
   const recon = cov?.recon;
-  const stages = (cov?.coord?.stages ?? live.coord?.stages ?? {}) as Record<
-    string,
-    { pf?: number; n?: number; open?: boolean }
-  >;
+  const stages = (cov?.coord?.stages ?? live.coord?.stages ?? {}) as Record<string, StageBlob>;
   const track = cov?.tracking;
   const load = cov?.load ?? live.engine?.load;
   const px = cov?.px ?? scan?.px ?? 0;
@@ -103,11 +145,16 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           {cov?.block?.overall !== false ? " · overall Real" : ""}
         </span>
         {sets.trailCover === false ? <span className="text-warn">trail cover gap</span> : null}
-        {stages.intern || stages.main || stages.real ? (
+        {stages.base || stages.main || stages.real ? (
           <span className="whitespace-nowrap">
-            intern {Number(stages.intern?.pf ?? 0).toFixed(2)}/{stages.intern?.n ?? 0}
-            {stages.intern?.open ? " open" : ""} · main {Number(stages.main?.pf ?? 0).toFixed(2)} · real{" "}
-            {Number(stages.real?.pf ?? 0).toFixed(2)}
+            {STAGE_ROWS.map((name) => `${name} ${stageLabel(stages[name])}`).join(" · ")}
+            {stages.intern?.open ? " · intern open" : ""}
+          </span>
+        ) : null}
+        {sets.microCount != null ? (
+          <span className="whitespace-nowrap">
+            micro {sets.microCount}
+            {sets.microMinPf != null ? ` ≥ ${Number(sets.microMinPf).toFixed(2)}` : ""}
           </span>
         ) : null}
         {track ? (
@@ -133,12 +180,20 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
 export function CoveragePanel({ live }: { live: LiveStats | null }) {
   const cov = live?.coverage;
   const strat = cov?.strategies ?? {};
-  const types = cov?.indicationTypes ?? live?.indications?.types ?? {};
+  const types = mergeKindTypes(live?.indications?.types, cov?.indicationTypes);
   const hits = cov?.indicationHits ?? live?.indications?.typeHits ?? {};
   const blk = cov?.block;
+  const stages = (cov?.coord?.stages ?? live?.coord?.stages ?? {}) as Record<string, StageBlob>;
+  const blockFloor = (row: { symbol?: string; side?: string; minPf?: number }) => {
+    const lane = (live?.block?.lanes ?? []).find((ln) => ln.symbol === row.symbol && ln.side === row.side);
+    const laneFloor = lane?.counts?.length ? Math.min(...lane.counts.map((c) => Number(c.minPF))) : undefined;
+    return Number(row.minPf ?? laneFloor ?? stages.real?.minPf ?? live?.block?.defaultMinPF ?? POSITIVE_PF);
+  };
+  const flowLine = stageFlowLine(live ?? null);
+  const axisAgg = axisLine(live ?? null);
   const counts = blk?.allCounts ?? live?.block?.allCounts ?? [];
   const scan = cov?.scan;
-  const sets = (cov?.sets ?? {}) as {
+  const sets = (cov?.sets ?? {}) as CoverageExtras & {
     setCount?: number;
     activeCount?: number;
     validatedCount?: number;
@@ -206,12 +261,21 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
                   .join(" · ")
               : "no live parent"
           }
-          ok={(blk?.overallReal ?? []).some((row) => Number(row.pf ?? 0) >= 1.1)}
+          ok={(blk?.overallReal ?? []).some((row) => Number(row.pf ?? 0) >= blockFloor(row))}
         />
         <KV
-          k="Stages intern/main/real"
-          v={`${Number(cov?.coord?.stages?.intern?.pf ?? 0).toFixed(2)} · ${Number(cov?.coord?.stages?.main?.pf ?? 0).toFixed(2)} · ${Number(cov?.coord?.stages?.real?.pf ?? 0).toFixed(2)}`}
+          k="Stages base/main/real · pf/n ≥ min"
+          v={STAGE_ROWS.map((name) => stageLabel(stages[name])).join(" · ")}
+          ok={STAGE_ROWS.every((name) => stageOk(stages[name]) !== false)}
         />
+        {sets.microCount != null ? (
+          <KV
+            k="Micro sets"
+            v={`${sets.microCount}${sets.microMinPf != null ? ` · PF ≥ ${Number(sets.microMinPf).toFixed(2)}` : ""}`}
+          />
+        ) : null}
+        {flowLine ? <KV k="Stage flow (qualified/evaluated)" v={flowLine} /> : null}
+        {axisAgg ? <KV k="Axis coordination" v={axisAgg} /> : null}
         <KV
           k="Tracking"
           v={`cid ${cov?.tracking?.withCid ?? 0}/${cov?.tracking?.ours ?? 0} · set ${cov?.tracking?.withSet ?? 0} · foreign ${cov?.tracking?.foreign ?? 0}`}

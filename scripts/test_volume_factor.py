@@ -57,14 +57,16 @@ class VolumeFactorOverlayLoad(unittest.TestCase):
         self.assertEqual(self.load({'volumeFactor': 2.5, 'targetNotional': 3}), (3.0, 2.5))
         self.assertEqual(self.load({'volumeFactor': 99, 'targetNotional': 9999}), (500.0, 10.0))
         self.assertEqual(self.load({'volumeFactor': 0.01, 'targetNotional': 0.01}), (0.2, 0.05))
-        self.assertEqual(self.load({}), (2.15, 1.0))
+        # Missing or zero factor means the shared default 0.1, as on the desk.
+        self.assertEqual(self.load({}), (2.15, 0.1))
+        self.assertEqual(self.load({'volumeFactor': 0}), (2.15, 0.1))
 
     def test_nonfinite_or_corrupt_values_never_saturate_to_the_maximum(self):
         # write_overlay rejects float NaN, but a JSON string still round-trips
         # and float("nan") passes min(): it must not become 10x / 500 USDT.
         for bad in ('nan', 'NaN', 'inf', '-Infinity', 'abc', None):
             target, factor = self.load({'volumeFactor': bad, 'targetNotional': bad})
-            self.assertEqual(factor, 1.0, bad)
+            self.assertEqual(factor, 0.1, bad)
             self.assertEqual(target, 2.15, bad)
 
 
@@ -75,6 +77,7 @@ class VolumeFactorEntries(unittest.TestCase):
         for name in ('size_qty', 'max_book_notional', 'avail_notional'):
             p.__dict__.pop(name, None)  # the real sizing chain, not fixture stubs
         p.volume_factor = vf
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
         p.vol1h = {}
         p.coord.size_mult = lambda n: 1.0
         p.block = NS(enabled=block, max_stack=6, volume_ratio=.25, max_volume_multiplier=2.0,
@@ -106,11 +109,12 @@ class VolumeFactorEntries(unittest.TestCase):
             self.assertEqual(entries, [want], vf)
             self.assertEqual(controls, {want}, vf)
 
-    def test_min_lot_parent_above_the_book_room_stays_skipped(self):
-        # Policy unchanged: an 8 USDT venue minimum is not rounding noise.
+    def test_min_lot_parent_above_the_book_room_is_raised_to_venue_min(self):
+        # Volume is always raised to the exchange minimum lot: an 8 USDT
+        # venue minimum above a small book room still trades one min lot.
         btc = pt.Contract('X-USDT', .0001, .0001, 4, 1, 2., 100)
-        self.assertEqual(self.place(1., btc, 80000.)[0], [])
-        self.assertEqual(self.place(1., btc, 80000., block=True)[0], [])
+        self.assertEqual(self.place(1., btc, 80000.)[0], [.0001])
+        self.assertEqual(self.place(1., btc, 80000., block=True)[0], [.0001])
         self.assertEqual(self.place(1., btc, 80000., block=True, dca=True)[0], [.0001])
 
 
@@ -124,6 +128,7 @@ class VolumeFactorAdds(unittest.TestCase):
         p.api = _Api(self.PX)
         p.halted = False
         p.volume_factor = vf
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
         p.vol1h = {}
         p.available = 1000.
         p.coord = NS(min_pf=1.1, real_eval=3, last={}, size_mult=lambda n: 1.,
@@ -233,3 +238,72 @@ class VolumeFactorAdds(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MicroCapEntries(unittest.TestCase):
+    """A Micro entry trades one venue-minimum lot, capped to microMaxShare x maxOpen."""
+
+    def place_micro(self, open_micro, share=0.25, max_open=8):
+        t = fixtures.AllValidEntries()
+        p = t.pulse(t.book(1))
+        for name in ('size_qty', 'max_book_notional', 'avail_notional'):
+            p.__dict__.pop(name, None)
+        p.volume_factor = 1.0
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
+        p.vol1h = {}
+        p.coord.size_mult = lambda n: 1.0
+        p.block = NS(enabled=False, max_stack=0, volume_ratio=.25, max_volume_multiplier=2.0,
+                     register_parent=Mock(), on_parent_close=Mock())
+        p.dca = NS(enabled=False, max_steps=0, _mult_at=lambda i: 1.0, attach=Mock(), on_close=Mock(), drop=Mock())
+        p.contracts = {'X-USDT': pt.Contract('X-USDT', .001, .001, 3, 2, .1, 100)}
+        p.px = {'X-USDT': 100.}
+        p.sets.micro_tier = lambda st, side: True
+        p.sets.micro_max_share = share
+        for k in range(open_micro):
+            p.open[f'm{k}'] = NS(micro=True, symbol=f'M{k}-USDT', side='LONG')
+        with patch.object(pt, 'MAX_OPEN', max_open):
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+        return [float(b['quantity']) for b in p.api.posts if b.get('type') == 'MARKET'], p
+
+    def test_micro_below_cap_trades_one_minimum_lot(self):
+        entries, p = self.place_micro(open_micro=1)
+        self.assertEqual(entries, [.001])
+        pos = next(v for k, v in p.open.items() if not str(k).startswith('m'))
+        self.assertTrue(pos.micro)
+
+    def test_micro_at_cap_is_skipped(self):
+        entries, p = self.place_micro(open_micro=2)
+        self.assertEqual(entries, [])
+        self.assertIn('micro cap 2/2', str(p._execution_decision.get('reason')))
+
+    def test_micro_share_zero_blocks_micro(self):
+        entries, _ = self.place_micro(open_micro=0, share=0.0)
+        self.assertEqual(entries, [])
+
+
+class LotsPerSymbolSideCap(unittest.TestCase):
+    def place_with(self, open_same, cap):
+        t = fixtures.AllValidEntries()
+        p = t.pulse(t.book(1))
+        for name in ('size_qty', 'max_book_notional', 'avail_notional'):
+            p.__dict__.pop(name, None)
+        p.volume_factor = 1.0
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
+        p.vol1h = {}
+        p.coord.size_mult = lambda n: 1.0
+        p.block = NS(enabled=False, max_stack=0, volume_ratio=.25, max_volume_multiplier=2.0,
+                     register_parent=Mock(), on_parent_close=Mock())
+        p.dca = NS(enabled=False, max_steps=0, _mult_at=lambda i: 1.0, attach=Mock(), on_close=Mock(), drop=Mock())
+        p.contracts = {'X-USDT': pt.Contract('X-USDT', .001, .001, 3, 2, .1, 100)}
+        p.px = {'X-USDT': 100.}
+        for k in range(open_same):
+            p.open[f's{k}'] = NS(symbol='X-USDT', side='LONG', ours=True, micro=False)
+        p.open['other'] = NS(symbol='X-USDT', side='SHORT', ours=True, micro=False)
+        with patch.object(pt, 'MAX_LOTS_PER_SIDE', cap):
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+        return [b for b in p.api.posts if b.get('type') == 'MARKET']
+
+    def test_cap_blocks_another_lot_on_the_same_signal_only(self):
+        self.assertEqual(self.place_with(open_same=2, cap=2), [])
+        self.assertEqual(len(self.place_with(open_same=1, cap=2)), 1)
+        self.assertEqual(len(self.place_with(open_same=5, cap=0)), 1)  # 0 = unlimited

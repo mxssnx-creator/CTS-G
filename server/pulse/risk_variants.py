@@ -19,6 +19,9 @@ TRAIL_ARM_MAX = 1.5
 TRAIL_GIVE_MIN = 0.1
 TRAIL_GIVE_MAX = 0.5
 TRAIL_GIVE_FACTOR = 1.0 / 3.0
+# Default trailing minimums (the constants above stay the hard floors).
+TRAIL_ARM_MIN_DEFAULT = 0.6
+TRAIL_GIVE_MIN_DEFAULT = 0.2
 
 
 def parse_trail(raw: Any) -> Tuple[float, float]:
@@ -185,9 +188,9 @@ class VariantBook:
         if isinstance(raw_trails, str):
             raw_trails = [p.strip() for p in raw_trails.split(",") if p.strip()]
         self.trail_variants = [str(x) for x in raw_trails] or list(TRAIL_VARIANTS)
-        self.trail_arm_min = snap_ratio(ov.get("trailArmMin", TRAIL_ARM_MIN), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
+        self.trail_arm_min = snap_ratio(ov.get("trailArmMin", TRAIL_ARM_MIN_DEFAULT), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
         self.trail_arm_max = snap_ratio(ov.get("trailArmMax", TRAIL_ARM_MAX), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-        self.trail_give_min = float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN)
+        self.trail_give_min = float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN_DEFAULT)
         self.trail_give_max = float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX)
         self.trail_give_factor = float(ov.get("trailGiveFactor") or TRAIL_GIVE_FACTOR)
         self.trail_recalc_give = bool(ov.get("trailRecalcGive", True))
@@ -419,7 +422,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     step = [round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(len(SL_TP_RATIOS))]
     out.append(("var-sl-grid", step == list(SL_TP_RATIOS), f"{step}"))
     b = VariantBook()
-    b.load({"slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333})
+    b.load({"slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333,
+            "trailArmMin": 0.3, "trailGiveMin": 0.1})
     out.append(("var-sl-default", abs(b.sl_ratio - 0.6) < 1e-9, f"sl={b.sl_ratio}"))
     out.append(("var-trail-give", abs(b.trail_give - 0.1) < 0.02, f"arm={b.trail_arm} give={b.trail_give}"))
     # independent recals: SL book does not move trail

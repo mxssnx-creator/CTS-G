@@ -1,5 +1,8 @@
 import { requestJson } from "./request-json.ts";
 
+/** 1h lane kinds (server/pulse/htf_engine.py HTF_KINDS), validated in reports/htf-validation-20261007. */
+export const HTF_KINDS = ["rsi-mom-10-25", "rsi-mom-14-15", "rsi-mom-14-20", "rsi-mom-14-25", "rsi-mom-21-15", "rsi-mom-21-20", "rsi-mom-21-25", "bb-walk@x4", "break-vol@x4", "break-vol-2@x4", "break-atr-2@x4", "act-burst-2.5@x4", "act-chop@x4", "cci-14-200@x4", "cci-40-200@x4", "z-50-2.5@x4"] as const;
+
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
   "XRP-USDT",
@@ -122,11 +125,47 @@ export const POSITIVE_PF = 1.15;
 // Shared "Overall minimum PF" default (minPf and its six sibling stage floors).
 // Mirrors EVAL_MIN_PF in server/pulse/connection_profile.py; POSITIVE_PF stays the
 // separate "positive Set" predicate and the Test Historic floor.
-export const EVAL_MIN_PF = 1.2;
+export const EVAL_MIN_PF = 1.1;
 export const INTERN_PF = 1.0;
-export const DEFAULT_HIST_LOOKBACK_BARS = 2880; // 48 hours of 1m bars
+/**
+ * Mirrors coord_engine.AXIS_SPECS: every relative count from min up to the
+ * configured max window (step 1, the finest grid) is one axis child per Base
+ * parent and direction.
+ */
+export const AXIS_SPECS = {
+  prev: { min: 4, max: 12, step: 1, default: 12 },
+  last: { min: 1, max: 4, step: 1, default: 4 },
+  cont: { min: 1, max: 8, step: 1, default: 8 },
+  pause: { min: 1, max: 8, step: 1, default: 8 },
+} as const;
+export type AxisName = keyof typeof AXIS_SPECS;
+/** Engine clamp_window: clamp to the axis range, then snap down onto its step grid. */
+export function clampAxisWindow(axis: AxisName, value: unknown): number {
+  const spec = AXIS_SPECS[axis];
+  const parsed = Math.trunc(Number(value));
+  const n = Number.isFinite(parsed) ? parsed : spec.default;
+  const clamped = Math.max(spec.min, Math.min(spec.max, n));
+  return spec.min + Math.floor((clamped - spec.min) / spec.step) * spec.step;
+}
+export { BASE_EVAL_DEFAULT, MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT } from "./stage-windows.ts";
+export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
 export const DEFAULT_MIN_STEP = 7;
 export const SL_MIN_PCT = 0.4;
+/** Default SL floor; SL_MIN_PCT stays the hard minimum. */
+export const SL_MIN_DEFAULT_PCT = 0.6;
+/** Trailing grid: arm 0.3–1.5 % on a 0.3 grid, give 0.1–0.5 % on a 0.1 grid (risk_variants.trail_grid). */
+export const TRAIL_ARM_MIN_DEFAULT = 0.6;
+export const TRAIL_GIVE_MIN_DEFAULT = 0.2;
+export function clampTrailGrid(v: { trailArmMin?: number; trailArmMax?: number; trailGiveMin?: number; trailGiveMax?: number }) {
+  const snap = (x: number, lo: number, hi: number, step: number) =>
+    Math.round(Math.max(lo, Math.min(hi, Math.round(x / step) * step)) * 10) / 10;
+  const n = (x: unknown, d: number) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : d);
+  const armMin = snap(n(v.trailArmMin, TRAIL_ARM_MIN_DEFAULT), 0.3, 1.5, 0.3);
+  const armMax = Math.max(armMin, snap(n(v.trailArmMax, 1.5), 0.3, 1.5, 0.3));
+  const giveMin = snap(n(v.trailGiveMin, TRAIL_GIVE_MIN_DEFAULT), 0.1, 0.5, 0.1);
+  const giveMax = Math.max(giveMin, snap(n(v.trailGiveMax, 0.5), 0.1, 0.5, 0.1));
+  return { trailArmMin: armMin, trailArmMax: armMax, trailGiveMin: giveMin, trailGiveMax: giveMax };
+}
 export const HIST_TEST_HOURS_MIN = 4;
 export const HIST_TEST_HOURS_MAX = 64;
 export const HIST_TEST_HOURS_DEFAULT = 20;
@@ -135,7 +174,7 @@ export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
 export const HIST_TEST_REFRESH_DEFAULT = 2;
 /** Scratch window ceiling on the desk; must cover the 600 s engine default. */
-export const SCRATCH_S_MAX = 3600;
+export const SCRATCH_S_MAX = 7200;
 
 export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
   const n = Math.round(Number(value));
@@ -209,6 +248,19 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 export type PulseOverlay = import("./system-settings").SystemSettings & {
   targetNotional: number;
   volumeFactor: number;
+  orderSizing: "minQty" | "factor";
+  htfEnabled: boolean;
+  htfKinds: string[];
+  htfMinPf: number;
+  htfWindow: number;
+  htfMinN: number;
+  htfLastN: number;
+  htfSideHours: number;
+  htfSideMinTrades: number;
+  htfSideMinPf: number;
+  htfMaxOpen: number;
+  htfHistoryBars: number;
+  slAutoLeverage: boolean;
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -292,6 +344,52 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   coordOptimizationN: number;
   pfWindow: number;
   slMinPct: number;
+  /** TP grid unit (%): TP = step × tpStepPct, independent of the position cost. */
+  tpStepPct: number;
+  venueSlTicks: number;
+  mainEvalPosCount: number;
+  realEvalPosCount: number;
+  setDdtWindow: number;
+  setHistTimeBars: number;
+  /** Max hold of a 1m-lane lot (s); the Set replay hold is capped to it. */
+  shortMaxHoldS: number;
+  setHonorTp: boolean;
+  setCooldownBars: number;
+  setScratchMin: number;
+  histSimulateBlock: boolean;
+  histSimulateDca: boolean;
+  histExactWindow: boolean;
+  marginCapPct: number;
+  maxLotsPerSymbolSide: number;
+  manualCloseLaneHoldS: number;
+  exitMinSamples: number;
+  exitTacticMinGainPct: number;
+  blockActiveLiveEnabled: boolean;
+  blockActiveRealEnabled: boolean;
+  variantBlockEnabled: boolean;
+  indDirRange: number;
+  indMoveRange: number;
+  indMoveRanges: number[];
+  indDirMinChange: number;
+  indMoveMinChange: number;
+  indActiveThreshold: number;
+  indActiveMovePct: number;
+  indMsiMinGap: number;
+  indVwapDevZ: number;
+  indVwapVolMult: number;
+  indRetestTol: number;
+  indRetestMinBreak: number;
+  indSqueezePctl: number;
+  indSweepWickAtr: number;
+  indRsi2Low: number;
+  indRsi2High: number;
+  indKeltnerMult: number;
+  indImpulseSigma: number;
+  indImpulseVolMult: number;
+  actSweepMin: number;
+  actRsi2Min: number;
+  actKeltnerMin: number;
+  actImpulseMin: number;
   slMaxPct: number;
   tpMinPct: number;
   tpMaxPct: number;
@@ -330,8 +428,26 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   indTypeSignals: boolean;
   indTypeTrend: boolean;
   indTypeBreak: boolean;
+  indTypeMsi: boolean;
+  indTypeVwap: boolean;
+  indTypeRetest: boolean;
+  indTypeSqueeze: boolean;
+  indTypeSweep: boolean;
+  indTypeRsi2: boolean;
+  indTypeKeltner: boolean;
+  indTypeImpulse: boolean;
+  indSweepRanges?: number[];
+  indRsi2Ranges?: number[];
+  indKeltnerRanges?: number[];
+  indImpulseRanges?: number[];
   indTrendRanges?: number[];
   indBreakRanges?: number[];
+  indMsiRanges?: number[];
+  indVwapRanges?: number[];
+  indRetestRanges?: number[];
+  indSqueezeRanges?: number[];
+  exitTacticOn: boolean;
+  exitTacticBufferPct: number;
   noise: number;
   volWeight: number;
   minStep: number;
@@ -372,6 +488,14 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   setMinPf: number;
   setMaxDdTimeS: number;
   setAutoDeact: boolean;
+  microEnabled: boolean;
+  microMinPf: number;
+  microMaxShare: number;
+  liveEdgeGuard: boolean;
+  liveEdgeN: number;
+  liveEdgeProbeShare: number;
+  /** 1m lanes: "on" full size, "probe" minimum lots only, "off" no new entries (1h lane separate). */
+  oneMinuteLanes: "on" | "probe" | "off";
   setLiveNegativeDeact: boolean;
   setUseHistoricGate: boolean;
   setStrictGate: boolean;
@@ -420,7 +544,20 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
-  volumeFactor: 1,
+  volumeFactor: 0.1,
+  orderSizing: "minQty",
+  htfEnabled: false,
+  htfKinds: [...HTF_KINDS],
+  htfMinPf: 1.05,
+  htfWindow: 50,
+  htfMinN: 20,
+  htfLastN: 0,
+  htfSideHours: 24,
+  htfSideMinTrades: 30,
+  htfSideMinPf: 1.05,
+  htfMaxOpen: 12,
+  htfHistoryBars: 1000,
+  slAutoLeverage: false,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 100,
@@ -434,8 +571,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
-  maxDdTimeS: 57600,
-  scratchS: 600,
+  maxDdTimeS: 64800,
+  scratchS: 7200,
   scratchMinPct: 0.16,
   scanS: 0.2,
   cooldownS: 9,
@@ -458,7 +595,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockVolumeRatio: 0.25,
   blockMaxVolumeMultiplier: 2,
   blockCounts: [1, 2, 3, 4, 5, 6],
-  blockProfitFactorRatio: 1.25,
+  blockProfitFactorRatio: 1.1,
   blockPauseCountRatio: 1,
   blockEvalPosCount: 50,
   blockActiveLive: true,
@@ -476,22 +613,22 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
-  axisPrevEnabled: false,
-  axisPrevMaxWindow: 12,
-  axisLastEnabled: false,
-  axisLastMaxWindow: 4,
-  axisContEnabled: false,
-  axisContMaxWindow: 8,
-  axisPauseEnabled: false,
-  axisPauseMaxWindow: 8,
+  axisPrevEnabled: true,
+  axisPrevMaxWindow: AXIS_SPECS.prev.default,
+  axisLastEnabled: true,
+  axisLastMaxWindow: AXIS_SPECS.last.default,
+  axisContEnabled: true,
+  axisContMaxWindow: AXIS_SPECS.cont.default,
+  axisPauseEnabled: true,
+  axisPauseMaxWindow: AXIS_SPECS.pause.default,
   prevPosWindow: 25,
   prevPosMinCount: 5,
   minPf: EVAL_MIN_PF,
   baseMinPf: EVAL_MIN_PF,
   mainMinPf: EVAL_MIN_PF,
   realMinPf: EVAL_MIN_PF,
-  positionCostPct: 0.10,
-  positionCostFallbackPct: 0.10,
+  positionCostPct: 0.18,
+  positionCostFallbackPct: 0.18,
   // Prefer measured exchange fees. The manual PositionCost remains the
   // deterministic fallback until a complete live sample is available.
   useLivePositionCosts: true,
@@ -508,7 +645,51 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   // XRP/BCH/SOL real-data sweep (see reports/14d-run/coord_sweep_result.json).
   coordOptimizationN: 150,
   pfWindow: 15,
-  slMinPct: 0.4,
+  slMinPct: SL_MIN_DEFAULT_PCT,
+  tpStepPct: 0.1,
+  venueSlTicks: 3,
+  mainEvalPosCount: 30,
+  realEvalPosCount: 30,
+  setDdtWindow: 0,
+  setHistTimeBars: 30,
+  shortMaxHoldS: 1800,
+  setHonorTp: true,
+  setCooldownBars: 2,
+  setScratchMin: 0.0016,
+  histSimulateBlock: true,
+  histSimulateDca: true,
+  histExactWindow: false,
+  marginCapPct: 0.1,
+  maxLotsPerSymbolSide: 0,
+  manualCloseLaneHoldS: 21600,
+  exitMinSamples: 0,
+  exitTacticMinGainPct: 0.15,
+  blockActiveLiveEnabled: true,
+  blockActiveRealEnabled: true,
+  variantBlockEnabled: true,
+  indDirRange: 10,
+  indMoveRange: 10,
+  indMoveRanges: [20, 30, 40],
+  indDirMinChange: 0.001,
+  indMoveMinChange: 0.001,
+  indActiveThreshold: 1,
+  indActiveMovePct: 0.5,
+  indMsiMinGap: 5,
+  indVwapDevZ: 2,
+  indVwapVolMult: 1.8,
+  indRetestTol: 0.12,
+  indRetestMinBreak: 0.08,
+  indSqueezePctl: 0.2,
+  indSweepWickAtr: 0.25,
+  indRsi2Low: 10,
+  indRsi2High: 90,
+  indKeltnerMult: 2,
+  indImpulseSigma: 3,
+  indImpulseVolMult: 2,
+  actSweepMin: 0.04,
+  actRsi2Min: 0.03,
+  actKeltnerMin: 0.04,
+  actImpulseMin: 0.03,
   slMaxPct: 3.0,
   tpMinPct: 0.3,
   tpMaxPct: 0,
@@ -523,9 +704,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailAuto: true,
   trailRecalcN: 6,
   trailRecalcEvery: 8,
-  trailArmMin: 0.3,
+  trailArmMin: 0.6,
   trailArmMax: 1.5,
-  trailGiveMin: 0.1,
+  trailGiveMin: 0.2,
   trailGiveMax: 0.5,
   trailGiveFactor: 0.333,
   trailRecalcGive: true,
@@ -549,6 +730,24 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTrendRanges: [13, 21, 34],
   indBreakRanges: [8, 16, 32],
   indTypeBreak: true,
+  indTypeMsi: true,
+  indTypeVwap: true,
+  indTypeRetest: true,
+  indTypeSqueeze: true,
+  indTypeSweep: true,
+  indTypeRsi2: true,
+  indTypeKeltner: true,
+  indTypeImpulse: true,
+  indSweepRanges: [12, 20, 34],
+  indRsi2Ranges: [21, 34, 55],
+  indKeltnerRanges: [14, 20, 30],
+  indImpulseRanges: [20, 30, 45],
+  indMsiRanges: [14, 21, 34],
+  indVwapRanges: [20, 30, 40],
+  indRetestRanges: [12, 20, 32],
+  indSqueezeRanges: [16, 20, 26],
+  exitTacticOn: true,
+  exitTacticBufferPct: 0.1,
   noise: 0.05,
   volWeight: 0.3,
   minStep: 7,
@@ -568,7 +767,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 2880,
+  histLookbackBars: 720,
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 3600,
@@ -577,13 +776,20 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histTestEnabled: true,
   histTestAutoAssign: true,
   histTestRefreshHours: HIST_TEST_REFRESH_DEFAULT,
-  setPfWindow: 30,
-  baseEvalPosCount: 30,
+  setPfWindow: 50,
+  baseEvalPosCount: 50,
   setDeactN: 25,
   controlMinTrades: 0,
   setMinPf: EVAL_MIN_PF,
-  setMaxDdTimeS: 57600,
+  setMaxDdTimeS: 64800,
   setAutoDeact: true,
+  microEnabled: true,
+  microMinPf: 1.05,
+  microMaxShare: 0.05,
+  liveEdgeGuard: true,
+  liveEdgeN: 50,
+  liveEdgeProbeShare: 0.25,
+  oneMinuteLanes: "on",
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
   setLiveNegativeDeact: false,
@@ -674,6 +880,19 @@ export type CtsSettings = {
   dcaPfWindow?: number;
   dcaDeactN?: number;
   volumeFactor?: number;
+  orderSizing?: string;
+  htfEnabled?: boolean;
+  htfKinds?: string[];
+  htfMinPf?: number;
+  htfWindow?: number;
+  htfMinN?: number;
+  htfLastN?: number;
+  htfSideHours?: number;
+  htfSideMinTrades?: number;
+  htfSideMinPf?: number;
+  htfMaxOpen?: number;
+  htfHistoryBars?: number;
+  slAutoLeverage?: boolean;
   axisPrevEnabled?: boolean;
   axisPrevMaxWindow?: number;
   axisLastEnabled?: boolean;
@@ -688,6 +907,8 @@ export type CtsSettings = {
   positionCost?: number;
   pfWindow?: number;
   slMinPct?: number;
+  tpStepPct?: number;
+  venueSlTicks?: number;
   slMaxPct?: number;
   tpMinPct?: number;
   tpMaxPct?: number;
@@ -726,8 +947,26 @@ export type CtsSettings = {
   indTypeSignals?: boolean;
   indTypeTrend?: boolean;
   indTypeBreak?: boolean;
+  indTypeMsi?: boolean;
+  indTypeVwap?: boolean;
+  indTypeRetest?: boolean;
+  indTypeSqueeze?: boolean;
+  indTypeSweep?: boolean;
+  indTypeRsi2?: boolean;
+  indTypeKeltner?: boolean;
+  indTypeImpulse?: boolean;
+  indSweepRanges?: number[];
+  indRsi2Ranges?: number[];
+  indKeltnerRanges?: number[];
+  indImpulseRanges?: number[];
   indTrendRanges?: number[];
   indBreakRanges?: number[];
+  indMsiRanges?: number[];
+  indVwapRanges?: number[];
+  indRetestRanges?: number[];
+  indSqueezeRanges?: number[];
+  exitTacticOn?: boolean;
+  exitTacticBufferPct?: number;
   activeNoiseFilter?: number;
   activeVolatilityWeight?: number;
   posCountsVolumeRatio?: number;
@@ -749,6 +988,13 @@ export type CtsSettings = {
   setMinPf?: number;
   setMaxDdTimeS?: number;
   setAutoDeact?: boolean;
+  microEnabled?: boolean;
+  microMinPf?: number;
+  microMaxShare?: number;
+  liveEdgeGuard?: boolean;
+  liveEdgeN?: number;
+  liveEdgeProbeShare?: number;
+  oneMinuteLanes?: string;
   setUseHistoricGate?: boolean;
   setStrictGate?: boolean;
   baseEvalPosCount?: number;
@@ -884,14 +1130,27 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
+    volumeFactor: num(cts.volumeFactor, 0.1),
+    orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
+    htfEnabled: bool(cts.htfEnabled, false),
+    htfKinds: Array.isArray(cts.htfKinds) ? cts.htfKinds.filter((k) => (HTF_KINDS as readonly string[]).includes(k)) : [...HTF_KINDS],
+    htfMinPf: Math.max(0.5, Math.min(3, num(cts.htfMinPf, 1.05))),
+    htfWindow: Math.max(5, Math.min(500, Math.round(num(cts.htfWindow, 50)))),
+    htfMinN: Math.max(1, Math.min(500, Math.round(num(cts.htfMinN, 20)))),
+    htfLastN: Math.max(0, Math.min(100, Math.round(num(cts.htfLastN, 0)))),
+    htfSideHours: Math.max(1, Math.min(168, num(cts.htfSideHours, 24))),
+    htfSideMinTrades: Math.max(1, Math.min(500, Math.round(num(cts.htfSideMinTrades, 30)))),
+    htfSideMinPf: Math.max(0.5, Math.min(3, num(cts.htfSideMinPf, 1.05))),
+    htfMaxOpen: Math.max(0, Math.min(200, Math.round(num(cts.htfMaxOpen, 12)))),
+    htfHistoryBars: Math.max(400, Math.min(1440, Math.round(num(cts.htfHistoryBars, 1000)))),
+    slAutoLeverage: bool(cts.slAutoLeverage, false),
+    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
-    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
+    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),
     axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
-    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
+    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), true),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
-    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
+    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     prevPosWindow: num(live?.prevPosWindow ?? cts.prevPosWindow ?? cts.prev_pos_window, 25),
     prevPosMinCount: num(live?.prevPosMinCount ?? cts.prevPosMinCount ?? cts.prev_pos_min_count, 5),
@@ -900,8 +1159,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, EVAL_MIN_PF), EVAL_MIN_PF),
   realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, EVAL_MIN_PF), EVAL_MIN_PF),
 
-    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.10),
-    positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.10),
+    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.18),
+    positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.18),
     useLivePositionCosts: bool(
       live?.useLivePositionCosts ?? cts.useLivePositionCosts ?? cts.useExchangePositionCost ?? cts.livePositionCostEnabled,
       true,
@@ -915,13 +1174,57 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       false,
     ),
     coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
-    maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 57600),
+    maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 64800),
     cooldownS: num(live?.cooldownS ?? cts.cooldownS, 9),
     staggerS: num(live?.staggerS ?? cts.staggerS, 0.6),
     drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 0),
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
-    slMinPct: num(cts.slMinPct, SL_MIN_PCT),
+    slMinPct: num(cts.slMinPct, SL_MIN_DEFAULT_PCT),
+    tpStepPct: Math.max(0.02, Math.min(1, num(cts.tpStepPct, 0.1))),
+    venueSlTicks: Math.max(1, Math.min(50, num(live?.venueSlTicks ?? cts.venueSlTicks, 3))),
+    mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 30)))),
+    realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 30)))),
+    setDdtWindow: Math.max(0, Math.min(200, Math.round(num(live?.setDdtWindow, 0)))),
+    setHistTimeBars: Math.max(8, Math.min(120, Math.round(num(live?.setHistTimeBars, 30)))),
+    shortMaxHoldS: Math.max(300, Math.min(21600, Math.round(num(live?.shortMaxHoldS, 1800)))),
+    setHonorTp: bool(live?.setHonorTp, true),
+    setCooldownBars: Math.max(1, Math.min(12, Math.round(num(live?.setCooldownBars, 2)))),
+    setScratchMin: Math.max(0, Math.min(0.05, num(live?.setScratchMin, 0.0016))),
+    histSimulateBlock: bool(live?.histSimulateBlock, true),
+    histSimulateDca: bool(live?.histSimulateDca, true),
+    histExactWindow: bool(live?.histExactWindow, false),
+    marginCapPct: Math.max(0, Math.min(1, num(live?.marginCapPct, 0.1))),
+    maxLotsPerSymbolSide: Math.max(0, Math.min(100, Math.round(num(live?.maxLotsPerSymbolSide, 0)))),
+    manualCloseLaneHoldS: Math.max(0, Math.min(86400, Math.round(num(live?.manualCloseLaneHoldS, 21600)))),
+    exitMinSamples: Math.max(0, Math.min(200, Math.round(num(live?.exitMinSamples, 0)))),
+    exitTacticMinGainPct: Math.max(0, Math.min(2, num(live?.exitTacticMinGainPct, 0.15))),
+    blockActiveLiveEnabled: bool(live?.blockActiveLiveEnabled, true),
+    blockActiveRealEnabled: bool(live?.blockActiveRealEnabled, true),
+    variantBlockEnabled: bool(live?.variantBlockEnabled, true),
+    indDirRange: Math.max(4, Math.min(55, Math.round(num(live?.indDirRange, 10)))),
+    indMoveRange: Math.max(4, Math.min(55, Math.round(num(live?.indMoveRange, 10)))),
+    indMoveRanges: Array.isArray(live?.indMoveRanges) ? (live?.indMoveRanges as number[]) : [20, 30, 40],
+    indDirMinChange: Math.max(0, Math.min(0.05, num(live?.indDirMinChange, 0.001))),
+    indMoveMinChange: Math.max(0, Math.min(0.05, num(live?.indMoveMinChange, 0.001))),
+    indActiveThreshold: Math.max(0.1, Math.min(10, num(live?.indActiveThreshold, 1))),
+    indActiveMovePct: Math.max(0, Math.min(5, num(live?.indActiveMovePct, 0.5))),
+    indMsiMinGap: Math.max(0.5, Math.min(30, num(live?.indMsiMinGap, 5))),
+    indVwapDevZ: Math.max(0.5, Math.min(6, num(live?.indVwapDevZ, 2))),
+    indVwapVolMult: Math.max(1, Math.min(10, num(live?.indVwapVolMult, 1.8))),
+    indRetestTol: Math.max(0.01, Math.min(2, num(live?.indRetestTol, 0.12))),
+    indRetestMinBreak: Math.max(0.01, Math.min(2, num(live?.indRetestMinBreak, 0.08))),
+    indSqueezePctl: Math.max(0.05, Math.min(0.5, num(live?.indSqueezePctl, 0.2))),
+    indSweepWickAtr: Math.max(0, Math.min(3, num(live?.indSweepWickAtr, 0.25))),
+    indRsi2Low: Math.max(1, Math.min(49, num(live?.indRsi2Low, 10))),
+    indRsi2High: Math.max(51, Math.min(99, num(live?.indRsi2High, 90))),
+    indKeltnerMult: Math.max(0.5, Math.min(5, num(live?.indKeltnerMult, 2))),
+    indImpulseSigma: Math.max(1, Math.min(10, num(live?.indImpulseSigma, 3))),
+    indImpulseVolMult: Math.max(1, Math.min(10, num(live?.indImpulseVolMult, 2))),
+    actSweepMin: Math.max(0, Math.min(2, num(live?.actSweepMin, 0.04))),
+    actRsi2Min: Math.max(0, Math.min(2, num(live?.actRsi2Min, 0.03))),
+    actKeltnerMin: Math.max(0, Math.min(2, num(live?.actKeltnerMin, 0.04))),
+    actImpulseMin: Math.max(0, Math.min(2, num(live?.actImpulseMin, 0.03))),
     slMaxPct: num(cts.slMaxPct, 3.0),
     tpMinPct: num(cts.tpMinPct, 0.3),
     tpMaxPct: num(cts.tpMaxPct, 0),
@@ -936,9 +1239,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailAuto: bool(cts.trailAuto, true),
     trailRecalcN: num(cts.trailRecalcN, 6),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
-    trailArmMin: num(cts.trailArmMin, 0.3),
+    trailArmMin: num(cts.trailArmMin, 0.6),
     trailArmMax: num(cts.trailArmMax, 1.5),
-    trailGiveMin: num(cts.trailGiveMin, 0.1),
+    trailGiveMin: num(cts.trailGiveMin, 0.2),
     trailGiveMax: num(cts.trailGiveMax, 0.5),
     trailGiveFactor: num(cts.trailGiveFactor, 0.333),
     trailRecalcGive: bool(cts.trailRecalcGive, true),
@@ -962,6 +1265,24 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTrendRanges: Array.isArray(cts.indTrendRanges) ? cts.indTrendRanges : [13, 21, 34],
     indBreakRanges: Array.isArray(cts.indBreakRanges) ? cts.indBreakRanges : [8, 16, 32],
     indTypeBreak: bool(cts.indTypeBreak, true),
+    indTypeMsi: bool(cts.indTypeMsi, true),
+    indTypeVwap: bool(cts.indTypeVwap, true),
+    indTypeRetest: bool(cts.indTypeRetest, true),
+    indTypeSqueeze: bool(cts.indTypeSqueeze, true),
+    indTypeSweep: bool(cts.indTypeSweep, true),
+    indTypeRsi2: bool(cts.indTypeRsi2, true),
+    indTypeKeltner: bool(cts.indTypeKeltner, true),
+    indTypeImpulse: bool(cts.indTypeImpulse, true),
+    indSweepRanges: Array.isArray(cts.indSweepRanges) ? cts.indSweepRanges : [12, 20, 34],
+    indRsi2Ranges: Array.isArray(cts.indRsi2Ranges) ? cts.indRsi2Ranges : [21, 34, 55],
+    indKeltnerRanges: Array.isArray(cts.indKeltnerRanges) ? cts.indKeltnerRanges : [14, 20, 30],
+    indImpulseRanges: Array.isArray(cts.indImpulseRanges) ? cts.indImpulseRanges : [20, 30, 45],
+    indMsiRanges: Array.isArray(cts.indMsiRanges) ? cts.indMsiRanges : [14, 21, 34],
+    indVwapRanges: Array.isArray(cts.indVwapRanges) ? cts.indVwapRanges : [20, 30, 40],
+    indRetestRanges: Array.isArray(cts.indRetestRanges) ? cts.indRetestRanges : [12, 20, 32],
+    indSqueezeRanges: Array.isArray(cts.indSqueezeRanges) ? cts.indSqueezeRanges : [16, 20, 26],
+    exitTacticOn: bool(cts.exitTacticOn, true),
+    exitTacticBufferPct: Math.max(0, Math.min(1, num(cts.exitTacticBufferPct, 0.1))),
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),
     minStep: num((coord as { minStep?: number }).minStep, DEFAULT_MIN_STEP),
@@ -980,13 +1301,20 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
     histTestAutoAssign: bool(cts.histTestAutoAssign ?? live?.histTestAutoAssign, true),
     histTestRefreshHours: clampHistTestRefreshHours(cts.histTestRefreshHours ?? live?.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT),
-    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
-    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
+    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 50),
+    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 50),
     setDeactN: num(cts.setDeactN, 25),
     controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),
-    setMaxDdTimeS: num(cts.setMaxDdTimeS, 57600),
+    setMaxDdTimeS: num(cts.setMaxDdTimeS, 64800),
     setAutoDeact: bool(cts.setAutoDeact, true),
+    microEnabled: bool(cts.microEnabled, true),
+    microMinPf: normalizePf(num(cts.microMinPf, 1.05), 1.05),
+    microMaxShare: Math.max(0, Math.min(1, num(cts.microMaxShare, 0.05))),
+    liveEdgeGuard: bool(cts.liveEdgeGuard, true),
+    liveEdgeN: Math.max(10, Math.min(500, Math.round(num(cts.liveEdgeN, 50)))),
+    liveEdgeProbeShare: Math.max(0, Math.min(1, num(cts.liveEdgeProbeShare, 0.25))),
+    oneMinuteLanes: ((v) => (v === "probe" || v === "off" ? v : "on"))(String(live?.oneMinuteLanes ?? cts.oneMinuteLanes ?? "on")),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),
@@ -1033,10 +1361,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.slToTpMax = SL_TP_MAX;
   out.slToTpStep = SL_TP_STEP;
   out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), SL_TP_MIN, SL_TP_MAX, SL_TP_STEP);
-  out.trailArmMin = 0.3;
-  out.trailArmMax = 1.5;
-  out.trailGiveMin = 0.1;
-  out.trailGiveMax = 0.5;
+  Object.assign(out, clampTrailGrid(out));
   out.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.setMinStep, DEFAULT_MIN_STEP))));
   out.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.minStep, DEFAULT_MIN_STEP))));
   out.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.trailingMinStep, DEFAULT_MIN_STEP))));
@@ -1045,8 +1370,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     out[key] = normalizePf(out.minPf, EVAL_MIN_PF);
   }
-  out.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.maxDdTimeS, 57600) / 600) * 600));
-  out.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.setMaxDdTimeS, 57600) / 600) * 600));
+  out.axisPrevMaxWindow = clampAxisWindow("prev", out.axisPrevMaxWindow);
+  out.axisLastMaxWindow = clampAxisWindow("last", out.axisLastMaxWindow);
+  out.axisContMaxWindow = clampAxisWindow("cont", out.axisContMaxWindow);
+  out.axisPauseMaxWindow = clampAxisWindow("pause", out.axisPauseMaxWindow);
+  out.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.maxDdTimeS, 64800) / 600) * 600));
+  out.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.setMaxDdTimeS, 64800) / 600) * 600));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),
@@ -1167,7 +1496,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     next[key] = normalizePf(next.minPf, EVAL_MIN_PF);
   }
-  next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 30))));
+  next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 40))));
   next.setPfWindow = next.baseEvalPosCount;
   next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
   next.slMinPct = Math.max(SL_MIN_PCT, Math.min(3, num(next.slMinPct, SL_MIN_PCT)));
@@ -1180,15 +1509,12 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.minStep, DEFAULT_MIN_STEP))));
   next.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.trailingMinStep, DEFAULT_MIN_STEP))));
   next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
-  // Save the same full trail grid that overlayFromCts loads. A narrower saved
-  // range would shrink the engine catalog until the next reload widened it.
-  next.trailArmMin = 0.3;
-  next.trailArmMax = 1.5;
-  next.trailGiveMin = 0.1;
-  next.trailGiveMax = 0.5;
+  // Save the same trail grid that overlayFromCts loads (same clamps), so the
+  // engine catalog matches what the desk shows.
+  Object.assign(next, clampTrailGrid(next));
   next.slPct = Math.max(next.slMinPct, num(next.slPct, next.slMinPct));
-  next.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.maxDdTimeS, 57600) / 600) * 600));
-  next.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.setMaxDdTimeS, 57600) / 600) * 600));
+  next.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.maxDdTimeS, 64800) / 600) * 600));
+  next.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.setMaxDdTimeS, 64800) / 600) * 600));
   next.cooldownS = Math.max(0, Math.min(120, num(next.cooldownS, 9)));
   next.staggerS = Math.max(0, Math.min(30, num(next.staggerS, 0.6)));
   next.drawdownHaltPct = Math.max(0, Math.min(80, num(next.drawdownHaltPct, 0)));

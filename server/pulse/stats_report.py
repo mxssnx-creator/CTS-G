@@ -225,7 +225,7 @@ def by_symbol(rows: Sequence[Dict[str, Any]], cost_pct: float) -> List[Dict[str,
         buckets.setdefault(r["symbol"] or "?", []).append(r)
     out = []
     for s, items in buckets.items():
-        d = drawdown_time_by_symbol(_ddt_tape(items))
+        d = drawdown_time_by_symbol(_ddt_tape(items), cost_pct=cost_pct)
         w = pf_window(items, None, cost_pct)
         out.append({
             "symbol": s,
@@ -246,7 +246,13 @@ def by_pack(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
 
 
 IND_KIND_SET = set(IND_KINDS)
-STRAT_KEYS = ("indications", "general", "block", "trailing", "dca", "exits")
+STRAT_KEYS = ("indications", "general", "block", "trailing", "dca", "exits", "htf")
+
+
+def _is_htf(r: Dict[str, Any]) -> bool:
+    """1h lane close: its own strategy bucket, never a 1m indication/trail."""
+    return (str(r.get("pack") or "").lower() == "htf" or str(r.get("set_id") or r.get("setId") or "").startswith("htf:")
+            or str(r.get("execution_lane") or "") == "htf")
 
 
 def _side_of(r: Dict[str, Any]) -> str:
@@ -268,12 +274,21 @@ def _kind_of(r: Dict[str, Any]) -> str:
         cand = (bits[1] if len(bits) > 1 else "").strip().lower()
         if cand in IND_KIND_SET:
             return cand
-        if reason.startswith("ind:"):
-            return "signals"
     return ""
 
 
+def _is_overlay(r: Dict[str, Any]) -> bool:
+    """Block/DCA closes: counted under byStrategy block/dca, never under an indication kind."""
+    pack = str(r.get("pack") or "").lower()
+    tagged = str(r.get("strategy") or "").lower()
+    reason = str(r.get("reason") or "").lower()
+    head = reason.split(":")[0].split()[0] if reason else ""
+    return tagged in ("block", "dca") or head.startswith("block") or head.startswith("dca") or pack in ("block", "dca")
+
+
 def _strats_of(r: Dict[str, Any]) -> List[str]:
+    if _is_htf(r):
+        return ["htf"]
     keys: List[str] = []
     pack = str(r.get("pack") or "").lower()
     tagged = str(r.get("strategy") or "").lower()
@@ -281,7 +296,7 @@ def _strats_of(r: Dict[str, Any]) -> List[str]:
     head = reason.split(":")[0].split()[0] if reason else ""
     kind = _kind_of(r)
     trail = str(r.get("trail_key") or r.get("trailKey") or "").strip().lower()
-    overlay = tagged in ("block", "dca") or head.startswith("block") or head.startswith("dca") or pack in ("block", "dca")
+    overlay = _is_overlay(r)
     if tagged == "block" or head.startswith("block") or pack == "block":
         keys.append("block")
         if kind == "signals":
@@ -307,8 +322,8 @@ def _strats_of(r: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(keys))
 
 
-def _with_ddt(window: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    d = drawdown_time_by_symbol(_ddt_tape(rows)) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+def _with_ddt(window: Dict[str, Any], rows: Sequence[Dict[str, Any]], cost_pct: float = POSITION_COST_PCT_DEFAULT) -> Dict[str, Any]:
+    d = drawdown_time_by_symbol(_ddt_tape(rows), cost_pct=cost_pct) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
     window["maxDdS"] = d.get("maxS")
     window["avgDdS"] = d.get("avgS")
     window["ddEpisodes"] = d.get("episodes")
@@ -318,12 +333,12 @@ def _with_ddt(window: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> Dict[st
 
 def _bucket_stats(items: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
     w = pf_window(items, None, cost_pct)
-    _with_ddt(w, items)
+    _with_ddt(w, items, cost_pct)
     by_side: Dict[str, Any] = {}
     for d in ("LONG", "SHORT"):
         sub = [x for x in items if _side_of(x) == d]
         sw = pf_window(sub, None, cost_pct)
-        _with_ddt(sw, sub)
+        _with_ddt(sw, sub, cost_pct)
         sw["direction"] = d
         by_side[d] = sw
     w["bySide"] = by_side
@@ -332,10 +347,12 @@ def _bucket_stats(items: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str,
 
 
 def by_indication(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
+    # Same closes as byStrategy["indications:<kind>"]: Block/DCA overlays stay
+    # under byStrategy block/dca so both tables report one n per kind.
     buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in IND_KINDS}
     for r in rows:
         k = _kind_of(r)
-        if k:
+        if k and not _is_overlay(r):
             buckets.setdefault(k, []).append(r)
     out: Dict[str, Any] = {}
     for k in IND_KINDS:
@@ -343,6 +360,15 @@ def by_indication(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, 
         blob["kind"] = k
         out[k] = blob
     return out
+
+
+def by_htf_kind(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
+    """1h-lane closes per kind (rsi-mom-*, *@x4)."""
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        if _is_htf(r):
+            buckets.setdefault(str(r.get("ind_kind") or r.get("indKind") or "unknown"), []).append(r)
+    return {k: {**_bucket_stats(v, cost_pct), "kind": k} for k, v in sorted(buckets.items())}
 
 
 def by_direction(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
@@ -394,14 +420,18 @@ def merge_kind_stats(
         hist_n = int(g.get("n") or 0)
         live_n = int(blob.get("n") or 0)
         if hist_n >= live_n and hist_n:
-            blob["pf"] = round(float(g.get("pf") or blob.get("pf") or 0), 4)
+            # Replay wins: every count/amount field comes from the replay gate so
+            # pf, n, wr, gp/gl/net and bySide never mix two tapes.
+            blob["source"] = "replay"
+            blob["pf"] = round(float(g.get("pf") or 0), 4)
             blob["n"] = hist_n
+            for key in ("gp", "gl", "net", "wr"):
+                blob[key] = g.get(key) if key in g else None
+            blob["bySide"] = g.get("bySide") if isinstance(g.get("bySide"), dict) else {}
             blob["maxDdS"] = g.get("maxDdS", blob.get("maxDdS"))
             blob["avgDdS"] = g.get("avgDdS", blob.get("avgDdS"))
             blob["ddEpisodes"] = g.get("ddEpisodes", blob.get("ddEpisodes"))
             blob["netAvg"] = g.get("netAvg", blob.get("netAvg"))
-            if isinstance(g.get("bySide"), dict) and g.get("bySide"):
-                blob["bySide"] = g.get("bySide")
             blob["validated"] = bool(g.get("validated")) if hist_n else bool(int(blob.get("n") or 0) >= LAST_N_DEFAULT)
             blob["profitable"] = bool(clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
         blob["ok"] = bool(int(blob.get("n") or 0) >= 8 and clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
@@ -444,7 +474,8 @@ def merge_strategy_stats(
     extras = {
         "block": {
             "enabled": bool(block.get("enabled", cov_on.get("block", True))),
-            "n": int(block.get("countN") or len(block.get("lanes") or []) or (out.get("block") or {}).get("n") or 0),
+            # n = closed Block trades; the count ladder / lane total is not a sample size.
+            "n": int((out.get("block") or {}).get("n") or 0),
             "pf": float(block.get("last15Ratio") or (out.get("block") or {}).get("pf") or 0),
         },
         "dca": {
@@ -537,7 +568,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     required_samples = int(policy.get("requiredSamples") or pf_n)
     pc = last_n_cost_pf(closed, pf_n, cost_pct)
     windows = evaluation_windows(closed, cost_pct)
-    ddt = drawdown_time_by_symbol(_ddt_tape(closed))
+    ddt = drawdown_time_by_symbol(_ddt_tape(closed), cost_pct=cost_pct)
     ddt_gross = drawdown_time_by_symbol(_ddt_tape(closed, gross=True))
     occ = occupancy(st.get("open") or [])
     rows = []
@@ -668,6 +699,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             kind_live=(st.get("indications") or {}).get("kindStats") or {},
         ),
         "byDirection": by_direction(closed, cost_pct),
+        "byHtfKind": by_htf_kind(closed, cost_pct),
         "byStrategy": merge_strategy_stats(
             closed,
             cost_pct,
@@ -705,6 +737,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "liveOverview": sets.get("liveOverview") or {},
         "setsProgress": sets.get("progress"),
         "sets": rows,
+        # Window behind every Set row's last15Ratio (set_engine pf_n), for labels.
+        "setPfWindow": int(sets.get("pfWindow") or pf_n),
         "internBest": [
             {
                 "id": r.get("id"),
@@ -730,6 +764,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             )[:12]
         ],
         "exits": exits.get("lanes"),
+        "exitPfWindow": int(exits.get("pfWindow") or LAST_N_DEFAULT),
         "exitRevOn": exits.get("revOn"),
         "dca": st.get("dca"),
         "indications": st.get("indications"),
@@ -898,6 +933,7 @@ def render_html(blob: Dict[str, Any]) -> str:
     historic_bars = historic_coverage.get("bars") or {}
     gate = blob.get("coordGate") or {}
     set_rows = [row for row in (blob.get("sets") or []) if isinstance(row, dict)]
+    set_pf_window = int(blob.get("setPfWindow") or LAST_N_DEFAULT)
     set_rows.sort(key=lambda row: (-float(row.get("last15Ratio") or 0), float(row.get("maxDdS") or 0)))
     symbols = blob.get("symbols") or []
     closed = [row for row in (blob.get("closed") or []) if isinstance(row, dict)]
@@ -1144,7 +1180,7 @@ footer {{ padding-top: 20px; color: var(--muted); font-size: 12px; }}
   <div class="panel"><h2>By strategy</h2>{table(["Strategy", "State", "N", "Cost PF", "WR", "Max DDt h"], strategy_rows)}</div>
   <div class="panel"><h2>By pack</h2>{table(["Pack", "N", "Cost PF", "Net", "WR"], pack_rows)}</div>
 </section>
-<section class="panel"><div class="panel-head"><h2>Independent Set ranking</h2><span class="muted">top {min(len(set_rows), 60)} of {len(set_rows)} rows · cost-net evidence</span></div>{table(["Set", "Pack", "Kind", "N", "PF15", "R25", "E", "Max DDt h", "State"], set_html_rows)}</section>
+<section class="panel"><div class="panel-head"><h2>Independent Set ranking</h2><span class="muted">top {min(len(set_rows), 60)} of {len(set_rows)} rows · cost-net evidence</span></div>{table(["Set", "Pack", "Kind", "N", f"PF{set_pf_window}", "R25", "E", "Max DDt h", "State"], set_html_rows)}</section>
 <section class="two">
   <div class="panel"><h2>Open book</h2>{table(["Symbol", "Side", "Qty", "Entry", "Mark", "uPnL %", "Pack", "Controls"], open_html_rows)}</div>
   <div class="panel"><h2>Recent closed tape</h2>{table(["Time", "Symbol", "Side", "Qty", "Entry", "Exit", "PnL", "Move %", "Reason"], close_html_rows)}</div>
@@ -1228,7 +1264,7 @@ def render_md(blob: Dict[str, Any]) -> str:
     lines += ["", "## Set intern ranking", ""]
     for r in sorted(sets, key=lambda x: (-float(x.get("last15Ratio") or 0), float(x.get("maxDdS") or 0)))[:20]:
         lines.append(
-            f"- `{r.get('id')}` PF15={r.get('last15Ratio')} R25={r.get('last25AvgR')} WR={r.get('wr')} E={r.get('expectancyNetCost')} hold={r.get('avgHoldS')}s maxDDt={r.get('maxDdS')}s n={r.get('n')}+{r.get('liveN')} on={r.get('active')} {r.get('deactReason') or ''}"
+            f"- `{r.get('id')}` PF{blob.get('setPfWindow') or LAST_N_DEFAULT}={r.get('last15Ratio')} R25={r.get('last25AvgR')} WR={r.get('wr')} E={r.get('expectancyNetCost')} hold={r.get('avgHoldS')}s maxDDt={r.get('maxDdS')}s n={r.get('n')}+{r.get('liveN')} on={r.get('active')} {r.get('deactReason') or ''}"
         )
     lines += ["", "## Coverage", ""]
     cov = blob.get("coverage") or {}
@@ -1236,7 +1272,7 @@ def render_md(blob: Dict[str, Any]) -> str:
     types = cov.get("indicationTypes") or {}
     hits = cov.get("indicationHits") or {}
     lines.append("- strategies: " + ", ".join(f"{k}={'ON' if v else 'off'}" for k, v in strat.items()))
-    lines.append("- indication types: " + ", ".join(f"{k}={'ON' if types.get(k, True) else 'off'} hits={hits.get(k, 0)}" for k in ("state", "direction", "move", "active", "common", "signals", "trend", "break")))
+    lines.append("- indication types: " + ", ".join(f"{k}={'ON' if types.get(k, True) else 'off'} hits={hits.get(k, 0)}" for k in IND_KINDS))
     bcov = cov.get("block") or {}
     lines.append(f"- block enabled={bcov.get('enabled')} counts={bcov.get('countN')} stack={bcov.get('maxStack')} liveLanes={bcov.get('liveLanes')}")
     for c in bcov.get("allCounts") or []:
@@ -1273,7 +1309,7 @@ def render_md(blob: Dict[str, Any]) -> str:
     lines.append(f"enabled={dca.get('enabled')} steps={dca.get('maxSteps')} dist={dca.get('distances')} last15={dca.get('last15Ratio')} active={dca.get('active')}")
     lines += ["", "## Exits", ""]
     for ln in blob.get("exits") or []:
-        lines.append(f"- {ln.get('key')} n={ln.get('n')} wins={ln.get('wins')} PF15={ln.get('last15Ratio')} active={ln.get('active')}")
+        lines.append(f"- {ln.get('key')} n={ln.get('n')} wins={ln.get('wins')} PF{blob.get('exitPfWindow') or LAST_N_DEFAULT}={ln.get('last15Ratio')} active={ln.get('active')}")
     activity = blob.get("activity") or {}
     lines += ["", "## Activity ledger", ""]
     lines.append(f"events={activity.get('eventCount', 0)} duplicates={activity.get('duplicateCount', 0)} fills={activity.get('fillCount', 0)} requests={activity.get('requestCount', 0)} responses={activity.get('responseCount', 0)} fees={activity.get('fees', 0)} parity={activity.get('parity', 'pending')}")

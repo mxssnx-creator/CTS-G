@@ -215,7 +215,7 @@ def _config_of(row: Any, meta: Optional[Dict[str, Any]] = None) -> str:
     return f"sl{sl:.1f}:st{step}:tr{trail or 'base'}"
 
 
-def _score(acc: _Acc, cost_pct: float, pf_n: int, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
+def _score(acc: _Acc, cost_pct: float, pf_n: int, min_pf: float = POSITIVE_PF, min_n: int = 8) -> Dict[str, Any]:
     tail = list(acc.tail)
     window = last_n_cost_pf(tail, max(1, pf_n), cost_pct, ordered=True, simple=True) if tail else last_n_cost_pf([], 1, cost_pct)
     try:
@@ -237,7 +237,7 @@ def _score(acc: _Acc, cost_pct: float, pf_n: int, min_pf: float = POSITIVE_PF) -
         "pf": round(pf, 4),
         "wr": wr,
         "netAvg": round(float(window.get("netAvg") or 0), 6),
-        "validated": eval_n >= 8 and is_positive_pf(pf, min_pf),
+        "validated": eval_n >= max(1, int(min_n)) and is_positive_pf(pf, min_pf),
         "costSubtracted": True,
         "maxDdS": round(max_dd, 1),
         "avgDdS": round(float(dd.get("avgS") or 0), 1),
@@ -261,8 +261,11 @@ def evaluate_fills(
     min_pf: float = POSITIVE_PF,
     cost_pct: float = 0.1,
     pf_n: int = 30,
+    min_n: int = 8,
 ) -> Dict[str, Any]:
-    """Score an already-materialised fill stream. Used by tests and evaluate_book."""
+    """Score an already-materialised fill stream. Used by tests and evaluate_book.
+
+    ``min_n`` is the sample floor for ``validated`` (the book's Base need)."""
     combo_acc: Dict[Tuple[str, str, str, str], _Acc] = {}
     matrix_acc: Dict[Tuple[str, str], _Acc] = {}
     family_acc: Dict[str, _Acc] = {key: _Acc() for key in PF_FAMILIES}
@@ -331,7 +334,7 @@ def evaluate_fills(
     public_combos: List[Dict[str, Any]] = []
     for key, acc in combo_acc.items():
         indication, config, strategy, set_id = key
-        scored = _score(acc, cost_pct, pf_n, min_pf)
+        scored = _score(acc, cost_pct, pf_n, min_pf, min_n)
         info = combo_meta[key]
         # Kind tapes score the matrix only. They are not catalog coordinations.
         if str(info.get("lane") or "") in KIND_LANES:
@@ -407,14 +410,14 @@ def evaluate_fills(
     for indication in INDICATIONS:
         for strategy in STRATEGIES:
             acc = matrix_acc.get((indication, strategy))
-            scored = _score(acc, cost_pct, pf_n, min_pf) if acc is not None else dict(MATRIX_EMPTY)
+            scored = _score(acc, cost_pct, pf_n, min_pf, min_n) if acc is not None else dict(MATRIX_EMPTY)
             matrix.append({"indication": indication, "strategy": strategy, **scored})
 
-    pf_stats = {name: _score(family_acc[name], cost_pct, pf_n, min_pf) if family_acc[name].n else _empty_family() for name in PF_FAMILIES}
+    pf_stats = {name: _score(family_acc[name], cost_pct, pf_n, min_pf, min_n) if family_acc[name].n else _empty_family() for name in PF_FAMILIES}
     with_without = {
         name: {
-            "with": _score(pair["with"], cost_pct, pf_n, min_pf) if pair["with"].n else _empty_family(),
-            "without": _score(pair["without"], cost_pct, pf_n, min_pf) if pair["without"].n else _empty_family(),
+            "with": _score(pair["with"], cost_pct, pf_n, min_pf, min_n) if pair["with"].n else _empty_family(),
+            "without": _score(pair["without"], cost_pct, pf_n, min_pf, min_n) if pair["without"].n else _empty_family(),
         }
         for name, pair in with_acc.items()
     }
@@ -426,6 +429,7 @@ def evaluate_fills(
         "minPf": float(min_pf),
         "costPct": float(cost_pct),
         "pfN": int(pf_n),
+        "minN": int(min_n),
         "pfStats": pf_stats,
         "withWithout": with_without,
         "matrix": matrix,
@@ -548,11 +552,13 @@ def evaluate_book(
     min_pf: float = POSITIVE_PF,
     cost_pct: Optional[float] = None,
     pf_n: Optional[int] = None,
+    min_n: Optional[int] = None,
 ) -> Dict[str, Any]:
     cost = float(cost_pct if cost_pct is not None else getattr(book, "cost_pct", 0.1) or 0.1)
     window = int(pf_n if pf_n is not None else getattr(book, "pf_n", 30) or 30)
     floor = float(min_pf if min_pf is not None else getattr(book, "min_pf", POSITIVE_PF) or POSITIVE_PF)
-    return evaluate_fills(iter_book_fills(book), min_pf=floor, cost_pct=cost, pf_n=window)
+    need = 8 if min_n is None else max(1, int(min_n))
+    return evaluate_fills(iter_book_fills(book), min_pf=floor, cost_pct=cost, pf_n=window, min_n=need)
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
