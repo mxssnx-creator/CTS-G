@@ -549,7 +549,6 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
-  volumeFactor: 1,
   sizingMode: "balance",
   targetNotionalPct: 1,
   volumeFactor: 0.1,
@@ -1140,10 +1139,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
     sizingMode: (live?.sizingMode ?? cts.sizingMode) === "fixed" ? "fixed" : "balance",
     targetNotionalPct: Math.max(0.05, Math.min(20, num(live?.targetNotionalPct ?? cts.targetNotionalPct, 1))),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     volumeFactor: num(cts.volumeFactor, 0.1),
     orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
     htfEnabled: bool(cts.htfEnabled, false),

@@ -849,11 +849,11 @@ function SettingsPage() {
                     />
                     <Slider
                       label="Volume factor"
-                      value={overlay.volumeFactor ?? 1}
-                      min={0.1}
-                      max={5}
-                      step={0.1}
-                      hint="Scales every order's notional. 1 = base. Independent per Live / VST."
+                      value={overlay.volumeFactor ?? 0.1}
+                      min={0.05}
+                      max={10}
+                      step={0.05}
+                      hint="Scales every order's notional (0.05–10). Independent per Live / VST."
                       onChange={(v) => patch("volumeFactor", v)}
                     />
                     <Toggle
@@ -883,16 +883,6 @@ function SettingsPage() {
                         return `${e.value.toFixed(2)} · ${e.source === "equity" ? "from equity" : "fixed"}${engine}`;
                       })()}
                     />
-                      value={overlay.volumeFactor || 0.1}
-                      min={0.05}
-                      max={10}
-                      step={0.05}
-                      hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
-                      onChange={(v) => patch("volumeFactor", v)}
-                    />
-                    <KV k="Effective notional" v={overlay.orderSizing === "factor"
-                      ? `${(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} USDT · raised to each pair's minimum lot`
-                      : "each pair's minimum lot (min qty / min USDT)"} />
                     <EnableSlider label="Minimum lot sizing" on={overlay.orderSizing !== "factor"}
                       hint="On: every order is the venue minimum lot · off: volume-factor notional" onChange={(v) => patch("orderSizing", v ? "minQty" : "factor")} />
                     <EnableSlider label="Auto leverage for SL" on={overlay.slAutoLeverage === true}
@@ -2662,7 +2652,6 @@ function SettingsPage() {
                     const e = effectiveNotional(overlay, stats?.sizingEquity);
                     return `${e.value.toFixed(2)} · ${e.source === "equity" ? `${overlay.targetNotionalPct}% of equity` : "fixed"}`;
                   })()}
-                  v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)}
                 />
                 <Toggle
                   label="Always max leverage"

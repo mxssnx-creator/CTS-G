@@ -1,5 +1,21 @@
 # CTS-G project preferences
 
+- User instruction, 2026-10-15: reload and maintain this repository's `main`,
+  use the canonical `/workspace/CTS-G` checkout, preserve verified backups,
+  and push reviewed changes to GitHub regularly. Record each completed
+  checkpoint and remaining work in `INFO.md` for subsequent chats. A local
+  checkout alone is not durable across workspace replacement; GitHub is the
+  recovery source.
+- User instruction, 2026-10-15: use return-based PF for headline statistics
+  and admission. On the CTS scale, PF = 1 + 0.1 × mean(net return / position
+  cost), with cost deducted once and each row's measured cost respected.
+  Zero measured cost subtracts zero and uses the configured reference cost
+  only for the denominator. Classic win/loss and cash PF are diagnostics
+  and must be labelled explicitly. Empty or incomplete evidence is not a
+  positive result. Keep indication types, timeframes, configurations,
+  strategies, directions and connections independent through replay,
+  evaluation, execution and statistics.
+
 - User instruction, 2026-09-15: defaults are **50 ranked symbols** and **100 effective positions** (unique symbol × LONG/SHORT groups). Independent intern, Block, DCA and control orders on an occupied group are unlimited (hundreds). Control orders stay overall: one SL/TP pair per symbol and direction using the widest member range. Direct user instruction of 50 symbols overrides the earlier 20-symbol test-universe note below.
 - User instruction, 2026-09-12: earlier VST test-universe size of 20 symbols (include BCH-USDT, SOL-USDT and XRP-USDT) remains a recorded benchmark, not the live default. Config/Set counts remain unlimited; keep the shared strict PF > 1.02 gate, two-day lookback and last-30 Base evaluation default. Keep managing existing positions even if their symbol leaves the test selection.
 - The completed exhaustive seven-day BCH/SOL/XRP report is a separate,
