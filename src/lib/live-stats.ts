@@ -668,6 +668,11 @@ export type LiveStats = {
     systemEquity?: number;
     systemStartEquity?: number;
     walletEquity?: number;
+    walletOwnEquity?: number;
+    returnOnEquityPct?: number | null;
+    balanceAgeS?: number | null;
+    stale?: boolean;
+    statsAgeS?: number;
     available: number;
     usedMargin?: number;
     unrealized: number;
@@ -1209,6 +1214,11 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   systemEquity: lane.systemEquity ?? lane.equity,
   systemStartEquity: lane.systemStartEquity,
   walletEquity: lane.walletEquity,
+  walletOwnEquity: lane.walletOwnEquity,
+  returnOnEquityPct: lane.returnOnEquityPct,
+  balanceAgeS: lane.balanceAgeS,
+  stale: Boolean(lane.stale || s.stale),
+  statsAgeS: lane.statsAgeS,
   startEquity: lane.systemStartEquity,
   available: lane.available,
   usedMargin: lane.usedMargin ?? 0,

@@ -871,7 +871,8 @@ function SettingsPage() {
                       k="Effective notional"
                       v={(() => {
                         const e = effectiveNotional(overlay, stats?.sizingEquity);
-                        return `${e.value.toFixed(2)} · ${e.source === "equity" ? "from equity" : "fixed"}`;
+                        const engine = stats?.effectiveNotional != null ? ` · engine ${stats.effectiveNotional.toFixed(2)}` : "";
+                        return `${e.value.toFixed(2)} · ${e.source === "equity" ? "from equity" : "fixed"}${engine}`;
                       })()}
                     />
                   </Grid>
