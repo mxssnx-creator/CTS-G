@@ -5,8 +5,10 @@ The periods match the CTS-A-O research years so results stay comparable:
 
 - A (select): 2025-10-11 → 2026-09-26, the A-O research year (halves A1/A2).
 - B (validate): 2024-10-11 → 2025-09-26, the A-O prior year.
-- C (holdout): 2024-05-12 → 2024-09-25, never used for selection of the
-  indication list. A-O did use it when choosing the matrix cell.
+- C (holdout): 2024-06-01 → 2024-09-25, inside A-O's 2024 period, which was
+  never used for selection of the indication list (A-O did use it when
+  choosing the matrix cell). BingX keeps about 900 days of 1h history (from
+  2024-04-27 here), so C starts once a month of warm-up exists.
 - T (tail): 2026-09-27 → end of data. No A-O or CTS-G choice has seen it.
 
 A period's universe is the top-n symbols by quote volume (close × volume)
@@ -44,7 +46,7 @@ PERIODS: Dict[str, Tuple[int, Optional[int]]] = {
     "A1": (utc_ms("2025-10-11"), utc_ms("2026-03-28")),
     "A2": (utc_ms("2026-03-28"), utc_ms("2026-09-26")),
     "B": (utc_ms("2024-10-11"), utc_ms("2025-09-26")),
-    "C": (utc_ms("2024-05-12"), utc_ms("2024-09-25")),
+    "C": (utc_ms("2024-06-01"), utc_ms("2024-09-25")),
     "T": (utc_ms("2026-09-27"), None),  # open end: the last fetched bar
 }
 
