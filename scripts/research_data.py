@@ -232,7 +232,7 @@ def run(args: argparse.Namespace) -> int:
         else:
             step = TF_MS[args.tf]
             end = now_ms // step * step  # exclude the bar still in progress
-            start = _utc_ms(args.since) if args.since else end - args.days * 86_400_000
+            start = _utc_ms(args.since) if args.since else end - int(args.days * 86_400_000) // step * step
             old = load_bars(out, args.tf, sym)
             rows_b: Dict[int, List[float]] = {}
             if old is not None and len(old["t"]):
@@ -257,7 +257,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--tf", choices=sorted(TF_MS), default="1h")
     ap.add_argument("--since", default="", help="UTC start day YYYY-MM-DD")
-    ap.add_argument("--days", type=int, default=30, help="window length when --since is empty")
+    ap.add_argument("--days", type=float, default=30, help="window length when --since is empty (fractions allowed)")
     ap.add_argument("--symbols", type=int, default=70, help="top-n by 24h quote volume")
     ap.add_argument("--symbol-list", default="", help="comma separated symbols (overrides --symbols)")
     ap.add_argument("--funding", action="store_true", help="fetch funding-rate history instead of bars")
