@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, moneyUnitOf, fmtMoney, balanceStaleReason, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -75,6 +75,8 @@ function DeskPage() {
   const grow = stats?.systemGrow ?? 0;
   const loss = stats?.systemLoss ?? 0;
   const systemEquity = stats?.systemEquity ?? stats?.equity ?? 0;
+  const unit = moneyUnitOf(stats);
+  const staleBalance = balanceStaleReason(stats);
   const foreignCount = (stats?.foreignPositionCount ?? 0) + (stats?.foreignOpenOrderCount ?? 0);
 
   return (
@@ -100,18 +102,20 @@ function DeskPage() {
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="font-mono text-xs tracking-wide text-muted uppercase">System equity</p>
-              <p className="mt-1 font-mono text-3xl tabular-nums">
-                {conn === "overall"
-                  ? `System $${fmt(systemEquity, 4)}`
-                  : stats?.unit === "VST" || stats?.connType === "vst"
-                    ? `${fmt(systemEquity, 4)} VST`
-                    : `$${fmt(systemEquity, 4)}`}
+              <p className={`mt-1 font-mono text-3xl tabular-nums ${staleBalance ? "text-muted line-through" : ""}`}>
+                {conn === "overall" ? `${unit === "VST" ? "VST" : "Mainnet"} ${fmtMoney(systemEquity, unit, 4)}` : fmtMoney(systemEquity, unit, 4)}
               </p>
+              {staleBalance ? (
+                <p className="mt-1 font-mono text-xs text-warn" data-testid="desk-stale">Not current · {staleBalance}</p>
+              ) : null}
               <p className="mt-1 font-mono text-[11px] tracking-wide text-muted uppercase" data-testid="desk-identity">
                 {stats?.connType || conn} · {stats?.unit || (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED")}
                 {stats?.connection ? ` · ${stats.connection}` : ""}
               </p>
-              <p className="mt-1 text-xs text-muted">System book only; wallet equity and foreign exposure stay diagnostic.</p>
+              <p className="mt-1 text-xs text-muted">
+                Engine session equity from the last Start{stats?.returnOnEquityPct != null ? ` · return ${fmt(stats.returnOnEquityPct, 2)}%` : ""}
+                {conn === "overall" ? " · USDT and VST are never added together" : ""}
+              </p>
               {conn === "overall" ? (
                 <p className="mt-1 min-w-0 font-mono text-sm text-muted [overflow-wrap:anywhere]">
                   live {fmt(stats?.equityLive, 4)} · vst {fmt(stats?.equityVst, 4)} · live pnl {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst pnl {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
@@ -119,16 +123,28 @@ function DeskPage() {
               ) : null}
               <p className={`mt-1 font-mono text-sm ${pnlClass(session)}`}>
                 system {session >= 0 ? "+" : ""}
-                {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {stats?.pnlPct == null ? "—" : `${fmt(stats.pnlPct, 2)}%`}
+                {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {stats?.pnlPct == null ? "—" : `${fmt(stats.pnlPct, 2)}% of traded notional`}
               </p>
             </div>
             <dl className="stat-rows w-full max-w-sm text-sm sm:w-auto">
               <dt className="text-muted">Wallet equity</dt>
-              <dd className="font-mono text-fg">{stats?.walletEquity != null ? `$${fmt(stats.walletEquity, 3)}` : "—"}</dd>
+              <dd className="font-mono text-fg">{fmtMoney(stats?.walletEquity, unit)}</dd>
+              {stats?.walletOwnEquity != null ? (
+                <>
+                  <dt className="text-muted">System capital (wallet − foreign)</dt>
+                  <dd className="font-mono text-fg">{fmtMoney(stats.walletOwnEquity, unit)}</dd>
+                </>
+              ) : null}
               <dt className="text-muted">Wallet available</dt>
-              <dd className="font-mono text-fg">${fmt(stats?.available, 3)}</dd>
+              <dd className="font-mono text-fg">{fmtMoney(stats?.available, unit)}</dd>
               <dt className="text-muted">Wallet used margin</dt>
-              <dd className="font-mono text-fg">${fmt(stats?.usedMargin, 3)}</dd>
+              <dd className="font-mono text-fg">{fmtMoney(stats?.usedMargin, unit)}</dd>
+              {conn === "overall" && stats?.walletEquityVst ? (
+                <>
+                  <dt className="text-muted">VST wallet (separate)</dt>
+                  <dd className="font-mono text-muted">{fmtMoney(stats.walletEquityVst, "VST")}</dd>
+                </>
+              ) : null}
               <dt className="text-muted">System unrealized</dt>
               <dd className={`font-mono ${pnlClass(stats?.systemUnrealized ?? stats?.unrealized ?? 0)}`}>
                 {fmt(stats?.systemUnrealized ?? stats?.unrealized, 4)}

@@ -155,6 +155,7 @@ DETAIL_KEYS = (
     "baseNotional",
     "effectiveNotional",
     "sizingSource",
+    "balanceAt",
     "cts",
     "pfCost",
     "profitFactor",
@@ -917,7 +918,8 @@ def _surface_hist_calc(out: dict, progress: dict, conn: str) -> None:
         out["running"] = True
         out["halted"] = False
         out["alive"] = True
-        out["stale"] = False
+        # A running historic calc says nothing about the trading lane's
+        # balance and positions: their staleness is kept as measured.
         out["haltReason"] = ""
         out["mode"] = "HIST"
         ht = dict(out.get("histTest") or {})
@@ -1777,6 +1779,10 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             mode = "aggregate" if isinstance(pulse, dict) and pulse.get("controlOrdersPerConfig") is False else "per-config"
         control_modes.add(mode)
     control_mode = next(iter(control_modes)) if len(control_modes) == 1 else "mixed"
+    # Money is reported in one unit: the Mainnet desks when any exist, else VST.
+    live_states = [state for state in states if str(state.get("connType") or "") == "live"]
+    money = live_states or states
+    money_unit = "USDT" if live_states else "VST"
     return {
         "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
         "mode": "MULTI_DESK",
@@ -1784,22 +1790,23 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "connection": "overall",
         "trackingScope": "overall",
         "trackPrefix": "mixed",
-        "unit": "MIXED",
-        "equity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in states),
-        "systemEquity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in states),
-        "systemStartEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in states),
-        "startEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in states),
-        "walletEquity": sum(_report_number(state.get("walletEquity", state.get("equity"))) for state in states),
-        "available": sum(_report_number(state.get("available")) for state in states),
-        "usedMargin": sum(_report_number(state.get("usedMargin")) for state in states),
-        "sessionPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in states),
-        "systemPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in states),
-        "realizedPnl": sum(_report_number(state.get("systemRealized", state.get("realizedPnl"))) for state in states),
-        "unrealized": sum(_report_number(state.get("systemUnrealized", state.get("unrealized"))) for state in states),
-        "foreignUnrealized": sum(_report_number(state.get("foreignUnrealized")) for state in states),
-        "foreignRealized": sum(_report_number(state.get("foreignRealized")) for state in states),
-        "foreignExposure": sum(_report_number(state.get("foreignExposure")) for state in states),
-        "foreignPositionCount": sum(int(_report_number(state.get("foreignPositionCount"))) for state in states),
+        "unit": money_unit,
+        "moneyUnit": money_unit,
+        "equity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in money),
+        "systemEquity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in money),
+        "systemStartEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in money),
+        "startEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in money),
+        "walletEquity": sum(_report_number(state.get("walletEquity")) for state in money),
+        "available": sum(_report_number(state.get("available")) for state in money),
+        "usedMargin": sum(_report_number(state.get("usedMargin")) for state in money),
+        "sessionPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in money),
+        "systemPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in money),
+        "realizedPnl": sum(_report_number(state.get("systemRealized", state.get("realizedPnl"))) for state in money),
+        "unrealized": sum(_report_number(state.get("systemUnrealized", state.get("unrealized"))) for state in money),
+        "foreignUnrealized": sum(_report_number(state.get("foreignUnrealized")) for state in money),
+        "foreignRealized": sum(_report_number(state.get("foreignRealized")) for state in money),
+        "foreignExposure": sum(_report_number(state.get("foreignExposure")) for state in money),
+        "foreignPositionCount": sum(int(_report_number(state.get("foreignPositionCount"))) for state in money),
         "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
         "wins": wins,
         "losses": losses,
@@ -2002,7 +2009,7 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "equity": _report_number(st.get("systemEquity", st.get("equity"))),
         "systemEquity": _report_number(st.get("systemEquity", st.get("equity"))),
         "systemStartEquity": _report_number(st.get("systemStartEquity", st.get("startEquity"))),
-        "walletEquity": _report_number(st.get("walletEquity", st.get("equity"))),
+        "walletEquity": _report_number(st["walletEquity"]) if st.get("walletEquity") is not None else None,
         "available": _report_number(st.get("available")),
         "usedMargin": _report_number(st.get("usedMargin")),
         "unrealized": _report_number(st.get("systemUnrealized", st.get("unrealized"))),
@@ -2272,15 +2279,21 @@ def merge_overall() -> dict:
         sets["setCount"] = sum(int(l.get("setCount") or 0) for l in lanes)
         sets["catalogSetCount"] = sets["catalogSetCount"] or sets["setCount"]
         sets["validatedCount"] = sum(int(l.get("validatedSetCount") or 0) for l in lanes)
-    system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in lanes)
-    wallet_equity = sum(_report_number(l.get("walletEquity")) for l in lanes)
-    session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in lanes)
-    system_grow = sum(_report_number(l.get("systemGrow")) for l in lanes)
-    system_loss = sum(_report_number(l.get("systemLoss")) for l in lanes)
-    # Overall PnL % = summed system PnL over summed traded notional. A lane
+    # Money is never summed across units: USDT (Mainnet) and VST (demo funds)
+    # are different currencies. The Overall money fields are the Mainnet lanes
+    # when one exists, else the VST lanes; both stay available per unit.
+    live_lanes = [l for l in lanes if str(l.get("type") or "") == "live"]
+    money_lanes = live_lanes or [l for l in lanes if str(l.get("type") or "") != "live"]
+    money_unit = "USDT" if live_lanes else "VST"
+    system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in money_lanes)
+    wallet_equity = sum(_report_number(l.get("walletEquity")) for l in money_lanes)
+    session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in money_lanes)
+    system_grow = sum(_report_number(l.get("systemGrow")) for l in money_lanes)
+    system_loss = sum(_report_number(l.get("systemLoss")) for l in money_lanes)
+    # Overall PnL % = system PnL over traded notional of the same unit. A lane
     # with PnL but no published notional makes the ratio unknown, not 0%.
     traded = 0.0
-    for l in lanes:
+    for l in money_lanes:
         if l.get("tradedNotional") is None:
             if _report_number(l.get("systemPnl", l.get("sessionPnl"))):
                 traded = None
@@ -2308,7 +2321,9 @@ def merge_overall() -> dict:
         "mode": "OVERALL",
         "connection": "overall",
         "connType": "overall",
-        "unit": "MIXED",
+        "unit": money_unit,
+        "moneyUnit": money_unit,
+        "moneyLanes": [l.get("id") for l in money_lanes],
         "exchange": "All",
         "lanes": lanes,
         "slots": SLOTS,
@@ -2317,9 +2332,14 @@ def merge_overall() -> dict:
         "walletEquity": wallet_equity,
         "equityLive": _report_number(live.get("equity")),
         "equityVst": _report_number(vst.get("equity")),
-        "available": _report_number(live.get("available")) + _report_number(vst.get("available")),
-        "usedMargin": sum(_report_number(l.get("usedMargin")) for l in lanes),
-        "unrealized": sum(_report_number(l.get("unrealized")) for l in lanes),
+        "walletEquityLive": _report_number(live.get("walletEquity")),
+        "walletEquityVst": _report_number(vst.get("walletEquity")),
+        "available": sum(_report_number(l.get("available")) for l in money_lanes),
+        "availableLive": _report_number(live.get("available")),
+        "availableVst": _report_number(vst.get("available")),
+        "usedMargin": sum(_report_number(l.get("usedMargin")) for l in money_lanes),
+        "unrealized": sum(_report_number(l.get("unrealized")) for l in money_lanes),
+        "stale": any(bool(l.get("stale")) for l in money_lanes),
         "sessionPnl": session_pnl,
         "systemPnl": session_pnl,
         "systemGrow": system_grow,
@@ -2331,10 +2351,10 @@ def merge_overall() -> dict:
         "systemGrowVst": _report_number(vst.get("systemGrow")),
         "systemLossVst": _report_number(vst.get("systemLoss")),
         "pnlPct": pnl_pct,
-        "drawdownPct": max((_report_number(l.get("drawdownPct")) for l in lanes), default=0),
-        "foreignUnrealized": sum(_report_number(l.get("foreignUnrealized")) for l in lanes),
-        "foreignRealized": sum(_report_number(l.get("foreignRealized")) for l in lanes),
-        "foreignExposure": sum(_report_number(l.get("foreignExposure")) for l in lanes),
+        "drawdownPct": max((_report_number(l.get("drawdownPct")) for l in money_lanes), default=0),
+        "foreignUnrealized": sum(_report_number(l.get("foreignUnrealized")) for l in money_lanes),
+        "foreignRealized": sum(_report_number(l.get("foreignRealized")) for l in money_lanes),
+        "foreignExposure": sum(_report_number(l.get("foreignExposure")) for l in money_lanes),
         "foreignPositionCount": sum(int(_report_number(l.get("foreignPositionCount"))) for l in lanes),
         "foreignOpenOrderCount": sum(int(_report_number(l.get("foreignOpenOrderCount"))) for l in lanes),
         "wins": wins,

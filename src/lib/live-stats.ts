@@ -264,6 +264,21 @@ export type LiveStats = {
   systemEquity?: number;
   systemStartEquity?: number;
   walletEquity?: number;
+  /** BingX wallet minus foreign positions: the real capital the system sizes from */
+  walletOwnEquity?: number;
+  /** (systemEquity − startEquity) / startEquity × 100, the session return on the account */
+  returnOnEquityPct?: number | null;
+  allTimeStartEquity?: number;
+  allTimeSystemEquity?: number;
+  /** epoch seconds of the last successful BingX balance read */
+  balanceAt?: number;
+  balanceAgeS?: number | null;
+  /** Overall: the unit its money fields are in (never a USDT + VST sum) */
+  moneyUnit?: "USDT" | "VST";
+  walletEquityLive?: number;
+  walletEquityVst?: number;
+  availableLive?: number;
+  availableVst?: number;
   startEquity: number;
   available: number;
   usedMargin: number;
@@ -1193,8 +1208,8 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   equity: lane.systemEquity ?? lane.equity,
   systemEquity: lane.systemEquity ?? lane.equity,
   systemStartEquity: lane.systemStartEquity,
-  walletEquity: lane.walletEquity ?? lane.equity,
-  startEquity: lane.systemStartEquity ?? lane.equity,
+  walletEquity: lane.walletEquity,
+  startEquity: lane.systemStartEquity,
   available: lane.available,
   usedMargin: lane.usedMargin ?? 0,
   walletUnrealized: lane.walletUnrealized,
@@ -1507,4 +1522,28 @@ export function livePosOrders(stats: {
 } | null | undefined): string {
   const { livePositions, liveOrders } = posOrdersCounts(stats);
   return formatPosOrders(livePositions, liveOrders);
+}
+
+/** Seconds after which a balance read counts as stale (3 × the engine's 6 s balance cadence). */
+export const BALANCE_STALE_S = 18;
+
+/** The unit a stats view's money is in: Overall reports its moneyUnit, a lane its own unit. */
+export function moneyUnitOf(stats: Pick<LiveStats, "moneyUnit" | "unit" | "connType"> | null | undefined): "USDT" | "VST" {
+  if (stats?.moneyUnit) return stats.moneyUnit;
+  return stats?.unit === "VST" || stats?.connType === "vst" ? "VST" : "USDT";
+}
+
+/** A money amount in its unit: "$1.234" for USDT, "1.234 VST" for demo funds. */
+export function fmtMoney(v: number | null | undefined, unit: "USDT" | "VST", digits = 3): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  const s = v.toFixed(digits);
+  return unit === "VST" ? `${s} VST` : v < 0 ? `-$${s.slice(1)}` : `$${s}`;
+}
+
+/** Why the balance on screen may not be current (null = fresh). */
+export function balanceStaleReason(stats: Pick<LiveStats, "stale" | "statsAgeS" | "balanceAgeS"> | null | undefined): string | null {
+  if (!stats) return null;
+  if (stats.stale) return `stats file ${stats.statsAgeS != null ? `${Math.round(stats.statsAgeS)} s old` : "stale"}`;
+  if (stats.balanceAgeS != null && stats.balanceAgeS > BALANCE_STALE_S) return `balance read ${Math.round(stats.balanceAgeS)} s ago`;
+  return null;
 }

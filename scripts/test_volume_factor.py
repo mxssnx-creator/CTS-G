@@ -238,19 +238,20 @@ if __name__ == '__main__':
 class BalanceSizing(unittest.TestCase):
     """sizingMode=balance: the order target follows the system's own equity."""
 
-    def pulse(self, system_equity=0.0, wallet=0.0):
+    def pulse(self, wallet=0.0, foreign=0.0, age=0.0):
         p = pt.Pulse.__new__(pt.Pulse)
-        p.system_equity, p.wallet_equity = system_equity, wallet
+        p.wallet_equity, p.foreign_upnl, p.foreign_realized = wallet, foreign, 0.0
+        p.last_bal = time.time() - age
         p.volume_factor = 1.0
         p.vol1h = {}
         p.open = {}
         p.coord = NS(size_mult=lambda n: 1.0)
         return p
 
-    def test_target_is_percent_of_system_equity_times_volume_factor(self):
+    def test_target_is_percent_of_own_wallet_capital_times_volume_factor(self):
         with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 1.0), \
                 patch.object(pt, 'TARGET_NOTIONAL', 2.15):
-            p = self.pulse(system_equity=500.0, wallet=900.0)
+            p = self.pulse(wallet=520.0, foreign=20.0)
             self.assertAlmostEqual(p.sized_notional(), 5.0)
             p.volume_factor = 2.0
             self.assertAlmostEqual(p.sized_notional(), 10.0)
@@ -258,15 +259,16 @@ class BalanceSizing(unittest.TestCase):
             snap = p.sizing_snapshot()
             self.assertEqual((snap['sizingSource'], snap['baseNotional'], snap['effectiveNotional']), ('equity', 5.0, 10.0))
 
-    def test_wallet_then_fixed_fallback_and_fixed_mode(self):
+    def test_stale_or_missing_balance_falls_back_to_fixed(self):
         with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 2.0), \
                 patch.object(pt, 'TARGET_NOTIONAL', 2.15):
             self.assertAlmostEqual(self.pulse(wallet=300.0).sized_notional(), 6.0)
+            self.assertAlmostEqual(self.pulse(wallet=300.0, age=60.0).sized_notional(), 2.15)
             p = self.pulse()
             self.assertAlmostEqual(p.sized_notional(), 2.15)
             self.assertEqual(p.sizing_snapshot()['sizingSource'], 'fixed')
         with patch.object(pt, 'SIZING_MODE', 'fixed'), patch.object(pt, 'TARGET_NOTIONAL', 3.0):
-            self.assertAlmostEqual(self.pulse(system_equity=10_000.0).sized_notional(), 3.0)
+            self.assertAlmostEqual(self.pulse(wallet=10_000.0).sized_notional(), 3.0)
 
     def test_overlay_parses_mode_and_percent_within_bounds(self):
         loader = VolumeFactorOverlayLoad()

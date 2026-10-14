@@ -2349,9 +2349,17 @@ class Pulse:
         return max(0.2, self.base_notional() * vf * ratio_f)
 
     def sizing_equity(self) -> float:
-        """The system's own equity (foreign positions excluded), else the wallet."""
-        eq = _sf(getattr(self, "system_equity", 0.0))
-        return eq if eq > 0 else max(0.0, _sf(getattr(self, "wallet_equity", 0.0)))
+        """Real account capital the system may size from: the BingX wallet minus foreign positions.
+
+        Read from the exchange balance, so actual fees and funding are in it and
+        model PnL or simulated lanes are not. A balance older than three reads
+        (or none yet) returns 0, and sizing falls back to the fixed target.
+        """
+        if time.time() - float(getattr(self, "last_bal", 0.0) or 0.0) > 3 * BALANCE_EVERY:
+            return 0.0
+        wallet = _sf(getattr(self, "wallet_equity", 0.0))
+        own = wallet - _sf(getattr(self, "foreign_upnl", 0.0)) - _sf(getattr(self, "foreign_realized", 0.0))
+        return max(0.0, own)
 
     def base_notional(self) -> float:
         """One order's target before volume factor, volatility and Set ratio."""
@@ -2366,7 +2374,8 @@ class Pulse:
         base = self.base_notional()
         return {"sizingMode": SIZING_MODE, "targetNotionalPct": TARGET_NOTIONAL_PCT, "sizingEquity": round(self.sizing_equity(), 6),
                 "baseNotional": round(base, 6), "effectiveNotional": round(max(0.2, base * vf), 6),
-                "sizingSource": "equity" if SIZING_MODE == "balance" and self.sizing_equity() > 0 else "fixed"}
+                "sizingSource": "equity" if SIZING_MODE == "balance" and self.sizing_equity() > 0 else "fixed",
+                "balanceAt": float(getattr(self, "last_bal", 0.0) or 0.0)}
 
     def notional_cap(self, ratio: float = 1.0) -> float:
         return max(self.sized_notional(ratio=ratio), 2.0)
@@ -10470,11 +10479,20 @@ class Pulse:
         return out
 
     def system_open_upnl(self) -> float:
-        """Mark-to-market of this connection's system book only. Cost-net."""
+        """Mark-to-market of this connection's system book on the exchange. Cost-net.
+
+        Simulated lots (ours, but their symbol and side are flat on the last
+        complete exchange snapshot) are not money: they stay in sim_stats /
+        simUPnl and in Set evaluation, never in equity or unrealized PnL.
+        """
         tot = 0.0
         open_book = getattr(self, "open", {})
+        keys = getattr(self, "live_pos_keys", None)
+        known = keys is not None and not bool(getattr(self, "exchange_position_snapshot_pending", False))
         for p in open_book.values() if isinstance(open_book, dict) else ():
             if not self.position_is_ours(p):
+                continue
+            if known and f"{p.symbol}:{p.side}" not in keys:
                 continue
             px = float(self.px.get(p.symbol) or 0)
             if px <= 0 or p.entry <= 0 or p.qty <= 0:
@@ -10491,7 +10509,9 @@ class Pulse:
         Wallet deposits, withdrawals, and independent (untagged / other-bot)
         trades never enter this tape.
         """
-        closes = self.strategy_closes()
+        # Money comes from exchange-confirmed closes only. Local closes of
+        # simulated lots (exchange=False, ghost drops) stay in the Set tapes.
+        closes = [c for c in self.strategy_closes() if bool(getattr(c, "exchange_confirmed", False))]
         grow = sum(float(c.pnl) for c in closes if float(c.pnl) > 0)
         loss = abs(sum(float(c.pnl) for c in closes if float(c.pnl) < 0))
         realized = sum(float(c.pnl) for c in closes)
@@ -12381,8 +12401,18 @@ class Pulse:
     def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
         act = persistent_activity(act, getattr(getattr(self, "runtime", None), "snapshot", {}), getattr(self, "start_eq", 0))
-        system_start_equity = float(act.get("systemStartEquity") or self.start_eq or 0.0)
-        system_equity = float(act.get("systemEquity") or (system_start_equity + float(act.get("pnl") or 0.0)))
+        # The desk shows the engine's own session equity (the value its halts and
+        # guards use), measured from the current Start baseline. The persistent
+        # all-time totals start from the first-ever capital and stay available
+        # as allTime* fields.
+        all_time_start = float(act.get("systemStartEquity") or 0.0)
+        all_time_equity = float(act.get("systemEquity") or 0.0)
+        system_start_equity = float(self.start_eq or 0.0) or all_time_start
+        engine_equity = float(getattr(self, "system_equity", 0.0) or 0.0)
+        system_equity = engine_equity if engine_equity > 0 else (all_time_equity or (system_start_equity + float(act.get("pnl") or 0.0)))
+        balance_at = float(getattr(self, "last_bal", 0.0) or 0.0)
+        own_wallet = (float(getattr(self, "wallet_equity", 0.0) or 0.0)
+                      - float(getattr(self, "foreign_upnl", 0.0) or 0.0) - float(getattr(self, "foreign_realized", 0.0) or 0.0))
         realized = float(act["realized"])
         wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
         dd = float(act["drawdownPct"])
@@ -12663,6 +12693,12 @@ class Pulse:
             "systemStartEquity": round(system_start_equity, 4),
             "walletEquity": round(float(getattr(self, "wallet_equity", self.equity) or 0.0), 4),
             "startEquity": round(system_start_equity, 4),
+            "returnOnEquityPct": round((system_equity - system_start_equity) / system_start_equity * 100.0, 4) if system_start_equity > 0 else None,
+            "allTimeStartEquity": round(all_time_start, 4),
+            "allTimeSystemEquity": round(all_time_equity, 4),
+            "walletOwnEquity": round(max(0.0, own_wallet), 4),
+            "balanceAt": balance_at,
+            "balanceAgeS": round(time.time() - balance_at, 1) if balance_at > 0 else None,
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
             "walletUnrealized": round(self.upnl, 4),

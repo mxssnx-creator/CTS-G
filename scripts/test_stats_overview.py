@@ -95,16 +95,17 @@ class StatsOverviewTests(unittest.TestCase):
         overall, _ = run_overall({"bingx-x01": live, "bingx-x02": vst})
         self.assertEqual(overall["foreignPositionCount"], 3)
         self.assertEqual(overall["foreignOpenOrderCount"], 1)
-        self.assertAlmostEqual(overall["foreignExposure"], 50.0)
-        self.assertAlmostEqual(overall["foreignUnrealized"], -0.2)
+        # Foreign money is Mainnet only (USDT and VST are never added).
+        self.assertAlmostEqual(overall["foreignExposure"], 40.0)
+        self.assertAlmostEqual(overall["foreignUnrealized"], -0.25)
         self.assertAlmostEqual(overall["foreignRealized"], 0.75)
-        self.assertAlmostEqual(overall["pnlPct"], 0.5)
+        self.assertAlmostEqual(overall["pnlPct"], 2.0)  # Mainnet PnL over Mainnet notional
         lane = next(row for row in overall["lanes"] if row["type"] == "live")
         for key, value in {"realizedPnl": 1.5, "systemRealized": 1.5, "systemUnrealized": 0.5,
                            "walletUnrealized": 0.7, "foreignRealized": 0.75, "pnlPct": 2.0}.items():
             self.assertAlmostEqual(lane[key], value, msg=key)
         # Unknown traded notional behind a non-zero PnL is not a 0% result.
-        del vst["tradedNotional"]
+        del live["tradedNotional"]
         overall, _ = run_overall({"bingx-x01": live, "bingx-x02": vst})
         self.assertIsNone(overall["pnlPct"])
         overall, _ = run_overall({})
