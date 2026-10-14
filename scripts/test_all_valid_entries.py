@@ -47,7 +47,7 @@ class Exchange:
 
 
 class AllValidEntries(unittest.TestCase):
-    def _real_qualify(self, state, side='LONG', pf=1.8, n=12):
+    def _real_qualify(self, state, side='LONG', pf=1.8, n=30):
         blob = dict(active=True, last15_n=n, last15_ratio=pf, last25_avg_r=0.002,
                     base_n=n, base_pf=pf, main_n=n, main_pf=pf, real_n=n, real_pf=pf,
                     ddOk=True, max_dd_s=0, net_avg=0.002, expectancy=0.002)
@@ -248,6 +248,8 @@ class AllValidEntries(unittest.TestCase):
         selected = p.sets.by_idx[0]
         selected.tp_pct = .08
         p.tp_max = 0
+        # 3% SL needs liquidation beyond it: at most 30x (auto leverage).
+        p.leverage_for = lambda c: 30
         p.place('X-USDT', 1, 'trend', .9, selected_set=selected)
         self.assertEqual(len(p.open), 1)
         pos = next(iter(p.open.values()))
@@ -422,7 +424,7 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual([state.id], [row.id for row in book.entry_sets("general", "LONG")])
         self.assertTrue(book.execution_allowed(state, "general", "LONG"))
         state.live = [
-            {"t": i, "symbol": "X-USDT", "side": "LONG", "qty": 1.0, "entry": 100.0, "exit": 99.0, "pnl_pct": -0.01, "pnl": -1.0}
+            {"t": i, "symbol": "X-USDT", "side": "LONG", "qty": 1.0, "entry": 100.0, "exit": 99.0, "pnl_pct": -0.01, "pnl": -1.0, "exchange_confirmed": True}
             for i in range(8)
         ]
         book._invalidate_entry_cache()

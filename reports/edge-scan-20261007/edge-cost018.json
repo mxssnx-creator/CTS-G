@@ -1,0 +1,1277 @@
+{
+ "generatedAt": "2026-10-07 00:22 UTC",
+ "symbols": [
+  "ADA-USDT",
+  "AVAX-USDT",
+  "BNB-USDT",
+  "BTC-USDT",
+  "DOGE-USDT",
+  "ETH-USDT",
+  "LINK-USDT",
+  "LTC-USDT",
+  "SOL-USDT",
+  "SUI-USDT",
+  "TRX-USDT",
+  "XRP-USDT"
+ ],
+ "days": 14,
+ "costPct": 0.18,
+ "trainDays": 3,
+ "top": 3,
+ "minTrainTrades": 60,
+ "exitGrid": {
+  "tp": [
+   0.3,
+   0.6,
+   1.0,
+   1.5
+  ],
+  "slRatio": [
+   0.6,
+   1.0,
+   1.5,
+   2.0
+  ],
+  "holdBars": [
+   60,
+   240
+  ]
+ },
+ "rule": "positive OOS on >= 4 of the last 6 days, total OOS net > 0, >= 30 trades/day, >= 55% of traded hours positive",
+ "families": {
+  "momentum": {
+   "configs": 288,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [
+      "L240z1.5|tp1.5|r2.0|h60",
+      "L240z1.5|tp1.5|r1.5|h60",
+      "L240z1.5|tp1.5|r1.0|h60"
+     ],
+     "trainPf": [
+      1.0382,
+      1.033,
+      1.0296
+     ],
+     "n": 258,
+     "pf": 0.9163,
+     "netPct": -38.8908,
+     "winRate": 37.2,
+     "hoursPositive": 5,
+     "hoursTraded": 15
+    },
+    {
+     "day": 4,
+     "picks": [
+      "L240z1.5|tp1.5|r2.0|h60",
+      "L240z1.5|tp1.5|r1.0|h60",
+      "L240z1.5|tp1.5|r1.5|h60"
+     ],
+     "trainPf": [
+      1.0146,
+      1.0108,
+      1.0103
+     ],
+     "n": 375,
+     "pf": 0.8045,
+     "netPct": -131.9825,
+     "winRate": 16.0,
+     "hoursPositive": 1,
+     "hoursTraded": 16
+    },
+    {
+     "day": 5,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 6,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 7,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 8,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 9,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 633,
+   "oosNetPct": -170.873,
+   "oosPf": 0.85,
+   "positiveDays": 0,
+   "tradedDays": 2,
+   "lastPositive": 0,
+   "lastDays": 6,
+   "hoursPositivePct": 19.4,
+   "survives": false
+  },
+  "reversion": {
+   "configs": 288,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [
+      "L240z2.5|tp1.5|r1.0|h240",
+      "L240z2.5|tp1.5|r2.0|h240",
+      "L15z3.5|tp1.5|r1.5|h60"
+     ],
+     "trainPf": [
+      1.0598,
+      1.0572,
+      1.0495
+     ],
+     "n": 72,
+     "pf": 1.3548,
+     "netPct": 45.9814,
+     "winRate": 84.7,
+     "hoursPositive": 6,
+     "hoursTraded": 11
+    },
+    {
+     "day": 4,
+     "picks": [
+      "L240z2.5|tp1.5|r1.0|h240",
+      "L240z2.5|tp1.5|r2.0|h240",
+      "L240z2.5|tp1.5|r1.5|h240"
+     ],
+     "trainPf": [
+      1.1434,
+      1.1414,
+      1.1225
+     ],
+     "n": 81,
+     "pf": 1.1052,
+     "netPct": 15.3383,
+     "winRate": 49.4,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 5,
+     "picks": [
+      "L240z2.5|tp1.5|r2.0|h240",
+      "L240z2.5|tp1.5|r1.5|h240",
+      "L240z2.5|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.1426,
+      1.1285,
+      1.113
+     ],
+     "n": 9,
+     "pf": 1.7333,
+     "netPct": 11.88,
+     "winRate": 100.0,
+     "hoursPositive": 2,
+     "hoursTraded": 2
+    },
+    {
+     "day": 6,
+     "picks": [
+      "L240z2.5|tp1.5|r2.0|h240",
+      "L240z2.5|tp1.5|r1.5|h240",
+      "L240z2.5|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.1587,
+      1.145,
+      1.1299
+     ],
+     "n": 33,
+     "pf": -0.2419,
+     "netPct": -73.7663,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 7,
+     "picks": [
+      "L15z3.5|tp1.5|r1.0|h240",
+      "L15z3.5|tp1.5|r1.5|h240",
+      "L240z2.5|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.0504,
+      1.0432,
+      1.0396
+     ],
+     "n": 101,
+     "pf": 1.2436,
+     "netPct": 44.2925,
+     "winRate": 68.3,
+     "hoursPositive": 4,
+     "hoursTraded": 9
+    },
+    {
+     "day": 8,
+     "picks": [
+      "L15z3.5|tp1.5|r1.5|h240",
+      "L15z3.5|tp1.5|r2.0|h240",
+      "L15z3.5|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.0908,
+      1.0816,
+      1.0764
+     ],
+     "n": 51,
+     "pf": 0.8781,
+     "netPct": -11.188,
+     "winRate": 35.3,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 9,
+     "picks": [
+      "L15z3.5|tp1.5|r1.5|h240",
+      "L15z3.5|tp1.5|r2.0|h240",
+      "L15z3.5|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.0775,
+      1.0715,
+      1.0653
+     ],
+     "n": 102,
+     "pf": 1.1579,
+     "netPct": 28.988,
+     "winRate": 64.7,
+     "hoursPositive": 5,
+     "hoursTraded": 9
+    },
+    {
+     "day": 10,
+     "picks": [
+      "L60z3.5|tp1.5|r1.5|h240",
+      "L60z3.5|tp1.5|r0.6|h240",
+      "L60z3.5|tp1.5|r2.0|h240"
+     ],
+     "trainPf": [
+      1.2122,
+      1.1774,
+      1.1731
+     ],
+     "n": 45,
+     "pf": 0.8177,
+     "netPct": -14.7636,
+     "winRate": 42.2,
+     "hoursPositive": 2,
+     "hoursTraded": 5
+    },
+    {
+     "day": 11,
+     "picks": [
+      "L60z3.5|tp1.5|r1.5|h240",
+      "L60z3.5|tp1.5|r0.6|h240",
+      "L60z3.5|tp1.5|r2.0|h240"
+     ],
+     "trainPf": [
+      1.1454,
+      1.1035,
+      1.1032
+     ],
+     "n": 27,
+     "pf": 0.9565,
+     "netPct": -2.1147,
+     "winRate": 37.0,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 12,
+     "picks": [
+      "L60z3.5|tp1.5|r1.5|h240",
+      "L60z3.5|tp1.5|r2.0|h240",
+      "L60z3.5|tp1.5|r1.5|h60"
+     ],
+     "trainPf": [
+      1.1349,
+      1.0923,
+      1.0826
+     ],
+     "n": 9,
+     "pf": 1.6151,
+     "netPct": 9.9641,
+     "winRate": 100.0,
+     "hoursPositive": 2,
+     "hoursTraded": 2
+    },
+    {
+     "day": 13,
+     "picks": [
+      "L60z3.5|tp1.5|r1.5|h240",
+      "L60z3.5|tp1.5|r2.0|h240",
+      "L60z3.5|tp1.5|r0.6|h240"
+     ],
+     "trainPf": [
+      1.1546,
+      1.1134,
+      1.0972
+     ],
+     "n": 3,
+     "pf": 0.7213,
+     "netPct": -1.5048,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    }
+   ],
+   "oosTrades": 533,
+   "oosNetPct": 53.107,
+   "oosPf": 1.0554,
+   "positiveDays": 6,
+   "tradedDays": 11,
+   "lastPositive": 2,
+   "lastDays": 6,
+   "hoursPositivePct": 46.3,
+   "survives": false
+  },
+  "breakout": {
+   "configs": 96,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 4,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 5,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 6,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 7,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 8,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 9,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "tradedDays": 0,
+   "lastPositive": 0,
+   "lastDays": 6,
+   "hoursPositivePct": null,
+   "survives": false
+  },
+  "fade-breakout": {
+   "configs": 96,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 4,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 5,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 6,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 7,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 8,
+     "picks": [
+      "L720|tp1.5|r2.0|h240",
+      "L720|tp1.5|r1.5|h240",
+      "L720|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.0244,
+      1.011,
+      1.009
+     ],
+     "n": 333,
+     "pf": 1.2568,
+     "netPct": 153.8983,
+     "winRate": 75.4,
+     "hoursPositive": 17,
+     "hoursTraded": 20
+    },
+    {
+     "day": 9,
+     "picks": [
+      "L720|tp1.5|r2.0|h240",
+      "L720|tp1.5|r1.5|h240",
+      "L720|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.0464,
+      1.0343,
+      1.0313
+     ],
+     "n": 582,
+     "pf": 0.5997,
+     "netPct": -419.3541,
+     "winRate": 31.4,
+     "hoursPositive": 8,
+     "hoursTraded": 18
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 915,
+   "oosNetPct": -265.456,
+   "oosPf": 0.8388,
+   "positiveDays": 1,
+   "tradedDays": 2,
+   "lastPositive": 1,
+   "lastDays": 6,
+   "hoursPositivePct": 65.8,
+   "survives": false
+  },
+  "squeeze-breakout": {
+   "configs": 128,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 4,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 5,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 6,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 7,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 8,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 9,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "tradedDays": 0,
+   "lastPositive": 0,
+   "lastDays": 6,
+   "hoursPositivePct": null,
+   "survives": false
+  },
+  "trend-pullback": {
+   "configs": 64,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 4,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 5,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 6,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 7,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 8,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 9,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "tradedDays": 0,
+   "lastPositive": 0,
+   "lastDays": 6,
+   "hoursPositivePct": null,
+   "survives": false
+  },
+  "volume-follow": {
+   "configs": 128,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 4,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 5,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 6,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 7,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 8,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 9,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "tradedDays": 0,
+   "lastPositive": 0,
+   "lastDays": 6,
+   "hoursPositivePct": null,
+   "survives": false
+  },
+  "volume-fade": {
+   "configs": 128,
+   "testDays": [
+    {
+     "day": 3,
+     "picks": [
+      "m4.0z3.0|tp1.5|r1.5|h240"
+     ],
+     "trainPf": [
+      1.0013
+     ],
+     "n": 58,
+     "pf": 1.1642,
+     "netPct": 17.1379,
+     "winRate": 60.3,
+     "hoursPositive": 9,
+     "hoursTraded": 15
+    },
+    {
+     "day": 4,
+     "picks": [
+      "m4.0z3.0|tp1.5|r1.5|h240",
+      "m4.0z3.0|tp1.5|r2.0|h240",
+      "m4.0z3.0|tp1.5|r1.0|h240"
+     ],
+     "trainPf": [
+      1.0405,
+      1.0319,
+      1.0105
+     ],
+     "n": 162,
+     "pf": 0.8815,
+     "netPct": -34.5414,
+     "winRate": 40.1,
+     "hoursPositive": 8,
+     "hoursTraded": 17
+    },
+    {
+     "day": 5,
+     "picks": [
+      "m4.0z3.0|tp1.5|r1.5|h240",
+      "m4.0z3.0|tp1.5|r2.0|h240"
+     ],
+     "trainPf": [
+      1.0148,
+      1.0021
+     ],
+     "n": 92,
+     "pf": 1.0625,
+     "netPct": 10.3549,
+     "winRate": 59.8,
+     "hoursPositive": 6,
+     "hoursTraded": 11
+    },
+    {
+     "day": 6,
+     "picks": [
+      "m4.0z3.0|tp1.5|r1.5|h240",
+      "m4.0z3.0|tp1.5|r2.0|h240"
+     ],
+     "trainPf": [
+      1.0205,
+      1.0111
+     ],
+     "n": 80,
+     "pf": 0.9692,
+     "netPct": -4.4392,
+     "winRate": 50.0,
+     "hoursPositive": 9,
+     "hoursTraded": 18
+    },
+    {
+     "day": 7,
+     "picks": [
+      "m4.0z3.0|tp1.5|r1.5|h240",
+      "m4.0z3.0|tp1.5|r2.0|h240"
+     ],
+     "trainPf": [
+      1.014,
+      1.0078
+     ],
+     "n": 122,
+     "pf": 0.9008,
+     "netPct": -21.7898,
+     "winRate": 54.1,
+     "hoursPositive": 6,
+     "hoursTraded": 12
+    },
+    {
+     "day": 8,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 9,
+     "picks": [
+      "m4.0z3.0|tp1.5|r2.0|h240"
+     ],
+     "trainPf": [
+      1.0014
+     ],
+     "n": 84,
+     "pf": 0.5928,
+     "netPct": -61.5643,
+     "winRate": 38.1,
+     "hoursPositive": 3,
+     "hoursTraded": 12
+    },
+    {
+     "day": 10,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 11,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 12,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 13,
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "pf": null,
+     "netPct": 0.0,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 598,
+   "oosNetPct": -94.842,
+   "oosPf": 0.9119,
+   "positiveDays": 2,
+   "tradedDays": 6,
+   "lastPositive": 0,
+   "lastDays": 6,
+   "hoursPositivePct": 48.2,
+   "survives": false
+  }
+ }
+}

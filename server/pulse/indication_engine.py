@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import hashlib
+import math
 import re
 import urllib.parse
 import urllib.request
@@ -133,6 +134,10 @@ class Indication:
     t: float
     timeframe: str = ""
     kind: str = "state"
+    # Per-indication exit tactic (price-only) and its reference level. Not
+    # part of the entry identity: a moved level is the same configuration.
+    exit_tactic: str = ""
+    exit_level: float = 0.0
 
     @property
     def entry_key(self) -> str:
@@ -167,8 +172,47 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "typeSignals": True,
     "typeTrend": True,
     "typeBreak": True,
+    "typeMsi": True,
+    "typeVwap": True,
+    "typeRetest": True,
+    "typeSqueeze": True,
     "trendRanges": [13, 21, 34],
     "breakRanges": [8, 16, 32],
+    # Extended kinds: every range is an independent configuration (own tape,
+    # own PF validation). Situation thresholds below are the fine-tuning knobs.
+    "msiRanges": [14, 21, 34],
+    "msiRsiPeriod": 14,
+    "msiMinGap": 5.0,
+    "vwapRanges": [20, 30, 40],
+    "vwapDevZ": 2.0,
+    "vwapVolMult": 1.8,
+    "retestRanges": [12, 20, 32],
+    "retestTol": 0.12,
+    "retestMinBreak": 0.08,
+    "squeezeRanges": [16, 20, 26],
+    "squeezePctl": 0.2,
+    "typeSweep": True,
+    "typeRsi2": True,
+    "typeKeltner": True,
+    "typeImpulse": True,
+    "sweepRanges": [12, 20, 34],
+    "sweepWickAtr": 0.25,
+    "rsi2Ranges": [21, 34, 55],
+    "rsi2Low": 10.0,
+    "rsi2High": 90.0,
+    "keltnerRanges": [14, 20, 30],
+    "keltnerMult": 2.0,
+    "impulseRanges": [20, 30, 45],
+    "impulseSigma": 3.0,
+    "impulseVolMult": 2.0,
+    # Activity specialization: minimum ATR(14) % of price per kind.
+    "actSweepMin": 0.04,
+    "actRsi2Min": 0.03,
+    "actKeltnerMin": 0.04,
+    "actImpulseMin": 0.03,
+    "exitTacticOn": True,
+    "exitTacticBufferPct": 0.1,
+    "exitTacticMinGainPct": 0.15,
     "dirRange": 10,
     "dirMinChange": 0.001,
     "moveRange": 10,
@@ -178,6 +222,42 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "activeNoise": 0.05,  # percent, like the desk's Noise setting
     "activeMovePct": 0.5,
     "activeVolatilityWeight": 0.3,
+}
+
+# Kind -> settings flag. One map for live filters, stats, snapshot and match.
+KIND_FLAGS: Dict[str, str] = {
+    "state": "typeState",
+    "signals": "typeSignals",
+    "active": "typeActive",
+    "direction": "typeDirection",
+    "move": "typeMove",
+    "common": "typeCommon",
+    "trend": "typeTrend",
+    "break": "typeBreak",
+    "msi": "typeMsi",
+    "vwap": "typeVwap",
+    "retest": "typeRetest",
+    "squeeze": "typeSqueeze",
+    "sweep": "typeSweep",
+    "rsi2": "typeRsi2",
+    "keltner": "typeKeltner",
+    "impulse": "typeImpulse",
+}
+KIND_ORDER: Dict[str, int] = {
+    "state": 5, "signals": 4, "trend": 4, "break": 4, "msi": 4, "retest": 3, "squeeze": 3,
+    "vwap": 3, "active": 3, "direction": 2, "move": 2, "common": 1,
+    "sweep": 4, "rsi2": 3, "keltner": 3, "impulse": 3,
+}
+# Extended kinds evaluated per range: kind -> (ranges key, defaults, range setting).
+RANGE_KINDS: Dict[str, Tuple[str, Tuple[int, ...], str]] = {
+    "msi": ("msiRanges", (14, 21, 34), "msiRange"),
+    "vwap": ("vwapRanges", (20, 30, 40), "vwapRange"),
+    "retest": ("retestRanges", (12, 20, 32), "retestRange"),
+    "squeeze": ("squeezeRanges", (16, 20, 26), "squeezePeriod"),
+    "sweep": ("sweepRanges", (12, 20, 34), "sweepRange"),
+    "rsi2": ("rsi2Ranges", (21, 34, 55), "rsi2Trend"),
+    "keltner": ("keltnerRanges", (14, 20, 30), "keltnerPeriod"),
+    "impulse": ("impulseRanges", (20, 30, 45), "impulseRange"),
 }
 
 TIMEFRAMES = ("1m", "5m", "15m")
@@ -1141,6 +1221,563 @@ def evaluate_break(
     )
 
 
+# ---------------------------------------------------------------------------
+# Extended indication kinds (appended after "break"; existing kinds untouched).
+# Each is evaluated per range (independent configuration, own tape, own PF
+# validation) and carries a price-only exit tactic with its reference level.
+#
+#   kind     situation                          relation calc                     exit tactic
+#   msi      price extreme not confirmed by RSI  RSI gap at the two swing extremes  msi-swing-fail
+#   vwap     stretched from VWAP on a vol surge  z-score of VWAP deviation, vol x   vwap-touch
+#   retest   broken range level retested, held   break size vs retest distance      retest-fail
+#   squeeze  band width in its low percentile,   width percentile, close vs band     squeeze-fail
+#            then a close outside the band
+# ---------------------------------------------------------------------------
+
+
+def rsi_series(values: Sequence[float], period: int = 14) -> List[float]:
+    """Wilder RSI per bar (bars before ``period`` read 50.0)."""
+    n = len(values)
+    out = [50.0] * n
+    if n <= period:
+        return out
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = values[i] - values[i - 1]
+        gains += max(0.0, d)
+        losses += max(0.0, -d)
+    avg_g, avg_l = gains / period, losses / period
+    out[period] = 100.0 if avg_l <= 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+    for i in range(period + 1, n):
+        d = values[i] - values[i - 1]
+        avg_g = (avg_g * (period - 1) + max(0.0, d)) / period
+        avg_l = (avg_l * (period - 1) + max(0.0, -d)) / period
+        out[i] = 100.0 if avg_l <= 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+    return out
+
+
+def _min_conf_ok(conf: float, settings: Dict[str, Any]) -> bool:
+    return conf >= float(settings.get("minimumConfidence", 0.6)) * 0.88
+
+
+def evaluate_msi(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Momentum divergence over ``msiRange`` bars.
+
+    Bearish: a higher high in the second half of the range with an RSI high
+    at least ``msiMinGap`` points lower than at the first-half high, the high
+    at least one bar old and the last bar turned down -> short. Bullish is the
+    mirror -> long. Exit tactic ``msi-swing-fail``: void once price trades
+    beyond the swing extreme that formed the divergence.
+    """
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
+    rng = max(10, min(55, int(settings.get("msiRange") or 21)))
+    period = max(5, min(21, int(settings.get("msiRsiPeriod") or 14)))
+    if len(closes) < rng + period + 2:
+        return None
+    r = rsi_series(closes[-(rng + period + 2):], period)
+    half = rng // 2
+    px_w, r_w = closes[-rng:], r[-rng:]
+    a_px, b_px = px_w[:half], px_w[half:]
+    a_r, b_r = r_w[:half], r_w[half:]
+    gap_min = float(settings.get("msiMinGap", 5.0))
+    last, prev = closes[-1], closes[-2]
+    if last <= 0:
+        return None
+    want, gap, level = "", 0.0, 0.0
+    hi_a, hi_b = max(a_px), max(b_px)
+    lo_a, lo_b = min(a_px), min(b_px)
+    if hi_b > hi_a:
+        ib = len(b_px) - 1 - b_px[::-1].index(hi_b)
+        ia = a_px.index(hi_a)
+        g = a_r[ia] - b_r[ib]
+        if g >= gap_min and ib < len(b_px) - 1 and last < prev and a_r[ia] >= 55.0:
+            want, gap, level = "short", g, hi_b
+    if not want and lo_b < lo_a:
+        ib = len(b_px) - 1 - b_px[::-1].index(lo_b)
+        ia = a_px.index(lo_a)
+        g = b_r[ib] - a_r[ia]
+        if g >= gap_min and ib < len(b_px) - 1 and last > prev and a_r[ia] <= 45.0:
+            want, gap, level = "long", g, lo_b
+    if not want:
+        return None
+    dist = abs(_pct(last, level))
+    strength = clamp(gap / 20.0, 0.0, 1.0)
+    conf = clamp(0.56 + min(0.32, gap / 40.0) + (0.04 if dist < 0.4 else 0.0), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    sl = max(dist * 1.15, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+    ind = _kind_indication(
+        symbol, "msi", want, strength, last, settings, [f"msi:{rng}:gap{gap:.1f}"],
+        sl_pct=sl, mode=f"msi:{rng}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "msi-swing-fail", float(level)
+    return ind
+
+
+def evaluate_vwap(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Volume-surge VWAP reversion over ``vwapRange`` bars.
+
+    Price deviates >= ``vwapDevZ`` deviations from the rolling VWAP on a bar
+    whose volume is >= ``vwapVolMult`` x the window mean, and the bar already
+    turns back toward VWAP. Exit tactic ``vwap-touch``: take the reversion
+    when price reaches VWAP.
+    """
+    frame = frame or IndicationFrame([], list(closes))
+    cs = frame.candles
+    rng = max(10, min(55, int(settings.get("vwapRange") or 30)))
+    if len(cs) < rng + 1:
+        return None
+    win = cs[-rng:]
+    vols = [max(0.0, float(c.volume or 0.0)) for c in win]
+    vsum = sum(vols)
+    if vsum <= 0:
+        return None
+    vwap = sum(((c.high + c.low + c.close) / 3.0) * v for c, v in zip(win, vols)) / vsum
+    if vwap <= 0:
+        return None
+    devs = [(c.close - vwap) / vwap for c in win]
+    mean_d = sum(devs) / len(devs)
+    sd = math.sqrt(sum((d - mean_d) ** 2 for d in devs) / len(devs))
+    if sd <= 0:
+        return None
+    last, prev = win[-1].close, win[-2].close
+    z = devs[-1] / sd
+    vol_mean = sum(vols[:-1]) / max(1, len(vols) - 1)
+    surge = vols[-1] / vol_mean if vol_mean > 0 else 0.0
+    z_min = float(settings.get("vwapDevZ", 2.0))
+    v_min = float(settings.get("vwapVolMult", 1.8))
+    if abs(z) < z_min or surge < v_min:
+        return None
+    want = "short" if z > 0 else "long"
+    turned = (last < prev or win[-1].close < win[-1].open) if want == "short" else (last > prev or win[-1].close > win[-1].open)
+    if not turned:
+        return None
+    dist = abs(_pct(last, vwap))
+    if dist < 0.08:
+        return None
+    strength = clamp((abs(z) - 1.5) / 2.5 + (surge - 1.5) / 6.0, 0.0, 1.0)
+    conf = clamp(0.56 + min(0.25, (abs(z) - z_min) * 0.1) + min(0.12, (surge - v_min) * 0.04), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    a = frame.atr(14)
+    sl = (a / last * 100.0 * float(settings.get("stopLossAtrMultiplier", 0.85)) * 1.6) if a > 0 and last > 0 else dist * 0.8
+    ind = _kind_indication(
+        symbol, "vwap", want, strength, last, settings, [f"vwap:{rng}:z{z:.1f}:v{surge:.1f}"],
+        sl_pct=sl, tp_pct=max(dist, sl * 1.1), mode=f"vwap:{rng}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "vwap-touch", float(vwap)
+    return ind
+
+
+def evaluate_retest(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Break-retest over ``retestRange`` bars.
+
+    Price broke the prior range by >= ``retestMinBreak`` percent 2..8 bars
+    ago, came back within ``retestTol`` percent of the broken level, held it,
+    and the last bar moves in the break direction. Exit tactic
+    ``retest-fail``: void once price closes back through the level.
+    """
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
+    rng = max(8, min(55, int(settings.get("retestRange") or 16)))
+    tol = float(settings.get("retestTol", 0.12)) / 100.0
+    min_brk = float(settings.get("retestMinBreak", 0.08)) / 100.0
+    if len(closes) < rng + 4:
+        return None
+    last, prev = closes[-1], closes[-2]
+    if last <= 0:
+        return None
+    for k in range(2, 9):
+        if len(closes) < rng + k + 2:
+            break
+        prior = closes[-(rng + k + 1):-(k + 1)]
+        after = closes[-(k + 1):-1]
+        hi, lo = max(prior), min(prior)
+        recent_lo, recent_hi = min(closes[-3:]), max(closes[-3:])
+        if (max(after) > hi * (1 + min_brk) and abs(recent_lo / hi - 1) <= tol
+                and last > hi and last > prev and min(after) >= hi * (1 - tol)):
+            want, level, brk = "long", hi, max(after) / hi - 1
+        elif (min(after) < lo * (1 - min_brk) and abs(recent_hi / lo - 1) <= tol
+                and last < lo and last < prev and max(after) <= lo * (1 + tol)):
+            want, level, brk = "short", lo, 1 - min(after) / lo
+        else:
+            continue
+        strength = clamp(brk / max(0.002, min_brk * 4), 0.0, 1.0)
+        conf = clamp(0.58 + min(0.25, brk * 60) + 0.03 * (8 - k) / 6, 0.5, 0.99)
+        if not _min_conf_ok(conf, settings):
+            return None
+        sl = max(abs(_pct(last, level)) + tol * 100 * 1.5, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+        ind = _kind_indication(
+            symbol, "retest", want, strength, last, settings, [f"retest:{rng}:k{k}:{brk * 100:.2f}"],
+            sl_pct=sl, mode=f"retest:{rng}", conf=conf,
+        )
+        ind.exit_tactic = "retest-fail"
+        ind.exit_level = float(level * (1 - tol) if want == "long" else level * (1 + tol))
+        return ind
+    return None
+
+
+def evaluate_squeeze(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Volatility squeeze release with a ``squeezePeriod`` Bollinger band.
+
+    The band width before the last bar sits in its lowest ``squeezePctl``
+    share of the frame, and the last close leaves the band. Exit tactic
+    ``squeeze-fail``: a breakout that falls back through the band mid failed.
+    """
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
+    period = max(10, min(30, int(settings.get("squeezePeriod") or 20)))
+    if len(closes) < period + 16:
+        return None
+    # Rolling band width (upper - lower) / mid over the frame, O(n).
+    widths: List[float] = []
+    s1 = sum(closes[:period])
+    s2 = sum(x * x for x in closes[:period])
+    for t in range(period, len(closes)):
+        mid = s1 / period
+        var = max(0.0, s2 / period - mid * mid)
+        if mid <= 0:
+            return None
+        widths.append(4.0 * math.sqrt(var) / mid)
+        s1 += closes[t] - closes[t - period]
+        s2 += closes[t] * closes[t] - closes[t - period] * closes[t - period]
+    if len(widths) < 15:
+        return None
+    pctl = clamp(float(settings.get("squeezePctl", 0.2)), 0.05, 0.5)
+    ranked = sorted(widths)
+    cutoff = ranked[max(0, int(len(ranked) * pctl) - 1)]
+    if widths[-1] > cutoff:
+        return None
+    band = bollinger(closes[:-1], period)
+    if not band:
+        return None
+    upper, mid, lower = band
+    last = closes[-1]
+    if last > upper:
+        want = "long"
+    elif last < lower:
+        want = "short"
+    else:
+        return None
+    out = abs(_pct(upper if want == "long" else lower, last))
+    expand = widths[-1] / max(1e-12, sum(widths) / len(widths))
+    strength = clamp(out / 0.15 + (1.0 - expand) * 0.5, 0.0, 1.0)
+    conf = clamp(0.57 + min(0.3, out * 1.5) + min(0.08, max(0.0, 1.0 - expand) * 0.2), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    sl = max(abs(_pct(last, mid)) * 1.05, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+    ind = _kind_indication(
+        symbol, "squeeze", want, strength, last, settings, [f"squeeze:{period}:w{widths[-1] * 100:.3f}"],
+        sl_pct=sl, mode=f"squeeze:{period}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "squeeze-fail", float(mid)
+    return ind
+
+
+# ---------------------------------------------------------------------------
+# Researched short-horizon kinds (appended after squeeze; 16 kinds total).
+# Short-horizon crypto reversal concentrates after aggressive moves (arXiv
+# 2608.21888); a liquidity sweep needs a rejection back through the level;
+# RSI(2) pullbacks inside a trend exit on the EMA5 snap-back (Connors);
+# Keltner wick fades confirm with a StochRSI turn. Every kind carries an
+# activity specialization: it stays quiet below its minimum ATR% of price.
+#
+#   kind     situation                                    exit tactic
+#   sweep    wick through N-bar high/low, close back in   sweep-fail (beyond the wick)
+#   rsi2     RSI(2) extreme against the EMA(N) trend      ema5-cross (snap-back target)
+#   keltner  wick outside Keltner(N), close back inside   keltner-mid (middle-line target)
+#   impulse  >= k sigma bar on a volume surge, fade it    impulse-fail (beyond the extreme)
+# ---------------------------------------------------------------------------
+
+
+def _activity_pct(frame: "IndicationFrame", px: float) -> float:
+    a = frame.atr(14) if frame.candles else 0.0
+    return (a / px * 100.0) if a > 0 and px > 0 else 0.0
+
+
+def _activity_ok(frame: "IndicationFrame", px: float, settings: Dict[str, Any], kind: str, default: float) -> Tuple[bool, float]:
+    act = _activity_pct(frame, px)
+    key = "act" + kind[:1].upper() + kind[1:] + "Min"
+    return act >= float(settings.get(key, default)), act
+
+
+def evaluate_sweep(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Liquidity sweep reversal over ``sweepRange`` bars: the last bar's wick
+    runs through the prior range high/low by >= ``sweepWickAtr`` x ATR and
+    the bar closes back inside the range (the rejection). Fade the sweep.
+    Exit tactic ``sweep-fail``: price trades back beyond the sweep wick."""
+    frame = frame or IndicationFrame([], list(closes))
+    cs = frame.candles
+    rng = max(8, min(55, int(settings.get("sweepRange") or 20)))
+    if len(cs) < rng + 2:
+        return None
+    last = cs[-1]
+    prior = cs[-(rng + 1):-1]
+    hi = max(c.high for c in prior)
+    lo = min(c.low for c in prior)
+    px = last.close
+    ok, act = _activity_ok(frame, px, settings, "sweep", 0.04)
+    if not ok:
+        return None
+    a = frame.atr(14)
+    if a <= 0 or px <= 0:
+        return None
+    k = float(settings.get("sweepWickAtr", 0.25))
+    if last.high > hi + k * a and last.close < hi and last.close < last.open + (last.high - last.open) * 0.5:
+        want, wick, extreme = "short", (last.high - hi) / a, last.high
+    elif last.low < lo - k * a and last.close > lo and last.close > last.open - (last.open - last.low) * 0.5:
+        want, wick, extreme = "long", (lo - last.low) / a, last.low
+    else:
+        return None
+    strength = clamp(wick / 1.5, 0.0, 1.0)
+    conf = clamp(0.58 + min(0.3, wick * 0.15) + min(0.06, act * 0.3), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    sl = max(abs(_pct(px, extreme)) * 1.1, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+    ind = _kind_indication(
+        symbol, "sweep", want, strength, px, settings, [f"sweep:{rng}:w{wick:.2f}:a{act:.3f}"],
+        sl_pct=sl, mode=f"sweep:{rng}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "sweep-fail", float(extreme)
+    return ind
+
+
+def evaluate_rsi2(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Connors-style RSI(2) pullback inside the EMA(``rsi2Trend``) trend:
+    long when price is above the trend EMA, below EMA5 and RSI(2) <=
+    ``rsi2Low``; short mirrored with ``rsi2High``. Exit tactic ``ema5-cross``:
+    take the snap-back when price closes back through EMA5."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
+    trend_n = max(8, min(55, int(settings.get("rsi2Trend") or 34)))
+    if len(closes) < trend_n + 3:
+        return None
+    px = closes[-1]
+    ok, act = _activity_ok(frame, px, settings, "rsi2", 0.03)
+    if not ok or px <= 0:
+        return None
+    trend = frame.ema(trend_n)
+    ema5 = frame.ema(5)
+    r2 = rsi(closes, 2)
+    lo_t = float(settings.get("rsi2Low", 10.0))
+    hi_t = float(settings.get("rsi2High", 90.0))
+    if px > trend and px < ema5 and r2 <= lo_t:
+        want, depth = "long", (lo_t - r2) / max(1.0, lo_t)
+    elif px < trend and px > ema5 and r2 >= hi_t:
+        want, depth = "short", (r2 - hi_t) / max(1.0, 100.0 - hi_t)
+    else:
+        return None
+    gap = abs(_pct(px, ema5))
+    strength = clamp(0.4 + depth * 0.6, 0.0, 1.0)
+    conf = clamp(0.58 + depth * 0.25 + min(0.08, abs(_pct(trend, px)) * 0.2), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    a = frame.atr(14)
+    sl = max((a / px * 100.0 * 1.5) if a > 0 else gap * 2.0, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+    ind = _kind_indication(
+        symbol, "rsi2", want, strength, px, settings, [f"rsi2:{trend_n}:r{r2:.1f}:a{act:.3f}"],
+        sl_pct=sl, tp_pct=max(gap * 1.2, sl * 1.1), mode=f"rsi2:{trend_n}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "ema5-cross", float(ema5)
+    return ind
+
+
+def stoch_rsi(values: Sequence[float], period: int = 14) -> Tuple[float, float]:
+    """(%K now, %K previous bar) of StochRSI over ``period``."""
+    r = rsi_series(list(values), period)
+    if len(r) < period * 2 + 1:
+        return 50.0, 50.0
+
+    def k_at(end: int) -> float:
+        w = r[end - period:end]
+        lo, hi = min(w), max(w)
+        return 50.0 if hi - lo <= 1e-9 else (w[-1] - lo) / (hi - lo) * 100.0
+
+    return k_at(len(r)), k_at(len(r) - 1)
+
+
+def evaluate_keltner(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Keltner(``keltnerPeriod``, ``keltnerMult`` x ATR) wick fade: the last
+    bar's wick pierces a band, the close is back inside, and StochRSI turns
+    from its extreme. Exit tactic ``keltner-mid``: target the middle line."""
+    frame = frame or IndicationFrame([], list(closes))
+    cs = frame.candles
+    n = max(10, min(40, int(settings.get("keltnerPeriod") or 20)))
+    if len(cs) < n + 16:
+        return None
+    px = cs[-1].close
+    ok, act = _activity_ok(frame, px, settings, "keltner", 0.04)
+    if not ok or px <= 0:
+        return None
+    mid = frame.ema(n)
+    a = frame.atr(14)
+    if a <= 0:
+        return None
+    mult = float(settings.get("keltnerMult", 2.0))
+    upper, lower = mid + mult * a, mid - mult * a
+    k_now, k_prev = stoch_rsi(frame.closes, 14)
+    last = cs[-1]
+    if last.high > upper and last.close < upper and k_prev >= 80 and k_now < k_prev:
+        want, pierce = "short", (last.high - upper) / a
+    elif last.low < lower and last.close > lower and k_prev <= 20 and k_now > k_prev:
+        want, pierce = "long", (lower - last.low) / a
+    else:
+        return None
+    dist = abs(_pct(px, mid))
+    if dist < 0.08:
+        return None
+    strength = clamp(0.35 + pierce * 0.5, 0.0, 1.0)
+    conf = clamp(0.58 + min(0.25, pierce * 0.3) + min(0.08, abs(k_now - k_prev) / 200.0), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    sl = max(abs(_pct(px, last.high if want == "short" else last.low)) + a / px * 100.0 * 0.5,
+             float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+    ind = _kind_indication(
+        symbol, "keltner", want, strength, px, settings, [f"keltner:{n}:p{pierce:.2f}:k{k_now:.0f}:a{act:.3f}"],
+        sl_pct=sl, tp_pct=max(dist, sl * 1.1), mode=f"keltner:{n}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "keltner-mid", float(mid)
+    return ind
+
+
+def evaluate_impulse(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Impulse fade: the last bar's return is >= ``impulseSigma`` x the
+    ``impulseRange``-bar return sigma on volume >= ``impulseVolMult`` x mean
+    (aggressive taker flow); fade it. Exit tactic ``impulse-fail``: price
+    trades beyond the impulse extreme."""
+    frame = frame or IndicationFrame([], list(closes))
+    cs = frame.candles
+    rng = max(10, min(55, int(settings.get("impulseRange") or 30)))
+    if len(cs) < rng + 2:
+        return None
+    px = cs[-1].close
+    ok, act = _activity_ok(frame, px, settings, "impulse", 0.03)
+    if not ok or px <= 0:
+        return None
+    rets = [(cs[i].close / cs[i - 1].close - 1.0) for i in range(len(cs) - rng, len(cs) - 1) if cs[i - 1].close > 0]
+    if len(rets) < 8:
+        return None
+    mu = sum(rets) / len(rets)
+    sd = math.sqrt(sum((x - mu) ** 2 for x in rets) / len(rets))
+    if sd <= 0:
+        return None
+    r_last = cs[-1].close / cs[-2].close - 1.0 if cs[-2].close > 0 else 0.0
+    z = r_last / sd
+    vols = [max(0.0, float(c.volume or 0.0)) for c in cs[-rng:-1]]
+    vmean = sum(vols) / len(vols) if vols else 0.0
+    surge = float(cs[-1].volume or 0.0) / vmean if vmean > 0 else 0.0
+    if abs(z) < float(settings.get("impulseSigma", 3.0)) or surge < float(settings.get("impulseVolMult", 2.0)):
+        return None
+    want = "short" if z > 0 else "long"
+    extreme = cs[-1].high if want == "short" else cs[-1].low
+    strength = clamp((abs(z) - 2.5) / 3.0 + (surge - 2.0) / 8.0, 0.0, 1.0)
+    conf = clamp(0.57 + min(0.25, (abs(z) - 3.0) * 0.06) + min(0.1, (surge - 2.0) * 0.03), 0.5, 0.99)
+    if not _min_conf_ok(conf, settings):
+        return None
+    move = abs(r_last) * 100.0
+    sl = max(abs(_pct(px, extreme)) * 1.2 + move * 0.25, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
+    ind = _kind_indication(
+        symbol, "impulse", want, strength, px, settings, [f"impulse:{rng}:z{z:.1f}:v{surge:.1f}:a{act:.3f}"],
+        sl_pct=sl, tp_pct=max(move * 0.5, sl * 1.1), mode=f"impulse:{rng}", conf=conf,
+    )
+    ind.exit_tactic, ind.exit_level = "impulse-fail", float(extreme)
+    return ind
+
+
+RANGE_EVALUATORS = {
+    "msi": evaluate_msi,
+    "vwap": evaluate_vwap,
+    "retest": evaluate_retest,
+    "squeeze": evaluate_squeeze,
+    "sweep": evaluate_sweep,
+    "rsi2": evaluate_rsi2,
+    "keltner": evaluate_keltner,
+    "impulse": evaluate_impulse,
+}
+
+EXIT_TACTICS = ("msi-swing-fail", "vwap-touch", "retest-fail", "squeeze-fail",
+                "sweep-fail", "ema5-cross", "keltner-mid", "impulse-fail")
+# Targets close when price reaches the level; invalidations when it trades
+# back through it by more than the buffer.
+TARGET_TACTICS = ("vwap-touch", "ema5-cross", "keltner-mid")
+
+
+def exit_tactic_hit(tactic: str, side: Any, px: float, level: float, buffer_pct: float = 0.0) -> bool:
+    """Price-only exit tactic check for an open position.
+
+    ``vwap-touch`` is a target (reached); the others are invalidations: price
+    closes back through the level that formed the setup by more than
+    ``buffer_pct`` percent (a wick-sized poke is not an invalidation)."""
+    if not tactic or level <= 0 or px <= 0:
+        return False
+    long = str(side).upper() in ("LONG", "L", "BUY", "1")
+    if tactic in TARGET_TACTICS:
+        return px >= level if long else px <= level
+    if tactic in ("msi-swing-fail", "retest-fail", "squeeze-fail", "sweep-fail", "impulse-fail"):
+        b = max(0.0, float(buffer_pct or 0.0)) / 100.0
+        return px < level * (1 - b) if long else px > level * (1 + b)
+    return False
+
+
+def tactic_should_close(tactic: str, side: Any, px: float, level: float, entry: float,
+                        buffer_pct: float = 0.1, min_gain_pct: float = 0.15) -> bool:
+    """Exit-tactic decision for an open position.
+
+    Invalidations close as soon as they hit. Targets close only once the
+    move from entry covers ``min_gain_pct`` (a target reached at a gain
+    below the round-trip cost would lock in a net loss)."""
+    if not exit_tactic_hit(tactic, side, px, level, buffer_pct):
+        return False
+    if tactic not in TARGET_TACTICS:
+        return True
+    if entry <= 0 or px <= 0:
+        return False
+    long = str(side).upper() in ("LONG", "L", "BUY", "1")
+    move = (px - entry) / entry * (1.0 if long else -1.0)
+    return move * 100.0 >= max(0.0, float(min_gain_pct or 0.0))
+
+
 def indication_ranges(values, defaults):
     if not isinstance(values, (list, tuple)):
         return list(defaults)
@@ -1167,6 +1804,17 @@ def evaluate_range_configs(symbol, closes, settings, frame=None):
     if settings.get("typeBreak", True):
         for period in indication_ranges(settings.get("breakRanges"), (8, 16, 32)):
             row = evaluate_break(symbol, closes, {**settings, "breakRange": period}, frame)
+            if row:
+                rows.append(row)
+    for kind, (rkey, defaults, setting) in RANGE_KINDS.items():
+        if not settings.get(KIND_FLAGS[kind], True):
+            continue
+        fn = RANGE_EVALUATORS[kind]
+        for period in indication_ranges(settings.get(rkey), defaults):
+            try:
+                row = fn(symbol, closes, {**settings, setting: period}, frame)
+            except Exception:
+                row = None
             if row:
                 rows.append(row)
     if settings.get("typeMove", True):
@@ -1842,6 +2490,14 @@ class IndicationBook:
             ("typeSignals", "indTypeSignals"),
             ("typeTrend", "indTypeTrend"),
             ("typeBreak", "indTypeBreak"),
+            ("typeMsi", "indTypeMsi"),
+            ("typeVwap", "indTypeVwap"),
+            ("typeRetest", "indTypeRetest"),
+            ("typeSqueeze", "indTypeSqueeze"),
+            ("typeSweep", "indTypeSweep"),
+            ("typeRsi2", "indTypeRsi2"),
+            ("typeKeltner", "indTypeKeltner"),
+            ("typeImpulse", "indTypeImpulse"),
         ):
             if ovk in overlay:
                 s[key] = bool(overlay.get(ovk))
@@ -1850,6 +2506,28 @@ class IndicationBook:
         s["trendRanges"] = indication_ranges(overlay.get("indTrendRanges", s.get("trendRanges")), (13, 21, 34))
         s["breakRanges"] = indication_ranges(overlay.get("indBreakRanges", s.get("breakRanges")), (8, 16, 32))
         s["moveRanges"] = indication_ranges(overlay.get("indMoveRanges", s.get("moveRanges")), (20, 30, 40))
+        for kind, (rkey, defaults, _setting) in RANGE_KINDS.items():
+            ovk = "ind" + rkey[0].upper() + rkey[1:]
+            s[rkey] = indication_ranges(overlay.get(ovk, s.get(rkey)), defaults)
+        for key, ovk in (
+            ("msiMinGap", "indMsiMinGap"), ("vwapDevZ", "indVwapDevZ"), ("vwapVolMult", "indVwapVolMult"),
+            ("retestTol", "indRetestTol"), ("retestMinBreak", "indRetestMinBreak"), ("squeezePctl", "indSqueezePctl"),
+            ("sweepWickAtr", "indSweepWickAtr"), ("rsi2Low", "indRsi2Low"), ("rsi2High", "indRsi2High"),
+            ("keltnerMult", "indKeltnerMult"), ("impulseSigma", "indImpulseSigma"), ("impulseVolMult", "indImpulseVolMult"),
+            ("actSweepMin", "actSweepMin"), ("actRsi2Min", "actRsi2Min"), ("actKeltnerMin", "actKeltnerMin"),
+            ("actImpulseMin", "actImpulseMin"),
+        ):
+            try:
+                if overlay.get(ovk) is not None:
+                    s[key] = float(overlay.get(ovk))
+            except (TypeError, ValueError):
+                pass
+        if overlay.get("exitTacticMinGainPct") is not None:
+            s["exitTacticMinGainPct"] = float(overlay.get("exitTacticMinGainPct"))
+        if overlay.get("exitTacticBufferPct") is not None:
+            s["exitTacticBufferPct"] = float(overlay.get("exitTacticBufferPct"))
+        if "exitTacticOn" in overlay:
+            s["exitTacticOn"] = bool(overlay.get("exitTacticOn"))
         outbreaks = overlay.get("activeOutbreakRanges") or overlay.get("indActiveOutbreak")
         if isinstance(outbreaks, (list, tuple)) and outbreaks:
             s["activeOutbreak"] = [int(x) for x in outbreaks]
@@ -2078,16 +2756,9 @@ class IndicationBook:
             crow = evaluate_common(symbol, candles_1m, self.settings, frame=frame_1m)
             if crow:
                 indications.append(crow)
-        if not self.settings.get("typeSignals", True):
-            indications = [i for i in indications if i.kind != "signals"]
-        if not self.settings.get("typeState", True):
-            indications = [i for i in indications if i.kind != "state"]
-        if not self.settings.get("typeCommon", True):
-            indications = [i for i in indications if i.kind != "common"]
-        if not self.settings.get("typeTrend", True):
-            indications = [i for i in indications if i.kind != "trend"]
-        if not self.settings.get("typeBreak", True):
-            indications = [i for i in indications if i.kind != "break"]
+        off = {k for k, flag in KIND_FLAGS.items() if k not in ("direction", "move", "active") and not self.settings.get(flag, True)}
+        if off:
+            indications = [i for i in indications if i.kind not in off]
         lane_result: Dict[str, Dict[str, Any]] = {}
         for kind in INDICATION_KINDS:
             bucket = self.counters[kind]
@@ -2148,7 +2819,7 @@ class IndicationBook:
             rows = list(self.last.get(symbol) or [])
         if not rows:
             return None
-        order = {"state": 5, "signals": 4, "trend": 4, "break": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
+        order = KIND_ORDER
         rows.sort(key=lambda e: (e.confidence, order.get(e.kind, 0), -e.stop_loss_pct), reverse=True)
         return rows[0]
 
@@ -2164,7 +2835,7 @@ class IndicationBook:
         want_kind = ""
         if bits and bits[0] == "ind" and len(bits) > 1:
             cand = bits[1].strip()
-            if cand in ("state", "signals", "active", "direction", "move", "common", "trend", "break"):
+            if cand in INDICATION_KINDS:
                 want_kind = cand
         if want_kind:
             cands = [i for i in rows if i.kind == want_kind]
@@ -2203,13 +2874,18 @@ class IndicationBook:
             kind = indication.kind
             if callable(allow):
                 try:
-                    if not bool(allow(kind, indication.direction)):
+                    try:
+                        verdict = allow(kind, indication.direction, indication.mode)
+                    except TypeError:
+                        verdict = allow(kind, indication.direction)
+                    if not bool(verdict):
                         continue
                 except TypeError:
                     if not bool(allow(kind)):
                         continue
                 except Exception:
-                    pass
+                    # Fail closed: an erroring gate never admits the lane.
+                    continue
             confidence = float(indication.confidence or 0.0)
             if confidence < min_conf:
                 continue
@@ -2251,7 +2927,7 @@ class IndicationBook:
             aligned = [i for i in cands if i.direction == selected]
             if aligned:
                 cands = aligned
-        order = {"state": 5, "signals": 4, "trend": 4, "break": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
+        order = KIND_ORDER
         cands.sort(key=lambda e: (e.confidence, order.get(e.kind, 0), -e.stop_loss_pct), reverse=True)
         pick = cands[0]
         agree_n = sum(1 for i in by.values() if i.direction == pick.direction)
@@ -2265,16 +2941,7 @@ class IndicationBook:
 
     def kind_stats(self) -> Dict[str, Any]:
         """Live scan evidence for every independent indication type."""
-        flags = {
-            "state": "typeState",
-            "signals": "typeSignals",
-            "active": "typeActive",
-            "direction": "typeDirection",
-            "move": "typeMove",
-            "common": "typeCommon",
-            "trend": "typeTrend",
-            "break": "typeBreak",
-        }
+        flags = KIND_FLAGS
         out: Dict[str, Any] = {}
         for kind in INDICATION_KINDS:
             source = self.counters.get(kind) or {}
@@ -2341,16 +3008,7 @@ class IndicationBook:
             })
         return {
             "enabled": bool(self.settings.get("enabled")),
-            "types": {
-                "state": bool(self.settings.get("typeState", True)),
-                "direction": bool(self.settings.get("typeDirection", True)),
-                "move": bool(self.settings.get("typeMove", True)),
-                "active": bool(self.settings.get("typeActive", True)),
-                "common": bool(self.settings.get("typeCommon", True)),
-                "signals": bool(self.settings.get("typeSignals", True)),
-                "trend": bool(self.settings.get("typeTrend", True)),
-                "break": bool(self.settings.get("typeBreak", True)),
-            },
+            "types": {k: bool(self.settings.get(flag, True)) for k, flag in KIND_FLAGS.items()},
             "typeHits": type_hits,
             "kindStats": kinds,
             "minSources": self.settings.get("minimumSourceSignals"),
@@ -2510,7 +3168,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book.settings["minimumConfidence"] = 0.5
     book.process("PICK-USDT", up, pulse_dir=1, pulse_conf=0.8, bars_by_tf={"1m": up, "5m": up, "15m": up})
     pe = book.pick_entry("PICK-USDT", min_conf=0.5)
-    t16 = (pe is not None and pe[0].kind in ("state", "signals", "move", "direction", "active", "common", "trend", "break") and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
+    t16 = (pe is not None and pe[0].kind in INDICATION_KINDS and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
     book.process("KEEP-USDT", up, pulse_dir=1, pulse_conf=0.7, bars_by_tf={"1m": up, "5m": up, "15m": up})
     dropped = book.keep(["PICK-USDT"])
     t17 = (dropped >= 1 and "PICK-USDT" in book.last and "KEEP-USDT" not in book.last, f"drop={dropped} keys={sorted(book.last)}")
@@ -2535,7 +3193,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta + rows_fade), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
     snap = book.snapshot()
     ks = snap.get("kindStats") or {}
-    t20 = (set(ks.keys()) == {"state", "signals", "active", "direction", "move", "common", "trend", "break"}, f"keys={sorted(ks)}")
+    t20 = (set(ks.keys()) == set(INDICATION_KINDS) and len(INDICATION_KINDS) == 16, f"keys={sorted(ks)}")
     t21 = (int((ks.get("signals") or {}).get("hits") or 0) >= 1 and int((ks.get("state") or {}).get("hits") or 0) >= 1, f"hits={{k: v.get('hits') for k, v in ks.items()}}")
     t22 = (all(bool(v.get("processed")) and "enabled" in v for v in ks.values()), str({k: v.get("enabled") for k, v in ks.items()}))
     # Direction / move / active / common still run independently on their own tapes

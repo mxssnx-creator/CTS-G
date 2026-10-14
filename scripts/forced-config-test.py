@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 import forced_configs as forced
 from hist_calc import resolve_symbols, cli_options
 from position_cost import completed_roundtrips
-from set_engine import SetBook, IND_KINDS, trades_per_hour
+from set_engine import SetBook, trades_per_hour
+from set_engine import VOTE_KINDS as IND_KINDS
 from pulse_trader import Pulse
 
 

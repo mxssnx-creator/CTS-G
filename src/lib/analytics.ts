@@ -279,6 +279,8 @@ export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITIO
       "12": lastNCostPf(newestFirst, 12, cost),
       "15": lastNCostPf(newestFirst, 15, cost),
       "25": lastNCostPf(newestFirst, 25, cost),
+      "30": lastNCostPf(newestFirst, 30, cost),
+      "50": lastNCostPf(newestFirst, 50, cost),
       "75": lastNCostPf(newestFirst, 75, cost),
       "150": lastNCostPf(newestFirst, 150, cost),
     } as const,

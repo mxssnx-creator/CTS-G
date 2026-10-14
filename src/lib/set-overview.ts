@@ -32,11 +32,16 @@ export type SetOverviewRow = {
   deactReason?: string;
 };
 
-export type SetGroup = Pick<SetOverviewRow, "scope" | "indicationKind" | "strategyType" | "tpRange" | "tpPct"> & { setCount: number };
+export type SetGroup = Pick<SetOverviewRow, "scope" | "indicationKind" | "strategyType" | "tpRange" | "tpPct"> & {
+  /** Unique Sets in the group. */
+  setCount: number;
+  /** Unique Set×side rows (LONG and SHORT of one Set count twice). */
+  sideCount?: number;
+};
 export type SetOverview = { version: number; generatedAt?: number; previewPerGroup?: number; connections?: string[]; groups: SetGroup[]; rows: SetOverviewRow[] };
 export type SetSelection = { scope: SetScope; indication: string; range: string; strategy: string };
 export const INITIAL_SET_SELECTION: SetSelection = { scope: "system", indication: "all", range: "all", strategy: "all" };
-export const INDICATION_GROUPS = ["general", "state", "signals", "active", "direction", "move", "common", "trend", "break", "combined"];
+export const INDICATION_GROUPS = ["general", "state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse", "combined"];
 export const STRATEGY_GROUPS = ["normal", "trailing", "axis", "block", "dca"];
 
 export function setRowKey(row: SetOverviewRow, index: number): string {

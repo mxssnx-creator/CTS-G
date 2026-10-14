@@ -58,14 +58,21 @@ class OverviewCollector:
         self.book = book
         self.groups: dict[tuple, dict] = {}
         self.previews: dict[tuple, list] = defaultdict(list)
+        # setCount = unique Sets; sideCount = unique Set×side rows in a group.
+        self._set_ids: dict[tuple, set] = defaultdict(set)
+        self._side_ids: dict[tuple, set] = defaultdict(set)
 
     def add(self, meta: dict, tape: list, *, metrics: dict | None = None):
         key = (meta["scope"], meta["indicationKind"], range_key(meta.get("tpPct")), meta["strategyType"])
         group = self.groups.setdefault(key, {
             "scope": key[0], "indicationKind": key[1], "tpRange": key[2],
-            "tpPct": meta.get("tpPct"), "strategyType": key[3], "setCount": 0,
+            "tpPct": meta.get("tpPct"), "strategyType": key[3], "setCount": 0, "sideCount": 0,
         })
-        group["setCount"] += 1
+        set_key = str(meta.get("setId") or meta["id"])
+        self._set_ids[key].add(set_key)
+        self._side_ids[key].add((set_key, str(meta.get("side") or "")))
+        group["setCount"] = len(self._set_ids[key])
+        group["sideCount"] = len(self._side_ids[key])
         # Retain references only for the bounded preview, not another catalog.
         rank = (-int(bool(tape) or bool(metrics)), -len(tape), str(meta["id"]))
         preview = self.previews[key]
@@ -148,8 +155,10 @@ def build_overview(book: Any, axis_rows=(), *, axis_enabled: bool = True) -> dic
         if st is None or not (st.stage_ledger or {}).get("base") or not row.get("qualified"):
             continue
         axis = str(row.get("axisKey") or "")
-        meta = set_meta(st, "system", "general" if st.pack == "general" else "combined", "axis", axis)
-        meta.update(axisKey=axis, relativeCount=row.get("relativeCount"))
+        side = str(row.get("side") or row.get("direction") or "").upper()
+        # LONG/SHORT children of one parent are separate rows with their own ids.
+        meta = set_meta(st, "system", "general" if st.pack == "general" else "combined", "axis", f"{axis}|{side}")
+        meta.update(axisKey=axis, relativeCount=row.get("relativeCount"), side=side)
         # Axis PF is its own closed window. Other metrics are unavailable in
         # the coordination record and must not inherit the parent's numbers.
         out.add(meta, [], metrics={"n": int(row.get("closedN") or 0), "last15_ratio": row.get("pf"),
@@ -173,6 +182,13 @@ def qualified_strategy_results(book: Any):
     for name, tape in list(book.ind_hist.items()) + list(book.strategy_hist.items()):
         buckets = defaultdict(list)
         for row in tape:
+            if name in INDICATION_KINDS and not row.get("set_id") and row.get("ind_config"):
+                # Per-range replay indication rows: their own config is the
+                # identity (kind|config|side), not a catalog Set.
+                key = ("", str(row.get("pack") or "indications"), name, str(row.get("ind_config")),
+                       str(row.get("side") or "").upper(), "", "", "", "", "")
+                buckets[key].append(row)
+                continue
             # Unknown legacy ranges cannot qualify a current configuration.
             if not row.get("set_id") or not row.get("tp_pct") or not row.get("sl_ratio"):
                 continue
@@ -191,8 +207,8 @@ def qualified_strategy_results(book: Any):
             meta = {"id": sid, "setId": key[0], "scope": "system", "pack": key[1],
                     "indicationKind": name if name in INDICATION_KINDS else indication(first, key[1]),
                     "strategyType": "normal" if name in INDICATION_KINDS else strategy({**first, "strategy": name.split(":")[0]}),
-                    "indicationConfig": key[3], "side": key[4], "tpPct": number(first["tp_pct"]) * 100,
-                    "slRatio": first["sl_ratio"], "trailKey": key[7], "step": first.get("step"), "tf": "1m"}
+                    "indicationConfig": key[3], "side": key[4], "tpPct": number(first.get("tp_pct")) * 100 or None,
+                    "slRatio": first.get("sl_ratio"), "trailKey": key[7], "step": first.get("step"), "tf": "1m"}
             results.append((meta, samples, metrics))
     book._strategy_result_cache = current
     return results
@@ -212,8 +228,9 @@ def merge_overviews(lanes: list[tuple[str, dict]]) -> dict | None:
         for group in overview.get("groups") or []:
             key = (group["scope"], group["indicationKind"], group["tpRange"], group["strategyType"])
             if key not in groups:
-                groups[key] = {**group, "setCount": 0}
+                groups[key] = {**group, "setCount": 0, "sideCount": 0}
             groups[key]["setCount"] += int(group.get("setCount") or 0)
+            groups[key]["sideCount"] += int(group.get("sideCount") or group.get("setCount") or 0)
         for row in overview.get("rows") or []:
             rows.append({**row, "id": f"{connection}:{row['id']}", "connection": connection})
     if not connections:

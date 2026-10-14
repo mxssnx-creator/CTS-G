@@ -94,6 +94,8 @@ class SetOverviewTests(unittest.TestCase):
         self.assertEqual(row["setId"], st.id)
 
     def test_legacy_unassigned_ranges_do_not_inherit_new_settings(self):
+        # Rows without a Set id and without their own ind_config stay out.
+        # (Replay rows carrying ind_config are covered below.)
         b = book([])
         b.min_step_cfg = 30
         b.ind_hist["trend"] = tape(ind_kind="trend")
@@ -118,6 +120,33 @@ class SetOverviewTests(unittest.TestCase):
         self.assertEqual((row["last15Ratio"], row["n"]), (1.12, 5))
         self.assertIsNone(row["maxDdS"])
         self.assertTrue(row["active"])
+
+    def test_axis_children_per_side_have_unique_ids(self):
+        st = state(hist=tape(.03))
+        axis = [{"parentSetId": st.id, "axisKey": "last:5", "pf": 1.2, "closedN": 5, "qualified": True, "side": side}
+                for side in ("LONG", "SHORT")]
+        rows = [row for row in build_overview(book([st]), axis)["rows"] if row["strategyType"] == "axis"]
+        self.assertEqual({row["side"] for row in rows}, {"LONG", "SHORT"})
+        self.assertEqual(len({row["id"] for row in rows}), 2)
+
+    def test_group_counts_unique_sets_and_set_side_rows(self):
+        both = tape(.004, n=15) + [dict(r, side="SHORT", t=r["t"] + 7) for r in tape(.004, n=15)]
+        result = build_overview(book([state(hist=both)]))
+        group = next(g for g in result["groups"] if g["scope"] == "system")
+        self.assertEqual(group["setCount"], 1)
+        self.assertEqual(group["sideCount"], 2)
+        merged = merge_overviews([("Live", result), ("VST demo", result)])
+        self.assertEqual(merged["groups"][0]["setCount"], 2)
+        self.assertEqual(merged["groups"][0]["sideCount"], 4)
+
+    def test_replay_indication_ranges_show_with_their_config(self):
+        b = book([])
+        b.ind_hist["trend"] = tape(.004, ind_kind="trend", ind_config="trend:w12:tp0.4")
+        b.ind_hist["trend"] += [dict(r, ind_config="trend:w24:tp0.8") for r in tape(.004, ind_kind="trend")]
+        rows = [row for row in build_overview(b)["rows"] if row["scope"] == "system"]
+        self.assertEqual({row["indicationConfig"] for row in rows}, {"trend:w12:tp0.4", "trend:w24:tp0.8"})
+        self.assertTrue(all(row["indicationKind"] == "trend" and row["side"] == "LONG" for row in rows))
+        self.assertEqual(len({row["id"] for row in rows}), 2)
 
     def test_overall_keeps_desk_results_separate_and_adds_counts(self):
         first = build_overview(book([state(hist=tape(.004))]))

@@ -295,7 +295,7 @@ class ExitBook:
         if len(last25) >= self.deact_n and ln.last25_avg_r < 0:
             reasons.append(f"last{len(last25)} avgR {ln.last25_avg_r:.2f}<0")
         if int(pf["count"]) >= min(self.pf_n, self.min_samples) and not clears_pf(ln.last15_ratio, self.min_pf):
-            reasons.append(f"last15 PF {ln.last15_ratio:.2f}<{self.min_pf:.2f}")
+            reasons.append(f"last{self.pf_n} PF {ln.last15_ratio:.2f}<{self.min_pf:.2f}")
         ln.active = not reasons
         ln.deact_reason = "; ".join(reasons)
 
@@ -331,6 +331,9 @@ class ExitBook:
             "optSlMax": round(self.opt_sl_max * 100, 3),
             "minHoldS": self.min_hold_s,
             "lastPick": self.last_pick,
+            # Window behind each lane's last15Ratio (exitPfWindow), for labels.
+            "pfWindow": self.pf_n,
+            "deactN": self.deact_n,
             "lanes": rows,
         }
 

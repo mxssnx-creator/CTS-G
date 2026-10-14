@@ -27,6 +27,7 @@ from block_engine import (
     shared_block_volume_ratio,
 )
 from position_cost import (
+
     INTERN_PF,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
@@ -41,6 +42,16 @@ from position_cost import (
 def hand_target(base: float, n: int, vr: float, cap: float = 2.0) -> float:
     extra = min(max(0.0, cap - 1.0), n * vr)
     return base * extra
+
+
+import itertools  # noqa: E402
+
+_CIDS = itertools.count()
+
+
+def _cid():
+    """Unique exchange client id: each fixture close is its own round trip."""
+    return f"c{next(_CIDS)}"
 
 
 class BlockCalculationTests(unittest.TestCase):
@@ -413,7 +424,7 @@ class BlockCalculationTests(unittest.TestCase):
         p.closed = [
             SimpleNamespace(
                 symbol="SOL-USDT", side="LONG", pnl=gross, pnl_pct=gross, t=now - i,
-                ours=True, member_count=1, exchange_confirmed=True, client_id=f"c{i}",
+                ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(),
             )
             for i in range(6)
         ]
@@ -470,7 +481,7 @@ class BlockCalculationTests(unittest.TestCase):
         self.assertEqual(p.block_overall_real_pf("SEI-USDT", "LONG"), 0.0)
         p.closed = [
             SimpleNamespace(symbol="SEI-USDT", side="LONG", pnl=-0.003, pnl_pct=-0.003, t=float(i),
-                            ours=True, member_count=1)
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0)
             for i in range(5)
         ]
         failed = p._block_overall_real_state("SEI-USDT", "LONG")
@@ -490,11 +501,11 @@ class BlockCalculationTests(unittest.TestCase):
         # must use the newest three (losses), not the trailing insertion wins.
         p.closed = [
             SimpleNamespace(symbol="XRP-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=30.0 + i,
-                            ours=True, member_count=1)
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0)
             for i in range(3)
         ] + [
             SimpleNamespace(symbol="XRP-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=10.0 + i,
-                            ours=True, member_count=1)
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0)
             for i in range(3)
         ]
         self.assertEqual(p.block_overall_real_pf("XRP-USDT", "SHORT"), 0.0)
@@ -555,11 +566,11 @@ class BlockCalculationTests(unittest.TestCase):
         # Three older single-lot wins, then three recent merged losses.
         p.closed = [
             SimpleNamespace(symbol="SOL-USDT", side="LONG", pnl=0.003, pnl_pct=0.003, t=10.0 + i,
-                            ours=True, member_count=1)
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0)
             for i in range(3)
         ] + [
             SimpleNamespace(symbol="SOL-USDT", side="LONG", pnl=-0.003, pnl_pct=-0.003, t=40.0 + i,
-                            ours=True, member_count=2)
+                            ours=True, member_count=2, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0)
             for i in range(3)
         ]
         self.assertEqual(p.block_overall_real_pf("SOL-USDT", "LONG"), 0.0)
@@ -578,17 +589,17 @@ class BlockCalculationTests(unittest.TestCase):
         # Unsorted: newest losses first, older wins after. Last-N Real = losses.
         p.closed = [
             SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=50.0,
-                            ours=True, member_count=1),
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0),
             SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=10.0,
-                            ours=True, member_count=1),
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0),
             SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=60.0,
-                            ours=True, member_count=1),
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0),
             SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=11.0,
-                            ours=True, member_count=1),
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0),
             SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=70.0,
-                            ours=True, member_count=1),
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0),
             SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=12.0,
-                            ours=True, member_count=1),
+                            ours=True, member_count=1, exchange_confirmed=True, client_id=_cid(), qty=1.0, entry=100.0),
         ]
         self.assertEqual(p.block_overall_real_pf("BCH-USDT", "SHORT"), 0.0)
 

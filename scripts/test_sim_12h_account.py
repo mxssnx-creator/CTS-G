@@ -151,7 +151,8 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
         class Book:
             cost_pct = 0.1
 
-        ov = {"volumeFactor": 1.0, "targetNotional": 2.15, "posCountsVolumeRatio": 0.05}
+        ov = {"volumeFactor": 1.0, "targetNotional": 2.15, "posCountsVolumeRatio": 0.05,
+              "orderSizing": "factor", "slAutoLeverage": False}
         res = sim.simulate("t", cands, [], None, catalog, [sym], bars, 60, 120, 0, Book(), sim.Sizer(contracts, ov, None),
                            10.0, True, True)
         tot = res["totals"]
@@ -196,7 +197,7 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
             cost_pct = 0.1
 
         res = sim.simulate("m", cands, [], None, catalog, [sym], bars, 60, 120, 0, Book(),
-                           sim.Sizer(contracts, {"volumeFactor": 1.0}, None), 1.0, True, True)
+                           sim.Sizer(contracts, {"volumeFactor": 1.0, "orderSizing": "factor", "slAutoLeverage": False}, None), 1.0, True, True)
         tot = res["totals"]
         # 1 USDT equity at 100x: each 4 USDT lot needs 0.04 margin (+0.002 fee); the book fills until free margin is gone
         self.assertGreater(tot["positions"]["lotsOpened"], 10)
@@ -205,5 +206,166 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
         self.assertLessEqual(tot["marginMax"], 1.0)
 
 
+class LoadSymbolTest(unittest.TestCase):
+    def test_time_base_is_first_row_not_start_when_warmup_precedes_window(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            rows = [[(1_000_000 + i * 60) * 1000, [1, 2, 0.5, 1.5, 3]] for i in range(5)]
+            json.dump(dict(symbol="AAA-USDT", start=(1_000_000 + 120) * 1000, warmup=2, rows=rows),
+                      open(os.path.join(d, "AAA-USDT.json"), "w"))
+            bars, start_s = sim.load_symbol(d, "AAA-USDT")
+            self.assertEqual(start_s, 1_000_000)
+            self.assertEqual(len(bars), 5)
+
+
+class DdtFastTest(unittest.TestCase):
+    def test_matches_the_engine_on_random_mixed_symbol_tapes(self):
+        import random
+        from position_cost import POSITION_COST_PCT_DEFAULT, cost_as_frac
+        from set_engine import drawdown_time_by_symbol
+        rng = random.Random(7)
+        cf = cost_as_frac(POSITION_COST_PCT_DEFAULT)
+        for trial in range(300):
+            n = rng.randint(0, 96)
+            nsym = rng.randint(1, 4)
+            t = sorted(rng.choice([0.0] + [60.0 * rng.randint(1, 4000) for _ in range(5)]) if rng.random() < 0.03
+                       else 60.0 * rng.randint(1, 4000) for _ in range(n))
+            sy = [rng.randrange(nsym) for _ in range(n)]
+            mv = [rng.gauss(0.0005, 0.004) for _ in range(n)]
+            rows = [{"t": a, "symbol": "S%d" % b, "pnl_pct": c} for a, b, c in zip(t, sy, mv)]
+            want = float(drawdown_time_by_symbol(rows, ordered=True)["maxS"]) if rows else 0.0
+            got = sim.ddt_max_s_fast(np.array(t), np.array(sy), np.array(mv), cf)
+            self.assertEqual(got, want, (trial, n, nsym))
+
+
+class ChartTest(unittest.TestCase):
+    labels = ["05:00", "06:00", "07:00"]
+
+    def test_bars_signed_and_stacked(self):
+        svg = sim.svg_bars("pnl", self.labels, [("pnl", [-2.0, 0.0, 3.0])])
+        self.assertEqual(svg.count("<rect"), 2)  # the zero hour draws no bar
+        st = sim.svg_bars("w/l", self.labels, [("w", [1.0, 2.0, 0.0]), ("l", [3.0, 0.0, 1.0])], stacked=True)
+        self.assertEqual(st.count("<rect"), 4)
+        self.assertIn("legend", st)
+
+    def test_lines_skip_missing_and_nan(self):
+        svg = sim.svg_lines("pf", self.labels, [("a", [1.5, None, float("nan")])], ref=1.0)
+        self.assertEqual(svg.count("<circle"), 1)
+        self.assertNotIn("nan", svg.lower().replace("<title>", ""))
+        self.assertNotIn("<polyline", svg)  # one point cannot draw a line
+
+    def test_degenerate_flat_series(self):
+        svg = sim.svg_lines("flat", self.labels, [("e", [0.0, 0.0, 0.0])])
+        self.assertIn("<polyline", svg)
+        self.assertEqual(sim.svg_bars("empty", [], [("x", [])]).count("<rect"), 0)
+
+    def test_run_charts_from_hourly_rows(self):
+        h = dict(startUtc="05:00", equityEnd=9.0, pnl=-1.0, ddMaxPct=10.0, ddIntrabarMaxPct=12.0, marginMaxPct=40.0,
+                 closed=dict(wins=1, losses=2), byStrategy={"general/normal": dict(n=3, pfNormal=0.8), "block": dict(n=0)},
+                 orders=dict(entry=3, blockAdd=0, dcaEntry=0, dcaAdd=0, closeFills={"sl": 2, "tp": 1},
+                             controlPlace=2, controlCancelReplace=0, controlCancel=2),
+                 positions=dict(lotsOpened=3, groupsOpened=1),
+                 skipped=dict(noFreeMargin=0, belowMinOrQty=0, liveNegativeDeact=0, addOnNoParent=0))
+        res = dict(hourly=[h, dict(h, startUtc="06:00")], equityCurve=[[0, 10.0, 9.9, 0.1, 1, 1], [5, 9.0, 8.5, 0.2, 2, 1]])
+        out = sim.run_charts(res, 0, 0)
+        self.assertEqual(out.count("<svg"), 11)
+
+
+
+class AxisChildrenTest(unittest.TestCase):
+    """Sim axis children follow coord_engine.axis_variants rules per Set x side."""
+
+    def ev(self, moves):
+        n = len(moves)
+        return sim.Evidence(np.zeros(n, dtype=np.int64), np.arange(n), np.array(moves, float), 0.1)
+
+    def test_children_cover_every_count_of_the_specs(self):
+        kids = sim.axis_children({})
+        self.assertEqual(len(kids), 29)
+        self.assertEqual([c for a, c in kids if a == "prev"], list(range(4, 13)))
+        off = sim.axis_children({"axisPauseEnabled": False, "axisLastMaxWindow": 2})
+        self.assertNotIn("pause", {a for a, _ in off})
+        self.assertEqual([c for a, c in off if a == "last"], [1, 2])
+
+    def test_partial_window_needs_min_three_and_pause_streak(self):
+        win, loss = 0.003, -0.003
+        ev = self.ev([win] * 6 + [loss] * 4)
+        idx, gs = ev.lookup(np.array([0]), np.array([10]))
+        r, ok = ev.partial_ratio(idx, gs, 8, 3)
+        self.assertTrue(ok[0])
+        want = last_n_cost_pf([{"t": i, "pnl_pct": m} for i, m in enumerate([win] * 6 + [loss] * 4)], 8, 0.1)["ratio"]
+        self.assertAlmostEqual(float(r[0]), round(want, 4), places=3)
+        self.assertTrue(bool(ev.all_losses(idx, gs, 4)[0]))
+        self.assertFalse(bool(ev.all_losses(idx, gs, 5)[0]))
+        short = self.ev([win, win])
+        i2, g2 = short.lookup(np.array([0]), np.array([2]))
+        self.assertFalse(bool(short.partial_ratio(i2, g2, 8, 3)[1][0]))
+        self.assertTrue(bool(short.partial_ratio(i2, g2, 2, 2)[1][0]))
+
+
+class BaseWindowParityTest(unittest.TestCase):
+    """The sim Base check equals SetBook: PF over the last min(n, window) closes, n >= need."""
+
+    def test_base_passes_with_need_closes_before_the_window_is_full(self):
+        ev = sim.Evidence(np.zeros(35, dtype=np.int64), np.arange(35), np.full(35, 0.003), 0.1)
+        idx, gs = ev.lookup(np.array([0]), np.array([35]))
+        full_r, full_ok = ev.ratio(idx, gs, 50)
+        part_r, part_ok = ev.partial_ratio(idx, gs, 50, 30)
+        self.assertFalse(bool(full_ok[0]))   # the old full-window rule rejected n=35
+        self.assertTrue(bool(part_ok[0]))    # engine: n=35 >= need 30, PF over 35 closes
+        want = last_n_cost_pf([{"t": i, "pnl_pct": 0.003} for i in range(35)], 50, 0.1)
+        self.assertEqual(want["count"], 35)
+        self.assertAlmostEqual(float(part_r[0]), round(want["ratio"], 4), places=3)
+        few_r, few_ok = ev.partial_ratio(*ev.lookup(np.array([0]), np.array([20])), 50, 30)
+        self.assertFalse(bool(few_ok[0]))    # below need
+
+
+class StageParityWithEngineTest(unittest.TestCase):
+    """sim.stage_flags == SetBook side gates on identical tapes (Base 50 / Main 30 / Real 30, PF 1.10)."""
+
+    def test_stage_flags_match_setbook_on_random_tapes(self):
+        sim._engine_path()
+        from connection_profile import processing_profile
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({**processing_profile(), "stratTrailing": False, "slToTpRatios": [0.6], "setMinStep": 8, "setStepMax": 8})
+        st = next(x for x in book.by_idx if x.kind == "base")
+        rng = np.random.default_rng(7)
+        checked = 0
+        for n in (20, 29, 30, 35, 49, 50, 55, 80):
+            for p_win in (0.35, 0.5, 0.62, 0.75):
+                wins = rng.random(n) < p_win
+                moves = np.where(wins, 0.004, -0.003)
+                st.hist = [{"t": 1_000_000 + i * 60, "pnl_pct": float(m), "symbol": "T", "side": "LONG",
+                            "hold_s": 60, "reason": "tp" if m > 0 else "sl"} for i, m in enumerate(moves)]
+                st.live = []
+                book._score_one(st)
+                view = st.by_side["LONG"]
+                ev = sim.Evidence(np.zeros(n, dtype=np.int64), np.arange(n), moves.astype(float), float(book.cost_pct))
+                idx, gs = ev.lookup(np.array([0]), np.array([n]))
+                fl = sim.stage_flags(ev, idx, gs, int(book.eval_need()), book._stage_window_ns(),
+                                     {k: float(v) for k, v in book.stage_min_pf.items()})
+                self.assertEqual(bool(fl["base_ok"][0]), bool(book._base_metrics_ok(view)), (n, p_win, view.get("base_pf")))
+                self.assertEqual(bool(fl["real_ok"][0]), bool(book._real_metrics_ok(view)), (n, p_win, view.get("main_pf"), view.get("real_pf")))
+                checked += 1
+        self.assertEqual(checked, 32)
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeployedSettingsPrecedenceTest(unittest.TestCase):
+    def test_overlay_wins_over_the_profile_like_the_live_engine(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ov.json")
+            with open(path, "w") as fh:
+                json.dump({"setHistTimeBars": 120, "slMinPct": 0.4}, fh)
+            ov = sim.deployed_settings(path)
+            self.assertEqual((ov["setHistTimeBars"], ov["slMinPct"]), (120, 0.4))
+            self.assertIn("baseEvalPosCount", ov, "profile fills keys the overlay leaves out")
+            sim.PROFILE_WINS = True
+            try:
+                self.assertEqual(sim.deployed_settings(path)["setHistTimeBars"], 30)
+            finally:
+                sim.PROFILE_WINS = False

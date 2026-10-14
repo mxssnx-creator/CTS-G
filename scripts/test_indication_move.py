@@ -103,7 +103,10 @@ class MoveFadeTests(unittest.TestCase):
         book.ingest_bars("M-USDT", bars)
         _, kind_sigs, _ = book.prepare_replay_signals("M-USDT", now=1800000000)
         i = len(px) - 4
-        self.assertEqual(kind_sigs["move"][i][0], -1)
+        # The primary range (30) is recorded as its own config lane, like live
+        # (evaluate_move mode "move:30"); the bare kind lane stays empty.
+        self.assertEqual(kind_sigs["move|move:30"][i][0], -1)
+        self.assertEqual(kind_sigs["move"][i][0], 0)
         self.assertEqual(kind_sigs["move|move:20"][i][0], -1)
         self.assertEqual(kind_sigs["move|move:40"][i][0], -1)
         self.assertFalse(any(k.startswith(("trend|", "break|")) for k in kind_sigs))

@@ -52,3 +52,5 @@ backups/overlays/*/
 
 # Walk-forward research cache (public BingX history), never committed
 .research-data/
+# sim_12h_account default runtime data dir
+.sim-data/

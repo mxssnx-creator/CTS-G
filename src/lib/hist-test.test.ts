@@ -180,12 +180,12 @@ test("fill target is clamped to the 50 evaluable majors", async (t) => {
 const majors = new Set(["BTC-USDT", "ETH-USDT", "SOL-USDT"]);
 
 test("auto-assign waits for a finished, error-free result", () => {
-  const base = { pct: 100, internSymbols: ["BTC-USDT"] };
+  const base = { pct: 100, positive: ["BTC-USDT"] };
   assert.equal(histTestAssignment(null), null);
   assert.equal(histTestAssignment({ ...base, phase: "replay", detail: "" }), null);
   assert.equal(histTestAssignment({ ...base, phase: "ready", ready: false, detail: "", error: "boom" }), null);
   assert.ok(histTestAssignment({ ...base, phase: "ready", detail: "", error: "audit: note" }));
-  assert.equal(histTestAssignment({ phase: "ready", pct: 100, detail: "", internSymbols: [] }), null);
+  assert.equal(histTestAssignment({ phase: "ready", pct: 100, detail: "", positive: [] }), null);
 });
 
 test("auto-assign keeps validated majors only, deduped, capped, in job order", () => {
@@ -193,14 +193,43 @@ test("auto-assign keeps validated majors only, deduped, capped, in job order", (
     phase: "ready",
     pct: 100,
     detail: "",
-    internSymbols: ["btc-usdt", "ETH-USDT", "ETH-USDT", "FOO-USDT", "*", "ALL", "SOL", "SOL-USDT"],
+    positive: ["btc-usdt", "ETH-USDT", "ETH-USDT", "FOO-USDT", "*", "ALL", "SOL", "SOL-USDT"],
   };
   const all = histTestAssignment(job, (s) => majors.has(s));
   assert.deepEqual(all?.symbols, ["BTC-USDT", "ETH-USDT", "SOL-USDT"]);
   assert.deepEqual(histTestAssignment(job, (s) => majors.has(s), 2)?.symbols, ["BTC-USDT", "ETH-USDT"]);
-  // Fall back from the intern book to positives, then to symbols.
+  // positives win over symbols; symbols only when the job carries no positive list.
   assert.deepEqual(histTestAssignment({ phase: "ready", pct: 100, detail: "", positive: ["ETH-USDT"], symbols: ["BTC-USDT"] })?.symbols, ["ETH-USDT"]);
   assert.deepEqual(histTestAssignment({ phase: "ready", pct: 100, detail: "", symbols: ["BTC-USDT"] })?.symbols, ["BTC-USDT"]);
+});
+
+test("auto-assign never assigns the padded intern pool", () => {
+  // internSymbols is the engine's 50-major intern book; SOL/ADA were never evaluated.
+  const job = {
+    phase: "ready",
+    pct: 100,
+    detail: "",
+    positive: ["XRP-USDT", "ETH-USDT", "DOGE-USDT"],
+    internSymbols: ["BCH-USDT", "SOL-USDT", "XRP-USDT", "ETH-USDT", "ADA-USDT", "DOGE-USDT"],
+  };
+  assert.deepEqual(histTestAssignment(job)?.symbols, ["XRP-USDT", "ETH-USDT", "DOGE-USDT"]);
+  assert.deepEqual(histTestAssignment(job, () => true, 2)?.symbols, ["XRP-USDT", "ETH-USDT"]);
+  // A run that validated no symbol assigns none, even with a full intern pool.
+  assert.equal(histTestAssignment({ ...job, positive: [] }), null);
+});
+
+test("auto-assign skips combo strategy rows that are not Set ids", () => {
+  const job = {
+    phase: "ready",
+    pct: 100,
+    detail: "",
+    successfulConfigs: [
+      { setId: "block", validated: true, pf: 2, n: 40 },
+      { config: "dca", validated: true, pf: 1.8, n: 40 },
+      { setId: "general:1m:sl0.6:st4", validated: true, pf: 1.4, n: 30 },
+    ],
+  };
+  assert.deepEqual(histTestAssignment(job)?.configs.map((c) => c.id), ["general:1m:sl0.6:st4"]);
 });
 
 test("auto-assign lists validated configs best PF first without rejected ones", () => {
@@ -223,12 +252,14 @@ test("auto-assign lists validated configs best PF first without rejected ones", 
 });
 
 test("auto-assign signature changes only with the validated result", () => {
-  const job = { phase: "ready", pct: 100, detail: "", internSymbols: ["BTC-USDT", "ETH-USDT"], validatedIds: ["a", "b"] };
+  const job = { phase: "ready", pct: 100, detail: "", positive: ["BTC-USDT", "ETH-USDT"], validatedIds: ["a", "b"] };
   const a = histTestAssignment(job);
-  const shuffled = histTestAssignment({ ...job, internSymbols: ["ETH-USDT", "BTC-USDT"], validatedIds: ["b", "a"] });
+  const shuffled = histTestAssignment({ ...job, positive: ["ETH-USDT", "BTC-USDT"], validatedIds: ["b", "a"] });
   assert.equal(a?.signature, shuffled?.signature);
   assert.notEqual(a?.signature, histTestAssignment({ ...job, validatedIds: ["a", "b", "c"] })?.signature);
-  assert.notEqual(a?.signature, histTestAssignment({ ...job, internSymbols: ["BTC-USDT"] })?.signature);
+  assert.notEqual(a?.signature, histTestAssignment({ ...job, positive: ["BTC-USDT"] })?.signature);
+  // The intern pool is not part of the result.
+  assert.equal(a?.signature, histTestAssignment({ ...job, internSymbols: ["SOL-USDT"] })?.signature);
 });
 
 test("applying validated symbols sets the selection, grows the cap, and no-ops on a match", () => {

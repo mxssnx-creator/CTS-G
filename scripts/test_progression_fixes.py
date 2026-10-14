@@ -65,7 +65,7 @@ def gross_for_pf(pf):
 
 
 def live_close(book, st, i, pf, t0):
-    book.on_live_close({
+    book.on_live_close({"exchange_confirmed": True, 
         "t": t0 + i * 300, "symbol": "X-USDT", "side": "LONG", "pnl": 1.0, "pnl_pct": gross_for_pf(pf),
         "hold_s": 60, "reason": "tp", "set_id": st.id, "strategy": "core", "client_id": f"c{i}",
         "close_fill_id": f"f{i}",
@@ -89,7 +89,9 @@ class Isolated(unittest.TestCase):
 
 class SeedVersusOwnEvidence(Isolated):
     def test_a_direction_with_its_own_complete_window_keeps_its_own_stages(self):
-        book = make_book()
+        # Main window pinned to last-5: this contract is about a losing tail
+        # of the direction's own Main window, not about the window length.
+        book = make_book(overlay={**STRICT, "mainEvalPosCount": 5})
         st = book.by_idx[0]
         t0 = time.time() - 200000
         for i in range(25):
