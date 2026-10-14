@@ -18,12 +18,78 @@ import {
   overlayEdits,
   SCRATCH_S_MAX,
   AXIS_SPECS,
+  TACTIC_CONTROLS_DEFAULTS,
+  TACTIC_METHODS,
   clampAxisWindow,
   type PulseOverlay,
 } from "./config-model.ts";
 import { CONFIG_PRESETS, applyPresetPatch } from "./config-presets.ts";
 import { applyUserPreset } from "./user-presets.ts";
 import { readFileSync } from "node:fs";
+
+test("Tactic defaults enable independent replay methods, timeframes and ranges", () => {
+  for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
+    assert.equal(value.indTypeTactic, true);
+    assert.deepEqual(value.indTacticRanges, [12, 20, 32]);
+    assert.deepEqual(value.tacticMethods, [...TACTIC_METHODS]);
+    for (const key of ["tacticTf1m", "tacticTf5m", "tacticTf15m", "tacticTf30m", "tacticCombined"] as const) assert.equal(value[key], true, key);
+    assert.equal(value.tacticMinAgree, 2);
+    assert.equal(value.tacticMinTargetReturnPf, 1.1);
+    assert.equal(value.tacticTrendEfficiency, 0.55);
+    assert.equal(value.tacticRevertEfficiencyMax, 0.4);
+    assert.equal(value.tacticRevertZ, 1.5);
+    assert.equal(value.minPf, EVAL_MIN_PF);
+    assert.equal(value.controlOrders, true);
+  }
+});
+
+test("Tactic saved axes and methods remain independent of other indication and live gates", () => {
+  const saved = syncOverlayFlags(overlayFromCts({}, {
+    indTypeTactic: false,
+    indTypeTrend: true,
+    indTacticRanges: [32, 12, 20, 32],
+    tacticMethods: ["trend", "mean_reversion"],
+    tacticTf1m: false,
+    tacticTf5m: true,
+    tacticTf15m: false,
+    tacticTf30m: true,
+    tacticCombined: false,
+    tacticMinAgree: 3,
+    tacticMoveAtr: 1.5,
+    tacticMoveVolume: 2,
+    tacticAtrMinPct: 0.06,
+    tacticMinTargetReturnPf: 1.23,
+  }));
+  const reloaded = overlayFromCts({}, saved);
+  for (const key of Object.keys(TACTIC_CONTROLS_DEFAULTS) as (keyof typeof TACTIC_CONTROLS_DEFAULTS)[]) assert.deepEqual(reloaded[key], saved[key], key);
+  assert.deepEqual(saved.indTacticRanges, [12, 20, 32]);
+  assert.deepEqual(saved.tacticMethods, ["trend", "mean_reversion"]);
+  assert.equal(saved.tacticTf1m, false);
+  assert.equal(saved.tacticTf5m, true);
+  assert.equal(saved.tacticTf15m, false);
+  assert.equal(saved.tacticTf30m, true);
+  assert.equal(saved.tacticCombined, false);
+  assert.equal(saved.indTypeTrend, true);
+  assert.equal(saved.baseEvalPosCount, DEFAULT_OVERLAY.baseEvalPosCount);
+  assert.equal(saved.minPf, EVAL_MIN_PF);
+  assert.equal(saved.controlOrders, true);
+});
+
+test("Tactic range bounds match the backend and empty axes remain explicitly disabled", () => {
+  const saved = syncOverlayFlags(overlayFromCts({}, {
+    indTacticRanges: [1, 12.9, 300, 12],
+    tacticMinAgree: 9,
+    tacticTrendEfficiency: 5,
+    tacticAtrMinPct: -1,
+  }));
+  assert.deepEqual(saved.indTacticRanges, [6, 12, 240]);
+  assert.equal(saved.tacticMinAgree, 4);
+  assert.equal(saved.tacticTrendEfficiency, 1);
+  assert.equal(saved.tacticAtrMinPct, 0);
+  const disabled = syncOverlayFlags(overlayFromCts({}, { indTacticRanges: [], tacticMethods: [] }));
+  assert.deepEqual(disabled.indTacticRanges, []);
+  assert.deepEqual(disabled.tacticMethods, []);
+});
 
 const laneFile = (id: string) =>
   JSON.parse(readFileSync(new URL(`../../server/pulse/overlay-${id}.json`, import.meta.url), "utf8")) as Partial<PulseOverlay>;

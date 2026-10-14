@@ -5,7 +5,7 @@
  */
 export const INDICATION_KINDS = [
   "state", "signals", "active", "direction", "move", "common", "trend", "break",
-  "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse",
+  "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse", "tactic",
 ] as const;
 
 export type IndicationKind = (typeof INDICATION_KINDS)[number];
@@ -28,6 +28,7 @@ export const KIND_HINT: Record<IndicationKind, string> = {
   rsi2: "RSI(2) extreme against the EMA trend · exit: EMA5 snap-back",
   keltner: "wick outside Keltner band + StochRSI turn · exit: middle line",
   impulse: "sigma impulse bar on a volume surge · exit: beyond the extreme",
+  tactic: "market regime, trend pullback, mean reversion and structure · independent 1/5/15/30m + combined",
 };
 
 /** Unique 2-3 letter codes for compact per-symbol vote strips. */
@@ -48,6 +49,7 @@ export const KIND_SHORT: Record<IndicationKind, string> = {
   rsi2: "Rsi",
   keltner: "Kc",
   impulse: "Im",
+  tactic: "Tac",
 };
 
 export function kindShort(kind: string): string {

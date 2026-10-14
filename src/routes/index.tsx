@@ -8,13 +8,12 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, moneyUnitOf, fmtMoney, balanceStaleReason, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfPolicy, returnPfMetric, moneyUnitOf, fmtMoney, balanceStaleReason, type LiveStats } from "@/lib/live-stats";
 import { kindShort } from "@/lib/indication-kinds";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
-import { buildOverview, formatDuration } from "@/lib/analytics";
+import { buildOverview, formatDuration, type CostPfMetric } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
 import { DeskShell } from "@/components/desk-shell";
 import { PosOrdersBlock, PosOrdersLine } from "@/components/pos-orders";
@@ -67,12 +66,14 @@ function DeskPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
+        stats?.closed ?? [],
         Date.now(),
-        stats?.pfCost?.costPct ?? stats?.positionCost?.effectivePct ?? 0.10,
+        costPfPolicy(stats).costPct,
+        costPfPolicy(stats),
       ),
     [stats],
   );
+  const returnPf = returnPfMetric(stats, overview.costPf);
   const session = stats?.systemPnl ?? stats?.sessionPnl ?? 0;
   const grow = stats?.systemGrow ?? 0;
   const loss = stats?.systemLoss ?? 0;
@@ -186,7 +187,7 @@ function DeskPage() {
               );
             })()}
           </div>
-          <CoordStrip stats={stats} />
+          <CoordStrip stats={stats} metric={returnPf} />
           {stats && conn !== "overall" ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
           <div className="mt-3">
             <CoverageBar live={stats} />
@@ -203,7 +204,7 @@ function DeskPage() {
           <p className="mb-3 font-mono text-xs tracking-wide text-muted uppercase">Hit rate</p>
           <WinRing wins={stats?.wins ?? 0} losses={stats?.losses ?? 0} />
           <div className="mt-4 grid grid-cols-2 gap-2 font-mono text-xs text-muted">
-            <span>PF {d.pf >= 99 ? "∞" : d.pf.toFixed(2)}</span>
+            <span>Return PF {returnPf.count ? returnPf.ratio.toFixed(2) : "—"}</span>
             <span className="text-right">hold {d.avgHold.toFixed(0)}s</span>
             <span>
               E {d.expectancy >= 0 ? "+" : ""}
@@ -592,8 +593,8 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               <dd className={pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}>
                 {fmt(l.systemPnl ?? l.sessionPnl, 3)}
               </dd>
-              <dt title="Cost-net PF over the last window, the same figure as this lane's own desk (classic gross PF is on Results)">PF · cost</dt>
-              <dd className="text-fg">{(l.pfCost ?? l.pf) >= 99 ? "∞" : (l.pfCost ?? l.pf).toFixed(2)}</dd>
+              <dt title="Return PF after position cost over this lane's configured window">Return PF</dt>
+              <dd className="text-fg">{l.wins + l.losses > 0 && typeof l.pfCost === "number" && Number.isFinite(l.pfCost) ? l.pfCost.toFixed(2) : "—"}</dd>
               <dt>Scan</dt>
               <dd className="text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
               <dt>SL+TP</dt>
@@ -612,20 +613,18 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
   );
 }
 
-function CoordStrip({ stats }: { stats: LiveStats | null }) {
+function CoordStrip({ stats, metric }: { stats: LiveStats | null; metric: CostPfMetric }) {
   const c = stats?.coord;
   const axes = c?.axes ?? {};
   const gate = c?.gate;
-  const allow = gate?.allow !== false;
-  const pc = stats?.pfCost;
-  const minPf = pc?.minPf ?? c?.minPf ?? 1.1;
-  const cost = pc?.costPct ?? 0.10;
+  const allow = gate?.allow;
+  const enough = metric.count >= metric.requiredSamples;
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={allow ? "text-primary" : "text-warn"}>{allow ? "coord open" : "coord pause"}</span>
+        <span className={allow == null ? "text-muted" : allow ? "text-primary" : "text-warn"}>{allow == null ? "coord pending" : allow ? "coord open" : "coord pause"}</span>
         <span className="text-muted">
-          last{costPfWindow(stats)} {fmt(pc?.ratio ?? gate?.metrics?.last15Ratio, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
+          last{metric.n} {metric.count ? fmt(metric.ratio, 2) : "—"} · R {metric.count ? fmt(metric.avgR, 2) : "—"} · n {metric.count}/{metric.requiredSamples} · min {fmt(metric.minPf, 2)} · cost {fmt(metric.costPct, 2)}%
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
@@ -638,8 +637,8 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
           );
         })}
         <span>{c?.rearrange ? "rearr on" : "rearr off"}</span>
-        <span className={pc?.pass === false ? "text-warn" : "text-primary"}>
-          {pc?.pass === false ? "block new risk" : "PF pass"}
+        <span className={!enough ? "text-muted" : metric.pass ? "text-primary" : "text-warn"}>
+          {!enough ? "PF insufficient sample" : metric.pass ? "PF pass" : "block new risk"}
         </span>
       </div>
       {gate?.reasons?.length ? <p className="mt-1 text-warn">{gate.reasons.join(" · ")}</p> : null}
@@ -887,7 +886,7 @@ function WorkStrip({ stats }: { stats: LiveStats | null }) {
           fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
         </p>
       ) : (
-        <p className="mt-1 text-muted">in-process tests holding</p>
+        <p className="mt-1 text-muted">{stats?.tests?.length ? "in-process tests holding" : "No in-process test results"}</p>
       )}
       {last.length ? (
         <div className="mt-1 flex flex-wrap gap-2 text-muted">

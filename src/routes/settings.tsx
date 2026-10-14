@@ -17,6 +17,8 @@ import {
   PF_MIN,
   PF_STEP,
   POSITIVE_PF,
+  TACTIC_METHODS,
+  TACTIC_CONTROLS_DEFAULTS,
   overlayEdits,
   overlayFromCts,
   saveOverlay,
@@ -1764,7 +1766,7 @@ function SettingsPage() {
           {section === "packs" && (
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
-                <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
+                <EnableSlider label="Indications" on={overlay.stratIndications} hint="Independent indication types, including Tactic" onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Default ON · OFF stops new Normal entries · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
@@ -2708,7 +2710,7 @@ function SettingsPage() {
           )}
 
           {section === "indication" && (
-            <Card title="Indications" hint="CTS types: State is the consensus Indication · Direction / Move / Active / Common / Signals / Trend / Break run independently">
+            <Card title="Indications" hint="Every indication type has independent configuration evidence and return PF validation">
               <Grid>
                 <EnableSlider label="Indications on" on={overlay.indEnabled} onChange={(v) => patch("indEnabled", v)} />
                 <EnableSlider label="State" on={overlay.indTypeState !== false} hint="tf_combined + low-stop consensus — the Indication" onChange={(v) => patch("indTypeState", v)} />
@@ -2727,6 +2729,38 @@ function SettingsPage() {
                 <EnableSlider label="RSI(2) pullback" on={overlay.indTypeRsi2 !== false} hint="RSI(2) extreme against the EMA trend · exit: EMA5 snap-back" onChange={(v) => patch("indTypeRsi2", v)} />
                 <EnableSlider label="Keltner fade" on={overlay.indTypeKeltner !== false} hint="wick outside Keltner band + StochRSI turn · exit: middle line" onChange={(v) => patch("indTypeKeltner", v)} />
                 <EnableSlider label="Impulse fade" on={overlay.indTypeImpulse !== false} hint="sigma impulse bar on a volume surge · exit: beyond the extreme" onChange={(v) => patch("indTypeImpulse", v)} />
+                <EnableSlider label="Tactic" on={overlay.indTypeTactic !== false} hint="Market regime, trend pullback, mean reversion and structure · independent 1/5/15/30m + combined" onChange={(v) => patch("indTypeTactic", v)} />
+                {TACTIC_METHODS.map((method) => (
+                  <EnableSlider key={`tactic-method-${method}`} label={`Tactic · ${kindLabel(method.replace("_", " "))}`}
+                    on={overlay.tacticMethods.includes(method)} hint="Independent method × range × timeframe × direction evidence"
+                    onChange={(on) => patch("tacticMethods", on ? [...new Set([...overlay.tacticMethods, method])] : overlay.tacticMethods.filter((m) => m !== method))} />
+                ))}
+                {([["tacticTf1m", "1m"], ["tacticTf5m", "5m"], ["tacticTf15m", "15m"], ["tacticTf30m", "30m"]] as const).map(([key, timeframe]) => (
+                  <EnableSlider key={key} label={`Tactic · ${timeframe}`} on={overlay[key]}
+                    hint="Own closed-candle calculations and return PF evidence" onChange={(on) => patch(key, on)} />
+                ))}
+                <EnableSlider label="Tactic · combined" on={overlay.tacticCombined} hint="Separate agreement lane; independent timeframe lanes stay active" onChange={(on) => patch("tacticCombined", on)} />
+                <Num label="Tactic agreement" value={overlay.tacticMinAgree} min={2} max={4} step={1} unit="TF"
+                  hint="Minimum same-direction timeframe votes for each method and range" onChange={(v) => patch("tacticMinAgree", Math.trunc(v))} />
+                {(overlay.indTacticRanges ?? TACTIC_CONTROLS_DEFAULTS.indTacticRanges).map((period, index, periods) => (
+                  <Num key={`tactic-range-${index}`} label={`Tactic range ${index + 1}`} value={period} min={6} max={240} step={1} unit="candles"
+                    hint="Each method and timeframe keeps a separate configuration and tape" onChange={(value) => patch("indTacticRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                <Num label="Tactic trend efficiency" value={overlay.tacticTrendEfficiency} min={0} max={1} step={0.01}
+                  onChange={(v) => patch("tacticTrendEfficiency", v)} />
+                <Num label="Tactic reversion efficiency max" value={overlay.tacticRevertEfficiencyMax} min={0} max={1} step={0.01}
+                  onChange={(v) => patch("tacticRevertEfficiencyMax", v)} />
+                <Num label="Tactic reversion stretch" value={overlay.tacticRevertZ} min={0.1} max={6} step={0.1} unit="z"
+                  onChange={(v) => patch("tacticRevertZ", v)} />
+                <Num label="Tactic move size" value={overlay.tacticMoveAtr} min={0.1} max={6} step={0.1} unit="ATR"
+                  onChange={(v) => patch("tacticMoveAtr", v)} />
+                <Num label="Tactic move volume" value={overlay.tacticMoveVolume} min={0.1} max={10} step={0.05} unit="x"
+                  onChange={(v) => patch("tacticMoveVolume", v)} />
+                <Num label="Tactic activity min" value={overlay.tacticAtrMinPct} min={0} max={2} step={0.01} unit="% ATR"
+                  onChange={(v) => patch("tacticAtrMinPct", v)} />
+                <Num label="Tactic target return PF" value={overlay.tacticMinTargetReturnPf} min={1.02} max={5} step={0.01}
+                  hint="Projected price objective after cost; measured Base/Main/Real return PF still decides admission"
+                  onChange={(v) => patch("tacticMinTargetReturnPf", v)} />
                 <EnableSlider label="Exit tactics" on={overlay.exitTacticOn !== false} hint="per-indication price-only exit (target or invalidation)" onChange={(v) => patch("exitTacticOn", v)} />
                 <Num label="Exit tactic buffer" value={overlay.exitTacticBufferPct ?? 0.1} min={0} max={1} step={0.05} unit="%"
                   hint="close beyond the invalidation level by this much" onChange={(v) => patch("exitTacticBufferPct", v)} />
@@ -2783,8 +2817,8 @@ function SettingsPage() {
                 <KV k="Noise filter" v={String(num(cts?.activeNoiseFilter, 0.05))} />
               </Grid>
               <p className="mt-3 text-xs text-muted">
-                State is the actual Indication (combined TF + multi-source consensus). Direction, Move, Active, Common, Signals, Trend and Break
-                process additionally and independently when their slider is ON.
+                Each enabled indication type keeps its own configurations and return PF evidence. Tactic evaluates 1, 5, 15 and 30 minute
+                lanes plus a separate combined lane. Live entries require the configured Base, Main and Real qualification gates.
               </p>
             </Card>
           )}

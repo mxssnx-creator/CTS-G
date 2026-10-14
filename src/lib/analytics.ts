@@ -1,6 +1,62 @@
 /** CTS live-trading analytics: profit factor windows + drawdown-time average. */
 
-export type PfRow = { pnl: number; t: number; symbol?: string; notional?: number; pnl_pct?: number };
+import { BASE_EVAL_DEFAULT } from "./stage-windows.ts";
+
+/** Same measured-cost aliases accepted by the engine's position_cost module. */
+export type PositionCostRow = {
+  notional?: number;
+  quoteQty?: number;
+  quoteQuantity?: number;
+  cumQuote?: number;
+  cumQuoteQty?: number;
+  qty?: number;
+  executedQty?: number;
+  filledQty?: number;
+  cumQty?: number;
+  quantity?: number;
+  entry?: number;
+  avgPrice?: number;
+  averagePrice?: number;
+  price?: number;
+  exit?: number;
+  position_cost_pct?: number;
+  positionCostPct?: number;
+  cost_pct?: number;
+  costPct?: number;
+  cost_source?: string;
+  costSource?: string;
+  source?: string;
+  fee_total?: unknown;
+  feeTotal?: unknown;
+  totalFee?: unknown;
+  totalCommission?: unknown;
+  entry_fee?: unknown;
+  entryFee?: unknown;
+  openFee?: unknown;
+  openCommission?: unknown;
+  exit_fee?: unknown;
+  exitFee?: unknown;
+  closeFee?: unknown;
+  closeCommission?: unknown;
+  fee?: unknown;
+  fees?: unknown;
+  feeAmount?: unknown;
+  commission?: unknown;
+  commissionAmount?: unknown;
+  transactionFee?: unknown;
+  realizedFee?: unknown;
+  fee_scope?: string;
+  feeScope?: string;
+  fee_type?: string;
+  feeType?: string;
+  fee_rate?: number;
+  feeRate?: number;
+  commissionRate?: number;
+  makerFeeRate?: number;
+  takerFeeRate?: number;
+};
+
+export type PfRow = PositionCostRow & { pnl: number; t: number; symbol?: string; pnl_pct?: number };
 
 export type ProfitFactorMetric = {
   trades: number;
@@ -40,15 +96,23 @@ export type CostPfMetric = {
   netAvg?: number;
   costSubtracted?: boolean;
   minPf: number;
+  requiredSamples: number;
+  pfReferenceCostPct?: number;
+  zeroCostSamples?: number;
+  costSamples?: number;
+  costSource?: string;
+  unavailableReturnSamples?: number;
   pass: boolean;
 };
+
+export type CostPfPolicy = { n?: number; minPf?: number; requiredSamples?: number };
 
 export const POSITION_COST_PCT_DEFAULT = 0.10;
 export const COST_RATIO_SCALE = 0.1;
 
-function finite(v: unknown): number {
+function finite(v: unknown, fallback = 0): number {
   const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function round(value: number, precision = 4): number {
@@ -94,6 +158,7 @@ export function calculateDrawdownTime(
   rows: PfRow[],
   now = Date.now(),
   lookbackDays = 3,
+  costPct = POSITION_COST_PCT_DEFAULT,
 ): DrawdownTimeMetric {
   const cutoff = now - lookbackDays * 24 * 60 * 60 * 1000;
   // stats.closed arrives newest-first. Restore arrival order before the stable
@@ -113,6 +178,7 @@ export function calculateDrawdownTime(
         ordered.filter((row) => (row.symbol || "?") === symbol),
         now,
         lookbackDays,
+        costPct,
       ),
     );
     const totalDurationMs = parts.reduce((sum, part) => sum + part.totalDurationMs, 0);
@@ -130,7 +196,7 @@ export function calculateDrawdownTime(
       inDrawdown: parts.some((part) => part.inDrawdown),
     };
   }
-  return calculateDrawdownTimeSingle(ordered, now, lookbackDays);
+  return calculateDrawdownTimeSingle(ordered, now, lookbackDays, costPct);
 }
 
 function timestampMs(value: number): number {
@@ -140,7 +206,7 @@ function timestampMs(value: number): number {
 function rowEquityPnl(row: PfRow, costPct = POSITION_COST_PCT_DEFAULT): number {
   const pnl = finite(row.pnl);
   if (row.pnl != null && Math.abs(pnl) > 1e-15) return pnl;
-  if (row.pnl_pct != null) return netPnlPct(finite(row.pnl_pct), costPct);
+  if (row.pnl_pct != null) return netPnlPct(finite(row.pnl_pct), rowPositionCostPct(row, costPct));
   return pnl;
 }
 
@@ -148,6 +214,7 @@ function calculateDrawdownTimeSingle(
   ordered: PfRow[],
   now: number,
   lookbackDays: number,
+  costPct: number,
 ): DrawdownTimeMetric {
   const lastTs = ordered.length ? timestampMs(ordered[ordered.length - 1].t) : 0;
   const observationNow = lastTs > 0 && now - lastTs > 3_600_000 ? lastTs : now;
@@ -162,7 +229,7 @@ function calculateDrawdownTimeSingle(
 
   for (const row of ordered) {
     const closedAt = timestampMs(row.t);
-    equity += rowEquityPnl(row);
+    equity += rowEquityPnl(row, costPct);
     if (equity >= peak) {
       if (drawdownStartedAt !== null) {
         const duration = Math.max(0, closedAt - drawdownStartedAt);
@@ -201,12 +268,10 @@ function calculateDrawdownTimeSingle(
   };
 }
 
-/** CTS Main-trade scale: 1.00 = Neutral after cost, 1.10 = +1× PositionCost net.
- * PositionCost is a percent; only legacy fractions strictly below 0.02 pass through
- * (same threshold as the engine's `position_cost.cost_as_frac`). */
+/** CTS return PF: 1.00 = neutral after cost, 1.10 = +1× PositionCost net.
+ * PositionCost is always a percent, including measured costs below 0.02%. */
 export function costAsFrac(costPct = POSITION_COST_PCT_DEFAULT): number {
-  const c = Math.max(0, finite(costPct));
-  return c >= 0.02 ? c / 100 : c;
+  return Math.max(0, finite(costPct, POSITION_COST_PCT_DEFAULT)) / 100;
 }
 
 export function netPnlPct(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
@@ -214,12 +279,100 @@ export function netPnlPct(pnlPctFraction: number, costPct = POSITION_COST_PCT_DE
 }
 
 export function signedResultR(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
-  const cost = Math.max(1e-9, finite(costPct));
-  return (finite(pnlPctFraction) * 100 - cost) / cost;
+  const cost = Math.max(0, finite(costPct, POSITION_COST_PCT_DEFAULT));
+  // A free fill keeps a finite reference unit while subtracting its actual zero cost.
+  return netPnlPct(pnlPctFraction, cost) * 100 / (cost || POSITION_COST_PCT_DEFAULT);
 }
 
 export function ratioFromR(signedR: number): number {
   return 1 + finite(signedR) * COST_RATIO_SCALE;
+}
+
+/** Shared admission boundary: strict PF > 1.02 plus the configured floor. */
+export function clearsReturnPf(ratio: number, minPf: number): boolean {
+  return Number.isFinite(ratio) && ratio > 1.02 && ratio + 1e-9 >= minPf;
+}
+
+function rowValue(row: PositionCostRow, ...keys: (keyof PositionCostRow)[]): unknown {
+  for (const key of keys) if (row[key] != null) return row[key];
+  return undefined;
+}
+
+function normalizeCostPct(value: unknown, fallback = POSITION_COST_PCT_DEFAULT): number {
+  let cost = Math.max(0, finite(value, fallback));
+  if (cost > 2) cost /= 100;
+  return round(cost <= 1 ? cost : fallback, 8);
+}
+
+function feeAmount(value: unknown): number {
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    for (const key of ["amount", "value", "qty", "quantity", "fee", "commission"]) {
+      if (obj[key] != null) return Math.abs(finite(obj[key]));
+    }
+  }
+  return Math.abs(finite(value));
+}
+
+export function rowNotional(row: PositionCostRow): number {
+  const direct = finite(rowValue(row, "notional", "quoteQty", "quoteQuantity", "cumQuote", "cumQuoteQty"));
+  if (direct > 1e-12) return direct;
+  const qty = finite(rowValue(row, "qty", "executedQty", "filledQty", "cumQty", "quantity"));
+  const entry = finite(rowValue(row, "entry", "avgPrice", "averagePrice", "price", "exit"));
+  return Math.max(0, qty * entry);
+}
+
+const FEE_RATE_KEYS = ["fee_rate", "feeRate", "commissionRate", "makerFeeRate", "takerFeeRate"] as const;
+
+function rowFee(row: PositionCostRow): number {
+  const total = rowValue(row, "fee_total", "feeTotal", "totalFee", "totalCommission", "fee", "fees", "feeAmount", "commission", "commissionAmount", "transactionFee", "realizedFee");
+  if (total != null) return feeAmount(total);
+  return feeAmount(rowValue(row, "entry_fee", "entryFee", "openFee", "openCommission"))
+    + feeAmount(rowValue(row, "exit_fee", "exitFee", "closeFee", "closeCommission"));
+}
+
+function rowHasMeasuredCost(row: PositionCostRow): boolean {
+  const source = String(rowValue(row, "cost_source", "costSource") ?? "").toLowerCase();
+  return source.includes("exchange")
+    || (rowValue(row, "position_cost_pct", "positionCostPct", "cost_pct") != null && (source.includes("cost") || source.includes("live")))
+    || (row.costPct != null && (source.includes("cost") || source.includes("exchange")))
+    || rowFee(row) > 0 || rowValue(row, ...FEE_RATE_KEYS) != null;
+}
+
+/** Round-trip cost precedence mirrors position_cost.row_position_cost_pct. */
+export function rowPositionCostPct(row: PositionCostRow, fallback = POSITION_COST_PCT_DEFAULT): number {
+  const explicit = rowValue(row, "position_cost_pct", "positionCostPct", "cost_pct");
+  if (explicit != null && finite(explicit, -1) >= 0) return normalizeCostPct(explicit);
+  const source = String(rowValue(row, "cost_source", "costSource", "source") ?? "").toLowerCase();
+  if (row.costPct != null && (source.includes("cost") || source.includes("exchange"))) return normalizeCostPct(row.costPct, fallback);
+  const notional = rowNotional(row);
+  if (notional <= 1e-12) return normalizeCostPct(fallback);
+  const entryFee = feeAmount(rowValue(row, "entry_fee", "entryFee", "openFee", "openCommission"));
+  const exitFee = feeAmount(rowValue(row, "exit_fee", "exitFee", "closeFee", "closeCommission"));
+  const total = rowValue(row, "fee_total", "feeTotal", "totalFee", "totalCommission");
+  const measuredTotal = total != null && (feeAmount(total) > 0 || ["exchange", "live", "cost"].some((key) => source.includes(key)));
+  if (measuredTotal || (entryFee > 0 && exitFee > 0)) {
+    return normalizeCostPct((total != null ? feeAmount(total) : entryFee + exitFee) / notional * 100, fallback);
+  }
+  const fee = rowFee(row);
+  if (fee > 0) {
+    const scope = String(rowValue(row, "fee_scope", "feeScope", "fee_type", "feeType") ?? "").toLowerCase();
+    const legs = ["roundtrip", "position", "total", "both"].includes(scope) ? 1 : 2;
+    return normalizeCostPct(fee / notional * 100 * legs, fallback);
+  }
+  const rate = rowValue(row, ...FEE_RATE_KEYS);
+  if (rate != null && finite(rate, -1) >= 0) {
+    const parsed = finite(rate);
+    return normalizeCostPct((parsed <= 0.02 ? parsed * 100 : parsed) * 2);
+  }
+  return normalizeCostPct(fallback);
+}
+
+/** Missing gross return can be reconstructed from already net cash PnL. */
+export function rowGrossReturn(row: PfRow, costPct = POSITION_COST_PCT_DEFAULT): number {
+  if (row.pnl_pct != null) return finite(row.pnl_pct);
+  const notional = rowNotional(row);
+  return notional > 1e-12 ? finite(row.pnl) / notional + costAsFrac(costPct) : 0;
 }
 
 export function lastNCostPf(
@@ -227,18 +380,50 @@ export function lastNCostPf(
   n = 15,
   costPct = POSITION_COST_PCT_DEFAULT,
   minPf = 1.1,
+  requiredSamples = n,
 ): CostPfMetric {
   const window = [...rows]
     .sort((a, b) => timestampMs(b.t) - timestampMs(a.t))
     .slice(0, Math.max(1, n));
+  return costPfFromWindow(window, n, costPct, minPf, requiredSamples);
+}
+
+function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: number, requiredSamples: number): CostPfMetric {
   const rs: number[] = [];
   const nets: number[] = [];
+  const grosses: number[] = [];
+  let weightedCost = 0;
+  let weightedNotional = 0;
+  let references = 0;
+  let zeroCostSamples = 0;
+  let costSamples = 0;
+  let unavailableReturnSamples = 0;
   let gp = 0;
   let gl = 0;
   for (const row of window) {
-    rs.push(signedResultR(finite(row.pnl_pct), costPct));
-    const net = row.pnl_pct != null ? netPnlPct(finite(row.pnl_pct), costPct) : finite(row.pnl);
+    const knownReturn = row.pnl_pct != null
+      ? Number.isFinite(Number(row.pnl_pct))
+      : rowNotional(row) > 1e-12 && row.pnl != null && Number.isFinite(Number(row.pnl));
+    if (!knownReturn) {
+      unavailableReturnSamples += 1;
+      continue;
+    }
+    const actualCost = rowPositionCostPct(row, costPct);
+    const gross = rowGrossReturn(row, actualCost);
+    rs.push(signedResultR(gross, actualCost));
+    const net = netPnlPct(gross, actualCost);
     nets.push(net);
+    grosses.push(gross);
+    references += actualCost || POSITION_COST_PCT_DEFAULT;
+    if (actualCost === 0) zeroCostSamples += 1;
+    if (rowHasMeasuredCost(row)) {
+      costSamples += 1;
+      const notional = rowNotional(row);
+      if (notional > 1e-12) {
+        weightedCost += actualCost * notional;
+        weightedNotional += notional;
+      }
+    }
     if (net > 0) gp += net;
     else if (net < 0) gl += Math.abs(net);
   }
@@ -247,50 +432,65 @@ export function lastNCostPf(
   const ratio = count ? ratioFromR(avgR) : 1;
   const classic = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
   const netAvg = count ? nets.reduce((a, b) => a + b, 0) / count : 0;
+  const required = Math.max(1, Math.trunc(finite(requiredSamples, n)));
   return {
     n,
     count,
     avgR: round(avgR),
     ratio: round(ratio),
     classicPf: round(classic),
-    costPct,
-    netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
-    grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),
+    costPct: weightedNotional > 1e-12 ? round(weightedCost / weightedNotional, 8) : normalizeCostPct(costPct),
+    netPct: round(netAvg * 100),
+    grossPct: count ? round(grosses.reduce((a, b) => a + b, 0) / count * 100) : 0,
     netAvg: round(netAvg, 6),
     costSubtracted: true,
     minPf,
-    pass: count < 8 || ratio + 1e-9 >= minPf,
+    requiredSamples: required,
+    pfReferenceCostPct: count ? round(references / count, 8) : normalizeCostPct(costPct) || POSITION_COST_PCT_DEFAULT,
+    zeroCostSamples,
+    costSamples,
+    unavailableReturnSamples,
+    costSource: weightedNotional > 1e-12 ? "live-exchange" : "manual-fallback",
+    pass: count >= required && clearsReturnPf(round(ratio), minPf),
   };
 }
 
-export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITION_COST_PCT_DEFAULT) {
+export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITION_COST_PCT_DEFAULT, policy: CostPfPolicy = {}) {
   const newestFirst = [...rows].sort((a, b) => timestampMs(b.t) - timestampMs(a.t));
   const withinHours = (hours: number) =>
     newestFirst.filter((row) => {
       const ts = timestampMs(row.t);
       return ts >= now - hours * 60 * 60 * 1000 && ts <= now;
     });
-  const cost = Number.isFinite(costPct) && costPct > 0 ? costPct : POSITION_COST_PCT_DEFAULT;
+  const cost = Number.isFinite(costPct) && costPct >= 0 ? costPct : POSITION_COST_PCT_DEFAULT;
+  const windowN = Math.max(1, Math.trunc(policy.n ?? BASE_EVAL_DEFAULT));
+  const minPf = policy.minPf ?? 1.1;
+  // Reuse the one sorted tape across all windows; independent windows need no extra sorts.
+  const positionMetric = (n: number, required = n) => costPfFromWindow(newestFirst.slice(0, n), n, cost, minPf, required);
+  const timeMetric = (hours: number) => {
+    const window = withinHours(hours);
+    return costPfFromWindow(window, window.length || 1, cost, minPf, policy.requiredSamples ?? windowN);
+  };
   return {
     generatedAt: now,
-    last4: lastNCostPf(newestFirst, 4, cost),
-    costPf: lastNCostPf(newestFirst, 15, cost, 1.1),
+    last4: positionMetric(4),
+    costPf: positionMetric(windowN, policy.requiredSamples ?? windowN),
     positionWindows: {
-      "12": lastNCostPf(newestFirst, 12, cost),
-      "15": lastNCostPf(newestFirst, 15, cost),
-      "25": lastNCostPf(newestFirst, 25, cost),
-      "30": lastNCostPf(newestFirst, 30, cost),
-      "50": lastNCostPf(newestFirst, 50, cost),
-      "75": lastNCostPf(newestFirst, 75, cost),
-      "150": lastNCostPf(newestFirst, 150, cost),
+      "12": positionMetric(12),
+      "15": positionMetric(15),
+      "25": positionMetric(25),
+      "30": positionMetric(30),
+      "50": positionMetric(50),
+      "75": positionMetric(75),
+      "150": positionMetric(150),
     } as const,
     timeWindows: {
-      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1, cost),
-      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1, cost),
-      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1, cost),
+      "4h": timeMetric(4),
+      "12h": timeMetric(12),
+      "48h": timeMetric(48),
     } as const,
-    drawdown3d: calculateDrawdownTime(newestFirst, now, 3),
-    drawdownAll: calculateDrawdownTime(newestFirst, now, 3650),
+    drawdown3d: calculateDrawdownTime(newestFirst, now, 3, cost),
+    drawdownAll: calculateDrawdownTime(newestFirst, now, 3650, cost),
   };
 }
 
