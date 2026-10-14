@@ -10478,6 +10478,20 @@ class Pulse:
             out.append(c)
         return out
 
+    def _on_exchange(self, p: Position) -> Optional[bool]:
+        keys = getattr(self, "live_pos_keys", None)
+        if keys is None or bool(getattr(self, "exchange_position_snapshot_pending", False)):
+            return None
+        return f"{p.symbol}:{p.side}" in keys
+
+    def _open_net_usdt(self, p: Position) -> float:
+        """One lot's mark-to-market in USDT, net of the round-trip position cost."""
+        px = float(self.px.get(p.symbol) or 0)
+        if px <= 0 or p.entry <= 0 or p.qty <= 0:
+            return 0.0
+        d = (px - p.entry) / p.entry
+        return net_pnl_usdt(d if p.side == "LONG" else -d, p.qty, p.entry, self.position_cost_pct)
+
     def system_open_upnl(self) -> float:
         """Mark-to-market of this connection's system book on the exchange. Cost-net.
 
@@ -12697,6 +12711,12 @@ class Pulse:
             "allTimeStartEquity": round(all_time_start, 4),
             "allTimeSystemEquity": round(all_time_equity, 4),
             "walletOwnEquity": round(max(0.0, own_wallet), 4),
+            # Account truth since the last Start: the wallet (minus foreign)
+            # now against the Start baseline. It holds actual fees and funding;
+            # its gap to the model systemPnl is the cost/funding drift.
+            # Deposits or withdrawals after Start also land here.
+            "accountNetSinceStart": round(own_wallet - system_start_equity, 4) if system_start_equity > 0 and balance_at > 0 else None,
+            "modelVsAccountGap": round(float(act["pnl"]) - (own_wallet - system_start_equity), 4) if system_start_equity > 0 and balance_at > 0 else None,
             "balanceAt": balance_at,
             "balanceAgeS": round(time.time() - balance_at, 1) if balance_at > 0 else None,
             "available": round(self.available, 4),
@@ -12720,6 +12740,7 @@ class Pulse:
             "pnlPct": round(float(act["pnlPct"]), 3),
             "tradedNotional": round(float(act.get("tradedNotional") or 0.0), 4),
             "drawdownPct": round(max(0, dd), 3),
+            "currentDrawdownPct": round(max(0.0, float(act.get("currentDrawdownPct", dd) or 0.0)), 3),
             "drawdownAmount": act["drawdownAmount"],
             "drawdownAvailable": act["drawdownAvailable"],
             "drawdownBasis": act["drawdownBasis"],
@@ -12836,6 +12857,9 @@ class Pulse:
                         else bool(getattr(p, "close_position", True))
                     ),
                     "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if exchange_own_open >= 0 else None,
+                    # Exchange truth for this lot's symbol+side (None = no complete snapshot yet).
+                    "onExchange": self._on_exchange(p),
+                    "uPnlUsdt": round(self._open_net_usdt(p), 6),
                     "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),

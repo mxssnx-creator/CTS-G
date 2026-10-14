@@ -2011,6 +2011,8 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "systemStartEquity": _report_number(st.get("systemStartEquity", st.get("startEquity"))),
         "walletEquity": _report_number(st["walletEquity"]) if st.get("walletEquity") is not None else None,
         "walletOwnEquity": st.get("walletOwnEquity"),
+        "accountNetSinceStart": st.get("accountNetSinceStart"),
+        "modelVsAccountGap": st.get("modelVsAccountGap"),
         "returnOnEquityPct": st.get("returnOnEquityPct"),
         "balanceAgeS": st.get("balanceAgeS"),
         "stale": bool(st.get("stale")),

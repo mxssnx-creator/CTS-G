@@ -135,6 +135,16 @@ function DeskPage() {
                   <dd className="font-mono text-fg">{fmtMoney(stats.walletOwnEquity, unit)}</dd>
                 </>
               ) : null}
+              {stats?.accountNetSinceStart != null ? (
+                <>
+                  <dt className="text-muted">Account net since Start</dt>
+                  <dd className={`font-mono ${pnlClass(stats.accountNetSinceStart)}`}>{fmtMoney(stats.accountNetSinceStart, unit, 4)}</dd>
+                  <dt className="text-muted">Model PnL − account</dt>
+                  <dd className="font-mono text-muted" title="Model fees vs actual fees and funding; deposits or withdrawals after Start also show here">
+                    {fmtMoney(stats.modelVsAccountGap, unit, 4)}
+                  </dd>
+                </>
+              ) : null}
               <dt className="text-muted">Wallet available</dt>
               <dd className="font-mono text-fg">{fmtMoney(stats?.available, unit)}</dd>
               <dt className="text-muted">Wallet used margin</dt>
@@ -167,7 +177,12 @@ function DeskPage() {
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <Meter label="Margin used" value={d.marginPct} danger={d.marginPct > 85} />
-            <Meter label="Drawdown" value={d.ddPct} max={18} warn={d.ddPct > 8 && d.ddPct <= 40} danger={d.ddPct > 40} />
+            {(() => {
+              const cur = stats?.currentDrawdownPct ?? d.ddPct;
+              return (
+                <Meter label={`Drawdown now · max ${fmt(d.ddPct, 1)}%`} value={cur} max={18} warn={cur > 8 && cur <= 40} danger={cur > 40} />
+              );
+            })()}
           </div>
           <CoordStrip stats={stats} />
           {stats && conn !== "overall" ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
@@ -234,6 +249,11 @@ function DeskPage() {
                     <div className="text-lg font-medium">{p.symbol.replace("-USDT", "")}</div>
                     <div className="flex items-center gap-1">
                       <SideChip side={p.side} />
+                      {p.onExchange === false ? (
+                        <span className="rounded-full bg-bg2 px-1.5 py-0.5 font-mono text-[10px] text-warn uppercase" title="Not on the exchange: simulated lot, not money">
+                          sim
+                        </span>
+                      ) : null}
                       {p.connType && conn === "overall" ? (
                         <span className="rounded-full bg-bg2 px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase">
                           {p.connType}
@@ -249,6 +269,12 @@ function DeskPage() {
                 <dl className="stat-rows mt-3 font-mono text-xs text-muted">
                   <dt>Qty</dt>
                   <dd className="text-fg">{fmt(p.qty, 4)}</dd>
+                  {p.uPnlUsdt != null ? (
+                    <>
+                      <dt>uPnL net</dt>
+                      <dd className={pnlClass(p.uPnlUsdt)}>{fmtMoney(p.uPnlUsdt, p.connType === "vst" || unit === "VST" ? "VST" : "USDT", 4)}</dd>
+                    </>
+                  ) : null}
                   <dt>Entry</dt>
                   <dd className="text-fg">{fmtPx(p.entry)}</dd>
                   <dt>Mark</dt>

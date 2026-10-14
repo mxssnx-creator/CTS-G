@@ -57,6 +57,10 @@ export type LiveOpen = {
   clientId?: string;
   ours?: boolean;
   indKind?: string;
+  /** exchange position list has this symbol+side (null = not known yet); false = simulated lot */
+  onExchange?: boolean | null;
+  /** mark-to-market in USDT net of the round-trip cost */
+  uPnlUsdt?: number;
 };
 
 export type LiveClosed = {
@@ -266,6 +270,12 @@ export type LiveStats = {
   walletEquity?: number;
   /** BingX wallet minus foreign positions: the real capital the system sizes from */
   walletOwnEquity?: number;
+  /** drawdown right now (drawdownPct is the all-time maximum) */
+  currentDrawdownPct?: number;
+  /** wallet − foreign now minus the Start baseline: the real account result (fees and funding included) */
+  accountNetSinceStart?: number | null;
+  /** model systemPnl − accountNetSinceStart: what model costs and missing funding add up to */
+  modelVsAccountGap?: number | null;
   /** (systemEquity − startEquity) / startEquity × 100, the session return on the account */
   returnOnEquityPct?: number | null;
   allTimeStartEquity?: number;
@@ -669,6 +679,8 @@ export type LiveStats = {
     systemStartEquity?: number;
     walletEquity?: number;
     walletOwnEquity?: number;
+    accountNetSinceStart?: number | null;
+    modelVsAccountGap?: number | null;
     returnOnEquityPct?: number | null;
     balanceAgeS?: number | null;
     stale?: boolean;
@@ -1215,6 +1227,8 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   systemStartEquity: lane.systemStartEquity,
   walletEquity: lane.walletEquity,
   walletOwnEquity: lane.walletOwnEquity,
+  accountNetSinceStart: lane.accountNetSinceStart,
+  modelVsAccountGap: lane.modelVsAccountGap,
   returnOnEquityPct: lane.returnOnEquityPct,
   balanceAgeS: lane.balanceAgeS,
   stale: Boolean(lane.stale || s.stale),

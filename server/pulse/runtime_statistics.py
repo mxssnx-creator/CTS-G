@@ -521,6 +521,8 @@ def persistent_activity(activity, status, capital=0):
     current_dd = max(0, peak - result["systemEquity"])
     result["drawdownAmount"] = max(number(totals.get("maxDrawdown")), current_dd)
     result["drawdownPct"] = max(number(totals.get("maxDrawdownPct")), current_dd / peak * 100 if peak > 0 and base > 0 else 0)
+    # drawdownPct is the all-time maximum; this is the drawdown right now.
+    result["currentDrawdownPct"] = current_dd / peak * 100 if peak > 0 and base > 0 else 0
     result["drawdownAvailable"] = base > 0
     result["drawdownBasis"] = "persistent-system-totals-plus-current-mark / starting-capital"
     result["source"] = "persistent-system-orders"
