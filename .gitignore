@@ -49,3 +49,6 @@ backups/overlays/*/
 .claude/settings.local.json
 # Claude Code agent worktrees live inside the checkout; never commit or lint them
 .claude/worktrees/
+
+# Walk-forward research cache (public BingX history), never committed
+.research-data/
