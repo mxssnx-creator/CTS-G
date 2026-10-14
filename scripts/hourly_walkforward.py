@@ -237,6 +237,65 @@ def run_period(name: str, bars, data_dir: str, cfg: SL.StageConfig, pairs: Seque
     return res
 
 
+def period_trades(name: str, bars, data_dir: str, pairs: Sequence[str], grid: Dict, tactics: Optional[Dict], n_symbols: int,
+                  cache_dir: str, workers: int, cost: float = AS.RT_COST, use_funding: bool = True):
+    start, end = RP.period_range(name, bars)
+    look = int((336 + WARMUP_H) * H_MS)
+    syms = RP.rank_symbols(bars, start, end, n_symbols, lookback_ms=look)
+    tr = shadow_trades(bars, syms, start - look, end + max(grid["holdH"]) * H_MS, pairs, grid, tactics, cost, cache_dir, workers)
+    if use_funding:
+        tr = dict(tr)
+        tr["r"] = tr["r"] + funding_for(tr, syms, load_funding(data_dir, syms))
+    return tr, start, end, syms
+
+
+def static_select(tr, start: int, end: int, n_pairs: int, n_cells: int, pf_min: float, per_pair: int,
+                  rate_min: float = 0.3) -> List[Tuple[int, int]]:
+    """Each pair's best cells on the selection period (PF >= pf_min, >= rate_min trades/day)."""
+    ins = (tr["entry_t"] >= start) & (tr["entry_t"] < end)
+    days = (end - start) / D_MS
+    out = []
+    for p in range(n_pairs):
+        cand = []
+        for c in range(n_cells):
+            s = SL.summarize(tr["r"][ins & (tr["pair"] == p) & (tr["cell"] == c)])
+            if s["n"] / days >= rate_min and s["pf"] >= pf_min:
+                cand.append((s["pf"], c))
+        cand.sort(reverse=True)
+        out += [(p, c) for _pf, c in cand[:per_pair]]
+    return out
+
+
+def static_eval(tr, start: int, end: int, sets: Sequence[Tuple[int, int]], pairs: Sequence[str], cells: List[AS.Cell]) -> Dict:
+    keep = np.zeros(len(tr["r"]), dtype=bool)
+    for p, c in sets:
+        keep |= (tr["pair"] == p) & (tr["cell"] == c)
+    ex = keep & (tr["entry_t"] >= start) & (tr["entry_t"] < end)
+    res = judge(tr["entry_t"][ex], tr["side"][ex], tr["r"][ex], (end - start) / D_MS)
+    res["bySet"] = {f"{pairs[p]}|{cells[c].id}": SL.summarize(tr["r"][ex & (tr["pair"] == p) & (tr["cell"] == c)]) for p, c in sets}
+    return res
+
+
+def run_static(args, bars, pairs, grid, tactics) -> Dict:
+    """Cells frozen on the selection period, then every signal of those Sets is taken in the judged periods."""
+    cells = AS.grid_cells(grid)
+    data = {n: period_trades(n, bars, args.data, pairs, grid, tactics, args.symbols, args.cache, args.workers,
+                             use_funding=not args.no_funding) for n in [args.select] + args.periods.split(",")}
+    tr, s0, e0, _ = data[args.select]
+    sets = static_select(tr, s0, e0, len(pairs), len(cells), args.static_pf, args.static_per_pair, args.static_rate)
+    out = {"mode": "static", "select": args.select, "pfMin": args.static_pf, "perPair": args.static_per_pair,
+           "rateMin": args.static_rate, "sets": [f"{pairs[p]}|{cells[c].id}" for p, c in sets], "periods": {}}
+    for name in [args.select] + args.periods.split(","):
+        tr, s, e, syms = data[name]
+        r = static_eval(tr, s, e, sets, pairs, cells)
+        r.update(period=name, start=RP.day_of(s), end=RP.day_of(e), symbols=len(syms))
+        out["periods"][name] = r
+        m = r["metrics"]
+        print(f"{args.label or 'static'} {name} sets={len(sets)} n={m['n']} /day={m['perDay']:.1f} PF={m['pf']:.3f} "
+              f"stress={m['stressPf']:.3f} L={m['long']['pf']:.2f} S={m['short']['pf']:.2f} wk={m['weeklyShare']:.2f} pass={r['pass']}", flush=True)
+    return out
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default=RP.DATA_DIR)
@@ -256,6 +315,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-funding", action="store_true")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--cache", default=os.path.join(ROOT, ".research-data", "wf-cache"))
+    ap.add_argument("--mode", default="walk", choices=["walk", "static"], help="walk: hourly Base/Main/Real; static: cells frozen on --select")
+    ap.add_argument("--select", default="A")
+    ap.add_argument("--static-pf", type=float, default=1.2)
+    ap.add_argument("--static-per-pair", type=int, default=2)
+    ap.add_argument("--static-rate", type=float, default=0.3)
     ap.add_argument("--label", default="")
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
@@ -265,6 +329,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = SL.StageConfig(long_h=args.long_h, pre_h=args.pre_h, min_trades=args.min_trades, min_pf=args.min_pf,
                          last_n=args.last_n, last_n_min_pf=args.last_n_min_pf, portfolio=args.portfolio)
     bars = RP.load_bars(args.data)
+    if args.mode == "static":
+        out = run_static(args, bars, pairs, grid, tactics)
+        out.update(pairs=pairs, grid=grid, tactics=tactics, symbols=args.symbols, funding=not args.no_funding)
+        if args.out:
+            os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+            with open(args.out, "w") as f:
+                json.dump(out, f, indent=1, default=float)
+        return 0
     t0 = time.time()
     out = {"label": args.label, "config": vars(cfg), "pairs": pairs, "grid": grid, "tactics": tactics, "execute": args.execute,
            "symbols": args.symbols, "funding": not args.no_funding, "periods": {}}
