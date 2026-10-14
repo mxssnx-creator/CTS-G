@@ -342,6 +342,12 @@ def rank_self_test() -> Tuple[bool, str]:
     return ok, f"got={got}"
 
 TARGET_NOTIONAL = 2.15
+# Order sizing. "balance": one order's target notional is TARGET_NOTIONAL_PCT
+# percent of the system's own equity (the wallet minus foreign positions),
+# times volumeFactor; TARGET_NOTIONAL is only the fallback before the first
+# balance read. "fixed": TARGET_NOTIONAL USDT times volumeFactor.
+SIZING_MODE = "balance"
+TARGET_NOTIONAL_PCT = 1.0
 LEVERAGE = 150
 USE_MAX_LEVERAGE = True
 MAX_OPEN = 0  # 0 = unlimited
@@ -2340,7 +2346,27 @@ class Pulse:
             vf *= float(self.coord.size_mult(open_n))
         except Exception:
             pass
-        return max(0.2, float(TARGET_NOTIONAL) * vf * ratio_f)
+        return max(0.2, self.base_notional() * vf * ratio_f)
+
+    def sizing_equity(self) -> float:
+        """The system's own equity (foreign positions excluded), else the wallet."""
+        eq = _sf(getattr(self, "system_equity", 0.0))
+        return eq if eq > 0 else max(0.0, _sf(getattr(self, "wallet_equity", 0.0)))
+
+    def base_notional(self) -> float:
+        """One order's target before volume factor, volatility and Set ratio."""
+        if SIZING_MODE == "balance":
+            eq = self.sizing_equity()
+            if eq > 0:
+                return eq * TARGET_NOTIONAL_PCT / 100.0
+        return float(TARGET_NOTIONAL)
+
+    def sizing_snapshot(self) -> Dict[str, Any]:
+        vf = float(getattr(self, "volume_factor", 1.0) or 1.0)
+        base = self.base_notional()
+        return {"sizingMode": SIZING_MODE, "targetNotionalPct": TARGET_NOTIONAL_PCT, "sizingEquity": round(self.sizing_equity(), 6),
+                "baseNotional": round(base, 6), "effectiveNotional": round(max(0.2, base * vf), 6),
+                "sizingSource": "equity" if SIZING_MODE == "balance" and self.sizing_equity() > 0 else "fixed"}
 
     def notional_cap(self, ratio: float = 1.0) -> float:
         return max(self.sized_notional(ratio=ratio), 2.0)
@@ -8398,6 +8424,7 @@ class Pulse:
 
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
+        global SIZING_MODE, TARGET_NOTIONAL_PCT
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         previous_symbols = tuple(SYMBOLS)
         previous_overlay = dict(getattr(self, "overlay", None) or {})
@@ -8459,6 +8486,12 @@ class Pulse:
         target_notional = finite_number(ov.get("targetNotional"), 0.0)
         if target_notional:
             TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
+        mode = str(ov.get("sizingMode") or "").strip().lower()
+        if mode in ("fixed", "balance"):
+            SIZING_MODE = mode
+        target_pct = finite_number(ov.get("targetNotionalPct"), 0.0)
+        if target_pct:
+            TARGET_NOTIONAL_PCT = max(0.05, min(20.0, target_pct))
         self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
@@ -8960,6 +8993,7 @@ class Pulse:
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            **self.sizing_snapshot(),
             "leverage": LEVERAGE,
             "useMaxLeverage": True,
             "leverageMap": self._intern_leverage_map(),
@@ -12689,6 +12723,7 @@ class Pulse:
             "tpPct": TP_PCT * 100,
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            **self.sizing_snapshot(),
             "paused": os.path.exists(PAUSE_PATH),
             "activityPerMin": round(per_min, 2),
             "consecLoss": self.consec_loss,

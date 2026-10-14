@@ -233,3 +233,47 @@ class VolumeFactorAdds(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BalanceSizing(unittest.TestCase):
+    """sizingMode=balance: the order target follows the system's own equity."""
+
+    def pulse(self, system_equity=0.0, wallet=0.0):
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.system_equity, p.wallet_equity = system_equity, wallet
+        p.volume_factor = 1.0
+        p.vol1h = {}
+        p.open = {}
+        p.coord = NS(size_mult=lambda n: 1.0)
+        return p
+
+    def test_target_is_percent_of_system_equity_times_volume_factor(self):
+        with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 1.0), \
+                patch.object(pt, 'TARGET_NOTIONAL', 2.15):
+            p = self.pulse(system_equity=500.0, wallet=900.0)
+            self.assertAlmostEqual(p.sized_notional(), 5.0)
+            p.volume_factor = 2.0
+            self.assertAlmostEqual(p.sized_notional(), 10.0)
+            self.assertAlmostEqual(p.sized_notional(ratio=0.5), 5.0)
+            snap = p.sizing_snapshot()
+            self.assertEqual((snap['sizingSource'], snap['baseNotional'], snap['effectiveNotional']), ('equity', 5.0, 10.0))
+
+    def test_wallet_then_fixed_fallback_and_fixed_mode(self):
+        with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 2.0), \
+                patch.object(pt, 'TARGET_NOTIONAL', 2.15):
+            self.assertAlmostEqual(self.pulse(wallet=300.0).sized_notional(), 6.0)
+            p = self.pulse()
+            self.assertAlmostEqual(p.sized_notional(), 2.15)
+            self.assertEqual(p.sizing_snapshot()['sizingSource'], 'fixed')
+        with patch.object(pt, 'SIZING_MODE', 'fixed'), patch.object(pt, 'TARGET_NOTIONAL', 3.0):
+            self.assertAlmostEqual(self.pulse(system_equity=10_000.0).sized_notional(), 3.0)
+
+    def test_overlay_parses_mode_and_percent_within_bounds(self):
+        loader = VolumeFactorOverlayLoad()
+        with patch.object(pt, 'SIZING_MODE', 'balance'), patch.object(pt, 'TARGET_NOTIONAL_PCT', 1.0):
+            loader.load({'sizingMode': 'fixed', 'targetNotionalPct': 99})
+            self.assertEqual((pt.SIZING_MODE, pt.TARGET_NOTIONAL_PCT), ('fixed', 20.0))
+            loader.load({'sizingMode': 'bogus', 'targetNotionalPct': 'nan'})
+            self.assertEqual((pt.SIZING_MODE, pt.TARGET_NOTIONAL_PCT), ('fixed', 20.0))
+            loader.load({'sizingMode': 'balance', 'targetNotionalPct': 0.5})
+            self.assertEqual((pt.SIZING_MODE, pt.TARGET_NOTIONAL_PCT), ('balance', 0.5))

@@ -630,6 +630,12 @@ export type LiveStats = {
   connType?: string;
   paused?: boolean;
   volumeFactor?: number;
+  sizingMode?: "balance" | "fixed";
+  targetNotionalPct?: number;
+  sizingEquity?: number;
+  baseNotional?: number;
+  effectiveNotional?: number;
+  sizingSource?: "equity" | "fixed";
   lanes?: Array<{
     type: string;
     id: string;
