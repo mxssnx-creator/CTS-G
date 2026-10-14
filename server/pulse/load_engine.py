@@ -783,7 +783,7 @@ class LoadGovernor:
         cursor: int,
         ranked: Optional[Sequence[str]] = None,
     ) -> Tuple[List[str], int]:
-        names = [s for s in symbols if s]
+        names = list(dict.fromkeys(s for s in symbols if s))
         if not names:
             return [], 0
         take = max(1, int(chunk or 1))
@@ -802,7 +802,7 @@ class LoadGovernor:
         # Ranked intern majors (BTC/ETH/...) must keep rotating even when
         # BCH/SOL/XRP already have many independent lots.
         min_rotate = 1 if take <= 2 else max(take // 2, 2)
-        if open_unique:
+        if open_unique and take > 1:
             min_rotate = min(min_rotate, take - 1)
         else:
             min_rotate = take
@@ -811,7 +811,11 @@ class LoadGovernor:
             out.append(s)
             seen.add(s)
         remaining = max(0, take - len(out))
-        ranked_n = min(4, remaining // 2) if remaining >= 2 else remaining
+        # Always leave an actual rotating slot. With a one-symbol budget the
+        # ranked head used to consume every scan; with two slots an occupied
+        # symbol plus the ranked head did the same. Those are precisely the
+        # budgets used under load, so the rest of the book never progressed.
+        ranked_n = min(4, max(0, (remaining - 1) // 2))
         head_src = list(ranked or names)
         added = 0
         for s in head_src:

@@ -5,7 +5,7 @@ Shared by the hourly lane at run time and by the walk-forward research
 Every decision at time t reads only closes whose exit time is before t:
 
 - Base(t): the Set's own closes in the rolling window [t - long_h, t):
-  at least min_trades, net > 0, classic PF >= min_pf and a positive lower
+  at least min_trades, net > 0, return PF >= min_pf and a positive lower
   confidence bound LCB = sum(r) - sd(r)·sqrt(n).
 - Main(t): Base passes and the pre-window [t - pre_h, t) is not negative.
 - Real(t): one seat per pair, the best Main cell by LCB; the top
@@ -25,8 +25,10 @@ from dataclasses import dataclass, fields
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
+from position_cost import RATIO_SCALE, POSITION_COST_PCT_DEFAULT, PF_MIN
 
 H_MS = 3_600_000
+HOURLY_POSITION_COST_PCT = 0.20  # AO simulator round-trip cost, in percent
 
 
 @dataclass
@@ -59,13 +61,18 @@ class StageConfig:
 class Tape:
     """One Set's closed trades ordered by exit time, with prefix sums."""
 
-    def __init__(self, entry_t: Sequence[float], exit_t: Sequence[float], r: Sequence[float], side: Sequence[int]) -> None:
-        order = np.argsort(np.asarray(exit_t, dtype=np.float64), kind="stable")
-        self.entry_t = np.asarray(entry_t, dtype=np.float64)[order]
-        self.exit_t = np.asarray(exit_t, dtype=np.float64)[order]
-        self.r = np.asarray(r, dtype=np.float64)[order]
+    def __init__(self, entry_t: Sequence[float], exit_t: Sequence[float], r: Sequence[float], side: Sequence[int],
+                 cost_pct=HOURLY_POSITION_COST_PCT) -> None:
+        entry, exits, returns = (np.asarray(x, dtype=np.float64) for x in (entry_t, exit_t, r))
+        costs = np.broadcast_to(np.asarray(cost_pct, dtype=np.float64), returns.shape)
+        valid = np.isfinite(entry) & np.isfinite(exits) & np.isfinite(returns)
+        order = np.flatnonzero(valid)[np.argsort(exits[valid], kind="stable")]
+        self.entry_t, self.exit_t, self.r = entry[order], exits[order], returns[order]
         self.side = np.asarray(side, dtype=np.int8)[order]
+        self.cost_pct = costs[order]
+        references = _cost_references(self.cost_pct)
         self._cs = self._prefix(self.r)
+        self._cs["returnR"] = np.concatenate([np.zeros(1), np.cumsum(self.r / references)])
 
     @staticmethod
     def _prefix(r: np.ndarray) -> Dict[str, np.ndarray]:
@@ -79,7 +86,7 @@ class Tape:
 
     def side_tape(self, side: int) -> "Tape":
         m = self.side == side
-        return Tape(self.entry_t[m], self.exit_t[m], self.r[m], self.side[m])
+        return Tape(self.entry_t[m], self.exit_t[m], self.r[m], self.side[m], self.cost_pct[m])
 
     def idx_before(self, t: np.ndarray) -> np.ndarray:
         """Number of closes with exit_t < t (strictly before the decision)."""
@@ -92,7 +99,8 @@ class Tape:
         s2 = cs["s2"][hi] - cs["s2"][lo]
         gp = cs["gp"][hi] - cs["gp"][lo]
         gl = cs["gl"][hi] - cs["gl"][lo]
-        return {"n": n, "net": s, "s2": s2, "gp": gp, "gl": gl}
+        return {"n": n, "net": s, "s2": s2, "gp": gp, "gl": gl,
+                "returnR": cs["returnR"][hi] - cs["returnR"][lo]}
 
     def window(self, t: np.ndarray, hours: float) -> Dict[str, np.ndarray]:
         hi = self.idx_before(t)
@@ -112,6 +120,16 @@ def pf_of(gp: np.ndarray, gl: np.ndarray) -> np.ndarray:
     return pf
 
 
+def return_pf_of(st: Dict[str, np.ndarray]) -> np.ndarray:
+    """Return PF from each trade's already cost-net result, never GP/GL."""
+    return 1.0 + RATIO_SCALE * st["returnR"] / np.maximum(st["n"], 1)
+
+
+def _cost_references(costs: np.ndarray) -> np.ndarray:
+    """Vector equivalent of pf_reference_cost_pct for the hot hourly tape."""
+    return np.where(np.isfinite(costs) & (costs > 0), costs, POSITION_COST_PCT_DEFAULT) / 100.0
+
+
 def lcb_of(st: Dict[str, np.ndarray]) -> np.ndarray:
     n = st["n"]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -122,19 +140,20 @@ def lcb_of(st: Dict[str, np.ndarray]) -> np.ndarray:
 
 def base_eval(tape: Tape, t: np.ndarray, cfg: StageConfig) -> Dict[str, np.ndarray]:
     st = tape.window(t, cfg.long_h)
-    pf = pf_of(st["gp"], st["gl"])
+    pf = return_pf_of(st)
     lcb = lcb_of(st)
-    ok = (st["n"] >= max(3, cfg.min_trades)) & (st["net"] > 0) & (pf >= cfg.min_pf) & (lcb > 0)
-    return {"ok": ok, "n": st["n"], "pf": pf, "net": st["net"], "lcb": lcb}
+    ok = ((st["n"] >= max(3, cfg.min_trades)) & (st["net"] > 0)
+          & (pf > PF_MIN + 1e-9) & (pf + 1e-9 >= cfg.min_pf) & (lcb > 0))
+    return {"ok": ok, "n": st["n"], "pf": pf, "classicPf": pf_of(st["gp"], st["gl"]), "net": st["net"], "lcb": lcb}
 
 
 def main_eval(tape: Tape, t: np.ndarray, cfg: StageConfig, base_ok: np.ndarray) -> np.ndarray:
     if cfg.pre_h <= 0:
         return base_ok.copy()
     st = tape.window(t, cfg.pre_h)
-    pf = pf_of(st["gp"], st["gl"])
+    pf = return_pf_of(st)
     # Fewer than 3 closes in the pre-window: no evidence against, Main follows Base.
-    pre_ok = (st["n"] < 3) | ((st["net"] >= 0) & (pf >= cfg.min_pf))
+    pre_ok = (st["n"] < 3) | ((st["net"] >= 0) & (pf > PF_MIN + 1e-9) & (pf + 1e-9 >= cfg.min_pf))
     return base_ok & pre_ok
 
 
@@ -143,7 +162,7 @@ def live_ok(side_tape: Tape, t: np.ndarray, cfg: StageConfig) -> np.ndarray:
     if cfg.last_n <= 0:
         return np.ones(len(t), dtype=bool)
     st = side_tape.last_n(t, cfg.last_n)
-    pf = pf_of(st["gp"], st["gl"])
+    pf = return_pf_of(st)
     full = st["n"] >= cfg.last_n
     return ~full | ((pf >= cfg.last_n_min_pf) & (st["net"] >= 0))
 
@@ -170,33 +189,44 @@ def events(entry_t: np.ndarray, side: np.ndarray, bucket_h: float = 4.0) -> int:
     return int(len(np.unique(keys, axis=0)))
 
 
-def summarize(r: np.ndarray) -> Dict[str, float]:
+def summarize(r: np.ndarray, cost_pct=HOURLY_POSITION_COST_PCT) -> Dict[str, float]:
     r = np.asarray(r, dtype=np.float64)
+    costs = np.broadcast_to(np.asarray(cost_pct, dtype=np.float64), r.shape)
+    valid = np.isfinite(r)
+    r, costs = r[valid], costs[valid]
     gp = float(r[r > 0].sum())
     gl = float(-r[r <= 0].sum())
     n = len(r)
-    return {"n": n, "pf": float(pf_of(np.array(gp), np.array(gl))), "net": float(r.sum() * 100),
-            "wr": float((r > 0).mean()) if n else 0.0, "avg": float(r.mean() * 100) if n else 0.0}
+    refs = _cost_references(costs)
+    pf = 1.0 + RATIO_SCALE * float((r / refs).mean()) if n else 1.0
+    return {"n": n, "pf": pf, "classicPf": float(pf_of(np.array(gp), np.array(gl))), "net": float(r.sum() * 100),
+            "wr": float((r > 0).mean()) if n else 0.0, "avg": float(r.mean() * 100) if n else 0.0,
+            "costSubtracted": True, "sampleAvailable": bool(n)}
 
 
-def forward_by_stage(stage_at_entry: Sequence[str], r: Sequence[float]) -> Dict[str, Dict[str, float]]:
+def forward_by_stage(stage_at_entry: Sequence[str], r: Sequence[float], cost_pct=HOURLY_POSITION_COST_PCT) -> Dict[str, Dict[str, float]]:
     """PF of trades entered while the Set held each stage (or a higher one)."""
     order = {"": 0, "Base": 1, "Main": 2, "Real": 3, "Live": 4}
     st = np.array([order.get(s, 0) for s in stage_at_entry])
     rr = np.asarray(r, dtype=np.float64)
-    return {name: summarize(rr[st >= lvl]) for name, lvl in (("Base", 1), ("Main", 2), ("Real", 3), ("Live", 4))}
+    costs = np.broadcast_to(np.asarray(cost_pct, dtype=np.float64), rr.shape)
+    return {name: summarize(rr[st >= lvl], costs[st >= lvl]) for name, lvl in (("Base", 1), ("Main", 2), ("Real", 3), ("Live", 4))}
 
 
 def lane_guard(executed_r: Sequence[float], n: int = 100, stop_below: float = 0.95, resume_at: float = 1.10,
-               shadow_r: Optional[Sequence[float]] = None, live_orders: bool = True) -> Dict[str, object]:
+               shadow_r: Optional[Sequence[float]] = None, live_orders: bool = True,
+               cost_pct: float = HOURLY_POSITION_COST_PCT) -> Dict[str, object]:
     """Stop live orders when the last n executed trades fall below stop_below; resume on shadow evidence."""
-    ex = np.asarray(list(executed_r)[-n:], dtype=np.float64)
-    pf = summarize(ex)["pf"] if len(ex) >= n else None
+    n = max(1, int(n))
+    ex = np.asarray(list(executed_r), dtype=np.float64)
+    ex = ex[np.isfinite(ex)][-n:]
+    pf = summarize(ex, cost_pct)["pf"] if len(ex) >= n else None
     if live_orders and pf is not None and pf < stop_below:
         return {"liveOrders": False, "reason": f"last {n} executed PF {pf:.2f} < {stop_below}", "pf": pf}
     if not live_orders:
-        sh = np.asarray(list(shadow_r or [])[-n:], dtype=np.float64)
-        spf = summarize(sh)["pf"] if len(sh) >= n else None
+        sh = np.asarray(list(shadow_r) if shadow_r is not None else [], dtype=np.float64)
+        sh = sh[np.isfinite(sh)][-n:]
+        spf = summarize(sh, cost_pct)["pf"] if len(sh) >= n else None
         if spf is not None and spf >= resume_at:
             return {"liveOrders": True, "reason": f"shadow PF {spf:.2f} >= {resume_at}", "pf": spf}
         return {"liveOrders": False, "reason": "waiting for shadow evidence", "pf": spf}

@@ -20,6 +20,9 @@ from position_cost import (  # noqa: E402
     last_n_cost_pf,
     net_pnl_pct,
     ratio_from_r,
+    row_pnl_pct,
+    row_position_cost_pct,
+    shared_pf_settings,
     signed_result_r,
 )
 from coord_engine import Coordinator, recent_closed_rows  # noqa: E402
@@ -116,12 +119,11 @@ def raw_cost_pf(closed: List[Dict[str, Any]], n: int = 15, cost: float = POSITIO
     nets: List[float] = []
     gp = gl = 0.0
     for r in seq:
-        pnl_pct = float(r.get("pnl_pct") or 0)
-        c = float(r.get("position_cost_pct") or r.get("costPct") or cost)
-        if c <= 0:
-            c = cost
-        signed = (pnl_pct * 100.0 - c) / c
-        net = pnl_pct - (c / 100.0 if c > 0.02 else c)
+        c = row_position_cost_pct(r, cost)
+        pnl_pct = row_pnl_pct(r, c)
+        net = pnl_pct - c / 100.0
+        reference = c if c > 0 else cost if cost > 0 else POSITION_COST_PCT_DEFAULT
+        signed = net * 100.0 / reference
         rs.append(signed)
         nets.append(net)
         if net > 0:
@@ -136,7 +138,7 @@ def raw_cost_pf(closed: List[Dict[str, Any]], n: int = 15, cost: float = POSITIO
 
 def hand_pf(closed: List[Dict[str, Any]], n: int = 15, cost: float = POSITION_COST_PCT_DEFAULT) -> Dict[str, Any]:
     seq = last_n_chrono(closed, n)
-    rs = [signed_result_r(float(r.get("pnl_pct") or 0), float(r.get("position_cost_pct") or r.get("costPct") or cost)) for r in seq]
+    rs = [signed_result_r(row_pnl_pct(r, row_position_cost_pct(r, cost)), row_position_cost_pct(r, cost), cost) for r in seq]
     avg_r = sum(rs) / len(rs) if rs else 0.0
     return {
         "n": len(seq),
@@ -179,7 +181,8 @@ def audit_lane(conn: str) -> Dict[str, Any]:
         "setsEnablePf": sets.get("enablePf"),
         "coordMinPf": (coord_snap.get("gate") or coord_snap).get("minPf") if isinstance(coord_snap, dict) else None,
     }
-    floor_ok = all(abs(float(v) - 1.10) < 1e-6 for k, v in floors.items() if v is not None and k != "coordMinPf")
+    expected_floor = shared_pf_settings(ov)["minPf"]
+    floor_ok = all(abs(float(v) - expected_floor) < 1e-6 for v in floors.values() if v is not None)
     sl_mismatch = 0
     for c in closed:
         sl_pct = float(c.get("sl_pct") or 0)

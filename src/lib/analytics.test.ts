@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
 
+test("measured free fills use the configured comparison unit without deducting a fee", () => {
+  const metric = lastNCostPf([{ t: 1, pnl: .2, pnl_pct: .002, notional: 100, position_cost_pct: 0 }], 1, .2, 1.1);
+  assert.equal(metric.ratio, 1.1);
+  assert.equal(metric.netAvg, .002);
+  assert.equal(metric.costPct, 0);
+  assert.equal(metric.pfReferenceCostPct, .2);
+  assert.equal(metric.pass, true);
+});
+
 test("unknown returns retain cash accounting but cannot become synthetic PF losses", () => {
   const metric = lastNCostPf([
     { t: 3, pnl: 5 },

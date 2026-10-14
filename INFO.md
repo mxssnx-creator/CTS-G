@@ -240,9 +240,11 @@ run is `hours=336` / `lookback=20160`. It processes every enabled pack, SL:TP ra
 trailing arm/give pair, step, direction and indication kind, plus independent
 Block and DCA tapes. Signals additionally publish a separate `block:signals`
 historic ledger by symbol and direction; this is evaluation evidence for the
-same-parent live Block add-on, not a standalone order. `validated #/#` means cost-adjusted PF >= 1.0 with the
-required evaluation sample; `active #/#` is intentionally stricter and also
-requires the configured enable PF and drawdown-time limit. Historic row counts
+same-parent live Block add-on, not a standalone order. `validated #/#` requires
+the configured minimum sample count, return PF strictly above 1.02, and the
+configured PF floor. Empty or unavailable return evidence cannot qualify.
+`active #/#` additionally requires the current execution gates and drawdown-time
+limit. Historic row counts
 may exceed the catalog count because LONG, SHORT and BOTH are reported as
 separate views.
 
@@ -286,10 +288,17 @@ DDT episodes.
 
 The Stats/Overview controls expose separate groups for catalog coverage,
 indication kinds (including `signals` and `break`), directions, strategies,
-Block, DCA, trailing, exits and per-symbol results. Cost PF, classic PF, net
+Block, DCA, trailing, exits and per-symbol results. Return PF, net
 PnL, wins/losses, fills, DDT and `valid #/#` / `active #/#` are sourced from
 the same full snapshot. The Settings table is not a top-N substitute for the
 catalog counters.
+
+The canonical PF is `1 + 0.1 * mean(net_return / PositionCost_fraction)`.
+Actual zero fees remain zero; a known positive configured reference cost is
+used for the denominator. Missing/nonfinite return samples are unavailable,
+never positive evidence. Classic win/loss PF is an explicitly named diagnostic
+only. Evidence belongs to the exact symbol, configuration, exit, direction and
+strategy child; it must not be borrowed from a neighbouring configuration.
 
 The reproducible offline VST evidence is
 `reports/cts-g-72h-report.html`, generated with:

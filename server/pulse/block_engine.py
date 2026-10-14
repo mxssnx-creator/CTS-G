@@ -12,8 +12,8 @@ from position_cost import (
     INTERN_PF,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
-    cost_as_frac,
     normalize_position_cost_pct,
+    net_return_r,
     ratio_from_r,
 )
 
@@ -152,16 +152,15 @@ def cost_pf_from_net_fracs(samples: Optional[List[float]], cost_pct: float = POS
     """PositionCost ratio from cost-net fractions. Intern 1.00 != real 1.10.
 
     ``samples`` are already cost-net fractions (0.001 = +0.10% net). Cost is
-    the CTS percent convention (0.10 = 0.10%); legacy fractions ≤ 0.02 are
-    accepted via ``cost_as_frac``.
+    the CTS percent convention (0.10 = 0.10%).
     """
     vals = [float(x) for x in (samples or []) if x is not None]
     if not vals:
         return 0.0
-    cost_frac = cost_as_frac(normalize_position_cost_pct(cost_pct))
-    if cost_frac <= 1e-15:
-        return 0.0
-    avg_r = sum(v / cost_frac for v in vals) / len(vals)
+    cost = normalize_position_cost_pct(cost_pct)
+    # A measured-free close keeps its zero subtraction. Its already-net
+    # return still uses the shared finite PF reference denominator.
+    avg_r = sum(net_return_r(v, cost) for v in vals) / len(vals)
     return float(ratio_from_r(avg_r))
 
 
@@ -226,7 +225,8 @@ class BlockBook:
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
         self.default_min_pf = float(cfg.get("defaultMinPF", POSITIVE_PF) or POSITIVE_PF)
-        self.cost_pct = max(1e-9, float(cfg.get("positionCostPct", POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT))
+        raw_cost = cfg.get("positionCostPct")
+        self.cost_pct = max(0., float(POSITION_COST_PCT_DEFAULT if raw_cost is None else raw_cost))
         self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
         self.eval_pos_count = clamp_eval_pos_count(cfg.get("blockEvalPosCount") or cfg.get("mainEvalPosCount") or BLOCK_EVAL_POS_DEFAULT)
         self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25), self.eval_pos_count)

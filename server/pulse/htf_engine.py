@@ -14,8 +14,8 @@ Ported from CTS-A-O (``src/core/math/indicators.ts``, ``indications/registry.ts`
   the trail arms on completed-bar peaks; the time exit closes at the close;
   r = side * (exit - entry) / entry - cost.
 
-Pure numpy / python, no engine imports: the validation script and the live
-trader run exactly this code.
+Pure numpy / python with shared CTS return-PF accounting: the validation script
+and the live trader run exactly this code.
 """
 from __future__ import annotations
 
@@ -623,10 +623,11 @@ def pf_classic(rs: Sequence[float]) -> float:
 
 
 def pf_cost(rs: Sequence[float], cost: float) -> float:
-    """CTS-G cost-coordinate PF: 1 + 0.1 * mean(net) / cost."""
-    if not rs or cost <= 0:
+    """CTS return PF over already-net fractions (never subtract cost twice)."""
+    from position_cost import net_return_pf
+    if len(rs) == 0:
         return 1.0
-    return 1.0 + 0.1 * (sum(rs) / len(rs)) / cost
+    return net_return_pf(sum(rs) / len(rs), cost * 100.0)
 
 
 # ------------------------------------------------------------- presets
@@ -677,7 +678,7 @@ HTF_TP_MAX = max(parse_exit_key(k).tp for k, _ in HTF_PRESETS.values())
 class HtfSettings:
     enabled: bool = False
     kinds: Tuple[str, ...] = HTF_KINDS
-    min_pf: float = 1.05          # classic PF over the evidence window
+    min_pf: float = 1.05          # return/cost PF over the evidence window
     window: int = 50              # evidence window (live-first)
     min_n: int = 20               # fewer closes: the validated preset decides
     last_n: int = 0               # CTS-A-O last-N gate (0 = off; hurt on our data)
@@ -738,9 +739,9 @@ class HtfBook:
         # bars/hist are replaced whole (copy-on-write) and every reader
         # iterates over a copy; live appends are serialized.
         self._lock = threading.Lock()
-        self._sig_cache: Dict[str, Tuple[float, Dict[str, np.ndarray]]] = {}
+        self._sig_cache: Dict[str, Tuple[Bars, Dict[str, np.ndarray]]] = {}
         self._snap_cache: Optional[Tuple[Tuple, Dict]] = None
-        self._ver = 0                                      # bumps on bars / replay changes
+        self._ver = 0                                      # bumps on evidence / bar changes
 
     # bars ------------------------------------------------------------
     def set_bars(self, sym: str, rows: Sequence, now_ms: Optional[float] = None) -> int:
@@ -762,22 +763,29 @@ class HtfBook:
             return 0
         ts = sorted(book)[-self.s.history_bars:]
         arr = np.array([[t, *book[t]] for t in ts], dtype=float)
+        if old is not None and old.n == len(ts) and all(
+            np.array_equal(arr[:, i], col) for i, col in enumerate((old.t, old.o, old.h, old.l, old.c, old.v))
+        ):
+            return len(ts)  # unchanged refreshes retain the signal/replay snapshot
         self.bars[sym] = Bars(arr[:, 0], arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 4], arr[:, 5], 60, sym)
         self._ver += 1
         return len(ts)
 
     def signals(self, sym: str) -> Dict[str, np.ndarray]:
         """Entry signals of every enabled kind on this symbol's bars, computed
-        once per new bar and shared by replay and new_signals."""
-        b = self.bars.get(sym)
+        once per bar snapshot and shared by replay and new_signals. Corrections
+        to closed OHLCV bars replace the snapshot even at the same timestamp."""
+        return self._signals_for(sym, self.bars.get(sym))
+
+    def _signals_for(self, sym: str, b: Optional[Bars]) -> Dict[str, np.ndarray]:
+        """Use one immutable bar snapshot throughout replay or signal emission."""
         if b is None or b.n == 0:
             return {}
-        last_t = float(b.t[-1])
         hit = self._sig_cache.get(sym)
-        if hit is not None and hit[0] == last_t and all(k in hit[1] for k in self.s.kinds):
+        if hit is not None and hit[0] is b and all(k in hit[1] for k in self.s.kinds):
             return hit[1]
         out = {k: entry_signals(b, [k], vol_regime=preset(k)[1])[k] for k in self.s.kinds}
-        self._sig_cache[sym] = (last_t, out)
+        self._sig_cache[sym] = (b, out)
         return out
 
     # replay evidence -------------------------------------------------
@@ -789,7 +797,7 @@ class HtfBook:
             return 0
         out: Dict[str, List[Dict]] = {}
         n = 0
-        sigs = self.signals(sym)
+        sigs = self._signals_for(sym, b)
         for kind in self.s.kinds:
             cfg, _ = preset(kind)
             sig = sigs[kind]
@@ -852,6 +860,7 @@ class HtfBook:
             rows = list(self.live.get(kind, ())) + [new]
             rows.sort(key=_row_t)
             self.live[kind] = rows[-500:]
+            self._ver += 1
         return True
 
     def seed_live(self, rows: Iterable) -> int:
@@ -859,40 +868,73 @@ class HtfBook:
         return sum(1 for r in rows if self.on_live_close(r))
 
     # gates -----------------------------------------------------------
-    def evidence(self, kind: str) -> Tuple[List[Dict], str]:
+    @staticmethod
+    def _scope_rows(rows: Iterable[Dict], symbol: str = "", side: Optional[str] = None,
+                    now_s: Optional[float] = None) -> List[Dict]:
+        want_side = str(side or "").upper()
+        return [r for r in rows if (not symbol or r.get("symbol") == symbol)
+                and (not want_side or str(r.get("side") or "").upper() == want_side)
+                and (now_s is None or _row_t(r) <= now_s)]
+
+    def evidence(self, kind: str, symbol: str = "", side: Optional[str] = None,
+                 *, now_s: Optional[float] = None) -> Tuple[List[Dict], str]:
+        """Own symbol/direction evidence is selected before live-first filling.
+
+        An omitted scope is a pooled diagnostic, not runtime entry proof.
+        """
         from position_cost import live_first_window
-        return live_first_window(self.live.get(kind, []), self.hist_rows(kind), self.s.window)
+        live = self._scope_rows(list(self.live.get(kind, ())), symbol, side, now_s)
+        replay = self._scope_rows(self.hist_rows(kind), symbol, side, now_s)
+        return live_first_window(live, replay, self.s.window)
 
     def side_accept(self, family: str, side: str, now_s: float) -> Tuple[bool, Dict]:
         """CTS-A-O acceptOnWindow on the family x side closes before now."""
+        from position_cost import clears_pf
         rows = [r for k in self.s.kinds if KINDS[k].family == family
                 for r in (self.hist_rows(k) + list(self.live.get(k, ()))) if r["side"] == side and r["t"] <= now_s]
 
         def stats(hours):
             rs = [r["r"] for r in rows if now_s - r["t"] <= hours * 3600]
-            return len(rs), pf_classic(rs)
-        n, pf = stats(self.s.side_hours)
+            return len(rs), pf_cost(rs, self.s.cost), pf_classic(rs)
+        n, pf, classic = stats(self.s.side_hours)
         if n >= self.s.side_min_trades:
-            return pf >= self.s.side_min_pf, {"n": n, "pf": round(pf, 3), "hours": self.s.side_hours}
-        n2, pf2 = stats(self.s.side_hours * 2)
-        ok = n2 < self.s.side_min_trades or pf2 >= self.s.side_min_pf
-        return ok, {"n": n2, "pf": round(pf2, 3), "hours": self.s.side_hours * 2}
+            return clears_pf(pf, self.s.side_min_pf), {"n": n, "pf": round(pf, 3),
+                    "classicPf": round(classic, 3), "hours": self.s.side_hours}
+        n2, pf2, classic2 = stats(self.s.side_hours * 2)
+        ok = n2 < self.s.side_min_trades or clears_pf(pf2, self.s.side_min_pf)
+        return ok, {"n": n2, "pf": round(pf2, 3) if n2 else None,
+                    "classicPf": round(classic2, 3) if n2 else None, "hours": self.s.side_hours * 2}
 
-    def gate(self, kind: str, side: str, now_s: float) -> Tuple[bool, str, Dict]:
+    def gate(self, kind: str, side: str, now_s: float, symbol: str = "") -> Tuple[bool, str, Dict]:
+        """Runtime entries pass an exact symbol and require its own full sample.
+
+        No-symbol calls retain the aggregate preset diagnostic for reports.
+        Family/side context can veto an entry but cannot supply its evidence.
+        """
+        from position_cost import clears_pf
         if not self.s.enabled:
             return False, "htf off", {}
         if kind not in self.s.kinds:
             return False, "kind off", {}
-        tape, src = self.evidence(kind)
+        tape, src = self.evidence(kind, symbol, side if symbol else None,
+                                  now_s=now_s if symbol else None)
         rs = [r["r"] for r in tape]
-        info = {"n": len(rs), "pf": round(pf_classic(rs), 3) if rs else None, "source": src,
-                "liveN": len(self.live.get(kind, []))}
-        if len(rs) >= self.s.min_n and pf_classic(rs) < self.s.min_pf:
-            return False, f"PF {pf_classic(rs):.2f} < {self.s.min_pf:.2f} ({src} {len(rs)})", info
+        pf = pf_cost(rs, self.s.cost)
+        info = {"n": len(rs), "pf": round(pf, 3) if rs else None,
+                "classicPf": round(pf_classic(rs), 3) if rs else None, "source": src,
+                "liveN": len(self._scope_rows(list(self.live.get(kind, ())), symbol,
+                              side if symbol else None, now_s if symbol else None)),
+                "symbol": symbol, "direction": side, "requiredSamples": self.s.min_n,
+                "scope": "symbol-direction" if symbol else "aggregate-diagnostic"}
+        if symbol and len(rs) < self.s.min_n:
+            return False, f"sample {len(rs)}/{self.s.min_n} ({symbol} {side} {src})", info
+        if len(rs) >= self.s.min_n and not clears_pf(pf, self.s.min_pf):
+            return False, f"PF {pf:.2f} < {self.s.min_pf:.2f} ({src} {len(rs)})", info
         if self.s.last_n > 0:
             tail = rs[-self.s.last_n:]
-            if len(tail) >= min(5, self.s.last_n) and pf_classic(tail) < 1.0:
-                return False, f"last {self.s.last_n} PF {pf_classic(tail):.2f} < 1", info
+            tail_pf = pf_cost(tail, self.s.cost)
+            if len(tail) >= min(5, self.s.last_n) and not clears_pf(tail_pf, 1.0):
+                return False, f"last {self.s.last_n} PF {tail_pf:.2f} < 1", info
         ok, acc = self.side_accept(KINDS[kind].family, side, now_s)
         info["sideAccept"] = acc
         if not ok:
@@ -910,7 +952,7 @@ class HtfBook:
             return []
         self.last_signal_t[sym] = last_t
         out = []
-        sigs = self.signals(sym)
+        sigs = self._signals_for(sym, b)
         for kind in self.s.kinds:
             cfg, _ = preset(kind)
             s = int(sigs[kind][-1])
@@ -922,8 +964,8 @@ class HtfBook:
     def snapshot(self, now_s: Optional[float] = None) -> Dict:
         import time as _t
         now_s = now_s if now_s is not None else _t.time()
-        # Gates only change with a new bar, a new live close or new replay.
-        token = (id(self.s), int(now_s // 3600), tuple(sorted((k, len(v)) for k, v in list(self.live.items()))),
+        # Settings and evidence changes invalidate the cached gate diagnostics.
+        token = (repr(self.s), int(now_s // 3600), tuple(sorted((k, len(v)) for k, v in list(self.live.items()))),
                  self._ver)
         cached = self._snap_cache
         if cached is not None and cached[0] == token:
@@ -936,10 +978,14 @@ class HtfBook:
             ok_l, why_l, _ = self.gate(k, "LONG", now_s)
             ok_s, why_s, _ = self.gate(k, "SHORT", now_s)
             kinds[k] = {"family": KINDS[k].family, "exit": HTF_PRESETS[k][0], "volRegime": HTF_PRESETS[k][1],
-                        "n": len(rs), "pf": round(pf_classic(rs), 3) if rs else None, "source": src,
-                        "liveN": len(live_rs), "livePf": round(pf_classic(live_rs), 3) if live_rs else None,
+                        "scope": "aggregate-diagnostic", "entryRequiresOwnSymbolDirection": True,
+                        "n": len(rs), "pf": round(pf_cost(rs, self.s.cost), 3) if rs else None,
+                        "classicPf": round(pf_classic(rs), 3) if rs else None, "source": src,
+                        "liveN": len(live_rs), "livePf": round(pf_cost(live_rs, self.s.cost), 3) if live_rs else None,
+                        "liveClassicPf": round(pf_classic(live_rs), 3) if live_rs else None,
                         "long": {"ok": ok_l, "why": why_l}, "short": {"ok": ok_s, "why": why_s}}
         snap = {"enabled": self.s.enabled, "symbols": len(self.bars),
+                "entryEvidenceScope": "symbol-direction", "entryMinimumSamples": self.s.min_n,
                 "bars": {s: int(b.n) for s, b in list(self.bars.items())}, "kinds": kinds,
                 "settings": {"minPf": self.s.min_pf, "window": self.s.window, "minN": self.s.min_n, "lastN": self.s.last_n,
                              "sideHours": self.s.side_hours, "sideMinTrades": self.s.side_min_trades,

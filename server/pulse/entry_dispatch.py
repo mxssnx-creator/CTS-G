@@ -4,7 +4,7 @@ from bisect import bisect_right
 
 class EntryMatrix:
     """Store references per pack/side, never millions of candidate tuples."""
-    def __init__(self, signals, sets_by_scope, keep_order=False):
+    def __init__(self, signals, sets_by_scope, keep_order=False, scope_resolver=None):
         """``keep_order`` keeps the caller's signal order (best first).
 
         The engine ranks signals by confidence, rebalances the sides and, with
@@ -14,18 +14,20 @@ class EntryMatrix:
         deterministic name order for callers that hand in an unranked list.
         """
         self.signals = []
+        self.scopes = []
         self.ends = []
         self.sets_by_scope = sets_by_scope
         self.phases = []
         ordered = signals if keep_order else sorted(signals, key=lambda r: (r[1], r[2], r[3]))
         for signal in ordered:
-            scope = self.scope(signal)
+            scope = scope_resolver(signal) if scope_resolver is not None else self.scope(signal)
             count = len(sets_by_scope.get(scope, ()))
             if count:
                 self.signals.append(signal)
+                self.scopes.append(scope)
         # Round-robin signals as well as Sets: a huge catalog on the first
         # symbol must not consume every slice before the next symbol is seen.
-        counts = [len(sets_by_scope[self.scope(row)]) for row in self.signals]
+        counts = [len(sets_by_scope[scope]) for scope in self.scopes]
         start = total = 0
         for end in sorted(set(counts)):
             active = [i for i, count in enumerate(counts) if count > start]
@@ -51,6 +53,6 @@ class EntryMatrix:
         round_index, signal_offset = divmod(offset, len(active))
         lane = active[signal_offset]
         signal = self.signals[lane]
-        states = self.sets_by_scope[self.scope(signal)]
+        states = self.sets_by_scope[self.scopes[lane]]
         selected = (round_start + round_index + lane) % len(states)
         return (*signal, states[selected])

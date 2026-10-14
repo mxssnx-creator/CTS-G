@@ -2162,7 +2162,7 @@ def set_orders_test() -> None:
     import tempfile
     from types import SimpleNamespace
     import pulse_trader as pt
-    from set_engine import SetBook, SetState, make_set_id
+    from set_engine import SetBook, SetState, make_set_id, hist_fill
 
     tmp = tempfile.mkdtemp(prefix="setord-test-")
     for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH", "TRADES_PATH"):
@@ -2233,6 +2233,7 @@ def set_orders_test() -> None:
 
     # --- real SetBook with three real Sets (2 general + 1 indications) ---
     book = SetBook()
+    book.pf_n = book.min_samples = book.main_eval = book.real_eval = 12
     specs = [("general", 0.6, 10), ("general", 0.9, 20), ("indications", 1.5, 30)]
     sts: List[SetState] = []
     for i, (pack, sl, stp) in enumerate(specs):
@@ -2245,12 +2246,23 @@ def set_orders_test() -> None:
         # live entry boundary intentionally requires the corresponding active
         # flag as well as PF/sample values.
         st.active = True
+        st.indication_symbol = ("AAA-USDT", "BBB-USDT", "CCC-USDT")[i]
+        st.indication_kind = "move" if pack == "indications" else "general"
+        st.indication_config = "move:30" if pack == "indications" else "general_signal"
+        st.hist.extend(hist_fill(time.time() - 800 + j * 60, st.indication_symbol,
+                                 1, .009, 60, "tp") for j in range(12))
         book.sets[sid] = st
         sts.append(st)
+        book._score_one(st)
     book.by_idx = list(sts)
     # This fixture exercises post-publication order attribution; the initial
     # historic safety gate has its own regression above.
     book.progress.ready = True
+    # Only these explicitly published fixture objects are current. Independent
+    # replay/stale-generation rejection has dedicated grid regressions.
+    book._indication_grid = SimpleNamespace(current=lambda state: book.sets.get(state.id) is state,
+                                           record_qualification=lambda state: None,
+                                           snapshot=lambda: {"configurations": [], "complete": False})
     cur = {"i": 0}
 
     book.pick_any = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
@@ -2262,6 +2274,33 @@ def set_orders_test() -> None:
     book.pick_trail = lambda pack, side=None: None
     book.adapt_from_live = lambda rows: None
     book.indication_ok = lambda kind, side=None: True
+    extras = {}
+    for symbol, step in (("DDD-USDT", 11), ("CCC-USDT", 12)):
+        sid = make_set_id("general", .6, "", step)
+        state = SetState(id=sid, pack="general", tf="1m", sl_ratio=.6, trail_key="",
+                         trail_arm=0., trail_give=0., step=step, tp_pct=.0045,
+                         idx=len(book.by_idx), indication_symbol=symbol,
+                         indication_kind="general", indication_config="general_signal")
+        state.hist.extend(hist_fill(time.time() - 800 + j * 60, symbol,
+                                    1, .009, 60, "tp") for j in range(12))
+        book.sets[sid] = state
+        book.by_idx.append(state)
+        book._score_one(state)
+        extras[symbol] = state
+    # Scope the post-publication fixture to the exact symbol and indication.
+    # Grid scoring and cold/mismatched evidence rejection are covered by the
+    # independent grid tests; this recording exchange tests order attribution.
+    def own_pack_entries(pack, side="LONG", symbol=""):
+        if side != "LONG" or pack != "general":
+            return []
+        return {"AAA-USDT": [sts[0]], "BBB-USDT": [sts[1]],
+                "DDD-USDT": [extras["DDD-USDT"]], "CCC-USDT": [extras["CCC-USDT"]]}.get(symbol, [])
+
+    def own_indication_entries(kind, config, side="LONG", symbol=""):
+        return [sts[2]] if (kind, config, side, symbol) == ("move", "move:30", "LONG", "CCC-USDT") else []
+
+    book.pack_entry_sets = own_pack_entries
+    book.indication_entry_sets = own_indication_entries
 
     def mk_pulse(fx: FakeEx):
         p = object.__new__(pt.Pulse)
@@ -2293,7 +2332,7 @@ def set_orders_test() -> None:
         p.strat_ind = True
         p.indications = SimpleNamespace(
             settings={"enabled": True, "takeProfitRewardRisk": 1.8},
-            match=lambda s, r: SimpleNamespace(direction="long", kind="move", stop_loss_pct=0.0, take_profit_pct=0.0),
+            match=lambda s, r: SimpleNamespace(direction="long", kind="move", mode="move:30", tf="1m", stop_loss_pct=0.0, take_profit_pct=0.0),
             primary=lambda s: None, best=lambda s: None)
         p.variants = SimpleNamespace(on_close=lambda rec: None, current_sl=lambda: 0.6,
                                      current_trail=lambda: ("0.3:0.1", 0.3, 0.1))
@@ -2413,14 +2452,16 @@ def set_orders_test() -> None:
         f"del={len(del_oids)} live={len(fx.orders)}")
     stA, stB, stC = sts
     rec("setord-win-attributes-setA",
-        len(stA.live) == 1 and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
+        len(stA.live) == 1 and abs(last_n_cost_pf(stA.live, 12, book.cost_pct)["ratio"] - 1.3) < 1e-6
+        and stA.last15_n == 12
         and len(stB.live) == 0 and len(stC.live) == 0 and stB.last15_n == 12 and stC.last15_n == 12,
         f"A n={stA.last15_n} r={stA.last15_ratio} B live={len(stB.live)} C live={len(stC.live)}")
     fx.fill["BBB-USDT"] = 199.0  # -0.50% gross -> -4.33R net
     p.close_pos(pos_for(p, "BBB-USDT"), 199.0, "sl")
     rec("setord-loss-attributes-setB",
-        len(stB.live) == 1 and stB.last15_n == 1 and abs(stB.last15_ratio - 0.5667) < 1e-3
-        and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
+        len(stB.live) == 1 and abs(last_n_cost_pf(stB.live, 12, book.cost_pct)["ratio"] - 0.5667) < 1e-3
+        and stB.last15_n == 12 and stA.last15_n == 12
+        and abs(last_n_cost_pf(stA.live, 12, book.cost_pct)["ratio"] - 1.3) < 1e-6
         and len(stC.live) == 0 and stC.last15_n == 12,
         f"B n={stB.last15_n} r={stB.last15_ratio} A r={stA.last15_ratio}")
     rec("setord-engine-stats-coordination",
@@ -2433,7 +2474,9 @@ def set_orders_test() -> None:
         snap.get(stA.id, {}).get("n") == 1 and snap.get(stB.id, {}).get("n") == 1
         and abs(snap.get(stA.id, {}).get("last15Ratio", 0) - 1.3) < 1e-6,
         str({k: (v.get("n"), v.get("last15Ratio")) for k, v in snap.items()})[:140])
-    rec("setord-unproven-not-system-results", book.snapshot().get("rows") == [], "Base not yet qualified")
+    rec("setord-history-and-live-evidence-independent",
+        len(stA.hist) == len(stB.hist) == len(stC.hist) == 12
+        and bool(book.snapshot().get("rows")), "Own Base evidence retained; confirmed close attributed once")
     p.live_pos_keys = {"CCC-USDT:LONG"}
     sim_n, _sim_u = p.sim_stats()
     p.live_pos_keys = set()
@@ -2449,7 +2492,7 @@ def set_orders_test() -> None:
     p.place("CCC-USDT", 1, reasons[2], 0.9)  # exact indication lane is already open
     rec("setord-independent-lane-and-dedup",
         after_independent == before + 1 and len(fx.posts) == after_independent
-        and pos_for(p, "CCC-USDT").set_id == stC.id,
+        and set(pos_for(p, "CCC-USDT").lineage_set_ids) == {stC.id, extras["CCC-USDT"].id},
         f"independent={after_independent - before} duplicate={len(fx.posts) - after_independent}")
     cur["i"] = 0
     fx2 = FakeEx(fail_controls=True)

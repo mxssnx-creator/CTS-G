@@ -21,7 +21,7 @@ import urllib.request
 from contextlib import nullcontext
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, replace
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -72,7 +72,7 @@ from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, SMALL_BOOK_ENTRY_BATCH, trim_map, cap_map, prune_ttl, cap_list
 from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
-from history_store import BAR_S, HistoryStore, parse_exchange_rows
+from history_store import BAR_S, HistoryStore, parse_exchange_rows, parse_row
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
 from hist_calc import read_stop_at as read_hist_stop_at
 from hist_calc import run_forced_calc, forced_path, request_lookback, job_is_running
@@ -144,6 +144,24 @@ def effective_indication_timeframes(
     if bool(configured.get("15m", True)) and bool(getattr(budget, "tf_15m", True)):
         allowed.add("15m")
     return tuple(tf for tf in TIMEFRAMES if tf in allowed)
+
+
+def indication_config_key(indication: Any) -> str:
+    """The exact live/replay configuration identity, including Signals TF."""
+    mode = str(getattr(indication, "mode", "") or "")
+    if mode == "direct_tf" or (str(getattr(indication, "kind", "") or "") == "tactic" and not mode.endswith(":combined")):
+        timeframe = str(getattr(indication, "timeframe", "") or "")
+        return f"{mode}:{timeframe}" if timeframe else mode
+    return mode
+
+
+def exchange_fee_known(row: Any) -> bool:
+    """A raw venue fee field can prove a measured zero commission."""
+    return isinstance(row, dict) and any(row.get(key) not in (None, "") for key in (
+        "fee_total", "feeTotal", "totalFee", "totalCommission", "fee", "fees", "feeAmount",
+        "commission", "commissionAmount", "transactionFee", "realizedFee",
+        "entry_fee", "entryFee", "openFee", "openCommission", "exit_fee", "exitFee", "closeFee", "closeCommission",
+    ))
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 LIVE_EDGE_N_DEFAULT = 50
@@ -1153,6 +1171,7 @@ class Position:
     pending_close_qty: float = 0.0
     last_fill_at: float = 0.0
     entry_fee: float = 0.0
+    entry_fee_known: bool = False
     entry_notional: float = 0.0
     strategy: str = "core"
     close_started_qty: float = 0.0
@@ -1414,6 +1433,7 @@ class Pulse:
         # filled entry is not mistaken for an already-consumed client id.
         self._load_pending_orders()
         self._load_open_book()
+        self._restore_independent_close_state()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
             "blockMaxStack": 6,
@@ -1839,7 +1859,7 @@ class Pulse:
             return 0
 
     def block_lane_key(self, pos: Position) -> str:
-        if bool(getattr(self, "block_overall", True)):
+        if bool(getattr(self, "block_overall", True)) and not getattr(pos, "ind_config", ""):
             try:
                 return self.block.key(pos.symbol, pos.side)
             except TypeError:
@@ -1851,7 +1871,7 @@ class Pulse:
             return self.block.key(pos.symbol, pos.side)
 
     def dca_lane_key(self, pos: Position) -> str:
-        if bool(getattr(self, "dca_overall", True)):
+        if bool(getattr(self, "dca_overall", True)) and not getattr(pos, "ind_config", ""):
             try:
                 return self.dca.key(pos.symbol, pos.side)
             except TypeError:
@@ -1866,8 +1886,8 @@ class Pulse:
         """Rebind Block/DCA state to this logical group after fills or restart."""
         if getattr(pos, "pack", "") == "htf":
             return  # the 1h lane carries no Block/DCA lanes
-        overall = bool(getattr(self, "block_overall", True))
-        dca_overall = bool(getattr(self, "dca_overall", True))
+        overall = bool(getattr(self, "block_overall", True)) and not getattr(pos, "ind_config", "")
+        dca_overall = bool(getattr(self, "dca_overall", True)) and not getattr(pos, "ind_config", "")
         group_key = "" if overall else self.logical_group_key(pos)
         dca_key = "" if dca_overall else self.logical_group_key(pos)
         core_qty = float(pos.qty or 0)
@@ -1915,8 +1935,8 @@ class Pulse:
 
     def merge_parent_lanes(self, pos: Position, added_qty: float, entry: float) -> None:
         """Keep Block/DCA parent anchors aligned with an entry merge."""
-        overall = bool(getattr(self, "block_overall", True))
-        dca_overall = bool(getattr(self, "dca_overall", True))
+        overall = bool(getattr(self, "block_overall", True)) and not getattr(pos, "ind_config", "")
+        dca_overall = bool(getattr(self, "dca_overall", True)) and not getattr(pos, "ind_config", "")
         block_key = "" if overall else self.logical_group_key(pos)
         dca_key = "" if dca_overall else self.logical_group_key(pos)
         try:
@@ -2092,7 +2112,7 @@ class Pulse:
     def aggregate_qty(self, symbol: str, side: str = "") -> float:
         return sum(max(0.0, float(getattr(pos, "qty", 0) or 0)) for pos in self.positions_for(symbol, side))
 
-    def merge_position(self, target: Position, incoming: Position) -> Position:
+    def merge_position(self, target: Position, incoming: Position, *, fill_sequence: float = 0.) -> Position:
         """Merge a same-range fill into the existing logical control group."""
         old_qty = max(0.0, float(target.qty or 0))
         add_qty = max(0.0, float(incoming.qty or 0))
@@ -2105,6 +2125,12 @@ class Pulse:
             target.close_started_qty += add_qty
         if total <= 0:
             return target
+        self._record_independent_core_fill(target, add_qty, incoming.entry, incoming.entry_fee,
+                                           incoming.client_id, incoming.order_id,
+                                           fee_known=incoming.entry_fee_known, incoming=incoming,
+                                           fill_sequence=fill_sequence or float(((getattr(self, "pending_orders", {}) or {}).get(incoming.client_id) or {}).get("filled_qty") or incoming.qty))
+        target.entry_fee_known = (bool(getattr(target, "entry_fee_known", False)) or target.entry_fee > 0) and (
+            bool(getattr(incoming, "entry_fee_known", False)) or incoming.entry_fee > 0)
         target.entry = ((target.entry * old_qty) + (incoming.entry * add_qty)) / total
         target.qty = total
         target.notional = total * target.entry
@@ -2569,7 +2595,7 @@ class Pulse:
         once here and never compounded again by Block/DCA fills.
         """
         try:
-            ratio_f = max(0.2, min(3.0, float(ratio or 1.0)))
+            ratio_f = max(0.01, min(3.0, float(ratio or 1.0)))
         except Exception:
             ratio_f = 1.0
         vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
@@ -4065,18 +4091,16 @@ class Pulse:
             log(f"UNIVERSE rank={self.symbol_sort} n={len(SYMBOLS)} dyn={int(self.symbols_dynamic)} cap={cap} wild={int(wild)} lead={(SYMBOLS[0] if SYMBOLS else '-')}", every=20.0, key="uni-rank")
 
     def _parse_klines(self, data: Any) -> List[List[float]]:
-        bars: List[List[float]] = []
         if not isinstance(data, list):
-            return bars
-        for b in data:
-            try:
-                if isinstance(b, dict):
-                    bars.append([float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"]), float(b.get("volume") or 0)])
-                else:
-                    bars.append([float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5])])
-            except Exception:
-                continue
-        return bars
+            return []
+        parsed = [record for row in data if (record := parse_row(row)) is not None]
+        # Public endpoints may return newest first. Live and replay must read
+        # the same chronological candles, and invalid OHLC cannot enter either.
+        # Preserve input order for legacy undated fixtures/caches.
+        if parsed and all(record[0] > 0 for record in parsed):
+            dated = {record[0]: record for record in parsed}
+            parsed = [dated[timestamp] for timestamp in sorted(dated)]
+        return [record[1] for record in parsed]
 
     def _fetch_klines(self, symbol: str, interval: str = "1m") -> Tuple[str, str, List[List[float]]]:
         r = self.api.public("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": str(KLINE_LIMIT)})
@@ -4228,7 +4252,7 @@ class Pulse:
                 continue
             try:
                 sym, kind, side = sig["symbol"], sig["kind"], sig["side"]
-                ok, why, _ = book.gate(kind, side, now)
+                ok, why, _ = book.gate(kind, side, now, symbol=sym)
                 if not ok:
                     log(f"HTF skip {sym} {side} {kind}: {why}", every=60.0, key=f"htf-skip:{kind}:{side}", quiet=True)
                     continue
@@ -6276,6 +6300,7 @@ class Pulse:
                     "avg_price": px,
                     "filled_qty": min(requested_qty, max(0.0, filled)),
                     "fee": row_fee_usdt(data) if isinstance(data, dict) else 0.0,
+                    "fee_known": exchange_fee_known(data),
                     "status": status or "ACCEPTED",
                 })
                 return True, px
@@ -6385,6 +6410,9 @@ class Pulse:
         lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
         if self.occupying(sym, side, pack, execution_lane=lane):
             return "slot-taken"
+        if selected_set is not None and getattr(selected_set, "indication_symbol", ""):
+            if str(selected_set.indication_symbol).upper() != str(sym).upper():
+                return "set-symbol-mismatch"
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
                 getattr(self.sets, "progress", None), "ready", False) and not (
                     selected_set is not None and self.partial_set_entries_allowed()
@@ -6407,6 +6435,11 @@ class Pulse:
             want = 1 if ind.direction == "long" else -1
             if want != direction:
                 return "ind-mismatch"
+            if selected_set is not None and callable(getattr(self.sets, "indication_entry_sets", None)):
+                if (str(getattr(selected_set, "indication_kind", "") or "") != str(ind.kind)
+                        or str(getattr(selected_set, "indication_config", "") or "") != indication_config_key(ind)
+                        or str(getattr(selected_set, "indication_symbol", "") or "").upper() != str(sym).upper()):
+                    return "ind-set-mismatch"
             # Kind-wide statistics describe a representative risk range.
             # The exact selected Set below owns the executable PF decision;
             # a different range must neither block nor qualify this Set.
@@ -6479,6 +6512,145 @@ class Pulse:
             None,
         )
 
+    def _independent_dca_ledger(self, *, create: bool = False):
+        ledger = getattr(self, "_dca_lot_ledger", None)
+        if ledger is not None:
+            return ledger
+        path = os.path.join(DIR, f"dca-lots-{CONN_SHORT}.json")
+        if not create and not os.path.exists(path):
+            return None
+        from dca_lot_ledger import DcaLotLedger
+        ledger = self._dca_lot_ledger = DcaLotLedger(CONN_SHORT, path=path)
+        return ledger
+
+    def _recover_independent_close_outbox(self) -> int:
+        """Finish a durable lot receipt interrupted before trade publication."""
+        ledger = self._independent_dca_ledger()
+        if ledger is None:
+            return 0
+        pending = ledger.pending_closes()
+        if not pending:
+            return 0
+        seen = {str(row.get("close_fill_id") or "") for row in read_jsonl(TRADES_PATH, max_rows=MAX_RETAINED_LINES)}
+        restored = 0
+        quantities = self.__dict__.setdefault("_recovered_lot_quantities", {})
+        intents = self.__dict__.setdefault("_recovered_close_intents", {})
+        for receipt in pending:
+            parent_key = str(receipt.get("parent_key") or "")
+            quantities[parent_key] = ledger.parent_qty(parent_key)
+            for row in receipt.get("rows") or []:
+                close_cid = str(row.get("close_client_id") or "")
+                if close_cid:
+                    intents[close_cid] = max(float(intents.get(close_cid) or 0), float(row.get("cumulative_close_qty") or 0))
+                fill_id = str(row.get("close_fill_id") or "")
+                if fill_id in seen:
+                    continue
+                append_bounded_line(TRADES_PATH, json.dumps(row) + "\n")
+                seen.add(fill_id)
+                restored += 1
+            ledger.ack_close(str(receipt.get("outbox_id") or ""))
+        return restored
+
+    def _restore_independent_close_state(self) -> None:
+        ledger = self._independent_dca_ledger()
+        quantities = self.__dict__.setdefault("_recovered_lot_quantities", {})
+        intents = self.__dict__.setdefault("_recovered_close_intents", {})
+        for key, pos in list((getattr(self, "open", {}) or {}).items()):
+            if not self.position_is_ours(pos):
+                continue
+            parent_key = str(pos.client_id or self.position_key(pos))
+            state = ledger.tracked_parent_state(parent_key) if ledger is not None else {}
+            if state.get("tracked"):
+                quantities[parent_key] = state["remainingQty"]
+                intent = state.get("closeIntent") or {}
+                close_cid = str(intent.get("close_client_id") or "")
+                if close_cid:
+                    intents[close_cid] = max(float(intents.get(close_cid) or 0), float(intent.get("cumulative_close_qty") or 0))
+            if parent_key not in quantities:
+                continue
+            remaining = max(0., float(quantities[parent_key]))
+            if remaining <= 1e-12:
+                self.open.pop(key, None)
+            elif abs(remaining - pos.qty) > 1e-12:
+                pos.qty = remaining
+                pos.exchange_qty = remaining
+                if ledger is not None:
+                    lots = ledger.snapshot(parent_key)["lots"]
+                    pos.entry = sum(lot["entry"] * lot["remaining_qty"] for lot in lots) / remaining
+                    pos.entry_fee = sum(lot["remaining_entry_fee"] for lot in lots)
+                    pos.entry_fee_known = all(lot["entry_fee_known"] for lot in lots if lot["remaining_qty"] > 0)
+                pos.notional = remaining * pos.entry
+                pos.entry_notional = pos.notional
+                pos.controls_ok = False
+                pos.ctrl_verified = False
+        for cid, cumulative in intents.items():
+            row = (getattr(self, "pending_orders", {}) or {}).get(cid)
+            if row is None:
+                continue
+            row["filled_qty"] = max(float(row.get("filled_qty") or 0), float(cumulative))
+            if float(row.get("requested_qty") or 0) > 0 and row["filled_qty"] + 1e-12 >= float(row["requested_qty"]):
+                self.pending_orders.pop(cid, None)
+                self.seen_fill_cids.add(cid)
+        if quantities:
+            self.save_open_book()
+            self._save_pending_orders()
+
+    def _record_independent_core_fill(self, pos: Position, qty: float, price: float, fee: float, cid: str,
+                                      order_id: str, *, fee_known: bool = False, incoming: Optional[Position] = None,
+                                      fill_sequence: float = 0.) -> None:
+        """A late normal fill must enter an already partitioned physical group."""
+        if not self.position_is_ours(pos) or (incoming is not None and not self.position_is_ours(incoming)):
+            return
+        ledger = self._independent_dca_ledger()
+        parent_key = str(pos.client_id or self.position_key(pos))
+        if ledger is None or not ledger.tracked_parent_state(parent_key).get("tracked"):
+            return
+        source = incoming or pos
+        metadata = {key: value for key, value in asdict(source).items() if key in Closed.__dataclass_fields__}
+        metadata.update(position_cost_pct=self.position_cost_pct,
+                        cost_source="live-exchange" if fee_known or fee > 0 else "manual-fallback",
+                        system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE, conn=CONN_SHORT)
+        strategy = str(getattr(source, "strategy", "core") or "core").split("+")[0]
+        if incoming is None:
+            strategy = next((lot["strategy"] for lot in ledger.snapshot(parent_key)["lots"]
+                             if lot["child_set_id"] == pos.set_id and lot["client_id"] == pos.client_id), strategy)
+        sequence = fill_sequence or float(((getattr(self, "pending_orders", {}) or {}).get(cid) or {}).get("filled_qty") or 0) + qty
+        fill_key = stable_key("core-lot", cid, order_id, round(sequence, 12))
+        ledger.register_fill(parent_key, pos.set_id, source.set_id, pos.symbol, pos.side, qty, price, fee,
+                             fill_key, order_id=order_id, client_id=cid or source.client_id,
+                             strategy=strategy, t=time.time(), metadata=metadata, reactivate=True)
+
+    def _record_independent_dca_fill(self, pos: Position, qty: float, price: float, fee: float, cid: str, order_id: str,
+                                    *, fee_known: bool = False) -> None:
+        if not self.position_is_ours(pos):
+            return
+        pending = (getattr(self, "pending_orders", {}) or {}).get(cid) or {}
+        metadata = dict(pending.get("metadata") or {})
+        child_id = str(metadata.get("adjustment_child_set_id") or metadata.get("dca_child_set_id") or "")
+        if not child_id:
+            return
+        ledger = self._independent_dca_ledger(create=True)
+        parent_key = str(pos.client_id or self.position_key(pos))
+        parent_metadata = {key: value for key, value in asdict(pos).items() if key in Closed.__dataclass_fields__}
+        parent_metadata.update(position_cost_pct=self.position_cost_pct,
+                               cost_source="live-exchange" if pos.entry_fee > 0 or getattr(pos, "entry_fee_known", False) else "live-average" if getattr(self, "position_cost_source", "") == "live-exchange" else "manual-fallback",
+                               system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE, conn=CONN_SHORT)
+        if not ledger.tracked_parent_state(parent_key).get("tracked"):
+            ledger.register_fill(parent_key, pos.set_id, pos.set_id, pos.symbol, pos.side,
+                                 pos.qty, pos.entry, pos.entry_fee, f"{parent_key}:baseline",
+                                 order_id=pos.order_id, client_id=parent_key,
+                                 strategy=str(getattr(pos, "strategy", "core") or "core").split("+")[0],
+                                 t=pos.opened_at, metadata=parent_metadata)
+        child_metadata = dict(parent_metadata, **metadata)
+        child_strategy = str(metadata.get("strategy") or "dca")
+        child_metadata.update(trail_set_id="", strategy=child_strategy, parent_set_id=pos.set_id,
+                              position_cost_pct=self.position_cost_pct,
+                              cost_source="live-exchange" if fee > 0 or fee_known else "live-average" if getattr(self, "position_cost_source", "") == "live-exchange" else "manual-fallback")
+        fill_key = stable_key("dca-lot", cid, order_id, round(pos.qty, 12), round(qty, 12))
+        ledger.register_fill(parent_key, pos.set_id, child_id, pos.symbol, pos.side,
+                             qty, price, fee, fill_key, order_id=order_id, client_id=cid,
+                             strategy=child_strategy, t=time.time(), metadata=child_metadata)
+
     def _apply_position_fill(
         self,
         pos: Position,
@@ -6489,6 +6661,9 @@ class Pulse:
         pending_qty: Optional[float] = None,
         source: str = "",
         fee: float = 0.0,
+        fill_cid: str = "",
+        fee_known: bool = False,
+        fill_sequence: float = 0.,
     ) -> float:
         """Apply only an exchange-confirmed delta to one logical position."""
         add_qty = max(0.0, float(qty or 0.0))
@@ -6518,6 +6693,13 @@ class Pulse:
         # Block/DCA fills already have a parent lane; re-seeding would treat
         # confirmed extras as new core and inflate Overall Block basis.
         fill_source_early = str(source or "").strip().lower()
+        if fill_source_early in ("block", "dca") and fill_cid:
+            # Register original parent basis and each confirmed child delta
+            # before averaging the physical exchange group's entry price.
+            self._record_independent_dca_fill(pos, add_qty, fill_px, max(0.0, float(fee or 0)), fill_cid, order_id, fee_known=fee_known)
+        elif fill_cid:
+            self._record_independent_core_fill(pos, add_qty, fill_px, max(0.0, float(fee or 0)), fill_cid, order_id,
+                                               fee_known=fee_known, fill_sequence=fill_sequence)
         if fill_source_early not in {"block", "dca"}:
             try:
                 self.ensure_strategy_lanes(pos)
@@ -6529,6 +6711,7 @@ class Pulse:
             pos.entry = ((float(pos.entry or fill_px) * old_qty) + fill_px * add_qty) / total
         pos.qty = total
         pos.notional = total * pos.entry
+        pos.entry_fee_known = (bool(getattr(pos, "entry_fee_known", False)) or pos.entry_fee > 0) and (fee_known or fee > 0)
         pos.entry_fee = max(0.0, float(getattr(pos, "entry_fee", 0.0) or 0.0)) + max(0.0, float(fee or 0.0))
         pos.entry_notional = max(0.0, float(getattr(pos, "entry_notional", 0.0) or 0.0)) + add_qty * fill_px
         pos.exchange_qty = max(0.0, float(getattr(pos, "exchange_qty", 0.0) or 0.0)) + add_qty
@@ -6664,6 +6847,7 @@ class Pulse:
             pending_qty=max(0.0, float(row.get("requested_qty") or 0.0) - fill_qty),
             last_fill_at=time.time(),
             entry_fee=max(0.0, _sf(row.get("fee_total") or row.get("feeTotal"))),
+            entry_fee_known=bool(meta.get("fee_known") or meta.get("entry_fee_known")),
             entry_notional=fill_qty * entry,
         )
         self.prepare_position_group(pos, legacy=pos.pack != "htf" and not bool(getattr(self, "control_orders_per_config", True)))
@@ -6677,6 +6861,7 @@ class Pulse:
         order_id: str = "",
         pending_qty: Optional[float] = None,
         fee: float = 0.0,
+        fee_known: bool = False,
     ) -> Optional[Position]:
         cid = str(row.get("client_id") or "")
         existing = self._position_for_client(cid)
@@ -6689,12 +6874,17 @@ class Pulse:
                 pending_qty=pending_qty,
                 source="entry",
                 fee=fee,
+                fill_cid=cid,
+                fee_known=fee_known,
+                fill_sequence=float(row.get("filled_qty") or delta_qty),
             )
             self.save_open_book()
             return existing
         pos = self._pending_position(row, delta_qty, fill_px)
         if pos is None:
             return None
+        pos.entry_fee = max(0., float(fee or 0))
+        pos.entry_fee_known = fee_known or fee > 0 or pos.entry_fee_known
         if pending_qty is not None:
             pos.pending_qty = max(0.0, float(pending_qty or 0.0))
         existing = self.position_for_group(pos.control_group_key) if self.per_config_controls(pos) else next(
@@ -6713,10 +6903,12 @@ class Pulse:
             # Seed the parent lane before adding this new entry member, then
             # update its weighted anchor by exactly the confirmed delta.
             self.ensure_strategy_lanes(existing)
-            self.merge_position(existing, pos)
+            self.merge_position(existing, pos, fill_sequence=float(row.get("filled_qty") or delta_qty))
             self.merge_parent_lanes(existing, float(pos.qty or 0), float(pos.entry or 0))
             pos = existing
         else:
+            self._record_independent_core_fill(pos, delta_qty, fill_px, fee, cid, order_id,
+                                               fee_known=fee_known, fill_sequence=float(row.get("filled_qty") or delta_qty))
             self.open[self.position_key(pos)] = pos
         self.owned_syms.add(pos.symbol)
         self.ensure_strategy_lanes(pos)
@@ -6758,6 +6950,17 @@ class Pulse:
             return None
         if not chosen or not self.sets.enabled or not self.sets.progress.ready:
             return reject("qualified reference unavailable")
+        exact_child = bool(getattr(chosen, "indication_config", ""))
+        reference_id = chosen.id
+        if exact_child:
+            if str(getattr(chosen, "kind", "")) != "block":
+                return reject("independent Block evidence unavailable")
+            parent = self.sets.sets.get(str(getattr(chosen, "parent_set_id", "") or ""))
+            if parent is None or not self.sets.execution_allowed(parent, parent.pack, side):
+                return reject("independent parent qualification unavailable")
+            if not self.sets.execution_allowed(chosen, chosen.pack, side):
+                return reject("independent Block qualification unavailable")
+            reference_id = parent.id
         if not self.control_orders or not self.recon_ok or getattr(self, "recon_pending", False):
             return reject("confirmed reconciliation and controls required")
         view = self.sets._side_view(chosen, side)
@@ -6845,7 +7048,8 @@ class Pulse:
             except Exception:
                 specified = 0.25
         min_level = int(getattr(self, "block_active_min_level", 0))
-        for count in sorted(self.block.counts):
+        counts = [int(getattr(chosen, "relative_count", 0) or 0)] if exact_child else sorted(self.block.counts)
+        for count in counts:
             if count < max(1, min_level) or count > getattr(self.block, "max_stack", 6):
                 continue
             allowed, cap, _, _ = self._coord_add_state(count=count, set_id=chosen.id, side=side, execution_lane=execution_lane, strategy="block")
@@ -6854,7 +7058,7 @@ class Pulse:
                 continue
             if (not intern_ok) and pf < formula["blockMinPF"]:
                 continue
-            own = [r for r in rows if r.parent_set_id == chosen.id
+            own = [r for r in rows if r.parent_set_id == reference_id
                    and same_lane(getattr(r, "execution_lane", ""), getattr(r, "strategy", ""))
                    and r.axis_key == f"block-active:{count}" and r.symbol == sym and r.side == side]
             if own and sum(float(r.pnl) for r in own[-25:]) <= 0:
@@ -6863,7 +7067,7 @@ class Pulse:
             if qty <= 0:
                 continue
             decision = {"mode": "block-active", "allowed": True, "reason": "qualified adjusted delta",
-                        "parentSetId": chosen.id, "blockCount": count, "minimumLevel": min_level, "referenceQty": reference_qty,
+                        "parentSetId": reference_id, "childSetId": chosen.id, "blockCount": count, "minimumLevel": min_level, "referenceQty": reference_qty,
                         "volumeIncrement": specified, "ownedQty": owned,
                         "pendingQty": pending, "requestedQty": qty, "normalQtyExecuted": 0}
             self._execution_decision = decision
@@ -6879,6 +7083,19 @@ class Pulse:
                          and bool(getattr(self, "strat_trail", False)))
         block_enabled = (forced_row is None and bool(getattr(self, "block_active", True))
                          and bool(getattr(self, "strat_block", False)) and bool(getattr(getattr(self, "block", None), "enabled", False)))
+        if forced_row is None and getattr(selected_set, "indication_config", ""):
+            exact_kind = str(getattr(selected_set, "kind", "") or "")
+            if exact_kind == "block":
+                return False, False, block_enabled and not str(getattr(selected_set, "axis_key", "") or "").startswith("block-add:")
+            if exact_kind == "axis":
+                return normal_enabled, bool(getattr(selected_set, "trail_key", "") and getattr(self, "strat_trail", False)), False
+            if exact_kind not in ("base", "trail"):
+                # An adjustment/axis without its own executable path stays
+                # calculation-only. It must never become a Normal order.
+                return False, False, False
+            # Independent Block children have their own evidence and identity;
+            # a qualified Normal parent cannot stand in for them.
+            block_enabled = False
         return normal_enabled, trail_enabled, block_enabled
 
     def _entry_modes(self, forced_row, selected_set) -> List[str]:
@@ -6957,6 +7174,35 @@ class Pulse:
         if MAX_OPEN > 0 and not occupied and self.entry_slot_count() >= MAX_OPEN:
             return
         pack = "htf" if htf_row else ("indications" if str(reason).startswith("ind:") else "general")
+        if selected_set is None and forced_row is None and pack == "indications":
+            independent_sets = getattr(self.sets, "indication_entry_sets", None)
+            if self.sets.enabled and callable(independent_sets):
+                ind = self.indications.match(sym, reason)
+                own_sets = independent_sets(str(ind.kind), indication_config_key(ind), side, sym) if ind is not None else []
+                if not own_sets:
+                    return
+                selected_set = own_sets[0]
+        elif selected_set is None and forced_row is None and pack == "general":
+            own_pack = getattr(self.sets, "pack_entry_sets", None)
+            if self.sets.enabled and callable(own_pack):
+                own_sets = own_pack(pack, side, sym)
+                if not own_sets:
+                    return
+                selected_set = own_sets[0]
+        if selected_set is not None and forced_row is None and self.sets.enabled and not getattr(selected_set, "indication_config", ""):
+            own_pack = getattr(self.sets, "pack_entry_sets", None)
+            independent_sets = getattr(self.sets, "indication_entry_sets", None)
+            own_sets = None
+            if pack == "general" and callable(own_pack):
+                own_sets = own_pack(pack, side, sym)
+            elif pack == "indications" and callable(independent_sets):
+                ind = self.indications.match(sym, reason)
+                own_sets = independent_sets(str(ind.kind), indication_config_key(ind), side, sym) if ind is not None else []
+            if own_sets is not None:
+                selected_set = next((state for state in own_sets if state is selected_set
+                                     or str(getattr(state, "template_set_id", "") or "") == str(selected_set.id)), None)
+                if selected_set is None:
+                    return
         lane_set = SimpleNamespace(id=forced_row["id"]) if forced_row is not None else selected_set
         execution_lane = self.execution_lane_key(pack, reason, lane_set, execution_strategy)
         if execution_lane and normal_allowed and any(
@@ -7070,7 +7316,7 @@ class Pulse:
             sl_ratio = chosen.sl_ratio
             set_id = chosen.id
             set_idx = int(getattr(chosen, "idx", -1))
-            if str(getattr(chosen, "kind", "") or "") == "trail" and getattr(chosen, "trail_key", ""):
+            if str(getattr(chosen, "kind", "") or "") in ("trail", "axis", "block") and getattr(chosen, "trail_key", ""):
                 trail_key, trail_arm, trail_give = chosen.trail_key, chosen.trail_arm, chosen.trail_give
                 trail_set_id = chosen.id
                 trail_idx = set_idx
@@ -7102,13 +7348,18 @@ class Pulse:
             ):
                 return
         try:
-            position_ratio = max(0.2, min(3.0, float(getattr(chosen, "volume_ratio", 1.0) or 1.0)))
+            position_ratio = max(0.01, min(3.0, float(getattr(chosen, "volume_ratio", 1.0) or 1.0)))
         except Exception:
             position_ratio = 1.0
         # Set/axis volume ratio is applied once to the entry target. Add-on
         # engines receive this confirmed parent quantity and never compound it.
+        sizing_ratio = position_ratio
+        if getattr(chosen, "kind", "") == "block" and getattr(chosen, "indication_config", ""):
+            reference = self.sets.sets.get(str(getattr(chosen, "parent_set_id", "") or ""))
+            if reference is not None:
+                sizing_ratio = max(.01, min(3.0, float(getattr(reference, "volume_ratio", 1.0) or 1.0)))
         try:
-            qty = self.size_qty(c, px, ratio=position_ratio)
+            qty = self.size_qty(c, px, ratio=sizing_ratio)
         except TypeError:
             # Keep lightweight in-process fakes and older adapters compatible.
             qty = self.size_qty(c, px)
@@ -7282,6 +7533,8 @@ class Pulse:
             "volume_ratio": position_ratio,
             "step": int(getattr(chosen, "step", 0) or 0),
             "ind_kind": ind_kind_hint,
+            "ind_config": str(getattr(chosen, "indication_config", "") or ""),
+            "strategy": "axis" if getattr(chosen, "kind", "") == "axis" else "core",
             "sl_ratio": sl_ratio,
             "sl_pct": sl_pct_a,
             "tp_pct": tp_pct_a,
@@ -7306,6 +7559,8 @@ class Pulse:
             if pre_ind is not None and getattr(pre_ind, "exit_tactic", ""):
                 pending_meta["exit_tactic"] = str(pre_ind.exit_tactic)
                 pending_meta["exit_level"] = float(getattr(pre_ind, "exit_level", 0.0) or 0.0)
+            if pre_ind is not None:
+                pending_meta["ind_config"] = indication_config_key(pre_ind)
         if execution_plan:
             pending_meta.update(axis_key=f"block-active:{execution_plan['blockCount']}",
                                 relative_count=execution_plan["blockCount"],
@@ -7548,6 +7803,7 @@ class Pulse:
         filled = order_fill_qty(data, qty)
         order_id = extract_oid(data)
         entry_fee = row_fee_usdt(data) if isinstance(data, dict) else 0.0
+        pending_meta["entry_fee_known"] = exchange_fee_known(data)
         if entry_fee > 0:
             pending_meta["entry_fee"] = entry_fee
         self._remember_pending(
@@ -7577,7 +7833,7 @@ class Pulse:
             ind = None
         if htf_row:
             ind = None  # 1h lane: no 1m indication exit tactic travels with it
-        elif ind is None and not str(reason).startswith("ind:"):
+        elif ind is None and not str(reason).startswith("ind:") and not getattr(chosen, "indication_config", ""):
             try:
                 ind = self.indications.primary(sym)
             except Exception:
@@ -7632,7 +7888,7 @@ class Pulse:
             execution_lane=execution_lane,
             overall=True, close_position=True, ind_kind=ind_kind,
             set_tp_pct=float(getattr(chosen, "tp_pct", 0.0) or 0.0) if (chosen is not None and forced_row is None) else 0.0,
-            ind_config=str(getattr(ind, "mode", "") or "") if ind is not None else "",
+            ind_config=str(pending_meta.get("ind_config") or (indication_config_key(ind) if ind is not None else "")),
             exit_tactic=str(getattr(ind, "exit_tactic", "") or "") if ind is not None else "",
             exit_level=float(getattr(ind, "exit_level", 0.0) or 0.0) if ind is not None else 0.0,
             micro=bool(micro),
@@ -7640,11 +7896,12 @@ class Pulse:
             axis_key=str(pending_meta["axis_key"]),
             relative_count=int(pending_meta["relative_count"]),
             volume_ratio=float(pending_meta["volume_ratio"]),
-            strategy="block" if execution_plan else "core",
+            strategy="block" if execution_plan else "axis" if getattr(chosen, "kind", "") == "axis" else "core",
             exchange_qty=filled,
             pending_qty=max(0.0, qty - filled),
             last_fill_at=time.time(),
             entry_fee=entry_fee,
+            entry_fee_known=exchange_fee_known(data),
             entry_notional=filled * avg,
         )
         if htf_row:
@@ -7978,7 +8235,7 @@ class Pulse:
             return True
         return False
 
-    def _close_strategy_lanes(self, pos: Position, rec: Closed, pnl: float, pnl_pct: float) -> None:
+    def _close_strategy_lanes(self, pos: Position, rec: Closed, pnl: float, pnl_pct: float, *, learn_adjustments: bool = True) -> None:
         """Reset only the Block/DCA state attached to this logical group."""
         if getattr(pos, "pack", "") == "htf":
             return  # 1h lots carry no Block/DCA lanes and feed none of their rings
@@ -8004,8 +8261,8 @@ class Pulse:
             pnl_pct = float(trip.get("pnl_pct") if trip.get("pnl_pct") is not None else pnl_pct)
             if isinstance(close_rec, dict):
                 close_rec = dict(close_rec, pnl=pnl, pnl_pct=pnl_pct)
-        block_overall = bool(getattr(self, "block_overall", True))
-        dca_overall = bool(getattr(self, "dca_overall", True))
+        block_overall = bool(getattr(self, "block_overall", True)) and not getattr(pos, "ind_config", "")
+        dca_overall = bool(getattr(self, "dca_overall", True)) and not getattr(pos, "ind_config", "")
         parts = set(str(getattr(pos, "strategy", "") or "").split("+"))
         lineage = [str(getattr(pos, "axis_key", "") or ""), *[str(k) for k in (getattr(pos, "lineage_axis_keys", None) or [])]]
         if any(k.startswith("block-active:") for k in lineage):
@@ -8024,7 +8281,8 @@ class Pulse:
             if dca_overall and isinstance(close_rec, dict):
                 close_rec = dict(close_rec, control_group_key="")
             if not (dca_overall and others and "dca" not in parts):
-                self.dca.on_close(close_rec)
+                if learn_adjustments:
+                    self.dca.on_close(close_rec)
                 try:
                     self.dca.drop(pos.symbol, pos.side, group_key=dca_group)
                 except TypeError:
@@ -8040,7 +8298,7 @@ class Pulse:
                 group_key="" if block_overall else group_key,
                 carried_add=(not block_overall) or ("block" in parts) or not others,
                 keep_lane=block_overall and others,
-                record=confirmed,
+                record=confirmed and learn_adjustments,
             )
         except TypeError:
             try:
@@ -8049,6 +8307,89 @@ class Pulse:
                 pass
         except Exception:
             pass
+
+    def _independent_close_records(self, pos: Position, rec: Closed, exit_fee: float, close_cid: str = "", close_oid: str = "", cumulative_qty: float = 0., *, exit_fee_known: bool = False):
+        ledger = self._independent_dca_ledger()
+        if ledger is None or not ledger.has_parent(str(pos.client_id or self.position_key(pos))):
+            return [rec]
+        result = ledger.allocate_close(str(pos.client_id or self.position_key(pos)), rec.qty, rec.exit,
+                                       exit_fee, rec.close_fill_id, t=rec.t,
+                                       reported_net_pnl=rec.pnl if rec.cost_source == "live-exchange" else None,
+                                       metadata={"reason": rec.reason, "position_cost_pct": rec.position_cost_pct,
+                                                 "cost_source": "live-exchange" if exit_fee_known or exit_fee > 0 else rec.cost_source, "close_client_id": close_cid,
+                                                 "close_order_id": close_oid, "cumulative_close_qty": cumulative_qty or rec.qty})
+        if result.get("duplicate"):
+            return None
+        rows = result.get("rows") or []
+        if not rows:
+            return [rec]
+        return [replace(rec, **{key: value for key, value in row.items() if key in Closed.__dataclass_fields__ and key != "roundtrip_result"},
+                        roundtrip_result=dict(row.get("roundtrip_result") or {})) for row in rows]
+
+    def _publish_close_record(self, pos: Position, rec: Closed, *, exchange: bool, close_cid: str, close_oid: str) -> bool:
+        """Publish one conserved internal lot leg, never the physical sum twice."""
+        self.closed.append(rec)
+        runtime = getattr(self, "runtime", None)
+        if runtime:
+            runtime.record_trade(asdict(rec), getattr(self, "start_eq", 0))
+        htf_lot = is_htf_row(pos)
+        if rec.pnl >= 0:
+            self.wins += 1
+            if not htf_lot:
+                self.consec_loss = 0
+        else:
+            self.losses += 1
+            if not htf_lot:
+                self.consec_loss += 1
+        manual_close = str(rec.reason or "").lower().startswith("manual")
+        roundtrip = None
+        try:
+            if exchange and not rec.partial:
+                completed = completed_roundtrips([row for row in self.closed if row.client_id == rec.client_id])
+                roundtrip = completed[-1] if completed else None
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and not manual_close and not htf_lot:
+                self.variants.on_close(roundtrip)
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and rec.member_count == 1 and not htf_lot:
+                self.sets.on_live_close(roundtrip)
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and not manual_close and str(rec.strategy) == "dca":
+                self.dca.on_close(roundtrip)
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and htf_lot and not manual_close:
+                self.htf.on_live_close(roundtrip)
+        except Exception:
+            pass
+        try:
+            if exchange:
+                self._record_config_evidence(rec, close_cid=close_cid, close_oid=close_oid)
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and not manual_close and not htf_lot:
+                self.sets.adapt_from_live(self.live_evidence_rows())
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and not manual_close and not htf_lot:
+                self.exits.on_close(roundtrip)
+        except Exception:
+            pass
+        try:
+            append_bounded_line(TRADES_PATH, json.dumps(asdict(rec)) + "\n")
+            return True
+        except Exception:
+            self.last_error = "Trade journal deferred; independent lot receipt remains durable"
+            return False
 
     def _record_close_fill(
         self,
@@ -8063,6 +8404,7 @@ class Pulse:
         status: str = "",
         cumulative_qty: float = 0.0,
         exit_fee: float = 0.0,
+        exit_fee_known: bool = False,
         skip_eval: Optional[bool] = None,
     ) -> bool:
         """Apply one exchange-confirmed close delta to exactly one position.
@@ -8096,7 +8438,8 @@ class Pulse:
         measured_exit_fee = max(0.0, float(exit_fee or 0.0))
         fee_total = allocated_entry_fee + measured_exit_fee
         close_notional = max(0.0, fill_qty * float(pos.entry or 0.0))
-        measured_roundtrip = allocated_entry_fee > 0 and measured_exit_fee > 0 and close_notional > 0
+        measured_roundtrip = (bool(getattr(pos, "entry_fee_known", False)) or allocated_entry_fee > 0) and (
+            exit_fee_known or measured_exit_fee > 0) and close_notional > 0
         fill_cost = (
             normalize_position_cost_pct(fee_total / close_notional * 100.0, self.position_cost_pct)
             if measured_roundtrip
@@ -8146,6 +8489,14 @@ class Pulse:
             roundtrip_qty=pos.close_started_qty, close_fill_id=close_key,
             block_count=self.position_block_count(pos),
         )
+        accounting_records = self._independent_close_records(pos, rec, measured_exit_fee, close_cid, close_oid, cumulative_qty,
+                                                             exit_fee_known=exit_fee_known) if exchange and not skip else [rec]
+        if accounting_records is None:
+            return False
+        if accounting_records != [rec]:
+            # Each lot may have a distinct measured fee or configured fallback.
+            # Its conserved net sum is authoritative for the physical close.
+            pnl = rec.pnl = sum(row.pnl for row in accounting_records)
         self.record_event(
             "close",
             stable_key(close_key, "closed"),
@@ -8184,70 +8535,13 @@ class Pulse:
             pos.roundtrip_result = accumulate_close(getattr(pos, "roundtrip_result", {}), asdict(rec))
             if final_fill:
                 rec.roundtrip_result = dict(pos.roundtrip_result)
-            self.closed.append(rec)
-            runtime = getattr(self, "runtime", None)
-            if runtime:
-                runtime.record_trade(asdict(rec), getattr(self, "start_eq", 0))
-            # Each confirmed execution leg is a realized financial event and
-            # is therefore counted exactly once. A cumulative close may emit
-            # several legs; the delta/idempotency guard above prevents a
-            # repeated exchange snapshot from counting any leg twice.
-            htf_lot = is_htf_row(pos)
-            if pnl >= 0:
-                self.wins += 1
-                if not htf_lot:
-                    self.consec_loss = 0
-            else:
-                self.losses += 1
-                if not htf_lot:
-                    self.consec_loss += 1
-            # A manual (outside-the-engine) close is account truth, not an
-            # outcome of the engine's own SL/exit/variant decisions.
-            manual_close = str(reason or "").lower().startswith("manual")
-            # Strategy books learn only from live exchange results: one
-            # confirmed, complete round trip per position (legs aggregated).
-            roundtrip = None
-            try:
-                if exchange and final_fill:
-                    completed = completed_roundtrips([row for row in self.closed if row.client_id == rec.client_id])
-                    roundtrip = completed[-1] if completed else None
-            except Exception:
-                roundtrip = None
-            # 1h-lane closes feed only the 1h book; 1m books never see them.
-            try:
-                if roundtrip is not None and not manual_close and not htf_lot:
-                    self.variants.on_close(roundtrip)
-            except Exception:
-                pass
-            try:
-                if roundtrip is not None and rec.member_count == 1 and not htf_lot:
-                    self.sets.on_live_close(roundtrip)
-            except Exception:
-                pass
-            try:
-                if roundtrip is not None and htf_lot and not manual_close:
-                    self.htf.on_live_close(roundtrip)
-            except Exception:
-                pass
-            try:
-                if exchange:
-                    self._record_config_evidence(rec, close_cid=close_cid, close_oid=close_oid)
-            except Exception:
-                pass
-            try:
-                if roundtrip is not None and not manual_close and not htf_lot:
-                    self.sets.adapt_from_live(self.live_evidence_rows())
-            except Exception:
-                pass
-            try:
-                if roundtrip is not None and not manual_close and not htf_lot:
-                    self.exits.on_close(roundtrip)
-            except Exception:
-                pass
-            try:
-                append_bounded_line(TRADES_PATH, json.dumps(asdict(rec)) + "\n")
-            except Exception:
-                pass
+            journal_saved = True
+            for accounting_rec in accounting_records:
+                journal_saved = self._publish_close_record(pos, accounting_rec, exchange=exchange, close_cid=close_cid, close_oid=close_oid) and journal_saved
+            if journal_saved:
+                ledger = getattr(self, "_dca_lot_ledger", None)
+                if ledger is not None:
+                    ledger.ack_close(close_key, parent_key=str(pos.client_id or self.position_key(pos)))
 
         # Decrement only the confirmed exchange delta. Foreign remainder is
         # never folded into this position and is intentionally left untouched.
@@ -8279,7 +8573,8 @@ class Pulse:
             return True
 
         try:
-            self._close_strategy_lanes(pos, rec, pnl, pnl_pct)
+            partitioned = len(accounting_records) != 1 or accounting_records[0] is not rec
+            self._close_strategy_lanes(pos, rec, pnl, pnl_pct, learn_adjustments=not partitioned)
         except Exception:
             pass
         if getattr(pos, "ind_kind", "") in INDICATION_KINDS:
@@ -8496,6 +8791,7 @@ class Pulse:
                 status="confirmed" if filled_qty + 1e-12 >= requested_qty else "partial",
                 cumulative_qty=filled_qty,
                 exit_fee=max(0.0, float(close_result.get("fee") or 0.0)),
+                exit_fee_known=bool(close_result.get("fee_known")),
                 skip_eval=skip_eval,
             )
             if filled_qty + 1e-12 >= requested_qty:
@@ -9004,6 +9300,7 @@ class Pulse:
         return book.seed_live(completed_roundtrips(rows))
 
     def _load_trade_history(self) -> None:
+        self._recover_independent_close_outbox()
         if not os.path.exists(TRADES_PATH):
             return
         try:
@@ -10433,8 +10730,10 @@ class Pulse:
         emitted = 0
         add_budget = 32 if MAX_OPEN <= 0 else max(8, min(32, int(MAX_OPEN or 8)))
         seen_parents = set()
-        overall = bool(getattr(self, "block_overall", True))
+        configured_overall = bool(getattr(self, "block_overall", True))
         for pos in list(self.open.values()):
+            exact_parent = bool(getattr(pos, "ind_config", ""))
+            overall = configured_overall and not exact_parent
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
             if bool(getattr(pos, "micro", False)) or getattr(pos, "pack", "") == "htf":
@@ -10573,9 +10872,15 @@ class Pulse:
                 # up to blockMaxStack counts and the volume cap. Every count
                 # needs its own continuation (n x 0.2%) and passes its own
                 # count gates below.
-                count_n = len(lane.legs) + 1
-                if count_n > max(1, stack_cap):
+                last_count = max((int(leg.get("blockCount") or leg.get("count") or 0)
+                                  if isinstance(leg, dict) else int(getattr(leg, "block_count", 0) or 0)
+                                  for leg in lane.legs), default=0)
+                last_count = max(last_count, len(lane.legs))
+                available_counts = [int(count) for count in sorted(self.block.counts)
+                                    if last_count < int(count) <= max(1, stack_cap)]
+                if not available_counts:
                     continue
+                count_n = available_counts[0]
                 if u < 0.002 * count_n:
                     continue
                 target_ratio = min(1.0, extra_cap, specified * count_n)
@@ -10594,6 +10899,11 @@ class Pulse:
                 if not row:
                     continue
                 count_n = int(row.get("blockCount") or 0)
+            block_child = None
+            if exact_parent:
+                block_child = self.sets.sets.get(f"{pos.set_id}:adjust:block-add:{count_n}")
+                if block_child is None or not self.sets.execution_allowed(block_child, pos.pack, pos.side):
+                    continue
             try:
                 ind_kind = str(getattr(pos, "ind_kind", "") or "")
                 if not self.sets.block_main_live_ok(
@@ -10732,13 +11042,17 @@ class Pulse:
                 group_key=block_group_key,
                 metadata={
                     "parent_client_id": pos.client_id,
-                    "set_id": pos.set_id,
-                    "set_idx": pos.set_idx,
+                    "set_id": block_child.id if block_child is not None else pos.set_id,
+                    "set_idx": block_child.idx if block_child is not None else pos.set_idx,
                     "pack": pos.pack,
-                    "parent_set_id": pos.parent_set_id,
-                    "axis_key": pos.axis_key,
-                    "relative_count": pos.relative_count,
-                    "volume_ratio": pos.volume_ratio,
+                    "parent_set_id": pos.set_id if block_child is not None else pos.parent_set_id,
+                    "axis_key": block_child.axis_key if block_child is not None else pos.axis_key,
+                    "relative_count": block_child.relative_count if block_child is not None else pos.relative_count,
+                    "volume_ratio": block_child.volume_ratio if block_child is not None else pos.volume_ratio,
+                    "adjustment_child_set_id": block_child.id if block_child is not None else "",
+                    "ind_kind": getattr(pos, "ind_kind", ""),
+                    "ind_config": getattr(pos, "ind_config", ""),
+                    "strategy": "block",
                     "block_count": int(row.get("blockCount") or 0),
                     "set_key": str(row.get("setKey") or ""),
                     "block_requested_qty": float(row.get("requestedAddQty") or qty),
@@ -10851,6 +11165,7 @@ class Pulse:
                 order_id=oid,
                 avg_price=avg,
                 group_key=block_group_key,
+                fee_total=row_fee_usdt(data),
             )
             if filled <= 0:
                 self.block_last_emit = time.time()
@@ -10858,7 +11173,7 @@ class Pulse:
                 continue
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
-            self._apply_position_fill(pos, filled, avg, order_id=oid, source="block")
+            self._apply_position_fill(pos, filled, avg, order_id=oid, source="block", fill_cid=cid, fee=row_fee_usdt(data), fee_known=exchange_fee_known(data))
             self.record_event(
                 "exchange_response",
                 stable_key(block_key, "response"),
@@ -10921,13 +11236,17 @@ class Pulse:
             return
         emitted = 0
         add_budget = 32 if MAX_OPEN <= 0 else max(8, min(32, int(MAX_OPEN or 8)))
-        overall = bool(getattr(self, "dca_overall", True))
-        if overall:
+        configured_overall = bool(getattr(self, "dca_overall", True))
+        if configured_overall and not any(getattr(pos, "ind_config", "") for pos in self.open.values()):
             for k in list(self.dca.lanes):
                 if ":group:" in str(k):
                     self.dca.lanes.pop(k, None)
         seen_parents = set()
         for pos in list(self.open.values()):
+            # Shared venue protection does not merge independent internal DCA
+            # evidence or its distance/cooldown state across configuration Sets.
+            exact_parent = bool(getattr(pos, "ind_config", ""))
+            overall = configured_overall and not exact_parent
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
             if bool(getattr(pos, "micro", False)) or getattr(pos, "pack", "") == "htf":
@@ -11016,6 +11335,12 @@ class Pulse:
             row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px, group_key=group_key, evidence=evidence)
             if not row:
                 continue
+            dca_child = None
+            if exact_parent:
+                child_id = f"{pos.set_id}:adjust:dca:{int(row.get('n') or 0)}"
+                dca_child = self.sets.sets.get(child_id)
+                if dca_child is None or not self.sets.execution_allowed(dca_child, pos.pack, pos.side):
+                    continue
             want = min(float(row["qty"]), seed * 2.5)
             room = max(0.0, book_cap - pos.qty * px)
             add_cap = min(max(self.notional_cap(), seed * px) * max(1.0, min(2.5, float(row.get("mult") or 1))), room)
@@ -11045,13 +11370,17 @@ class Pulse:
                 group_key=group_key,
                 metadata={
                     "parent_client_id": pos.client_id,
-                    "set_id": pos.set_id,
-                    "set_idx": pos.set_idx,
+                    "set_id": dca_child.id if dca_child is not None else pos.set_id,
+                    "set_idx": dca_child.idx if dca_child is not None else pos.set_idx,
                     "pack": pos.pack,
-                    "parent_set_id": pos.parent_set_id,
-                    "axis_key": pos.axis_key,
-                    "relative_count": pos.relative_count,
-                    "volume_ratio": pos.volume_ratio,
+                    "parent_set_id": pos.set_id if dca_child is not None else pos.parent_set_id,
+                    "axis_key": dca_child.axis_key if dca_child is not None else pos.axis_key,
+                    "relative_count": dca_child.relative_count if dca_child is not None else pos.relative_count,
+                    "volume_ratio": dca_child.volume_ratio if dca_child is not None else pos.volume_ratio,
+                    "dca_child_set_id": dca_child.id if dca_child is not None else "",
+                    "ind_kind": getattr(pos, "ind_kind", ""),
+                    "ind_config": getattr(pos, "ind_config", ""),
+                    "strategy": "dca",
                     "dca_n": int(row.get("n") or 0),
                     "dca_target_qty": float(row.get("requestedQty") or qty),
                     "dca_distance_pct": float(row.get("distancePct") or 0),
@@ -11138,6 +11467,7 @@ class Pulse:
                 order_id=oid,
                 avg_price=avg,
                 group_key=group_key,
+                fee_total=row_fee_usdt(data),
             )
             if filled <= 0:
                 self.dca_last_emit = time.time()
@@ -11152,7 +11482,7 @@ class Pulse:
                 cid,
                 requested_qty=float(row.get("requestedQty") or qty),
             )
-            self._apply_position_fill(pos, filled, avg, order_id=oid, source="dca")
+            self._apply_position_fill(pos, filled, avg, order_id=oid, source="dca", fill_cid=cid, fee=row_fee_usdt(data), fee_known=exchange_fee_known(data))
             actual_margin = (filled * avg) / max(1, self.leverage_for(c))
             self.available = max(0.0, self.available - actual_margin)
             if filled + 1e-12 >= qty:
@@ -11412,6 +11742,10 @@ class Pulse:
                 len(bars),
                 last_c,
                 last_v,
+                # A full rolling window may have identical OHLCV on two
+                # successive closed minutes. The minute identity still moves
+                # pseudo positions and time exits; value-only caching froze it.
+                int((getattr(self, "bar_min", {}).get(s) or [0])[0]),
                 effective_tfs,
                 str(getattr(b, "level", "normal") or "normal"),
                 bool(s in extra_syms),
@@ -11739,7 +12073,7 @@ class Pulse:
             return False
         tape = completed_roundtrips([c for c in self.closed if c.set_id == row["id"]])
         recent = last_n_cost_pf(tape, int(getattr(self, "overlay", {}).get("baseEvalPosCount") or 30), self.position_cost_pct)
-        if tape and (recent["classicPf"] <= max(FORCED_MIN_PF, self.coord.min_pf) or recent["netAvg"] <= 0):
+        if tape and (not clears_pf(recent["ratio"], max(FORCED_MIN_PF, self.coord.min_pf)) or recent["netAvg"] <= 0):
             return False
         return True
 
@@ -11796,12 +12130,12 @@ class Pulse:
             row = dict(raw)
             tape = [c for c in live if c.get("set_id") == row["id"] and c.get("strategy") == "core"]
             metric = last_n_cost_pf(tape, 50, self.position_cost_pct)
-            stable = len(tape) >= 25 and metric["classicPf"] > FORCED_MIN_PF and metric["netAvg"] > 0
+            stable = len(tape) >= 25 and clears_pf(metric["ratio"], FORCED_MIN_PF) and metric["netAvg"] > 0
             windows = evaluation_windows(tape, self.position_cost_pct)
-            stable = stable and all(w["classicPf"] > 1 and w["netAvg"] > 0 for w in windows.values() if w["available"])
+            stable = stable and all(w["ratio"] > 1 and w["netAvg"] > 0 for w in windows.values() if w["available"])
             measured = bool(tape) and all(c.get("cost_source") == "live-exchange" for c in tape)
             # 25 trades is an observation floor, not a promise or a mainnet switch.
-            row.update(liveN=len(tape), livePf=metric["classicPf"], liveCostRatio=metric["ratio"],
+            row.update(liveN=len(tape), livePf=metric["ratio"], liveCostRatio=metric["ratio"], liveClassicPf=metric["classicPf"],
                        liveStatus="positive-observation" if stable and measured else "collecting-evidence" if tape else "unvalidated",
                        liveEnabled=bool(trial_mode and row.get("source") == "historical-market"),
                        measuredCosts=measured, mainnetReady=False)
@@ -11899,6 +12233,10 @@ class Pulse:
             return contracts.get(token) is not None
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
             def _ind_allow(kind: str, direction: str = "", config: str = "") -> bool:
+                if self.sets.enabled and callable(getattr(self.sets, "indication_entry_sets", None)):
+                    # The grid below evaluates each exact exit Set. A losing
+                    # representative TP range cannot hide a winning sibling.
+                    return True
                 gate = getattr(self.sets, "indication_ok", None)
                 if not (self.sets.enabled and callable(gate)):
                     return True
@@ -12090,7 +12428,7 @@ class Pulse:
                         )
                 else:
                     by_scope[(pack_name, side_name)] = [None]
-        matrix = EntryMatrix(ranked, by_scope, keep_order=True)
+        matrix = self.build_entry_matrix(ranked, by_scope)
         self._entry_candidate_count = len(matrix)
         def _entry_burst() -> int:
             room = self.avail_notional()
@@ -12203,6 +12541,45 @@ class Pulse:
                 key="entry-idle",
             )
             self.skip_log["entry-idle"] = time.time()
+    def build_entry_matrix(self, ranked, by_scope):
+        """Bind each indication range to its own independently scored exit Sets."""
+        independent_sets = getattr(self.sets, "indication_entry_sets", None)
+        own_pack = getattr(self.sets, "pack_entry_sets", None)
+        if not self.sets.enabled or (not callable(independent_sets) and not callable(own_pack)):
+            return EntryMatrix(ranked, by_scope, keep_order=True)
+        scopes = {}
+        for signal in ranked:
+            _, symbol, direction, reason = signal
+            if not str(reason).startswith("ind:"):
+                if callable(own_pack):
+                    side = "LONG" if direction > 0 else "SHORT"
+                    scope = ("general", side, "general", "general_signal", symbol)
+                    scopes[(symbol, direction, reason)] = scope
+                    if scope not in by_scope:
+                        try:
+                            by_scope[scope] = own_pack("general", side, symbol)
+                        except Exception:
+                            by_scope[scope] = []
+                continue
+            side = "LONG" if direction > 0 else "SHORT"
+            try:
+                ind = self.indications.match(symbol, reason)
+            except Exception:
+                ind = None
+            # A vanished exact configuration owns an empty scope. It cannot
+            # fall through to the pack's pooled tape during a warm update.
+            kind = str(getattr(ind, "kind", "") or "")
+            config = indication_config_key(ind) if ind is not None else ""
+            scope = ("indications", side, kind, config, symbol)
+            scopes[(symbol, direction, reason)] = scope
+            if scope not in by_scope:
+                try:
+                    by_scope[scope] = independent_sets(kind, config, side, symbol) if ind is not None else []
+                except Exception:
+                    by_scope[scope] = []
+        return EntryMatrix(ranked, by_scope, keep_order=True,
+                           scope_resolver=lambda signal: scopes.get(tuple(signal[1:]), EntryMatrix.scope(signal)))
+
     def entry_candidate_window(self, ranked):
         """Fair cooperative slice, not a cap on symbols or completed trades.
 
@@ -12999,6 +13376,7 @@ class Pulse:
         previous = max(0.0, _sf(old.get("filled_qty") or old.get("filledQty")))
         previous_fee = max(0.0, _sf(old.get("fee_total") or old.get("feeTotal")))
         observed_fee = max(0.0, row_fee_usdt(order))
+        meta["fee_known"] = exchange_fee_known(order)
         fee_total = max(previous_fee, observed_fee)
         if requested > 0:
             cumulative = min(cumulative, requested)
@@ -13019,6 +13397,47 @@ class Pulse:
             "metadata": meta,
         }
         return row, cumulative, px, oid
+
+    def _sync_add_fill(self, row, delta, price, order_id, cid, kind, fee):
+        metadata = row.get("metadata") or {}
+        parent_cid = str(metadata.get("parent_client_id") or "")
+        exact_child = bool(metadata.get("dca_child_set_id") or metadata.get("adjustment_child_set_id"))
+        # An explicit parent identity wins over a shared protection group.
+        # A neighbor with the same symbol/range never receives this add.
+        pos = self._position_for_client(parent_cid) if parent_cid else self.position_for_group(str(row.get("group_key") or ""))
+        if pos is not None and (pos.symbol != row["symbol"] or pos.side != row["side"]):
+            return None
+        if pos is None and exact_child:
+            # An accepted add can fill after its original parent closed.
+            # Recover that own child as a protected lot with its durable key.
+            return self._upsert_pending_entry(row, delta, price, order_id,
+                                             pending_qty=max(0., row["requested_qty"] - row["filled_qty"]), fee=fee,
+                                             fee_known=bool(metadata.get("fee_known")))
+        if pos is None and not parent_cid:
+            candidates = self.positions_for(row["symbol"], row["side"])
+            pos = candidates[0] if len(candidates) == 1 else None
+        if pos is None:
+            return None
+        self.ensure_strategy_lanes(pos)
+        if kind == "b":
+            lane = self.block.lanes.get(self.block_lane_key(pos))
+            if lane is not None:
+                block_row = {"blockCount": int(_sf(metadata.get("block_count") or metadata.get("blockCount"), 1)),
+                             "setKey": str(metadata.get("set_key") or metadata.get("setKey") or f"{pos.symbol}:{pos.side.lower()}#block"),
+                             "requestedAddQty": max(delta, _sf(metadata.get("block_requested_qty") or metadata.get("requestedAddQty"), row["requested_qty"]))}
+                self.block.record_fill(lane, block_row, delta, cid, order_id)
+        elif kind == "d":
+            lane = self.dca.lanes.get(self.dca_lane_key(pos))
+            step_n = int(_sf(metadata.get("dca_n") or metadata.get("dcaN"), 0))
+            step = next((item for item in (lane.steps if lane is not None else []) if item.n == step_n), None)
+            if lane is not None and step is not None:
+                self.dca.record_fill(lane, step, delta, price, cid,
+                                     requested_qty=max(delta, _sf(metadata.get("dca_target_qty") or metadata.get("dcaTargetQty"), row["requested_qty"])))
+        self._apply_position_fill(pos, delta, price, order_id=order_id,
+                                  pending_qty=max(0., row["requested_qty"] - row["filled_qty"]),
+                                  source="block" if kind == "b" else "dca" if kind == "d" else "entry", fee=fee, fill_cid=cid,
+                                  fee_known=bool(metadata.get("fee_known")), fill_sequence=float(row["filled_qty"]))
+        return pos
 
     def _sync_pending_fill(self, order: Dict[str, Any], cid: str, track: Dict[str, Any], kind: str) -> bool:
         row, cumulative, px, oid = self._pending_row_from_exchange(order, cid, track, kind)
@@ -13069,14 +13488,22 @@ class Pulse:
                 )
                 return False
         if delta > 0 and px > 0:
+            fill_px = px
+            if previous > 0:
+                previous_px = _sf((self.pending_orders.get(cid) or {}).get("avg_price"))
+                if previous_px > 0:
+                    fill_px = (cumulative * px - previous * previous_px) / delta
+                    if not math.isfinite(fill_px) or fill_px <= 0:
+                        return False
             if kind == "o":
                 pos = self._upsert_pending_entry(
                     row,
                     delta,
-                    px,
+                    fill_px,
                     oid,
                     pending_qty=max(0.0, row["requested_qty"] - cumulative),
                     fee=fee_delta,
+                    fee_known=bool(meta.get("fee_known")),
                 )
             elif kind == "c":
                 if pos is None:
@@ -13102,12 +13529,6 @@ class Pulse:
                         metadata={**meta, "observedCumulativeQty": cumulative},
                     )
                     return False
-                fill_px = px
-                if meta.get("confirmed_control_fill") and previous > 0:
-                    previous_px = _sf((self.pending_orders.get(cid) or {}).get("avg_price"))
-                    fill_px = (cumulative * px - previous * previous_px) / delta
-                    if not math.isfinite(fill_px) or fill_px <= 0:
-                        return False
                 applied = self._record_close_fill(
                     pos,
                     delta,
@@ -13119,6 +13540,7 @@ class Pulse:
                     status="confirmed" if row["requested_qty"] > 0 and cumulative + 1e-12 >= row["requested_qty"] else "partial",
                     cumulative_qty=cumulative,
                     exit_fee=fee_delta,
+                    exit_fee_known=bool(meta.get("fee_known")),
                     skip_eval=bool(meta.get("skipEvaluation") or meta.get("skip_eval")),
                 )
                 if not applied:
@@ -13126,52 +13548,7 @@ class Pulse:
                 if row["requested_qty"] > 0:
                     pos.pending_close_qty = max(0.0, row["requested_qty"] - cumulative)
             else:
-                pos = self.position_for_group(str(row.get("group_key") or ""))
-                if pos is None:
-                    pos = self._position_for_client(str(row.get("metadata", {}).get("parent_client_id") or ""))
-                if pos is None:
-                    candidates = self.positions_for(row["symbol"], row["side"])
-                    pos = candidates[0] if len(candidates) == 1 else None
-                if pos is None:
-                    return False
-                self.ensure_strategy_lanes(pos)
-                if kind == "b":
-                    lane = self.block.lanes.get(self.block_lane_key(pos))
-                    if lane is not None:
-                        block_row = {
-                            "blockCount": int(_sf(meta.get("block_count") or meta.get("blockCount"), 1)),
-                            "setKey": str(meta.get("set_key") or meta.get("setKey") or f"{pos.symbol}:{pos.side.lower()}#block"),
-                            "requestedAddQty": max(
-                                delta,
-                                _sf(meta.get("block_requested_qty") or meta.get("requestedAddQty"), row["requested_qty"]),
-                            ),
-                        }
-                        self.block.record_fill(lane, block_row, delta, cid, oid)
-                elif kind == "d":
-                    lane = self.dca.lanes.get(self.dca_lane_key(pos))
-                    step_n = int(_sf(meta.get("dca_n") or meta.get("dcaN"), 0))
-                    step = next((item for item in (lane.steps if lane is not None else []) if item.n == step_n), None)
-                    if lane is not None and step is not None:
-                        self.dca.record_fill(
-                            lane,
-                            step,
-                            delta,
-                            px,
-                            cid,
-                            requested_qty=max(
-                                delta,
-                                _sf(meta.get("dca_target_qty") or meta.get("dcaTargetQty"), row["requested_qty"]),
-                            ),
-                        )
-                self._apply_position_fill(
-                    pos,
-                    delta,
-                    px,
-                    order_id=oid,
-                    pending_qty=max(0.0, row["requested_qty"] - cumulative),
-                    source="block" if kind == "b" else ("dca" if kind == "d" else "entry"),
-                    fee=fee_delta,
-                )
+                pos = self._sync_add_fill(row, delta, fill_px, oid, cid, kind, fee_delta)
             if pos is None:
                 return False
             self.record_event(
@@ -14983,7 +15360,7 @@ class Pulse:
         Trend and Break. Missing flags or a real settings/report mismatch fail.
         """
         types = snapshot.get("types") or {}
-        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
+        kinds = INDICATION_KINDS
         expected = {kind: bool(self.indications.settings.get("type" + kind.title(), True)) for kind in kinds}
         mismatches = [kind for kind in kinds if types.get(kind) is not expected[kind]]
         self.record_test("qa-ind-types", not mismatches, f"types={types} mismatch={mismatches}")
@@ -15117,6 +15494,11 @@ class Pulse:
                 missing.append(symbol)
             elif bars:
                 book.ingest_bars(symbol, bars)
+                # window() returns OHLCV for the contiguous replay run. Its
+                # actual final closed minute must survive that projection so
+                # 5m/15m buckets use exchange UTC boundaries after a late replay.
+                if hasattr(book, "_bar_end_ts"):
+                    book._bar_end_ts[symbol] = int(item.get("watermark") or end) * BAR_S
         return coverage, missing
 
     def _hist_can_publish_partial(
@@ -15995,6 +16377,8 @@ class Pulse:
                     retry.append(symbol)
                     continue
                 book.ingest_bars(symbol, bars)
+                if hasattr(book, "_bar_end_ts"):
+                    book._bar_end_ts[symbol] = input_watermarks[symbol] * BAR_S
             # Short symbols are not re-queued here (that spun every 0.25 s):
             # the next closed bar queues them again with more history.
             names = [symbol for symbol in names if symbol not in retry]

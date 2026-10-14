@@ -723,6 +723,23 @@ def _timed_klines(data: Any) -> List[Tuple[int, List[float]]]:
     return rows
 
 
+class TimedReplayBars(list):
+    """Legacy OHLCV rows with their real candle times carried across workers."""
+    def __init__(self, rows=(), timestamps=()):
+        super().__init__(rows)
+        self.timestamps = tuple(timestamps)
+
+    def __getitem__(self, index):
+        result = super().__getitem__(index)
+        if isinstance(index, slice):
+            return TimedReplayBars(result, self.timestamps[index])
+        return result
+
+    @property
+    def end_timestamp(self) -> float:
+        return float(self.timestamps[-1]) / 1000.0 if self.timestamps else 0.0
+
+
 def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 12.0) -> List[List[float]]:
     """Fetch the full requested 1m window using BingX's 1,440-candle pages."""
     limit = max(60, min(LOOKBACK_MAX, int(limit)))
@@ -752,9 +769,14 @@ def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 12.0) -> List[
         if not got:
             break
         for ts, bar in got:
-            pages[ts] = bar
+            stamp = ts * 1000 if 1_000_000_000 <= ts < 100_000_000_000 else ts
+            # The page endpoint may include its endTime candle, which is
+            # still forming on the final page. Keep closed requested minutes.
+            if start_ms <= stamp < end_ms:
+                pages[stamp] = bar
         cursor = page_end
-    return [bar for _ts, bar in sorted(pages.items())][-limit:]
+    ordered = sorted(pages.items())[-limit:]
+    return TimedReplayBars([bar for _ts, bar in ordered], [ts for ts, _bar in ordered])
 
 
 def fetch_exchange_universe() -> List[str]:
@@ -1900,6 +1922,15 @@ def _worker_book() -> SetBook:
     return book
 
 
+def _install_worker_bars(book: SetBook, symbol: str, bars: Sequence[Sequence[float]]) -> None:
+    """Install one input's timestamp without inheriting an earlier worker job."""
+    book.bars[str(symbol)] = bars
+    book._bar_end_ts.pop(str(symbol), None)
+    stamp = float(getattr(bars, "end_timestamp", 0.0) or 0.0)
+    if stamp > 1_000_000_000:
+        book._bar_end_ts[str(symbol)] = stamp
+
+
 def _prepare_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
     str, int, Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int], Dict[str, Any], float
 ]:
@@ -1907,13 +1938,14 @@ def _prepare_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tup
     sym, bars, now = payload
     book = _worker_book()
     started = time.perf_counter()
-    book.bars[sym] = bars
+    _install_worker_bars(book, sym, bars)
     try:
         prepared = book.prepare_replay_signals(sym, now)
         forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=_HIST_WORKER_CONTROL_N)
         return sym, len(bars), prepared, forced, (time.perf_counter() - started) * 1000.0
     finally:
         book.bars.pop(sym, None)
+        book._bar_end_ts.pop(sym, None)
 
 
 def _replay_tile_worker(payload: Tuple[Any, ...]) -> Tuple[
@@ -1932,7 +1964,7 @@ def _replay_tile_worker(payload: Tuple[Any, ...]) -> Tuple[
         raise ValueError("replay tile payload is incomplete")
     book = _worker_book()
     started = time.perf_counter()
-    book.bars[str(sym)] = bars
+    _install_worker_bars(book, str(sym), bars)
     try:
         ids = [str(sid) for sid in set_ids]
         local_hist: Dict[str, List[Dict[str, Any]]] = {}
@@ -1972,6 +2004,7 @@ def _replay_tile_worker(payload: Tuple[Any, ...]) -> Tuple[
         )
     finally:
         book.bars.pop(str(sym), None)
+        book._bar_end_ts.pop(str(sym), None)
 
 
 def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
@@ -1989,7 +2022,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
     sym, bars, now = payload
     book = _worker_book()
     started = time.perf_counter()
-    book.bars[str(sym)] = bars
+    _install_worker_bars(book, str(sym), bars)
     try:
         local_hist: Dict[str, List[Dict[str, Any]]] = {}
         local_ind: Dict[str, List[Dict[str, Any]]] = {}
@@ -2026,6 +2059,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
         )
     finally:
         book.bars.pop(str(sym), None)
+        book._bar_end_ts.pop(str(sym), None)
 
 
 def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: int = 0) -> Dict[str, Any]:

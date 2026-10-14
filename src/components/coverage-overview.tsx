@@ -6,6 +6,7 @@ import { histTestIsEnabled } from "@/lib/hist-test";
 import { PosOrdersLine } from "@/components/pos-orders";
 import { INDICATION_KINDS, mergeKindTypes } from "@/lib/indication-kinds";
 import { POSITIVE_PF } from "@/lib/config-model";
+import { IndependentCalculations } from "@/components/independent-calculations";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
 const TYPES = INDICATION_KINDS;
@@ -173,6 +174,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         <p className="mt-1 text-warn">ind gap {scan.missingInd.slice(0, 8).join(" · ")}</p>
       ) : null}
       <HistTestStatus histTest={live.histTest} compact />
+      <IndependentCalculations grid={live.sets?.indicationGrid} />
     </div>
   );
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1354,13 +1355,16 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self._tmp, "hist-test.pid")))
 
     def test_cli_resume_with_live_runner_only_clears_the_pause(self):
-        with open(os.path.join(self._tmp, "hist-test.pid"), "w", encoding="utf-8") as handle:
-            handle.write(str(os.getppid()))
-        ht.publish({"phase": "replay", "pct": 60, "running": True})
-        ht.pause_test()
-        spawn = AssertionError("a live runner must not be duplicated")
-        with patch.object(ht, "start_test", side_effect=spawn), patch.object(ht, "run_test", side_effect=spawn):
-            code = ht.main(["--resume"])
+        # The test runner's parent can be PID1 in an isolated worker. Use an
+        # actual separate process: PID1 is deliberately never a historic runner.
+        with subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE) as runner:
+            with open(os.path.join(self._tmp, "hist-test.pid"), "w", encoding="utf-8") as handle:
+                handle.write(str(runner.pid))
+            ht.publish({"phase": "replay", "pct": 60, "running": True})
+            ht.pause_test()
+            spawn = AssertionError("a live runner must not be duplicated")
+            with patch.object(ht, "start_test", side_effect=spawn), patch.object(ht, "run_test", side_effect=spawn):
+                code = ht.main(["--resume"])
         self.assertEqual(code, 0)
         self.assertFalse(ht.pause_requested())
         job = ht.read_job()

@@ -91,8 +91,16 @@ class EntryWindow(unittest.TestCase):
         self.assertEqual(len(kept), len(by_name), 6)
 
     def test_a_ranked_desk_examines_far_more_than_eight_candidates_per_cycle(self):
-        budget = LoadGovernor().observe(
+        # This tests the normal-tier budget, independent of the test host's
+        # concurrent replay work and cgroup pressure.
+        governor = LoadGovernor()
+        governor.cgroup_mb = 8192
+        governor._cgroup_current_override = 128
+        governor._host_avail_override = 8192
+        governor._swap_used_override = 0
+        budget = governor.observe(
             n_sym=50, n_open=10, hot_ms=20.0, warm_ms=20.0, hist_busy=False, kline_ban=False, cycle_overrun=False,
+            rss_mb=128,
         )
         self.assertEqual(budget.level, "normal")
         self.assertEqual(budget.entry_batch, SMALL_BOOK_ENTRY_BATCH["normal"])

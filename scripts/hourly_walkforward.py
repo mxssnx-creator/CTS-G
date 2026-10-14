@@ -73,7 +73,9 @@ def shadow_trades(bars: Dict[str, Dict[str, np.ndarray]], syms: List[str], t0: i
     path = os.path.join(cache_dir, f"shadow-{key}.npz")
     if os.path.exists(path):
         with np.load(path) as z:
-            return {k: z[k] for k in z.files}
+            # The cache key includes the simulated cost; legacy cache files
+            # predate its explicit PF denominator metadata.
+            return {**{k: z[k] for k in z.files}, "cost_pct": np.array(cost * 100.0)}
     jobs = [(s, RP.slice_bars(bars[s], t0, t1), list(pairs), grid, tactics, cost) for s in syms]
     parts = []
     with ProcessPoolExecutor(max_workers=max(1, workers)) as ex:
@@ -83,7 +85,8 @@ def shadow_trades(bars: Dict[str, Dict[str, np.ndarray]], syms: List[str], t0: i
                 parts.append(np.column_stack([np.full(len(res["rows"]), sym_i), res["rows"]]))
     a = np.concatenate(parts) if parts else np.zeros((0, 9))
     out = {"sym": a[:, 0].astype(np.int32), "pair": a[:, 1].astype(np.int32), "cell": a[:, 2].astype(np.int32),
-           "side": a[:, 3].astype(np.int8), "entry_t": a[:, 4], "exit_t": a[:, 5], "r": a[:, 6]}
+           "side": a[:, 3].astype(np.int8), "entry_t": a[:, 4], "exit_t": a[:, 5], "r": a[:, 6],
+           "cost_pct": np.array(cost * 100.0)}
     os.makedirs(cache_dir, exist_ok=True)
     np.savez_compressed(path, **out)
     return out
@@ -133,7 +136,8 @@ def walk(tr: Dict[str, np.ndarray], n_pairs: int, cells: List[AS.Cell], start: i
             m = mp & (tr["cell"] == c)
             if not m.any():
                 continue
-            tape = SL.Tape(tr["entry_t"][m], tr["exit_t"][m], tr["r"][m], tr["side"][m])
+            tape = SL.Tape(tr["entry_t"][m], tr["exit_t"][m], tr["r"][m], tr["side"][m],
+                           tr.get("cost_pct", AS.RT_COST * 100.0))
             tapes[(p, c)] = tape
             b = SL.base_eval(tape, hours, cfg)
             mo = SL.main_eval(tape, hours, cfg, b["ok"])
@@ -173,21 +177,26 @@ JUDGE = {"min_trades": 150, "min_events": 30, "event_pf": 1.10, "pf": 1.15, "str
          "side_trades": 30, "block_share": 2 / 3, "orders_day": 10.0}
 
 
-def judge(entry_t, side, r, days: float, j: Dict = JUDGE) -> Dict:
+def judge(entry_t, side, r, days: float, j: Dict = JUDGE, cost_pct: float = AS.RT_COST * 100.0) -> Dict:
     r = np.asarray(r, dtype=np.float64)
     side = np.asarray(side)
     entry_t = np.asarray(entry_t, dtype=np.float64)
-    s = SL.summarize(r)
-    stress = SL.summarize(r - 0.002)
-    lg, sh = SL.summarize(r[side > 0]), SL.summarize(r[side < 0])
+    valid = np.isfinite(r) & np.isfinite(entry_t)
+    r, side, entry_t = r[valid], side[valid], entry_t[valid]
+    s = SL.summarize(r, cost_pct)
+    stress = SL.summarize(r - 0.002, cost_pct)
+    lg, sh = SL.summarize(r[side > 0], cost_pct), SL.summarize(r[side < 0], cost_pct)
     ev = SL.events(entry_t, side, 4.0)
     if len(r):
         keys = np.stack([side.astype(np.int64), np.floor(entry_t / (4 * H_MS)).astype(np.int64)], axis=1)
         _, inv = np.unique(keys, axis=0, return_inverse=True)
         ev_r = np.bincount(inv.ravel(), weights=r)
-        ev_pf = SL.summarize(ev_r)["pf"]
+        # Each event represents multiple paid round trips. Its cost unit is
+        # their sum, not one trade's cost, so clustering cannot inflate PF.
+        ev_cost = np.bincount(inv.ravel()) * (cost_pct if cost_pct > 0 else 0.10)
+        ev_pf = SL.summarize(ev_r, ev_cost)["pf"]
         wk = np.floor(entry_t / (7 * D_MS)).astype(np.int64)
-        blocks = [SL.summarize(r[wk == w]) for w in np.unique(wk)]
+        blocks = [SL.summarize(r[wk == w], cost_pct) for w in np.unique(wk)]
         blocks = [b for b in blocks if b["n"] >= 5]
         share = sum(b["pf"] >= 1 for b in blocks) / len(blocks) if blocks else 0.0
     else:
@@ -217,23 +226,24 @@ def run_period(name: str, bars, data_dir: str, cfg: SL.StageConfig, pairs: Seque
     hold_max = max(grid["holdH"]) * H_MS
     tr = shadow_trades(bars, syms, start - look, end + hold_max, pairs, grid, tactics, cost, cache_dir, workers)
     cells = AS.grid_cells(grid)
-    w = walk(tr, len(pairs), cells, start, end, cfg, execute)
     if use_funding:
         tr = dict(tr)
         tr["r"] = tr["r"] + funding_for(tr, syms, load_funding(data_dir, syms))
+    # Entry decisions must see the same cost/funding-net closes as reporting.
+    w = walk(tr, len(pairs), cells, start, end, cfg, execute)
     ex = w["stage"] == 4
     days = (end - start) / D_MS
     stage_names = np.array(["", "Base", "Main", "Real", "Live"])
     ins = w["inside"]
-    forward = SL.forward_by_stage(stage_names[w["stage"][ins]], tr["r"][ins])
-    res = judge(tr["entry_t"][ex], tr["side"][ex], tr["r"][ex], days)
+    forward = SL.forward_by_stage(stage_names[w["stage"][ins]], tr["r"][ins], cost * 100.0)
+    res = judge(tr["entry_t"][ex], tr["side"][ex], tr["r"][ex], days, cost_pct=cost * 100.0)
     by_pair = {}
     for pi, pair in enumerate(pairs):
         m = ex & (tr["pair"] == pi)
         if m.any():
-            by_pair[pair] = SL.summarize(tr["r"][m])
+            by_pair[pair] = SL.summarize(tr["r"][m], cost * 100.0)
     res.update(period=name, start=RP.day_of(start), end=RP.day_of(end), symbols=len(syms), days=round(days, 2),
-               forward=forward, byPair=by_pair, shadow=SL.summarize(tr["r"][ins]))
+               forward=forward, byPair=by_pair, shadow=SL.summarize(tr["r"][ins], cost * 100.0))
     return res
 
 
@@ -258,7 +268,7 @@ def static_select(tr, start: int, end: int, n_pairs: int, n_cells: int, pf_min: 
     for p in range(n_pairs):
         cand = []
         for c in range(n_cells):
-            s = SL.summarize(tr["r"][ins & (tr["pair"] == p) & (tr["cell"] == c)])
+            s = SL.summarize(tr["r"][ins & (tr["pair"] == p) & (tr["cell"] == c)], tr.get("cost_pct", AS.RT_COST * 100.0))
             if s["n"] / days >= rate_min and s["pf"] >= pf_min:
                 cand.append((s["pf"], c))
         cand.sort(reverse=True)
@@ -271,8 +281,9 @@ def static_eval(tr, start: int, end: int, sets: Sequence[Tuple[int, int]], pairs
     for p, c in sets:
         keep |= (tr["pair"] == p) & (tr["cell"] == c)
     ex = keep & (tr["entry_t"] >= start) & (tr["entry_t"] < end)
-    res = judge(tr["entry_t"][ex], tr["side"][ex], tr["r"][ex], (end - start) / D_MS)
-    res["bySet"] = {f"{pairs[p]}|{cells[c].id}": SL.summarize(tr["r"][ex & (tr["pair"] == p) & (tr["cell"] == c)]) for p, c in sets}
+    cost_pct = float(tr.get("cost_pct", AS.RT_COST * 100.0))
+    res = judge(tr["entry_t"][ex], tr["side"][ex], tr["r"][ex], (end - start) / D_MS, cost_pct=cost_pct)
+    res["bySet"] = {f"{pairs[p]}|{cells[c].id}": SL.summarize(tr["r"][ex & (tr["pair"] == p) & (tr["cell"] == c)], cost_pct) for p, c in sets}
     return res
 
 

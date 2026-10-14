@@ -154,6 +154,8 @@ class HistoryStore:
 
                 with open(self.path, encoding="utf-8") as handle:
                     payload = json.load(handle)
+                if isinstance(payload, dict) and payload.get("connection") not in (None, "", self.connection):
+                    return
                 symbols = payload.get("symbols") if isinstance(payload, dict) else {}
                 if not isinstance(symbols, dict):
                     return
@@ -484,7 +486,7 @@ class HistoryStore:
 
     def checkpoint(self, values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if values is not None:
-            payload = {"version": 1, "connection": self.connection, "updatedAt": time.time(), **dict(values)}
+            payload = {**dict(values), "version": 1, "connection": self.connection, "updatedAt": time.time()}
             atomic_write(self.checkpoint_path, payload)
             return payload
         try:
@@ -492,7 +494,7 @@ class HistoryStore:
 
             with open(self.checkpoint_path, encoding="utf-8") as handle:
                 value = json.load(handle)
-            return value if isinstance(value, dict) else {}
+            return value if isinstance(value, dict) and value.get("connection") in (None, "", self.connection) else {}
         except (OSError, ValueError, TypeError):
             return {}
 

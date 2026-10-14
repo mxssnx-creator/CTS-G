@@ -1,0 +1,2175 @@
+{
+  "version": 1,
+  "formula": "PF = 1 + 0.10 * (sum(net return percent) / closed count) / roundtrip PositionCost percent",
+  "costPct": 0.2,
+  "evidence": "Historical simulation summaries; returns already include cost and funding. No account cash or live orders.",
+  "limitations": [
+    "Original admission used classic PF; selected trades are unchanged.",
+    "Raw candles and trade caches unavailable in this checkout; corrected admission was not rerun.",
+    "Event PF and weekly admission cannot be reconstructed from headline sums and are omitted."
+  ],
+  "reports": [
+    {
+      "sourceFile": "reports/hourly-wf-2026-10-14/static-all30-pf1.2-per2.json",
+      "selectionPolicy": "original-legacy-admission-unchanged",
+      "periods": {
+        "A": {
+          "start": "2025-10-11 00:00",
+          "end": "2026-09-26 00:00",
+          "metrics": {
+            "n": 21941,
+            "pf": 1.2505502498770158,
+            "netPctSum": 10994.646065103205,
+            "netAvgPct": 0.5011004997540315,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 1.1505502498770157,
+            "long": {
+              "n": 12160,
+              "pf": 1.2631389287196098,
+              "netPctSum": 6399.538746460909,
+              "netAvgPct": 0.5262778574392195,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 9781,
+              "pf": 1.234899668676122,
+              "netPctSum": 4595.107318642296,
+              "netAvgPct": 0.4697993373522438,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {},
+          "bySet": {
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h16": {
+              "n": 372,
+              "pf": 1.217865568709076,
+              "netPctSum": 162.09198311955265,
+              "netAvgPct": 0.4357311374181523,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h24": {
+              "n": 372,
+              "pf": 1.228138935096546,
+              "netPctSum": 169.7353677118302,
+              "netAvgPct": 0.45627787019309196,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr0|h16": {
+              "n": 1219,
+              "pf": 1.199164822418099,
+              "netPctSum": 485.5638370553253,
+              "netAvgPct": 0.3983296448361979,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr4|h24": {
+              "n": 1202,
+              "pf": 1.1977203628179596,
+              "netPctSum": 475.31975221437455,
+              "netAvgPct": 0.3954407256359189,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h24": {
+              "n": 354,
+              "pf": 1.2465714595498922,
+              "netPctSum": 174.57259336132373,
+              "netAvgPct": 0.4931429190997845,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h16": {
+              "n": 355,
+              "pf": 1.213695685921648,
+              "netPctSum": 151.72393700437001,
+              "netAvgPct": 0.42739137184329584,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr4|h16": {
+              "n": 1078,
+              "pf": 1.2428786388872943,
+              "netPctSum": 523.6463454410067,
+              "netAvgPct": 0.48575727777458877,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr0|h16": {
+              "n": 1061,
+              "pf": 1.2703939590458426,
+              "netPctSum": 573.7759810952782,
+              "netAvgPct": 0.5407879180916854,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp5|sl10|tr2.5|h16": {
+              "n": 718,
+              "pf": 1.1874966405850609,
+              "netPctSum": 269.2451758801475,
+              "netAvgPct": 0.3749932811701219,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp8|sl8|tr4|h16": {
+              "n": 695,
+              "pf": 1.224964117638359,
+              "netPctSum": 312.7001235173191,
+              "netAvgPct": 0.44992823527671816,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl16|tr4|h16": {
+              "n": 796,
+              "pf": 1.3036492346552437,
+              "netPctSum": 483.4095815711481,
+              "netAvgPct": 0.6072984693104876,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl8|tr4|h16": {
+              "n": 796,
+              "pf": 1.2820751463643263,
+              "netPctSum": 449.0636330120075,
+              "netAvgPct": 0.5641502927286526,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl8|tr0|h24": {
+              "n": 1074,
+              "pf": 1.295620953968487,
+              "netPctSum": 634.9938091243101,
+              "netAvgPct": 0.5912419079369741,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl16|tr0|h24": {
+              "n": 1074,
+              "pf": 1.288099689550983,
+              "netPctSum": 618.8381331555116,
+              "netAvgPct": 0.5761993791019662,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl16|tr0|h16": {
+              "n": 1514,
+              "pf": 1.2241005324933514,
+              "netPctSum": 678.576412389868,
+              "netAvgPct": 0.44820106498670276,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl8|tr0|h16": {
+              "n": 1515,
+              "pf": 1.2004529374949153,
+              "netPctSum": 607.3724006095931,
+              "netAvgPct": 0.40090587498983044,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl16|tr0|h24": {
+              "n": 1402,
+              "pf": 1.302929808914476,
+              "netPctSum": 849.4151841961913,
+              "netAvgPct": 0.6058596178289524,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl8|tr0|h24": {
+              "n": 1405,
+              "pf": 1.2905879635723585,
+              "netPctSum": 816.5521776383273,
+              "netAvgPct": 0.5811759271447169,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl16|tr0|h16": {
+              "n": 1013,
+              "pf": 1.1964871414918432,
+              "netPctSum": 398.0829486624745,
+              "netAvgPct": 0.3929742829836866,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl8|tr0|h16": {
+              "n": 1013,
+              "pf": 1.1905953823610183,
+              "netPctSum": 386.146244663423,
+              "netAvgPct": 0.3811907647220365,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl16|tr0|h16": {
+              "n": 192,
+              "pf": 1.5446471504066246,
+              "netPctSum": 209.14450575614384,
+              "netAvgPct": 1.0892943008132492,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl8|tr0|h16": {
+              "n": 192,
+              "pf": 1.4804217580269716,
+              "netPctSum": 184.48195508235713,
+              "netAvgPct": 0.9608435160539434,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl16|tr0|h24": {
+              "n": 748,
+              "pf": 1.383022456669362,
+              "netPctSum": 573.0015951773657,
+              "netAvgPct": 0.7660449133387243,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl8|tr0|h24": {
+              "n": 748,
+              "pf": 1.3334059044350441,
+              "netPctSum": 498.77523303482593,
+              "netAvgPct": 0.6668118088700882,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|mfi-14-20@x4|tp8|sl8|tr0|h16": {
+              "n": 1033,
+              "pf": 1.149282262647207,
+              "netPctSum": 308.4171546291296,
+              "netAvgPct": 0.2985645252944139,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "byPair": {},
+          "shadow": null
+        },
+        "B": {
+          "start": "2024-10-11 00:00",
+          "end": "2025-09-26 00:00",
+          "metrics": {
+            "n": 20976,
+            "pf": 1.2472267618721673,
+            "netPctSum": 10371.657114061165,
+            "netAvgPct": 0.4944535237443347,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 1.1472267618721674,
+            "long": {
+              "n": 11730,
+              "pf": 1.2818508990471043,
+              "netPctSum": 6612.222091645063,
+              "netAvgPct": 0.5637017980942083,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 9246,
+              "pf": 1.2033006176950087,
+              "netPctSum": 3759.4350224161017,
+              "netAvgPct": 0.40660123539001747,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {},
+          "bySet": {
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h16": {
+              "n": 315,
+              "pf": 1.4237391798079888,
+              "netPctSum": 266.95568327903294,
+              "netAvgPct": 0.8474783596159776,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h24": {
+              "n": 315,
+              "pf": 1.4807984405249062,
+              "netPctSum": 302.90301753069093,
+              "netAvgPct": 0.9615968810498124,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr0|h16": {
+              "n": 1143,
+              "pf": 1.2645078830869707,
+              "netPctSum": 604.6650207368152,
+              "netAvgPct": 0.5290157661739415,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr4|h24": {
+              "n": 1145,
+              "pf": 1.247196712205591,
+              "netPctSum": 566.0804709508031,
+              "netAvgPct": 0.4943934244111818,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h24": {
+              "n": 297,
+              "pf": 1.5325445030012959,
+              "netPctSum": 316.3314347827697,
+              "netAvgPct": 1.0650890060025915,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h16": {
+              "n": 298,
+              "pf": 1.4866798447071503,
+              "netPctSum": 290.0611874454616,
+              "netAvgPct": 0.9733596894143006,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr4|h16": {
+              "n": 1092,
+              "pf": 1.214199424088623,
+              "netPctSum": 467.8115422095525,
+              "netAvgPct": 0.4283988481772459,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr0|h16": {
+              "n": 1058,
+              "pf": 1.2970388578192946,
+              "netPctSum": 628.5342231456275,
+              "netAvgPct": 0.5940777156385894,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp5|sl10|tr2.5|h16": {
+              "n": 701,
+              "pf": 1.2079822547342185,
+              "netPctSum": 291.5911211373744,
+              "netAvgPct": 0.41596450946843705,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp8|sl8|tr4|h16": {
+              "n": 691,
+              "pf": 1.4123030275038977,
+              "netPctSum": 569.8027840103865,
+              "netAvgPct": 0.8246060550077953,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl16|tr4|h16": {
+              "n": 615,
+              "pf": 1.3043186275864014,
+              "netPctSum": 374.3119119312735,
+              "netAvgPct": 0.6086372551728025,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl8|tr4|h16": {
+              "n": 615,
+              "pf": 1.3798999839230244,
+              "netPctSum": 467.27698022532013,
+              "netAvgPct": 0.759799967846049,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl8|tr0|h24": {
+              "n": 1006,
+              "pf": 1.3843548693645984,
+              "netPctSum": 773.3219971615721,
+              "netAvgPct": 0.7687097387291969,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl16|tr0|h24": {
+              "n": 1005,
+              "pf": 1.236093335343799,
+              "netPctSum": 474.54760404103587,
+              "netAvgPct": 0.4721866706875979,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl16|tr0|h16": {
+              "n": 1606,
+              "pf": 1.1653741993600235,
+              "netPctSum": 531.1819283443953,
+              "netAvgPct": 0.33074839872004685,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl8|tr0|h16": {
+              "n": 1612,
+              "pf": 1.1719274780142261,
+              "netPctSum": 554.2941891178654,
+              "netAvgPct": 0.34385495602845245,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl16|tr0|h24": {
+              "n": 1496,
+              "pf": 1.0889876922324302,
+              "netPctSum": 266.25117515943134,
+              "netAvgPct": 0.17797538446486053,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl8|tr0|h24": {
+              "n": 1496,
+              "pf": 1.1341282891768607,
+              "netPctSum": 401.31184121716694,
+              "netAvgPct": 0.26825657835372124,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl16|tr0|h16": {
+              "n": 872,
+              "pf": 1.4979939800761866,
+              "netPctSum": 868.5015012528695,
+              "netAvgPct": 0.9959879601523732,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl8|tr0|h16": {
+              "n": 872,
+              "pf": 1.4835524747362392,
+              "netPctSum": 843.3155159400011,
+              "netAvgPct": 0.9671049494724783,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl16|tr0|h16": {
+              "n": 130,
+              "pf": 1.7993167000854369,
+              "netPctSum": 207.82234202221352,
+              "netAvgPct": 1.5986334001708733,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl8|tr0|h16": {
+              "n": 130,
+              "pf": 1.759195569487654,
+              "netPctSum": 197.39084806679003,
+              "netAvgPct": 1.518391138975308,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl16|tr0|h24": {
+              "n": 815,
+              "pf": 0.9012525072281792,
+              "netPctSum": -160.958413218068,
+              "netAvgPct": -0.1974949855436417,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl8|tr0|h24": {
+              "n": 815,
+              "pf": 1.1386384383674293,
+              "netPctSum": 225.9806545389096,
+              "netAvgPct": 0.2772768767348584,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|mfi-14-20@x4|tp8|sl8|tr0|h16": {
+              "n": 836,
+              "pf": 1.0253412398515986,
+              "netPctSum": 42.370553031872795,
+              "netAvgPct": 0.05068247970319712,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "byPair": {},
+          "shadow": null
+        },
+        "C": {
+          "start": "2024-06-01 00:00",
+          "end": "2024-09-25 00:00",
+          "metrics": {
+            "n": 7503,
+            "pf": 1.3305181546230382,
+            "netPctSum": 4959.755428273312,
+            "netAvgPct": 0.6610363092460765,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 1.2305181546230382,
+            "long": {
+              "n": 2828,
+              "pf": 1.1840373911346684,
+              "netPctSum": 1040.9154842576847,
+              "netAvgPct": 0.3680747822693369,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 4675,
+              "pf": 1.419127266739639,
+              "netPctSum": 3918.839944015626,
+              "netAvgPct": 0.8382545334792783,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {},
+          "bySet": {
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h16": {
+              "n": 109,
+              "pf": 0.6492738240603684,
+              "netPctSum": -76.45830635483969,
+              "netAvgPct": -0.7014523518792632,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h24": {
+              "n": 109,
+              "pf": 0.7411274137287346,
+              "netPctSum": -56.434223807135865,
+              "netAvgPct": -0.5177451725425308,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr0|h16": {
+              "n": 468,
+              "pf": 1.0459119619787105,
+              "netPctSum": 42.97359641207298,
+              "netAvgPct": 0.0918239239574209,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr4|h24": {
+              "n": 461,
+              "pf": 1.1979453136204923,
+              "netPctSum": 182.50557915809392,
+              "netAvgPct": 0.39589062724098467,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h24": {
+              "n": 126,
+              "pf": 0.8963603497867124,
+              "netPctSum": -26.117191853748462,
+              "netAvgPct": -0.2072793004265751,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h16": {
+              "n": 126,
+              "pf": 0.8965738004827103,
+              "netPctSum": -26.06340227835701,
+              "netAvgPct": -0.20685239903457944,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr4|h16": {
+              "n": 431,
+              "pf": 1.2687894831340412,
+              "netPctSum": 231.69653446154342,
+              "netAvgPct": 0.5375789662680822,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr0|h16": {
+              "n": 426,
+              "pf": 1.1988581694660612,
+              "netPctSum": 169.42716038508416,
+              "netAvgPct": 0.39771633893212244,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp5|sl10|tr2.5|h16": {
+              "n": 188,
+              "pf": 1.0914587093664525,
+              "netPctSum": 34.38847472178615,
+              "netAvgPct": 0.18291741873290507,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp8|sl8|tr4|h16": {
+              "n": 183,
+              "pf": 1.2676919944829406,
+              "netPctSum": 97.97526998075625,
+              "netAvgPct": 0.5353839889658811,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl16|tr4|h16": {
+              "n": 170,
+              "pf": 0.9364504252400521,
+              "netPctSum": -21.606855418382303,
+              "netAvgPct": -0.1270991495198959,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl8|tr4|h16": {
+              "n": 170,
+              "pf": 0.9413793107084694,
+              "netPctSum": -19.931034359120396,
+              "netAvgPct": -0.11724137858306115,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl8|tr0|h24": {
+              "n": 375,
+              "pf": 1.3331024394941884,
+              "netPctSum": 249.82682962064135,
+              "netAvgPct": 0.6662048789883769,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl16|tr0|h24": {
+              "n": 375,
+              "pf": 1.2356882779205178,
+              "netPctSum": 176.76620844038834,
+              "netAvgPct": 0.47137655584103555,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl16|tr0|h16": {
+              "n": 587,
+              "pf": 1.5843222797469976,
+              "netPctSum": 685.9943564229752,
+              "netAvgPct": 1.1686445594939951,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl8|tr0|h16": {
+              "n": 587,
+              "pf": 1.5858262047541132,
+              "netPctSum": 687.7599643813289,
+              "netAvgPct": 1.1716524095082264,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl16|tr0|h24": {
+              "n": 499,
+              "pf": 1.8641262017684248,
+              "netPctSum": 862.3979493648878,
+              "netAvgPct": 1.7282524035368494,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl8|tr0|h24": {
+              "n": 499,
+              "pf": 1.8966558780998575,
+              "netPctSum": 894.8625663436577,
+              "netAvgPct": 1.793311756199715,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl16|tr0|h16": {
+              "n": 301,
+              "pf": 0.896398572249156,
+              "netPctSum": -62.3680595060081,
+              "netAvgPct": -0.20720285550168804,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl8|tr0|h16": {
+              "n": 301,
+              "pf": 0.8912691331082941,
+              "netPctSum": -65.45598186880693,
+              "netAvgPct": -0.21746173378341171,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl16|tr0|h16": {
+              "n": 19,
+              "pf": 0.9717772866940694,
+              "netPctSum": -1.072463105625365,
+              "netAvgPct": -0.05644542661186132,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl8|tr0|h16": {
+              "n": 19,
+              "pf": 0.9551002223614132,
+              "netPctSum": -1.706191550266296,
+              "netAvgPct": -0.08979955527717348,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl16|tr0|h24": {
+              "n": 317,
+              "pf": 1.2547074071883961,
+              "netPctSum": 161.48449615744315,
+              "netAvgPct": 0.5094148143767923,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl8|tr0|h24": {
+              "n": 317,
+              "pf": 1.541804842743836,
+              "netPctSum": 343.504270299592,
+              "netAvgPct": 1.083609685487672,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|mfi-14-20@x4|tp8|sl8|tr0|h16": {
+              "n": 340,
+              "pf": 1.7285380620961028,
+              "netPctSum": 495.4058822253499,
+              "netAvgPct": 1.4570761241922057,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "byPair": {},
+          "shadow": null
+        },
+        "T": {
+          "start": "2026-09-27 00:00",
+          "end": "2026-10-14 14:00",
+          "metrics": {
+            "n": 994,
+            "pf": -0.08759987461655072,
+            "netPctSum": -2162.148550737703,
+            "netAvgPct": -2.1751997492331014,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": -0.1875998746165508,
+            "long": {
+              "n": 286,
+              "pf": 0.003469198662308548,
+              "netPctSum": -570.0156183651595,
+              "netAvgPct": -1.993061602675383,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 708,
+              "pf": -0.12438766410490376,
+              "netPctSum": -1592.1329323725438,
+              "netAvgPct": -2.2487753282098075,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {},
+          "bySet": {
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h16": {
+              "n": 17,
+              "pf": 0.20871838932402065,
+              "netPctSum": -26.903574762983297,
+              "netAvgPct": -1.5825632213519587,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-15|tp5|sl5|tr0|h24": {
+              "n": 17,
+              "pf": 0.5567260026781338,
+              "netPctSum": -15.07131590894345,
+              "netAvgPct": -0.8865479946437324,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr0|h16": {
+              "n": 68,
+              "pf": -0.36875725661615655,
+              "netPctSum": -186.1509868997973,
+              "netAvgPct": -2.737514513232313,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-14-20|tp8|sl8|tr4|h24": {
+              "n": 67,
+              "pf": -0.2471080950668736,
+              "netPctSum": -167.11248473896106,
+              "netAvgPct": -2.494216190133747,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h24": {
+              "n": 16,
+              "pf": -0.03563715502946607,
+              "netPctSum": -33.140388960942914,
+              "netAvgPct": -2.071274310058932,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20|tp5|sl5|tr0|h16": {
+              "n": 16,
+              "pf": -0.28998887380198446,
+              "netPctSum": -41.2796439616635,
+              "netAvgPct": -2.579977747603969,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr4|h16": {
+              "n": 60,
+              "pf": -0.6620228299539612,
+              "netPctSum": -199.44273959447534,
+              "netAvgPct": -3.3240456599079224,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25|tp8|sl8|tr0|h16": {
+              "n": 59,
+              "pf": -0.7119322510356598,
+              "netPctSum": -202.00800562220786,
+              "netAvgPct": -3.4238645020713196,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp5|sl10|tr2.5|h16": {
+              "n": 20,
+              "pf": -0.2773161230018033,
+              "netPctSum": -51.09264492007214,
+              "netAvgPct": -2.554632246003607,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4|tp8|sl8|tr4|h16": {
+              "n": 20,
+              "pf": -0.5624754463226487,
+              "netPctSum": -62.49901785290595,
+              "netAvgPct": -3.1249508926452974,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl16|tr4|h16": {
+              "n": 45,
+              "pf": 0.12909645911276102,
+              "netPctSum": -78.3813186798515,
+              "netAvgPct": -1.741807081774478,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4|tp8|sl8|tr4|h16": {
+              "n": 45,
+              "pf": 0.10298020330019253,
+              "netPctSum": -80.73178170298267,
+              "netAvgPct": -1.794039593399615,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl8|tr0|h24": {
+              "n": 61,
+              "pf": 0.00752888773600513,
+              "netPctSum": -121.08147569620738,
+              "netAvgPct": -1.9849422245279897,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4|tp8|sl16|tr0|h24": {
+              "n": 60,
+              "pf": -0.040653458297540634,
+              "netPctSum": -124.87841499570489,
+              "netAvgPct": -2.0813069165950813,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl16|tr0|h16": {
+              "n": 63,
+              "pf": -0.31034691698460204,
+              "netPctSum": -165.10371154005986,
+              "netAvgPct": -2.620693833969204,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|kelt-20-2.5@x4|tp8|sl8|tr0|h16": {
+              "n": 63,
+              "pf": -0.06579682192019964,
+              "netPctSum": -134.29039956194515,
+              "netAvgPct": -2.1315936438403993,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl16|tr0|h24": {
+              "n": 54,
+              "pf": 0.5787595140173789,
+              "netPctSum": -45.49397248612307,
+              "netAvgPct": -0.8424809719652421,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk-50@x4|tp8|sl8|tr0|h24": {
+              "n": 54,
+              "pf": 0.5453249493793644,
+              "netPctSum": -49.104905467028644,
+              "netAvgPct": -0.9093501012412711,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl16|tr0|h16": {
+              "n": 52,
+              "pf": 0.18967098971594343,
+              "netPctSum": -84.27421706954188,
+              "netAvgPct": -1.620658020568113,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-20-200@x4|tp8|sl8|tr0|h16": {
+              "n": 52,
+              "pf": 0.25971381938348037,
+              "netPctSum": -76.98976278411804,
+              "netAvgPct": -1.4805723612330393,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl16|tr0|h16": {
+              "n": 7,
+              "pf": -0.6474274078193551,
+              "netPctSum": -23.063983709470968,
+              "netAvgPct": -3.29485481563871,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|bb-bounce-20-3@x4|tp8|sl8|tr0|h16": {
+              "n": 7,
+              "pf": -0.8173240433868265,
+              "netPctSum": -25.442536607415573,
+              "netAvgPct": -3.634648086773653,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl16|tr0|h24": {
+              "n": 22,
+              "pf": -0.623371319796117,
+              "netPctSum": -71.42833807102915,
+              "netAvgPct": -3.246742639592234,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|rsi-14-25-75@x4|tp8|sl8|tr0|h24": {
+              "n": 22,
+              "pf": -0.413310095856124,
+              "netPctSum": -62.185644217669456,
+              "netAvgPct": -2.826620191712248,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|mfi-14-20@x4|tp8|sl8|tr0|h16": {
+              "n": 27,
+              "pf": 0.35190213100736245,
+              "netPctSum": -34.99728492560243,
+              "netAvgPct": -1.296195737985275,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "byPair": {},
+          "shadow": null
+        }
+      }
+    },
+    {
+      "sourceFile": "reports/hourly-wf-2026-10-14/walk-robust-r0.json",
+      "selectionPolicy": "original-legacy-admission-unchanged",
+      "periods": {
+        "A1": {
+          "start": "2025-10-11 00:00",
+          "end": "2026-03-28 00:00",
+          "metrics": {
+            "n": 1832,
+            "pf": 0.6318324635815378,
+            "netPctSum": -1348.9658534372459,
+            "netAvgPct": -0.7363350728369246,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 0.5318324635815377,
+            "long": {
+              "n": 562,
+              "pf": 0.6549411915279312,
+              "netPctSum": -387.84610072260534,
+              "netAvgPct": -0.6901176169441376,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 1270,
+              "pf": 0.621606396569039,
+              "netPctSum": -961.1197527146408,
+              "netAvgPct": -0.7567872068619218,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {
+            "Base": {
+              "n": 45336,
+              "pf": 0.706547892236162,
+              "netPctSum": -26607.88951516272,
+              "netAvgPct": -0.586904215527676,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Main": {
+              "n": 41128,
+              "pf": 0.6594009937678134,
+              "netPctSum": -28016.31185663475,
+              "netAvgPct": -0.6811980124643734,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Real": {
+              "n": 2848,
+              "pf": 0.7112716911103607,
+              "netPctSum": -1644.5964474353857,
+              "netAvgPct": -0.5774566177792787,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Live": {
+              "n": 1832,
+              "pf": 0.6318324635815378,
+              "netPctSum": -1348.9658534372459,
+              "netAvgPct": -0.7363350728369246,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "bySet": {},
+          "byPair": {
+            "follow|rsi-mom-14-15": {
+              "n": 55,
+              "pf": 0.7753431232436696,
+              "netPctSum": -24.71225644319634,
+              "netAvgPct": -0.4493137535126607,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20": {
+              "n": 39,
+              "pf": 0.6287344005883564,
+              "netPctSum": -28.958716754108206,
+              "netAvgPct": -0.7425311988232873,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25": {
+              "n": 198,
+              "pf": 1.0501675662456813,
+              "netPctSum": 19.86635623328983,
+              "netAvgPct": 0.10033513249136279,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4": {
+              "n": 107,
+              "pf": 0.718560984925648,
+              "netPctSum": -60.22794922591132,
+              "netAvgPct": -0.5628780301487039,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol-2@x4": {
+              "n": 248,
+              "pf": 0.2171105678484836,
+              "netPctSum": -388.3131583471521,
+              "netAvgPct": -1.5657788643030328,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol@x4": {
+              "n": 286,
+              "pf": 0.607637671279313,
+              "netPctSum": -224.431252028233,
+              "netAvgPct": -0.7847246574413741,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-atr-2@x4": {
+              "n": 163,
+              "pf": 0.3735224801253283,
+              "netPctSum": -204.23167147914296,
+              "netAvgPct": -1.2529550397493434,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|act-burst-2.5@x4": {
+              "n": 192,
+              "pf": 0.579501636779397,
+              "netPctSum": -161.47137147671157,
+              "netAvgPct": -0.840996726441206,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|act-chop@x4": {
+              "n": 16,
+              "pf": 0.039992749830535135,
+              "netPctSum": -30.720232005422876,
+              "netAvgPct": -1.9200145003389297,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4": {
+              "n": 162,
+              "pf": 0.5200644008477511,
+              "netPctSum": -155.49913412532862,
+              "netAvgPct": -0.9598711983044976,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-40-200@x4": {
+              "n": 143,
+              "pf": -0.2583514430966798,
+              "netPctSum": -359.8885127256505,
+              "netAvgPct": -2.51670288619336,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4": {
+              "n": 223,
+              "pf": 1.6045337330500486,
+              "netPctSum": 269.6220449403217,
+              "netAvgPct": 1.2090674661000973,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "shadow": {
+            "n": 143116,
+            "pf": 1.0272616767533347,
+            "netPctSum": 7803.164260460489,
+            "netAvgPct": 0.054523353506669335,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation"
+          }
+        },
+        "A2": {
+          "start": "2026-03-28 00:00",
+          "end": "2026-09-26 00:00",
+          "metrics": {
+            "n": 1841,
+            "pf": 1.191106291890068,
+            "netPctSum": 703.6533667392298,
+            "netAvgPct": 0.3822125837801357,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 1.0911062918900678,
+            "long": {
+              "n": 1391,
+              "pf": 1.315423191406893,
+              "netPctSum": 877.5073184939764,
+              "netAvgPct": 0.630846382813786,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 450,
+              "pf": 0.8068289424947259,
+              "netPctSum": -173.85395175474665,
+              "netAvgPct": -0.3863421150105481,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {
+            "Base": {
+              "n": 40606,
+              "pf": 1.156465828270012,
+              "netPctSum": 12706.902845464223,
+              "netAvgPct": 0.3129316565400242,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Main": {
+              "n": 35996,
+              "pf": 1.1725243560663063,
+              "netPctSum": 12420.373441925527,
+              "netAvgPct": 0.34504871213261273,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Real": {
+              "n": 2530,
+              "pf": 1.0630249204275488,
+              "netPctSum": 318.906097363397,
+              "netAvgPct": 0.12604984085509763,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Live": {
+              "n": 1841,
+              "pf": 1.191106291890068,
+              "netPctSum": 703.6533667392298,
+              "netAvgPct": 0.3822125837801357,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "bySet": {},
+          "byPair": {
+            "follow|rsi-mom-14-15": {
+              "n": 58,
+              "pf": 1.137279027563999,
+              "netPctSum": 15.924367197423878,
+              "netAvgPct": 0.2745580551279979,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20": {
+              "n": 76,
+              "pf": 1.3898845402374693,
+              "netPctSum": 59.26245011609532,
+              "netAvgPct": 0.7797690804749384,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25": {
+              "n": 158,
+              "pf": 1.651298036193071,
+              "netPctSum": 205.81017943701042,
+              "netAvgPct": 1.3025960723861418,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4": {
+              "n": 161,
+              "pf": 1.4938587992524432,
+              "netPctSum": 159.02253335928668,
+              "netAvgPct": 0.9877175985048863,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol-2@x4": {
+              "n": 129,
+              "pf": 1.1300291827759643,
+              "netPctSum": 33.547529156198806,
+              "netAvgPct": 0.26005836555192874,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol@x4": {
+              "n": 165,
+              "pf": 1.273984319374577,
+              "netPctSum": 90.41482539361041,
+              "netAvgPct": 0.547968638749154,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-atr-2@x4": {
+              "n": 198,
+              "pf": 1.1280395459532349,
+              "netPctSum": 50.703660197480986,
+              "netAvgPct": 0.2560790919064696,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|act-burst-2.5@x4": {
+              "n": 276,
+              "pf": 0.99000193535567,
+              "netPctSum": -5.5189316836701305,
+              "netAvgPct": -0.019996129288659893,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4": {
+              "n": 169,
+              "pf": 0.8898189975927002,
+              "netPctSum": -37.24117881366732,
+              "netAvgPct": -0.22036200481459953,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-40-200@x4": {
+              "n": 215,
+              "pf": 1.237005368058924,
+              "netPctSum": 101.9123082653373,
+              "netAvgPct": 0.47401073611784794,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4": {
+              "n": 236,
+              "pf": 1.0631686951570414,
+              "netPctSum": 29.81562411412355,
+              "netAvgPct": 0.12633739031408284,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "shadow": {
+            "n": 145929,
+            "pf": 1.0440624126238092,
+            "netPctSum": 12859.96762355968,
+            "netAvgPct": 0.08812482524761822,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation"
+          }
+        },
+        "B": {
+          "start": "2024-10-11 00:00",
+          "end": "2025-09-26 00:00",
+          "metrics": {
+            "n": 3906,
+            "pf": 0.7547827214946032,
+            "netPctSum": -1915.6373796841592,
+            "netAvgPct": -0.49043455701079347,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 0.6547827214946033,
+            "long": {
+              "n": 2021,
+              "pf": 0.8806103969704775,
+              "netPctSum": -482.57277544533014,
+              "netAvgPct": -0.2387792060590451,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 1885,
+              "pf": 0.6198767628013717,
+              "netPctSum": -1433.064604238829,
+              "netAvgPct": -0.7602464743972567,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {
+            "Base": {
+              "n": 87274,
+              "pf": 0.856261070865701,
+              "netPctSum": -25089.342602533627,
+              "netAvgPct": -0.28747785826859806,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Main": {
+              "n": 79047,
+              "pf": 0.859850892650917,
+              "netPctSum": -22156.732977245934,
+              "netAvgPct": -0.28029821469816607,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Real": {
+              "n": 5421,
+              "pf": 0.8110115808474838,
+              "netPctSum": -2049.0124404515805,
+              "netAvgPct": -0.37797683830503237,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Live": {
+              "n": 3906,
+              "pf": 0.7547827214946032,
+              "netPctSum": -1915.6373796841592,
+              "netAvgPct": -0.49043455701079347,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "bySet": {},
+          "byPair": {
+            "follow|rsi-mom-14-15": {
+              "n": 80,
+              "pf": 0.1978575818038658,
+              "netPctSum": -128.34278691138147,
+              "netAvgPct": -1.6042848363922684,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20": {
+              "n": 77,
+              "pf": 0.4618351057418856,
+              "netPctSum": -82.87739371574962,
+              "netAvgPct": -1.0763297885162288,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25": {
+              "n": 425,
+              "pf": 0.7980036632273114,
+              "netPctSum": -171.69688625678526,
+              "netAvgPct": -0.4039926735453771,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4": {
+              "n": 295,
+              "pf": 1.3778749435946054,
+              "netPctSum": 222.94621672081715,
+              "netAvgPct": 0.7557498871892107,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol-2@x4": {
+              "n": 385,
+              "pf": 0.7909671761584486,
+              "netPctSum": -160.9552743579946,
+              "netAvgPct": -0.41806564768310284,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol@x4": {
+              "n": 671,
+              "pf": 0.8470875068749806,
+              "netPctSum": -205.20856577377612,
+              "netAvgPct": -0.3058249862500389,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-atr-2@x4": {
+              "n": 444,
+              "pf": 0.46151485388610713,
+              "netPctSum": -478.17480974913684,
+              "netAvgPct": -1.0769702922277857,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|act-burst-2.5@x4": {
+              "n": 512,
+              "pf": 0.49695416330058495,
+              "netPctSum": -515.118936780201,
+              "netAvgPct": -1.00609167339883,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|act-chop@x4": {
+              "n": 28,
+              "pf": 0.9301338360699668,
+              "netPctSum": -3.9125051800818564,
+              "netAvgPct": -0.1397323278600663,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4": {
+              "n": 193,
+              "pf": 1.0799016854819992,
+              "netPctSum": 30.842050596051656,
+              "netAvgPct": 0.15980337096399821,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-40-200@x4": {
+              "n": 429,
+              "pf": 1.0283330919834075,
+              "netPctSum": 24.309792921763663,
+              "netAvgPct": 0.05666618396681507,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4": {
+              "n": 367,
+              "pf": 0.3903974370603748,
+              "netPctSum": -447.4482811976849,
+              "netAvgPct": -1.2192051258792505,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "shadow": {
+            "n": 258426,
+            "pf": 1.1680613361271752,
+            "netPctSum": 86862.83770000278,
+            "netAvgPct": 0.3361226722543505,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation"
+          }
+        },
+        "C": {
+          "start": "2024-06-01 00:00",
+          "end": "2024-09-25 00:00",
+          "metrics": {
+            "n": 1270,
+            "pf": 1.0736163786087247,
+            "netPctSum": 186.98560166616062,
+            "netAvgPct": 0.1472327572174493,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 0.9736163786087246,
+            "long": {
+              "n": 391,
+              "pf": 0.9992374769513639,
+              "netPctSum": -0.5962930240334119,
+              "netAvgPct": -0.0015250460972721532,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 879,
+              "pf": 1.1067018741127383,
+              "netPctSum": 187.581894690194,
+              "netAvgPct": 0.21340374822547667,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {
+            "Base": {
+              "n": 27478,
+              "pf": 0.8495049873260446,
+              "netPctSum": -8270.603916509892,
+              "netAvgPct": -0.30099002534791075,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Main": {
+              "n": 25745,
+              "pf": 0.8733698199899429,
+              "netPctSum": -6520.187968717838,
+              "netAvgPct": -0.2532603600201141,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Real": {
+              "n": 1656,
+              "pf": 0.962755868766685,
+              "netPctSum": -123.35256264473946,
+              "netAvgPct": -0.07448826246663011,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Live": {
+              "n": 1270,
+              "pf": 1.0736163786087247,
+              "netPctSum": 186.98560166616062,
+              "netAvgPct": 0.1472327572174493,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "bySet": {},
+          "byPair": {
+            "follow|rsi-mom-14-15": {
+              "n": 14,
+              "pf": -0.06220487908228822,
+              "netPctSum": -29.74173661430407,
+              "netAvgPct": -2.1244097581645764,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20": {
+              "n": 38,
+              "pf": 0.4078731258334689,
+              "netPctSum": -45.00164243665636,
+              "netAvgPct": -1.1842537483330622,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25": {
+              "n": 172,
+              "pf": 1.5799531735108263,
+              "netPctSum": 199.50389168772426,
+              "netAvgPct": 1.1599063470216526,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4": {
+              "n": 84,
+              "pf": 0.5985072195391928,
+              "netPctSum": -67.4507871174156,
+              "netAvgPct": -0.8029855609216143,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol-2@x4": {
+              "n": 154,
+              "pf": 1.6102404416344918,
+              "netPctSum": 187.95405602342342,
+              "netAvgPct": 1.2204808832689833,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol@x4": {
+              "n": 215,
+              "pf": 1.6112064999515634,
+              "netPctSum": 262.8187949791723,
+              "netAvgPct": 1.222412999903127,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-atr-2@x4": {
+              "n": 71,
+              "pf": -0.006290259833774403,
+              "netPctSum": -142.89321689639596,
+              "netAvgPct": -2.012580519667549,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|act-burst-2.5@x4": {
+              "n": 154,
+              "pf": 0.6103648798300012,
+              "netPctSum": -120.00761701235965,
+              "netAvgPct": -0.7792702403399977,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-14-200@x4": {
+              "n": 32,
+              "pf": 0.370680609008867,
+              "netPctSum": -40.27644102343252,
+              "netAvgPct": -1.2586387819822662,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-40-200@x4": {
+              "n": 133,
+              "pf": 0.6704993632310288,
+              "netPctSum": -87.64716938054636,
+              "netAvgPct": -0.6590012735379426,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4": {
+              "n": 203,
+              "pf": 1.1717425356082543,
+              "netPctSum": 69.72746945695118,
+              "netAvgPct": 0.3434850712165083,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "shadow": {
+            "n": 98384,
+            "pf": 1.0566631188779787,
+            "netPctSum": 11149.488575382107,
+            "netAvgPct": 0.11332623775595735,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation"
+          }
+        },
+        "T": {
+          "start": "2026-09-27 00:00",
+          "end": "2026-10-14 14:00",
+          "metrics": {
+            "n": 94,
+            "pf": 0.7566843846077378,
+            "netPctSum": -45.743335693745294,
+            "netAvgPct": -0.4866312307845244,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation",
+            "stressPf": 0.6566843846077378,
+            "long": {
+              "n": 43,
+              "pf": 0.5754858284763791,
+              "netPctSum": -36.50821875103139,
+              "netAvgPct": -0.8490283430472417,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "short": {
+              "n": 51,
+              "pf": 0.9094596378165304,
+              "netPctSum": -9.235116942713905,
+              "netAvgPct": -0.1810807243669393,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "forward": {
+            "Base": {
+              "n": 1856,
+              "pf": 0.3591939636235416,
+              "netPctSum": -2378.6720070294136,
+              "netAvgPct": -1.2816120727529168,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Main": {
+              "n": 1560,
+              "pf": 0.28494737527912195,
+              "netPctSum": -2230.9641891291394,
+              "netAvgPct": -1.430105249441756,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Real": {
+              "n": 130,
+              "pf": 0.6037160024654553,
+              "netPctSum": -103.03383935898162,
+              "netAvgPct": -0.7925679950690894,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "Live": {
+              "n": 94,
+              "pf": 0.7566843846077378,
+              "netPctSum": -45.743335693745294,
+              "netAvgPct": -0.4866312307845244,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "bySet": {},
+          "byPair": {
+            "follow|rsi-mom-14-15": {
+              "n": 1,
+              "pf": 2.073581894901976,
+              "netPctSum": 2.147163789803952,
+              "netAvgPct": 2.147163789803952,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-20": {
+              "n": 2,
+              "pf": -0.8046635830768647,
+              "netPctSum": -7.218654332307459,
+              "netAvgPct": -3.6093271661537294,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|rsi-mom-21-25": {
+              "n": 10,
+              "pf": 0.768358760948107,
+              "netPctSum": -4.63282478103786,
+              "netAvgPct": -0.46328247810378603,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|bb-walk@x4": {
+              "n": 6,
+              "pf": 0.15201454173247264,
+              "netPctSum": -10.175825499210328,
+              "netAvgPct": -1.6959709165350547,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-vol-2@x4": {
+              "n": 8,
+              "pf": 1.1086601100114621,
+              "netPctSum": 1.738561760183393,
+              "netAvgPct": 0.21732022002292412,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "follow|break-atr-2@x4": {
+              "n": 41,
+              "pf": 1.1167289356052532,
+              "netPctSum": 9.571772719630772,
+              "netAvgPct": 0.23345787121050662,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|cci-40-200@x4": {
+              "n": 15,
+              "pf": 0.26449424854336323,
+              "netPctSum": -22.065172543699102,
+              "netAvgPct": -1.4710115029132735,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            },
+            "revert|z-50-2.5@x4": {
+              "n": 11,
+              "pf": 0.313256508767788,
+              "netPctSum": -15.108356807108663,
+              "netAvgPct": -1.373486982464424,
+              "costPct": 0.2,
+              "pfReferenceCostPct": 0.2,
+              "costSubtracted": true,
+              "source": "archived-cost-and-funding-net-simulation"
+            }
+          },
+          "shadow": {
+            "n": 15339,
+            "pf": 0.26001713203986576,
+            "netPctSum": -22701.194423281,
+            "netAvgPct": -1.4799657359202685,
+            "costPct": 0.2,
+            "pfReferenceCostPct": 0.2,
+            "costSubtracted": true,
+            "source": "archived-cost-and-funding-net-simulation"
+          }
+        }
+      }
+    }
+  ]
+}

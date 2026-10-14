@@ -909,6 +909,28 @@ export type LiveStats = {
   };
   sets?: {
     enabled?: boolean;
+    indicationGrid?: {
+      independent?: boolean;
+      complete?: boolean;
+      tile?: number;
+      pfDefinition?: string;
+      qualificationScope?: string;
+      configurations?: Array<{
+        kind: string;
+        config: string;
+        symbol?: string;
+        requested: number;
+        completed: number;
+        requestedBehaviors?: number;
+        completedBehaviors?: number;
+        qualifiedBase: number;
+        qualifiedReal: number;
+        minPf: number;
+        phase: string;
+        elapsedMs?: number;
+        error?: string;
+      }>;
+    };
     ready?: boolean;
     entryPolicy?: string;
     entryPolicyMaxCandidates?: number;

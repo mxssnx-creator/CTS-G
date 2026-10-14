@@ -3326,7 +3326,7 @@ function Card({ title, hint, children }: { title: string; hint?: string; childre
 }
 
 function Grid({ children }: { children: React.ReactNode }) {
-  return <div className="grid gap-3 sm:grid-cols-2">{children}</div>;
+  return <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">{children}</div>;
 }
 
 function KV({ k, v }: { k: string; v: string }) {

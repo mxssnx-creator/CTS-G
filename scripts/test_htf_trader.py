@@ -178,6 +178,15 @@ class HtfDispatchTests(unittest.TestCase):
     def trader(self):
         p = object.__new__(pt.Pulse)
         p.htf = he.HtfBook(he.HtfSettings(enabled=True, max_open=2))
+        # Dispatch fixtures require their own closed symbol/direction tape.
+        # A validated family preset alone cannot qualify a cold live lane.
+        kind = "z-50-2.5@x4"
+        now = time.time()
+        p.htf.hist["X-USDT"] = {kind: [
+            {"r": .01, "t": now - (p.htf.s.min_n - i) * 60,
+             "symbol": "X-USDT", "side": "LONG", "source": "replay"}
+            for i in range(p.htf.s.min_n)
+        ]}
         p._htf_queue = []
         p.halted = False
         p.open = {}
@@ -213,6 +222,13 @@ class HtfDispatchTests(unittest.TestCase):
         p = self.trader()
         p.htf.s.kinds = ("rsi-mom-14-25",)
         p._htf_queue = [self.sig(age=3600), self.sig()]
+        with patch.object(pt, "log"):
+            p.maybe_htf_entries()
+        self.assertEqual(p.placed, [])
+
+    def test_dispatch_cannot_borrow_a_neighbors_or_opposite_sides_evidence(self):
+        p = self.trader()
+        p._htf_queue = [self.sig(sym="Y-USDT"), self.sig(side="SHORT")]
         with patch.object(pt, "log"):
             p.maybe_htf_entries()
         self.assertEqual(p.placed, [])

@@ -22,6 +22,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 import numpy as np
 
 from ao_indications import js_num
+from position_cost import net_return_r, ratio_from_r
 
 RT_COST = 0.002  # 0.1 % per side, round trip (A-O config.ts RT_COST)
 PF_NO_LOSS = 4.0  # PF reported for wins without losses (A-O config.ts)
@@ -88,6 +89,7 @@ class Trade:
     mae: float
     funding: float = 0.0
     meta: Dict = field(default_factory=dict)
+    cost: float = RT_COST
 
     def to_ao_dict(self) -> Dict:
         return {"cfg": self.cfg, "sym": self.sym, "side": self.side, "entryT": self.entry_t, "exitT": self.exit_t,
@@ -131,7 +133,7 @@ def simulate(cfg: str, bars, sig: np.ndarray, cell: Cell, cost: float = RT_COST,
 
     def close(i, ex, reason, exit_t):
         trades.append(Trade(cfg, sym, side, t[entry_i], exit_t, entry, ex, (side * (ex - entry)) / entry - cost,
-                            reason, i - entry_i + 1, mfe, mae))
+                            reason, i - entry_i + 1, mfe, mae, cost=cost))
 
     i = 0
     while i < n:
@@ -265,11 +267,19 @@ def profit_factor(gp: float, gl: float) -> float:
 
 
 def stats_of(trades: Sequence[Trade]) -> Dict[str, float]:
-    """n, PF, net % and win rate, A-O semantics (PF_NO_LOSS for loss-free samples)."""
+    """Net return PF; AO classic profit/loss PF remains an explicit diagnostic.
+
+    ``Trade.r`` already pays its own simulation cost (and funding). Do not
+    subtract it again; normalize each independent result by its cost unit.
+    """
     n = len(trades)
     if not n:
-        return {"n": 0, "pf": 0.0, "net": 0.0, "wr": 0.0, "gp": 0.0, "gl": 0.0}
+        return {"n": 0, "pf": 1.0, "classicPf": 0.0, "net": 0.0, "wr": 0.0, "gp": 0.0, "gl": 0.0,
+                "costSubtracted": True, "sampleAvailable": False}
     gp = sum(t.r for t in trades if t.r > 0)
     gl = -sum(t.r for t in trades if t.r <= 0)
     wins = sum(1 for t in trades if t.r > 0)
-    return {"n": n, "pf": profit_factor(gp, gl), "net": sum(t.r for t in trades) * 100, "wr": wins / n, "gp": gp, "gl": gl}
+    avg_r = sum(net_return_r(t.r, t.cost * 100.0) for t in trades) / n
+    return {"n": n, "pf": ratio_from_r(avg_r), "classicPf": profit_factor(gp, gl),
+            "net": sum(t.r for t in trades) * 100, "wr": wins / n, "gp": gp, "gl": gl,
+            "costSubtracted": True, "sampleAvailable": True}

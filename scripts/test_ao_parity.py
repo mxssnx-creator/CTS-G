@@ -92,7 +92,8 @@ class ParityTests(unittest.TestCase):
                     self.assertEqual(rows, exp, f"{sym} {pair} {cell.id}")
             st = AS.stats_of(AS.simulate_both("x", k.b, AI.pair_signal(AI.PAIRS_VALIDATED[1], k), cells[0])[0])
             self.assertEqual(st["n"], g["stats"]["n"])
-            self.assertAlmostEqual(st["pf"], g["stats"]["pf"], places=12)
+            self.assertAlmostEqual(st["classicPf"], g["stats"]["pf"], places=12)
+            self.assertAlmostEqual(st["pf"], 1 + 0.1 * (st["net"] / st["n"]) / (AS.RT_COST * 100), places=12)
             self.assertAlmostEqual(st["wr"], g["stats"]["wr"], places=12)
             self.assertAlmostEqual(st["net"], g["stats"]["net"], places=9)
 

@@ -278,10 +278,10 @@ export function netPnlPct(pnlPctFraction: number, costPct = POSITION_COST_PCT_DE
   return finite(pnlPctFraction) - costAsFrac(costPct);
 }
 
-export function signedResultR(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
+export function signedResultR(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT, referenceCostPct = POSITION_COST_PCT_DEFAULT): number {
   const cost = Math.max(0, finite(costPct, POSITION_COST_PCT_DEFAULT));
   // A free fill keeps a finite reference unit while subtracting its actual zero cost.
-  return netPnlPct(pnlPctFraction, cost) * 100 / (cost || POSITION_COST_PCT_DEFAULT);
+  return netPnlPct(pnlPctFraction, cost) * 100 / (cost || Math.max(0, finite(referenceCostPct)) || POSITION_COST_PCT_DEFAULT);
 }
 
 export function ratioFromR(signedR: number): number {
@@ -397,6 +397,7 @@ function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: nu
   let references = 0;
   let zeroCostSamples = 0;
   let costSamples = 0;
+  let costTotal = 0;
   let unavailableReturnSamples = 0;
   let gp = 0;
   let gl = 0;
@@ -409,12 +410,14 @@ function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: nu
       continue;
     }
     const actualCost = rowPositionCostPct(row, costPct);
+    costTotal += actualCost;
     const gross = rowGrossReturn(row, actualCost);
-    rs.push(signedResultR(gross, actualCost));
+    const reference = actualCost || normalizeCostPct(costPct) || POSITION_COST_PCT_DEFAULT;
+    rs.push(signedResultR(gross, actualCost, reference));
     const net = netPnlPct(gross, actualCost);
     nets.push(net);
     grosses.push(gross);
-    references += actualCost || POSITION_COST_PCT_DEFAULT;
+    references += reference;
     if (actualCost === 0) zeroCostSamples += 1;
     if (rowHasMeasuredCost(row)) {
       costSamples += 1;
@@ -439,7 +442,7 @@ function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: nu
     avgR: round(avgR),
     ratio: round(ratio),
     classicPf: round(classic),
-    costPct: weightedNotional > 1e-12 ? round(weightedCost / weightedNotional, 8) : normalizeCostPct(costPct),
+    costPct: weightedNotional > 1e-12 ? round(weightedCost / weightedNotional, 8) : count ? round(costTotal / count, 8) : normalizeCostPct(costPct),
     netPct: round(netAvg * 100),
     grossPct: count ? round(grosses.reduce((a, b) => a + b, 0) / count * 100) : 0,
     netAvg: round(netAvg, 6),
@@ -450,7 +453,7 @@ function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: nu
     zeroCostSamples,
     costSamples,
     unavailableReturnSamples,
-    costSource: weightedNotional > 1e-12 ? "live-exchange" : "manual-fallback",
+    costSource: costSamples === count && count ? "live-exchange" : costSamples ? "mixed-cost" : "manual-fallback",
     pass: count >= required && clearsReturnPf(round(ratio), minPf),
   };
 }

@@ -1,0 +1,466 @@
+{
+  "sourceManifest": "/workspace/backups/CTS-G/six-hour-20261014T2308Z/data/manifest.json",
+  "requestedSymbols": 50,
+  "usableSymbols": 48,
+  "preparationStart": 1791976080000,
+  "executionStart": 1791997680000,
+  "endExclusive": 1792019280000,
+  "issues": [],
+  "executionFundingEvents": [
+    {
+      "symbol": "TIA-USDT",
+      "t": 1792008000000,
+      "rate": 4.4e-05,
+      "markPrice": 0.5501
+    },
+    {
+      "symbol": "JUP-USDT",
+      "t": 1792008000000,
+      "rate": 5e-05,
+      "markPrice": 0.3193
+    },
+    {
+      "symbol": "RENDER-USDT",
+      "t": 1792008000000,
+      "rate": 5e-05,
+      "markPrice": 1.915
+    },
+    {
+      "symbol": "TAO-USDT",
+      "t": 1792008000000,
+      "rate": 5e-05,
+      "markPrice": 270.3
+    },
+    {
+      "symbol": "WIF-USDT",
+      "t": 1792008000000,
+      "rate": 5e-05,
+      "markPrice": 0.2011
+    },
+    {
+      "symbol": "IMX-USDT",
+      "t": 1792008000000,
+      "rate": 5e-05,
+      "markPrice": 0.1652
+    },
+    {
+      "symbol": "AXS-USDT",
+      "t": 1792008000000,
+      "rate": 5e-05,
+      "markPrice": 1.0755
+    }
+  ],
+  "symbols": [
+    {
+      "symbol": "BTC-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "ETH-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "SOL-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "XRP-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "BNB-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "DOGE-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "ADA-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "BCH-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "AVAX-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "LINK-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "LTC-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "DOT-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "UNI-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "ATOM-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "NEAR-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "APT-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "ARB-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "SUI-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "INJ-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "TIA-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "AAVE-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "WLD-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "FIL-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "OP-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "TRX-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "XLM-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "ETC-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "JUP-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "RENDER-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "FET-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "TAO-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "SEI-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "WIF-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "1000PEPE-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "LDO-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "STX-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "IMX-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "GRT-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "HBAR-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "ALGO-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "VET-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "EOS-USDT",
+      "usable": false,
+      "warmupOnlyCandles": 0,
+      "preparationCandles": 0,
+      "executionCandles": 0,
+      "errors": [
+        "candles 1791846480000: ValueError: public response code 109418",
+        "candles 1791906480000: ValueError: public response code 109418",
+        "candles 1791966480000: ValueError: public response code 109418",
+        "funding: ValueError: public response code 109418"
+      ]
+    },
+    {
+      "symbol": "THETA-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "AXS-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "SAND-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "MANA-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "CRV-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "MKR-USDT",
+      "usable": false,
+      "warmupOnlyCandles": 0,
+      "preparationCandles": 0,
+      "executionCandles": 0,
+      "errors": [
+        "candles 1791846480000: ValueError: public response code 100410",
+        "candles 1791906480000: ValueError: public response code 109418",
+        "candles 1791966480000: ValueError: public response code 109418",
+        "funding: ValueError: public response code 109418"
+      ]
+    },
+    {
+      "symbol": "SNX-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    },
+    {
+      "symbol": "COMP-USDT",
+      "usable": true,
+      "warmupOnlyCandles": 2160,
+      "preparationCandles": 360,
+      "executionCandles": 360,
+      "errors": []
+    }
+  ],
+  "costSource": "frozen overlay configured PositionCost0.18percent; public quoted taker roundtrip0.10percent is separately available, no measured account fills"
+}
