@@ -55,6 +55,12 @@ def _row_value(row: Any, *keys: str) -> Any:
     return None
 
 
+def row_time_seconds(row: Any) -> float:
+    """Chronological key for tapes containing Unix seconds or milliseconds."""
+    stamp = finite(_row_value(row, "t"))
+    return stamp / 1000.0 if abs(stamp) >= 100_000_000_000 else stamp
+
+
 def row_notional(row: Any) -> float:
     """Return the executed quote notional represented by one row."""
     direct = finite(_row_value(row, "notional", "quoteQty", "quoteQuantity", "cumQuote", "cumQuoteQty"))
@@ -430,12 +436,10 @@ def live_first_window(live: Sequence[Any], replay: Sequence[Any], n: int) -> tup
     slots, so replay never pushes a live result out of the window.
     Returns (window rows in chronological order, "live" | "bootstrap")."""
     n = max(1, int(n))
-    def stamp(r: Any) -> float:
-        return finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0))
-    lv = sorted(list(live), key=stamp)
+    lv = sorted(list(live), key=row_time_seconds)
     if len(lv) >= n:
         return lv[-n:], "live"
-    rp = sorted(list(replay), key=stamp)
+    rp = sorted(list(replay), key=row_time_seconds)
     fill = rp[-(n - len(lv)):] if n > len(lv) else []
     return list(fill) + lv, ("live" if lv and not fill else "bootstrap")
 
@@ -457,7 +461,7 @@ def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
         groups.setdefault(key, []).append(row)
     out = []
     for legs in groups.values():
-        legs.sort(key=lambda row: finite(row.get("t")))
+        legs.sort(key=row_time_seconds)
         if legs[-1].get("partial"):
             continue
         row = dict(legs[-1])
@@ -484,7 +488,7 @@ def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
                    fee_total=sum(finite(leg.get("fee_total")) for leg in legs),
                    position_cost_pct=cost, partial=False, closeLegs=len(legs))
         out.append(row)
-    return sorted(out, key=lambda row: finite(row.get("t")))
+    return sorted(out, key=row_time_seconds)
 
 
 def row_side(row: Any) -> str:
@@ -584,7 +588,7 @@ def last_n_cost_pf(
     else:
         window = sorted(
             list(rows),
-            key=lambda row: finite(_row_value(row, "t")),
+            key=row_time_seconds,
         )[-take:]
     use_simple = _simple_historic_tape(window) if simple is None else bool(simple)
     if use_simple:
@@ -602,8 +606,8 @@ def last_n_cost_pf(
         return {
             "n": float(n),
             "count": float(count),
-            "avgR": round(avg_r, 4),
-            "ratio": round(ratio_from_r(avg_r), 4) if count else RATIO_BASE,
+            "avgR": avg_r,
+            "ratio": ratio_from_r(avg_r) if count else RATIO_BASE,
             "classicPf": round(classic_fast, 4),
             "costPct": cost,
             "netPct": round(net_total / count * 100.0, 4) if count else 0.0,
@@ -659,8 +663,8 @@ def last_n_cost_pf(
     return {
         "n": float(n),
         "count": float(count),
-        "avgR": round(avg_r, 4),
-        "ratio": round(ratio, 4),
+        "avgR": avg_r,
+        "ratio": ratio,
         "classicPf": round(classic, 4),
         "costPct": round(float(effective_cost), 8),
         # Costs can differ per fill: avg(normalized return) × weighted cost
@@ -721,7 +725,7 @@ def evaluation_windows(
     else:
         seq = sorted(
             [row for row in rows if row is not None],
-            key=lambda row: finite(_row_value(row, "t")),
+            key=row_time_seconds,
         )
     out: Dict[str, Dict[str, Any]] = {}
     seen: set[int] = set()
@@ -743,7 +747,7 @@ def evaluation_windows(
             "available": count >= requested,
             "requiredSamples": required,
             "validated": count >= required and is_positive_pf(ratio),
-            "pf": round(ratio, 4),
+            "pf": ratio,
             "classicPf": float(metric.get("classicPf") or 0.0),
             "avgR": float(metric.get("avgR") or 0.0),
             "netAvg": float(metric.get("netAvg") or 0.0),
@@ -801,8 +805,8 @@ def cost_aware_metrics(
             "requiredSamples": required,
             "grossPf": round(gross_pf, 6),
             "netPf": round(net_pf, 6),
-            "grossReturnPf": round(net_return_pf(sum(gross) / sample, cost), 6) if sample else RATIO_BASE,
-            "netReturnPf": round(net_return_pf(sum(net) / sample, cost), 6) if sample else RATIO_BASE,
+            "grossReturnPf": net_return_pf(sum(gross) / sample, cost) if sample else RATIO_BASE,
+            "netReturnPf": net_return_pf(sum(net) / sample, cost) if sample else RATIO_BASE,
             "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
             "netEv": round(sum(net) / sample, 8) if sample else 0.0,
             "ev": round(sum(net) / sample, 8) if sample else 0.0,
@@ -840,8 +844,8 @@ def cost_aware_metrics(
         "requiredSamples": required,
         "grossPf": round(_classic_pf(gross), 6),
         "netPf": round(_classic_pf(net), 6),
-        "grossReturnPf": round(ratio_from_r(gross_return_r / sample), 6) if sample else RATIO_BASE,
-        "netReturnPf": round(ratio_from_r(net_return_units / sample), 6) if sample else RATIO_BASE,
+        "grossReturnPf": ratio_from_r(gross_return_r / sample) if sample else RATIO_BASE,
+        "netReturnPf": ratio_from_r(net_return_units / sample) if sample else RATIO_BASE,
         "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
         "netEv": round(sum(net) / sample, 8) if sample else 0.0,
         "ev": round(sum(net) / sample, 8) if sample else 0.0,

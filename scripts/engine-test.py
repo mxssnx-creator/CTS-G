@@ -2691,15 +2691,13 @@ def grouped_control_test() -> None:
 
 
 def strict_gate_test() -> None:
-    """Strict validation gate: only VALIDATED (last-N samples >=
-    max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00) strategy
-    sets and indication kinds may drive live orders.
+    """Strict validation gate: own sufficient return evidence clears both
+    the configured floor and the strict positive boundary before orders.
 
     Proves end-to-end: entry_sense blocks when nothing is validated, the
     intern_any override no longer reopens closed packs, place() never posts
     an order without a validated + profitable set, place() DOES trade once
-    one exists, the per-kind indication gate cuts proven losers while an
-    unproven kind rides a validated pack, and Block intern PF only lifts off
+    one exists, a cold kind cannot borrow a validated pack, and Block PF lifts off
     the CTS floor for validated + profitable sets.
     """
     import tempfile
@@ -2719,11 +2717,11 @@ def strict_gate_test() -> None:
     def win_rows(strong: bool = False):
         pct = 0.006 if strong else 0.003
         pnl = 0.003 if strong else 0.0015
-        return [{"t": 1000 + i * 60, "pnl": pnl, "pnl_pct": pct, "symbol": "T",
+        return [{"t": 1000 + i * 60, "pnl": pnl, "pnl_pct": pct, "symbol": "AAA-USDT",
                  "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
 
     def loss_rows():
-        return [{"t": 2000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T",
+        return [{"t": 2000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "AAA-USDT",
                  "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
 
     def mk_book(winner: bool = True, strong: bool = False):
@@ -2740,6 +2738,32 @@ def strict_gate_test() -> None:
             for st in b.by_idx:
                 st.hist = win_rows(strong) if st is b.by_idx[0] or st is general else []
                 b._score_one(st)
+        # Published fixtures carry actual separate own-symbol tapes. The
+        # template combined pack remains a diagnostic, never a cold-kind grant.
+        import copy
+        general = next(st for st in b.by_idx if st.pack == "general" and st.kind == "base")
+        general.indication_kind, general.indication_config = "general", "general_signal"
+        general.indication_symbol = "AAA-USDT"
+        own = {}
+        for kind in ("move", "state", "signals"):
+            state = copy.deepcopy(b.by_idx[0])
+            state.id = f"fixture:{kind}:{state.id}"
+            state.idx = len(b.by_idx)
+            state.indication_kind, state.indication_config = kind, "fixture"
+            state.indication_symbol = "AAA-USDT"
+            state.hist = win_rows(strong) if winner else []
+            b.sets[state.id] = state
+            b.by_idx.append(state)
+            own[kind] = state
+            b._score_one(state)
+        b._indication_grid = SimpleNamespace(current=lambda state: b.sets.get(state.id) is state,
+            record_qualification=lambda state: None, snapshot=lambda: {"configurations": [], "complete": False})
+        b.pack_entry_sets = lambda pack, side="LONG", symbol="": [general] if (
+            pack == "general" and side == "LONG" and symbol == "AAA-USDT"
+            and b.execution_allowed(general, pack, side)) else []
+        b.indication_entry_sets = lambda kind, config, side="LONG", symbol="": [own[kind]] if (
+            kind in own and config == "fixture" and side == "LONG" and symbol == "AAA-USDT"
+            and b.execution_allowed(own[kind], "indications", side)) else []
         return b
 
     def mk_trader(book):
@@ -2813,33 +2837,33 @@ def strict_gate_test() -> None:
     p4 = mk_trader(ind_book)
     ind_book.ind_live["move"] = loss_rows()[:12]
     ind_book.ind_live["state"] = win_rows()[:12]
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="move")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="move", mode="fixture")
     rec("strict-ind-loser-kind-cannot-block-own-winner",
         p4.entry_sense("AAA-USDT", 1, "ind:move:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
         "own Set remains qualified despite representative move loss")
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state", mode="fixture")
     rec("strict-ind-winner-kind-runs",
         p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
         "state kind runs")
-    # unproven kind rides the validated indications pack
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common")
-    rec("strict-ind-unproven-rides-pack",
-        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") is None,
-        "common kind unproven but pack validated")
+    # A cold kind cannot borrow the combined or neighbouring type's evidence.
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common", mode="fixture")
+    rec("strict-ind-unproven-cannot-borrow-pack",
+        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") == "set-gate",
+        "common has no own evidence despite a qualified combined pack")
     # Signals keep running when State is the proven loser
     ind_book.ind_live["state"] = loss_rows()[:12]
     ind_book.ind_live["signals"] = win_rows()[:12]
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state", mode="fixture")
     rec("strict-ind-state-loser-cannot-block-own-winner",
         p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
         "own Set remains qualified despite representative state loss")
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="signals")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="signals", mode="fixture")
     rec("strict-ind-signals-runs",
         p4.entry_sense("AAA-USDT", 1, "ind:signals:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
         "signals kind runs while state is gated")
     # restore state as winner for the pack-closed follow-up
     ind_book.ind_live["state"] = win_rows()[:12]
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common", mode="fixture")
     # ...but not when the indications pack itself has no validated winner
     ind_book.by_idx[0].hist = []
     ind_book._score_one(ind_book.by_idx[0])

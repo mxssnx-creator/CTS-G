@@ -8,11 +8,98 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server/pulse"))
 import dca_lot_ledger as module
 from dca_lot_ledger import DcaLotLedger
-from position_cost import completed_roundtrips, row_net_pnl
+from position_cost import accumulate_close, completed_roundtrips, row_net_pnl
 from dca_engine import DcaBook
 
 
 class DcaLotTests(unittest.TestCase):
+    def test_entry_lots_returns_only_active_original_cid_and_independent_copies(self):
+        ledger = DcaLotLedger("x02")
+        ledger.register_fill("p", "b", "b", "A", "LONG", 1, 100, .05, "one", client_id="cid")
+        ledger.register_fill("other", "b", "b", "A", "LONG", 1, 100, .05, "two", client_id="other-cid")
+        lots = ledger.entry_lots("cid")
+        self.assertEqual(len(lots), 1)
+        lots[0]["entry"] = 1
+        self.assertEqual(ledger.entry_lots("cid")[0]["entry"], 100)
+        closed = ledger.allocate_close("p", 1, 101, .05, "close")
+        ledger.ack_close(closed["outbox_id"])
+        self.assertEqual(ledger.entry_lots("cid"), [])
+        ledger.register_fill("p", "b", "b", "A", "LONG", 1, 99, .05, "three", client_id="cid", reactivate=True)
+        self.assertEqual(ledger.entry_lots("cid")[0]["entry_client_id"], "cid")
+
+    def test_delta_order_fee_and_price_refine_without_inventing_fill_quantity(self):
+        ledger = DcaLotLedger("x02")
+        for seq in (1, 2):
+            ledger.register_fill("p", "b", "c", "A", "LONG", 1, 100, 0, f"f{seq}",
+                                 order_id="order", client_id="cid", metadata=dict(cost_source="manual-fallback", position_cost_pct=.18))
+        result = ledger.refine_order("p", 2, 99, .099, order_id="order", client_id="cid",
+                                     metadata=dict(cost_source="live-exchange"))
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(ledger.parent_qty("p"), 2)
+        self.assertAlmostEqual(result["feeDelta"], .099)
+        self.assertAlmostEqual(result["notionalDelta"], -2)
+        self.assertTrue(ledger.refine_order("p", 2, 99, .099, order_id="order", client_id="cid",
+                                           metadata=dict(cost_source="live-exchange"))["duplicate"])
+        row = ledger.allocate_close("p", 2, 100, .1, "done", metadata=dict(cost_source="live-exchange"))["rows"][0]
+        self.assertAlmostEqual(row["pnl"], 2-.099-.1)
+        self.assertEqual(row["cost_source"], "live-exchange")
+
+    def test_refinement_after_partial_close_is_rejected_without_mutating_history(self):
+        ledger = self.seed()
+        ledger.allocate_close("parent", .5, 100, .025, "partial", t=3)
+        before = ledger._state()
+        with self.assertRaises(ValueError):
+            ledger.refine_order("parent", 1, 101, .06, client_id=before["lots"][next(iter(before["lots"]))]["entry_client_id"])
+        self.assertEqual(ledger._state(), before)
+
+    def test_measured_free_fee_refinement_keeps_configured_pf_reference(self):
+        ledger = DcaLotLedger("x02")
+        ledger.register_fill("p", "b", "b", "A", "LONG", 1, 100, 0, "fill", client_id="cid",
+                             metadata=dict(position_cost_pct=.2, cost_source="manual-fallback"))
+        ledger.refine_order("p", 1, 100, 0, client_id="cid", metadata=dict(cost_source="live-exchange"))
+        result = ledger.allocate_close("p", 1, 100.2, 0, "close", metadata=dict(cost_source="live-exchange"))
+        self.assertEqual(result["rows"][0]["position_cost_pct"], 0)
+        self.assertAlmostEqual(result["netPnl"], .2)
+
+    def test_partial_before_first_add_remains_one_complete_baseline_roundtrip(self):
+        prior_leg = dict(client_id="parent", set_id="base", symbol="BTC-USDT", side="LONG", conn="x02",
+                         qty=.4, entry=100., exit=105., pnl=1.96, pnl_pct=.05, partial=True,
+                         exchange_confirmed=True, entry_fee=.02, exit_fee=.02, fee_total=.04,
+                         position_cost_pct=.1, cost_source="live-exchange")
+        prior = accumulate_close({}, prior_leg)
+        ledger = DcaLotLedger("x02")
+        baseline = ledger.register_fill("parent", "base", "base", "BTC-USDT", "LONG", .6, 100., .03,
+                                        "baseline", strategy="core", client_id="parent", t=1,
+                                        prior_roundtrip_result=prior)["lot"]
+        self.assertEqual(ledger.parent_qty("parent"), .6)
+        self.assertEqual(baseline["remaining_entry_fee"], .03)
+        self.assertAlmostEqual(baseline["opened_qty"], 1.)
+        ledger.register_fill("parent", "base", "child", "BTC-USDT", "LONG", .6, 90., .027,
+                             "child", strategy="dca", client_id="child", t=2)
+        closing = ledger.allocate_close("parent", 1.2, 110., .066, "done", t=3)
+        base = closing["baseRows"][0]
+        self.assertAlmostEqual(base["qty"], .6)
+        self.assertAlmostEqual(base["roundtrip_result"]["qty"], 1.)
+        self.assertAlmostEqual(base["roundtrip_result"]["pnl"], 1.96+6-.03-.033)
+        self.assertAlmostEqual(base["roundtrip_result"]["entry_fee"], .05)
+        self.assertAlmostEqual(base["roundtrip_result"]["fee_total"], .04+.03+.033)
+        self.assertEqual(len(completed_roundtrips(closing["rows"])), 2)
+        wrong = dict(prior, client_id="foreign")
+        with self.assertRaises(ValueError):
+            DcaLotLedger("x02").register_fill("parent", "base", "base", "BTC-USDT", "LONG", .6, 100., .03,
+                                             "baseline", client_id="parent", prior_roundtrip_result=wrong)
+
+    def test_invalid_reactivation_preserves_retired_inventory_truth(self):
+        ledger = self.seed()
+        closed = ledger.allocate_close("parent", 2, 100, .1, "full", t=3)
+        ledger.ack_close(closed["outbox_id"])
+        before = ledger._state()
+        with self.assertRaises(ValueError):
+            ledger.register_fill("parent", "base", "base", "BTC-USDT", "LONG", 0, 100, .01,
+                                 "invalid-new-fill", strategy="core", reactivate=True, t=4)
+        self.assertEqual(ledger._state(), before)
+        self.assertTrue(ledger.tracked_parent_state("parent")["retired"])
+
     def seed(self, ledger=None):
         ledger = ledger or DcaLotLedger("x02")
         ledger.register_fill("parent", "base", "base", "BTC-USDT", "LONG", 1, 100, .05,

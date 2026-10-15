@@ -542,7 +542,7 @@ def _rolling_ratio(cs: np.ndarray, idx: np.ndarray, gstart: np.ndarray, n: int) 
     hi = np.where(ok, idx + 1, 0)
     lo = np.where(ok, idx + 1 - n, 0)
     mean = (cs[hi] - cs[lo]) / n
-    return np.round(1.0 + 0.1 * mean, 4), ok
+    return 1.0 + 0.1 * mean, ok
 
 
 def clears_vec(v: np.ndarray, floor: float) -> np.ndarray:
@@ -619,7 +619,7 @@ class Evidence:
         hi = np.where(ok, idx + 1, 0)
         lo = np.where(ok, idx + 1 - take, 0)
         mean = (self.cs[hi] - self.cs[lo]) / np.where(ok, take, 1)
-        return np.round(1.0 + 0.1 * mean, 4), ok
+        return 1.0 + 0.1 * mean, ok
 
     def all_losses(self, idx, gstart, n):
         """The last ``n`` closes are all cost-net losses (coord_engine pause)."""

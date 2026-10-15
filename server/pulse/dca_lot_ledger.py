@@ -16,7 +16,8 @@ import time
 from typing import Any
 
 from contracts import normalize_direction, stable_key
-from position_cost import POSITION_COST_PCT_DEFAULT, normalize_position_cost_pct
+from position_cost import (POSITION_COST_PCT_DEFAULT, normalize_position_cost_pct,
+                           row_notional, row_pnl_pct, row_position_cost_pct)
 from storage_paths import atomic_write
 
 EPS = 1e-10
@@ -141,11 +142,62 @@ class DcaLotLedger:
             return dict(connection=self.connection, lots=lots,
                         qty=sum(lot["remaining_qty"] for lot in lots), persistent=bool(self.path))
 
+    def entry_lots(self, client_id: str) -> list[dict]:
+        """Only matching active original-entry lots, without copying the book."""
+        client_id = str(client_id)
+        with self.lock:
+            return [deepcopy(lot) for lot in self.lots.values()
+                    if lot["remaining_qty"] > EPS
+                    and lot.get("entry_client_id", lot["client_id"]) == client_id]
+
+    def refine_order(self, parent_key: str, cumulative_qty: float, price: float, fee: float, *,
+                     order_id: str = "", client_id: str = "", metadata: dict | None = None) -> dict:
+        """Apply a measured cumulative price/fee refinement before any close.
+
+        Runtime delta registrations also retain their cumulative quote basis,
+        so a later venue fee need not create another entry fill. Corrections
+        after a partial close require a separate cash reconciliation and are
+        deliberately rejected here rather than rewriting published history.
+        """
+        parent_key = str(parent_key)
+        if not parent_key or not (order_id or client_id):
+            raise ValueError("Order refinement requires parent and order identity")
+        qty = _number(cumulative_qty, "cumulative quantity", positive=True)
+        price, fee = _number(price, "price", positive=True), _number(fee, "fee")
+        meta = dict(metadata or {})
+        with self.lock:
+            matching = [lot for lot in self.lots.values() if lot["parent_key"] == parent_key
+                        and (not order_id or lot["order_id"] == str(order_id))
+                        and (not client_id or lot.get("entry_client_id", lot["client_id"]) == str(client_id))]
+            if len(matching) != 1:
+                raise ValueError("Order refinement requires one unambiguous own lot")
+            lot = matching[0]
+            if lot["closed_qty"] > EPS or abs(lot["opened_qty"]-qty) > max(EPS, qty*1e-8):
+                raise ValueError("Closed or unmatched order refinement requires cash reconciliation")
+            delta_fee = fee-lot["entry_fee"]
+            if delta_fee < -EPS:
+                raise ValueError("Cumulative fee regressed")
+            delta_notional = qty*price-lot["notional"]
+            known = not _manual_cost(meta)
+            if (abs(delta_fee) <= EPS and abs(delta_notional) <= EPS
+                    and known == lot["entry_fee_known"] and all(lot["metadata"].get(key) == value for key,value in meta.items())):
+                return dict(duplicate=True, qty=0., feeDelta=0., notionalDelta=0., lot=deepcopy(lot))
+            previous = self._state()
+            lot.update(entry=price, notional=qty*price, entry_fee=fee,
+                       remaining_entry_fee=fee, entry_fee_known=known)
+            lot["metadata"].update(meta)
+            for order in self.orders.values():
+                if order["lot_id"] == lot["lot_id"]:
+                    order.update(qty=qty, fee=fee, notional=qty*price)
+            self._commit(previous)
+            return dict(duplicate=False, qty=0., feeDelta=delta_fee,
+                        notionalDelta=delta_notional, lot=deepcopy(lot))
+
     def register_fill(self, parent_key: str, parent_set_id: str, child_set_id: str, symbol: str, side: str,
                       qty: float, price: float, fee: float = 0, fill_id: str = "", *, order_id: str = "",
                       client_id: str = "", strategy: str = "dca", t: float | None = None,
                       cumulative: bool = False, metadata: dict | None = None,
-                      reactivate: bool = False) -> dict:
+                      reactivate: bool = False, prior_roundtrip_result: dict | None = None) -> dict:
         """Record a unique confirmed delta, or cumulative order qty/avg/fee.
 
         For cumulative updates the incremental cost basis is the change in
@@ -159,6 +211,24 @@ class DcaLotLedger:
         qty, price, fee = _number(qty, "quantity"), _number(price, "price", positive=True), _number(fee, "fee")
         stamp = _number(time.time() if t is None else t, "timestamp")
         meta = dict(metadata or {})
+        prior = dict(prior_roundtrip_result or {})
+        if prior:
+            if (cumulative or reactivate or str(child_set_id) != str(parent_set_id)
+                    or not prior.get("exchange_confirmed") or not prior.get("partial")
+                    or str(prior.get("client_id") or "") != str(client_id)
+                    or str(prior.get("set_id") or "") != child_set_id
+                    or str(prior.get("symbol") or "") != str(symbol)
+                    or normalize_direction(prior.get("side")) != direction):
+                raise ValueError("Prior partial close must belong to the confirmed baseline position")
+            prior_qty = _number(prior.get("qty", 0), "prior closed quantity", positive=True)
+            prior_notional = _number(row_notional(prior), "prior closed notional", positive=True)
+            prior_entry_fee = _number(prior.get("entry_fee", 0), "prior entry fee")
+            prior_cost = prior_notional * row_position_cost_pct(prior) / 100.0
+            prior_gross = prior_notional * row_pnl_pct(prior)
+            if not math.isfinite(float(prior.get("pnl", math.nan))):
+                raise ValueError("Prior partial close has invalid net PnL")
+            prior.update(notional=prior_notional, grossPnl=prior_gross, cost_usdt=prior_cost,
+                         estimated_cost_usdt=prior.get("estimated_cost_usdt", prior_cost if _manual_cost(prior) else 0.0))
         if not cumulative and not fill_id:
             raise ValueError("Confirmed delta requires unique fill_id")
         event_key = stable_key(self.connection, parent_key, fill_id) if fill_id else ""
@@ -185,11 +255,15 @@ class DcaLotLedger:
                 raise ValueError("Cumulative fee regressed")
             if delta <= EPS and abs(delta_fee) <= EPS and abs(delta_notional) <= EPS:
                 return dict(duplicate=True, qty=0.0, lot_id=lot_id)
+            if retired and (delta <= EPS or delta_notional <= 0):
+                raise ValueError("Reactivation requires positive confirmed fill quantity")
             previous = self._state()
             if retired:
                 self.retired.pop(parent_key, None)
                 self.epochs[parent_key] = epoch
             lot = self.lots.get(lot_id)
+            if prior and (lot is not None or any(row["parent_key"] == parent_key for row in self.lots.values())):
+                raise ValueError("Prior partial accumulator is valid only on initial baseline seed")
             if delta <= EPS:
                 if not lot or lot["closed_qty"] > EPS:
                     raise ValueError("Late fee-only correction requires exchange cash reconciliation")
@@ -214,6 +288,10 @@ class DcaLotLedger:
                         order_id=str(order_id), opened_at=stamp, opened_qty=0.0, remaining_qty=0.0,
                         closed_qty=0.0, notional=0.0, entry=0.0, entry_fee=0.0,
                         remaining_entry_fee=0.0, metadata=meta, entry_fee_known=not _manual_cost(meta))
+                    if prior:
+                        lot.update(opened_qty=prior_qty, closed_qty=prior_qty,
+                                   notional=prior_notional, roundtrip_result=prior,
+                                   entry_fee=prior_entry_fee)
                 elif lot["symbol"] != symbol or lot["side"] != direction or lot["parent_set_id"] != str(parent_set_id):
                     raise ValueError("DCA lot identity changed")
                 remaining_notional = lot["entry"] * lot["remaining_qty"] + delta_notional

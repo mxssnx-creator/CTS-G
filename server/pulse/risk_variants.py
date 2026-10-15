@@ -11,7 +11,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, snap_ratio, SL_TP_RATIOS, SL_TP_STEP, SL_TP_MIN, SL_TP_MAX, sl_tp_grid
+from position_cost import (last_n_cost_pf, snap_ratio, SL_TP_RATIOS, SL_TP_STEP,
+    SL_TP_MIN, SL_TP_MAX, sl_tp_grid, POSITION_COST_PCT_DEFAULT,
+    normalize_position_cost_pct, row_net_pnl, row_has_return, finite)
 
 TRAIL_VARIANTS = ("0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5")
 TRAIL_ARM_MIN = 0.3
@@ -118,7 +120,9 @@ class LaneScore:
     n: int = 0
     wins: int = 0
     pf: float = 0.0
-    ratio: float = 1.0
+    ratio: float = 0.0
+    classic_pf: float = 0.0
+    cash_expectancy: float = 0.0
     expectancy: float = 0.0
     avg_hold: float = 0.0
     selected: bool = False
@@ -157,10 +161,15 @@ class VariantBook:
     trail_scores: List[LaneScore] = field(default_factory=list)
     last_sl_pick: str = "default"
     last_trail_pick: str = "default"
+    cost_pct: float = POSITION_COST_PCT_DEFAULT
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
+        raw_cost = ov.get("positionCostPct")
+        if raw_cost is None:
+            raw_cost = cts.get("positionCostPct", self.cost_pct)
+        self.cost_pct = normalize_position_cost_pct(raw_cost, self.cost_pct)
         has_range = any(k in ov for k in ("slToTpMin", "slToTpMax", "slToTpStep"))
         raw_ratios = ov.get("slToTpRatios")
         if has_range or not (isinstance(raw_ratios, (list, tuple)) and raw_ratios):
@@ -222,26 +231,37 @@ class VariantBook:
         return self.trail_arm / 100.0, self.trail_give / 100.0
 
     def on_close(self, rec: Any) -> None:
-        if isinstance(rec, dict):
-            pnl = float(rec.get("pnl") or 0)
-            pnl_pct = float(rec.get("pnl_pct") or 0)
-            hold = float(rec.get("hold_s") or 0)
-            sl_r = float(rec.get("sl_ratio") or rec.get("slRatio") or self.sl_ratio)
-            t_key = str(rec.get("trail_key") or rec.get("trailKey") or self.trail_key)
-        else:
-            pnl = float(getattr(rec, "pnl", 0) or 0)
-            pnl_pct = float(getattr(rec, "pnl_pct", 0) or 0)
-            hold = float(getattr(rec, "hold_s", 0) or 0)
-            sl_r = float(getattr(rec, "sl_ratio", 0) or self.sl_ratio)
-            t_key = str(getattr(rec, "trail_key", "") or self.trail_key)
-        sl_key = f"{snap_ratio(sl_r):.1f}"
-        row = {"pnl": pnl, "pnl_pct": pnl_pct, "hold_s": hold}
-        self.sl_rows.setdefault(sl_key, []).append(row)
-        self.sl_rows[sl_key] = self.sl_rows[sl_key][-40:]
-        self.trail_rows.setdefault(t_key, []).append(row)
-        self.trail_rows[t_key] = self.trail_rows[t_key][-40:]
-        self.sl_closes += 1
-        self.trail_closes += 1
+        get = rec.get if hasattr(rec, "get") else lambda key, default=None: getattr(rec, key, default)
+        if get("partial") or get("exchange_confirmed") is False or get("ours") is False:
+            return
+        raw_ratio = get("sl_ratio")
+        if raw_ratio is None:
+            raw_ratio = get("slRatio")
+        sl_r = finite(raw_ratio, 0.)
+        sl_key = f"{snap_ratio(sl_r):.1f}" if SL_TP_MIN-1e-9 <= sl_r <= SL_TP_MAX+1e-9 else ""
+        t_key = str(get("trail_key") or get("trailKey") or "").strip()
+        if not sl_key and not t_key:
+            return
+        # Keep the actual executed basis and measured cost aliases. Missing
+        # ROI stays missing; coercing it to zero created cost-only losses.
+        keys = ("pnl", "pnl_pct", "hold_s", "t", "qty", "entry", "notional",
+            "position_cost_pct", "positionCostPct", "cost_pct", "costPct", "cost_source", "costSource",
+            "entry_fee", "entryFee", "exit_fee", "exitFee", "fee_total", "feeTotal", "fee",
+            "feeRate", "fee_rate", "fee_scope", "feeScope", "openFee", "openCommission",
+            "closeFee", "closeCommission", "totalFee", "totalCommission", "transactionFee",
+            "realizedFee", "commission", "commissionRate", "makerFeeRate", "takerFeeRate")
+        row = {key: value for key in keys if (value := get(key)) is not None}
+        row["hold_s"] = finite(row.get("hold_s"))
+        if sl_key:
+            self.sl_rows.setdefault(sl_key, []).append(row)
+            self.sl_rows[sl_key] = self.sl_rows[sl_key][-40:]
+        if t_key:
+            # A Normal close with no executed trailing configuration is not
+            # evidence for whichever trailing key happens to be selected now.
+            self.trail_rows.setdefault(t_key, []).append(row)
+            self.trail_rows[t_key] = self.trail_rows[t_key][-40:]
+        self.sl_closes += int(bool(sl_key))
+        self.trail_closes += int(bool(t_key))
         self.maybe_recalc()
 
     def maybe_recalc(self, force: bool = False) -> None:
@@ -265,21 +285,27 @@ class VariantBook:
         self.trail_closes = 0
         self.maybe_recalc(force=True)
 
-    def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: float = 0.15) -> LaneScore:
-        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
-        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] < 0))
-        pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
-        wins = sum(1 for r in rows if r["pnl"] > 0)
-        exp = (sum(r["pnl"] for r in rows) / len(rows)) if rows else 0.0
+    def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: Optional[float] = None) -> LaneScore:
+        cost_pct = self.cost_pct if cost_pct is None else cost_pct
+        cash = [finite(r.get("pnl")) for r in rows if r.get("pnl") is not None]
+        gp = sum(value for value in cash if value > 0)
+        gl = abs(sum(value for value in cash if value < 0))
+        classic = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+        valid = [r for r in rows if row_has_return(r)]
+        wins = sum(row_net_pnl(r, cost_pct) > 0 for r in valid)
         hold = (sum(r.get("hold_s", 0) for r in rows) / len(rows)) if rows else 0.0
-        cost = last_n_cost_pf(list(rows), max(len(rows), 1), cost_pct) if rows else {"ratio": 1.0}
+        cost = last_n_cost_pf(list(rows), max(len(rows), 1), cost_pct)
+        count = int(cost["count"])
+        pf = float(cost["ratio"]) if count else 0.
         return LaneScore(
             key="",
-            n=len(rows),
+            n=count,
             wins=wins,
-            pf=round(pf, 3),
-            ratio=float(cost.get("ratio") or 1.0),
-            expectancy=round(exp, 5),
+            pf=pf,
+            ratio=pf,
+            classic_pf=round(classic, 3),
+            cash_expectancy=round(sum(cash)/len(cash), 5) if cash else 0.,
+            expectancy=float(cost["netAvg"]),
             avg_hold=round(hold, 1),
         )
 
@@ -366,7 +392,14 @@ class VariantBook:
                     "wins": s.wins,
                     "pf": s.pf,
                     "ratio": round(s.ratio, 3),
+                    "classicPf": s.classic_pf,
+                    "classicCashPf": s.classic_pf,
+                    "pfDefinition": "return/cost",
+                    "classicPfDefinition": "cash-win-loss",
+                    "available": s.n > 0,
                     "expectancy": s.expectancy,
+                    "netAvgPct": s.expectancy*100.,
+                    "cashExpectancy": s.cash_expectancy,
                     "avgHold": s.avg_hold,
                     "selected": s.selected,
                     "inRange": s.in_range,

@@ -1572,8 +1572,8 @@ function SettingsPage() {
                 />
               </div>
               <p className="text-sm text-muted">
-                Ratio = 1 + avg( (move% − cost%) / cost% ) × 0.10. Gate uses this scale, not classic
-                gross-profit / gross-loss. Classic PF still shows on Results.
+                Return PF = 1 + avg(cost-net return / PositionCost reference) × 0.10.
+                This scale is used for qualification and the PF headlines on Results. A measured zero cost keeps a finite reference unit.
               </p>
             </Card>
             <ForcedConfigsPanel live={stats?.forcedConfigs} />

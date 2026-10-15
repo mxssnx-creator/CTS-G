@@ -2043,11 +2043,20 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         st = load_stats(lane["id"])
     gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) > 0)
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) < 0))
-    pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
+    classic_cash_pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
     sets = st.get("sets") or {}
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
+    policy = overall_pf_policy([st])
+    reference = _report_number(pc.get("pfReferenceCostPct"), policy["costPct"])
+    def close_time(row):
+        stamp = _report_number(row.get("t"))
+        return stamp / 1000 if stamp > 1e11 else stamp
+    own_closed = sorted((row for row in (st.get("closed") or [])
+                         if _report_row_in_scope(row, st)), key=close_time)
+    return_metric = last_n_cost_pf(own_closed, max(1, policy["n"]), reference, ordered=True)
+    pf = float(return_metric["ratio"]) if return_metric["count"] else None
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{lane['id']}")) or os.path.exists(STOP_ALL_PATH)
     paused = bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}"))
     state = unit_state(lane["id"])
@@ -2140,7 +2149,9 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "systemPnl": st.get("systemPnl") or st.get("sessionPnl") or 0,
         "systemGrow": st.get("systemGrow") or 0,
         "systemLoss": st.get("systemLoss") or 0,
-        "pf": round(pf, 3),
+        "pf": round(pf, 6) if pf is not None else None,
+        "classicCashPf": round(classic_cash_pf, 6),
+        "pfSampleCount": return_metric["count"],
         "scanMs": st.get("scanMs"),
         "rssMb": st.get("rssMb"),
         "errors": st.get("errors") or 0,
@@ -2168,7 +2179,7 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "progressError": prog.get("error") or "",
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
-        "pfCost": pc.get("ratio"),
+        "pfCost": round(pf, 6) if pf is not None else None,
         "controlsOk": cov.get("ok") or 0,
         "controlsMissing": cov.get("missing") or 0,
         "controlPairsOk": cov.get("protectedPairs") if cov.get("protectedPairs") is not None else cov.get("ok") or 0,

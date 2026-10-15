@@ -102,8 +102,8 @@ test("return PF uses measured costs per fill and actual mean returns", () => {
     { t: 2, pnl: 3.7, pnl_pct: 0.004, qty: 10, entry: 100, fee_total: 0.3, cost_source: "live-exchange" },
     { t: 1, pnl: 0.15, pnl_pct: 0.003, notional: 100, position_cost_pct: 0.15, cost_source: "live-exchange" },
   ], 2);
-  assert.equal(metric.avgR, 6.6667);
-  assert.equal(metric.ratio, 1.6667);
+  assert.ok(Math.abs(metric.avgR - 20 / 3) < 1e-12);
+  assert.ok(Math.abs(metric.ratio - 5 / 3) < 1e-12);
   assert.equal(metric.netAvg, 0.0026);
   assert.equal(metric.netPct, 0.26);
   assert.equal(metric.grossPct, 0.35);
@@ -124,7 +124,7 @@ test("cost aliases preserve measured precedence and round-trip fee scope", () =>
 
 test("legacy net cash PnL reconstructs return without a second cost deduction", () => {
   const metric = lastNCostPf([{ t: 1, pnl: 1, qty: 100, entry: 1 }], 1, 0.15);
-  assert.equal(metric.ratio, 1.6667);
+  assert.ok(Math.abs(metric.ratio - 5 / 3) < 1e-12);
   assert.equal(metric.netAvg, 0.01);
   assert.equal(metric.netPct, 1);
   assert.equal(metric.grossPct, 1.15);
@@ -140,7 +140,14 @@ test("return PF passes only nonempty evidence satisfying its configured sample f
   assert.equal(clearsReturnPf(1.02, 1.02), false);
   assert.equal(clearsReturnPf(1.0201, 1.02), true);
   assert.equal(clearsReturnPf(1.1, 1.15), false);
-  assert.equal(lastNCostPf([{ t: 1, pnl: 0, pnl_pct: 0.0012000001 }], 1, 0.1, 1.02).pass, false);
+  assert.equal(lastNCostPf([{ t: 1, pnl: 0, pnl_pct: 0.0012 }], 1, 0.1, 1.02).pass, false);
+  assert.equal(lastNCostPf([{ t: 1, pnl: 0, pnl_pct: 0.0012000001 }], 1, 0.1, 1.02).pass, true);
+});
+
+test("qualification keeps exact PF below the configured floor", () => {
+  const metric = lastNCostPf([{ t: 1, pnl: 0, pnl_pct: .0019996 }], 1, .1, 1.1);
+  assert.ok(Math.abs(metric.ratio - 1.09996) < 1e-12);
+  assert.equal(metric.pass, false);
 });
 
 test("overview follows configured last-N policy and preserves measured zero cost", () => {

@@ -758,7 +758,7 @@ export type LiveStats = {
     systemPnl?: number;
     systemGrow?: number;
     systemLoss?: number;
-    pf: number;
+    pf: number | null;
     scanMs?: number;
     rssMb?: number;
     errors: number;
@@ -782,7 +782,7 @@ export type LiveStats = {
     progressError?: string;
     klinesReady?: number;
     hotMs?: number;
-    pfCost?: number;
+    pfCost?: number | null;
     controlsOk?: number;
     controlsMissing?: number;
   controlsSecurity?: number;

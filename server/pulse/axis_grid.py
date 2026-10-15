@@ -8,6 +8,147 @@ Identical entry masks share one price replay, never a parent's PF or tape.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence as SequenceABC
+
+
+class AxisStates(list):
+    """List-compatible children; capture-mode open marks stay outside PF."""
+    def __init__(self):
+        super().__init__()
+        self.open = []
+
+
+def _axis_metadata(row, child):
+    row = dict(row)
+    row.update(set_id=child.id, parent_set_id=child.parent_set_id, strategy="axis",
+               axis_key=child.axis_key, relative_count=child.relative_count,
+               volume_ratio=child.volume_ratio, ind_kind=child.indication_kind,
+               ind_config=child.indication_config)
+    return row
+
+
+class AxisTape(SequenceABC):
+    """Shared immutable execution rows with each child's independent identity."""
+    __slots__ = ("rows", "state")
+
+    def __init__(self, rows, state):
+        self.rows, self.state = rows, state
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return _axis_metadata(self.rows[index], self.state)
+
+    def __eq__(self, other):
+        return isinstance(other, SequenceABC) and len(self) == len(other) and all(a == b for a, b in zip(self, other))
+
+
+def _gate_masks(book, rows, variants, lane, warmup, base_ts, direction):
+    """Closed-only prefix arithmetic; never recompute 29 rolling row windows."""
+    from set_engine import BAR_S, _np
+    from position_cost import clears_pf, ratio_from_r, signed_result_r
+    np = _np
+    n, k = len(lane), len(rows)
+    times = np.asarray([float(r["t"]) for r in rows])
+    values = np.asarray([signed_result_r(float(r.get("pnl_pct") or 0), book.cost_pct) for r in rows])
+    prefix = np.r_[0., np.cumsum(values)]
+    negative = np.r_[0, np.cumsum(values < 0)]
+    count = np.searchsorted(times, base_ts + np.arange(n) * BAR_S, side="left")
+    samples = np.arange(k + 1)
+    need, window = book.eval_need(), book.pf_n
+    qualified = np.zeros(k + 1, dtype=bool)
+    floor = float(book.stage_min_pf.get("base", book.min_pf))
+    for size in range(need, k + 1):
+        width = min(size, window)
+        ratio = ratio_from_r((prefix[size] - prefix[size-width]) / width)
+        if not clears_pf(ratio, floor):
+            continue
+        first = max(0, size-book.ddt_window())
+        # Any episode lies inside the observed window; this bound is exact
+        # regardless of position volume and avoids unnecessary DDT rescans.
+        dd_ok = not size or times[size-1]-times[first] <= book.max_dd_s
+        if not dd_ok:
+            dd_ok = float(book.ddt_when_enough(rows[:size], need, ordered=True)["maxS"]) <= book.max_dd_s
+        qualified[size] = dd_ok
+    signal = np.asarray([int(s[0]) == direction for s in lane], dtype=bool)
+    signal[:warmup] = False
+    masks = {}
+    for axis, width in variants:
+        if axis == "prev":
+            stop = np.maximum(0, samples-width)
+            start = np.maximum(0, samples-2*width)
+            available = np.where(samples >= 2*width, width, 0)
+        else:
+            stop, start = samples, np.maximum(0, samples-width)
+            available = np.minimum(samples, width)
+        mean = (prefix[stop]-prefix[start]) / np.maximum(available, 1)
+        ratios = [ratio_from_r(float(v)) for v in mean]
+        accepted = qualified & (available >= min(3, width)) & np.asarray([clears_pf(v, floor) for v in ratios])
+        if axis == "pause":
+            accepted &= ~((samples >= width) & (negative[stop]-negative[start] == width))
+        masks[(axis, width)] = accepted[count] & signal
+    return masks
+
+
+def _replay_mask_groups(book, symbol, bars, groups, lane, warmup, now, lane_exits, capture):
+    """512 independent masked price lanes at a time, using native protection."""
+    from set_engine import BAR_S, REPLAY_HIST_CAP, _np, hist_fill
+    from indication_adjustment_grid import _Positions
+    np = _np
+    base_ts = float((getattr(book, "_bar_end_ts", {}) or {}).get(symbol) or now)-(len(bars)-1)*BAR_S
+    time_bars = max(8, min(book.hist_time_bars, max(8, len(bars)-warmup-1)))
+    scratch_bars = max(8, int(book.scratch_s/BAR_S))
+    for direction in (1, -1):
+        pending = [g for g in groups.values() if g["direction"] == direction]
+        for start in range(0, len(pending), 512):
+            tile = pending[start:start+512]
+            params = np.asarray([g["params"][:2] for g in tile])
+            trailing = np.asarray([g["params"][2] for g in tile], dtype=bool)
+            arms = np.asarray([g["params"][3] for g in tile])
+            gives = np.asarray([g["params"][4] for g in tile])
+            masks = np.vstack([g["mask"] for g in tile])
+            state = _Positions(np, params[:,0], params[:,1], arms, gives, trailing)
+            rows, counts = [[] for g in tile], np.zeros(len(tile), dtype=int)
+            parent = tile[0]["parent"]
+            native = parent.pack == "general" or parent.indication_kind in ("general", "combined")
+            floor = .58 if native or not parent.indication_config else .52
+            for i in range(warmup, len(bars)):
+                high, low, close = (float(bars[i][j]) for j in (1,2,3))
+                if min(high, low, close) <= 0:
+                    continue
+                state.cooldown[~state.active & (state.cooldown > 0)] -= 1
+                dead, px, reasons = state.advance(high, low, close, i, direction, book,
+                    time_bars, scratch_bars, bool(book.hist_honor_tp))
+                for j in np.flatnonzero(dead):
+                    rows[j].append(hist_fill(base_ts+i*BAR_S, symbol, direction,
+                        float((px[j]-state.entry[j])/state.entry[j]*direction),
+                        float((i-state.opened[j])*BAR_S), str(reasons[j])))
+                    counts[j] += 1
+                    if not capture and len(rows[j]) > REPLAY_HIST_CAP:
+                        del rows[j][0]
+                if lane[i][0] == direction and lane[i][1] >= floor:
+                    seed = ~state.active & (state.cooldown <= 0) & masks[:,i]
+                    state.seed(seed, close, i, direction, (lane_exits or {}).get(i, ("",0.)))
+            for j, group in enumerate(tile):
+                group["rows"], group["count"] = tuple(rows[j]), int(counts[j])
+                if capture and state.active[j]:
+                    opened, entry = int(state.opened[j]), float(state.entry[j])
+                    terminal = float(bars[-1][3])
+                    group["open"] = dict(t=base_ts+(len(bars)-1)*BAR_S, symbol=symbol,
+                        side="LONG" if direction > 0 else "SHORT", reason="open",
+                        pnl_pct=(terminal-entry)/entry*direction,
+                        hold_s=(len(bars)-1-opened)*BAR_S,
+                        _entry=opened, _parent_entry=opened, _exit=len(bars)-1,
+                        _avg=entry, _entry_px=entry, _exit_px=terminal, _qty=1., _parent=1.,
+                        _bundle_avg=entry, _bundle_qty=1., _log=(), _bundle_log=(), _adds=0,
+                        entry_ts=base_ts+opened*BAR_S,
+                        stop_loss=float(state.sl[j]), take_profit=float(state.tp[j]),
+                        trail_stop=float(state.trail[j]), peak=float(state.peak[j]),
+                        exit_tactic=str(state.tactic[j]), exit_level=float(state.level[j]),
+                        confirmed_close=False, open_position=True)
 
 
 def axis_ranges(book: Any) -> List[Tuple[str, int]]:
@@ -108,7 +249,8 @@ def _axis_accept(axis: str, count: int, closed: Sequence, cost_pct: float, floor
 def calculate_axes(book: Any, symbol: str, bars: Sequence, parent_states: Sequence,
                    lane: Sequence, warmup: int, now: float, *,
                    lane_exits: Optional[Dict[int, Tuple[str, float]]] = None,
-                   capture: bool = False) -> List[Any]:
+                   capture: bool = False,
+                   parent_captures: Optional[Dict[str, Sequence]] = None) -> List[Any]:
     """Build each parent's own axis children, with actual independent trade tapes.
 
     All configured children remain present when evidence rejects them. Parent
@@ -117,44 +259,33 @@ def calculate_axes(book: Any, symbol: str, bars: Sequence, parent_states: Sequen
     """
     from contracts import VOLUME_RATIO_UNIT, stable_key
     from indication_adjustment_grid import capture_parent_events
-    from position_cost import clears_pf, last_n_cost_pf
-    from set_engine import BAR_S, REPLAY_HIST_CAP, recent_direction_rows
+    from set_engine import BAR_S, _np
     variants = axis_ranges(book)
     n = len(bars)
+    out = AxisStates()
     if not variants or not n or len(lane) != n:
-        return []
+        return out
+    if _np is None:
+        raise RuntimeError("independent axes require NumPy replay")
     base_ts = float((getattr(book, "_bar_end_ts", {}) or {}).get(symbol) or now) - (n - 1) * BAR_S
-    floor = float(book.stage_min_pf.get("base", book.min_pf))
-    need = int(book.eval_need())
-    window = int(book.pf_n)
-    out = []
     parents = [parent for parent in parent_states if parent.kind in ("base", "trail")
                and (not parent.indication_symbol or parent.indication_symbol == symbol)]
-    captures = capture_parent_events(book, symbol, bars, parents, lane, warmup, now, lane_exits=lane_exits)
+    if len({(p.indication_kind, p.indication_config) for p in parents}) > 1:
+        raise ValueError("one signal lane can only capture one indication kind/configuration")
+    captures = dict(parent_captures) if parent_captures is not None else {}
+    missing = [p for p in parents if p.id not in captures]
+    if missing:
+        captures.update(capture_parent_events(book, symbol, bars, missing, lane, warmup, now, lane_exits=lane_exits))
+    groups, records = {}, []
     for parent in parents:
+        with book.sl_scope(symbol):
+            sl, tp = book.pair_sl_tp(float(parent.tp_pct), float(parent.sl_ratio or .6))
+        arm = parent.trail_arm/100 if parent.trail_arm > .05 else parent.trail_arm
+        give = parent.trail_give/100 if parent.trail_give > .05 else parent.trail_give
+        params = (sl, tp, bool(parent.kind == "trail" or parent.trail_key), arm, give)
         for side, direction in (("LONG", 1), ("SHORT", -1)):
-            parent_closes = [row for row in captures[parent.id] if row["side"] == side]
-            positions = {axis_count: [False] * n for axis_count in variants}
-            closed, cursor, qualified = [], 0, False
-            accepted = {axis_count: False for axis_count in variants}
-            for i in range(max(0, warmup), n):
-                ts = base_ts + i * BAR_S
-                changed = False
-                while cursor < len(parent_closes) and float(parent_closes[cursor]["t"]) < ts:
-                    closed.append(parent_closes[cursor])
-                    cursor += 1
-                    changed = True
-                if changed:
-                    metric = last_n_cost_pf(closed, window, book.cost_pct, ordered=True, simple=True)
-                    dd = book.ddt_when_enough(closed, need, ordered=True)
-                    qualified = int(metric["count"]) >= need and clears_pf(metric["ratio"], floor) and float(dd["maxS"]) <= book.max_dd_s
-                    accepted = {key: qualified and _axis_accept(*key, closed, book.cost_pct, floor) for key in variants}
-                if lane[i][0] == direction:
-                    for key, yes in accepted.items():
-                        positions[key][i] = bool(yes)
-            # Sibling counts often have identical masks. Share actual price
-            # transitions for those mathematically identical trades only.
-            groups: Dict[Tuple[bool, ...], List[Any]] = {}
+            rows = [row for row in captures[parent.id] if row["side"] == side]
+            masks = _gate_masks(book, rows, variants, lane, warmup, base_ts, direction)
             for axis, count in variants:
                 child = parent.catalog_copy()
                 child.id = "axis:" + stable_key(parent.id, symbol, side, axis, count)
@@ -162,46 +293,40 @@ def calculate_axes(book: Any, symbol: str, bars: Sequence, parent_states: Sequen
                 child.template_set_id = parent.template_set_id or parent.id
                 child.axis_key, child.relative_count = f"{axis}:{count}", count
                 child.volume_ratio = round(count * VOLUME_RATIO_UNIT, 6)
-                child.indication_symbol = symbol
-                child.locked = bool(parent.locked)
-                groups.setdefault(tuple(positions[(axis, count)]), []).append(child)
-            for mask, children in groups.items():
-                filtered = [(int(lane[i][0]), float(lane[i][1]), str(lane[i][2]) if len(lane[i]) > 2 else parent.indication_config)
-                            if mask[i] else (0, 0.0, "") for i in range(n)]
-                actual = replay_parent_closes(book, symbol, bars, parent, filtered, warmup, now,
-                    lane_exits=lane_exits, side=side) if any(mask) else []
-                retained = actual if capture else recent_direction_rows(actual, REPLAY_HIST_CAP)
-                current_base = bool(book._base_metrics_ok((parent.by_side or {}).get(side) or {}))
-                for child in children:
-                    child.hist = []
-                    for fill in retained:
-                        row = dict(fill)
-                        row.update(set_id=child.id, parent_set_id=parent.id, strategy="axis",
-                            axis_key=child.axis_key, relative_count=child.relative_count,
-                            volume_ratio=child.volume_ratio, ind_kind=child.indication_kind,
-                            ind_config=child.indication_config)
-                        child.hist.append(row)
-                    book._score_pair((child, None))
-                    child.n = len(actual)
-                    child.stage_ledger.update(parentBaseQualified=current_base, parentDirection=side,
-                        closedOnly=True, openExcluded=True, actualReplay=True)
-                    child.strategy_adjustments["axis"] = {"axisKey": child.axis_key,
-                        "relativeCount": child.relative_count, "volumeRatio": child.volume_ratio,
-                        "parentSetId": parent.id, "parentDirection": side}
-                    if not current_base:
-                        child.active = False
-                        child.stage_ledger["main"] = child.stage_ledger["real"] = False
-                        child.stage_ledger["parentQualificationReason"] = "own parent direction has not passed Base"
-                        for stage in ("Main", "Real"):
-                            record = (child.stage_ledger.get("records") or {}).get(stage)
-                            if isinstance(record, dict):
-                                record.update(evaluated=False, qualified=False,
-                                    reason="own parent direction has not passed Base")
-                            adjustment = child.strategy_adjustments.get(stage.lower())
-                            if isinstance(adjustment, dict):
-                                adjustment.update(evaluated=False, qualified=False)
-                        for metric in child.by_side.values():
-                            metric["active"] = False
-                        child.stage = child.stage_qualified = "Base" if child.stage_ledger.get("base") else "Unqualified"
-                    out.append(child)
+                child.indication_symbol, child.locked = symbol, bool(parent.locked)
+                mask = masks[(axis, count)]
+                key = (direction, params, mask.tobytes())
+                group = groups.setdefault(key, dict(parent=parent, direction=direction,
+                    params=params, mask=mask, rows=(), count=0))
+                records.append((child, parent, side, group))
+    active_groups = {key: group for key, group in groups.items() if group["mask"].any()}
+    _replay_mask_groups(book, symbol, bars, active_groups, lane, warmup, now, lane_exits, capture)
+    for child, parent, side, group in records:
+        child.hist = AxisTape(group["rows"], child)
+        if capture and group.get("open"):
+            out.open.append(_axis_metadata(group["open"], child))
+        book._score_pair((child, None))
+        child.n = group["count"]
+        current_base = bool(book._base_metrics_ok((parent.by_side or {}).get(side) or {}))
+        child.stage_ledger.update(parentBaseQualified=current_base, parentDirection=side,
+            closedOnly=True, openExcluded=True, actualReplay=True)
+        child.strategy_adjustments["axis"] = {"axisKey": child.axis_key,
+            "relativeCount": child.relative_count, "volumeRatio": child.volume_ratio,
+            "parentSetId": parent.id, "parentDirection": side}
+        if not current_base:
+            child.active = False
+            child.stage_ledger["main"] = child.stage_ledger["real"] = False
+            child.stage_ledger["parentQualificationReason"] = "own parent direction has not passed Base"
+            for stage in ("Main", "Real"):
+                record = (child.stage_ledger.get("records") or {}).get(stage)
+                if isinstance(record, dict):
+                    record.update(evaluated=False, qualified=False,
+                        reason="own parent direction has not passed Base")
+                adjustment = child.strategy_adjustments.get(stage.lower())
+                if isinstance(adjustment, dict):
+                    adjustment.update(evaluated=False, qualified=False)
+            for metric in child.by_side.values():
+                metric["active"] = False
+            child.stage = child.stage_qualified = "Base" if child.stage_ledger.get("base") else "Unqualified"
+        out.append(child)
     return out

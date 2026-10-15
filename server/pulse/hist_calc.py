@@ -1888,21 +1888,96 @@ def replay_pool_workers(
     n_sets: int = 0,
     requested: Optional[int] = None,
     cpu: Optional[int] = None,
+    *,
+    memory_headroom_mb: Optional[float] = None,
+    n_bars: int = 3000,
 ) -> int:
-    """Process-pool size follows CPU and symbol count. No extra fat-catalog cap."""
+    """Bound concurrent catalogs by available CPU and memory, keeping all jobs."""
     n_symbols = max(1, int(n_symbols or 1))
     try:
-        cpu_n = max(1, int(cpu if cpu is not None else (os.cpu_count() or 1)))
+        cpu_n = max(1, int(cpu if cpu is not None else replay_cpu_count()))
     except Exception:
         cpu_n = 2
-    cap = max(1, min(cpu_n, n_symbols))
+    headroom = replay_memory_headroom_mb() if memory_headroom_mb is None else max(0., float(memory_headroom_mb))
+    # One reusable catalog, NumPy/runtime pages, and bounded vector tile
+    # scratch space per process. Reserve room for controls and result merging.
+    catalog_mb = max(32., max(0, int(n_sets)) * 2048. / 1048576.)
+    worker_mb = 96. + catalog_mb * 1.5 + 128. * max(1., max(0, int(n_bars)) / 3000.)
+    memory_cap = max(1, int(max(0., headroom - 512.) / worker_mb))
+    cap = max(1, min(cpu_n, n_symbols, memory_cap))
     if requested is None:
         return cap
     try:
         want = int(requested)
     except Exception:
         return cap
-    return max(1, min(n_symbols, want))
+    return max(1, min(cap, want))
+
+
+def replay_cpu_count() -> int:
+    """Respect affinity and every visible ancestor cgroup CPU quota."""
+    cap = max(1, int(os.cpu_count() or 1))
+    try:
+        cap = min(cap, max(1, len(os.sched_getaffinity(0))))
+    except (AttributeError, OSError):
+        pass
+    paths = ["/sys/fs/cgroup/cpu.max"]
+    v1 = ["/sys/fs/cgroup/cpu"]
+    try:
+        from load_engine import unescape_cgroup_rel
+        with open("/proc/self/cgroup") as stream:
+            for line in stream:
+                fields = line.strip().split(":", 2)
+                if len(fields) != 3:
+                    continue
+                rel = unescape_cgroup_rel(fields[2]).strip("/")
+                while rel:
+                    paths.append(os.path.join("/sys/fs/cgroup", rel, "cpu.max"))
+                    if "cpu" in fields[1].split(","):
+                        v1.append(os.path.join("/sys/fs/cgroup/cpu", rel))
+                    rel = os.path.dirname(rel)
+    except OSError:
+        pass
+    for path in dict.fromkeys(paths):
+        try:
+            with open(path) as stream:
+                quota, period = stream.read().strip().split()[:2]
+            if quota != "max" and float(quota) > 0 and float(period) > 0:
+                cap = min(cap, max(1, int(float(quota) / float(period))))
+        except (OSError, ValueError, IndexError):
+            pass
+    for base in dict.fromkeys(v1):
+        try:
+            with open(os.path.join(base, "cpu.cfs_quota_us")) as stream:
+                quota = float(stream.read())
+            with open(os.path.join(base, "cpu.cfs_period_us")) as stream:
+                period = float(stream.read())
+            if quota > 0 and period > 0:
+                cap = min(cap, max(1, int(quota / period)))
+        except (OSError, ValueError):
+            pass
+    return cap
+
+
+def replay_memory_headroom_mb() -> float:
+    """Available cgroup working-set room, including reclaimable file pages."""
+    from load_engine import cgroup_memory_limit_mb, cgroup_memory_current_mb, host_mem_mb, _cgroup_paths
+    available, _ = host_mem_mb()
+    limit = cgroup_memory_limit_mb()
+    if limit <= 0:
+        return max(0., available) if available > 0 else 512.
+    current = cgroup_memory_current_mb()
+    reclaimable = 0.
+    for path in _cgroup_paths("memory.stat", "memory.stat"):
+        try:
+            with open(path) as stream:
+                values = dict(line.split()[:2] for line in stream if len(line.split()) >= 2)
+            reclaimable = max(0., float(values.get("inactive_file", values.get("total_inactive_file", 0)))) / 1048576.
+            break
+        except (OSError, ValueError):
+            continue
+    headroom = max(0., limit-current+reclaimable)
+    return min(headroom, available) if available > 0 else headroom
 
 
 def _init_replay_worker(overlay: Dict[str, Any]) -> None:
@@ -2251,14 +2326,14 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "fetchEnd": request_end,
         })
         try:
-            cpu = max(1, int(os.cpu_count() or 1))
+            cpu = replay_cpu_count()
             requested_raw = body.get("workers")
             requested_workers: Optional[int] = None
             if requested_raw not in (None, "", 0, "0"):
                 requested_workers = int(requested_raw)
-            workers = replay_pool_workers(len(symbols), len(book.by_idx), requested_workers, cpu)
+            workers = replay_pool_workers(len(symbols), len(book.by_idx), requested_workers, cpu, n_bars=fetch_bars)
         except Exception:
-            workers = 2
+            workers = 1
         job["workers"] = workers
         job["partial"] = True
         job["async"] = True
@@ -3211,10 +3286,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-pool-workers-helper", "def replay_pool_workers" in prod_src)
     rec("calc-oneshot-small-book", job.get("replayMode") == "oneshot", str(job.get("replayMode")))
     rec("calc-20h-oneshot", long_job.get("replayMode") == "oneshot", str(long_job.get("replayMode")))
-    rec("pool-workers-small-cpu", replay_pool_workers(8, 780, None, 2) == 2, str(replay_pool_workers(8, 780, None, 2)))
-    rec("pool-workers-eight-cpu", replay_pool_workers(8, 780, None, 8) == 8, str(replay_pool_workers(8, 780, None, 8)))
-    rec("pool-workers-fat-uses-cpu", replay_pool_workers(25, 34000, None, 8) == 8, str(replay_pool_workers(25, 34000, None, 8)))
-    rec("pool-workers-honor", replay_pool_workers(8, 780, 4, 2) == 4, str(replay_pool_workers(8, 780, 4, 2)))
+    roomy = {"memory_headroom_mb": 8192.}
+    rec("pool-workers-small-cpu", replay_pool_workers(8, 780, None, 2, **roomy) == 2, str(replay_pool_workers(8, 780, None, 2, **roomy)))
+    rec("pool-workers-eight-cpu", replay_pool_workers(8, 780, None, 8, **roomy) == 8, str(replay_pool_workers(8, 780, None, 8, **roomy)))
+    rec("pool-workers-fat-uses-cpu", replay_pool_workers(25, 34000, None, 8, **roomy) == 8, str(replay_pool_workers(25, 34000, None, 8, **roomy)))
+    rec("pool-workers-request-bounded-cpu", replay_pool_workers(8, 780, 4, 2, **roomy) == 2, str(replay_pool_workers(8, 780, 4, 2, **roomy)))
+    rec("pool-workers-memory-bound", replay_pool_workers(50, 34000, 50, 8, memory_headroom_mb=900.) == 1)
+    rec("pool-workers-catalog-bound", replay_pool_workers(50, 500000, 50, 8, memory_headroom_mb=3000.) == 1)
     rec(
         "calc-listings-index",
         isinstance(job.get("listings"), dict)

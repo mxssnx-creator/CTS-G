@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../server/pulse")))
 import forced_configs as forced
 from hist_calc import resolve_symbols, cli_options
-from position_cost import completed_roundtrips
+from position_cost import completed_roundtrips, net_return_pf
 from set_engine import SetBook, trades_per_hour
 from set_engine import VOTE_KINDS as IND_KINDS
 from pulse_trader import Pulse
@@ -20,10 +20,12 @@ class ForcedTests(unittest.TestCase):
         result = {"id": "forced:XRP:signals:LONG:test", "symbol": "XRP-USDT", "indication": "signals",
                 "direction": "LONG", "tpPct": .4, "slPct": .1, "pf": 1.2, "trainPf": 1.3,
                 "holdoutPf": 1.1, "trainN": 20, "holdoutN": 10, "maxDrawdownR": 2,
-                "evidenceVersion": 3, "trainingWindowsOk": True, "trainingMaxDrawdownR": 2,
+                "evidenceVersion": forced.FORCED_EVIDENCE_VERSION, "trainingWindowsOk": True, "trainingMaxDrawdownR": 2,
                 "tradesPerHour": 4, "source": "historical-market", "eligible": True, **overrides}
         pf = result.get("trainPfExact", result["trainPf"])
-        result["trainingResults"] = [pf * .001, -.001] if result["trainN"] else []
+        # Already cost-net ROI which produces the requested return PF.
+        net_mean = (pf - 1) * .0015 / .10
+        result["trainingResults"] = [2 * net_mean + .001, -.001] if result["trainN"] else []
         result["trainingCostPct"] = .15
         return result
 
@@ -107,11 +109,12 @@ class ForcedTests(unittest.TestCase):
     def test_strict_training_and_optional_control_validation(self):
         self.assertTrue(forced.valid_candidate(self.row()))
         self.assertTrue(forced.valid_candidate(self.row(), min_pf=1.15))
-        self.assertFalse(forced.valid_candidate(self.row(), min_pf=1.3))
+        self.assertTrue(forced.valid_candidate(self.row(), min_pf=1.3))
+        self.assertFalse(forced.valid_candidate(self.row(), min_pf=1.3001))
         for field in ("pf", "trainPf", "holdoutPf"):
             self.assertFalse(forced.valid_candidate(self.row(**{field: float("nan")})))
         for changes in ({"source": "synth"}, {"trainN": 0}, {"slPct": .12},
-                        {"trainPf":1.05}, {"evidenceVersion":1}):
+                        {"trainPf":1.0499}, {"evidenceVersion":3}):
             self.assertFalse(forced.valid_candidate(self.row(**changes)))
         losing_control=self.row(holdoutN=0,holdoutPf=0,pf=0,maxDrawdownR=100,eligible=False)
         self.assertTrue(forced.valid_candidate(losing_control))
@@ -121,7 +124,8 @@ class ForcedTests(unittest.TestCase):
 
     def test_reporting_rounding_cannot_change_the_exact_training_gate(self):
         self.assertTrue(forced.valid_candidate(self.row(trainPf=1.05,trainPfExact=1.0500004)))
-        self.assertFalse(forced.valid_candidate(self.row(trainPf=1.050001,trainPfExact=1.05)))
+        self.assertTrue(forced.valid_candidate(self.row(trainPf=1.050001,trainPfExact=1.05)))
+        self.assertFalse(forced.valid_candidate(self.row(trainPf=1.05,trainPfExact=1.04999)))
 
     def test_symbol_winners_prefer_engine_admitted(self):
         weak = self.row(id="bch-weak", symbol="BCH-USDT", indication="break", direction="SHORT",
@@ -154,7 +158,8 @@ class ForcedTests(unittest.TestCase):
 
     def test_stop_first_when_both_touched(self):
         result = self.replay([[100, 101, 99, 100, 1]] * 120)
-        self.assertEqual(result["pf"], 0)
+        self.assertAlmostEqual(result["pf"], net_return_pf(-.0025, .15), places=6)
+        self.assertEqual(result["classicPf"], 0)
         self.assertAlmostEqual(result["netAvgPct"], -.25)
 
     def test_stop_gap_not_optimistic(self):
@@ -172,7 +177,8 @@ class ForcedTests(unittest.TestCase):
         result = self.replay([[100, 100.6, 99.99, 100, 1]] * 84 + [[100, 100, 99, 100, 1]] * 36, control_n=8)
         self.assertGreater(result["trainPf"], 1.02)
         self.assertFalse(result["eligible"])
-        self.assertEqual(result["holdoutPf"], 0)
+        self.assertAlmostEqual(result["holdoutPf"], net_return_pf(-.0025, .15), places=6)
+        self.assertEqual(result["holdoutClassicPf"], 0)
 
     def test_disabled_control_cannot_veto_via_whole_period_pf_drawdown_or_windows(self):
         training=[[100, 100.6, 99.99, 100, 1]] * 84
@@ -182,7 +188,8 @@ class ForcedTests(unittest.TestCase):
         self.assertTrue(good["eligible"])
         self.assertFalse(bad["controlChecked"])
         self.assertIsNone(bad["controlPassed"])
-        self.assertEqual(bad["holdoutPf"],0)
+        self.assertAlmostEqual(bad["holdoutPf"], net_return_pf(-.0025, .15), places=6)
+        self.assertEqual(bad["holdoutClassicPf"],0)
         self.assertGreater(bad["maxDrawdownR"],6)
         self.assertEqual(bad["trainingMaxDrawdownR"],0)
         self.assertEqual(bad["evaluationWindows"],good["evaluationWindows"])
@@ -196,7 +203,7 @@ class ForcedTests(unittest.TestCase):
         r=self.replay(bars,signals)
         self.assertEqual((r["trainN"],r["holdoutN"],r["boundaryCloses"],r["splitCensored"],r["openUnresolved"]),(1,1,2,0,0))
         self.assertAlmostEqual(r["netPct"],-.39)
-        self.assertEqual(r["pf"],0)
+        self.assertAlmostEqual(r["pf"], net_return_pf(-.0039/2, .15), places=6)
 
     def test_complete_coverage_without_signals(self):
         with patch.object(forced, "indication_kind_votes", return_value=[]):

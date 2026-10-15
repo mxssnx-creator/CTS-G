@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { calcIsRunning, fetchHistCalc, forcedBestBySymbol, startHistCalc, type ForcedConfigSummary, type HistCalcJob } from "@/lib/hist-calc";
+import { calcIsRunning, fetchHistCalc, forcedBestBySymbol, formatForcedPf, guardForcedEvidence, isCurrentForcedEvidence, FORCED_RECALCULATION_MESSAGE, startHistCalc, type ForcedConfigSummary, type HistCalcJob } from "@/lib/hist-calc";
 import { useConnection } from "@/components/connection-provider";
 
 export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
@@ -31,15 +31,20 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
       setError("Calculation could not be started. No execution settings changed.");
     } finally { setPending(false); }
   };
-  const data = (job?.forcedConfigs?.rows?.length ? job.forcedConfigs : null) || live || job?.forcedConfigs;
-  const rows = data?.rows ?? [];
-  const liveById = new Map((live?.rows ?? []).map(row => [row.id, row]));
+  const server = guardForcedEvidence(job?.forcedConfigs);
+  const currentLive = guardForcedEvidence(live);
+  const data = isCurrentForcedEvidence(server) && server.rows?.length ? server
+    : isCurrentForcedEvidence(currentLive) ? currentLive
+    : isCurrentForcedEvidence(server) ? server : server ?? currentLive;
+  const current = isCurrentForcedEvidence(data);
+  const rows = current ? data.rows ?? [] : [];
+  const needsRecalculation = Boolean(data?.needsReturnPfRecalculation);
+  const liveById = new Map((isCurrentForcedEvidence(currentLive) ? currentLive.rows ?? [] : []).map(row => [row.id, row]));
   const busy = pending || (Boolean(job?.forcedOnly) && calcIsRunning(job?.phase) && !job?.ready);
-  const succeeded = data?.succeeded?.length
-    ? data.succeeded
-    : [...new Set(rows.filter(row => row.eligible).map(row => row.symbol))];
-  const missing = data?.missing ?? [];
   const bests = forcedBestBySymbol(data);
+  const positiveSymbols = new Set(bests.map(row => row.symbol));
+  const succeeded = current && data.succeeded?.length ? data.succeeded.filter(symbol => positiveSymbols.has(symbol)) : [...positiveSymbols];
+  const missing = current ? data.missing ?? [] : [];
   const variant = data?.variant;
   return (
     <section className="min-w-0 space-y-4 rounded-xl border border-border bg-bg2 p-4 sm:p-5" data-testid="forced-configs">
@@ -56,9 +61,9 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
         <span>{data?.completed ?? 0} / {data?.requested ?? 3888} combinations</span>
         <span>{data?.coveragePct ?? 0}% coverage</span>
         <span>{rows.length} selected</span>
-        <span>{"Training classic PF > 1.05 · engine admits PF > 1.10"}</span>
+        <span>Training return PF ≥ {data?.minPf ?? 1.05} · engine floor {data?.engineMinPf ?? 1.1} · strict PF &gt; 1.02</span>
         <span>Control trades: {data?.controlMinTrades ?? 0} · {(data?.controlMinTrades ?? 0) === 0 ? "holdout gate off" : "holdout gate on"}</span>
-        <span>{live?.trialMode || data?.trialMode ? "VST trial lane on" : "Live lane not enabled"}</span>
+        <span>{(isCurrentForcedEvidence(currentLive) && currentLive.trialMode) || (current && data.trialMode) ? "VST trial lane on" : "Live lane not enabled"}</span>
         {variant ? <span data-testid="forced-variant">Variant {variant}</span> : null}
       </div>
       {succeeded.length || missing.length ? (
@@ -84,8 +89,8 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
                 {row.indication} {row.direction} · TP {row.tpPct.toFixed(2)}% / SL {row.slPct.toFixed(2)}%
               </div>
               <div className="mt-1 font-mono text-xs text-muted">
-                train PF {(row.trainPf ?? 0).toFixed(3)} · {(row.tradesPerHour ?? 0).toFixed(2)} /h
-                {(row.trainPf ?? 0) > 1.1 ? " · engine admitted" : ""}
+                training return PF {formatForcedPf(row.trainPf, row.trainingUsedN ?? row.trainN)} · {(row.tradesPerHour ?? 0).toFixed(2)} /h
+                {typeof row.trainPf === "number" && row.trainPf + 1e-9 >= (data?.engineMinPf ?? 1.1) ? " · historic engine floor met" : ""}
               </div>
             </div>
           ))}
@@ -98,12 +103,12 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
       </p>
       {busy ? <p role="status" className="text-sm text-muted">{job?.detail || "Starting…"}</p> : null}
       {error || job?.error ? <p role="alert" className="text-sm text-danger">{error || job?.error}</p> : null}
-      {!rows.length ? <p className="rounded-lg border border-border p-4 text-sm text-muted">No qualifying baseline configs yet. Unproven or failing combinations remain inactive.</p> : (
+      {needsRecalculation ? <p className="rounded-lg border border-border p-4 text-sm text-warn" data-testid="forced-recalculation-required">{FORCED_RECALCULATION_MESSAGE}</p> : !rows.length ? <p className="rounded-lg border border-border p-4 text-sm text-muted">No qualifying baseline configs yet. Unproven or failing combinations remain inactive.</p> : (
         <div className="max-h-[70vh] overflow-auto rounded-lg border border-border" tabIndex={0} role="region" aria-label="Forced config results">
           <table className="w-full whitespace-nowrap text-left text-xs">
-            <caption className="sr-only">Every selected configuration, one row each. PF after configured replay costs.</caption>
+            <caption className="sr-only">Every selected configuration, one row each. Return PF after configured replay costs; empty samples have no PF.</caption>
             <thead className="sticky top-0 bg-bg2 text-muted"><tr>
-              {["Symbol / type", "Side", "TP / SL %", "SL:TP", "Closes train / test", "Net PF / holdout", "CTS ratio", "Trades/h hist", "DD R", "VST closes / PF", "Status"].map(label => <th key={label} className="px-3 py-3 font-medium">{label}</th>)}
+              {["Symbol / type", "Side", "TP / SL %", "SL:TP", "Closes train / test", "Return PF all / training / holdout", "Last-15 return PF", "Trades/h hist", "DD R", "VST closes / return PF", "Status"].map(label => <th key={label} className="px-3 py-3 font-medium">{label}</th>)}
             </tr></thead>
             <tbody>{rows.map(row => {
               const observed = liveById.get(row.id);
@@ -113,11 +118,11 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
                 <td className="px-3 py-3 font-mono">{row.tpPct.toFixed(2)} / {row.slPct.toFixed(2)}</td>
                 <td className="px-3 py-3 font-mono">{row.slRatio.toFixed(3)}</td>
                 <td className="px-3 py-3">{row.trainN} / {row.holdoutN}</td>
-                <td className="px-3 py-3 font-mono">{row.pf.toFixed(3)} / {row.holdoutPf.toFixed(3)}</td>
-                <td className="px-3 py-3 font-mono">{row.costRatio.toFixed(3)}</td>
+                <td className="px-3 py-3 font-mono">{formatForcedPf(row.pf, row.n)} / {formatForcedPf(row.trainPf, row.trainingUsedN ?? row.trainN)} / {formatForcedPf(row.holdoutPf, row.holdoutN)}</td>
+                <td className="px-3 py-3 font-mono">{formatForcedPf(row.costRatio, row.n)}</td>
                 <td className="px-3 py-3 font-mono">{row.tradesPerHour.toFixed(2)}</td>
                 <td className="px-3 py-3 font-mono">{row.maxDrawdownR.toFixed(2)}</td>
-                <td className="px-3 py-3 font-mono">{observed?.liveN ?? 0} / {observed?.liveN ? observed.livePf?.toFixed(3) : "—"}</td>
+                <td className="px-3 py-3 font-mono">{observed?.liveN ?? 0} / {formatForcedPf(observed?.livePf, observed?.liveN ?? 0)}</td>
                 <td className="px-3 py-3 text-muted">{observed?.liveStatus || "unvalidated"}<div>{observed?.measuredCosts ? "measured costs" : "no complete measured-cost proof"}</div></td>
               </tr>;
             })}</tbody>

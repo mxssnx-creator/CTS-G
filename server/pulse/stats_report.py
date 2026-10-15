@@ -26,6 +26,7 @@ from position_cost import (
     row_pnl_pct,
     row_position_cost_pct,
     row_has_measured_cost,
+    row_time_seconds,
     signed_result_r,
 )
 from set_engine import drawdown_time_by_symbol, IND_KINDS, row_equity_pnl
@@ -97,7 +98,7 @@ def _row(c: Any) -> Dict[str, Any]:
             **{key: c[key] for key in ("notional", "fee_scope", "feeScope", "fee_type", "feeType",
                                       "fee_rate", "feeRate", "commissionRate", "makerFeeRate", "takerFeeRate",
                                       "cost_pct", "costPct") if key in c},
-            "t": _f(c.get("t")),
+            "t": row_time_seconds(c),
             "symbol": str(c.get("symbol") or ""),
             "side": str(c.get("side") or ""),
             "qty": _f(c.get("qty", c.get("quantity", c.get("executedQty")))),
@@ -124,7 +125,7 @@ def _row(c: Any) -> Dict[str, Any]:
             "indKind": str(c.get("indKind") or c.get("ind_kind") or ""),
         }
     return {
-        "t": _f(getattr(c, "t", 0)),
+        "t": row_time_seconds(c),
         "symbol": str(getattr(c, "symbol", "") or ""),
         "side": str(getattr(c, "side", "") or ""),
         "qty": _f(getattr(c, "qty", 0)),
@@ -167,7 +168,7 @@ def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
         # read the 0.0 placeholder from _row() as a cost-only loss.
         row["pnl_pct"] = gross_pct
     net_usdt = notion * net_pct if notion else row["pnl"]
-    r = signed_result_r(gross_pct, row_cost)
+    r = signed_result_r(gross_pct, row_cost, cost_pct)
     row["notional"] = round(notion, 6)
     row["grossPnlPct"] = round(gross_pct, 8)
     row["grossPnl"] = round(notion * gross_pct, 8)
@@ -214,13 +215,13 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "gp": round(gp, 6),
         "gl": round(gl, 6),
         "net": round(gp - gl, 6),
-        "pf": round(float(cost["ratio"]), 4),
+        "pf": float(cost["ratio"]),
         "classicPf": round(classic_net, 4),
         "grossClassicPf": round(classic, 4),
         "gpNetCost": round(gp_net, 6),
         "glNetCost": round(gl_net, 6),
         "netAfterCost": round(gp_net - gl_net, 6),
-        "pfAfterCost": round(float(cost["ratio"]), 4),
+        "pfAfterCost": float(cost["ratio"]),
         "avgHoldS": round(sum(holds) / len(holds), 1) if holds else 0.0,
         "costRatio": cost.get("ratio"),
         "avgR": cost.get("avgR"),
@@ -440,7 +441,7 @@ def merge_kind_stats(
             # Replay wins: every count/amount field comes from the replay gate so
             # pf, n, wr, gp/gl/net and bySide never mix two tapes.
             blob["source"] = "replay"
-            blob["pf"] = round(float(g.get("pf") or 0), 4)
+            blob["pf"] = float(g.get("pf") or 0)
             blob["pfAfterCost"] = blob["pf"]
             blob["costRatio"] = blob["pf"]
             blob["n"] = hist_n

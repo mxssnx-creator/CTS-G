@@ -26,7 +26,7 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
 import overall_controls
-from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
+from forced_configs import FORCED_SYMBOLS, FORCED_EVIDENCE_VERSION, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
 from validation_policy import control_min_trades
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_pause_count_ratio, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
 from block_active import ContinuationBook, adjusted_quantity, executable_parent_qty, observe_continuation
@@ -162,6 +162,11 @@ def exchange_fee_known(row: Any) -> bool:
         "commission", "commissionAmount", "transactionFee", "realizedFee",
         "entry_fee", "entryFee", "openFee", "openCommission", "exit_fee", "exitFee", "closeFee", "closeCommission",
     ))
+
+
+def position_entry_fee_known(pos: Any) -> bool:
+    known = getattr(pos, "entry_fee_known", None)
+    return bool(known) if known is not None else float(getattr(pos, "entry_fee", 0.) or 0.) > 0
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 LIVE_EDGE_N_DEFAULT = 50
@@ -1171,7 +1176,7 @@ class Position:
     pending_close_qty: float = 0.0
     last_fill_at: float = 0.0
     entry_fee: float = 0.0
-    entry_fee_known: bool = False
+    entry_fee_known: Optional[bool] = None
     entry_notional: float = 0.0
     strategy: str = "core"
     close_started_qty: float = 0.0
@@ -2129,8 +2134,7 @@ class Pulse:
                                            incoming.client_id, incoming.order_id,
                                            fee_known=incoming.entry_fee_known, incoming=incoming,
                                            fill_sequence=fill_sequence or float(((getattr(self, "pending_orders", {}) or {}).get(incoming.client_id) or {}).get("filled_qty") or incoming.qty))
-        target.entry_fee_known = (bool(getattr(target, "entry_fee_known", False)) or target.entry_fee > 0) and (
-            bool(getattr(incoming, "entry_fee_known", False)) or incoming.entry_fee > 0)
+        target.entry_fee_known = position_entry_fee_known(target) and position_entry_fee_known(incoming)
         target.entry = ((target.entry * old_qty) + (incoming.entry * add_qty)) / total
         target.qty = total
         target.notional = total * target.entry
@@ -6446,6 +6450,16 @@ class Pulse:
         side_name = "LONG" if direction > 0 else "SHORT"
         if selected_set is not None:
             return None if self.sets.execution_allowed(selected_set, pack, side_name) else "set-gate"
+        if self.sets.enabled:
+            own_api = getattr(self.sets, "indication_entry_sets", None) if pack == "indications" else getattr(self.sets, "pack_entry_sets", None) if pack == "general" else None
+            if callable(own_api):
+                try:
+                    own_sets = own_api(str(ind.kind), indication_config_key(ind), side_name, sym) if pack == "indications" else own_api(pack, side_name, sym)
+                except Exception:
+                    return "set-gate"
+                if not own_sets:
+                    return "set-gate"
+                return self.entry_sense(sym, direction, reason, conf, pack, own_sets[0], execution_strategy)
         chosen = None
         try:
             pick_entry = getattr(self.sets, "pick_entry", None)
@@ -6555,6 +6569,14 @@ class Pulse:
         ledger = self._independent_dca_ledger()
         quantities = self.__dict__.setdefault("_recovered_lot_quantities", {})
         intents = self.__dict__.setdefault("_recovered_close_intents", {})
+        close_values = {}
+        def remember_intent(intent):
+            close_cid = str(intent.get("close_client_id") or "")
+            if close_cid:
+                intents[close_cid] = max(float(intents.get(close_cid) or 0), float(intent.get("cumulative_close_qty") or 0))
+                if intent.get("cumulative_close_avg_price") is not None:
+                    close_values[close_cid] = {"avg_price": float(intent["cumulative_close_avg_price"]),
+                                               "fee_total": float(intent.get("cumulative_close_fee") or 0)}
         for key, pos in list((getattr(self, "open", {}) or {}).items()):
             if not self.position_is_ours(pos):
                 continue
@@ -6562,10 +6584,7 @@ class Pulse:
             state = ledger.tracked_parent_state(parent_key) if ledger is not None else {}
             if state.get("tracked"):
                 quantities[parent_key] = state["remainingQty"]
-                intent = state.get("closeIntent") or {}
-                close_cid = str(intent.get("close_client_id") or "")
-                if close_cid:
-                    intents[close_cid] = max(float(intents.get(close_cid) or 0), float(intent.get("cumulative_close_qty") or 0))
+                remember_intent(state.get("closeIntent") or {})
             if parent_key not in quantities:
                 continue
             remaining = max(0., float(quantities[parent_key]))
@@ -6583,11 +6602,21 @@ class Pulse:
                 pos.entry_notional = pos.notional
                 pos.controls_ok = False
                 pos.ctrl_verified = False
+        if ledger is not None:
+            for cid, row in list((getattr(self, "pending_orders", {}) or {}).items()):
+                if str(row.get("kind") or "").lower() not in ("close", "c"):
+                    continue
+                parent_key = str((row.get("metadata") or {}).get("parent_client_id") or "")
+                intent = ledger.tracked_parent_state(parent_key).get("closeIntent") or {}
+                if intent.get("close_client_id") == cid:
+                    remember_intent(intent)
         for cid, cumulative in intents.items():
             row = (getattr(self, "pending_orders", {}) or {}).get(cid)
             if row is None:
                 continue
-            row["filled_qty"] = max(float(row.get("filled_qty") or 0), float(cumulative))
+            if float(cumulative) >= float(row.get("filled_qty") or 0):
+                row["filled_qty"] = float(cumulative)
+                row.update(close_values.get(cid) or {})
             if float(row.get("requested_qty") or 0) > 0 and row["filled_qty"] + 1e-12 >= float(row["requested_qty"]):
                 self.pending_orders.pop(cid, None)
                 self.seen_fill_cids.add(cid)
@@ -6621,7 +6650,7 @@ class Pulse:
                              strategy=strategy, t=time.time(), metadata=metadata, reactivate=True)
 
     def _record_independent_dca_fill(self, pos: Position, qty: float, price: float, fee: float, cid: str, order_id: str,
-                                    *, fee_known: bool = False) -> None:
+                                    *, fee_known: bool = False, fill_sequence: float = 0.) -> None:
         if not self.position_is_ours(pos):
             return
         pending = (getattr(self, "pending_orders", {}) or {}).get(cid) or {}
@@ -6631,22 +6660,24 @@ class Pulse:
             return
         ledger = self._independent_dca_ledger(create=True)
         parent_key = str(pos.client_id or self.position_key(pos))
-        parent_metadata = {key: value for key, value in asdict(pos).items() if key in Closed.__dataclass_fields__}
+        parent_metadata = {key: value for key, value in asdict(pos).items() if key in Closed.__dataclass_fields__ and key != "roundtrip_result"}
         parent_metadata.update(position_cost_pct=self.position_cost_pct,
-                               cost_source="live-exchange" if pos.entry_fee > 0 or getattr(pos, "entry_fee_known", False) else "live-average" if getattr(self, "position_cost_source", "") == "live-exchange" else "manual-fallback",
+                               cost_source="live-exchange" if position_entry_fee_known(pos) else "live-average" if getattr(self, "position_cost_source", "") == "live-exchange" else "manual-fallback",
                                system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE, conn=CONN_SHORT)
         if not ledger.tracked_parent_state(parent_key).get("tracked"):
             ledger.register_fill(parent_key, pos.set_id, pos.set_id, pos.symbol, pos.side,
                                  pos.qty, pos.entry, pos.entry_fee, f"{parent_key}:baseline",
                                  order_id=pos.order_id, client_id=parent_key,
                                  strategy=str(getattr(pos, "strategy", "core") or "core").split("+")[0],
-                                 t=pos.opened_at, metadata=parent_metadata)
+                                 t=pos.opened_at, metadata=parent_metadata,
+                                 prior_roundtrip_result=getattr(pos, "roundtrip_result", None))
         child_metadata = dict(parent_metadata, **metadata)
         child_strategy = str(metadata.get("strategy") or "dca")
         child_metadata.update(trail_set_id="", strategy=child_strategy, parent_set_id=pos.set_id,
                               position_cost_pct=self.position_cost_pct,
                               cost_source="live-exchange" if fee > 0 or fee_known else "live-average" if getattr(self, "position_cost_source", "") == "live-exchange" else "manual-fallback")
-        fill_key = stable_key("dca-lot", cid, order_id, round(pos.qty, 12), round(qty, 12))
+        sequence = fill_sequence or float(pending.get("filled_qty") or qty)
+        fill_key = stable_key("dca-lot", cid, order_id, round(sequence, 12))
         ledger.register_fill(parent_key, pos.set_id, child_id, pos.symbol, pos.side,
                              qty, price, fee, fill_key, order_id=order_id, client_id=cid,
                              strategy=child_strategy, t=time.time(), metadata=child_metadata)
@@ -6696,7 +6727,8 @@ class Pulse:
         if fill_source_early in ("block", "dca") and fill_cid:
             # Register original parent basis and each confirmed child delta
             # before averaging the physical exchange group's entry price.
-            self._record_independent_dca_fill(pos, add_qty, fill_px, max(0.0, float(fee or 0)), fill_cid, order_id, fee_known=fee_known)
+            self._record_independent_dca_fill(pos, add_qty, fill_px, max(0.0, float(fee or 0)), fill_cid, order_id,
+                                               fee_known=fee_known, fill_sequence=fill_sequence)
         elif fill_cid:
             self._record_independent_core_fill(pos, add_qty, fill_px, max(0.0, float(fee or 0)), fill_cid, order_id,
                                                fee_known=fee_known, fill_sequence=fill_sequence)
@@ -6711,7 +6743,7 @@ class Pulse:
             pos.entry = ((float(pos.entry or fill_px) * old_qty) + fill_px * add_qty) / total
         pos.qty = total
         pos.notional = total * pos.entry
-        pos.entry_fee_known = (bool(getattr(pos, "entry_fee_known", False)) or pos.entry_fee > 0) and (fee_known or fee > 0)
+        pos.entry_fee_known = position_entry_fee_known(pos) and (fee_known or fee > 0)
         pos.entry_fee = max(0.0, float(getattr(pos, "entry_fee", 0.0) or 0.0)) + max(0.0, float(fee or 0.0))
         pos.entry_notional = max(0.0, float(getattr(pos, "entry_notional", 0.0) or 0.0)) + add_qty * fill_px
         pos.exchange_qty = max(0.0, float(getattr(pos, "exchange_qty", 0.0) or 0.0)) + add_qty
@@ -8298,7 +8330,7 @@ class Pulse:
                 group_key="" if block_overall else group_key,
                 carried_add=(not block_overall) or ("block" in parts) or not others,
                 keep_lane=block_overall and others,
-                record=confirmed and learn_adjustments,
+                record=confirmed and learn_adjustments and not getattr(pos, "_block_own_lot_learned", False),
             )
         except TypeError:
             try:
@@ -8312,12 +8344,20 @@ class Pulse:
         ledger = self._independent_dca_ledger()
         if ledger is None or not ledger.has_parent(str(pos.client_id or self.position_key(pos))):
             return [rec]
+        pending = (getattr(self, "pending_orders", {}) or {}).get(close_cid) or {}
+        cumulative = cumulative_qty or rec.qty
+        applied = float(pending.get("filled_qty") or 0)
+        already_staged = applied >= cumulative - 1e-12
+        average = float(pending.get("avg_price") or rec.exit) if already_staged else (
+            applied * float(pending.get("avg_price") or rec.exit) + rec.qty * rec.exit) / (applied + rec.qty)
+        fees = float(pending.get("fee_total") or 0) + (0 if already_staged else exit_fee)
         result = ledger.allocate_close(str(pos.client_id or self.position_key(pos)), rec.qty, rec.exit,
                                        exit_fee, rec.close_fill_id, t=rec.t,
                                        reported_net_pnl=rec.pnl if rec.cost_source == "live-exchange" else None,
                                        metadata={"reason": rec.reason, "position_cost_pct": rec.position_cost_pct,
                                                  "cost_source": "live-exchange" if exit_fee_known or exit_fee > 0 else rec.cost_source, "close_client_id": close_cid,
-                                                 "close_order_id": close_oid, "cumulative_close_qty": cumulative_qty or rec.qty})
+                                                 "close_order_id": close_oid, "cumulative_close_qty": cumulative,
+                                                 "cumulative_close_avg_price": average, "cumulative_close_fee": fees})
         if result.get("duplicate"):
             return None
         rows = result.get("rows") or []
@@ -8362,6 +8402,14 @@ class Pulse:
         try:
             if roundtrip is not None and not manual_close and str(rec.strategy) == "dca":
                 self.dca.on_close(roundtrip)
+        except Exception:
+            pass
+        try:
+            if roundtrip is not None and not manual_close and not htf_lot:
+                method = getattr(self.block, "record_lot_close" if str(rec.strategy) == "block" else "record_parent_lot_close", None)
+                scope = "" if bool(getattr(self, "block_overall", True)) and not getattr(pos, "ind_config", "") else self.logical_group_key(pos)
+                if callable(method) and method(roundtrip, group_key=scope):
+                    pos._block_own_lot_learned = True
         except Exception:
             pass
         try:
@@ -8438,7 +8486,7 @@ class Pulse:
         measured_exit_fee = max(0.0, float(exit_fee or 0.0))
         fee_total = allocated_entry_fee + measured_exit_fee
         close_notional = max(0.0, fill_qty * float(pos.entry or 0.0))
-        measured_roundtrip = (bool(getattr(pos, "entry_fee_known", False)) or allocated_entry_fee > 0) and (
+        measured_roundtrip = position_entry_fee_known(pos) and (
             exit_fee_known or measured_exit_fee > 0) and close_notional > 0
         fill_cost = (
             normalize_position_cost_pct(fee_total / close_notional * 100.0, self.position_cost_pct)
@@ -9326,11 +9374,15 @@ class Pulse:
                     axis_key=str(rec.get("axis_key") or rec.get("axisKey") or ""),
                     relative_count=int(rec.get("relative_count") or rec.get("relativeCount") or 1),
                     volume_ratio=float(rec.get("volume_ratio") or rec.get("volumeRatio") or 1),
+                    size_ratio=float(rec.get("size_ratio") or rec.get("sizeRatio") or 1),
                     pack=str(rec.get("pack") or ""),
                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
                     ours=bool(rec.get("ours", True)),
                     conn=str(rec.get("conn") or rec.get("connection") or ""),
                     ind_kind=str(rec.get("ind_kind") or rec.get("indKind") or ""),
+                    ind_config=str(rec.get("ind_config") or rec.get("indConfig") or ""),
+                    set_tp_pct=float(rec.get("set_tp_pct") or rec.get("setTpPct") or 0),
+                    block_count=max(0, int(rec.get("block_count") or rec.get("blockCount") or 0)),
                     system_id=str(rec.get("system_id") or rec.get("systemId") or ""),
                     tracking_scope=str(rec.get("tracking_scope") or rec.get("trackingScope") or ""),
                     control_group_key=str(rec.get("control_group_key") or rec.get("controlGroupKey") or ""),
@@ -9341,7 +9393,7 @@ class Pulse:
                     exit_fee=max(0.0, _sf(rec.get("exit_fee") or rec.get("exitFee"))),
                     fee_total=max(0.0, _sf(rec.get("fee_total") or rec.get("feeTotal"))),
                     position_cost_pct=normalize_position_cost_pct(
-                        rec.get("position_cost_pct") or rec.get("positionCostPct") or POSITION_COST_PCT_DEFAULT,
+                        rec.get("position_cost_pct") if rec.get("position_cost_pct") is not None else rec.get("positionCostPct"),
                         POSITION_COST_PCT_DEFAULT,
                     ),
                     cost_source=str(rec.get("cost_source") or rec.get("costSource") or "manual-fallback"),
@@ -9502,7 +9554,11 @@ class Pulse:
             getattr(self, "block", None),
         ):
             if component is not None and hasattr(component, "cost_pct"):
-                component.cost_pct = cost
+                setter = getattr(component, "set_cost_pct", None)
+                if callable(setter):
+                    setter(cost)
+                else:
+                    component.cost_pct = cost
         if getattr(self, "coord", None) is not None:
             self.coord.position_cost_pct = cost
         if getattr(self, "indications", None) is not None:
@@ -9933,7 +9989,12 @@ class Pulse:
         # Keep the configured ratio. BlockBook.effective_volume_ratio() shares
         # extra size across live stack counts when n=1 would consume the cap.
         try:
-            self.block.cost_pct = max(1e-9, float(self.position_cost_pct or POSITION_COST_PCT_DEFAULT))
+            cost = normalize_position_cost_pct(self.position_cost_pct, POSITION_COST_PCT_DEFAULT)
+            setter = getattr(self.block, "set_cost_pct", None)
+            if callable(setter):
+                setter(cost)
+            else:
+                self.block.cost_pct = cost
         except Exception:
             self.block.cost_pct = POSITION_COST_PCT_DEFAULT
         self.block.pf_ratio = max(BLOCK_PF_RATIO_MIN, min(BLOCK_PF_RATIO_MAX, b_pfr))
@@ -10687,9 +10748,12 @@ class Pulse:
             except Exception:
                 tape = None
         if set_id and count is not None:
-            tape = [row.pnl for row in rows if str(getattr(row, "axis_key", "")) == f"block-active:{count}"]
+            tape = [row for row in rows if str(getattr(row, "axis_key", "")) == f"block-active:{count}"]
         allow, reasons, metrics = self.coord.add_gate(rows, consec, intern=intern, count=count, count_tape=tape)
-        last_pf = float((metrics or {}).get("lastPf") or (metrics or {}).get("last15Ratio") or 1.0)
+        last_pf = (metrics or {}).get("lastPf")
+        if last_pf is None:
+            last_pf = (metrics or {}).get("last15Ratio")
+        last_pf = float(last_pf) if last_pf is not None else 0.0
         stack = int(getattr(self.block, "max_stack", 3) or 3)
         cap = self.coord.add_stack_cap(stack, last_pf)
         return bool(allow), int(cap), last_pf, list(reasons or [])
@@ -12036,7 +12100,7 @@ class Pulse:
             with open(path, encoding="utf-8") as stream:
                 blob = json.load(stream)
             if (not isinstance(blob, dict) or not blob.get("baselineOnly")
-                    or blob.get("version") != 3 or blob.get("connection") != CONN_SHORT):
+                    or blob.get("version") != FORCED_EVIDENCE_VERSION or blob.get("connection") != CONN_SHORT):
                 return {}
             if not 0 <= now - float(blob.get("updatedAt") or 0) <= 3 * 3600:
                 return {}
@@ -13439,6 +13503,67 @@ class Pulse:
                                   fee_known=bool(metadata.get("fee_known")), fill_sequence=float(row["filled_qty"]))
         return pos
 
+    def _refine_confirmed_order(self, order, cid, kind) -> bool:
+        """Apply late measured fee/price details only to an unclosed own lot."""
+        pending = (getattr(self, "pending_orders", {}) or {}).get(cid) or {}
+        metadata = dict(pending.get("metadata") or {})
+        ledger = self._independent_dca_ledger()
+        matching = ledger.entry_lots(cid) if ledger is not None else []
+        parent_cid = str(metadata.get("parent_client_id") or (matching[0]["parent_key"] if len(matching) == 1 else cid))
+        pos = self._position_for_client(parent_cid)
+        if pos is None or not self.position_is_ours(pos):
+            return False
+        cumulative = order_fill_qty(order, 0)
+        price = _sf(order.get("avgPrice") or order.get("price"))
+        if cumulative <= 0 or price <= 0:
+            return False
+        old_qty = float(pending.get("filled_qty") or (matching[0]["opened_qty"] if len(matching) == 1 else pos.qty))
+        old_price = float(pending.get("avg_price") or (matching[0]["entry"] if len(matching) == 1 else pos.entry))
+        old_fee = float(pending.get("fee_total") or (matching[0]["entry_fee"] if len(matching) == 1 else pos.entry_fee))
+        if abs(cumulative - old_qty) > max(1e-12, old_qty * 1e-8):
+            return False
+        known = exchange_fee_known(order)
+        fee = row_fee_usdt(order) if known else old_fee
+        old_known = matching[0]["entry_fee_known"] if len(matching) == 1 else position_entry_fee_known(pos)
+        if abs(price - old_price) <= 1e-12 and abs(fee - old_fee) <= 1e-12 and (not known or old_known):
+            return False
+        try:
+            if ledger is not None and ledger.tracked_parent_state(parent_cid).get("tracked"):
+                result = ledger.refine_order(parent_cid, cumulative, price, fee,
+                                             order_id=real_oid(order.get("orderId") or pending.get("order_id")), client_id=cid,
+                                             metadata={"cost_source": "live-exchange" if known or old_known else "manual-fallback"})
+                notional_delta, fee_delta = result["notionalDelta"], result["feeDelta"]
+                pos.entry_fee_known = all(lot["entry_fee_known"] for lot in ledger.snapshot(parent_cid)["lots"])
+            else:
+                if pos.member_count != 1 or pos.close_applied_qty > 0 or abs(pos.qty-cumulative) > 1e-12 or fee < old_fee:
+                    raise ValueError("Closed or combined entry refinement requires cash reconciliation")
+                notional_delta, fee_delta = cumulative*(price-old_price), fee-old_fee
+                pos.entry_fee_known = known or old_known
+            pos.entry = (pos.qty*pos.entry + notional_delta) / pos.qty
+            pos.notional = pos.qty*pos.entry
+            pos.entry_notional += notional_delta
+            pos.entry_fee += fee_delta
+            if abs(notional_delta) > 1e-12:
+                pos.sl, pos.tp = self.security_prices(pos)
+                pos.controls_ok = pos.ctrl_verified = False
+            self.save_open_book()
+            if pending:
+                pending.update(avg_price=price, fee_total=fee)
+                pending.setdefault("metadata", {})["fee_known"] = known or old_known
+                self._save_pending_orders()
+            return True
+        except ValueError as exc:
+            metadata["deferredFeePriceReconciliation"] = {"quantity": cumulative, "averagePrice": price,
+                                                         "feeTotal": fee, "reason": str(exc)}
+            self._remember_pending(kind="entry" if kind == "o" else "dca" if kind == "d" else "block",
+                                   cid=cid, symbol=pos.symbol, side=pos.side,
+                                   requested_qty=float(pending.get("requested_qty") or cumulative), filled_qty=old_qty,
+                                   avg_price=old_price, fee_total=old_fee,
+                                   order_id=real_oid(order.get("orderId") or pending.get("order_id")),
+                                   group_key=str(pending.get("group_key") or pos.control_group_key), metadata=metadata)
+            self.last_error = "Confirmed fee/price correction retained for cash reconciliation"
+            return False
+
     def _sync_pending_fill(self, order: Dict[str, Any], cid: str, track: Dict[str, Any], kind: str) -> bool:
         row, cumulative, px, oid = self._pending_row_from_exchange(order, cid, track, kind)
         previous = max(0.0, _sf((self.pending_orders.get(cid) or {}).get("filled_qty")))
@@ -13447,6 +13572,19 @@ class Pulse:
         delta = max(0.0, cumulative - previous)
         pos: Optional[Position] = None
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if delta <= 1e-12 and previous > 0 and kind in ("o", "d", "b"):
+            return self._refine_confirmed_order(order, cid, kind)
+        if delta <= 1e-12 and previous > 0 and kind == "c" and (fee_delta > 0 or abs(px-_sf((self.pending_orders.get(cid) or {}).get("avg_price"))) > 1e-12):
+            applied = self.pending_orders.get(cid) or {}
+            self._remember_pending(kind="close", cid=cid, symbol=row["symbol"], side=row["side"],
+                                   requested_qty=row["requested_qty"], filled_qty=previous,
+                                   order_id=oid, avg_price=_sf(applied.get("avg_price")), fee_total=previous_fee,
+                                   group_key=str(row.get("group_key") or ""),
+                                   metadata={**meta, "deferredFeePriceReconciliation": {
+                                       "quantity": cumulative, "averagePrice": px,
+                                       "feeTotal": row["fee_total"], "reason": "Already closed fill requires cash reconciliation"}})
+            self.last_error = "Confirmed close fee/price correction retained for cash reconciliation"
+            return False
         if kind == "c":
             if meta.get("confirmed_control_fill"):
                 # Exact persisted parent lineage only. A new position in the
@@ -13523,10 +13661,12 @@ class Pulse:
                         requested_qty=row["requested_qty"],
                         filled_qty=previous,
                         order_id=oid,
-                        avg_price=px,
+                        avg_price=_sf((self.pending_orders.get(cid) or {}).get("avg_price")),
                         group_key=str(row.get("group_key") or ""),
-                        fee_total=float(row.get("fee_total") or 0.0),
-                        metadata={**meta, "observedCumulativeQty": cumulative},
+                        fee_total=previous_fee,
+                        metadata={**meta, "observedCumulativeQty": cumulative,
+                                  "observedCumulativeFee": float(row.get("fee_total") or 0.0),
+                                  "observedAveragePrice": px},
                     )
                     return False
                 applied = self._record_close_fill(
@@ -13687,6 +13827,8 @@ class Pulse:
                 # cumulative executed quantity reaches the requested size.
                 # Entry/add-on orders retain the existing one-shot dedupe.
                 if cid in self.seen_fill_cids and not (kind == "c" and cid in self.pending_orders):
+                    if kind in ("o", "d", "b"):
+                        n += int(self._refine_confirmed_order(o, cid, kind))
                     continue
                 if kind == "c" and cid not in self.pending_orders:
                     # A close callback without a persisted intent is safe only
@@ -14927,7 +15069,7 @@ class Pulse:
                 "wins": sum(1 for x in pnls if x > 0),
                 "losses": sum(1 for x in pnls if x < 0),
                 "net": round(sum(pnls), 6),
-                "pf": round(float(cost.get("ratio") or 1.0), 4),
+                "pf": round(float(cost["ratio"]), 4) if cost.get("count", 0) > 0 and cost.get("ratio") is not None else None,
                 "classicPf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0), 4),
                 "maxDdS": d.get("maxS"),
                 "avgDdS": d.get("avgS"),
@@ -15247,7 +15389,7 @@ class Pulse:
             try:
                 with open(forced_path(CONN_SHORT), encoding="utf-8") as stream:
                     completed = json.load(stream)
-                if (completed.get("version") == 3 and completed.get("connection") == CONN_SHORT
+                if (completed.get("version") == FORCED_EVIDENCE_VERSION and completed.get("connection") == CONN_SHORT
                         and completed.get("requestRunId") == run_id):
                     self._hist_request_seen = run_id
                     return {}  # completed baseline survives a worker restart

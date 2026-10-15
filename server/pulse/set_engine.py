@@ -56,6 +56,7 @@ from position_cost import (
     pf_reference_cost_pct,
     net_return_pf,
     row_side,
+    row_time_seconds,
     filter_side,
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
@@ -386,12 +387,12 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
     """Return observed close throughput from a timestamped live tape."""
     ordered = sorted(
         [row for row in rows if row is not None],
-        key=lambda row: finite(row.get("t") if _is_hist_row(row) else getattr(row, "t", 0)),
+        key=row_time_seconds,
     )
     if len(ordered) < 2:
         return 0.0
-    first = finite(ordered[0].get("t") if _is_hist_row(ordered[0]) else getattr(ordered[0], "t", 0))
-    last = finite(ordered[-1].get("t") if _is_hist_row(ordered[-1]) else getattr(ordered[-1], "t", 0))
+    first = row_time_seconds(ordered[0])
+    last = row_time_seconds(ordered[-1])
     # Duplicate/near-duplicate exchange timestamps must not create an
     # infinite score or make a tiny test burst look like a stable rate.
     span_h = max(1.0 / 60.0, (last - first) / 3600.0)
@@ -402,7 +403,7 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
 
 def recent_direction_rows(bucket, cap):
     """Retain chronological last-N evidence for both independent directions."""
-    rows = sorted(bucket, key=lambda r: finite(r.get("t")))
+    rows = sorted(bucket, key=row_time_seconds)
     if len(rows) <= cap:
         return rows
     per = min(75, cap // 2)
@@ -429,7 +430,7 @@ def hist_row_key(row: Dict[str, Any]) -> Tuple[str, float, str, str, float, floa
     """Stable identity for a deterministic historic replay row."""
     return (
         str(row.get("symbol") or ""),
-        round(finite(row.get("t")), 6),
+        round(row_time_seconds(row), 6),
         str(row.get("side") or row.get("direction") or ""),
         str(row.get("reason") or ""),
         round(finite(row.get("pnl_pct")), 10),
@@ -445,7 +446,7 @@ IND_CONFIG_SIDE_CAP = 75
 
 def trim_ind_tape(bucket: Sequence[Dict[str, Any]], per: int = IND_CONFIG_SIDE_CAP) -> List[Dict[str, Any]]:
     """Chronological last ``per`` rows per (ind_config, side)."""
-    rows = sorted((r for r in bucket if r is not None), key=lambda r: finite(r.get("t")))
+    rows = sorted((r for r in bucket if r is not None), key=row_time_seconds)
     per = max(8, int(per or IND_CONFIG_SIDE_CAP))
     counts: Dict[Tuple[str, str], int] = {}
     keep: List[int] = []
@@ -491,7 +492,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if _is_hist_row(r)]
-        seq.sort(key=lambda r: finite(r.get("t")))
+        seq.sort(key=row_time_seconds)
     if len(seq) <= n:
         return seq
     by: Dict[str, List[Dict[str, Any]]] = {}
@@ -501,15 +502,15 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
         return seq[-n:]
     names = list(by.keys())
     if len(names) >= n:
-        recent = sorted(names, key=lambda s: finite(by[s][-1].get("t")), reverse=True)[:n]
+        recent = sorted(names, key=lambda s: row_time_seconds(by[s][-1]), reverse=True)[:n]
         picked = [by[s][-1] for s in recent]
-        picked.sort(key=lambda r: finite(r.get("t")))
+        picked.sort(key=row_time_seconds)
         return picked
     per = max(1, n // len(names))
     out: List[Dict[str, Any]] = []
     for tape in by.values():
         out.extend(tape[-per:])
-    out.sort(key=lambda r: finite(r.get("t")))
+    out.sort(key=row_time_seconds)
     if len(out) < n:
         taken = {id(x) for x in out}
         for r in reversed(seq):
@@ -519,7 +520,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
             taken.add(id(r))
             if len(out) >= n:
                 break
-        out.sort(key=lambda r: finite(r.get("t")))
+        out.sort(key=row_time_seconds)
     return out[-n:]
 
 
@@ -535,16 +536,14 @@ def last_n_chrono(rows: Sequence[Any], n: int, *, ordered: bool = False) -> List
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if r is not None]
-        seq.sort(key=lambda r: finite(r.get("t") if _is_hist_row(r) else getattr(r, "t", 0)))
+        seq.sort(key=row_time_seconds)
     if len(seq) <= take:
         return seq if isinstance(seq, list) else list(seq)
     return seq[-take:]
 
 
 def row_ts(row: Any) -> float:
-    if _is_hist_row(row):
-        return finite(row.get("t"))
-    return finite(getattr(row, "t", 0))
+    return row_time_seconds(row)
 
 
 def row_symbol(row: Any) -> str:
@@ -1920,7 +1919,7 @@ class SetBook:
         return max(need, int(self.pf_n or PF_N_DEFAULT))
 
     def _ddt_rows(self, rows: Sequence[Any], ordered: bool) -> List[Any]:
-        seq = list(rows) if ordered else sorted(rows, key=lambda r: finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0.0)))
+        seq = list(rows) if ordered else sorted(rows, key=row_time_seconds)
         return seq[-self.ddt_window():]
 
     def ddt_when_enough(self, rows: Sequence[Any], need: int, *, ordered: bool = False) -> Dict[str, float]:
@@ -2300,13 +2299,13 @@ class SetBook:
         partial last50/last75 (or a cold last5) must not veto a qualified
         overall last-N tape (``pf_n`` / ``baseEvalPosCount``).
         """
-        ordered = sorted((r for r in rows if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
+        ordered = sorted((r for r in rows if _is_hist_row(r)), key=row_time_seconds)
         need = self.eval_need()
         overall_n = max(need, int(self.pf_n or need))
         windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
         overall = overall_last_pos_eval(ordered, overall_n, self.cost_pct, ordered=True)
         n = int(overall.get("count") or 0)
-        pf = float(overall.get("ratio") or 1.0)
+        pf = finite(overall.get("ratio"), 1.0)
         windows["overall"] = {
             "requestedN": overall_n,
             "n": n,
@@ -2413,7 +2412,7 @@ class SetBook:
             "n": len(rows),
             "positive": n_pos,
             "positiveRate": round(n_pos / len(rows), 4) if rows else 0.0,
-            "pf": float(opt_pf.get("ratio") or 1.0),
+            "pf": finite(opt_pf.get("ratio"), 1.0),
             "netAvg": round(avg, 8),
             "maxDdS": float(opt_dd.get("maxS") or 0.0),
             "costPct": float(opt_pf.get("costPct") or self.cost_pct),
@@ -3022,7 +3021,7 @@ class SetBook:
                         "costSubtracted": True,
                     },
                 }
-            ordered = sorted(samples, key=lambda r: finite(r.get("t")))
+            ordered = sorted(samples, key=row_time_seconds)
             window = ordered[-need:]
             overall = overall_last_pos_eval(window, need, self.cost_pct, ordered=True)
             pf = float(overall.get("ratio") or 0.0)
@@ -3183,7 +3182,7 @@ class SetBook:
                 st.n = sum(counts.values())
                 updated.append(st.id)
             else:
-                full.sort(key=lambda r: finite(r.get("t")))
+                full.sort(key=row_time_seconds)
                 st.hist = full
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
@@ -4299,8 +4298,8 @@ class SetBook:
         return {
             "n": float(requested),
             "count": float(count),
-            "avgR": round(avg_r, 4),
-            "ratio": round(ratio, 4),
+            "avgR": avg_r,
+            "ratio": ratio,
             "classicPf": round(classic, 4),
             "costPct": round(cost_pct, 8),
             "netPct": round(nets_sum / count * 100.0, 4),
@@ -4543,7 +4542,7 @@ class SetBook:
             # live_first_window order: replay fill first, live results newest.
             ordered = [r for r in tape if _is_hist_row(r)]
         else:
-            ordered = sorted((r for r in tape if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
+            ordered = sorted((r for r in tape if _is_hist_row(r)), key=row_time_seconds)
         nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
         wins = sum(1 for x in nets if x > 0)
         gp = round(sum(x for x in nets if x > 0), 6)
@@ -4672,9 +4671,11 @@ class SetBook:
         st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
         st.stage = qualified or "Unqualified"
         st.stage_qualified = qualified
-        st.base_pf = round(base_pf, 6)
-        st.main_pf = round(main_pf, 6)
-        st.real_pf = round(real_pf, 6)
+        # These values are reused by execution gates. Presentation rounding
+        # must not promote evidence just below a configured PF floor.
+        st.base_pf = base_pf
+        st.main_pf = main_pf
+        st.real_pf = real_pf
         st.position_cost_pct = self.cost_pct
         st.evaluation = dict(m.get("evaluation") or {})
         st.evaluation_windows = dict(m.get("evaluation_windows") or {})
@@ -4724,16 +4725,16 @@ class SetBook:
                 reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
         reason = "; ".join(reasons)
         st.strategy_adjustments = {
-            "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": round(base_pf, 6), "n": base_n, "ddtS": dd_s},
-            "main": {"qualified": main, "evaluated": base, "minPf": main_floor, "pf": round(main_pf, 6), "n": main_n, "ddtS": dd_s},
-            "real": {"qualified": real, "evaluated": main, "minPf": real_floor, "pf": round(real_pf, 6), "n": real_n, "ddtS": dd_s},
+            "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": base_pf, "n": base_n, "ddtS": dd_s},
+            "main": {"qualified": main, "evaluated": base, "minPf": main_floor, "pf": main_pf, "n": main_n, "ddtS": dd_s},
+            "real": {"qualified": real, "evaluated": main, "minPf": real_floor, "pf": real_pf, "n": real_n, "ddtS": dd_s},
             "live": {"evaluation": False, "source": "real"},
             "exchange": {"trackingOnly": True},
         }
         records = {
-            "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": round(base_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Main": {"evaluated": base, "qualified": main, "sampleCount": main_n, "pf": round(main_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Real": {"evaluated": main, "qualified": real, "sampleCount": real_n, "pf": round(real_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
+            "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": base_pf, "ddtS": dd_s, "reason": reason or "qualified"},
+            "Main": {"evaluated": base, "qualified": main, "sampleCount": main_n, "pf": main_pf, "ddtS": dd_s, "reason": reason or "qualified"},
+            "Real": {"evaluated": main, "qualified": real, "sampleCount": real_n, "pf": real_pf, "ddtS": dd_s, "reason": reason or "qualified"},
         }
         for name, required in zip(("Base", "Main", "Real"), self._stage_window_ns()):
             evidence = (m.get("evaluation") or {}) if name == "Base" else (m.get("stage_evaluations") or {}).get(name, {})
@@ -4781,7 +4782,7 @@ class SetBook:
             parent_set_id=st.parent_set_id or st.id,
             stage=name.title(),
             gross_pf=round(finite(evaluation.get("grossPf")), 6),
-            net_pf=round(cost_pf, 6),
+            net_pf=cost_pf,
             position_cost_pct=finite(st.position_cost_pct, self.cost_pct),
             ddt_s=ddt_s,
             sample_count=sample_n,
@@ -4926,7 +4927,7 @@ class SetBook:
         losers stay off. Live last-N losses deactivate either mode.
         """
         if self.live_negative_deact and len(live) >= self.deact_n:
-            tail = sorted(live, key=lambda r: finite(r.get("t")))[-self.deact_n:]
+            tail = sorted(live, key=row_time_seconds)[-self.deact_n:]
             if sum(row_net_pnl(row, self.cost_pct) for row in tail) < 0:
                 return False, f"live last{self.deact_n} avg loss"
         n = int((m or {}).get("last15_n") or 0)
@@ -5037,7 +5038,7 @@ class SetBook:
         }
         if live_rows:
             live_m = self._score_metrics(live_rows)
-            live_ordered = sorted((r for r in live_rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+            live_ordered = sorted((r for r in live_rows if isinstance(r, dict)), key=row_time_seconds)
             live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
             live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
             live_opt_dd = drawdown_time_by_symbol(live_opt_window, cost_pct=self.cost_pct) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
@@ -5070,7 +5071,7 @@ class SetBook:
             "source": "live-exchange",
             "optimizationN": len(live_opt_window),
             "optimizationWindow": max(50, self.deact_n, self.optimization_n),
-            "optimizationPf": round(float(live_opt_pf.get("ratio") or 1.0), 4),
+            "optimizationPf": round(finite(live_opt_pf.get("ratio"), 1.0), 4),
             "optimizationNetAvg": round(live_opt_avg, 8),
             "optimizationMaxDdS": round(float(live_opt_dd.get("maxS") or 0.0), 1),
             "optimizationPositive": live_opt_avg >= 0.0,
@@ -5105,7 +5106,7 @@ class SetBook:
             sm["liveN"] = len(sub_live)
             if sub_live:
                 lm = self._score_metrics(sub_live)
-                live_opt_n = len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):])
+                live_opt_n = len(sorted(sub_live, key=row_time_seconds)[-max(50, self.deact_n, self.optimization_n):])
             else:
                 lm = empty_live
                 live_opt_n = 0
@@ -5612,7 +5613,7 @@ class SetBook:
         def live_rows(s: SetState) -> List[Dict[str, Any]]:
             return sorted(
                 filter_side(s.live, want_side if use_side else None),
-                key=lambda r: finite(r.get("t")),
+                key=row_time_seconds,
             )
 
         def live_ok(s: SetState) -> bool:
@@ -5728,7 +5729,7 @@ class SetBook:
         rows = filter_side(state.evaluation_live(), side)
         if not self.live_negative_deact or len(rows) < self.deact_n:
             return True
-        tail = sorted(rows, key=lambda r: finite(r.get("t")))[-self.deact_n:]
+        tail = sorted(rows, key=row_time_seconds)[-self.deact_n:]
         return sum(row_net_pnl(row, self.cost_pct) for row in tail) >= 0
 
     def _validated_entry_rows(self, pack: str, side: Optional[str] = None) -> List[SetState]:
@@ -6336,7 +6337,7 @@ class SetBook:
                     continue
                 seen.add(cid)
                 fills.append(r)
-        fills.sort(key=lambda r: finite(r.get("t")))
+        fills.sort(key=row_time_seconds)
         m = self._score_metrics(fills)
         rows = []
         for s in sorted(processed, key=lambda x: (-len(x.live), -float((x.live_eval or {}).get("last15Ratio") or 0), x.max_dd_s)):
@@ -7263,7 +7264,7 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     w._score_one(wst)
     l15 = rows20[-15:]
     rs15 = [((r["pnl_pct"] * 100.0) - 0.15) / 0.15 for r in l15]
-    want_ratio = round(1.0 + (sum(rs15) / len(rs15)) * 0.10, 4)
+    want_ratio = 1.0 + (sum(rs15) / len(rs15)) * 0.10
     l25 = rows20[-25:]
     rs25 = [((r["pnl_pct"] * 100.0) - 0.15) / 0.15 for r in l25]
     want25r = sum(rs25) / len(rs25)

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import time
+import math
+from numbers import Real
 from collections import OrderedDict
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
+from position_cost import (clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF,
+                           last_n_cost_pf, net_return_pf, normalize_pf, normalize_position_cost_pct,
+                           row_has_return, row_net_pnl, row_notional, row_time_seconds)
 from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
 from set_engine import MAIN_EVAL_DEFAULT, PF_N_DEFAULT, REAL_EVAL_DEFAULT, row_equity_pnl
 
@@ -27,9 +31,7 @@ UNIX_TS_MIN = 1_000_000_000.0
 
 
 def _row_ts(row: Any) -> float:
-    if isinstance(row, dict):
-        return float(row.get("t") or 0)
-    return float(getattr(row, "t", 0) or 0)
+    return row_time_seconds(row)
 
 
 def recent_closed_rows(closed_rows: Sequence[Any], now: Optional[float] = None, horizon_s: float = LIVE_TAPE_HORIZON_S) -> List[Any]:
@@ -177,11 +179,8 @@ class Coordinator:
         self.min_pf = unified["minPf"]
         self.stage_min_pf = {stage: self.min_pf for stage in ("base", "main", "real")}
         self.pf_window = int(ov.get("pfWindow") or 15)
-        self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
-        if self.position_cost_pct > 2:
-            self.position_cost_pct = self.position_cost_pct / 100.0
-        if self.position_cost_pct > 1:
-            self.position_cost_pct = POSITION_COST_PCT_DEFAULT
+        cost_value = next((value for value in (ov.get("positionCostPct"), cts.get("exchangePositionCost"), cts.get("positionCost")) if value is not None), POSITION_COST_PCT_DEFAULT)
+        self.position_cost_pct = normalize_position_cost_pct(cost_value)
         try:
             self.optimization_n = max(50, min(200, int(ov.get("coordOptimizationN") or 50)))
         except Exception:
@@ -284,8 +283,8 @@ class Coordinator:
         intern_pf = float(intern.get("pf") or intern.get("indications") or intern.get("general") or 0)
         intern_n = float(intern.get("n") or 0)
         metrics: Dict[str, float] = {
-            "lastPf": round(float(last_cost["ratio"]), 3),
-            "prevPf": round(float(prev_cost["ratio"]), 3),
+            "lastPf": float(last_cost["ratio"]),
+            "prevPf": float(prev_cost["ratio"]),
             "consecLoss": float(consec),
             "last15Ratio": cost["ratio"],
             "last15R": cost["avgR"],
@@ -298,11 +297,11 @@ class Coordinator:
             "realMinPf": float(self.stage_min_pf.get("real", POSITIVE_PF)),
             "pfNeutral": 1.0,
             "pfPlus1x": 1.1,
-            "internPf": round(intern_pf, 4) if intern_pf else 0.0,
+            "internPf": intern_pf,
             "internN": intern_n,
-            "mainPf": round(float(main_cost["ratio"]), 4),
+            "mainPf": float(main_cost["ratio"]),
             "mainN": float(main_cost["count"]),
-            "realPf": round(float(real_cost["ratio"]), 4),
+            "realPf": float(real_cost["ratio"]),
             "realN": float(real_cost["count"]),
             "optimizationN": float(len(coord_rows)),
             "optimizationWindow": float(window_limit if self.additional_coordination else len(ordered)),
@@ -311,14 +310,23 @@ class Coordinator:
             "prevCount": float(prev_cost["count"]),
         }
         if coord_rows:
-            net = sum(pnls)
+            cash_values = []
+            for row in coord_rows:
+                value = row.get("pnl") if isinstance(row, dict) else getattr(row, "pnl", None)
+                try:
+                    cash = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if row_notional(row) > 1e-12 and math.isfinite(cash):
+                    cash_values.append(cash)
             self.optimization_stats = {
                 "n": len(coord_rows),
                 "positive": sum(1 for value in pnls if value > 0),
                 "positiveRate": round(sum(1 for value in pnls if value > 0) / len(coord_rows), 4),
-                "pf": float(cost.get("ratio") or 1.0),
-                "netAvg": round(net / len(coord_rows), 8),
-                "costPct": float(cost.get("costPct") or self.position_cost_pct),
+                "pf": float(cost["ratio"]) if cost["count"] else None,
+                "netAvg": float(cost["netAvg"]),
+                "cashNetAvg": sum(cash_values) / len(cash_values) if cash_values else None,
+                "costPct": float(cost.get("costPct", self.position_cost_pct)),
                 "costSource": cost.get("costSource") or "manual-fallback",
                 "window": window_limit if self.additional_coordination else len(ordered),
                 "enabled": bool(self.additional_coordination),
@@ -328,7 +336,7 @@ class Coordinator:
                 "n": 0,
                 "positive": 0,
                 "positiveRate": 0.0,
-                "pf": 1.0,
+                "pf": None,
                 "netAvg": 0.0,
                 "costPct": self.position_cost_pct,
                 "costSource": "manual-fallback",
@@ -409,7 +417,8 @@ class Coordinator:
             if st is None:
                 continue
             n = int(getattr(st, "last15_n", 0) or 0)
-            pf = float(getattr(st, "last15_ratio", 1.0) or 1.0)
+            raw_pf = getattr(st, "last15_ratio", None)
+            pf = float(raw_pf) if raw_pf is not None else 0.0
             ledger = getattr(st, "stage_ledger", None) or {}
             # The scored Base ledger (sample, PF and DD-time) owns the parent
             # decision; bare vars are only a fallback for unscored books.
@@ -423,7 +432,7 @@ class Coordinator:
                 "childCount": 0,
                 "qualifiedChildren": 1 if ok else 0,
                 "n": n,
-                "pf": round(pf, 6),
+                "pf": pf,
                 "idx": int(getattr(st, "idx", 0) or 0),
                 "pack": str(getattr(st, "pack", "") or ""),
                 "fromVars": True,
@@ -488,7 +497,7 @@ class Coordinator:
         want = want if want in ("LONG", "SHORT") else ""
         ordered = sorted(
             [r for r in filter_side([r for r in closed_rows if r is not None], want or None) if r is not None],
-            key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
+            key=_row_ts,
         )
         closed = ordered[-max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2) :] if self.additional_coordination else ordered
         _ = list(open_rows or ())  # explicit boundary: never mixed into closed
@@ -537,7 +546,7 @@ class Coordinator:
                     "closedOnly": True,
                     "openExcluded": True,
                     "closedN": len(tape),
-                    "pf": round(float(pf.get("ratio") or 1.0), 6),
+                    "pf": float(pf["ratio"]) if pf["count"] else None,
                     "paused": paused,
                     "qualified": qualifies,
                     "qualificationReason": "qualified" if qualifies else (
@@ -609,7 +618,7 @@ class Coordinator:
         consec: int,
         intern: Optional[Dict[str, Any]] = None,
         count: Optional[int] = None,
-        count_tape: Optional[Sequence[float]] = None,
+        count_tape: Optional[Sequence[Any]] = None,
     ) -> Tuple[bool, List[str], Dict[str, float]]:
         """Axis coordination for additional strategies (Block / DCA) using count-pos.
 
@@ -619,23 +628,49 @@ class Coordinator:
         allow, reasons, metrics = self.gate(closed_rows, consec, intern=intern)
         if count is not None:
             n = max(1, int(count))
-            tape = [float(x) for x in (count_tape or []) if x is not None]
+            raw_tape = list(count_tape or [])
             last_w = max(1, int(self.axes["last"].max_window))
-            tail = tape[-max(last_w, n) :]
+            raw_tail = raw_tape[-max(last_w, n) :]
+            tail = []
+            returns = []
+            unavailable = 0
+            for value in raw_tail:
+                if isinstance(value, Real) and not isinstance(value, bool):
+                    if not math.isfinite(float(value)):
+                        unavailable += 1
+                        continue
+                    # Scalar native count rings are already cost-net returns,
+                    # normalized to this book's configured reference cost.
+                    result = float(value)
+                    tail.append({"pnl_pct": result + self.position_cost_pct / 100.0})
+                elif row_has_return(value):
+                    result = row_net_pnl(value, self.position_cost_pct)
+                    tail.append(value)
+                else:
+                    unavailable += 1
+                    continue
+                returns.append(result)
             metrics["count"] = float(n)
             metrics["countN"] = float(len(tail))
+            metrics["countUnavailableReturns"] = float(unavailable)
+            metrics["countPf"] = None
+            if unavailable:
+                allow = False
+                reasons.append(f"count-pos n={n} has {unavailable} unavailable returns")
             if self.axes["last"].enabled and len(tail) >= min(3, last_w):
-                gp = sum(x for x in tail if x > 0)
-                gl = abs(sum(x for x in tail if x < 0))
-                pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
+                metric = last_n_cost_pf(tail, max(1, len(tail)), self.position_cost_pct)
+                pf = (net_return_pf(sum(returns) / len(returns), self.position_cost_pct)
+                      if all(isinstance(value, Real) and not isinstance(value, bool) for value in raw_tail)
+                      else metric["ratio"])
                 floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
-                metrics["countPf"] = round(pf, 4)
+                metrics["countPf"] = pf
+                metrics["countClassicPf"] = metric["classicPf"]
                 if not clears_pf(pf, floor):
                     allow = False
                     reasons.append(f"count-pos n={n} last{len(tail)} PF {pf:.2f}<{floor:.2f}")
-            if self.axes["pause"].enabled and tail:
+            if self.axes["pause"].enabled and returns:
                 pause_n = max(1, int(self.axes["pause"].max_window))
-                cl = consec_loss(tail)
+                cl = consec_loss(returns)
                 metrics["countConsec"] = float(cl)
                 if cl >= pause_n:
                     allow = False

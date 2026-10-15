@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server/pulse"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from history_store import HistoryStore
 from load_engine import LoadGovernor
 import pulse_trader as trader
@@ -15,6 +16,286 @@ from set_engine import SetBook
 
 
 class RuntimeLaneFairnessTests(unittest.TestCase):
+    def partitioned_fixture(self, *, free_entry=False, child_fee=0., child_fee_known=False, preclose=False):
+        import test_all_valid_entries as base
+        from dataclasses import replace
+        from dca_lot_ledger import DcaLotLedger
+        helper = base.AllValidEntries("setUp")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        book = helper.book(1)
+        parent = book.by_idx[0]
+        parent.indication_config, parent.indication_symbol = "general_signal", "X-USDT"
+        book._indication_grid = SimpleNamespace(current=lambda state: True)
+        pulse = helper.pulse(book)
+        pulse.place("X-USDT", 1, "gen:trend", .8, selected_set=parent)
+        position = next(iter(pulse.open.values()))
+        position.entry_fee_known = free_entry
+        if preclose:
+            pulse.control_orders = False
+            self.assertTrue(pulse._record_close_fill(position, .025, 101, "tp", close_cid="before-dca-close",
+                                                   cumulative_qty=.025, exit_fee_known=free_entry))
+        child = replace(parent, id=parent.id + ":adjust:dca:1", kind="dca", parent_set_id=parent.id,
+                        axis_key="dca:1", relative_count=1, live=[])
+        book.sets[child.id] = child
+        book.by_idx.append(child)
+        path = str(pathlib.Path(helper.tmp.name) / "dca-lots.json")
+        pulse._dca_lot_ledger = DcaLotLedger(trader.CONN_SHORT, path=path)
+        child_cid = pulse.cid("d", position)
+        pulse.pending_orders[child_cid] = {"metadata": {"dca_child_set_id": child.id, "axis_key": "dca:1",
+                                                         "relative_count": 1, "parent_set_id": parent.id,
+                                                         "ind_config": "general_signal"}}
+        pulse.control_orders = False
+        pulse._apply_position_fill(position, .05, 90, source="dca", fill_cid=child_cid, order_id="dca-order",
+                                   fee=child_fee, fee_known=child_fee_known)
+        return pulse, position, parent, child, path
+
+    def test_late_normal_partial_fill_after_dca_conserves_own_inventory_and_basis(self):
+        pulse, position, parent, child, _ = self.partitioned_fixture()
+        pulse._apply_position_fill(position, .05, 110, source="entry", fill_cid=position.client_id,
+                                   order_id=position.order_id, fill_sequence=.1)
+        self.assertAlmostEqual(position.qty, .15)
+        self.assertAlmostEqual(position.entry, 100)
+        self.assertAlmostEqual(pulse._dca_lot_ledger.parent_qty(position.client_id), .15)
+        self.assertTrue(pulse._record_close_fill(position, .15, 105, "tp", close_cid="late-core-close", cumulative_qty=.15))
+        rows = {row.set_id: row for row in pulse.closed}
+        self.assertAlmostEqual(rows[parent.id].entry, 105)
+        self.assertAlmostEqual(rows[parent.id].qty, .1)
+        self.assertAlmostEqual(rows[child.id].entry, 90)
+        self.assertAlmostEqual(rows[child.id].qty, .05)
+        self.assertAlmostEqual(sum(row.pnl for row in rows.values()), trader.net_pnl_usdt(.05, .15, 100, pulse.position_cost_pct))
+
+    def test_measured_free_commissions_remain_zero_on_each_independent_lot(self):
+        pulse, position, _, _, _ = self.partitioned_fixture(free_entry=True, child_fee_known=True)
+        self.assertTrue(pulse._record_close_fill(position, .1, 101, "tp", exit_fee_known=True))
+        self.assertAlmostEqual(sum(row.pnl for row in pulse.closed), .6)
+        self.assertTrue(all(row.position_cost_pct == 0 and row.cost_source == "live-exchange" for row in pulse.closed))
+        self.assertTrue(trader.exchange_fee_known({"commission": "0"}))
+        self.assertFalse(trader.exchange_fee_known({"avgPrice": "101"}))
+
+    def test_measured_child_fees_are_not_replaced_by_unknown_parent_fallback(self):
+        pulse, position, parent, child, _ = self.partitioned_fixture(child_fee=.002, child_fee_known=True)
+        self.assertTrue(pulse._record_close_fill(position, .1, 101, "tp", exit_fee=.003, exit_fee_known=True))
+        rows = {row.set_id: row for row in pulse.closed}
+        self.assertAlmostEqual(rows[parent.id].position_cost_pct, pulse.position_cost_pct)
+        self.assertEqual(rows[child.id].cost_source, "live-exchange")
+        self.assertAlmostEqual(rows[child.id].position_cost_pct, .0035 / 4.5 * 100)
+        self.assertAlmostEqual(rows[child.id].pnl, .55 - .0035)
+
+    def test_acknowledged_receipt_repairs_stale_physical_book_after_restart(self):
+        from dataclasses import replace
+        from dca_lot_ledger import DcaLotLedger
+        pulse, position, _, _, path = self.partitioned_fixture()
+        stale = replace(position)
+        self.assertTrue(pulse._record_close_fill(position, .1, 101, "tp", close_cid="full-close", cumulative_qty=.1))
+        self.assertEqual(pulse._dca_lot_ledger.pending_closes(), [])
+        pulse.open = {pulse.position_key(stale): stale}
+        pulse.pending_orders["full-close"] = {"kind": "close", "requested_qty": .1, "filled_qty": 0}
+        pulse._dca_lot_ledger = DcaLotLedger(trader.CONN_SHORT, path=path)
+        pulse._restore_independent_close_state()
+        self.assertEqual(pulse.open, {})
+        self.assertNotIn("full-close", pulse.pending_orders)
+
+    def test_cumulative_entry_average_yields_the_actual_incremental_fill_price(self):
+        import test_all_valid_entries as base
+        helper = base.AllValidEntries("setUp")
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        pulse = helper.pulse(helper.book(1))
+        pulse.api.fill_fraction = .5
+        pulse.place("X-USDT", 1, "gen:trend", .8, selected_set=pulse.sets.by_idx[0])
+        position = next(iter(pulse.open.values()))
+        cid = position.client_id
+        track = pulse.parse_track(cid)
+        self.assertTrue(pulse._sync_pending_fill({"symbol": position.symbol, "positionSide": "LONG",
+                                                "orderId": position.order_id, "executedQty": .05,
+                                                "avgPrice": 95, "status": "FILLED", "commission": "0"}, cid, track, "o"))
+        self.assertAlmostEqual(position.qty, .05)
+        self.assertAlmostEqual(position.entry, 95)
+
+    def test_partial_acknowledged_receipt_restores_quantity_fees_and_pending_marker(self):
+        from dataclasses import replace
+        from dca_lot_ledger import DcaLotLedger
+        pulse, position, _, _, path = self.partitioned_fixture(child_fee=.002, child_fee_known=True)
+        stale = replace(position)
+        self.assertTrue(pulse._record_close_fill(position, .05, 101, "tp", close_cid="partial-close", cumulative_qty=.05))
+        pulse.open = {pulse.position_key(stale): stale}
+        pulse.pending_orders["partial-close"] = {"kind": "close", "requested_qty": .1, "filled_qty": 0}
+        pulse._dca_lot_ledger = DcaLotLedger(trader.CONN_SHORT, path=path)
+        pulse._restore_independent_close_state()
+        self.assertAlmostEqual(stale.qty, .05)
+        self.assertAlmostEqual(stale.entry, 95)
+        self.assertAlmostEqual(stale.entry_fee, .001)
+        self.assertAlmostEqual(pulse.pending_orders["partial-close"]["filled_qty"], .05)
+
+    def test_confirmed_late_core_delta_after_flat_reopens_a_new_lot_epoch(self):
+        pulse, position, parent, _, _ = self.partitioned_fixture()
+        cid, oid = position.client_id, position.order_id
+        row = {"client_id": cid, "order_id": oid, "symbol": position.symbol, "side": position.side,
+               "requested_qty": .1, "filled_qty": .05, "avg_price": 100,
+               "metadata": {"set_id": parent.id, "set_idx": parent.idx, "pack": "general",
+                            "ind_config": "general_signal", "sl_pct": position.sl_pct, "tp_pct": position.tp_pct}}
+        pulse.pending_orders[cid] = dict(row)
+        self.assertTrue(pulse._record_close_fill(position, .1, 101, "tp", close_cid="flat-close", cumulative_qty=.1))
+        row["filled_qty"] = .1
+        reopened = pulse._upsert_pending_entry(row, .05, 110, oid, pending_qty=0)
+        self.assertIsNotNone(reopened)
+        self.assertAlmostEqual(pulse._dca_lot_ledger.parent_qty(cid), .05)
+        pulse._restore_independent_close_state()
+        self.assertEqual(len(pulse.open), 1)
+        self.assertTrue(pulse._record_close_fill(reopened, .05, 111, "tp", close_cid="reopened-close", cumulative_qty=.05))
+        self.assertNotEqual(pulse.closed[0].client_id, pulse.closed[-1].client_id)
+        self.assertEqual(pulse.closed[-1].set_id, parent.id)
+        self.assertAlmostEqual(pulse.closed[-1].entry, 110)
+
+    def test_restart_retains_exact_close_config_and_measured_zero_cost(self):
+        pulse, position, parent, child, _ = self.partitioned_fixture(free_entry=True, child_fee_known=True)
+        self.assertTrue(pulse._record_close_fill(position, .1, 101, "tp", exit_fee_known=True))
+        pulse.closed.clear()
+        pulse._load_trade_history()
+        self.assertEqual({row.set_id for row in pulse.closed}, {parent.id, child.id})
+        self.assertTrue(all(row.ind_config == "general_signal" for row in pulse.closed))
+        self.assertTrue(all(row.position_cost_pct == 0 for row in pulse.closed))
+        self.assertTrue(all(pulse.cid_ours(row.client_id) for row in pulse.closed))
+
+    def test_missing_close_parent_preserves_all_applied_cumulative_markers(self):
+        pulse, position, _, _, _ = self.partitioned_fixture(free_entry=True, child_fee_known=True)
+        cid = pulse.cid("c", position)
+        self.assertTrue(pulse._record_close_fill(position, .02, 101, "tp", close_cid=cid,
+                                               cumulative_qty=.02, exit_fee=.002, exit_fee_known=True))
+        pulse.pending_orders[cid] = {"kind": "close", "client_id": cid, "symbol": position.symbol,
+                                     "side": position.side, "requested_qty": .1, "filled_qty": .02,
+                                     "fee_total": .002, "avg_price": 101, "group_key": position.control_group_key,
+                                     "metadata": {"reason": "tp", "parent_client_id": position.client_id}}
+        order = {"symbol": position.symbol, "positionSide": "LONG", "orderId": "partial-close-order",
+                 "executedQty": .04, "avgPrice": 102, "commission": .004, "status": "PARTIALLY_FILLED"}
+        track = pulse.parse_track(cid)
+        pulse.open.clear()
+        self.assertFalse(pulse._sync_pending_fill(order, cid, track, "c"))
+        deferred = pulse.pending_orders[cid]
+        self.assertAlmostEqual(deferred["filled_qty"], .02)
+        self.assertAlmostEqual(deferred["avg_price"], 101)
+        self.assertAlmostEqual(deferred["fee_total"], .002)
+        pulse.open[pulse.position_key(position)] = position
+        self.assertTrue(pulse._sync_pending_fill(order, cid, track, "c"))
+        self.assertAlmostEqual(position.qty, .06)
+        self.assertTrue(all(row.exit == 103 for row in pulse.closed[-2:]))
+        self.assertAlmostEqual(sum(row.exit_fee for row in pulse.closed[-2:]), .002)
+        self.assertAlmostEqual(sum(row.pnl for row in pulse.closed), .276)
+
+    def test_unselected_preflight_cannot_borrow_a_qualified_pooled_set(self):
+        pulse = Pulse.__new__(Pulse)
+        pulse.px, pulse.open = {"X": 100}, {}
+        pulse.occupying = lambda *args, **kwargs: False
+        pooled = SimpleNamespace(id="pooled-winner")
+        pulse.sets = SimpleNamespace(enabled=True, use_historic_gate=False, pick_entry=lambda *args, **kwargs: pooled,
+                                     execution_allowed=lambda *args: True, pack_entry_sets=lambda *args: [])
+        self.assertEqual(pulse.entry_sense("X", 1, "gen:trend", .8, "general"), "set-gate")
+        ind = SimpleNamespace(kind="signals", mode="direct_tf", timeframe="5m", direction="long")
+        pulse.strat_ind = True
+        pulse.indications = SimpleNamespace(settings={"enabled": True}, match=lambda *args: ind)
+        pulse.sets.indication_entry_sets = lambda *args: []
+        self.assertEqual(pulse.entry_sense("X", 1, "ind:signals:direct_tf", .8, "indications"), "set-gate")
+
+    def test_first_dca_after_core_partial_preserves_the_full_original_roundtrip(self):
+        pulse, position, parent, child, _ = self.partitioned_fixture(preclose=True)
+        self.assertAlmostEqual(position.qty, .075)
+        self.assertTrue(pulse._record_close_fill(position, .075, 102, "tp", close_cid="after-dca-close", cumulative_qty=.075))
+        own_base = parent.evaluation_live()
+        own_child = child.evaluation_live()
+        self.assertEqual((len(own_base), len(own_child)), (1, 1))
+        self.assertAlmostEqual(own_base[0]["qty"], .05)
+        self.assertAlmostEqual(own_base[0]["entry"], 100)
+        self.assertAlmostEqual(own_base[0]["pnl"], .075 - .0075)
+        self.assertAlmostEqual(own_child[0]["qty"], .05)
+        self.assertAlmostEqual(own_child[0]["entry"], 90)
+        self.assertAlmostEqual(sum(row.qty for row in pulse.closed), .1)
+
+    def test_equal_add_deltas_separated_by_a_close_have_distinct_cumulative_ids(self):
+        pulse, position, _, _, _ = self.partitioned_fixture()
+        child_cid = next(cid for cid, row in pulse.pending_orders.items() if (row.get("metadata") or {}).get("dca_child_set_id"))
+        self.assertTrue(pulse._record_close_fill(position, .05, 101, "tp", close_cid="intervening-close", cumulative_qty=.05))
+        self.assertAlmostEqual(position.qty, .05)
+        pulse._apply_position_fill(position, .05, 90, source="dca", fill_cid=child_cid,
+                                   order_id="dca-order", fill_sequence=.1)
+        self.assertAlmostEqual(position.qty, .1)
+        self.assertAlmostEqual(pulse._dca_lot_ledger.parent_qty(position.client_id), .1)
+
+    def test_fee_and_price_only_order_update_refines_own_open_child_without_new_qty(self):
+        pulse, position, _, child, _ = self.partitioned_fixture()
+        cid = next(cid for cid, row in pulse.pending_orders.items() if (row.get("metadata") or {}).get("dca_child_set_id"))
+        self.assertTrue(pulse._refine_confirmed_order({"executedQty": .05, "avgPrice": 91,
+                                                     "commission": .002, "orderId": "dca-order"}, cid, "d"))
+        self.assertAlmostEqual(position.qty, .1)
+        self.assertAlmostEqual(position.entry, 95.5)
+        self.assertAlmostEqual(position.entry_fee, .002)
+        own = pulse._dca_lot_ledger.entry_lots(cid)[0]
+        self.assertEqual(own["set_id"], child.id)
+        self.assertAlmostEqual(own["entry"], 91)
+        self.assertAlmostEqual(own["entry_fee"], .002)
+        self.assertTrue(own["entry_fee_known"])
+
+    def test_fee_only_update_after_partial_close_preserves_applied_markers_for_cash_reconciliation(self):
+        pulse, position, _, _, _ = self.partitioned_fixture()
+        cid = next(cid for cid, row in pulse.pending_orders.items() if (row.get("metadata") or {}).get("dca_child_set_id"))
+        self.assertTrue(pulse._record_close_fill(position, .05, 101, "tp", close_cid="partial", cumulative_qty=.05))
+        self.assertFalse(pulse._refine_confirmed_order({"executedQty": .05, "avgPrice": 90,
+                                                      "commission": .002, "orderId": "dca-order"}, cid, "d"))
+        self.assertAlmostEqual(position.entry_fee, 0)
+        self.assertAlmostEqual(pulse.pending_orders[cid]["fee_total"], 0)
+        deferred = pulse.pending_orders[cid]["metadata"]["deferredFeePriceReconciliation"]
+        self.assertAlmostEqual(deferred["feeTotal"], .002)
+
+    def test_restart_receipt_restores_close_price_and_fees_even_without_an_open_parent(self):
+        pulse, position, _, _, _ = self.partitioned_fixture(free_entry=True, child_fee_known=True)
+        cid = pulse.cid("c", position)
+        self.assertTrue(pulse._record_close_fill(position, .02, 101, "tp", close_cid=cid,
+                                               cumulative_qty=.02, exit_fee=.002, exit_fee_known=True))
+        pulse.open.clear()
+        pulse.pending_orders[cid] = {"kind": "close", "client_id": cid, "symbol": position.symbol,
+                                     "side": position.side, "requested_qty": .1, "filled_qty": 0,
+                                     "fee_total": 0, "avg_price": 0, "group_key": position.control_group_key,
+                                     "metadata": {"parent_client_id": position.client_id, "reason": "tp"}}
+        pulse._restore_independent_close_state()
+        self.assertAlmostEqual(pulse.pending_orders[cid]["filled_qty"], .02)
+        self.assertAlmostEqual(pulse.pending_orders[cid]["avg_price"], 101)
+        self.assertAlmostEqual(pulse.pending_orders[cid]["fee_total"], .002)
+
+    def test_price_only_refinement_retains_previously_measured_child_fee(self):
+        pulse, position, _, _, _ = self.partitioned_fixture(child_fee=.002, child_fee_known=True)
+        cid = next(cid for cid, row in pulse.pending_orders.items() if (row.get("metadata") or {}).get("dca_child_set_id"))
+        self.assertTrue(pulse._refine_confirmed_order({"executedQty": .05, "avgPrice": 91,
+                                                     "orderId": "dca-order"}, cid, "d"))
+        lot = pulse._dca_lot_ledger.entry_lots(cid)[0]
+        self.assertTrue(lot["entry_fee_known"])
+        self.assertAlmostEqual(lot["entry_fee"], .002)
+
+    def test_additional_count_gate_receives_own_measured_rows_instead_of_cash_pnl(self):
+        pulse = Pulse.__new__(Pulse)
+        row = SimpleNamespace(pnl=10., pnl_pct=.002, qty=100., entry=100., position_cost_pct=.1,
+                              axis_key="block-active:2", set_id="own", side="LONG")
+        gate = Mock(return_value=(True, [], {"lastPf": 1.1}))
+        pulse.coord = SimpleNamespace(last={}, add_gate=gate, add_stack_cap=lambda stack, pf: stack)
+        pulse.block = SimpleNamespace(max_stack=6, count_tape={2: [100000.]})
+        pulse.config_strategy_closes = lambda *args: [row]
+        view = {"real_pf": 1.2, "real_n": 30}
+        pulse.sets = SimpleNamespace(sets={"own": object()}, _side_view=lambda *args: view,
+                                     _real_metrics_ok=lambda metrics: True)
+        self.assertTrue(pulse._coord_add_state(count=2, set_id="own", side="LONG", strategy="block")[0])
+        self.assertEqual(gate.call_args.kwargs["count_tape"], [row])
+        gate.return_value = (False, ["count PF"], {"lastPf": 0., "last15Ratio": 1.7})
+        result = pulse._coord_add_state(count=2, set_id="own", side="LONG", strategy="block")
+        self.assertFalse(result[0])
+        self.assertEqual(result[2], 0.)
+
+    def test_symbol_summary_preserves_zero_return_pf_and_unavailable_evidence(self):
+        pulse = Pulse.__new__(Pulse)
+        pulse.position_cost_pct = .15
+        losing = {"t": 1, "symbol": "X", "side": "LONG", "qty": 1, "entry": 100,
+                  "pnl_pct": -.0135, "pnl": -1.5}
+        self.assertEqual(pulse._by_symbol_blob([losing])[0]["pf"], 0.)
+        self.assertIsNone(pulse._by_symbol_blob([{"t": 1, "symbol": "X", "side": "LONG"}])[0]["pf"])
+
     def test_small_load_budgets_eventually_process_every_symbol(self):
         names = [f"S{i}-USDT" for i in range(12)]
         governor = LoadGovernor()

@@ -332,6 +332,7 @@ class LoadGovernor:
         self.cgroup_headroom_mb = 0.0
         self.cgroup_events: Dict[str, int] = {}
         self.cgroup_event_delta: Dict[str, int] = {}
+        self._cgroup_events_override: Optional[Dict[str, int]] = None
         self.level = "normal"
         self.raw_level = "normal"
         self.rss = 0.0
@@ -431,7 +432,7 @@ class LoadGovernor:
             except Exception:
                 self.cgroup_current_mb = 0.0
             try:
-                events = cgroup_memory_events()
+                events = dict(self._cgroup_events_override) if self._cgroup_events_override is not None else cgroup_memory_events()
                 if not self.cgroup_events:
                     # Historical OOM counters from a prior process in this
                     # cgroup are a baseline, not a fresh kill this cycle.
@@ -911,6 +912,7 @@ class LoadGovernor:
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     g = LoadGovernor()
+    g._cgroup_events_override = {}
     g._host_avail_override = 8192.0
     g.cgroup_mb = 4096.0
     g._cgroup_current_override = 42.0
@@ -940,6 +942,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("load-shed-hot", (not b2.tf_15m) and (not b2.extra_sources) and b2.scan_chunk <= 12, f"chunk={b2.scan_chunk} shed={b2.shed}"))
     out.append(("load-backpressure", b2.kline_rest is False or "hist" in b2.shed or not b2.hist_run, f"klineRest={b2.kline_rest} hist={b2.hist_run}"))
     g3 = LoadGovernor()
+    g3._cgroup_events_override = {}
     g3._host_avail_override = 8192.0
     g3.cgroup_mb = 4096.0
     g3._cgroup_current_override = 700.0
@@ -1011,6 +1014,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ))
     g._host_avail_override = 8192.0
     g_floor = LoadGovernor()
+    g_floor._cgroup_events_override = {}
     g_floor.cgroup_mb = 0.0
     g_floor._host_avail_override = 8192.0
     out.append((
@@ -1026,6 +1030,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     avail, total = host_mem_mb()
     out.append(("load-host-mem-readable", avail >= 0 and total >= 0, f"avail={avail:.0f} total={total:.0f}"))
     g_book = LoadGovernor()
+    g_book._cgroup_events_override = {}
     g_book.cgroup_mb = 3840.0
     g_book._cgroup_current_override = 900.0
     g_book._host_avail_override = 4096.0
@@ -1042,6 +1047,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         f"look={b_book.lookback} chunk={b_book.hist_chunk} run={b_book.hist_run} level={b_book.level}",
     ))
     g8 = LoadGovernor()
+    g8._cgroup_events_override = {}
     g8.cgroup_mb = 3840.0
     g8._cgroup_current_override = 400.0
     g8._host_avail_override = 4096.0
@@ -1052,6 +1058,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         f"chunk={b8.hist_chunk} look={b8.lookback} level={b8.level}",
     ))
     gd = LoadGovernor()
+    gd._cgroup_events_override = {}
     gd.cgroup_mb = 4096.0
     gd._host_avail_override = 8192.0
     gd._cgroup_current_override = 1000.0
@@ -1072,6 +1079,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         f"level={recovered.level} down={gd._level_down_streak}",
     ))
     gs = LoadGovernor()
+    gs._cgroup_events_override = {}
     gs.cgroup_mb = 4096.0
     gs._host_avail_override = 8192.0
     gs._cgroup_current_override = 4085.0
@@ -1083,6 +1091,18 @@ def self_test() -> List[Tuple[str, bool, str]]:
         bs.level == "critical" and gs.safety_partial and len(kept) <= bs.scan_chunk,
         f"level={bs.level} safetyPartial={gs.safety_partial} chunk={bs.scan_chunk} kept={len(kept)}",
     ))
+    g_oom = LoadGovernor()
+    g_oom.cgroup_mb = 4096.0
+    g_oom._cgroup_current_override = 42.0
+    g_oom._host_avail_override = 8192.0
+    g_oom._cgroup_events_override = {"oom_kill": 1, "max": 10}
+    g_oom.configure({"loadPartial": False})
+    baseline = g_oom.observe(n_sym=200, rss_mb=42.0)
+    out.append(("load-prior-oom-is-baseline", baseline.scan_chunk == 200, str(baseline.scan_chunk)))
+    g_oom._cgroup_events_override = {"oom_kill": 2, "max": 10}
+    fresh = g_oom.observe(n_sym=200, rss_mb=42.0)
+    out.append(("load-new-oom-overrides-full-mode", fresh.level == "critical" and fresh.scan_chunk < 200
+                and g_oom.cgroup_event_delta.get("oom_kill") == 1, f"{fresh.level} {fresh.scan_chunk}"))
     return out
 
 

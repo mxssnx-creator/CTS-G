@@ -290,7 +290,7 @@ export function ratioFromR(signedR: number): number {
 
 /** Shared admission boundary: strict PF > 1.02 plus the configured floor. */
 export function clearsReturnPf(ratio: number, minPf: number): boolean {
-  return Number.isFinite(ratio) && ratio > 1.02 && ratio + 1e-9 >= minPf;
+  return Number.isFinite(ratio) && ratio > 1.02 + 1e-9 && ratio + 1e-9 >= minPf;
 }
 
 function rowValue(row: PositionCostRow, ...keys: (keyof PositionCostRow)[]): unknown {
@@ -439,8 +439,8 @@ function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: nu
   return {
     n,
     count,
-    avgR: round(avgR),
-    ratio: round(ratio),
+    avgR,
+    ratio,
     classicPf: round(classic),
     costPct: weightedNotional > 1e-12 ? round(weightedCost / weightedNotional, 8) : count ? round(costTotal / count, 8) : normalizeCostPct(costPct),
     netPct: round(netAvg * 100),
@@ -454,7 +454,7 @@ function costPfFromWindow(window: PfRow[], n: number, costPct: number, minPf: nu
     costSamples,
     unavailableReturnSamples,
     costSource: costSamples === count && count ? "live-exchange" : costSamples ? "mixed-cost" : "manual-fallback",
-    pass: count >= required && clearsReturnPf(round(ratio), minPf),
+    pass: count >= required && clearsReturnPf(ratio, minPf),
   };
 }
 

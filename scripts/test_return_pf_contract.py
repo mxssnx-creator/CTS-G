@@ -16,6 +16,54 @@ import pf_audit
 
 
 class ReturnCostContract(unittest.TestCase):
+    def test_report_qualification_cannot_round_pf_up_to_real_floor(self):
+        rows = [report.enrich(report._row(dict(t=i,pnl_pct=.0024996,qty=1,entry=100)),.1) for i in range(8)]
+        metric = report.pf_window(rows,None,.1)
+        self.assertAlmostEqual(metric["pf"],1.14996)
+        self.assertFalse(pc.clears_pf(metric["pf"],pc.POSITIVE_PF))
+        self.assertFalse(report._bucket_stats(rows,.1)["validated"])
+
+    def test_canonical_unrounded_pf_cannot_cross_configured_floor(self):
+        simple = [dict(t=i,pnl_pct=.0019996) for i in range(3)]
+        measured = [dict(row,qty=1,entry=100,position_cost_pct=.1) for row in simple]
+        for rows in (simple,measured):
+            metric = pc.last_n_cost_pf(rows,3,.1)
+            self.assertAlmostEqual(metric["ratio"],1.09996)
+            self.assertFalse(pc.clears_pf(metric["ratio"],1.1))
+            named = pc.evaluation_windows(rows,.1,windows=(3,))["last3"]
+            self.assertAlmostEqual(named["pf"],1.09996)
+            self.assertFalse(pc.clears_pf(named["pf"],1.1))
+
+    def test_report_rows_normalize_millisecond_time_and_free_reference(self):
+        row = report.enrich(report._row(dict(t=1_800_000_000_000,qty=1,entry=100,
+                                             pnl_pct=.002,position_cost_pct=0,cost_source="live-exchange")),.2)
+        self.assertEqual(row["t"],1_800_000_000)
+        self.assertAlmostEqual(row["resultR"],1)
+        self.assertAlmostEqual(row["netPnlPct"],.002)
+
+    def test_mixed_seconds_milliseconds_choose_actual_latest_positions(self):
+        rows = [dict(t=1_800_000_030, pnl_pct=.004),
+                dict(t=1_800_000_005_000, pnl_pct=-.01),
+                dict(t=1_800_000_020, pnl_pct=.004),
+                dict(t=1_800_000_000, pnl_pct=-.01)]
+        result = pc.last_n_cost_pf(rows, 2, .1)
+        self.assertAlmostEqual(result["ratio"], 1.3)
+        windows = pc.evaluation_windows(rows, .1, windows=(1,2))
+        self.assertAlmostEqual(windows["last2"]["pf"], 1.3)
+        selected, source = pc.live_first_window([], rows, 2)
+        self.assertEqual([row["t"] for row in selected], [1_800_000_020,1_800_000_030])
+        self.assertEqual(source, "bootstrap")
+
+    def test_mixed_units_do_not_make_old_partial_newer_than_final_close(self):
+        base = dict(client_id="position",conn="x02",symbol="A",side="LONG",qty=1,entry=100,
+                    pnl=.3,pnl_pct=.004,position_cost_pct=.1,exchange_confirmed=True,roundtrip_qty=2)
+        old_partial = dict(base,t=1_800_000_000_000,partial=True,close_fill_id="partial")
+        final = dict(base,t=1_800_000_020,partial=False,close_fill_id="final")
+        rows = pc.completed_roundtrips([final,old_partial])
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]["qty"],2)
+        self.assertEqual(rows[0]["t"],1_800_000_020)
+
     def test_hard_boundary_is_strict_even_at_the_requested_floor(self):
         self.assertFalse(pc.clears_pf(1.02, 1.02))
         self.assertTrue(pc.clears_pf(1.03, 1.02))
@@ -101,8 +149,8 @@ class ReportContract(unittest.TestCase):
     def test_report_keeps_a_genuine_zero_return_pf(self):
         row = report.enrich(report._row(dict(t=1, qty=1, entry=100, pnl_pct=-.009)), .1)
         metric = report.pf_window([row], None, .1)
-        self.assertEqual(metric["pf"], 0)
-        self.assertEqual(metric["pfAfterCost"], 0)
+        self.assertAlmostEqual(metric["pf"], 0)
+        self.assertAlmostEqual(metric["pfAfterCost"], 0)
 
     def test_unknown_cash_return_is_accounted_but_not_pf_evidence(self):
         known = dict(t=1, qty=1, entry=100, pnl_pct=.01, pack="general")
