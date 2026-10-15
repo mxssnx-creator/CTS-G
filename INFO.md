@@ -240,9 +240,11 @@ run is `hours=336` / `lookback=20160`. It processes every enabled pack, SL:TP ra
 trailing arm/give pair, step, direction and indication kind, plus independent
 Block and DCA tapes. Signals additionally publish a separate `block:signals`
 historic ledger by symbol and direction; this is evaluation evidence for the
-same-parent live Block add-on, not a standalone order. `validated #/#` means cost-adjusted PF >= 1.0 with the
-required evaluation sample; `active #/#` is intentionally stricter and also
-requires the configured enable PF and drawdown-time limit. Historic row counts
+same-parent live Block add-on, not a standalone order. `validated #/#` requires
+the configured minimum sample count, return PF strictly above 1.02, and the
+configured PF floor. Empty or unavailable return evidence cannot qualify.
+`active #/#` additionally requires the current execution gates and drawdown-time
+limit. Historic row counts
 may exceed the catalog count because LONG, SHORT and BOTH are reported as
 separate views.
 
@@ -286,10 +288,17 @@ DDT episodes.
 
 The Stats/Overview controls expose separate groups for catalog coverage,
 indication kinds (including `signals` and `break`), directions, strategies,
-Block, DCA, trailing, exits and per-symbol results. Cost PF, classic PF, net
+Block, DCA, trailing, exits and per-symbol results. Return PF, net
 PnL, wins/losses, fills, DDT and `valid #/#` / `active #/#` are sourced from
 the same full snapshot. The Settings table is not a top-N substitute for the
 catalog counters.
+
+The canonical PF is `1 + 0.1 * mean(net_return / PositionCost_fraction)`.
+Actual zero fees remain zero; a known positive configured reference cost is
+used for the denominator. Missing/nonfinite return samples are unavailable,
+never positive evidence. Classic win/loss PF is an explicitly named diagnostic
+only. Evidence belongs to the exact symbol, configuration, exit, direction and
+strategy child; it must not be borrowed from a neighbouring configuration.
 
 The reproducible offline VST evidence is
 `reports/cts-g-72h-report.html`, generated with:
@@ -745,3 +754,64 @@ The X02 and X01 overlays already carry the high-count contract
 entryPolicyMaxCandidates: 0`, `controlOrders`/`controlOrdersPerConfig: true`,
 `dcaEnabled: true`, `blockActive*: true`), so no overlay change is required
 before the run.
+
+
+## Return-PF audit checkpoint — 2026-10-15 (work in progress)
+
+Canonical checkout `/workspace/CTS-G`, repository `mxssnx-creator/CTS-G`.
+Reloaded `main` at `eabd20f837dcfda0c2b0f6bc3f7fafdfa9812d1d`; development
+branch `codex/return-pf-pipeline-audit-20261014`, draft PR #108. The latest
+published source checkpoint is `8e43db30e9b0885fe1e6600e5da5b0b6a8e8cd42`.
+The following source checkpoint completes the remaining runtime/PF paths;
+the full simulation is still in progress. Fetch and inspect this branch
+rather than resetting the worktree. No remote deployment or exchange order
+was performed in this audit.
+
+Recovery checkpoint: `/workspace/backups/CTS-G/20261015T0002Z-source-checkpoint`,
+complete `cts-g-source-8e43db3.bundle` and verified `SHA256SUMS`. Original-main
+backup branch: `backup/main-eabd20f-20261014`. GitHub is the durable source
+recovery path. A rejected generic shell push was replaced by verified, scoped
+GitHub connector blobs/tree/commit/ref updates; remote tree equality was
+verified before moving the branch.
+
+The frozen public input archive is
+`cts-g-six-hour-market-input-20261014T2308Z.zip`. It is saved separately for
+reproduction. Local input/cache path:
+`/workspace/backups/CTS-G/six-hour-20261014T2308Z`. Preparation is
+2026-10-14 11:08–17:08 UTC; execution is 17:08–23:08 UTC. All 48 usable symbols
+have contiguous closed 1m bars; EOS and MKR are explicitly unavailable. Earlier
+candles warm indicators only. Configured roundtrip cost is 0.18%, PF floor
+1.10 with strict >1.02 boundary, starting paper equity 1,000 USDT. Production
+sample defaults are unchanged. The separate short-history experiment uses
+five own completed samples for Base/Main/Real; it was chosen by the requested
+horizon before observing execution results.
+
+Reports and reproduction scripts are in `reports/systemwide-audit-20261015/`.
+Baseline currently has one losing FET trailing execution (return PF 0.15);
+final account controls/descendant regeneration and the complete 48-symbol
+experiment are still being verified. Do not describe either as consistently
+positive. Exact current-source BTC parity covers all 2,958,047 cached rows;
+raw replay caches stay outside Git.
+
+Completed checks: full Python regressions 1,387 tests, one optional skip;
+frontend typecheck/lint/build and 144 TS analytics/config tests. Node22/npm10
+clean installation exposed a missing nested lru-cache lock entry, now repaired
+without upgrades. Node22 frontend checks and dependency audit pass. The local
+proxy preload emits an experimental warning on Node22; suppressing that
+warning for the JSON-stderr CLI test is an environment-only test setting.
+Focused desktop/mobile UI checks verify Tactic save/reload, honest progress
+fixture pagination and all six pages; a narrow Grid fix corrected mobile
+clipping. Standard smoke has external font/Grok loading failures in this
+environment, with no application page errors.
+
+Exact unrounded PF now drives qualification; display rounding cannot admit
+a value just below its configured floor. Missing forced holdout evidence
+sorts last and remains unavailable. Mixed Unix seconds/milliseconds use one
+chronological key. Load self-tests have isolated event fixtures while live
+memory/OOM guards remain active.
+
+Pending completion: verify the cgroup-aware historical worker bound and final
+engine/full regressions, finish compact checkpointed 48-symbol scoring,
+verify final account and all hourly stage/strategy/order outputs, publish
+scoped changes, wait for green CI, then complete the PR/main update and
+verified backup.

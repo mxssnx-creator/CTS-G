@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Mapping
 from html import escape
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -16,11 +17,16 @@ from position_cost import (
     cost_as_frac,
     evaluation_windows,
     last_n_cost_pf,
+    normalize_pf,
+    normalize_position_cost_pct,
     net_pnl_pct,
     net_pnl_usdt,
     row_net_pnl,
+    row_notional,
     row_pnl_pct,
     row_position_cost_pct,
+    row_has_measured_cost,
+    row_time_seconds,
     signed_result_r,
 )
 from set_engine import drawdown_time_by_symbol, IND_KINDS, row_equity_pnl
@@ -50,7 +56,7 @@ def _ddt_tape(rows: Sequence[Dict[str, Any]], *, gross: bool = False) -> List[Di
     tape: List[Dict[str, Any]] = []
     for x in rows:
         if gross:
-            pnl = x.get("pnl")
+            pnl = x.get("grossPnl", x.get("pnl"))
             try:
                 pnl_f = float(pnl) if pnl is not None else 0.0
             except Exception:
@@ -58,7 +64,7 @@ def _ddt_tape(rows: Sequence[Dict[str, Any]], *, gross: bool = False) -> List[Di
             if abs(pnl_f) > 1e-15:
                 equity = pnl_f
             else:
-                pct = x.get("pnl_pct")
+                pct = x.get("grossPnlPct", x.get("pnl_pct"))
                 try:
                     equity = float(pct) if pct is not None else 0.0
                 except Exception:
@@ -83,28 +89,35 @@ def _ddt_tape(rows: Sequence[Dict[str, Any]], *, gross: bool = False) -> List[Di
 
 
 def _row(c: Any) -> Dict[str, Any]:
-    if isinstance(c, dict):
+    if isinstance(c, Mapping):
         has_pct = c.get("pnl_pct") is not None
         return {
-            "t": _f(c.get("t")),
+            # Preserve measured fee units/scopes before report normalization.
+            # Missing totals must stay missing; a synthetic zero can erase a
+            # real entry+exit fee or mark a one-leg fee as a free round trip.
+            **{key: c[key] for key in ("notional", "fee_scope", "feeScope", "fee_type", "feeType",
+                                      "fee_rate", "feeRate", "commissionRate", "makerFeeRate", "takerFeeRate",
+                                      "cost_pct", "costPct") if key in c},
+            "t": row_time_seconds(c),
             "symbol": str(c.get("symbol") or ""),
             "side": str(c.get("side") or ""),
-            "qty": _f(c.get("qty")),
-            "entry": _f(c.get("entry")),
+            "qty": _f(c.get("qty", c.get("quantity", c.get("executedQty")))),
+            "entry": _f(c.get("entry", c.get("avgPrice", c.get("price")))),
             "exit": _f(c.get("exit") or c.get("exit_px")),
             "pnl": _f(c.get("pnl")),
-            "pnl_pct": _f(c.get("pnl_pct")),
+            "pnl_pct": _f(c.get("pnl_pct")) if has_pct else None,
             "entry_fee": _f(c.get("entry_fee") or c.get("entryFee")),
             "exit_fee": _f(c.get("exit_fee") or c.get("exitFee")),
-            "fee_total": _f(c.get("fee_total") or c.get("feeTotal") or c.get("totalFee")),
+            "fee_total": next((c.get(key) for key in ("fee_total", "feeTotal", "totalFee", "totalCommission") if c.get(key) is not None), None),
             "position_cost_pct": c.get("position_cost_pct") if c.get("position_cost_pct") is not None else c.get("positionCostPct"),
             "cost_source": str(c.get("cost_source") or c.get("costSource") or ""),
-            "fee": _f(c.get("fee")),
+            "fee": next((c.get(key) for key in ("fee", "fees", "feeAmount", "commission", "commissionAmount", "transactionFee", "realizedFee") if c.get(key) is not None), None),
             "_pnl_pct_present": has_pct,
             "hold_s": _f(c.get("hold_s") or c.get("holdS")),
             "reason": str(c.get("reason") or ""),
             "set_id": str(c.get("set_id") or c.get("setId") or ""),
             "pack": str(c.get("pack") or ""),
+            "strategy": str(c.get("strategy") or ""),
             "client_id": str(c.get("client_id") or c.get("clientId") or ""),
             "sl_ratio": _f(c.get("sl_ratio") or c.get("slRatio")),
             "trail_key": str(c.get("trail_key") or c.get("trailKey") or ""),
@@ -112,25 +125,26 @@ def _row(c: Any) -> Dict[str, Any]:
             "indKind": str(c.get("indKind") or c.get("ind_kind") or ""),
         }
     return {
-        "t": _f(getattr(c, "t", 0)),
+        "t": row_time_seconds(c),
         "symbol": str(getattr(c, "symbol", "") or ""),
         "side": str(getattr(c, "side", "") or ""),
         "qty": _f(getattr(c, "qty", 0)),
         "entry": _f(getattr(c, "entry", 0)),
         "exit": _f(getattr(c, "exit", 0)),
         "pnl": _f(getattr(c, "pnl", 0)),
-        "pnl_pct": _f(getattr(c, "pnl_pct", 0)),
+        "pnl_pct": _f(getattr(c, "pnl_pct", 0)) if getattr(c, "pnl_pct", None) is not None else None,
         "entry_fee": _f(getattr(c, "entry_fee", 0)),
         "exit_fee": _f(getattr(c, "exit_fee", 0)),
-        "fee_total": _f(getattr(c, "fee_total", 0)),
+        "fee_total": getattr(c, "fee_total", None),
         "position_cost_pct": getattr(c, "position_cost_pct", None),
         "cost_source": str(getattr(c, "cost_source", "") or ""),
-        "fee": _f(getattr(c, "fee", 0)),
+        "fee": getattr(c, "fee", None),
         "_pnl_pct_present": getattr(c, "pnl_pct", None) is not None,
         "hold_s": _f(getattr(c, "hold_s", 0)),
         "reason": str(getattr(c, "reason", "") or ""),
         "set_id": str(getattr(c, "set_id", "") or ""),
         "pack": str(getattr(c, "pack", "") or ""),
+        "strategy": str(getattr(c, "strategy", "") or ""),
         "client_id": str(getattr(c, "client_id", "") or ""),
         "sl_ratio": _f(getattr(c, "sl_ratio", 0)),
         "trail_key": str(getattr(c, "trail_key", "") or ""),
@@ -140,7 +154,7 @@ def _row(c: Any) -> Dict[str, Any]:
 
 
 def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
-    notion = max(0.0, row["qty"] * row["entry"])
+    notion = row_notional(row)
     row_cost = row_position_cost_pct(row, cost_pct)
     if not row.get("_pnl_pct_present", True) and notion > 1e-12:
         # Persisted Closed.pnl is net of one PositionCost. Reconstruct the
@@ -153,8 +167,8 @@ def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
         # Publish the reconstructed gross move so last_n_cost_pf / DDT do not
         # read the 0.0 placeholder from _row() as a cost-only loss.
         row["pnl_pct"] = gross_pct
-    net_usdt = net_pnl_usdt(gross_pct, row["qty"], row["entry"], row_cost) if notion else row["pnl"]
-    r = signed_result_r(gross_pct, row_cost)
+    net_usdt = notion * net_pct if notion else row["pnl"]
+    r = signed_result_r(gross_pct, row_cost, cost_pct)
     row["notional"] = round(notion, 6)
     row["grossPnlPct"] = round(gross_pct, 8)
     row["grossPnl"] = round(notion * gross_pct, 8)
@@ -162,7 +176,7 @@ def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
     row["netPnl"] = round(net_usdt, 8)
     row["resultR"] = round(r, 4)
     row["costPct"] = row_cost
-    row["costSource"] = row.get("cost_source") or ("live-exchange" if row_cost != cost_pct else "manual-fallback")
+    row["costSource"] = row.get("cost_source") or ("live-exchange" if row_has_measured_cost(row) else "manual-fallback")
     row["costUsdt"] = round(notion * cost_as_frac(row_cost), 8)
     row.pop("_pnl_pct_present", None)
     return row
@@ -201,18 +215,22 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "gp": round(gp, 6),
         "gl": round(gl, 6),
         "net": round(gp - gl, 6),
-        "pf": round(float(cost.get("ratio") or 1.0), 4),
+        "pf": float(cost["ratio"]),
         "classicPf": round(classic_net, 4),
         "grossClassicPf": round(classic, 4),
         "gpNetCost": round(gp_net, 6),
         "glNetCost": round(gl_net, 6),
         "netAfterCost": round(gp_net - gl_net, 6),
-        "pfAfterCost": round(float(cost.get("ratio") or 1.0), 4),
+        "pfAfterCost": float(cost["ratio"]),
         "avgHoldS": round(sum(holds) / len(holds), 1) if holds else 0.0,
         "costRatio": cost.get("ratio"),
         "avgR": cost.get("avgR"),
         "classicPfCost": cost.get("classicPf"),
-        "costPct": cost_pct,
+        "costPct": cost.get("costPct", cost_pct),
+        "pfReferenceCostPct": cost.get("pfReferenceCostPct"),
+        "zeroCostSamples": cost.get("zeroCostSamples", 0),
+        "returnSampleCount": int(cost.get("count") or 0),
+        "unavailableReturnSamples": int(cost.get("unavailableReturnSamples") or 0),
         "netAvg": round(float(cost.get("netAvg") or 0), 6),
         "costSubtracted": True,
         "scale": "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost",
@@ -342,7 +360,7 @@ def _bucket_stats(items: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str,
         sw["direction"] = d
         by_side[d] = sw
     w["bySide"] = by_side
-    w["validated"] = int(w.get("n") or 0) >= 8 and clears_pf(float(w.get("pf") or 0), POSITIVE_PF)
+    w["validated"] = int(w.get("returnSampleCount") or 0) >= 8 and clears_pf(float(w.get("pf") or 0), POSITIVE_PF)
     return w
 
 
@@ -423,18 +441,22 @@ def merge_kind_stats(
             # Replay wins: every count/amount field comes from the replay gate so
             # pf, n, wr, gp/gl/net and bySide never mix two tapes.
             blob["source"] = "replay"
-            blob["pf"] = round(float(g.get("pf") or 0), 4)
+            blob["pf"] = float(g.get("pf") or 0)
+            blob["pfAfterCost"] = blob["pf"]
+            blob["costRatio"] = blob["pf"]
             blob["n"] = hist_n
-            for key in ("gp", "gl", "net", "wr"):
+            blob["returnSampleCount"] = int(g.get("returnSampleCount", hist_n) or 0)
+            blob["unavailableReturnSamples"] = int(g.get("unavailableReturnSamples") or 0)
+            for key in ("gp", "gl", "net", "wr", "wins", "losses", "gpNetCost", "glNetCost", "netAfterCost",
+                        "classicPf", "grossClassicPf", "classicPfCost", "avgR", "netAvg", "avgHoldS"):
                 blob[key] = g.get(key) if key in g else None
             blob["bySide"] = g.get("bySide") if isinstance(g.get("bySide"), dict) else {}
-            blob["maxDdS"] = g.get("maxDdS", blob.get("maxDdS"))
-            blob["avgDdS"] = g.get("avgDdS", blob.get("avgDdS"))
-            blob["ddEpisodes"] = g.get("ddEpisodes", blob.get("ddEpisodes"))
-            blob["netAvg"] = g.get("netAvg", blob.get("netAvg"))
+            blob["maxDdS"] = g.get("maxDdS")
+            blob["avgDdS"] = g.get("avgDdS")
+            blob["ddEpisodes"] = g.get("ddEpisodes")
             blob["validated"] = bool(g.get("validated")) if hist_n else bool(int(blob.get("n") or 0) >= LAST_N_DEFAULT)
             blob["profitable"] = bool(clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
-        blob["ok"] = bool(int(blob.get("n") or 0) >= 8 and clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
+        blob["ok"] = bool(int(blob.get("returnSampleCount") or 0) >= 8 and clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
         blob["gateOpen"] = g.get("ok") if "ok" in g else None
         blob["hits"] = int(live.get("hits") or hits.get(k) or 0)
         blob["scanSymbols"] = int(live.get("symbols") or 0)
@@ -464,30 +486,23 @@ def merge_strategy_stats(
     block = block or {}
     dca = dca or {}
     exits = exits or {}
-    pack_pf: Dict[str, List[float]] = {}
-    for r in sets_rows or []:
-        pack = str(r.get("pack") or "")
-        if pack:
-            pack_pf.setdefault(pack, []).append(float(r.get("last15Ratio") or 0))
-        if str(r.get("kind") or "") == "trail":
-            pack_pf.setdefault("trailing", []).append(float(r.get("last15Ratio") or 0))
+    selected_exit = next((ln for ln in exits.get("lanes") or [] if isinstance(ln, dict) and ln.get("selected")), {})
     extras = {
         "block": {
             "enabled": bool(block.get("enabled", cov_on.get("block", True))),
-            # n = closed Block trades; the count ladder / lane total is not a sample size.
-            "n": int((out.get("block") or {}).get("n") or 0),
-            "pf": float(block.get("last15Ratio") or (out.get("block") or {}).get("pf") or 0),
+            "n": int(block.get("last15N") or 0),
+            "pf": block.get("last15Ratio"),
         },
         "dca": {
             "enabled": bool(dca.get("enabled", cov_on.get("dca", False))),
-            "n": int(dca.get("last15N") or len(dca.get("lanes") or []) or (out.get("dca") or {}).get("n") or 0),
-            "pf": float(dca.get("last15Ratio") or (out.get("dca") or {}).get("pf") or 0),
+            "n": int(dca.get("last15N") or 0),
+            "pf": dca.get("last15Ratio"),
         },
         "trailing": {"enabled": bool(cov_on.get("trailing", True))},
         "exits": {
             "enabled": bool(exits.get("enabled", cov_on.get("exits", True))),
-            "n": sum(int(ln.get("n") or 0) for ln in (exits.get("lanes") or []) if isinstance(ln, dict)) or int((out.get("exits") or {}).get("n") or 0),
-            "pf": next((float(ln.get("last15Ratio") or 0) for ln in (exits.get("lanes") or []) if isinstance(ln, dict) and ln.get("selected")), float((out.get("exits") or {}).get("pf") or 0)),
+            "n": int(selected_exit.get("n") or 0),
+            "pf": selected_exit.get("last15Ratio"),
         },
         "indications": {"enabled": bool(cov_on.get("indications", True))},
         "general": {"enabled": bool(cov_on.get("general", True))},
@@ -496,12 +511,13 @@ def merge_strategy_stats(
         blob = out.setdefault(k, {**_bucket_stats([], cost_pct), "strategy": k})
         extra = extras.get(k) or {}
         blob["enabled"] = bool(extra.get("enabled", cov_on.get(k, k != "dca")))
-        if extra.get("pf") and not blob.get("n"):
-            blob["pf"] = round(float(extra["pf"]), 4)
-        if extra.get("n") and not blob.get("n"):
-            blob["n"] = int(extra["n"])
-        if pack_pf.get(k) and not blob.get("n"):
-            blob["pf"] = round(sum(pack_pf[k]) / len(pack_pf[k]), 4)
+        # Headline counts, PF, wins, amounts and DD remain one closed tape.
+        # Independent calculation candidates are a separate source; an open
+        # DCA lane is not a close, and multiple exit candidates are not extra
+        # realized trades. Never average Set PFs into an exchange headline.
+        if extra.get("pf") is not None:
+            blob["calculationPreview"] = {"pf": _f(extra["pf"]), "n": int(extra.get("n") or 0),
+                                          "source": "strategy-calculation-snapshot", "costSubtracted": True}
         blob["strategy"] = k
         blob["costSubtracted"] = True
         blob["processed"] = True
@@ -556,7 +572,7 @@ def occupancy(open_pos: Sequence[Any]) -> Dict[str, Any]:
 
 
 def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, conn: str = "") -> Dict[str, Any]:
-    cost_pct = float(cost_pct or POSITION_COST_PCT_DEFAULT)
+    cost_pct = normalize_position_cost_pct(cost_pct)
     # Snapshots publish closes newest-first (and Overall concatenates lanes);
     # every tail slice below assumes one chronological tape.
     closed = sorted((enrich(_row(c), cost_pct) for c in (st.get("closed") or [])), key=lambda r: r["t"])
@@ -564,7 +580,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     exits = st.get("exits") or {}
     policy = st.get("pfCost") or {}
     pf_n = int(policy.get("n") or LAST_N_DEFAULT)
-    pf_floor = max(POSITIVE_PF, float(policy.get("minPf") or POSITIVE_PF))
+    pf_floor = normalize_pf(policy.get("minPf"), POSITIVE_PF)
     required_samples = int(policy.get("requiredSamples") or pf_n)
     pc = last_n_cost_pf(closed, pf_n, cost_pct)
     windows = evaluation_windows(closed, cost_pct)

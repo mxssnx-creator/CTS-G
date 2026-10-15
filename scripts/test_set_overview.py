@@ -80,18 +80,28 @@ class SetOverviewTests(unittest.TestCase):
 
     def test_compaction_preserves_additional_strategy_range_lineage(self):
         original = {**tape()[0], "set_id": "general:1m:sl0.6:st3", "pack": "general",
-                    "strategy": "block", "tp_pct": .003, "sl_ratio": .6, "step": 3}
+                    "strategy": "block", "tp_pct": .003, "sl_ratio": .6, "step": 3,
+                    "parent_set_id": "own-parent", "axis_key": "block-active:3", "volume_ratio": .25}
         compact = slim_hist_row(original)
-        # Catalog identity lives on the Set; compact fills keep scoring metadata only.
-        for key in ("set_id", "pack", "strategy"):
+        # Additional strategies retain their own exact lineage and volume;
+        # their rows can never be credited as an ordinary parent's evidence.
+        for key in ("pack", "pnl"):
             self.assertNotIn(key, compact)
-        for key in ("tp_pct", "sl_ratio", "step"):
+        for key in ("tp_pct", "sl_ratio", "step", "set_id", "strategy", "parent_set_id", "axis_key", "volume_ratio"):
             self.assertEqual(compact[key], original[key])
-        self.assertNotIn("pnl", compact)
-        st = state(hist=[slim_hist_row(dict(original, t=original['t']+60*i)) for i in range(15)])
+        st = state(id=original["set_id"],kind="block",parent_set_id=original["parent_set_id"],
+                   axis_key=original["axis_key"],
+                   hist=[slim_hist_row(dict(original, t=original['t']+60*i)) for i in range(15)])
         row = next(r for r in build_overview(book([st]))["rows"] if r["scope"] == "system")
-        self.assertEqual((row["strategyType"], row["tpRange"]), ("normal", "0.3000"))
+        self.assertEqual((row["strategyType"], row["tpRange"]), ("block", "0.3000"))
         self.assertEqual(row["setId"], st.id)
+
+    def test_exact_indication_configs_keep_their_system_type_and_symbol(self):
+        st=state(pack="indications",kind="dca",indication_kind="tactic",
+                 indication_config="tactic:trend:12:5m",indication_symbol="X-USDT",hist=tape())
+        row=next(r for r in build_overview(book([st]))["rows"] if r["scope"]=="system")
+        self.assertEqual((row["indicationKind"],row["indicationConfig"],row["indicationSymbol"],row["strategyType"]),
+                         ("tactic","tactic:trend:12:5m","X-USDT","dca"))
 
     def test_legacy_unassigned_ranges_do_not_inherit_new_settings(self):
         # Rows without a Set id and without their own ind_config stay out.

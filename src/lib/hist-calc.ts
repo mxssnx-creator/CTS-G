@@ -123,18 +123,21 @@ export type HistCalcOptions = {
 export type IndTypeFlags = { [K in IndicationKind as `indType${Capitalize<K>}`]: boolean };
 
 export type ForcedConfigRow = {
+  evidenceVersion?: number;
   id: string; symbol: string; indication: string; direction: string;
   tpPct: number; slPct: number; slRatio: number; rank?: number;
-  n: number; trainN: number; holdoutN: number; pf: number; trainPf: number; holdoutPf: number;
+  n: number; trainN: number; holdoutN: number; pf: number | null; trainPf: number | null; holdoutPf: number | null;
   costRatio: number; netPct: number; maxDrawdownR: number; tradesPerHour: number;
   avgHoldS: number; eligible: boolean; status: string; source: string; settingsKey: string;
   evaluationWindows?: Record<string, EvaluationWindow>;
-  liveN?: number; livePf?: number; liveStatus?: string; liveEnabled?: boolean;
+  liveN?: number; livePf?: number | null; liveStatus?: string; liveEnabled?: boolean;
+  trainingUsedN?: number;
   measuredCosts?: boolean; openUnresolved?: number;
   variant?: string;
 };
 
 export type ForcedBestRow = {
+  evidenceVersion?: number;
   id?: string;
   symbol: string;
   indication?: string;
@@ -142,18 +145,23 @@ export type ForcedBestRow = {
   tpPct: number;
   slPct: number;
   slRatio?: number;
-  trainPf?: number;
-  pf?: number;
-  holdoutPf?: number;
+  trainPf?: number | null;
+  pf?: number | null;
+  holdoutPf?: number | null;
   tradesPerHour?: number;
   variant?: string;
   settingsKey?: string;
   trainN?: number;
+  trainingUsedN?: number;
   n?: number;
   eligible?: boolean;
 };
 
 export type ForcedConfigSummary = {
+  version?: number;
+  pfDefinition?: string;
+  needsReturnPfRecalculation?: boolean;
+  detail?: string;
   rows?: ForcedConfigRow[]; symbols?: string[]; completed?: number; requested?: number;
   coveragePct?: number; selectedCount?: number; eligibleCount?: number;
   minPf?: number; updatedAt?: number; baselineOnly?: boolean; mainnetReady?: boolean;
@@ -355,36 +363,65 @@ export function hasCalcSnapshot(job: HistCalcJob | null | undefined): boolean {
 }
 
 export function forcedBestBySymbol(data?: ForcedConfigSummary | null): ForcedBestRow[] {
+  if (!isCurrentForcedEvidence(data)) return [];
+  const floor = data?.minPf ?? 1.05;
+  const hasEvidence = (row: ForcedBestRow) => Boolean(row) && row.evidenceVersion === FORCED_EVIDENCE_VERSION
+    && Number(row.trainingUsedN ?? row.trainN ?? 0) > 0
+    && typeof row.trainPf === "number" && Number.isFinite(row.trainPf)
+    && row.trainPf > 1.02 && row.trainPf + 1e-9 >= floor && row.eligible !== false;
   const stored = data?.forcedBest || data?.bestBySymbol;
   if (Array.isArray(stored) && stored.length) {
-    return [...stored].sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return stored.filter(hasEvidence).sort((a, b) => a.symbol.localeCompare(b.symbol));
   }
   if (stored && typeof stored === "object") {
     const fromMap = Object.entries(stored).map(([symbol, row]) => ({ ...row, symbol: row.symbol || symbol }));
-    if (fromMap.length) return fromMap.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    if (fromMap.length) return fromMap.filter(hasEvidence).sort((a, b) => a.symbol.localeCompare(b.symbol));
   }
   const ENGINE = data?.engineMinPf && data.engineMinPf > 0 ? data.engineMinPf : 1.1;
   const best = new Map<string, ForcedConfigRow>();
   for (const row of data?.rows ?? []) {
-    if (!row.eligible) continue;
+    if (!row.eligible || !hasEvidence(row)) continue;
     const cur = best.get(row.symbol);
     if (!cur) {
       best.set(row.symbol, row);
       continue;
     }
-    const rowPass = row.trainPf > ENGINE;
-    const curPass = cur.trainPf > ENGINE;
+    const rowPf = row.trainPf as number;
+    const curPf = cur.trainPf as number;
+    const rowPass = rowPf + 1e-9 >= ENGINE;
+    const curPass = curPf + 1e-9 >= ENGINE;
     if (rowPass !== curPass) {
       if (rowPass) best.set(row.symbol, row);
       continue;
     }
     const tph = row.tradesPerHour - cur.tradesPerHour;
     const sl = row.slPct - cur.slPct;
-    if (tph > 0 || (tph === 0 && sl < 0) || (tph === 0 && sl === 0 && row.trainPf > cur.trainPf)) {
+    if (tph > 0 || (tph === 0 && sl < 0) || (tph === 0 && sl === 0 && rowPf > curPf)) {
       best.set(row.symbol, row);
     }
   }
   return [...best.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+export const FORCED_EVIDENCE_VERSION = 4;
+export const FORCED_RECALCULATION_MESSAGE = "Needs return-PF recalculation: legacy or unversioned baseline evidence is not eligible.";
+
+/** A versioned row contract prevents classic-PF artifacts from becoming return-PF winners. */
+export function isCurrentForcedEvidence(data?: ForcedConfigSummary | null): data is ForcedConfigSummary & { version: typeof FORCED_EVIDENCE_VERSION } {
+  const rows = data?.rows ?? [];
+  const storedRows = [data?.forcedBest, data?.bestBySymbol].flatMap(stored => stored == null ? [] : Array.isArray(stored) ? stored : Object.values(stored));
+  return Boolean(data && data.version === FORCED_EVIDENCE_VERSION && !data.needsReturnPfRecalculation
+    && Array.isArray(rows) && [...rows, ...storedRows].every(row => row && row.evidenceVersion === FORCED_EVIDENCE_VERSION));
+}
+
+export function guardForcedEvidence(data?: ForcedConfigSummary | null): ForcedConfigSummary | undefined {
+  if (!data) return undefined;
+  return isCurrentForcedEvidence(data) ? data : { version: data.version, needsReturnPfRecalculation: true, detail: FORCED_RECALCULATION_MESSAGE };
+}
+
+/** Zero is an observed result; null and a tape with no observations have no PF. */
+export function formatForcedPf(value: number | null | undefined, samples?: number): string {
+  return typeof value === "number" && Number.isFinite(value) && (samples == null || samples > 0) ? value.toFixed(3) : "—";
 }
 
 export function calcPollMs(job: HistCalcJob | null | undefined, hidden = false): number {
@@ -425,21 +462,12 @@ export async function fetchHistCalc(connection?: string, signal?: AbortSignal): 
     const r = await fetch(`/hist-calc.json${query}`, { cache: "no-store", signal });
     if (!r.ok) return { phase: "idle", pct: 0, detail: `status ${r.status}` };
     const job = (await r.json()) as HistCalcJob;
+    job.forcedConfigs = guardForcedEvidence(job.forcedConfigs);
     const local = await fetchLocalForced(signal);
     if (local) {
-      if (!(job.forcedConfigs?.rows?.length)) job.forcedConfigs = local;
-      else {
-        job.forcedConfigs = {
-          ...job.forcedConfigs,
-          succeeded: local.succeeded ?? job.forcedConfigs.succeeded,
-          missing: local.missing ?? job.forcedConfigs.missing,
-          variant: local.variant ?? job.forcedConfigs.variant,
-          variantSettings: local.variantSettings ?? job.forcedConfigs.variantSettings,
-          bestBySymbol: local.bestBySymbol ?? job.forcedConfigs.bestBySymbol,
-          forcedBest: local.forcedBest ?? job.forcedConfigs.forcedBest,
-          engineMinPf: local.engineMinPf ?? job.forcedConfigs.engineMinPf,
-        };
-      }
+      // A complete server result is authoritative; a separate static artifact
+      // cannot replace its winners, successes, settings or cost contract.
+      if (!isCurrentForcedEvidence(job.forcedConfigs)) job.forcedConfigs = local;
     }
     return job;
   } catch (e) {
@@ -449,21 +477,25 @@ export async function fetchHistCalc(connection?: string, signal?: AbortSignal): 
 }
 
 let localForcedCache: ForcedConfigSummary | null | undefined;
+let localForcedCacheAt = 0;
 
-async function fetchLocalForced(signal?: AbortSignal): Promise<ForcedConfigSummary | null> {
-  if (localForcedCache !== undefined) return localForcedCache;
+export async function fetchLocalForced(signal?: AbortSignal): Promise<ForcedConfigSummary | null> {
+  if (localForcedCache !== undefined && Date.now() - localForcedCacheAt < 30_000) return localForcedCache;
   try {
     const r = await fetch("/forced-configs.json", { cache: "no-store", signal });
     if (!r.ok) {
       localForcedCache = null;
+      localForcedCacheAt = Date.now();
       return null;
     }
     const parsed = (await r.json()) as ForcedConfigSummary;
-    localForcedCache = Array.isArray(parsed?.rows) && parsed.rows.length ? parsed : null;
+    localForcedCache = guardForcedEvidence(parsed) ?? null;
+    localForcedCacheAt = Date.now();
     return localForcedCache;
   } catch {
     if (signal?.aborted) return null;
     localForcedCache = null;
+    localForcedCacheAt = Date.now();
     return null;
   }
 }

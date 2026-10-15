@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, formatEffectiveSets, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, formatEffectiveSets, costPfPolicy, returnPfMetric, type LiveClosed, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -64,12 +64,14 @@ function ResultsPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
+        stats?.closed ?? [],
         Date.now(),
-        stats?.pfCost?.costPct ?? stats?.positionCost?.effectivePct ?? 0.10,
+        costPfPolicy(stats).costPct,
+        costPfPolicy(stats),
       ),
     [stats],
   );
+  const returnPf = useMemo(() => returnPfMetric(stats, overview.costPf), [stats, overview]);
   const closed = stats?.closed ?? [];
   const closedN = Math.max(
     Number(stats?.closedN || 0),
@@ -147,9 +149,9 @@ function ResultsPage() {
         <Hero k="Gross profit" v={`+${gp.toFixed(4)}`} s={`avg win ${d.avgWin.toFixed(4)}`} good />
         <Hero k="Gross loss" v={gl ? `-${Math.abs(gl).toFixed(4)}` : "0"} s={`avg loss ${d.avgLoss.toFixed(4)}`} />
         <Hero
-          k="PF after cost"
-          v={(stats?.pfCost?.ratio ?? stats?.profitFactor ?? 1).toFixed(2)}
-          s={`1.00=neutral · 1.10=+1×cost · min ${stats?.pfCost?.minPf ?? 1.1} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
+          k="Return PF after cost"
+          v={returnPf.count ? returnPf.ratio.toFixed(2) : "—"}
+          s={`1.00=neutral · 1.10=+1×cost · min ${returnPf.minPf} · ${returnPf.count < returnPf.requiredSamples ? "insufficient sample" : returnPf.pass ? "pass" : "gate"}`}
         />
       </section>
 

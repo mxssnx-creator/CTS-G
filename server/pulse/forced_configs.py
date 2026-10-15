@@ -1,7 +1,7 @@
 """Independent, bounded baseline sweep for mandatory indication symbols.
 
 Percent units at the boundary; decimal fractions only inside the replay.
-PF is conventional NET gross-profit / gross-loss, not CTS's cost ratio.
+PF is CTS's return coordinate from already cost-net returns.
 No Block, DCA, trailing, scratch, or early-exit strategy participates.
 Historical candidates are never evidence of exchange execution.
 """
@@ -13,7 +13,8 @@ import json
 import math
 from typing import Any, Dict, List, Sequence
 
-from position_cost import evaluation_windows, last_n_cost_pf
+from position_cost import (clears_pf, evaluation_windows, last_n_cost_pf,
+                           net_return_pf, normalize_position_cost_pct)
 from validation_policy import CONTROL_MIN_PF, control_min_trades
 from set_engine import BAR_S, IND_TAG_KIND, indication_kind_votes
 from set_engine import VOTE_KINDS as IND_KINDS
@@ -25,6 +26,7 @@ MIN_PF = 1.05
 TRAINING_MIN_TRADES = 0
 TOP_N = 0  # zero means all eligible configurations
 MAX_TAPE = 80
+FORCED_EVIDENCE_VERSION = 4
 
 
 def mandatory_symbols(names: Sequence[str]) -> List[str]:
@@ -38,8 +40,15 @@ def _pf(gain: float, loss: float) -> float:
 def rank_key(row: Dict[str, Any]) -> tuple:
     # Only eligible rows reach selection. Prioritize observed throughput,
     # then smaller risk and stronger chronological holdout performance.
+    def descending_pf(key):
+        value = row.get(key + "Exact", row.get(key))
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return math.inf
+        return -value if math.isfinite(value) else math.inf
     return (-row["tradesPerHour"], row["slPct"], row["maxDrawdownR"],
-            -row["holdoutPf"], -row["pf"], row["tpPct"], row["id"])
+            descending_pf("holdoutPf"), descending_pf("pf"), row["tpPct"], row["id"])
 
 
 def select_best(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -55,7 +64,7 @@ ENGINE_MIN_PF = 1.10
 
 
 def engine_admitted(row: Dict[str, Any], min_pf: float = ENGINE_MIN_PF, *, last_n: int = 30) -> bool:
-    """True when the row would pass the live/VST admission gate (classic PF > 1.10)."""
+    """True when the row passes the live/VST return-PF admission floor."""
     return valid_candidate(dict(row), min_pf, control_n=0, last_n=last_n)
 
 
@@ -81,7 +90,10 @@ def training_window(row, last_n=30):
     """Re-evaluate only this Set's retained closes; no additional sample floor."""
     values = row.get("trainingResults", [])[-max(1, min(75, int(last_n))):]
     if not values or not all(math.isfinite(float(v)) for v in values):
-        return {"trainPf": 0.0, "trainingWindowsOk": False, "trainingUsedN": 0}
+        return {"trainPf": None, "trainPfExact": None, "trainingWindowsOk": False, "trainingUsedN": 0}
+    raw_cost = float(row["trainingCostPct"])
+    if not math.isfinite(raw_cost) or raw_cost < 0:
+        return {"trainPf": None, "trainPfExact": None, "trainingWindowsOk": False, "trainingUsedN": 0}
     gain = sum(max(0, v) for v in values)
     loss = sum(max(0, -v) for v in values)
     equity = peak = dd = 0.0
@@ -89,9 +101,10 @@ def training_window(row, last_n=30):
         equity += value
         peak = max(peak, equity)
         dd = max(dd, peak-equity)
-    pf = _pf(gain, loss)
+    cost_pct = normalize_position_cost_pct(raw_cost)
+    pf = net_return_pf(sum(values) / len(values), cost_pct)
     dd_r = dd / max((float(row["slPct"]) + float(row["trainingCostPct"])) / 100, 1e-12)
-    return dict(trainPf=pf, trainPfExact=pf, trainingWindowsOk=gain > loss,
+    return dict(trainPf=pf, trainPfExact=pf, trainClassicPf=_pf(gain, loss), trainingWindowsOk=gain > loss,
                 trainingUsedN=len(values), trainingRequestedN=int(last_n),
                 trainingWindowComplete=len(values) >= int(last_n),
                 trainingMaxDrawdownR=dd_r, trainingMaxDrawdownRExact=dd_r,
@@ -102,15 +115,19 @@ def valid_candidate(row: Dict[str, Any], min_pf: float = MIN_PF, *, control_n: i
     """Fail closed before a historical row can enter the VST trial lane."""
     try:
         row = dict(row, **training_window(row, last_n))
-        metrics = [float(row.get(k + "Exact", row[k])) for k in ("pf", "trainPf", "holdoutPf", "trainingMaxDrawdownR")]
+        metrics = [float(row.get(k + "Exact", row[k])) for k in ("pf", "trainPf", "trainingMaxDrawdownR")]
         need = control_min_trades(control_n)
-        return bool(row.get("evidenceVersion") == 3 and row.get("source") == "historical-market"
+        holdout = row.get("holdoutPfExact", row.get("holdoutPf"))
+        if int(row.get("holdoutN") or 0) > 0 and (holdout is None or not math.isfinite(float(holdout))):
+            return False
+        return bool(row.get("evidenceVersion") == FORCED_EVIDENCE_VERSION and row.get("source") == "historical-market"
                     and row.get("symbol") in FORCED_SYMBOLS and row.get("indication") in IND_KINDS
                     and row.get("direction") in ("LONG", "SHORT")
                     and all(math.isfinite(v) for v in metrics)
-                    and metrics[1] > max(MIN_PF, float(min_pf)) and 0 <= metrics[3] <= 6
+                    and clears_pf(metrics[1], max(MIN_PF, float(min_pf))) and 0 <= metrics[2] <= 6
                     and row.get("trainingWindowsOk") is True and int(row.get("trainingUsedN", 0)) > 0
-                    and (not need or (int(row["holdoutN"]) >= need and metrics[2] > CONTROL_MIN_PF))
+                    and (not need or (int(row["holdoutN"]) >= need and holdout is not None
+                                      and clears_pf(float(holdout), CONTROL_MIN_PF)))
                     and float(row["tpPct"]) in TP_GRID and float(row["slPct"]) in SL_GRID)
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
@@ -198,15 +215,15 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
     # Diagnostic windows are separate from the eligibility policy. A partial
     # window remains partial; never label 7 closes as a last-8 PF.
     recent = evaluation_windows(list(tape), cost_pct, windows=(8, 25, 75), required_samples=need)
-    recent = {key: {k: metric[k] for k in ("n", "requestedN", "available", "classicPf")}
+    recent = {key: {k: metric[k] for k in ("n", "requestedN", "available", "pf", "classicPf")}
               for key, metric in recent.items()}
     if dd_start is not None:
         duration = (nbar - 1 - dd_start) * BAR_S
         dd_total += duration
         dd_max = max(dd_max, duration)
-    windows_ok = all(m["classicPf"] > 1 and m["netAvg"] > 0
-                     for m in windows.values() if m["n"] >= m["requiredSamples"])
-    pf, train_pf, test_pf = _pf(gp, gl), _pf(train_gp, train_gl), _pf(test_gp, test_gl)
+    classic_pf, train_classic, test_classic = _pf(gp, gl), _pf(train_gp, train_gl), _pf(test_gp, test_gl)
+    pf = net_return_pf((gp-gl)/n, cost_pct) if n else None
+    test_pf = net_return_pf((test_gp-test_gl)/test_n, cost_pct) if test_n else None
     dd_r = drawdown / max(sl + cost, 1e-12)
     train_dd_r = train_dd / max(sl + cost, 1e-12)
     control_n = control_min_trades(control_n)
@@ -214,22 +231,23 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
     train_pf = selected["trainPf"]
     windows_ok = selected["trainingWindowsOk"]
     train_dd_r = selected.get("trainingMaxDrawdownR", 0)
-    training_ok = train_n > 0 and train_pf > floor and windows_ok and train_dd_r <= dd_limit
-    control_ok = test_n >= control_n and test_pf > CONTROL_MIN_PF if control_n else None
+    training_ok = train_n > 0 and clears_pf(train_pf, floor) and windows_ok and train_dd_r <= dd_limit
+    control_ok = test_n >= control_n and test_pf is not None and clears_pf(test_pf, CONTROL_MIN_PF) if control_n else None
     eligible = training_ok and (not control_n or control_ok)
     reason = ("candidate" if eligible else "insufficient-training" if train_n == 0 else
-              "training-pf" if train_pf <= floor else "negative-training-window" if not windows_ok else
+              "training-pf" if not clears_pf(train_pf, floor) else "negative-training-window" if not windows_ok else
               "training-drawdown" if train_dd_r > dd_limit else
               "insufficient-control" if test_n < control_n else "control-pf")
     hours = max(BAR_S, (nbar - warmup) * BAR_S) / 3600
-    return {**selected, "trainingResults": [r["pnl"] for r in train_tape], "trainingCostPct": cost_pct, "evidenceVersion": 3, "n": n, "trainN": train_n, "holdoutN": test_n,
+    return {**selected, "trainingResults": [r["pnl"] for r in train_tape], "trainingCostPct": cost_pct, "evidenceVersion": FORCED_EVIDENCE_VERSION, "n": n, "trainN": train_n, "holdoutN": test_n,
             "trainingEligible": training_ok, "trainingWindowsOk": windows_ok,
             "trainingMaxDrawdownR": round(train_dd_r, 6),
             "trainingMaxDrawdownRExact": train_dd_r,
             "controlMinTrades": control_n, "controlMinPf": CONTROL_MIN_PF,
             "controlChecked": bool(control_n), "controlPassed": control_ok,
             "controlStatus": "disabled" if not control_n else "passed" if control_ok else "failed",
-            "pf": round(pf, 6), "trainPf": round(train_pf, 6), "holdoutPf": round(test_pf, 6),
+            "pf": pf, "pfExact": pf, "trainPf": train_pf, "holdoutPf": test_pf,
+            "classicPf": classic_pf, "trainClassicPf": selected.get("trainClassicPf", train_classic), "holdoutClassicPf": test_classic,
             "trainPfExact": train_pf, "holdoutPfExact": test_pf,
             "costRatio": last_n_cost_pf(list(tape), 15, cost_pct)["ratio"],
             "netPct": round((gp - gl) * 100, 6), "netAvgPct": round((gp - gl) * 100 / max(1, n), 6),
@@ -290,8 +308,8 @@ def summary(results: Sequence[Dict[str, Any]], sources: Dict[str, str], now: flo
     completed = sum(int(r.get("completed", 0)) for r in results)
     requested = len(FORCED_SYMBOLS) * len(IND_KINDS) * 2 * len(TP_GRID) * len(SL_GRID)
     controls = sorted({control_min_trades(r.get("controlMinTrades")) for r in results})
-    return {"version": 3, "symbols": list(FORCED_SYMBOLS), "tpGrid": list(TP_GRID), "slGrid": list(SL_GRID),
-            "minPf": MIN_PF, "pfDefinition": "net-gross-profit / net-gross-loss",
+    return {"version": FORCED_EVIDENCE_VERSION, "symbols": list(FORCED_SYMBOLS), "tpGrid": list(TP_GRID), "slGrid": list(SL_GRID),
+            "minPf": MIN_PF, "pfDefinition": "1 + 0.10 * mean(cost-net-return / PositionCost-reference)",
             "baselineOnly": True, "additionalStrategies": [], "topPerSymbolIndication": TOP_N,
             "trainingMinTrades": 0, "controlMinTrades": controls[0] if len(controls)==1 else 0,
             "controlPolicies": controls, "controlMinPf": CONTROL_MIN_PF,

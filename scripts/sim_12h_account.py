@@ -542,7 +542,7 @@ def _rolling_ratio(cs: np.ndarray, idx: np.ndarray, gstart: np.ndarray, n: int) 
     hi = np.where(ok, idx + 1, 0)
     lo = np.where(ok, idx + 1 - n, 0)
     mean = (cs[hi] - cs[lo]) / n
-    return np.round(1.0 + 0.1 * mean, 4), ok
+    return 1.0 + 0.1 * mean, ok
 
 
 def clears_vec(v: np.ndarray, floor: float) -> np.ndarray:
@@ -619,7 +619,7 @@ class Evidence:
         hi = np.where(ok, idx + 1, 0)
         lo = np.where(ok, idx + 1 - take, 0)
         mean = (self.cs[hi] - self.cs[lo]) / np.where(ok, take, 1)
-        return np.round(1.0 + 0.1 * mean, 4), ok
+        return 1.0 + 0.1 * mean, ok
 
     def all_losses(self, idx, gstart, n):
         """The last ``n`` closes are all cost-net losses (coord_engine pause)."""
@@ -670,15 +670,13 @@ class Sizer:
         P = pt.Pulse
         # No balance read in the simulation (last_bal unset): base_notional
         # takes the fixed targetNotional, as the account simulation models.
-        for name in ("round_qty_up", "min_order_qty", "raise_to_min_qty", "leverage_for", "sized_notional",
-                     "base_notional", "sizing_equity", "avail_notional", "size_qty"):
         # Exchange-accepted SL floor, same helper as the live entry path.
         self.sl_min = max(pt.SL_MIN_PCT / 100.0, float(overlay.get("slMinPct") or pt.SL_MIN_PCT) / 100.0)
         self.sl_max = max(self.sl_min, float(overlay.get("slMaxPct") or 3.0) / 100.0)
         self.venue_sl_ticks = float(overlay.get("venueSlTicks") or pt.VENUE_SL_TICKS)
         self.sl_learned: Dict[str, float] = {}
         for name in ("round_qty_up", "min_order_qty", "raise_to_min_qty", "leverage_for", "sized_notional",
-                     "avail_notional", "margin_headroom", "size_qty", "venue_sl_min"):
+                     "base_notional", "sizing_equity", "avail_notional", "margin_headroom", "size_qty", "venue_sl_min"):
             setattr(self, name, getattr(P, name).__get__(self))
 
 

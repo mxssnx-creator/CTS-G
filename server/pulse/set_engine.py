@@ -53,7 +53,10 @@ from position_cost import (
     ratio_from_r,
     row_net_pnl,
     row_position_cost_pct,
+    pf_reference_cost_pct,
+    net_return_pf,
     row_side,
+    row_time_seconds,
     filter_side,
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
@@ -160,6 +163,9 @@ def _invalidate_entry_cache_around_score(fn: Callable[..., Any]) -> Callable[...
             return fn(book, *args, **kwargs)
         finally:
             book._invalidate_entry_cache()
+            grid = getattr(book, "_indication_grid", None)
+            if grid is not None and args and getattr(args[0], "indication_config", ""):
+                grid.record_qualification(args[0])
     return wrapped
 
 
@@ -316,6 +322,10 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
         value = row.get(key) if hasattr(row, "get") else None
         if value not in (None, ""):
             compact[key] = value
+    if str(row.get("strategy") or "") in ("block", "dca", "axis") or row.get("axis_key"):
+        for key in ("strategy", "volume_ratio", "relative_count", "dca_n", "dca_cap", "set_id", "parent_set_id"):
+            if row.get(key) is not None:
+                compact[key] = row[key]
     return compact
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = INDICATION_KINDS
@@ -377,12 +387,12 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
     """Return observed close throughput from a timestamped live tape."""
     ordered = sorted(
         [row for row in rows if row is not None],
-        key=lambda row: finite(row.get("t") if _is_hist_row(row) else getattr(row, "t", 0)),
+        key=row_time_seconds,
     )
     if len(ordered) < 2:
         return 0.0
-    first = finite(ordered[0].get("t") if _is_hist_row(ordered[0]) else getattr(ordered[0], "t", 0))
-    last = finite(ordered[-1].get("t") if _is_hist_row(ordered[-1]) else getattr(ordered[-1], "t", 0))
+    first = row_time_seconds(ordered[0])
+    last = row_time_seconds(ordered[-1])
     # Duplicate/near-duplicate exchange timestamps must not create an
     # infinite score or make a tiny test burst look like a stable rate.
     span_h = max(1.0 / 60.0, (last - first) / 3600.0)
@@ -393,7 +403,7 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
 
 def recent_direction_rows(bucket, cap):
     """Retain chronological last-N evidence for both independent directions."""
-    rows = sorted(bucket, key=lambda r: finite(r.get("t")))
+    rows = sorted(bucket, key=row_time_seconds)
     if len(rows) <= cap:
         return rows
     per = min(75, cap // 2)
@@ -420,7 +430,7 @@ def hist_row_key(row: Dict[str, Any]) -> Tuple[str, float, str, str, float, floa
     """Stable identity for a deterministic historic replay row."""
     return (
         str(row.get("symbol") or ""),
-        round(finite(row.get("t")), 6),
+        round(row_time_seconds(row), 6),
         str(row.get("side") or row.get("direction") or ""),
         str(row.get("reason") or ""),
         round(finite(row.get("pnl_pct")), 10),
@@ -436,7 +446,7 @@ IND_CONFIG_SIDE_CAP = 75
 
 def trim_ind_tape(bucket: Sequence[Dict[str, Any]], per: int = IND_CONFIG_SIDE_CAP) -> List[Dict[str, Any]]:
     """Chronological last ``per`` rows per (ind_config, side)."""
-    rows = sorted((r for r in bucket if r is not None), key=lambda r: finite(r.get("t")))
+    rows = sorted((r for r in bucket if r is not None), key=row_time_seconds)
     per = max(8, int(per or IND_CONFIG_SIDE_CAP))
     counts: Dict[Tuple[str, str], int] = {}
     keep: List[int] = []
@@ -482,7 +492,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if _is_hist_row(r)]
-        seq.sort(key=lambda r: finite(r.get("t")))
+        seq.sort(key=row_time_seconds)
     if len(seq) <= n:
         return seq
     by: Dict[str, List[Dict[str, Any]]] = {}
@@ -492,15 +502,15 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
         return seq[-n:]
     names = list(by.keys())
     if len(names) >= n:
-        recent = sorted(names, key=lambda s: finite(by[s][-1].get("t")), reverse=True)[:n]
+        recent = sorted(names, key=lambda s: row_time_seconds(by[s][-1]), reverse=True)[:n]
         picked = [by[s][-1] for s in recent]
-        picked.sort(key=lambda r: finite(r.get("t")))
+        picked.sort(key=row_time_seconds)
         return picked
     per = max(1, n // len(names))
     out: List[Dict[str, Any]] = []
     for tape in by.values():
         out.extend(tape[-per:])
-    out.sort(key=lambda r: finite(r.get("t")))
+    out.sort(key=row_time_seconds)
     if len(out) < n:
         taken = {id(x) for x in out}
         for r in reversed(seq):
@@ -510,7 +520,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
             taken.add(id(r))
             if len(out) >= n:
                 break
-        out.sort(key=lambda r: finite(r.get("t")))
+        out.sort(key=row_time_seconds)
     return out[-n:]
 
 
@@ -526,16 +536,14 @@ def last_n_chrono(rows: Sequence[Any], n: int, *, ordered: bool = False) -> List
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if r is not None]
-        seq.sort(key=lambda r: finite(r.get("t") if _is_hist_row(r) else getattr(r, "t", 0)))
+        seq.sort(key=row_time_seconds)
     if len(seq) <= take:
         return seq if isinstance(seq, list) else list(seq)
     return seq[-take:]
 
 
 def row_ts(row: Any) -> float:
-    if _is_hist_row(row):
-        return finite(row.get("t"))
-    return finite(getattr(row, "t", 0))
+    return row_time_seconds(row)
 
 
 def row_symbol(row: Any) -> str:
@@ -1060,6 +1068,9 @@ class SetState:
     volume_ratio: float = 1.0
     indication_kind: str = ""
     strategy_adjustments: Dict[str, Any] = field(default_factory=dict)
+    indication_config: str = ""
+    indication_symbol: str = ""
+    template_set_id: str = ""
     stage_ledger: Dict[str, Any] = field(default_factory=dict)
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
@@ -1126,6 +1137,9 @@ class SetState:
             parent_set_id=self.parent_set_id,
             position_cost_pct=self.position_cost_pct,
             indication_kind=self.indication_kind,
+            indication_config=self.indication_config,
+            indication_symbol=self.indication_symbol,
+            template_set_id=self.template_set_id,
             locked=self.locked,
             processing_active=False,
             processing_reason="",
@@ -1141,7 +1155,13 @@ class SetState:
             if row.get("exchange_confirmed") is not True or row.get("partial") or row.get("ours") is False:
                 continue
             strategy = str(row.get("strategy") or "core").lower()
-            if strategy not in ("core", "normal", "trail", "trailing") or row.get("axis_key"):
+            if self.kind in ("block", "dca", "axis"):
+                own_strategies = {"block", "block-active"} if self.kind == "block" else {self.kind}
+                if strategy not in own_strategies or row.get("set_id") != self.id:
+                    continue
+                if str(row.get("axis_key") or "") != str(self.axis_key or ""):
+                    continue
+            elif strategy not in ("core", "normal", "trail", "trailing") or row.get("axis_key"):
                 continue
             if strategy in ("trail", "trailing") and self.kind != "trail":
                 continue
@@ -1215,8 +1235,10 @@ def _tape_fingerprint(rows: Sequence[Any], tail: int = 96) -> Tuple[Any, ...]:
         return (0,)
 
     def one(r: Any) -> Tuple[Any, ...]:
-        g = r.get if isinstance(r, dict) else (lambda k, d=None: getattr(r, k, d))
-        return (g("t"), g("pnl_pct"), g("pnl"), g("side"), g("symbol"), g("reason"), g("ind_config"))
+        g = r.get if hasattr(r, "get") else (lambda k, d=None: getattr(r, k, d))
+        return tuple(g(k) for k in ("t", "pnl_pct", "pnl", "side", "symbol", "reason", "ind_config",
+                     "entry", "qty", "fee_total", "position_cost_pct", "costPct", "cost_source",
+                     "exchange_confirmed", "partial"))
 
     return (n, one(rows[0])) + tuple(one(r) for r in rows[max(0, n - tail):])
 
@@ -1312,6 +1334,9 @@ class SetBook:
         self._ids_by_pack: Dict[str, List[str]] = {}
         self._ids_by_kind: Dict[str, List[str]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
+        self._bar_end_ts: Dict[str, float] = {}
+        self._indication_grid = None
+        self._pending_set_live: Dict[str, List[Dict[str, Any]]] = {}
         self.progress = Progress()
         self.sl_min, self.sl_max = SL_MIN_PCT / 100.0, 0.03
         self.sym_sl_floor: Dict[str, float] = {}
@@ -1396,6 +1421,7 @@ class SetBook:
         state = dict(self.__dict__)
         state.pop("_pick_lock", None)
         state["calculation_cache"] = None  # Never pickle live Redis connections.
+        state["_indication_grid"] = None  # Worker/locks are process-local.
         # A copied book must never serve a snapshot produced by the live
         # book.  Besides stale rows, the cache can retain the full preview
         # matrix and defeat the bounded replay-memory contract.
@@ -1423,6 +1449,11 @@ class SetBook:
             self.score_refresh_required = False
         if not hasattr(self, "_score_settings_signature"):
             self._score_settings_signature = ()
+        if not isinstance(getattr(self, "_bar_end_ts", None), dict):
+            self._bar_end_ts = {}
+        self._indication_grid = None
+        if not isinstance(getattr(self, "_pending_set_live", None), dict):
+            self._pending_set_live = {}
 
     def _invalidate_entry_cache(self) -> None:
         """Advance the entry-read generation without racing score workers."""
@@ -1513,6 +1544,8 @@ class SetBook:
             "_pick_lock", "_by_pack", "_ids_by_pack", "_ids_by_kind",
             "_processing_set_ids", "_processing_reasons",
             "_entry_rows_cache", "_entry_cache_epoch", "_strategy_result_cache",
+            "_indication_grid",
+            "_pending_set_live",
         }
         for name, value in self.__dict__.items():
             if name in skip:
@@ -1525,6 +1558,8 @@ class SetBook:
         states: Dict[str, SetState] = {}
         ordered: List[SetState] = []
         for original in self.by_idx:
+            if original.indication_config:
+                continue  # Exact indication lanes have their own replay worker.
             state = original.catalog_copy()
             states[state.id] = state
             ordered.append(state)
@@ -1670,7 +1705,10 @@ class SetBook:
         except Exception:
             raw_active = 0
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
-        self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
+        raw_cost = ov.get("positionCostPct")
+        if raw_cost is None:
+            raw_cost = ov.get("setCostPct", POSITION_COST_PCT_DEFAULT)
+        self.cost_pct = max(0.0, finite(raw_cost, POSITION_COST_PCT_DEFAULT))
         if self.cost_pct > 2:
             self.cost_pct = self.cost_pct / 100.0
         if self.cost_pct > 1:
@@ -1696,6 +1734,7 @@ class SetBook:
         self.block_stack = clamp_stack(ov.get("blockMaxStack"))
         self.block_max_multiplier = max(1.0, min(2.0, finite_number(ov.get("blockMaxVolumeMultiplier"), 2.0)))
         self.block_counts = normalize_block_counts(ov.get("blockCounts"))
+        self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         try:
             from block_engine import clamp_eval_pos_count
             self.block_eval_pos = clamp_eval_pos_count(ov.get("blockEvalPosCount") or 50)
@@ -1705,8 +1744,19 @@ class SetBook:
         self.block_vr = shared_block_volume_ratio(
             self.block_vr_specified, len(live_block), max(0.0, self.block_max_multiplier - 1.0),
         )
-        self.dca_dist = [0.012, 0.016, 0.020, 0.024]
-        self.dca_mult = [1.5, 2.0, 2.3, 2.5]
+        from dca_engine import DcaBook
+        dca_profile = DcaBook()
+        dca_profile.load(ov, cts)
+        self.dca_dist, self.dca_mult = list(dca_profile.distances), list(dca_profile.mults)
+        self.dca_max_steps = dca_profile.max_steps
+        self.dca_cooldown_s = dca_profile.cooldown_s
+        self.dca_enabled = dca_profile.enabled
+        self.dca_tp_mode, self.dca_be_pct = dca_profile.tp_mode, dca_profile.be_pct
+        from coord_engine import Coordinator
+        axis_profile = Coordinator()
+        axis_profile.load(cts, ov)
+        self.axis_settings = {name: {"enabled": cfg.enabled, "maxWindow": cfg.max_window}
+                              for name, cfg in axis_profile.axes.items()}
         opt = float(ov.get("exitOptSlPct") or 0.30)
         self.opt_sl = opt / 100.0 if opt > 0.02 else opt
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_LIVE_MIN)
@@ -1826,6 +1876,13 @@ class SetBook:
             "activeMovePct": float(ov.get("indActiveMovePct") or ov.get("activeMovePct") or 0.5),
             "activeVolatilityWeight": float(ov.get("volWeight") or ov.get("activeVolatilityWeight") or 0.3),
         }
+        # Share the live indication loader's complete normalization, including
+        # timeframe switches. Replay must not silently use a different profile.
+        from indication_engine import IndicationBook
+        indication_settings = IndicationBook()
+        indication_settings.load(ov)
+        self.ind_settings.update(indication_settings.settings)
+        self.ind_settings["positionCostPct"] = self.cost_pct
         try:
             self.cooldown_bars = max(1, min(12, int(ov.get("setCooldownBars") or 2)))
         except Exception:
@@ -1862,7 +1919,7 @@ class SetBook:
         return max(need, int(self.pf_n or PF_N_DEFAULT))
 
     def _ddt_rows(self, rows: Sequence[Any], ordered: bool) -> List[Any]:
-        seq = list(rows) if ordered else sorted(rows, key=lambda r: finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0.0)))
+        seq = list(rows) if ordered else sorted(rows, key=row_time_seconds)
         return seq[-self.ddt_window():]
 
     def ddt_when_enough(self, rows: Sequence[Any], need: int, *, ordered: bool = False) -> Dict[str, float]:
@@ -1967,6 +2024,7 @@ class SetBook:
             bool(self.ignore_tp),
             bool(self.hist_honor_tp),
             bool(self.hist_block),
+            bool(getattr(self, "block_active", True)),
             bool(self.hist_dca),
             round(float(self.block_vr), 12),
             round(float(getattr(self, "block_vr_specified", self.block_vr) or 0), 12),
@@ -1975,6 +2033,11 @@ class SetBook:
             tuple(self.block_counts),
             tuple(round(float(x), 12) for x in self.dca_dist),
             tuple(round(float(x), 12) for x in self.dca_mult),
+            int(getattr(self, "dca_max_steps", len(self.dca_dist))),
+            round(float(getattr(self, "dca_cooldown_s", 30)), 6),
+            bool(getattr(self, "dca_enabled", True)),
+            str(getattr(self, "dca_tp_mode", "average")),
+            round(float(getattr(self, "dca_be_pct", 0.002)), 12),
         )
 
     def _score_signature(self) -> Tuple[Any, ...]:
@@ -2023,6 +2086,7 @@ class SetBook:
 
     def _rebuild_sets(self) -> None:
         keep = {sid: st for sid, st in self.sets.items()}
+        independent = [st for st in keep.values() if st.indication_config]
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
@@ -2162,6 +2226,24 @@ class SetBook:
             # catalog has been replayed over the full configured universe.
             self.progress.ready = False
             self.progress.phase = "idle"
+        # Retain exact live identities across reloads. Changed inputs retire
+        # their historic verdicts; an unchanged catalog keeps own evidence.
+        for st in independent:
+            st.locked = bool(self.locks.get(st.id))
+            if replay_changed and not st.live and not st.processing_active:
+                continue  # Superseded pure calculation states are reproducible.
+            if st.template_set_id not in next_sets and not st.live and not st.processing_active:
+                continue
+            if replay_changed:
+                st.hist = []
+                st.active = False
+                st.by_side = {}
+                st.stage_ledger = {}
+                st.deact_reason = "indication evidence stale"
+            st.idx = len(self.by_idx)
+            self.sets[st.id] = st
+            self.by_idx.append(st)
+        self._reindex()
 
     def restrict_to_ids(self, ids: Sequence[str]) -> int:
         """Keep only the named Sets for a focused Test Historic recalc."""
@@ -2217,13 +2299,13 @@ class SetBook:
         partial last50/last75 (or a cold last5) must not veto a qualified
         overall last-N tape (``pf_n`` / ``baseEvalPosCount``).
         """
-        ordered = sorted((r for r in rows if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
+        ordered = sorted((r for r in rows if _is_hist_row(r)), key=row_time_seconds)
         need = self.eval_need()
         overall_n = max(need, int(self.pf_n or need))
         windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
         overall = overall_last_pos_eval(ordered, overall_n, self.cost_pct, ordered=True)
         n = int(overall.get("count") or 0)
-        pf = float(overall.get("ratio") or 1.0)
+        pf = finite(overall.get("ratio"), 1.0)
         windows["overall"] = {
             "requestedN": overall_n,
             "n": n,
@@ -2330,7 +2412,7 @@ class SetBook:
             "n": len(rows),
             "positive": n_pos,
             "positiveRate": round(n_pos / len(rows), 4) if rows else 0.0,
-            "pf": float(opt_pf.get("ratio") or 1.0),
+            "pf": finite(opt_pf.get("ratio"), 1.0),
             "netAvg": round(avg, 8),
             "maxDdS": float(opt_dd.get("maxS") or 0.0),
             "costPct": float(opt_pf.get("costPct") or self.cost_pct),
@@ -2357,7 +2439,20 @@ class SetBook:
             cleaned.append([row[0], row[1], row[2], row[3], row[4]])
         if len(cleaned) >= 16:
             replay_cap = self.lookback + (self.warmup if self.exact_replay_window else 0)
-            self.bars[symbol] = cleaned[-max(self.lookback, replay_cap) :]
+            published = cleaned[-max(self.lookback, replay_cap) :]
+            if self.bars.get(symbol) != published:
+                self.bars[symbol] = published
+            # Timestamped inputs carry the final closed bar's time into UTC
+            # higher-timeframe bucketing. Legacy OHLCV inputs keep the explicit
+            # replay-now convention rather than inventing exchange timestamps.
+            try:
+                last = bars[-1]
+                stamp = float(last[0]) if len(last) >= 6 else 0.0
+                stamp = stamp / 1000 if stamp > 1e11 else stamp
+                if stamp > 1e9:
+                    self._bar_end_ts[symbol] = stamp
+            except (TypeError, ValueError, IndexError):
+                pass
 
     def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
         n = 0
@@ -2369,6 +2464,9 @@ class SetBook:
         for st in self.by_idx:
             if len(st.hist) > hc:
                 st.hist = recent_direction_rows(st.hist, hc)
+                if st.indication_config and st.kind in ("base", "trail"):
+                    from indication_grid import ColumnarTape
+                    st.hist = ColumnarTape(st.hist, st.indication_kind, st.indication_config)
                 n += 1
             if len(st.live) > lc:
                 st.live = recent_direction_rows(st.live, lc)
@@ -2529,6 +2627,28 @@ class SetBook:
             if not x:
                 continue
             st = self.sets.get(x)
+            if st is None and str(x).startswith("indcfg:") and row.get("ind_config"):
+                # Restart recovery: replay workers are process-local, while
+                # a confirmed close's exact Set identity is durable. Rebuild
+                # that parameter-only identity before crediting its own tape.
+                from indication_grid import lane_set_id
+                template_id = str(x).split(":", 2)[-1]
+                template = self.sets.get(template_id)
+                config = str(row["ind_config"]).lower()
+                lane_kind = ind_kind or ("general" if template is not None and template.pack == "general" else "combined")
+                if template is not None and lane_set_id(lane_kind, config, template_id, row["symbol"]) == x:
+                    st = template.catalog_copy()
+                    st.id = x
+                    st.template_set_id = template_id
+                    st.indication_kind, st.indication_config = lane_kind, config
+                    st.indication_symbol = row["symbol"]
+                    st.parent_set_id = x if st.kind == "base" else lane_set_id(lane_kind, config, template.parent_set_id, row["symbol"])
+                    st.idx = len(self.by_idx)
+                    self.sets[x] = st
+                    self.by_idx.append(st)
+                    self._by_pack.setdefault(st.pack, []).append(st)
+                    self._ids_by_pack.setdefault(st.pack, []).append(st.id)
+                    self._ids_by_kind.setdefault(st.kind, []).append(st.id)
             if not st:
                 st = self.sets.get(f"{x}:st{self.min_step}")
             if st:
@@ -2554,6 +2674,17 @@ class SetBook:
                 tape.append(dict(row))
                 self.ind_live[ind_kind] = trim_ind_tape(tape)
         if target is None:
+            if confirmed and str(row.get("set_id") or "").startswith(("indcfg:", "axis:")):
+                pending = getattr(self, "_pending_set_live", None)
+                if pending is None:
+                    pending = self._pending_set_live = {}
+                own = pending.setdefault(row["set_id"], [])
+                if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in own):
+                    own.append(dict(row))
+                    pending[row["set_id"]] = recent_direction_rows(own, HIST_CAP)
+                if len(pending) > 512:
+                    oldest = min(pending, key=lambda k: finite(pending[k][-1].get("t")) if pending[k] else 0)
+                    pending.pop(oldest, None)
             return
         if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in target.live):
             target.live.append(dict(row))
@@ -2890,7 +3021,7 @@ class SetBook:
                         "costSubtracted": True,
                     },
                 }
-            ordered = sorted(samples, key=lambda r: finite(r.get("t")))
+            ordered = sorted(samples, key=row_time_seconds)
             window = ordered[-need:]
             overall = overall_last_pos_eval(window, need, self.cost_pct, ordered=True)
             pf = float(overall.get("ratio") or 0.0)
@@ -3013,7 +3144,7 @@ class SetBook:
                         touched.add(st.id)
             states = [self.sets[sid] for sid in touched if sid in self.sets]
         else:
-            states = self.by_idx if (not merge or names) else []
+            states = [st for st in self.by_idx if not st.indication_config or st.id in hist] if (not merge or names) else []
         updated: List[str] = []
         for st in states:
             # A bounded replay may commit one configuration slice at a time.
@@ -3051,7 +3182,7 @@ class SetBook:
                 st.n = sum(counts.values())
                 updated.append(st.id)
             else:
-                full.sort(key=lambda r: finite(r.get("t")))
+                full.sort(key=row_time_seconds)
                 st.hist = full
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
@@ -3320,7 +3451,12 @@ class SetBook:
         elif strategy == "dca" and held >= 1:
             self._maybe_dca_add(pos, bar, sl_frac, tp_frac)
             entry = float(pos["entry"])
-        if use_trail:
+        # The current OHLC bar cannot reveal whether its low preceded its
+        # high. Existing protection is tested first; a trail armed from this
+        # completed bar becomes effective on the next bar. This matches the
+        # hourly simulator and avoids turning an earlier SL into a later win.
+        why, px = hit_exit(side, entry, pos["sl"], pos["tp"], pos.get("trail"), bar, ignore_tp=not honor_tp)
+        if use_trail and why is None:
             if side > 0:
                 pos["peak"] = max(pos["peak"], float(bar[1]))
                 fav = (pos["peak"] - entry) / entry
@@ -3338,7 +3474,6 @@ class SetBook:
             pos["peak"] = max(pos["peak"], float(bar[1]))
         else:
             pos["peak"] = min(pos["peak"], float(bar[2]))
-        why, px = hit_exit(side, entry, pos["sl"], pos["tp"], pos.get("trail"), bar, ignore_tp=not honor_tp)
         if why is None and held >= time_bars:
             why, px = "time", float(bar[3])
         if why is None and held >= scratch_bars and strategy != "block":
@@ -3386,6 +3521,61 @@ class SetBook:
             if "indications" in self.packs
             else None
         )
+        # Direct Signals and the State timeframe agreement use the same
+        # closed-candle evaluators as live processing. Keep their configuration
+        # identities separate; a pooled 1m vote is not evidence for 5m or 15m.
+        from bisect import bisect_right
+        from indication_engine import DEFAULT_SETTINGS, TIMEFRAMES, TF_SECONDS, TF_WEIGHT, combine_timeframes
+        tf_settings = {**DEFAULT_SETTINGS, **self.ind_settings}
+        tf_frames: Dict[str, Tuple[IndicationFrame, List[int]]] = {}
+        tf_evaluations: Dict[str, Any] = {}
+        tf_counts: Dict[str, int] = {}
+        need_tf = bool(tf_settings.get("typeSignals", True)) or bool(
+            tf_settings.get("typeState", True) and tf_settings.get("tfCombined", True)
+        )
+        end_ts = finite((getattr(self, "_bar_end_ts", {}) or {}).get(symbol), frame_now)
+        # Timestamped ingestion may provide the final candle's open. Legacy
+        # five-value OHLCV follows the replay's existing now/60s convention.
+        base_minute = int(end_ts // BAR_S) - (n - 1)
+        if indication_frame is not None and need_tf:
+            for tf in TIMEFRAMES:
+                if not tf_settings.get(f"tf{tf}", True):
+                    continue
+                if tf_settings.get("typeSignals", True):
+                    kind_sigs[f"signals|direct_tf:{tf}"] = [(0, 0.0)] * n
+                if tf == "1m":
+                    tf_frames[tf] = (indication_frame, list(range(n)))
+                    continue
+                width = max(1, int(TF_SECONDS[tf] / BAR_S))
+                rolled, closes = [], []
+                # Drop a leading partial UTC bucket. A higher-timeframe candle
+                # appears only once all its constituent 1m candles have closed.
+                start = (-base_minute) % width
+                for lo in range(start, n - width + 1, width):
+                    chunk = bars[lo:lo + width]
+                    rolled.append([float(chunk[0][0]), max(float(x[1]) for x in chunk),
+                                   min(float(x[2]) for x in chunk), float(chunk[-1][3]),
+                                   sum(float(x[4]) for x in chunk)])
+                    closes.append(lo + width - 1)
+                if rolled:
+                    last_ts = (base_minute + closes[-1]) * BAR_S
+                    tf_frames[tf] = (build_indication_frame(rolled, now=last_ts, period_s=TF_SECONDS[tf]), closes)
+        if indication_frame is not None and tf_settings.get("typeState", True):
+            kind_sigs["state|ta_pack"] = [(0, 0.0)] * n
+            if tf_settings.get("tfCombined", True):
+                kind_sigs["state|tf_combined"] = [(0, 0.0)] * n
+        if indication_frame is not None and tf_settings.get("typeDirection", True):
+            kind_sigs["direction|direction"] = [(0, 0.0)] * n
+        if indication_frame is not None and tf_settings.get("typeCommon", True):
+            common_mode = "rsi-macd-ema-bb" if str(tf_settings.get("commonMode") or "fade").lower() in ("follow", "legacy") else "ema-stretch-fade"
+            kind_sigs[f"common|{common_mode}"] = [(0, 0.0)] * n
+        if indication_frame is not None and tf_settings.get("typeTactic", True):
+            from tactic_indications import prepare_tactic_signals
+            tactic_lanes = prepare_tactic_signals(symbol, bars, tf_settings, end_ts + BAR_S, end_open_ts=end_ts)
+            for config, lane in tactic_lanes.items():
+                kind_sigs[f"tactic|{config}"] = lane
+            for config, exits in getattr(tactic_lanes, "exits", {}).items():
+                kind_sigs.exits[f"tactic|{config}"] = exits
         move_primary = max(8, min(55, int(self.ind_settings.get("moveFadeRange") or 30)))
         for i in range(warmup, n):
             lo = max(0, i + 1 - 60)
@@ -3414,8 +3604,50 @@ class SetBook:
                         # that range so its own evidence exists.
                         key = f"move|move:{move_primary}"
                         kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (d, conf)
-                    elif kind and kind not in PHANTOM_VOTE_LANES:
+                    elif kind == "direction":
+                        kind_sigs["direction|direction"][i] = (d, conf)
+                    elif kind and kind not in PHANTOM_VOTE_LANES and kind not in ("signals", "state", "common"):
                         kind_sigs[kind][i] = (d, conf)
+                frame_1m = vote_frame or indication_frame.window(lo, i + 1)
+                if tf_settings.get("typeCommon", True):
+                    common = evaluate_common(symbol, frame_1m.candles, tf_settings, frame=frame_1m)
+                    if common is not None:
+                        key = f"common|{common.mode}"
+                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (
+                            1 if common.direction == "long" else -1, common.confidence,
+                        )
+                current_tf_evals = []
+                for tf, (tf_frame, close_indices) in tf_frames.items():
+                    count = bisect_right(close_indices, i)
+                    if count < 20:
+                        continue
+                    if tf_counts.get(tf) != count:
+                        frame = frame_1m if tf == "1m" else tf_frame.window(max(0, count - 60), count)
+                        settings = tf_settings if tf == "1m" else {**tf_settings, "signalsModel": "trend"}
+                        tf_evaluations[tf] = evaluate_signal_candles(
+                            f"bingx-{tf}", f"BingX {tf}", frame.candles, settings,
+                            weight=TF_WEIGHT[tf], frame=frame,
+                        )
+                        tf_counts[tf] = count
+                    ev = tf_evaluations.get(tf)
+                    if ev is None:
+                        continue
+                    current_tf_evals.append(ev)
+                    if tf_settings.get("typeSignals", True):
+                        kind_sigs[f"signals|direct_tf:{tf}"][i] = (
+                            1 if ev.direction == "long" else -1, ev.confidence,
+                        )
+                if tf_settings.get("typeState", True):
+                    ta = evaluate_ta_pack(frame_1m.candles, tf_settings, frame=frame_1m)
+                    if ta is not None:
+                        kind_sigs["state|ta_pack"][i] = (1 if ta.direction == "long" else -1, ta.confidence)
+                    if tf_settings.get("tfCombined", True):
+                        combined = combine_timeframes(current_tf_evals, int(tf_settings.get("tfMinAgree") or 2), tf_settings)
+                        if combined is not None:
+                            direction, _, risk = combined
+                            kind_sigs["state|tf_combined"][i] = (
+                                1 if direction == "long" else -1, risk["confidence"],
+                            )
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
                 if any(self.ind_settings.get(flag, True) for flag in ("typeTrend", "typeBreak", "typeMove", "typeMsi", "typeVwap", "typeRetest", "typeSqueeze",
@@ -3459,6 +3691,9 @@ class SetBook:
         hist: Dict[str, List[Dict[str, Any]]],
         hist_counts: Optional[Dict[str, int]] = None,
         on_step: Optional[Callable[[], None]] = None,
+        *,
+        confidence_floor: float = 0.58,
+        lane_exits: Optional[Dict[int, Tuple[str, float]]] = None,
     ) -> None:
         """Replay core configs with columnar state, preserving scalar rules.
 
@@ -3486,7 +3721,7 @@ class SetBook:
             (float(st.trail_give) / 100.0 if float(st.trail_give or 0) > 0.05 else float(st.trail_give or 0))
             for st in pack_sets
         ], dtype=float)
-        base_ts = now - (n - 1) * BAR_S
+        base_ts = finite((getattr(self, "_bar_end_ts", {}) or {}).get(symbol), now) - (n - 1) * BAR_S
         cooldown_n = max(0, int(self.cooldown_bars or 0))
         scratch_min = float(self.scratch_min or 0.0)
         started = time.monotonic()
@@ -3499,6 +3734,13 @@ class SetBook:
         close_held = np.empty((m, REPLAY_HIST_CAP), dtype=np.int32)
         close_reason = np.empty((m, REPLAY_HIST_CAP), dtype=np.uint8)
         reasons = ("sl", "tp", "time", "scratch+")
+        reasons = list(reasons)
+        tactic_names = {name for name, _ in (lane_exits or {}).values() if name}
+        tactic_codes = {name: len(reasons) + j for j, name in enumerate(sorted(tactic_names))}
+        reasons.extend("tactic-" + name for name in sorted(tactic_names))
+        tactic_buffer = finite(self.ind_settings.get("exitTacticBufferPct"), 0.1)
+        tactic_gain = finite(self.ind_settings.get("exitTacticMinGainPct"), 0.15)
+        tactic_enabled = bool(self.ind_settings.get("exitTacticOn", True))
 
         for want_side in side_values:
             close_count = np.zeros(m, dtype=np.int64)
@@ -3510,6 +3752,8 @@ class SetBook:
             peak = np.zeros(m, dtype=float)
             trail_px = np.zeros(m, dtype=float)
             entry_i = np.zeros(m, dtype=np.int32)
+            entry_tactic = np.full(m, "", dtype=object)
+            entry_level = np.zeros(m, dtype=float)
 
             for i in range(warmup, n):
                 if on_step and i % 80 == 0:
@@ -3531,6 +3775,7 @@ class SetBook:
                 live = active.copy()
                 if live.any():
                     if want_side > 0:
+                        effective_stop = np.where(live & (trail_px > 0), np.maximum(stop_loss, trail_px), stop_loss)
                         if trailing.any():
                             peak[live] = np.maximum(peak[live], high)
                             fav = (peak - entry) / np.maximum(entry, 1e-12)
@@ -3540,13 +3785,13 @@ class SetBook:
                                 trail_px[arm_now] = np.maximum(trail_px[arm_now], next_trail[arm_now])
                         if (~trailing & live).any():
                             peak[live & ~trailing] = np.maximum(peak[live & ~trailing], high)
-                        effective_stop = np.where(live & (trail_px > 0), np.maximum(stop_loss, trail_px), stop_loss)
                         sl_hit = live & (low <= effective_stop)
                         tp_hit = live & (high >= take_profit) if honor_tp else np.zeros(m, dtype=bool)
                         exited = sl_hit | tp_hit
                         exit_px = np.where(sl_hit, effective_stop, take_profit)
                         raw = (exit_px - entry) / np.maximum(entry, 1e-12)
                     else:
+                        effective_stop = np.where(live & (trail_px > 0), np.minimum(stop_loss, trail_px), stop_loss)
                         if trailing.any():
                             peak[live] = np.minimum(peak[live], low)
                             fav = (entry - peak) / np.maximum(entry, 1e-12)
@@ -3558,7 +3803,6 @@ class SetBook:
                                 trail_px[arm_now & ~fresh] = np.minimum(trail_px[arm_now & ~fresh], next_trail[arm_now & ~fresh])
                         if (~trailing & live).any():
                             peak[live & ~trailing] = np.minimum(peak[live & ~trailing], low)
-                        effective_stop = np.where(live & (trail_px > 0), np.minimum(stop_loss, trail_px), stop_loss)
                         sl_hit = live & (high >= effective_stop)
                         tp_hit = live & (low <= take_profit) if honor_tp else np.zeros(m, dtype=bool)
                         exited = sl_hit | tp_hit
@@ -3569,6 +3813,14 @@ class SetBook:
                     # after the stop/TP decision on the same bar.
                     held = i - entry_i
                     current_move = (close - entry) / np.maximum(entry, 1e-12) * want_side
+                    tactic_exit = np.zeros(m, dtype=bool)
+                    if tactic_enabled and tactic_names:
+                        for j in np.flatnonzero(live & ~exited & (held >= 1)):
+                            if entry_tactic[j] and tactic_should_close(entry_tactic[j], want_side, close,
+                                    entry_level[j], entry[j], tactic_buffer, tactic_gain):
+                                tactic_exit[j] = True
+                        exited |= tactic_exit
+                        raw[tactic_exit] = current_move[tactic_exit]
                     time_exit = live & ~exited & (held >= time_bars)
                     scratch_exit = live & ~exited & ~time_exit & (current_move >= scratch_min) & (held >= scratch_bars)
                     if time_exit.any():
@@ -3589,17 +3841,22 @@ class SetBook:
                         close_reason[exit_indices, slots] = np.where(
                             sl_hit[exit_indices], 0, np.where(
                                 tp_hit[exit_indices], 1, np.where(time_exit[exit_indices], 2, 3)))
+                        for j in np.flatnonzero(tactic_exit):
+                            close_reason[j, close_count[j] % REPLAY_HIST_CAP] = tactic_codes[entry_tactic[j]]
                         close_count[exit_indices] += 1
                         active[exited] = False
                         cooldown[exited] = cooldown_n
 
                 d, conf, _why = pack_sig[i]
-                if d == want_side and conf >= 0.58:
+                if d == want_side and conf >= confidence_floor:
                     seed = (~active) & (cooldown <= 0)
                     if seed.any():
                         entry[seed] = close
                         peak[seed] = close
                         entry_i[seed] = i
+                        tactic_name, tactic_level = (lane_exits or {}).get(i, ("", 0.0))
+                        entry_tactic[seed] = tactic_name
+                        entry_level[seed] = tactic_level
                         trail_px[seed] = 0.0
                         if want_side > 0:
                             stop_loss[seed] = close * (1.0 - sl_frac[seed])
@@ -3642,14 +3899,16 @@ class SetBook:
     ) -> None:
         bars = self.bars[symbol]
         if set_ids is None:
-            replay_sets = self.by_idx
+            replay_sets = [st for st in self.by_idx if not st.indication_config]
             by_pack = self._by_pack or {}
+            by_pack = {pack: [st for st in rows if not st.indication_config] for pack, rows in by_pack.items()}
             if not by_pack:
                 for st in replay_sets:
                     by_pack.setdefault(st.pack, []).append(st)
             set_map = self.sets
         else:
-            replay_sets = [self.sets[str(sid)] for sid in set_ids if str(sid) in self.sets]
+            replay_sets = [self.sets[str(sid)] for sid in set_ids if str(sid) in self.sets
+                           and not self.sets[str(sid)].indication_config]
             by_pack = {}
             for st in replay_sets:
                 by_pack.setdefault(st.pack, []).append(st)
@@ -3659,7 +3918,7 @@ class SetBook:
             signals, kind_sigs, warmup = self.prepare_replay_signals(symbol, now, on_step=on_step)
         else:
             signals, kind_sigs, warmup = prepared
-        base_ts = now - (n - 1) * BAR_S
+        base_ts = finite((getattr(self, "_bar_end_ts", {}) or {}).get(symbol), now) - (n - 1) * BAR_S
         time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
         scratch_bars = max(8, int(self.scratch_s / BAR_S))
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
@@ -3848,7 +4107,7 @@ class SetBook:
         n = len(bars)
         if n <= warmup:
             return
-        base_ts = now - (n - 1) * BAR_S
+        base_ts = finite((getattr(self, "_bar_end_ts", {}) or {}).get(symbol), now) - (n - 1) * BAR_S
         sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.tp_step_pct), 0.6)
         for want_side in (1, -1):
             parent_pos: Optional[Dict[str, Any]] = None
@@ -3918,7 +4177,7 @@ class SetBook:
         n = len(bars)
         if n <= warmup:
             return
-        base_ts = now - (n - 1) * BAR_S
+        base_ts = finite((getattr(self, "_bar_end_ts", {}) or {}).get(symbol), now) - (n - 1) * BAR_S
         sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.tp_step_pct), 0.6)
         tactic_on = bool((self.ind_settings or {}).get("exitTacticOn", True))
         tactic_buf = float((self.ind_settings or {}).get("exitTacticBufferPct", 0.1) or 0.0)
@@ -4021,8 +4280,9 @@ class SetBook:
                 "costSource": "manual-fallback",
                 "costSamples": 0.0,
             }
-        inv_cost = 100.0 / cost_pct if cost_pct else 0.0
-        avg_r = sum(value * inv_cost - 1.0 for value in window) / count if cost_pct else 0.0
+        reference = pf_reference_cost_pct(cost_pct)
+        inv_cost = 100.0 / reference
+        avg_r = (sum(window) / count - cost_frac) * inv_cost
         ratio = ratio_from_r(avg_r)
         nets_sum = 0.0
         gp = 0.0
@@ -4038,16 +4298,17 @@ class SetBook:
         return {
             "n": float(requested),
             "count": float(count),
-            "avgR": round(avg_r, 4),
-            "ratio": round(ratio, 4),
+            "avgR": avg_r,
+            "ratio": ratio,
             "classicPf": round(classic, 4),
             "costPct": round(cost_pct, 8),
-            "netPct": round(net_move_pct(ratio, cost_pct), 4),
-            "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+            "netPct": round(nets_sum / count * 100.0, 4),
+            "grossPct": round(sum(window) / count * 100.0, 4),
             "netAvg": round(nets_sum / count, 6),
             "costSubtracted": True,
             "costSource": "manual-fallback",
             "costSamples": 0.0,
+            "pfReferenceCostPct": reference,
         }
 
     def _fast_historic_metrics(
@@ -4145,6 +4406,8 @@ class SetBook:
             "requiredSamples": required,
             "grossPf": round(gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0), 6),
             "netPf": round(net_profit / net_loss if net_loss > 0 else (99.0 if net_profit > 0 else 0.0), 6),
+            "grossReturnPf": round(net_return_pf(sum(pf_gross) / sample, cost_pct), 6) if sample else 1.0,
+            "netReturnPf": round(float(last15["ratio"]), 6),
             "grossEv": round(sum(pf_gross) / sample, 8) if sample else 0.0,
             "netEv": round(net_values_sum / sample, 8) if sample else 0.0,
             "ev": round(net_values_sum / sample, 8) if sample else 0.0,
@@ -4279,7 +4542,7 @@ class SetBook:
             # live_first_window order: replay fill first, live results newest.
             ordered = [r for r in tape if _is_hist_row(r)]
         else:
-            ordered = sorted((r for r in tape if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
+            ordered = sorted((r for r in tape if _is_hist_row(r)), key=row_time_seconds)
         nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
         wins = sum(1 for x in nets if x > 0)
         gp = round(sum(x for x in nets if x > 0), 6)
@@ -4408,27 +4671,34 @@ class SetBook:
         st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
         st.stage = qualified or "Unqualified"
         st.stage_qualified = qualified
-        st.base_pf = round(base_pf, 6)
-        st.main_pf = round(main_pf, 6)
-        st.real_pf = round(real_pf, 6)
+        # These values are reused by execution gates. Presentation rounding
+        # must not promote evidence just below a configured PF floor.
+        st.base_pf = base_pf
+        st.main_pf = main_pf
+        st.real_pf = real_pf
         st.position_cost_pct = self.cost_pct
         st.evaluation = dict(m.get("evaluation") or {})
         st.evaluation_windows = dict(m.get("evaluation_windows") or {})
         st.normal_evaluation = {
-            "pf": finite(m.get("gross_pf")),
+            "pf": finite(st.evaluation.get("grossReturnPf"), net_return_pf(finite(m.get("gross_ev")), self.cost_pct)),
+            "classicPf": finite(m.get("gross_pf")),
             "ev": finite(m.get("gross_ev")),
             "sampleCount": base_n,
             "source": "gross-price-move",
+            "costSubtracted": False,
         }
         st.adjusted_evaluation = {
-            "pf": finite(m.get("net_pf")),
+            "pf": base_pf,
+            "classicPf": finite(m.get("net_pf")),
             "ev": finite(m.get("net_ev")),
             "ratio": base_pf,
             "sampleCount": base_n,
             "source": "cost-net",
+            "costSubtracted": True,
         }
         st.adjustment_deltas = {
-            "pf": round(finite(m.get("net_pf")) - finite(m.get("gross_pf")), 6),
+            "pf": round(st.adjusted_evaluation["pf"] - st.normal_evaluation["pf"], 6),
+            "classicPf": round(finite(m.get("net_pf")) - finite(m.get("gross_pf")), 6),
             "ev": round(finite(m.get("net_ev")) - finite(m.get("gross_ev")), 8),
             "costPct": self.cost_pct,
         }
@@ -4455,16 +4725,16 @@ class SetBook:
                 reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
         reason = "; ".join(reasons)
         st.strategy_adjustments = {
-            "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": round(base_pf, 6), "n": base_n, "ddtS": dd_s},
-            "main": {"qualified": main, "evaluated": base, "minPf": main_floor, "pf": round(main_pf, 6), "n": main_n, "ddtS": dd_s},
-            "real": {"qualified": real, "evaluated": main, "minPf": real_floor, "pf": round(real_pf, 6), "n": real_n, "ddtS": dd_s},
+            "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": base_pf, "n": base_n, "ddtS": dd_s},
+            "main": {"qualified": main, "evaluated": base, "minPf": main_floor, "pf": main_pf, "n": main_n, "ddtS": dd_s},
+            "real": {"qualified": real, "evaluated": main, "minPf": real_floor, "pf": real_pf, "n": real_n, "ddtS": dd_s},
             "live": {"evaluation": False, "source": "real"},
             "exchange": {"trackingOnly": True},
         }
         records = {
-            "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": round(base_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Main": {"evaluated": base, "qualified": main, "sampleCount": main_n, "pf": round(main_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Real": {"evaluated": main, "qualified": real, "sampleCount": real_n, "pf": round(real_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
+            "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": base_pf, "ddtS": dd_s, "reason": reason or "qualified"},
+            "Main": {"evaluated": base, "qualified": main, "sampleCount": main_n, "pf": main_pf, "ddtS": dd_s, "reason": reason or "qualified"},
+            "Real": {"evaluated": main, "qualified": real, "sampleCount": real_n, "pf": real_pf, "ddtS": dd_s, "reason": reason or "qualified"},
         }
         for name, required in zip(("Base", "Main", "Real"), self._stage_window_ns()):
             evidence = (m.get("evaluation") or {}) if name == "Base" else (m.get("stage_evaluations") or {}).get(name, {})
@@ -4512,7 +4782,7 @@ class SetBook:
             parent_set_id=st.parent_set_id or st.id,
             stage=name.title(),
             gross_pf=round(finite(evaluation.get("grossPf")), 6),
-            net_pf=round(cost_pf, 6),
+            net_pf=cost_pf,
             position_cost_pct=finite(st.position_cost_pct, self.cost_pct),
             ddt_s=ddt_s,
             sample_count=sample_n,
@@ -4657,7 +4927,7 @@ class SetBook:
         losers stay off. Live last-N losses deactivate either mode.
         """
         if self.live_negative_deact and len(live) >= self.deact_n:
-            tail = sorted(live, key=lambda r: finite(r.get("t")))[-self.deact_n:]
+            tail = sorted(live, key=row_time_seconds)[-self.deact_n:]
             if sum(row_net_pnl(row, self.cost_pct) for row in tail) < 0:
                 return False, f"live last{self.deact_n} avg loss"
         n = int((m or {}).get("last15_n") or 0)
@@ -4711,20 +4981,25 @@ class SetBook:
         st.net_ev = float(m.get("net_ev") or 0.0)
         st.evaluation = dict(m.get("evaluation") or {})
         st.normal_evaluation = {
-            "pf": st.gross_pf,
+            "pf": finite(st.evaluation.get("grossReturnPf"), net_return_pf(st.gross_ev, self.cost_pct)),
+            "classicPf": st.gross_pf,
             "ev": st.gross_ev,
             "sampleCount": int(st.evaluation.get("sampleCount") or 0),
             "source": "gross-price-move",
+            "costSubtracted": False,
         }
         st.adjusted_evaluation = {
-            "pf": st.net_pf,
+            "pf": float(m.get("last15_ratio") or 0.0),
+            "classicPf": st.net_pf,
             "ev": st.net_ev,
             "ratio": float(m.get("last15_ratio") or 0.0),
             "sampleCount": int(st.evaluation.get("sampleCount") or 0),
             "source": "cost-net",
+            "costSubtracted": True,
         }
         st.adjustment_deltas = {
-            "pf": round(st.net_pf - st.gross_pf, 6),
+            "pf": round(st.adjusted_evaluation["pf"] - st.normal_evaluation["pf"], 6),
+            "classicPf": round(st.net_pf - st.gross_pf, 6),
             "ev": round(st.net_ev - st.gross_ev, 8),
             "costPct": self.cost_pct,
         }
@@ -4763,7 +5038,7 @@ class SetBook:
         }
         if live_rows:
             live_m = self._score_metrics(live_rows)
-            live_ordered = sorted((r for r in live_rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+            live_ordered = sorted((r for r in live_rows if isinstance(r, dict)), key=row_time_seconds)
             live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
             live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
             live_opt_dd = drawdown_time_by_symbol(live_opt_window, cost_pct=self.cost_pct) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
@@ -4796,7 +5071,7 @@ class SetBook:
             "source": "live-exchange",
             "optimizationN": len(live_opt_window),
             "optimizationWindow": max(50, self.deact_n, self.optimization_n),
-            "optimizationPf": round(float(live_opt_pf.get("ratio") or 1.0), 4),
+            "optimizationPf": round(finite(live_opt_pf.get("ratio"), 1.0), 4),
             "optimizationNetAvg": round(live_opt_avg, 8),
             "optimizationMaxDdS": round(float(live_opt_dd.get("maxS") or 0.0), 1),
             "optimizationPositive": live_opt_avg >= 0.0,
@@ -4831,7 +5106,7 @@ class SetBook:
             sm["liveN"] = len(sub_live)
             if sub_live:
                 lm = self._score_metrics(sub_live)
-                live_opt_n = len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):])
+                live_opt_n = len(sorted(sub_live, key=row_time_seconds)[-max(50, self.deact_n, self.optimization_n):])
             else:
                 lm = empty_live
                 live_opt_n = 0
@@ -5061,6 +5336,9 @@ class SetBook:
             "relativeCount": st.relative_count,
             "volumeRatio": st.volume_ratio,
             "indicationKind": st.indication_kind,
+            "indicationConfig": st.indication_config,
+            "indicationSymbol": st.indication_symbol,
+            "templateSetId": st.template_set_id,
             "strategyAdjustments": st.strategy_adjustments,
         }
 
@@ -5176,6 +5454,7 @@ class SetBook:
             "independentStrategy": True,
             "independentSlTp": True,
             "independentConfigs": True,
+            "indicationGrid": self.indication_grid_status(),
             "costSubtracted": True,
             "stageDefaults": {"base": self.stage_min_pf["base"], "main": self.stage_min_pf["main"], "real": self.stage_min_pf["real"]},
             "stageCounts": stage_counts,
@@ -5334,7 +5613,7 @@ class SetBook:
         def live_rows(s: SetState) -> List[Dict[str, Any]]:
             return sorted(
                 filter_side(s.live, want_side if use_side else None),
-                key=lambda r: finite(r.get("t")),
+                key=row_time_seconds,
             )
 
         def live_ok(s: SetState) -> bool:
@@ -5450,7 +5729,7 @@ class SetBook:
         rows = filter_side(state.evaluation_live(), side)
         if not self.live_negative_deact or len(rows) < self.deact_n:
             return True
-        tail = sorted(rows, key=lambda r: finite(r.get("t")))[-self.deact_n:]
+        tail = sorted(rows, key=row_time_seconds)[-self.deact_n:]
         return sum(row_net_pnl(row, self.cost_pct) for row in tail) >= 0
 
     def _validated_entry_rows(self, pack: str, side: Optional[str] = None) -> List[SetState]:
@@ -5791,6 +6070,16 @@ class SetBook:
         """Revalidate the exact selected object at the submission boundary."""
         if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
             return False
+        if st.indication_config:
+            grid = getattr(self, "_indication_grid", None)
+            if grid is None or not grid.current(st):
+                return False
+            if st.kind in ("block", "dca", "axis"):
+                parent = self.sets.get(st.parent_set_id)
+                if parent is None or parent.indication_symbol != st.indication_symbol or parent.indication_config != st.indication_config:
+                    return False
+                if not self._real_metrics_ok(self._side_view(parent, side)):
+                    return False
         # VST's permissive-bounded rollout admits a Set as soon as that
         # Set's own Base -> Main -> Real/PF/DD-time evidence is current. The
         # aggregate replay flag only describes catalog completeness; it must
@@ -5826,6 +6115,36 @@ class SetBook:
         if n < self.eval_need():
             return False
         return self._base_metrics_ok(view) or (soft and self._micro_metrics_ok(view))
+
+    def indication_entry_sets(self, kind: str, config: str, side: str = "LONG", symbol: str = "") -> List[SetState]:
+        """Own signal × TP/SL/trailing candidates; queue cold grid work off-thread."""
+        if not self.enabled or str(kind).lower() not in IND_KINDS:
+            return []
+        from indication_grid import IndicationGrid
+        with self._pick_lock:
+            if getattr(self, "_indication_grid", None) is None:
+                self._indication_grid = IndicationGrid(self)
+            grid = self._indication_grid
+        return grid.candidates(kind, config, self._entry_side(side) or "LONG", symbol)
+
+    def pack_entry_sets(self, pack: str, side: str = "LONG", symbol: str = "") -> List[SetState]:
+        """Native pack candidates qualify on this symbol's own signal/exit tape."""
+        if pack not in PACKS or not self.enabled:
+            return []
+        from indication_grid import IndicationGrid
+        with self._pick_lock:
+            if getattr(self, "_indication_grid", None) is None:
+                self._indication_grid = IndicationGrid(self)
+            grid = self._indication_grid
+        kind, config = ("general", "general_signal") if pack == "general" else ("combined", "combined_vote")
+        return grid.candidates(kind, config, self._entry_side(side) or "LONG", symbol)
+
+    def indication_grid_status(self) -> Dict[str, Any]:
+        grid = getattr(self, "_indication_grid", None)
+        return grid.snapshot() if grid is not None else {
+            "tile": 128, "configurations": [], "independent": True,
+            "pfDefinition": "return/cost", "complete": False,
+        }
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)
@@ -5863,8 +6182,10 @@ class SetBook:
         # Signals for hundreds of symbols share this indication evidence.
         # Cache by contents, not TTL or count: a corrected/rolling close or a
         # changed cost/window/PF setting must invalidate immediately.
+        live_side = filter_side(live, side)
+        hist_side = filter_side(hist, side)
         signature = (self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
-                     _tape_fingerprint(hist), _tape_fingerprint(live))
+                     _tape_fingerprint(hist_side), _tape_fingerprint(live_side))
         cache = getattr(self, "_ind_stats_cache", None)
         if cache is None:
             cache = self._ind_stats_cache = {}
@@ -5872,9 +6193,8 @@ class SetBook:
         cached = cache.get(key)
         if cached is not None and cached[0] == signature:
             return copy.deepcopy(cached[1])
-        live_side = filter_side(live, side)
         # Live exchange results decide; replay only fills missing slots.
-        tape, src = live_first_window(live_side, filter_side(hist, side), max(int(self.pf_n or 0), need))
+        tape, src = live_first_window(live_side, hist_side, max(int(self.pf_n or 0), need))
         source = "live-exchange" if src == "live" else ("mixed" if live_side else "hist-sim")
         dd = self.ddt_when_enough(tape, need, ordered=True)
         if tape:
@@ -5923,11 +6243,13 @@ class SetBook:
         hist = self.ind_hist.get(k) or []
         live = self.ind_live.get(k) or []
         need = self.eval_need()
-        sig = (len(hist), len(live), finite((hist[-1] if hist else {}).get("t")) if hist else 0.0,
-               finite((live[-1] if live else {}).get("t")) if live else 0.0,
-               self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
-               finite((hist[-1] if hist else {}).get("pnl_pct")) if hist else 0.0,
-               finite((live[-1] if live else {}).get("pnl_pct")) if live else 0.0)
+        def tagged(src):
+            return filter_side([r for r in src
+                                if str((r.get("ind_config") if hasattr(r, "get") else getattr(r, "ind_config", "")) or "").lower() == cfg], side)
+        live_rows, hist_rows = tagged(live), tagged(hist)
+        sig = (self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
+               _tape_fingerprint(hist_rows, tail=len(hist_rows)),
+               _tape_fingerprint(live_rows, tail=len(live_rows)))
         cache = getattr(self, "_ind_cfg_cache", None)
         if cache is None:
             cache = self._ind_cfg_cache = {}
@@ -5937,12 +6259,8 @@ class SetBook:
             return dict(hit[1])
         # Replay rows are CompactHistRow mappings (not dicts): read the tag
         # through the mapping API, never as an attribute.
-        def tagged(src):
-            return filter_side([r for r in src
-                                if str((r.get("ind_config") if hasattr(r, "get") else getattr(r, "ind_config", "")) or "").lower() == cfg], side)
-        live_rows = tagged(live)
         # Live exchange results decide; replay only fills missing slots.
-        tape, src = live_first_window(live_rows, tagged(hist), max(int(self.pf_n or 0), need))
+        tape, src = live_first_window(live_rows, hist_rows, max(int(self.pf_n or 0), need))
         if tape:
             last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=True)
             n, pf = int(last["count"]), float(last["ratio"])
@@ -5969,10 +6287,11 @@ class SetBook:
             return True
         k = str(kind or "").strip()
         if k and config:
-            # A configuration with its own evidence decides for itself.
+            # A configuration decides from its own evidence even while cold.
+            # Borrowing the pooled kind here admitted an unproven range when
+            # a busy sibling happened to have enough profitable closes.
             cst = self.ind_config_stats(k, str(config), side=side)
-            if cst["enough"]:
-                return bool(cst["validated"])
+            return bool(cst["validated"])
         if k:
             st = self.ind_stats(k, side=side)
             if st["validated"]:
@@ -6018,7 +6337,7 @@ class SetBook:
                     continue
                 seen.add(cid)
                 fills.append(r)
-        fills.sort(key=lambda r: finite(r.get("t")))
+        fills.sort(key=row_time_seconds)
         m = self._score_metrics(fills)
         rows = []
         for s in sorted(processed, key=lambda x: (-len(x.live), -float((x.live_eval or {}).get("last15Ratio") or 0), x.max_dd_s)):
@@ -6115,6 +6434,9 @@ class SetBook:
                     "relativeCount": st.relative_count,
                     "volumeRatio": st.volume_ratio,
                     "indicationKind": st.indication_kind,
+                    "indicationConfig": st.indication_config,
+                    "indicationSymbol": st.indication_symbol,
+                    "templateSetId": st.template_set_id,
                     "strategyAdjustments": st.strategy_adjustments,
                     "adjustmentDeltas": st.adjustment_deltas,
                     "grossPf": st.gross_pf,
@@ -6942,7 +7264,7 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     w._score_one(wst)
     l15 = rows20[-15:]
     rs15 = [((r["pnl_pct"] * 100.0) - 0.15) / 0.15 for r in l15]
-    want_ratio = round(1.0 + (sum(rs15) / len(rs15)) * 0.10, 4)
+    want_ratio = 1.0 + (sum(rs15) / len(rs15)) * 0.10
     l25 = rows20[-25:]
     rs25 = [((r["pnl_pct"] * 100.0) - 0.15) / 0.15 for r in l25]
     want25r = sum(rs25) / len(rs25)
@@ -7085,7 +7407,7 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     finally:
         globals()["indication_kind_votes"] = _orig_votes
     ind_fills = sum(len(v) for v in g6.ind_hist.values())
-    out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
+    out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction", "state", "common", "tactic"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
     out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
     # Signals must also have an independently attributable historic Block tape.
     g6b = SetBook()

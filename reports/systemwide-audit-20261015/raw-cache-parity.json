@@ -1,0 +1,20 @@
+{
+  "symbol": "BTC-USDT",
+  "oldModelSignature": "0038f4b6b5c329b1f814777f6928aa4435c3ce93d2c3d87bd0cb7fa88e71c236",
+  "currentModelSignature": "d5d64b755f7d8086cf0ac61879892d33942ee280020e5d111ff4afe1fda6d96a",
+  "rows": 2958047,
+  "checks": {
+    "uid": true,
+    "side": true,
+    "entry": true,
+    "exit": true,
+    "raw": true,
+    "reason": true,
+    "catalog": true,
+    "coverage": true,
+    "reasons": true,
+    "bars": true
+  },
+  "complete": true,
+  "currentReplaySeconds": 62.101
+}

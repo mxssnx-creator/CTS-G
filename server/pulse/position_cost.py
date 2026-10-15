@@ -55,6 +55,12 @@ def _row_value(row: Any, *keys: str) -> Any:
     return None
 
 
+def row_time_seconds(row: Any) -> float:
+    """Chronological key for tapes containing Unix seconds or milliseconds."""
+    stamp = finite(_row_value(row, "t"))
+    return stamp / 1000.0 if abs(stamp) >= 100_000_000_000 else stamp
+
+
 def row_notional(row: Any) -> float:
     """Return the executed quote notional represented by one row."""
     direct = finite(_row_value(row, "notional", "quoteQty", "quoteQuantity", "cumQuote", "cumQuoteQty"))
@@ -155,7 +161,7 @@ def row_position_cost_pct(row: Any, fallback: float = POSITION_COST_PCT_DEFAULT)
         or "cost" in source
     )
     if total_is_measured or (entry_fee > 0 and exit_fee > 0):
-        measured = (_nested_amount(total_fee) if total_fee is not None else entry_fee + exit_fee) / notion * 100.0
+        measured = (_nested_amount(total_fee) if total_is_measured else entry_fee + exit_fee) / notion * 100.0
         return normalize_position_cost_pct(measured, fallback)
     fee = row_fee_usdt(row)
     if fee > 0:
@@ -285,8 +291,13 @@ def shared_pf_settings(overlay):
 
 
 def clears_pf(value, floor=POSITIVE_PF):
-    """Admit at/above the requested floor. Intern 1.00 is cost-neutral, not real."""
-    return finite(value) + 1e-9 >= 1.0 and finite(value) + 1e-9 >= finite(floor, POSITIVE_PF)
+    """Clear the strict >1.02 hard gate and the configured inclusive floor.
+
+    Intern 1.00 is a separate cost-neutral coordinate, never positive
+    admission evidence. The desk minimum 1.02 itself is not eligible.
+    """
+    pf = finite(value)
+    return pf > PF_MIN + 1e-9 and pf + 1e-9 >= finite(floor, POSITIVE_PF)
 SL_TP_MIN = 0.1
 SL_TP_MAX = 3.0
 SL_TP_STEP = 0.1
@@ -334,15 +345,13 @@ def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: f
 
 
 def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """PositionCost as a fraction.
+    """PositionCost percent to fraction, including small measured venue fees.
 
-    CTS stores PositionCost in percent (0.15 means 0.15%). A small legacy
-    caller may still pass a fraction such as 0.0015; values strictly below 0.02
-    retain that compatibility convention. 0.02 is the desk slider minimum and
-    is a percent.
+    Fee-rate fractions are converted at exchange ingestion. Guessing units
+    from magnitude here turns a measured 0.01% cost into a 1% loss, while PF
+    still divides by 0.01%; all calculation inputs use the percent contract.
     """
-    c = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
-    return c / 100.0 if c >= 0.02 else c
+    return max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT)) / 100.0
 
 
 def net_pnl_pct(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
@@ -364,18 +373,11 @@ def row_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     gross move in that case so a missing percentage cannot become a synthetic
     cost-only loss in PF, expectancy, or DDT calculations.
     """
-    raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
+    raw = _row_value(row, "pnl_pct")
     if raw is not None:
         return finite(raw)
-    if isinstance(row, dict):
-        pnl = finite(row.get("pnl"))
-        qty = finite(row.get("qty"))
-        entry = finite(row.get("entry"))
-    else:
-        pnl = finite(getattr(row, "pnl", 0))
-        qty = finite(getattr(row, "qty", 0))
-        entry = finite(getattr(row, "entry", 0))
-    notional = max(0.0, qty * entry)
+    pnl = finite(_row_value(row, "pnl"))
+    notional = row_notional(row)
     row_cost = row_position_cost_pct(row, cost_pct)
     return pnl / notional + cost_as_frac(row_cost) if notional > 1e-12 else 0.0
 
@@ -386,6 +388,14 @@ def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
         return net_pnl_pct(finite(row.get("pnl_pct")), cost_pct)
     actual_cost = row_position_cost_pct(row, cost_pct)
     return net_pnl_pct(row_pnl_pct(row, actual_cost), actual_cost)
+
+
+def row_has_return(row: Any) -> bool:
+    """Whether the row contains a finite ROI or reconstructable cash ROI."""
+    raw_pct = _row_value(row, "pnl_pct")
+    if raw_pct is not None:
+        return math.isfinite(finite(raw_pct, math.nan))
+    return row_notional(row) > 1e-12 and math.isfinite(finite(_row_value(row, "pnl"), math.nan))
 
 
 def accumulate_close(previous: Dict[str, Any], leg: Dict[str, Any]) -> Dict[str, Any]:
@@ -426,12 +436,10 @@ def live_first_window(live: Sequence[Any], replay: Sequence[Any], n: int) -> tup
     slots, so replay never pushes a live result out of the window.
     Returns (window rows in chronological order, "live" | "bootstrap")."""
     n = max(1, int(n))
-    def stamp(r: Any) -> float:
-        return finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0))
-    lv = sorted(list(live), key=stamp)
+    lv = sorted(list(live), key=row_time_seconds)
     if len(lv) >= n:
         return lv[-n:], "live"
-    rp = sorted(list(replay), key=stamp)
+    rp = sorted(list(replay), key=row_time_seconds)
     fill = rp[-(n - len(lv)):] if n > len(lv) else []
     return list(fill) + lv, ("live" if lv and not fill else "bootstrap")
 
@@ -453,7 +461,7 @@ def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
         groups.setdefault(key, []).append(row)
     out = []
     for legs in groups.values():
-        legs.sort(key=lambda row: finite(row.get("t")))
+        legs.sort(key=row_time_seconds)
         if legs[-1].get("partial"):
             continue
         row = dict(legs[-1])
@@ -480,7 +488,7 @@ def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
                    fee_total=sum(finite(leg.get("fee_total")) for leg in legs),
                    position_cost_pct=cost, partial=False, closeLegs=len(legs))
         out.append(row)
-    return sorted(out, key=lambda row: finite(row.get("t")))
+    return sorted(out, key=row_time_seconds)
 
 
 def row_side(row: Any) -> str:
@@ -510,11 +518,35 @@ def filter_side(rows: Sequence[Any], side: Optional[str] = None) -> List[Any]:
     return [r for r in rows if row_side(r) == want]
 
 
-def signed_result_r(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """pnl_pct is a fraction (0.001 = 0.10%). Cost is a percent (0.15)."""
-    cost = max(1e-9, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
-    gross_move_pct = finite(pnl_pct) * 100.0
-    return (gross_move_pct - cost) / cost
+def pf_reference_cost_pct(cost_pct: float = POSITION_COST_PCT_DEFAULT,
+                          reference_cost_pct: Optional[float] = None) -> float:
+    """Positive cost unit for return PF; a free fill retains the desk reference.
+
+    Zero measured fees remain zero when calculating PnL. Return/cost has no
+    finite scale at a zero denominator, so it uses the default PositionCost
+    unit for comparison rather than inventing a 1e-9 fee and enormous PF.
+    """
+    cost = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
+    reference = finite(reference_cost_pct, POSITION_COST_PCT_DEFAULT)
+    return cost if cost > 0 else reference if reference > 0 else POSITION_COST_PCT_DEFAULT
+
+
+def net_return_r(net: float, cost_pct: float = POSITION_COST_PCT_DEFAULT,
+                 reference_cost_pct: Optional[float] = None) -> float:
+    """Already cost-net return fraction expressed in PositionCost units."""
+    return finite(net) * 100.0 / pf_reference_cost_pct(cost_pct, reference_cost_pct)
+
+
+def net_return_pf(net: float, cost_pct: float = POSITION_COST_PCT_DEFAULT,
+                  reference_cost_pct: Optional[float] = None) -> float:
+    """Canonical return-based PF from an already cost-net return fraction."""
+    return ratio_from_r(net_return_r(net, cost_pct, reference_cost_pct))
+
+
+def signed_result_r(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT,
+                    reference_cost_pct: Optional[float] = None) -> float:
+    """Gross return fraction minus one percent-denominated PositionCost."""
+    return net_return_r(net_pnl_pct(pnl_pct, cost_pct), cost_pct, reference_cost_pct)
 
 
 def ratio_from_r(signed_r: float) -> float:
@@ -556,46 +588,65 @@ def last_n_cost_pf(
     else:
         window = sorted(
             list(rows),
-            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+            key=row_time_seconds,
         )[-take:]
     use_simple = _simple_historic_tape(window) if simple is None else bool(simple)
     if use_simple:
         cost = normalize_position_cost_pct(cost_pct)
         cost_frac = cost_as_frac(cost)
-        gross_values = [finite(_row_value(row, "pnl_pct")) for row in window]
+        gross_values = [value for row in window
+                        if math.isfinite(value := finite(_row_value(row, "pnl_pct"), math.nan))]
         net_values = [value - cost_frac for value in gross_values]
         count = len(gross_values)
-        avg_r = sum(signed_result_r(value, cost) for value in gross_values) / count if count else 0.0
+        net_total = sum(net_values)
+        avg_r = net_return_r(net_total / count, cost) if count else 0.0
         gp_fast = sum(value for value in net_values if value > 0)
         gl_fast = abs(sum(value for value in net_values if value < 0))
         classic_fast = gp_fast / gl_fast if gl_fast > 0 else (99.0 if gp_fast > 0 else 0.0)
         return {
             "n": float(n),
             "count": float(count),
-            "avgR": round(avg_r, 4),
-            "ratio": round(ratio_from_r(avg_r), 4) if count else RATIO_BASE,
+            "avgR": avg_r,
+            "ratio": ratio_from_r(avg_r) if count else RATIO_BASE,
             "classicPf": round(classic_fast, 4),
             "costPct": cost,
-            "netPct": round(net_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
-            "grossPct": round(gross_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
-            "netAvg": round(sum(net_values) / count, 6) if count else 0.0,
+            "netPct": round(net_total / count * 100.0, 4) if count else 0.0,
+            "grossPct": round(sum(gross_values) / count * 100.0, 4) if count else 0.0,
+            "netAvg": round(net_total / count, 6) if count else 0.0,
             "costSubtracted": True,
             "costSource": "manual-fallback",
             "costSamples": 0,
+            "pfReferenceCostPct": pf_reference_cost_pct(cost),
+            "zeroCostSamples": count if cost == 0 else 0,
+            "unavailableReturnSamples": len(window) - count,
         }
     rs: List[float] = []
     nets: List[float] = []
     gp = gl = 0.0
     weighted_cost = 0.0
     weighted_notional = 0.0
+    gross_total = reference_total = cost_total = 0.0
+    measured = zero_cost = 0
+    unavailable = 0
     for row in window:
+        if not row_has_return(row):
+            # Cash accounting remains valid, but without executed notional
+            # or gross ROI it cannot supply a return-based PF observation.
+            unavailable += 1
+            continue
         actual_cost = row_position_cost_pct(row, cost_pct)
         pnl_pct = row_pnl_pct(row, actual_cost)
-        net = row_net_pnl(row, actual_cost)
-        rs.append(signed_result_r(pnl_pct, actual_cost))
+        net = net_pnl_pct(pnl_pct, actual_cost)
+        rs.append(net_return_r(net, actual_cost, cost_pct))
         nets.append(net)
+        gross_total += pnl_pct
+        cost_total += actual_cost
+        reference_total += pf_reference_cost_pct(actual_cost, cost_pct)
+        zero_cost += int(actual_cost == 0)
         notion = row_notional(row)
-        if row_has_measured_cost(row) and notion > 1e-12:
+        is_measured = row_has_measured_cost(row)
+        measured += int(is_measured)
+        if is_measured and notion > 1e-12:
             weighted_cost += actual_cost * notion
             weighted_notional += notion
         if net > 0:
@@ -606,21 +657,27 @@ def last_n_cost_pf(
     avg_r = sum(rs) / count if count else 0.0
     net_avg = sum(nets) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
-    effective_cost = weighted_cost / weighted_notional if weighted_notional > 1e-12 else normalize_position_cost_pct(cost_pct)
+    effective_cost = (weighted_cost / weighted_notional if weighted_notional > 1e-12
+                      else cost_total / count if count else normalize_position_cost_pct(cost_pct))
     classic = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
     return {
         "n": float(n),
         "count": float(count),
-        "avgR": round(avg_r, 4),
-        "ratio": round(ratio, 4),
+        "avgR": avg_r,
+        "ratio": ratio,
         "classicPf": round(classic, 4),
         "costPct": round(float(effective_cost), 8),
-        "netPct": round(net_move_pct(ratio, effective_cost), 4),
-        "grossPct": round(gross_move_pct(ratio, effective_cost), 4),
+        # Costs can differ per fill: avg(normalized return) × weighted cost
+        # does not reconstruct the actual average net/gross return.
+        "netPct": round(net_avg * 100.0, 4),
+        "grossPct": round(gross_total / count * 100.0, 4) if count else 0.0,
         "netAvg": round(net_avg, 6),
         "costSubtracted": True,
-        "costSource": "live-exchange" if weighted_notional > 1e-12 else "manual-fallback",
-        "costSamples": sum(1 for row in window if row_has_measured_cost(row)),
+        "costSource": "live-exchange" if measured == count and measured else "mixed-cost" if measured else "manual-fallback",
+        "costSamples": measured,
+        "pfReferenceCostPct": round(reference_total / count, 8) if count else pf_reference_cost_pct(cost_pct),
+        "zeroCostSamples": zero_cost,
+        "unavailableReturnSamples": unavailable,
     }
 
 
@@ -668,7 +725,7 @@ def evaluation_windows(
     else:
         seq = sorted(
             [row for row in rows if row is not None],
-            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+            key=row_time_seconds,
         )
     out: Dict[str, Dict[str, Any]] = {}
     seen: set[int] = set()
@@ -682,7 +739,7 @@ def evaluation_windows(
         seen.add(requested)
         metric = last_n_cost_pf(seq, requested, cost_pct, ordered=True, simple=simple)
         count = int(metric.get("count") or 0)
-        ratio = float(metric.get("ratio") or RATIO_BASE)
+        ratio = float(metric["ratio"])
         required = max(1, min(requested, int(required_samples or 1)))
         out[f"last{requested}"] = {
             "requestedN": requested,
@@ -690,13 +747,16 @@ def evaluation_windows(
             "available": count >= requested,
             "requiredSamples": required,
             "validated": count >= required and is_positive_pf(ratio),
-            "pf": round(ratio, 4),
+            "pf": ratio,
             "classicPf": float(metric.get("classicPf") or 0.0),
             "avgR": float(metric.get("avgR") or 0.0),
             "netAvg": float(metric.get("netAvg") or 0.0),
             "netPct": float(metric.get("netPct") or 0.0),
-            "costPct": float(metric.get("costPct") or normalize_position_cost_pct(cost_pct)),
+            "costPct": float(metric["costPct"]),
             "costSamples": int(metric.get("costSamples") or 0),
+            "pfReferenceCostPct": metric.get("pfReferenceCostPct"),
+            "zeroCostSamples": metric.get("zeroCostSamples", 0),
+            "unavailableReturnSamples": metric.get("unavailableReturnSamples", 0),
             "costSubtracted": True,
         }
     return out
@@ -733,7 +793,8 @@ def cost_aware_metrics(
     """
     cost = normalize_position_cost_pct(cost_pct)
     if _simple_historic_tape(rows):
-        gross = [finite(row.get("pnl_pct")) for row in rows]
+        gross = [value for row in rows
+                 if math.isfinite(value := finite(_row_value(row, "pnl_pct"), math.nan))]
         net = [value - cost_as_frac(cost) for value in gross]
         sample = len(gross)
         required = max(1, int(required_samples or 1))
@@ -744,6 +805,8 @@ def cost_aware_metrics(
             "requiredSamples": required,
             "grossPf": round(gross_pf, 6),
             "netPf": round(net_pf, 6),
+            "grossReturnPf": net_return_pf(sum(gross) / sample, cost) if sample else RATIO_BASE,
+            "netReturnPf": net_return_pf(sum(net) / sample, cost) if sample else RATIO_BASE,
             "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
             "netEv": round(sum(net) / sample, 8) if sample else 0.0,
             "ev": round(sum(net) / sample, 8) if sample else 0.0,
@@ -755,15 +818,22 @@ def cost_aware_metrics(
             "costSubtracted": True,
             "costSource": "manual-fallback",
             "costSamples": 0,
+            "unavailableReturnSamples": len(rows) - sample,
         }
     gross: List[float] = []
     net: List[float] = []
     measured = 0
+    gross_return_r = net_return_units = 0.0
     for row in rows:
+        if not row_has_return(row):
+            continue
         row_cost = row_position_cost_pct(row, cost)
         gross_value = row_pnl_pct(row, row_cost)
         gross.append(gross_value)
-        net.append(gross_value - cost_as_frac(row_cost))
+        net_value = gross_value - cost_as_frac(row_cost)
+        net.append(net_value)
+        gross_return_r += net_return_r(gross_value, row_cost, cost)
+        net_return_units += net_return_r(net_value, row_cost, cost)
         measured += int(row_has_measured_cost(row))
     sample = len(gross)
     required = max(1, int(required_samples or 1))
@@ -774,6 +844,8 @@ def cost_aware_metrics(
         "requiredSamples": required,
         "grossPf": round(_classic_pf(gross), 6),
         "netPf": round(_classic_pf(net), 6),
+        "grossReturnPf": ratio_from_r(gross_return_r / sample) if sample else RATIO_BASE,
+        "netReturnPf": ratio_from_r(net_return_units / sample) if sample else RATIO_BASE,
         "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
         "netEv": round(sum(net) / sample, 8) if sample else 0.0,
         "ev": round(sum(net) / sample, 8) if sample else 0.0,
@@ -785,6 +857,7 @@ def cost_aware_metrics(
         "costSubtracted": True,
         "costSource": "live-exchange" if measured else "manual-fallback",
         "costSamples": measured,
+        "unavailableReturnSamples": len(rows) - sample,
     }
 
 
@@ -916,7 +989,7 @@ if __name__ == "__main__":
     assert abs(ratio_from_r(1.0) - 1.10) < 1e-9
     assert abs(ratio_from_r(0.0) - 1.00) < 1e-9
     assert abs(cost_as_frac(0.15) - 0.0015) < 1e-12
-    assert abs(cost_as_frac(0.0015) - 0.0015) < 1e-12
+    assert abs(cost_as_frac(0.0015) - 0.000015) < 1e-12
     assert abs(net_pnl_pct(0.003, 0.15) - 0.0015) < 1e-12
     assert abs(net_pnl_usdt(0.003, 1.0, 100.0, 0.15) - 0.15) < 1e-9
     assert abs(row_net_pnl({"pnl_pct": 0.003, "pnl": 9}, 0.15) - 0.0015) < 1e-12

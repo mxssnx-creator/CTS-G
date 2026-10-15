@@ -287,6 +287,9 @@ class AllValidEntries(unittest.TestCase):
     def pulse(self, book=None):
         p = pt.Pulse.__new__(pt.Pulse)
         p.sets = book or self.book()
+        # These order-boundary fixtures explicitly declare every supplied
+        # template qualified. Own-symbol replay admission is tested separately.
+        p.sets.pack_entry_sets = lambda pack, side, symbol: p.sets.entry_sets(pack, side)
         p.api = Exchange()
         p.overlay = {"histTestEnabled": False}
         p.overlay_wild = False
@@ -598,8 +601,13 @@ class AllValidEntries(unittest.TestCase):
         b = self.book(2)
         original = b.by_idx[1]
         del b.sets[original.id]
-        ind_state = replace(original, id='indications:1m:sl0.6:st3', pack='indications')
+        # The exact indication configuration now owns its exit evidence;
+        # qualify this fixture explicitly rather than borrow the pooled pack.
+        ind_state = replace(original, id='indications:1m:sl0.6:st3', pack='indications',
+                            indication_kind='trend', indication_config='trend', indication_symbol='X-USDT')
         b.by_idx[1] = ind_state; b.sets[ind_state.id] = ind_state
+        b._indication_grid = NS(current=lambda state: state is ind_state)
+        b.indication_entry_sets = lambda kind, config, side, symbol: [ind_state] if (kind, config, symbol) == ('trend', 'trend', 'X-USDT') else []
         p = self.pulse(b)
         signal = self.indication()
         p.indications.last['X-USDT'] = [signal, replace(signal, timeframe='5m'), replace(signal, direction='short')]

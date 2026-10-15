@@ -15,11 +15,13 @@ sys.path.insert(0, os.path.join(ROOT, "server", "pulse"))
 
 from forced_configs import (  # noqa: E402
     FORCED_SYMBOLS,
+    FORCED_EVIDENCE_VERSION,
     MIN_PF,
     evaluate_symbol,
     rank_key,
     select_best,
     select_symbol_winners,
+    valid_candidate,
     summary as forced_summary,
 )
 from hist_calc import fetch_klines, hours_to_bars, winner_patch  # noqa: E402
@@ -148,7 +150,8 @@ def compact_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "variant", "source", "eligible", "status", "n", "trainN", "holdoutN", "pf", "trainPf",
         "holdoutPf", "costRatio", "tradesPerHour", "maxDrawdownR", "trainingMaxDrawdownR",
         "trainingWindowsOk", "trainingUsedN", "evidenceVersion", "netPct", "wr", "rank",
-        "trainingResults", "trainingCostPct", "trainPfExact", "holdoutPfExact", "trainingMaxDrawdownRExact",
+        "trainingResults", "trainingCostPct", "pfExact", "trainPfExact", "holdoutPfExact", "trainingMaxDrawdownRExact",
+        "classicPf", "trainClassicPf", "holdoutClassicPf",
         "liveStatus", "liveEnabled",
     )
     out = {k: row[k] for k in keep if k in row}
@@ -392,7 +395,10 @@ def assemble_result(winners: List[Dict[str, Any]], chosen: Dict[str, Any], sourc
 def persist_existing() -> int:
     """Rebuild matrix / overlay values from the last successful sweep without re-fetching tape."""
     path = FORCED_PROJECT if os.path.exists(FORCED_PROJECT) else FORCED_OUT
-    blob = json.load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as handle:
+        blob = json.load(handle)
+    if blob.get("version") != FORCED_EVIDENCE_VERSION:
+        raise ValueError("Cached classic-PF evidence is obsolete; a new market calculation is required before persisting winners")
     overlay = load_overlay()
     variant = {"name": blob.get("variant") or "overlay-default", **(blob.get("variantSettings") or {})}
     variant.setdefault("lastN", int(overlay.get("setPfWindow") or 30))
@@ -402,7 +408,10 @@ def persist_existing() -> int:
     variant.setdefault("indExtraSources", overlay.get("indExtraSources", True))
     variant.setdefault("indMinStrength", overlay.get("indMinStrength") or 0.20)
     book = book_for(overlay, variant)
-    winners = [dict(r, source=r.get("source") or "historical-market", eligible=True) for r in (blob.get("rows") or [])]
+    winners = [dict(r, source=r.get("source") or "historical-market", eligible=True) for r in (blob.get("rows") or [])
+               if valid_candidate(dict(r, source=r.get("source") or "historical-market"),
+                                  max(MIN_PF, float(overlay.get("minPf") or overlay.get("setMinPf") or 1.10)),
+                                  control_n=int(overlay.get("controlMinTrades") or 0), last_n=variant["lastN"])]
     chosen = {"variant": variant, "settings": book.ind_settings, "results": []}
     sources = blob.get("sourceBySymbol") or {s: "historical-market" for s in FORCED_SYMBOLS}
     set_score = blob.get("setBook") or {"bySymbol": {}, "winner": {}, "byStrategy": {}, "validatedSets": 0, "rowCount": 0, "positiveSymbols": []}

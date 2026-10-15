@@ -113,6 +113,9 @@ def set_meta(st: Any, scope: str, kind: str, strat: str, suffix: str = "") -> di
         "id": stable_key(scope, st.id, kind, strat, suffix), "setId": st.id,
         "parentSetId": st.parent_set_id or st.id, "scope": scope,
         "indicationKind": kind, "strategyType": strat, "pack": st.pack,
+        "indicationConfig": getattr(st, "indication_config", ""),
+        "indicationSymbol": getattr(st, "indication_symbol", ""),
+        "templateSetId": getattr(st, "template_set_id", ""),
         "tf": st.tf, "slRatio": st.sl_ratio, "trailKey": st.trail_key,
         "step": st.step, "tpPct": round(st.tp_pct * 100, 4),
     }
@@ -121,8 +124,8 @@ def set_meta(st: Any, scope: str, kind: str, strat: str, suffix: str = "") -> di
 def build_overview(book: Any, axis_rows=(), *, axis_enabled: bool = True) -> dict:
     out = OverviewCollector(book)
     for st in book.by_idx:
-        kind = "general" if st.pack == "general" else "combined"
-        strat = "trailing" if st.kind == "trail" else "normal"
+        kind = getattr(st, "indication_kind", "") or ("general" if st.pack == "general" else "combined")
+        strat = "trailing" if st.kind == "trail" else st.kind if st.kind in ("block", "dca", "axis") else "normal"
         if (st.stage_ledger or {}).get("base"):
             for side, metrics in st.by_side.items():
                 if not book._base_metrics_ok(metrics):

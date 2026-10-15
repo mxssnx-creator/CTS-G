@@ -32,7 +32,7 @@ def strict_loads(raw):
 class CostBoundary(unittest.TestCase):
     def test_the_desk_slider_minimum_is_a_percent_not_a_fraction(self):
         self.assertAlmostEqual(pc.cost_as_frac(0.02), 0.0002)
-        self.assertAlmostEqual(pc.cost_as_frac(0.019), 0.019)  # legacy fraction convention stays below the slider minimum
+        self.assertAlmostEqual(pc.cost_as_frac(0.019), 0.00019)  # small measured costs retain percent units
         rows = [{'t': i, 'pnl_pct': 0.003} for i in range(15)]
         m = pc.last_n_cost_pf(rows, 15, 0.02)
         self.assertGreater(m['classicPf'], 1.0)

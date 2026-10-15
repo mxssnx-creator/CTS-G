@@ -126,6 +126,41 @@ export const POSITIVE_PF = 1.15;
 // Mirrors EVAL_MIN_PF in server/pulse/connection_profile.py; POSITIVE_PF stays the
 // separate "positive Set" predicate and the Test Historic floor.
 export const EVAL_MIN_PF = 1.1;
+export const TACTIC_METHODS = ["trend", "breakout", "pullback", "move", "mean_reversion"] as const;
+export type TacticMethod = (typeof TACTIC_METHODS)[number];
+export type TacticControls = {
+  indTypeTactic: boolean;
+  indTacticRanges: number[];
+  tacticMethods: TacticMethod[];
+  tacticTf1m: boolean;
+  tacticTf5m: boolean;
+  tacticTf15m: boolean;
+  tacticTf30m: boolean;
+  tacticCombined: boolean;
+  tacticMinAgree: number;
+  tacticTrendEfficiency: number;
+  tacticRevertEfficiencyMax: number;
+  tacticRevertZ: number;
+  tacticMoveAtr: number;
+  tacticMoveVolume: number;
+  tacticAtrMinPct: number;
+  tacticMinTargetReturnPf: number;
+};
+/** Mirror tactic_indications.TACTIC_DEFAULTS; these enable replay candidates, never bypass live gates. */
+export const TACTIC_CONTROLS_DEFAULTS: TacticControls = {
+  indTypeTactic: true,
+  indTacticRanges: [12, 20, 32],
+  tacticMethods: [...TACTIC_METHODS],
+  tacticTf1m: true, tacticTf5m: true, tacticTf15m: true, tacticTf30m: true,
+  tacticCombined: true, tacticMinAgree: 2,
+  tacticTrendEfficiency: 0.55,
+  tacticRevertEfficiencyMax: 0.4,
+  tacticRevertZ: 1.5,
+  tacticMoveAtr: 0.8,
+  tacticMoveVolume: 1.15,
+  tacticAtrMinPct: 0.02,
+  tacticMinTargetReturnPf: 1.1,
+};
 export const INTERN_PF = 1.0;
 /**
  * Mirrors coord_engine.AXIS_SPECS: every relative count from min up to the
@@ -247,7 +282,7 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 
 export type SizingMode = "balance" | "fixed";
 
-export type PulseOverlay = import("./system-settings").SystemSettings & {
+export type PulseOverlay = import("./system-settings").SystemSettings & TacticControls & {
   targetNotional: number;
   volumeFactor: number;
   /** "balance": one order = targetNotionalPct % of the system's equity × volumeFactor; "fixed": targetNotional × volumeFactor */
@@ -547,9 +582,9 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
 };
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
+  ...TACTIC_CONTROLS_DEFAULTS,
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
-  volumeFactor: 1,
   sizingMode: "balance",
   targetNotionalPct: 1,
   volumeFactor: 0.1,
@@ -846,7 +881,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   },
 };
 
-export type CtsSettings = {
+export type CtsSettings = Partial<TacticControls> & {
   coordination_settings?: Record<string, unknown>;
   coordinationSettings?: Record<string, unknown>;
   strategyBaseTrailingVariants?: string[];
@@ -1085,6 +1120,35 @@ export function bool(v: unknown, d = false): boolean {
   return d;
 }
 
+export function normalizeTacticControls(value: Partial<TacticControls>): TacticControls {
+  const defaults = TACTIC_CONTROLS_DEFAULTS;
+  const bounded = (key: keyof TacticControls, lo: number, hi: number) => Math.max(lo, Math.min(hi, num(value[key], defaults[key] as number)));
+  const ranges = Array.isArray(value.indTacticRanges)
+    ? value.indTacticRanges.filter((n) => Number.isFinite(n)).map((n) => Math.max(6, Math.min(240, Math.trunc(n))))
+    : defaults.indTacticRanges;
+  const methods = Array.isArray(value.tacticMethods)
+    ? value.tacticMethods.filter((method) => (TACTIC_METHODS as readonly string[]).includes(method))
+    : defaults.tacticMethods;
+  return {
+    indTypeTactic: bool(value.indTypeTactic, true),
+    indTacticRanges: [...new Set(ranges)].sort((a, b) => a - b),
+    tacticMethods: [...new Set(methods)],
+    tacticTf1m: bool(value.tacticTf1m, true),
+    tacticTf5m: bool(value.tacticTf5m, true),
+    tacticTf15m: bool(value.tacticTf15m, true),
+    tacticTf30m: bool(value.tacticTf30m, true),
+    tacticCombined: bool(value.tacticCombined, true),
+    tacticMinAgree: Math.trunc(bounded("tacticMinAgree", 2, 4)),
+    tacticTrendEfficiency: bounded("tacticTrendEfficiency", 0, 1),
+    tacticRevertEfficiencyMax: bounded("tacticRevertEfficiencyMax", 0, 1),
+    tacticRevertZ: bounded("tacticRevertZ", 0.1, 6),
+    tacticMoveAtr: bounded("tacticMoveAtr", 0.1, 6),
+    tacticMoveVolume: bounded("tacticMoveVolume", 0.1, 10),
+    tacticAtrMinPct: bounded("tacticAtrMinPct", 0, 2),
+    tacticMinTargetReturnPf: bounded("tacticMinTargetReturnPf", 1.02, 5),
+  };
+}
+
 function arr<T>(v: unknown, d: T[] = []): T[] {
   return Array.isArray(v) ? (v as T[]) : d;
 }
@@ -1140,10 +1204,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
     sizingMode: (live?.sizingMode ?? cts.sizingMode) === "fixed" ? "fixed" : "balance",
     targetNotionalPct: Math.max(0.05, Math.min(20, num(live?.targetNotionalPct ?? cts.targetNotionalPct, 1))),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     volumeFactor: num(cts.volumeFactor, 0.1),
     orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
     htfEnabled: bool(cts.htfEnabled, false),
@@ -1287,6 +1349,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTypeRsi2: bool(cts.indTypeRsi2, true),
     indTypeKeltner: bool(cts.indTypeKeltner, true),
     indTypeImpulse: bool(cts.indTypeImpulse, true),
+    indTypeTactic: bool(cts.indTypeTactic, true),
     indSweepRanges: Array.isArray(cts.indSweepRanges) ? cts.indSweepRanges : [12, 20, 34],
     indRsi2Ranges: Array.isArray(cts.indRsi2Ranges) ? cts.indRsi2Ranges : [21, 34, 55],
     indKeltnerRanges: Array.isArray(cts.indKeltnerRanges) ? cts.indKeltnerRanges : [14, 20, 30],
@@ -1360,6 +1423,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
   };
   Object.assign(out, normalizeSystemSettings({ ...cts, ...live }));
+  Object.assign(out, normalizeTacticControls({ ...cts, ...live }));
   out.stratGeneral = true; // Permanent calculation basis; not an execution toggle.
   out.histEnabled = true;
   out.blockActiveMinLevel = Math.max(0, Math.min(out.blockMaxStack || 6, Math.trunc(num(out.blockActiveMinLevel, 0))));
@@ -1494,6 +1558,7 @@ export async function fetchCtsSettings(conn = "overall"): Promise<CtsSettings | 
 export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
+    ...normalizeTacticControls(overlay),
     ...normalizeSystemSettings(overlay),
     stratGeneral: true,
     histEnabled: true,

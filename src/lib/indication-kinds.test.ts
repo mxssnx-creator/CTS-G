@@ -26,6 +26,17 @@ test("historic calc toggles are generated for every kind; coord window default m
   assert.equal(DEFAULT_CALC_OPTIONS.coordOptimizationN, 50);
 });
 
+test("Tactic participates in the same independent indication and historic toggles", () => {
+  assert.ok(INDICATION_KINDS.includes("tactic"));
+  assert.equal(indTypeKey("tactic"), "indTypeTactic");
+  assert.equal(kindShort("tactic"), "Tac");
+  assert.match(KIND_HINT.tactic, /1\/5\/15\/30m/);
+  assert.equal(DEFAULT_CALC_OPTIONS.indTypeTactic, true);
+  const merged = mergeKindTypes({ tactic: true, trend: true }, { tactic: false });
+  assert.equal(merged.tactic, false);
+  assert.equal(merged.trend, true);
+});
+
 test("coverage flags override the scan blob so an off kind never reads as on", () => {
   const merged = mergeKindTypes({ state: true, trend: true }, { state: false });
   assert.equal(merged.state, false);

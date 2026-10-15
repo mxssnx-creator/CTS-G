@@ -17,7 +17,7 @@ from system_settings import calculation_overlay
 def candidate(**changes):
     return dict(id='forced:one',symbol='SOL-USDT',indication='signals',direction='LONG',tpPct=.4,slPct=.1,
         pf=.4,trainPf=2,holdoutPf=0,trainN=10,holdoutN=8,maxDrawdownR=10,trainingMaxDrawdownR=1,
-        trainingResults=[.002,-.001],trainingCostPct=.15,trainingWindowsOk=True,evidenceVersion=3,tradesPerHour=1,eligible=False,**changes)
+        trainingResults=[.004,-.001],trainingCostPct=.15,trainingWindowsOk=True,evidenceVersion=pt.FORCED_EVIDENCE_VERSION,tradesPerHour=1,eligible=False,**changes)
 
 
 class ForcedQueueTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class ForcedQueueTests(unittest.TestCase):
     def test_completed_baseline_stays_consumed_after_restart_in_its_own_connection(self):
         with tempfile.TemporaryDirectory() as d:
             path=pathlib.Path(d)/'baseline.json'
-            completed={'version':3,'connection':'bingx-x02','requestRunId':'manual:4'}
+            completed={'version':pt.FORCED_EVIDENCE_VERSION,'connection':'bingx-x02','requestRunId':'manual:4'}
             path.write_text(json.dumps(completed))
             p=self.pulse();p._hist_request_seen=''
             with patch.object(pt,'CONN_SHORT','bingx-x02'),patch.object(pt,'forced_path',return_value=str(path)), \
@@ -61,7 +61,7 @@ class ForcedQueueTests(unittest.TestCase):
     def test_queued_baseline_is_processed_with_saved_zero_and_does_not_change_main_book(self):
         p=self.pulse();book=p.sets=object()
         request=dict(runId='x02:7',generation=7,forcedOnly=True,hours=24)
-        result=dict(phase='ready',ready=True,forcedConfigs={'version':3},_forcedMatrix=[{'symbol':'SOL-USDT'}])
+        result=dict(phase='ready',ready=True,forcedConfigs={'version':pt.FORCED_EVIDENCE_VERSION},_forcedMatrix=[{'symbol':'SOL-USDT'}])
         def calculate(body,**kw):
             self.assertEqual(body['overlay']['controlMinTrades'],0)
             self.assertFalse(kw['persist'])
@@ -85,7 +85,7 @@ class ForcedQueueTests(unittest.TestCase):
         def calculate(body,**kw):
             changed[0]=True
             self.assertTrue(kw['should_cancel']())
-            return dict(phase='ready',ready=True,forcedConfigs={'version':3},_forcedMatrix=[])
+            return dict(phase='ready',ready=True,forcedConfigs={'version':pt.FORCED_EVIDENCE_VERSION},_forcedMatrix=[])
         with patch.object(pt,'run_forced_calc',side_effect=calculate),patch.object(pt,'atomic_write') as write, \
              patch.object(pt,'write_hist_job') as publish:
             p._hist_run_forced(dict(runId='old',forcedOnly=True))
@@ -106,7 +106,7 @@ class ForcedQueueTests(unittest.TestCase):
     def test_scoped_cache_reclassifies_each_set_when_zero_disables_control(self):
         with tempfile.TemporaryDirectory() as d:
             path=pathlib.Path(d)/'forced.json'
-            blob=dict(version=3,connection='bingx-x02',baselineOnly=True,updatedAt=time.time(),
+            blob=dict(version=pt.FORCED_EVIDENCE_VERSION,connection='bingx-x02',baselineOnly=True,updatedAt=time.time(),
                 sourceBySymbol={'SOL-USDT':'historical-market'},rows=[],matrix=[{'symbol':'SOL-USDT','rows':[candidate()]}])
             path.write_text(json.dumps(blob))
             p=self.pulse();p.overlay['controlMinTrades']=5
@@ -132,6 +132,18 @@ class ForcedQueueTests(unittest.TestCase):
         self.assertEqual(hc.parse_options({'controlMinTrades':0})['controlMinTrades'],0)
         self.assertEqual(hc.overlay_from_options({'hours':24,'controlMinTrades':5})['controlMinTrades'],5)
         self.assertEqual(hc.overlay_from_options({'hours':24,'controlMinTrades':5},{'controlMinTrades':0})['controlMinTrades'],0)
+
+    def test_old_classic_pf_artifact_cannot_supply_candidates_or_consume_a_request(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=pathlib.Path(d)/'classic.json'
+            path.write_text(json.dumps(dict(version=3,connection='bingx-x02',baselineOnly=True,
+                requestRunId='old:3',updatedAt=time.time(),sourceBySymbol={'SOL-USDT':'historical-market'},
+                matrix=[{'symbol':'SOL-USDT','rows':[candidate()]}])))
+            p=self.pulse();p._hist_request_seen=''
+            with patch.object(pt,'CONN_SHORT','bingx-x02'),patch.object(pt,'forced_path',return_value=str(path)), \
+                 patch.object(pt,'read_hist_request',return_value={'runId':'old:3','forcedOnly':True}):
+                self.assertEqual(p._forced_data(),{})
+                self.assertEqual(p._hist_new_request(consume=False)['runId'],'old:3')
 
 
 if __name__=='__main__':unittest.main()

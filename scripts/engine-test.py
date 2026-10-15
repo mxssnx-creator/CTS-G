@@ -2162,7 +2162,7 @@ def set_orders_test() -> None:
     import tempfile
     from types import SimpleNamespace
     import pulse_trader as pt
-    from set_engine import SetBook, SetState, make_set_id
+    from set_engine import SetBook, SetState, make_set_id, hist_fill
 
     tmp = tempfile.mkdtemp(prefix="setord-test-")
     for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH", "TRADES_PATH"):
@@ -2233,6 +2233,7 @@ def set_orders_test() -> None:
 
     # --- real SetBook with three real Sets (2 general + 1 indications) ---
     book = SetBook()
+    book.pf_n = book.min_samples = book.main_eval = book.real_eval = 12
     specs = [("general", 0.6, 10), ("general", 0.9, 20), ("indications", 1.5, 30)]
     sts: List[SetState] = []
     for i, (pack, sl, stp) in enumerate(specs):
@@ -2245,12 +2246,23 @@ def set_orders_test() -> None:
         # live entry boundary intentionally requires the corresponding active
         # flag as well as PF/sample values.
         st.active = True
+        st.indication_symbol = ("AAA-USDT", "BBB-USDT", "CCC-USDT")[i]
+        st.indication_kind = "move" if pack == "indications" else "general"
+        st.indication_config = "move:30" if pack == "indications" else "general_signal"
+        st.hist.extend(hist_fill(time.time() - 800 + j * 60, st.indication_symbol,
+                                 1, .009, 60, "tp") for j in range(12))
         book.sets[sid] = st
         sts.append(st)
+        book._score_one(st)
     book.by_idx = list(sts)
     # This fixture exercises post-publication order attribution; the initial
     # historic safety gate has its own regression above.
     book.progress.ready = True
+    # Only these explicitly published fixture objects are current. Independent
+    # replay/stale-generation rejection has dedicated grid regressions.
+    book._indication_grid = SimpleNamespace(current=lambda state: book.sets.get(state.id) is state,
+                                           record_qualification=lambda state: None,
+                                           snapshot=lambda: {"configurations": [], "complete": False})
     cur = {"i": 0}
 
     book.pick_any = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
@@ -2262,6 +2274,33 @@ def set_orders_test() -> None:
     book.pick_trail = lambda pack, side=None: None
     book.adapt_from_live = lambda rows: None
     book.indication_ok = lambda kind, side=None: True
+    extras = {}
+    for symbol, step in (("DDD-USDT", 11), ("CCC-USDT", 12)):
+        sid = make_set_id("general", .6, "", step)
+        state = SetState(id=sid, pack="general", tf="1m", sl_ratio=.6, trail_key="",
+                         trail_arm=0., trail_give=0., step=step, tp_pct=.0045,
+                         idx=len(book.by_idx), indication_symbol=symbol,
+                         indication_kind="general", indication_config="general_signal")
+        state.hist.extend(hist_fill(time.time() - 800 + j * 60, symbol,
+                                    1, .009, 60, "tp") for j in range(12))
+        book.sets[sid] = state
+        book.by_idx.append(state)
+        book._score_one(state)
+        extras[symbol] = state
+    # Scope the post-publication fixture to the exact symbol and indication.
+    # Grid scoring and cold/mismatched evidence rejection are covered by the
+    # independent grid tests; this recording exchange tests order attribution.
+    def own_pack_entries(pack, side="LONG", symbol=""):
+        if side != "LONG" or pack != "general":
+            return []
+        return {"AAA-USDT": [sts[0]], "BBB-USDT": [sts[1]],
+                "DDD-USDT": [extras["DDD-USDT"]], "CCC-USDT": [extras["CCC-USDT"]]}.get(symbol, [])
+
+    def own_indication_entries(kind, config, side="LONG", symbol=""):
+        return [sts[2]] if (kind, config, side, symbol) == ("move", "move:30", "LONG", "CCC-USDT") else []
+
+    book.pack_entry_sets = own_pack_entries
+    book.indication_entry_sets = own_indication_entries
 
     def mk_pulse(fx: FakeEx):
         p = object.__new__(pt.Pulse)
@@ -2293,7 +2332,7 @@ def set_orders_test() -> None:
         p.strat_ind = True
         p.indications = SimpleNamespace(
             settings={"enabled": True, "takeProfitRewardRisk": 1.8},
-            match=lambda s, r: SimpleNamespace(direction="long", kind="move", stop_loss_pct=0.0, take_profit_pct=0.0),
+            match=lambda s, r: SimpleNamespace(direction="long", kind="move", mode="move:30", tf="1m", stop_loss_pct=0.0, take_profit_pct=0.0),
             primary=lambda s: None, best=lambda s: None)
         p.variants = SimpleNamespace(on_close=lambda rec: None, current_sl=lambda: 0.6,
                                      current_trail=lambda: ("0.3:0.1", 0.3, 0.1))
@@ -2413,14 +2452,16 @@ def set_orders_test() -> None:
         f"del={len(del_oids)} live={len(fx.orders)}")
     stA, stB, stC = sts
     rec("setord-win-attributes-setA",
-        len(stA.live) == 1 and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
+        len(stA.live) == 1 and abs(last_n_cost_pf(stA.live, 12, book.cost_pct)["ratio"] - 1.3) < 1e-6
+        and stA.last15_n == 12
         and len(stB.live) == 0 and len(stC.live) == 0 and stB.last15_n == 12 and stC.last15_n == 12,
         f"A n={stA.last15_n} r={stA.last15_ratio} B live={len(stB.live)} C live={len(stC.live)}")
     fx.fill["BBB-USDT"] = 199.0  # -0.50% gross -> -4.33R net
     p.close_pos(pos_for(p, "BBB-USDT"), 199.0, "sl")
     rec("setord-loss-attributes-setB",
-        len(stB.live) == 1 and stB.last15_n == 1 and abs(stB.last15_ratio - 0.5667) < 1e-3
-        and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
+        len(stB.live) == 1 and abs(last_n_cost_pf(stB.live, 12, book.cost_pct)["ratio"] - 0.5667) < 1e-3
+        and stB.last15_n == 12 and stA.last15_n == 12
+        and abs(last_n_cost_pf(stA.live, 12, book.cost_pct)["ratio"] - 1.3) < 1e-6
         and len(stC.live) == 0 and stC.last15_n == 12,
         f"B n={stB.last15_n} r={stB.last15_ratio} A r={stA.last15_ratio}")
     rec("setord-engine-stats-coordination",
@@ -2433,7 +2474,9 @@ def set_orders_test() -> None:
         snap.get(stA.id, {}).get("n") == 1 and snap.get(stB.id, {}).get("n") == 1
         and abs(snap.get(stA.id, {}).get("last15Ratio", 0) - 1.3) < 1e-6,
         str({k: (v.get("n"), v.get("last15Ratio")) for k, v in snap.items()})[:140])
-    rec("setord-unproven-not-system-results", book.snapshot().get("rows") == [], "Base not yet qualified")
+    rec("setord-history-and-live-evidence-independent",
+        len(stA.hist) == len(stB.hist) == len(stC.hist) == 12
+        and bool(book.snapshot().get("rows")), "Own Base evidence retained; confirmed close attributed once")
     p.live_pos_keys = {"CCC-USDT:LONG"}
     sim_n, _sim_u = p.sim_stats()
     p.live_pos_keys = set()
@@ -2449,7 +2492,7 @@ def set_orders_test() -> None:
     p.place("CCC-USDT", 1, reasons[2], 0.9)  # exact indication lane is already open
     rec("setord-independent-lane-and-dedup",
         after_independent == before + 1 and len(fx.posts) == after_independent
-        and pos_for(p, "CCC-USDT").set_id == stC.id,
+        and set(pos_for(p, "CCC-USDT").lineage_set_ids) == {stC.id, extras["CCC-USDT"].id},
         f"independent={after_independent - before} duplicate={len(fx.posts) - after_independent}")
     cur["i"] = 0
     fx2 = FakeEx(fail_controls=True)
@@ -2648,15 +2691,13 @@ def grouped_control_test() -> None:
 
 
 def strict_gate_test() -> None:
-    """Strict validation gate: only VALIDATED (last-N samples >=
-    max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00) strategy
-    sets and indication kinds may drive live orders.
+    """Strict validation gate: own sufficient return evidence clears both
+    the configured floor and the strict positive boundary before orders.
 
     Proves end-to-end: entry_sense blocks when nothing is validated, the
     intern_any override no longer reopens closed packs, place() never posts
     an order without a validated + profitable set, place() DOES trade once
-    one exists, the per-kind indication gate cuts proven losers while an
-    unproven kind rides a validated pack, and Block intern PF only lifts off
+    one exists, a cold kind cannot borrow a validated pack, and Block PF lifts off
     the CTS floor for validated + profitable sets.
     """
     import tempfile
@@ -2676,11 +2717,11 @@ def strict_gate_test() -> None:
     def win_rows(strong: bool = False):
         pct = 0.006 if strong else 0.003
         pnl = 0.003 if strong else 0.0015
-        return [{"t": 1000 + i * 60, "pnl": pnl, "pnl_pct": pct, "symbol": "T",
+        return [{"t": 1000 + i * 60, "pnl": pnl, "pnl_pct": pct, "symbol": "AAA-USDT",
                  "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
 
     def loss_rows():
-        return [{"t": 2000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T",
+        return [{"t": 2000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "AAA-USDT",
                  "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
 
     def mk_book(winner: bool = True, strong: bool = False):
@@ -2697,6 +2738,32 @@ def strict_gate_test() -> None:
             for st in b.by_idx:
                 st.hist = win_rows(strong) if st is b.by_idx[0] or st is general else []
                 b._score_one(st)
+        # Published fixtures carry actual separate own-symbol tapes. The
+        # template combined pack remains a diagnostic, never a cold-kind grant.
+        import copy
+        general = next(st for st in b.by_idx if st.pack == "general" and st.kind == "base")
+        general.indication_kind, general.indication_config = "general", "general_signal"
+        general.indication_symbol = "AAA-USDT"
+        own = {}
+        for kind in ("move", "state", "signals"):
+            state = copy.deepcopy(b.by_idx[0])
+            state.id = f"fixture:{kind}:{state.id}"
+            state.idx = len(b.by_idx)
+            state.indication_kind, state.indication_config = kind, "fixture"
+            state.indication_symbol = "AAA-USDT"
+            state.hist = win_rows(strong) if winner else []
+            b.sets[state.id] = state
+            b.by_idx.append(state)
+            own[kind] = state
+            b._score_one(state)
+        b._indication_grid = SimpleNamespace(current=lambda state: b.sets.get(state.id) is state,
+            record_qualification=lambda state: None, snapshot=lambda: {"configurations": [], "complete": False})
+        b.pack_entry_sets = lambda pack, side="LONG", symbol="": [general] if (
+            pack == "general" and side == "LONG" and symbol == "AAA-USDT"
+            and b.execution_allowed(general, pack, side)) else []
+        b.indication_entry_sets = lambda kind, config, side="LONG", symbol="": [own[kind]] if (
+            kind in own and config == "fixture" and side == "LONG" and symbol == "AAA-USDT"
+            and b.execution_allowed(own[kind], "indications", side)) else []
         return b
 
     def mk_trader(book):
@@ -2770,33 +2837,33 @@ def strict_gate_test() -> None:
     p4 = mk_trader(ind_book)
     ind_book.ind_live["move"] = loss_rows()[:12]
     ind_book.ind_live["state"] = win_rows()[:12]
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="move")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="move", mode="fixture")
     rec("strict-ind-loser-kind-cannot-block-own-winner",
         p4.entry_sense("AAA-USDT", 1, "ind:move:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
         "own Set remains qualified despite representative move loss")
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state", mode="fixture")
     rec("strict-ind-winner-kind-runs",
         p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
         "state kind runs")
-    # unproven kind rides the validated indications pack
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common")
-    rec("strict-ind-unproven-rides-pack",
-        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") is None,
-        "common kind unproven but pack validated")
+    # A cold kind cannot borrow the combined or neighbouring type's evidence.
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common", mode="fixture")
+    rec("strict-ind-unproven-cannot-borrow-pack",
+        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") == "set-gate",
+        "common has no own evidence despite a qualified combined pack")
     # Signals keep running when State is the proven loser
     ind_book.ind_live["state"] = loss_rows()[:12]
     ind_book.ind_live["signals"] = win_rows()[:12]
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state", mode="fixture")
     rec("strict-ind-state-loser-cannot-block-own-winner",
         p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
         "own Set remains qualified despite representative state loss")
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="signals")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="signals", mode="fixture")
     rec("strict-ind-signals-runs",
         p4.entry_sense("AAA-USDT", 1, "ind:signals:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
         "signals kind runs while state is gated")
     # restore state as winner for the pack-closed follow-up
     ind_book.ind_live["state"] = win_rows()[:12]
-    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common", mode="fixture")
     # ...but not when the indications pack itself has no validated winner
     ind_book.by_idx[0].hist = []
     ind_book._score_one(ind_book.by_idx[0])

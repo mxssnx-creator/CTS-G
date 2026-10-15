@@ -12,8 +12,13 @@ from position_cost import (
     INTERN_PF,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
-    cost_as_frac,
     normalize_position_cost_pct,
+    net_return_r,
+    pf_reference_cost_pct,
+    row_has_return,
+    row_net_pnl,
+    row_position_cost_pct,
+    completed_roundtrips,
     ratio_from_r,
 )
 
@@ -152,16 +157,15 @@ def cost_pf_from_net_fracs(samples: Optional[List[float]], cost_pct: float = POS
     """PositionCost ratio from cost-net fractions. Intern 1.00 != real 1.10.
 
     ``samples`` are already cost-net fractions (0.001 = +0.10% net). Cost is
-    the CTS percent convention (0.10 = 0.10%); legacy fractions ≤ 0.02 are
-    accepted via ``cost_as_frac``.
+    the CTS percent convention (0.10 = 0.10%).
     """
     vals = [float(x) for x in (samples or []) if x is not None]
     if not vals:
         return 0.0
-    cost_frac = cost_as_frac(normalize_position_cost_pct(cost_pct))
-    if cost_frac <= 1e-15:
-        return 0.0
-    avg_r = sum(v / cost_frac for v in vals) / len(vals)
+    cost = normalize_position_cost_pct(cost_pct)
+    # A measured-free close keeps its zero subtraction. Its already-net
+    # return still uses the shared finite PF reference denominator.
+    avg_r = sum(net_return_r(v, cost) for v in vals) / len(vals)
     return float(ratio_from_r(avg_r))
 
 
@@ -195,6 +199,7 @@ class BlockLane:
     legs: List[BlockLeg] = field(default_factory=list)
     pause_remaining: Dict[int, int] = field(default_factory=dict)
     pause_until: Dict[int, float] = field(default_factory=dict)
+    pause_started_t: Dict[int, float] = field(default_factory=dict)
     pf_ring: Dict[int, List[float]] = field(default_factory=dict)
     parent_pf_ring: List[float] = field(default_factory=list)
     satisfied: Dict[int, bool] = field(default_factory=dict)
@@ -226,13 +231,15 @@ class BlockBook:
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
         self.default_min_pf = float(cfg.get("defaultMinPF", POSITIVE_PF) or POSITIVE_PF)
-        self.cost_pct = max(1e-9, float(cfg.get("positionCostPct", POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT))
+        raw_cost = cfg.get("positionCostPct")
+        self.cost_pct = normalize_position_cost_pct(POSITION_COST_PCT_DEFAULT if raw_cost is None else raw_cost)
         self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
         self.eval_pos_count = clamp_eval_pos_count(cfg.get("blockEvalPosCount") or cfg.get("mainEvalPosCount") or BLOCK_EVAL_POS_DEFAULT)
         self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25), self.eval_pos_count)
         self.lanes: Dict[str, BlockLane] = {}
         self.count_tape: Dict[int, List[float]] = {n: [] for n in range(1, BLOCK_EVAL_N + 1)}
         self.overall_tape: List[float] = []
+        self._lot_close_seen: Dict[str, float] = {}
         self.load()
 
     def key(self, symbol: str, side: str, group_key: str = "") -> str:
@@ -272,6 +279,9 @@ class BlockBook:
             return
         if not isinstance(raw, dict):
             return
+        saved_seen = raw.get("lotCloseSeen")
+        self._lot_close_seen = {str(k): finite_number(v) for k, v in
+                                list(saved_seen.items())[-2048:]} if isinstance(saved_seen, dict) else {}
         leg_fields = set(BlockLeg.__dataclass_fields__)
         for k, v in (raw.get("lanes") or {}).items():
             if not isinstance(v, dict):
@@ -298,6 +308,7 @@ class BlockBook:
                 legs=legs,
                 pause_remaining={int(a): int(b) for a, b in (v.get("pause_remaining") or {}).items()},
                 pause_until={int(a): float(b) for a, b in (v.get("pause_until") or {}).items()},
+                pause_started_t={int(a): float(b) for a, b in (v.get("pause_started_t") or {}).items()},
                 pf_ring={int(a): list(b) for a, b in (v.get("pf_ring") or {}).items()},
                 parent_pf_ring=list(v.get("parent_pf_ring") or []),
                 satisfied={int(a): bool(b) for a, b in (v.get("satisfied") or {}).items()},
@@ -315,6 +326,27 @@ class BlockBook:
             self.overall_tape = [float(x) for x in (raw.get("overallTape") or [])][-self.window :]
         except Exception:
             self.overall_tape = []
+        saved_scale = normalize_position_cost_pct(raw.get("returnScaleCostPct"), self.cost_pct)
+        self._rescale_return_tapes(pf_reference_cost_pct(self.cost_pct)/pf_reference_cost_pct(saved_scale))
+
+    def _rescale_return_tapes(self, factor: float) -> None:
+        if abs(factor-1.) <= 1e-15:
+            return
+        for lane in self.lanes.values():
+            lane.pf_ring = {n: [value*factor for value in rows] for n, rows in lane.pf_ring.items()}
+            lane.parent_pf_ring = [value*factor for value in lane.parent_pf_ring]
+        self.count_tape = {n: [value*factor for value in rows] for n, rows in self.count_tape.items()}
+        self.overall_tape = [value*factor for value in self.overall_tape]
+
+    def set_cost_pct(self, value: Any) -> bool:
+        """Change the book scale without changing completed lots' measured R."""
+        new_cost = normalize_position_cost_pct(value, self.cost_pct)
+        if new_cost == self.cost_pct:
+            return False
+        self._rescale_return_tapes(pf_reference_cost_pct(new_cost)/pf_reference_cost_pct(self.cost_pct))
+        self.cost_pct = new_cost
+        self.save()
+        return True
 
     def save(self) -> None:
         if not self.path:
@@ -344,6 +376,7 @@ class BlockBook:
                 "legs": [asdict(x) for x in lane.legs],
                 "pause_remaining": {str(a): b for a, b in lane.pause_remaining.items()},
                 "pause_until": {str(a): b for a, b in lane.pause_until.items()},
+                "pause_started_t": {str(a): b for a, b in lane.pause_started_t.items()},
                 "pf_ring": {str(a): b for a, b in lane.pf_ring.items()},
                 "parent_pf_ring": lane.parent_pf_ring[-self.window :],
                 "satisfied": {str(a): b for a, b in lane.satisfied.items()},
@@ -353,6 +386,8 @@ class BlockBook:
             }
         blob["countTape"] = {str(n): list(v)[-self.window :] for n, v in (self.count_tape or {}).items()}
         blob["overallTape"] = list(self.overall_tape or [])[-self.window :]
+        blob["lotCloseSeen"] = dict(list(self._lot_close_seen.items())[-2048:])
+        blob["returnScaleCostPct"] = self.cost_pct
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(blob, f)
@@ -760,6 +795,108 @@ class BlockBook:
         lane.pause_remaining[n] = max(int(lane.pause_remaining.get(n, 0)), max(1, self.pause_ratio))
         self.save()
 
+    def _confirmed_lot(self, roundtrip: Dict[str, Any], group_key: Optional[str]):
+        """Validate one completed own lot and retain its measured Return PF."""
+        if not isinstance(roundtrip, dict) or roundtrip.get("exchange_confirmed") is not True \
+                or roundtrip.get("partial") or roundtrip.get("ours") is False or not row_has_return(roundtrip):
+            return None
+        try:
+            completed = completed_roundtrips([roundtrip])
+        except (TypeError, ValueError):
+            return None
+        if not completed:
+            return None
+        row = completed[-1]
+        symbol, side = str(row.get("symbol") or "").upper(), str(row.get("side") or "").upper()
+        if not symbol or side not in ("LONG", "SHORT") or not row_has_return(row):
+            return None
+        cid = str(row.get("client_id") or "")
+        fill = str(row.get("close_fill_id") or row.get("fillId") or "")
+        if not cid or not fill:
+            return None
+        scope = str(group_key if group_key is not None else
+                    row.get("control_group_key") or row.get("controlGroupKey") or "")
+        from contracts import stable_key
+        key = stable_key(row.get("conn"), symbol, side, scope, row.get("set_id"), cid, fill)
+        if key in self._lot_close_seen:
+            return None
+        # Native rings store net fractions. Normalize the measured per-lot R
+        # to the book's denominator, so their existing float PF calculation
+        # recovers the exact mean of each fill's own return/cost observation.
+        actual_cost = row_position_cost_pct(row, self.cost_pct)
+        own_r = net_return_r(row_net_pnl(row, self.cost_pct), actual_cost, self.cost_pct)
+        sample = own_r * pf_reference_cost_pct(self.cost_pct) / 100.
+        return row, symbol, side, scope, key, sample
+
+    def record_lot_close(self, roundtrip: Dict[str, Any], group_key: Optional[str] = None) -> bool:
+        """Learn one pure Block count outcome without resetting its live lane.
+
+        Physical aggregate closes and partial fill legs never teach the count.
+        The caller publishes the completed internal lot, then invokes the
+        existing parent lifecycle with ``record=False`` if a parent closes.
+        """
+        item = self._confirmed_lot(roundtrip, group_key)
+        if item is None:
+            return False
+        row, symbol, side, scope, key, sample = item
+        if str(row.get("strategy") or "").lower() != "block":
+            return False
+        axis = str(row.get("axis_key") or row.get("axisKey") or "")
+        count = finite_number(row.get("block_count") or row.get("blockCount"))
+        if not count and axis.startswith(("block-active:", "block-add:")):
+            count = finite_number(axis.rsplit(":", 1)[-1])
+        if count != int(count) or not 1 <= count <= BLOCK_EVAL_N:
+            return False
+        if axis.startswith(("block-active:", "block-add:")) and finite_number(axis.rsplit(":", 1)[-1]) != count:
+            return False
+        n = int(count)
+        lane = self.lanes.get(self.key(symbol, side, scope))
+        if lane is not None:
+            lane.pf_ring.setdefault(n, []).append(sample)
+            lane.pf_ring[n] = lane.pf_ring[n][-self.window:]
+            if lane.pause_remaining.get(n, 0) > 0:
+                lane.pause_remaining[n] -= 1
+            if sample > 0:
+                lane.pause_remaining[n] = self.pause_ratio
+                lane.pause_until[n] = time.time() + 45*self.pause_ratio
+                lane.pause_started_t[n] = finite_number(row.get("t"))
+                lane.held_factor[n] = 1.
+            else:
+                lane.held_factor[n] = max(float(n), lane.held_factor.get(n, 1.))
+        self.count_tape.setdefault(n, []).append(sample)
+        self.count_tape[n] = self.count_tape[n][-self.window:]
+        self._lot_close_seen[key] = finite_number(row.get("t"))
+        self._lot_close_seen = dict(list(self._lot_close_seen.items())[-2048:])
+        self.save()
+        return True
+
+    def record_parent_lot_close(self, roundtrip: Dict[str, Any], group_key: Optional[str] = None) -> bool:
+        """Learn the pure parent's measured return separately from add lots."""
+        item = self._confirmed_lot(roundtrip, group_key)
+        if item is None:
+            return False
+        row, symbol, side, scope, key, sample = item
+        if str(row.get("strategy") or "core").lower() not in ("core", "normal", "trail", "trailing") \
+                or row.get("axis_key") or row.get("axisKey"):
+            return False
+        lane = self.lanes.get(self.key(symbol, side, scope))
+        if lane is not None:
+            lane.parent_pf_ring.append(sample)
+            lane.parent_pf_ring = lane.parent_pf_ring[-self.window:]
+            # A later confirmed own parent round trip advances each count's
+            # pause once. The parent and its split child at the SAME receipt
+            # timestamp must not immediately consume the newly set pause.
+            stamp = finite_number(row.get("t"))
+            for n, remaining in list(lane.pause_remaining.items()):
+                if remaining > 0 and stamp > finite_number(lane.pause_started_t.get(n)):
+                    lane.pause_remaining[n] = remaining-1
+        self.overall_tape.append(sample)
+        self.overall_tape = self.overall_tape[-self.window:]
+        self._lot_close_seen[key] = finite_number(row.get("t"))
+        self._lot_close_seen = dict(list(self._lot_close_seen.items())[-2048:])
+        self.save()
+        return True
+
     def on_parent_close(
         self,
         symbol: str,
@@ -800,9 +937,10 @@ class BlockBook:
             self.save()
             return
         # advance every existing pause once — each count independently
-        for n, rem in list(lane.pause_remaining.items()):
-            if rem > 0:
-                lane.pause_remaining[n] = rem - 1
+        if record:
+            for n, rem in list(lane.pause_remaining.items()):
+                if rem > 0:
+                    lane.pause_remaining[n] = rem - 1
         used_counts = {int(leg.block_count) for leg in lane.legs if int(leg.block_count or 0) >= 1}
         for n in self._eval_range():
             if n not in used_counts or not record:

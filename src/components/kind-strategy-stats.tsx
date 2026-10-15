@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { lastNCostPf, formatDuration } from "@/lib/analytics";
-import { kindGateOpen, type KindStat, type LiveClosed, type LiveStats, type SideStat, type StrategyStat } from "@/lib/live-stats";
+import { lastNCostPf, formatDuration, netPnlPct, rowGrossReturn, rowPositionCostPct } from "@/lib/analytics";
+import { costPfPolicy, kindGateOpen, type KindStat, type LiveClosed, type LiveStats, type SideStat, type StrategyStat } from "@/lib/live-stats";
 import { pfClass } from "@/lib/status-tone";
 import { INDICATION_KINDS, KIND_HINT, mergeKindTypes } from "@/lib/indication-kinds";
 const STRATEGY_KEYS = ["indications", "general", "block", "block:signals", "trailing", "dca", "exits"] as const;
@@ -54,22 +54,28 @@ function stratsOf(c: LiveClosed): string[] {
   return [...new Set(keys)];
 }
 
-function tapeStats(rows: LiveClosed[]): { n: number; pf: number; wr: number; bySide: Record<string, SideStat> } {
+function tapeStats(rows: LiveClosed[], costPct: number): { n: number; pf: number; wr: number; bySide: Record<string, SideStat> } {
   const pf = lastNCostPf(
-    rows.map((r) => ({ pnl: r.pnl, t: r.t, pnl_pct: r.pnl_pct })),
+    rows,
     Math.max(1, rows.length),
+    costPct,
   );
-  const wins = rows.filter((r) => r.pnl > 0).length;
-  const decided = rows.filter((r) => r.pnl !== 0).length;
+  const net = (row: LiveClosed) => {
+    const cost = rowPositionCostPct(row, costPct);
+    return netPnlPct(rowGrossReturn(row, cost), cost);
+  };
+  const wins = rows.filter((r) => net(r) > 0).length;
+  const decided = rows.filter((r) => net(r) !== 0).length;
   const side = (dir: string): SideStat => {
     const sub = rows.filter((r) => (r.side || "").toUpperCase().startsWith(dir[0]));
     const s = lastNCostPf(
-      sub.map((r) => ({ pnl: r.pnl, t: r.t, pnl_pct: r.pnl_pct })),
+      sub,
       Math.max(1, sub.length),
+      costPct,
     );
-    const subDecided = sub.filter((r) => r.pnl !== 0).length;
+    const subDecided = sub.filter((r) => net(r) !== 0).length;
     // Percent, as the server's bySide wr.
-    return { n: sub.length, pf: s.ratio, wr: subDecided ? (100 * sub.filter((r) => r.pnl > 0).length) / subDecided : 0 };
+    return { n: sub.length, pf: s.ratio, wr: subDecided ? (100 * sub.filter((r) => net(r) > 0).length) / subDecided : 0 };
   };
   return {
     n: rows.length,
@@ -107,7 +113,7 @@ function resolveKindStats(stats: LiveStats | null): Record<string, KindStat> {
     const a = fromBlob[k] || {};
     const g = fromGate[k] || {};
     const l = live[k] || {};
-    const tape = byKind[k] ? tapeStats(byKind[k]) : null;
+    const tape = byKind[k] ? tapeStats(byKind[k], costPfPolicy(stats).costPct) : null;
     const n = Number(a.n ?? g.n ?? tape?.n ?? 0);
     const pf = Number(a.pf ?? g.pf ?? tape?.pf ?? 0);
     out[k] = {
@@ -146,7 +152,7 @@ function resolveStrategyStats(stats: LiveStats | null): Record<string, StrategyS
   const out: Record<string, StrategyStat> = {};
   for (const k of STRATEGY_KEYS) {
     const a = fromBlob[k] || {};
-    const tape = buckets[k] ? tapeStats(buckets[k]) : null;
+    const tape = buckets[k] ? tapeStats(buckets[k], costPfPolicy(stats).costPct) : null;
     out[k] = {
       strategy: k,
       n: Number(a.n ?? tape?.n ?? 0),

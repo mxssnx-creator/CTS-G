@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import POSITIVE_PF, clears_pf, shared_pf_settings, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_result_r
+from position_cost import POSITIVE_PF, clears_pf, shared_pf_settings, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
@@ -103,6 +103,7 @@ class DcaBook:
         self.deact_reason = ""
         self.lanes: Dict[str, DcaLane] = {}
         self.closes: List[Dict[str, Any]] = []
+        self._seen_roundtrips: Dict[tuple, bool] = {}
         self.last_pick = ""
         self.emits = 0
         self.skips = 0
@@ -164,7 +165,8 @@ class DcaBook:
         self.deact_n = max(5, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = shared_pf_settings(ov)["minPf"]
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
-        self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
+        raw_cost = ov.get("positionCostPct")
+        self.cost_pct = float(POSITION_COST_PCT_DEFAULT if raw_cost is None else raw_cost)
         if self.cost_pct > 2:
             self.cost_pct = self.cost_pct / 100.0
         if self.cost_pct > 1:
@@ -264,15 +266,17 @@ class DcaBook:
         # the chronological latest window, just like the PF gate.
         ordered = sorted(rows, key=lambda row: float(row.get("t") or 0) if isinstance(row, dict) else float(getattr(row, "t", 0) or 0))
         last25 = ordered[-self.deact_n :]
-        avg_r = 0.0
-        if last25:
-            avg_r = sum(signed_result_r(float(r.get("pnl_pct") or 0), self.cost_pct) for r in last25) / len(last25)
-        if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
+        # The deactivation window uses the same measured per-fill cost and
+        # unavailable-return handling as admission. A configured fallback
+        # must not replace explicit zero or different venue fee observations.
+        deact_pf = last_n_cost_pf(last25, self.deact_n, self.cost_pct, ordered=True)
+        avg_r = float(deact_pf.get("avgR") or 0.)
+        if self.auto_deact and deact_pf["count"] >= self.deact_n and avg_r < 0:
             active = False
             reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
         elif pc["count"] >= self.pf_n and not clears_pf(pc["ratio"], self.min_pf):
             active = False
-            reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
+            reason = f"last{self.pf_n} PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
         else:
             if not active and avg_r >= 0 and (pc["count"] < self.pf_n or clears_pf(pc["ratio"], self.min_pf)):
                 active = True
@@ -372,6 +376,8 @@ class DcaBook:
         self.emits += 1
 
     def on_close(self, rec: Dict[str, Any]) -> None:
+        if rec.get("partial"):
+            return  # one completed child position, not one sample per close leg
         why = str(rec.get("reason") or "")
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
         sym = str(rec.get("symbol") or "")
@@ -380,12 +386,21 @@ class DcaBook:
         lane = self.lanes.get(self.key(sym, side, group_key)) if sym else None
         used = bool(lane and int(getattr(lane, "filled_n", 0) or 0) > 0)
         kind_d = len(cid) > 4 and cid[4:5].lower() == "d"
-        if not used and "dca" not in why.lower() and not kind_d:
+        tagged_dca = str(rec.get("strategy") or "").lower() == "dca" or str(rec.get("pack") or "").lower() == "dca"
+        if not used and "dca" not in why.lower() and not kind_d and not tagged_dca:
             return
-        if rec.get("exchange_confirmed") is False:
+        if rec.get("exchange_confirmed") is not True:
             # Not a live exchange result: lifecycle only, no evidence sample.
             self.drop(sym, side, group_key=group_key)
             return
+        if not cid:
+            return
+        identity = (str(rec.get("conn") or ""), sym, side, cid)
+        if identity in self._seen_roundtrips:
+            return
+        self._seen_roundtrips[identity] = True
+        while len(self._seen_roundtrips) > 4096:
+            self._seen_roundtrips.pop(next(iter(self._seen_roundtrips)))
         self.closes.append(rec)
         if len(self.closes) > 80:
             self.closes = self.closes[-80:]
@@ -464,7 +479,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t7 = (len(b.lanes) >= 2, f"lanes={list(b.lanes)}")
     # last25 deact
     for i in range(25):
-        b.on_close({"symbol": "AAA-USDT", "side": "LONG", "reason": "dca:sl", "client_id": "Gx02dxx", "pnl": -0.02, "pnl_pct": -0.002})
+        b.on_close({"symbol": "AAA-USDT", "side": "LONG", "reason": "dca:sl", "client_id": f"Gx02dxx{i}", "pnl": -0.02, "pnl_pct": -0.002, "exchange_confirmed": True})
     t8 = (b.active is False, f"active={b.active} {b.deact_reason}")
     # disabled
     b2 = DcaBook()
@@ -510,7 +525,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pr = parent.due("QQQ-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
     if pr:
         parent.record_fill(pr["lane"], pr["step"], pr["qty"], 98.7, "Gx01dxx")
-    parent.on_close({"symbol": "QQQ-USDT", "side": "LONG", "reason": "sl", "client_id": "Gx01og060308000ab", "pnl": -0.02, "pnl_pct": -0.002})
+    parent.on_close({"symbol": "QQQ-USDT", "side": "LONG", "reason": "sl", "client_id": "Gx01og060308000ab", "pnl": -0.02, "pnl_pct": -0.002, "exchange_confirmed": True})
     t19 = (len(parent.closes) == 1, f"parent-close n={len(parent.closes)}")
     t20 = (parent.distances[0] >= 0.012 - 1e-12, f"minDist={parent.distances}")
     ov = DcaBook()

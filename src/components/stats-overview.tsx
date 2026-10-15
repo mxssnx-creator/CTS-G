@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
-import { formatEffectiveSets } from "@/lib/live-stats";
+import { formatEffectiveSets, returnPfMetric } from "@/lib/live-stats";
 import { pfClass, pnlClass } from "@/lib/status-tone";
 import { HistTestStatus } from "@/components/hist-test-controls";
 import { PosOrdersLine } from "@/components/pos-orders";
@@ -24,37 +24,16 @@ export function StatsOverview({
   const engineMaxMs = Number(live?.pfCost?.maxDdS ?? 0) * 1000;
   const engineCurrentMs = Number(live?.pfCost?.currentS ?? 0) * 1000;
   const engineEpisodes = Number(live?.pfCost?.ddEpisodes ?? 0);
-  const liveRatio = Number(live?.pfCost?.ratio ?? live?.profitFactor ?? 0);
-  const liveCount = Number(live?.pfCost?.count ?? live?.pfCost?.n ?? 0);
-  const cost: CostPfMetric = {
-    ...data.costPf,
-    ...(live?.pfCost && typeof live.pfCost === "object"
-      ? {
-          n: live.pfCost.n ?? data.costPf.n,
-          count: live.pfCost.count ?? live.pfCost.n ?? data.costPf.count,
-          avgR: live.pfCost.avgR ?? data.costPf.avgR,
-          ratio: live.pfCost.ratio ?? data.costPf.ratio,
-          classicPf: live.pfCost.classicPf ?? data.costPf.classicPf,
-          costPct: live.pfCost.costPct ?? data.costPf.costPct,
-          netPct: live.pfCost.netPct ?? data.costPf.netPct,
-          grossPct: live.pfCost.grossPct ?? data.costPf.grossPct,
-          minPf: live.pfCost.minPf ?? data.costPf.minPf,
-          pass: live.pfCost.pass ?? data.costPf.pass,
-        }
-      : liveRatio
-        ? { ...data.costPf, ratio: liveRatio, classicPf: liveRatio, count: liveCount || data.costPf.count }
-        : {}),
-  };
-  const shownCount = cost.count || liveCount;
-  // Engine sample floor (pfCost.requiredSamples), falling back to the PF window.
-  const requiredSamples = Number(live?.pfCost?.requiredSamples ?? cost.n ?? 0);
-  const shownRatio = shownCount ? cost.ratio : liveRatio;
+  const cost = live ? returnPfMetric(live, data.costPf) : data.costPf;
+  const shownCount = cost.count;
+  const requiredSamples = cost.requiredSamples;
+  const shownRatio = cost.ratio;
   const heroes = (
     <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
-          k={`Last ${cost.n} cost PF`}
-          v={shownCount || shownRatio ? shownRatio.toFixed(2) : "—"}
-          s={`classic ${cost.classicPf.toFixed(2)} · 1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${shownCount} · ${cost.pass ? "pass" : "block"}`}
+          k={`Last ${cost.n} return PF`}
+          v={shownCount ? shownRatio.toFixed(2) : "—"}
+          s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${shownCount}/${requiredSamples} · ${shownCount < requiredSamples ? "insufficient sample" : cost.pass ? "pass" : "block"}`}
           tone={shownCount < requiredSamples ? "ok" : cost.pass ? "good" : "ok"}
         />
         <Hero
@@ -97,7 +76,7 @@ export function StatsOverview({
       {live ? <HistTestStatus histTest={live.histTest} /> : null}
 
       <div className="grid gap-3 lg:grid-cols-2">
-        <Card title="Profit factor · cost PF scale plus classic PF">
+        <Card title="Return PF · position cost scale">
           <div className="max-w-full overflow-x-auto">
           <table className="w-full min-w-[32rem] text-sm">
             <thead className="font-mono text-[11px] text-muted">
@@ -105,8 +84,7 @@ export function StatsOverview({
                 <th className="pb-2 text-left font-medium">Window</th>
                 <th className="pb-2 text-right font-medium">n</th>
                 <th className="pb-2 text-right font-medium">R</th>
-                <th className="pb-2 text-right font-medium">Cost PF</th>
-                <th className="pb-2 text-right font-medium">Classic PF</th>
+                <th className="pb-2 text-right font-medium">Return PF</th>
                 <th className="pb-2 text-right font-medium">Net%</th>
               </tr>
             </thead>
@@ -152,10 +130,9 @@ function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
       <td className="py-2">{label}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.count}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.avgR.toFixed(2)}</td>
-      <td className={`py-2 text-right font-mono tabular-nums ${pfClass(m.ratio, m.count)}`}>
+      <td className={`py-2 text-right font-mono tabular-nums ${pfClass(m.ratio, m.count, m.minPf)}`}>
         {m.count ? m.ratio.toFixed(2) : "—"}
       </td>
-      <td className="py-2 text-right font-mono tabular-nums">{m.count ? (m.classicPf >= 99 ? "∞" : m.classicPf.toFixed(2)) : "—"}</td>
       <td className={`py-2 text-right font-mono tabular-nums ${pnlClass(m.netPct)}`}>
         {m.netPct >= 0 ? "+" : ""}
         {m.netPct.toFixed(3)}

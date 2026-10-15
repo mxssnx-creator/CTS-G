@@ -17,7 +17,8 @@ from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from contracts import INDICATION_KINDS
-from position_cost import SL_MIN_PCT
+from position_cost import SL_MIN_PCT, normalize_position_cost_pct
+from tactic_indications import TACTIC_DEFAULTS, evaluate_tactic_configs
 
 try:
     import httpx
@@ -222,6 +223,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "activeNoise": 0.05,  # percent, like the desk's Noise setting
     "activeMovePct": 0.5,
     "activeVolatilityWeight": 0.3,
+    **TACTIC_DEFAULTS,
 }
 
 # Kind -> settings flag. One map for live filters, stats, snapshot and match.
@@ -242,11 +244,13 @@ KIND_FLAGS: Dict[str, str] = {
     "rsi2": "typeRsi2",
     "keltner": "typeKeltner",
     "impulse": "typeImpulse",
+    "tactic": "typeTactic",
 }
 KIND_ORDER: Dict[str, int] = {
     "state": 5, "signals": 4, "trend": 4, "break": 4, "msi": 4, "retest": 3, "squeeze": 3,
     "vwap": 3, "active": 3, "direction": 2, "move": 2, "common": 1,
     "sweep": 4, "rsi2": 3, "keltner": 3, "impulse": 3,
+    "tactic": 4,
 }
 # Extended kinds evaluated per range: kind -> (ranges key, defaults, range setting).
 RANGE_KINDS: Dict[str, Tuple[str, Tuple[int, ...], str]] = {
@@ -1740,13 +1744,13 @@ EXIT_TACTICS = ("msi-swing-fail", "vwap-touch", "retest-fail", "squeeze-fail",
                 "sweep-fail", "ema5-cross", "keltner-mid", "impulse-fail")
 # Targets close when price reaches the level; invalidations when it trades
 # back through it by more than the buffer.
-TARGET_TACTICS = ("vwap-touch", "ema5-cross", "keltner-mid")
+TARGET_TACTICS = ("vwap-touch", "ema5-cross", "keltner-mid", "mean_reversion")
 
 
 def exit_tactic_hit(tactic: str, side: Any, px: float, level: float, buffer_pct: float = 0.0) -> bool:
     """Price-only exit tactic check for an open position.
 
-    ``vwap-touch`` is a target (reached); the others are invalidations: price
+    ``TARGET_TACTICS`` are targets (reached); the others are invalidations: price
     closes back through the level that formed the setup by more than
     ``buffer_pct`` percent (a wick-sized poke is not an invalidation)."""
     if not tactic or level <= 0 or px <= 0:
@@ -2476,6 +2480,7 @@ class IndicationBook:
         s["stopLossAtrMultiplier"] = float(overlay.get("indAtrMult", s["stopLossAtrMultiplier"]))
         s["takeProfitRewardRisk"] = float(overlay.get("indRewardRisk", s["takeProfitRewardRisk"]))
         s["extraSources"] = bool(overlay.get("indExtraSources", s["extraSources"]))
+        s["positionCostPct"] = normalize_position_cost_pct(overlay.get("positionCostPct", s["positionCostPct"]))
         s["tf1m"] = bool(overlay.get("tf1m", True))
         s["tf5m"] = bool(overlay.get("tf5m", True))
         s["tf15m"] = bool(overlay.get("tf15m", True))
@@ -2498,9 +2503,16 @@ class IndicationBook:
             ("typeRsi2", "indTypeRsi2"),
             ("typeKeltner", "indTypeKeltner"),
             ("typeImpulse", "indTypeImpulse"),
+            ("typeTactic", "indTypeTactic"),
         ):
             if ovk in overlay:
                 s[key] = bool(overlay.get(ovk))
+        for key in TACTIC_DEFAULTS:
+            if key == "typeTactic":
+                continue
+            ovk = "ind" + key[0].upper() + key[1:]
+            if ovk in overlay or key in overlay:
+                s[key] = overlay.get(ovk, overlay.get(key))
         s["dirRange"] = int(overlay.get("indDirRange") or s.get("dirRange") or 10)
         s["moveRange"] = int(overlay.get("indMoveRange") or s.get("moveRange") or 10)
         s["trendRanges"] = indication_ranges(overlay.get("indTrendRanges", s.get("trendRanges")), (13, 21, 34))
@@ -2756,6 +2768,8 @@ class IndicationBook:
             crow = evaluate_common(symbol, candles_1m, self.settings, frame=frame_1m)
             if crow:
                 indications.append(crow)
+        if self.settings.get("typeTactic", True):
+            indications.extend(evaluate_tactic_configs(symbol, bars, self.settings, tf_map))
         off = {k for k, flag in KIND_FLAGS.items() if k not in ("direction", "move", "active") and not self.settings.get(flag, True)}
         if off:
             indications = [i for i in indications if i.kind not in off]
@@ -3193,7 +3207,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta + rows_fade), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
     snap = book.snapshot()
     ks = snap.get("kindStats") or {}
-    t20 = (set(ks.keys()) == set(INDICATION_KINDS) and len(INDICATION_KINDS) == 16, f"keys={sorted(ks)}")
+    t20 = (set(ks.keys()) == set(INDICATION_KINDS) and len(INDICATION_KINDS) == 17 and "tactic" in ks, f"keys={sorted(ks)}")
     t21 = (int((ks.get("signals") or {}).get("hits") or 0) >= 1 and int((ks.get("state") or {}).get("hits") or 0) >= 1, f"hits={{k: v.get('hits') for k, v in ks.items()}}")
     t22 = (all(bool(v.get("processed")) and "enabled" in v for v in ks.values()), str({k: v.get("enabled") for k, v in ks.items()}))
     # Direction / move / active / common still run independently on their own tapes

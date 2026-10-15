@@ -1,7 +1,32 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
-import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, kindGateOpen, costPfWindow, effectiveSetCounts, formatEffectiveSets, type LiveStats } from "./live-stats.ts";
+import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, kindGateOpen, costPfWindow, costPfPolicy, returnPfMetric, effectiveSetCounts, formatEffectiveSets, type LiveStats } from "./live-stats.ts";
+
+test("return PF summaries preserve zero observed samples and ignore classic aliases", () => {
+  const empty = returnPfMetric({ profitFactor: 99, pfCost: { n: 30, ratio: 1.4, count: 0, requiredSamples: 30, pass: true } } as LiveStats);
+  assert.equal(empty.count, 0);
+  assert.equal(empty.pass, false);
+  const noCount = returnPfMetric({ pfCost: { n: 30, ratio: 1.4, pass: true } } as LiveStats);
+  assert.equal(noCount.count, 0);
+  assert.equal(noCount.pass, false);
+  assert.equal(returnPfMetric({ profitFactor: 99 } as LiveStats).ratio, 1);
+  assert.equal(costPfPolicy({ pfCost: { n: 25, minPf: 1.2, costPct: 0, requiredSamples: 0 } } as LiveStats).costPct, 0);
+});
+
+test("return PF reconstruction uses configured window and sample floor", () => {
+  const stats = {
+    profitFactor: 99,
+    sets: { pfWindow: 5, minPf: 1.2 },
+    pfCost: { requiredSamples: 5 },
+    closed: Array.from({ length: 5 }, (_, t) => ({ t, pnl: 0.2, pnl_pct: 0.003 })),
+  } as LiveStats;
+  const metric = returnPfMetric(stats);
+  assert.equal(metric.n, 5);
+  assert.equal(metric.ratio, 1.2);
+  assert.equal(metric.pass, true);
+  assert.equal(returnPfMetric({ ...stats, pfCost: { ...stats.pfCost, pass: false } }).pass, false);
+});
 import { fetchConnections } from "./connections.ts";
 import { fetchCtsBundle } from "./config-model.ts";
 

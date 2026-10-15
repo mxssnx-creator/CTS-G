@@ -31,7 +31,7 @@ def frame_from(closes, vols=None, spread=0.0005):
 class KindListTests(unittest.TestCase):
     def test_new_kinds_appended_after_break(self):
         self.assertEqual(INDICATION_KINDS[:8], ("state", "signals", "active", "direction", "move", "common", "trend", "break"))
-        self.assertEqual(INDICATION_KINDS[8:], ("msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse"))
+        self.assertEqual(INDICATION_KINDS[8:], ("msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse", "tactic"))
         self.assertEqual(se.IND_KINDS, INDICATION_KINDS)
         self.assertEqual(set(ie.KIND_FLAGS), set(INDICATION_KINDS))
 

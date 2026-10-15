@@ -2,6 +2,7 @@ import type { EvaluationWindow } from "./hist-calc";
 import type { SetOverview } from "./set-overview";
 import { requestPreferredJson } from "./request-json.ts";
 import { BASE_EVAL_DEFAULT } from "./stage-windows.ts";
+import { clearsReturnPf, lastNCostPf, POSITION_COST_PCT_DEFAULT, type CostPfMetric, type PositionCostRow } from "./analytics.ts";
 
 export type LiveOpen = {
   symbol: string;
@@ -64,7 +65,7 @@ export type LiveOpen = {
   uPnlUsdt?: number;
 };
 
-export type LiveClosed = {
+export type LiveClosed = PositionCostRow & {
   systemId?: string;
   trackingScope?: string;
   connection?: string;
@@ -757,7 +758,7 @@ export type LiveStats = {
     systemPnl?: number;
     systemGrow?: number;
     systemLoss?: number;
-    pf: number;
+    pf: number | null;
     scanMs?: number;
     rssMb?: number;
     errors: number;
@@ -781,7 +782,7 @@ export type LiveStats = {
     progressError?: string;
     klinesReady?: number;
     hotMs?: number;
-    pfCost?: number;
+    pfCost?: number | null;
     controlsOk?: number;
     controlsMissing?: number;
   controlsSecurity?: number;
@@ -874,6 +875,10 @@ export type LiveStats = {
     minPf?: number;
     /** Sample floor before the cost PF can pass (engine eval_need). */
     requiredSamples?: number;
+    pfReferenceCostPct?: number;
+    zeroCostSamples?: number;
+    costSamples?: number;
+    costSource?: string;
     pass?: boolean;
     scale?: string;
     neutral?: number;
@@ -904,6 +909,28 @@ export type LiveStats = {
   };
   sets?: {
     enabled?: boolean;
+    indicationGrid?: {
+      independent?: boolean;
+      complete?: boolean;
+      tile?: number;
+      pfDefinition?: string;
+      qualificationScope?: string;
+      configurations?: Array<{
+        kind: string;
+        config: string;
+        symbol?: string;
+        requested: number;
+        completed: number;
+        requestedBehaviors?: number;
+        completedBehaviors?: number;
+        qualifiedBase: number;
+        qualifiedReal: number;
+        minPf: number;
+        phase: string;
+        elapsedMs?: number;
+        error?: string;
+      }>;
+    };
     ready?: boolean;
     entryPolicy?: string;
     entryPolicyMaxCandidates?: number;
@@ -1368,6 +1395,44 @@ export function kindGateOpen(blob?: KindStat, gate?: KindStat): boolean | undefi
 /** Last-N window behind the headline cost PF (configured pfWindow, not a fixed 15). */
 export function costPfWindow(stats: { pfCost?: { n?: number }; sets?: { pfWindow?: number } } | null | undefined): number {
   return knownCount(stats?.pfCost?.n) || knownCount(stats?.sets?.pfWindow) || BASE_EVAL_DEFAULT;
+}
+
+/** UI fallback follows the configured return-PF policy, including zero measured fees. */
+export function costPfPolicy(stats: LiveStats | null | undefined) {
+  const n = Math.max(1, Math.trunc(costPfWindow(stats)));
+  return {
+    n,
+    costPct: knownCount(stats?.pfCost?.costPct) ?? knownCount(stats?.positionCost?.effectivePct) ?? POSITION_COST_PCT_DEFAULT,
+    minPf: knownCount(stats?.pfCost?.minPf) ?? knownCount(stats?.sets?.minPf) ?? 1.15,
+    requiredSamples: Math.max(1, Math.trunc(knownCount(stats?.pfCost?.requiredSamples) ?? n)),
+  };
+}
+
+/** Only canonical return metrics may override the locally reconstructed return PF. */
+export function returnPfMetric(stats: LiveStats | null | undefined, fallback?: CostPfMetric): CostPfMetric {
+  const policy = costPfPolicy(stats);
+  const local = fallback ?? lastNCostPf(stats?.closed ?? [], policy.n, policy.costPct, policy.minPf, policy.requiredSamples);
+  const engine = stats?.pfCost;
+  const metric: CostPfMetric = {
+    ...local,
+    n: policy.n,
+    count: knownCount(engine?.count) ?? local.count,
+    avgR: typeof engine?.avgR === "number" && Number.isFinite(engine.avgR) ? engine.avgR : local.avgR,
+    ratio: typeof engine?.ratio === "number" && Number.isFinite(engine.ratio) ? engine.ratio : local.ratio,
+    classicPf: knownCount(engine?.classicPf) ?? local.classicPf,
+    costPct: knownCount(engine?.costPct) ?? local.costPct,
+    netPct: typeof engine?.netPct === "number" && Number.isFinite(engine.netPct) ? engine.netPct : local.netPct,
+    grossPct: typeof engine?.grossPct === "number" && Number.isFinite(engine.grossPct) ? engine.grossPct : local.grossPct,
+    minPf: policy.minPf,
+    requiredSamples: policy.requiredSamples,
+    pfReferenceCostPct: engine?.pfReferenceCostPct ?? local.pfReferenceCostPct,
+    zeroCostSamples: engine?.zeroCostSamples ?? local.zeroCostSamples,
+    pass: false,
+  };
+  const enough = metric.count >= metric.requiredSamples;
+  const clears = clearsReturnPf(metric.ratio, metric.minPf);
+  metric.pass = enough && clears && engine?.pass !== false;
+  return metric;
 }
 
 /** Positions/Orders pair. Never falls order counts back onto position counts. */
