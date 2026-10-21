@@ -401,7 +401,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
   const allow = gate?.allow !== false;
   const pc = stats?.pfCost;
   const minPf = pc?.minPf ?? c?.minPf ?? DEFAULT_OVERLAY.minPf;
-  const cost = pc?.costPct ?? 0.15;
+  const cost = pc?.costPct ?? 0.12;
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -478,7 +478,7 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
     ["dca", p.dcaEnabled !== false && stats?.dca?.enabled !== false],
     ["trailing", p.stratTrailing !== false],
   ];
-  const tp = (p.positionCostPct ?? 0.15) * (p.tpCostRatio ?? 5);
+  const tp = (p.positionCostPct ?? 0.12) * (p.tpCostRatio ?? 5);
   const sl = tp * (p.slToTpRatio ?? 0.6);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">

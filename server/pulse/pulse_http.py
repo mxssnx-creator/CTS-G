@@ -180,9 +180,19 @@ def slim_for_ui(st: dict) -> dict:
     if isinstance(out.get("signals"), list):
         out["signals"] = out["signals"][:8]
     closed = out.get("closed") or []
-    if isinstance(closed, list) and len(closed) > 40:
-        out["closed"] = closed[:40]
+    if isinstance(closed, list) and len(closed) > 80:   # the engine keeps 80; counts and windows need them all
+        out["closed"] = closed[:80]
     return out
+
+
+def _cost_pct_of(st: dict) -> float:
+    """The PositionCost (percent) a lane's engine runs with, so PF figures here match the engine's own; the library
+    default only when the lane reports none."""
+    try:
+        c = float(((st or {}).get("pfCost") or {}).get("costPct") or 0)
+    except (TypeError, ValueError):
+        c = 0.0
+    return c if c > 0 else POSITION_COST_PCT_DEFAULT
 
 
 def _sum_or_none(a: dict, b: dict, key: str):
@@ -397,7 +407,7 @@ def lane_summary(lane: dict) -> dict:
     pf_usdt = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)   # gross, on the USDT pnl field: display only
     # the decision PF is cost-based and needs pnl_pct; rows without it are not guessed (None, not 0)
     cost_rows = [c for c in (st.get("closed") or []) if c.get("pnl_pct") is not None]
-    pf = last_n_cost_pf(cost_rows, len(cost_rows) or 1, POSITION_COST_PCT_DEFAULT)["pf"] if cost_rows else None
+    pf = last_n_cost_pf(cost_rows, len(cost_rows) or 1, _cost_pct_of(st))["pf"] if cost_rows else None
     sets = st.get("sets") or {}
     prog = sets.get("progress") or {}
     eng = st.get("engine") or {}
@@ -503,7 +513,6 @@ def merge_overall() -> dict:
         stats_by_id[lane["id"]] = st
         if not st:
             continue
-        running_any = running_any or bool(st.get("running") and not st.get("halted"))
         wins += int(st.get("wins") or 0)
         losses += int(st.get("losses") or 0)
         errors += int(st.get("errors") or 0)
@@ -521,10 +530,14 @@ def merge_overall() -> dict:
             closed.append(q)
         tests.extend(st.get("tests") or [])
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
+    # live only when a lane is running, not halted and its stats are fresh: the lane summary already weighs file age
+    running_any = any(bool(x.get("running")) and not x.get("halted") and not x.get("stale") for x in lanes)
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
-    pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
+    cost_pct = next((_cost_pct_of(stats_by_id[x["id"]]) for x in lanes if x["type"] == "live" and stats_by_id.get(x["id"])),
+                    POSITION_COST_PCT_DEFAULT)
+    pc = last_n_cost_pf([c for c in reversed(closed) if c.get("pnl_pct") is not None], 15, cost_pct)
     pc["minPf"] = GATE_MIN_PF_DEFAULT
     pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= GATE_MIN_PF_DEFAULT)
     detail_lane, detail_st = _pick_detail(LANES)
@@ -564,6 +577,7 @@ def merge_overall() -> dict:
         "tests": tests[-24:],
         "errors": errors,
         "halted": not running_any,
+        "stale": bool(lanes) and all(bool(x.get("stale")) for x in lanes),
         "paused": any(bool(x.get("paused")) for x in lanes),
         "symbols": sorted({str(p.get("symbol")) for p in opens if p.get("symbol")}),
         "now": __import__("time").time(),

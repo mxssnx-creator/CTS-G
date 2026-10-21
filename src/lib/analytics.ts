@@ -41,7 +41,7 @@ export type CostPfMetric = {
   pass: boolean;
 };
 
-export const POSITION_COST_PCT_DEFAULT = 0.15;
+export const POSITION_COST_PCT_DEFAULT = 0.12;
 export const COST_RATIO_SCALE = 0.1;
 
 function finite(v: unknown): number {
@@ -167,7 +167,9 @@ export function lastNCostPf(
   minPf = 1.1,
 ): CostPfMetric {
   // The newest n closes by time, the same window as position_cost.last_n_cost_pf on the engine tape.
-  const newest = [...rows].sort((x, y) => finite(y.t) - finite(x.t)).slice(0, Math.max(1, n));
+  // a close without pnl_pct is skipped, as on the engine: a missing value is not a loss
+  const usable = rows.filter((r) => r.pnl_pct !== null && r.pnl_pct !== undefined && Number.isFinite(Number(r.pnl_pct)));
+  const newest = [...usable].sort((x, y) => finite(y.t) - finite(x.t)).slice(0, Math.max(1, n));
   const rs: number[] = [];
   let gp = 0;
   let gl = 0;
