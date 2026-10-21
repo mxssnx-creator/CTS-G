@@ -1448,6 +1448,17 @@ class SetBook:
         with self._lock:
             return self._snapshot()
 
+    def _pf_split(self) -> Dict[str, Any]:
+        """Pooled net PF of the Sets that pass Base validation (the effective one) and of every Set (unfiltered, before
+        Base). The unfiltered figure sits under 1 by design: Base validation exists to drop the losing Sets."""
+        def pool(sts: List[SetState]) -> Dict[str, Any]:
+            gp = sum(x.gp for x in sts)
+            gl = sum(x.gl for x in sts)
+            pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
+            return {"pf": pf, "n": sum(x.n for x in sts), "sets": len(sts)}
+        valid = [x for x in self.by_idx if not self.gate_reason(x)]
+        return {"base": pool(valid), "unfiltered": pool(list(self.by_idx))}
+
     def _snapshot(self) -> Dict[str, Any]:
         rows = []
         for st in sorted(self.sets.values(), key=lambda s: (not self.is_eligible(s), -s.gate_pf, s.max_dd_s)):
@@ -1544,6 +1555,7 @@ class SetBook:
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if self.is_eligible(s)),
             "counts": self.counts(),
+            "pfBase": self._pf_split(),
             "coverage": cover,
             "index": index,
             "minStep": self.min_step,

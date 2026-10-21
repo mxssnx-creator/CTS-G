@@ -429,7 +429,26 @@ def pick_any_has_no_gap_between_lookups():
     return ok, f"gap between base and trail lookups={seen['gap']} a thread entered it={seen['entered']}"
 
 
+def effective_pf_is_pooled_over_valid_sets_only():
+    """The snapshot reports the effective PF (Sets that pass Base validation) apart from the unfiltered PF of every Set.
+    The base figure is rebuilt here from the valid Sets' own gross profit and loss, so a mix-up of the two pools fails."""
+    b = _book(n_syms=3, bars=900, **SMALL)
+    b.replay_all(now=T0)
+    pfs = sorted(st.gate_pf for st in b.by_idx if st.gate_n >= b.gate_min)
+    b.min_pf = pfs[len(pfs) // 2] if pfs else 0.0   # the median: some Sets pass Base, some do not
+    snap = b.snapshot()["pfBase"]
+    valid = [st for st in b.by_idx if not b.gate_reason(st)]
+    def pf(sts):
+        gp = sum(x.gp for x in sts); gl = sum(x.gl for x in sts)
+        return round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
+    ok = (snap["base"]["sets"] == len(valid) and snap["unfiltered"]["sets"] == len(b.by_idx)
+          and snap["base"]["pf"] == pf(valid) and snap["unfiltered"]["pf"] == pf(b.by_idx)
+          and 0 < snap["base"]["sets"] < snap["unfiltered"]["sets"])
+    return ok, f"base pf={snap['base']['pf']} over {snap['base']['sets']} Sets; unfiltered pf={snap['unfiltered']['pf']} over {snap['unfiltered']['sets']}"
+
+
 CHECKS = [
+    ("processing.effective-pf-pooled-over-valid-sets", effective_pf_is_pooled_over_valid_sets_only),
     ("processing.pick-any-no-gap-between-lookups", pick_any_has_no_gap_between_lookups),
     ("processing.departed-symbols-leave-caches", departed_symbols_leave_every_cache),
     ("processing.snapshot-waits-for-writer", snapshot_waits_for_a_writer_mid_update),

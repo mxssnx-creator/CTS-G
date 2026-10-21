@@ -41,6 +41,14 @@ export function StatsOverview({
           s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
+        {live?.sets?.pfBase ? (
+          <Hero
+            k="Effective PF · after Base"
+            v={live.sets.pfBase.base.sets ? live.sets.pfBase.base.pf.toFixed(2) : "—"}
+            s={`${live.sets.pfBase.base.sets} valid Sets · n ${live.sets.pfBase.base.n} · before Base ${live.sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)`}
+            tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
+          />
+        ) : null}
         <Hero
           k="Drawdown time avg"
           v={formatDuration(dd.averageDurationMs || all.averageDurationMs)}

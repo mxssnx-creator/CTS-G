@@ -461,6 +461,8 @@ export type LiveStats = {
     maxDdS?: number;
     useHistoricGate?: boolean;
     setCount?: number;
+    /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
+    pfBase?: { base: { pf: number; n: number; sets: number }; unfiltered: { pf: number; n: number; sets: number } };
     minStep?: number;
     minStepCfg?: number;
     stepMax?: number;

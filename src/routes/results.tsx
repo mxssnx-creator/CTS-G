@@ -231,6 +231,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
         gate {gate?.allow ? "open" : "paused"} · intern {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
+        {sets?.pfBase ? ` · effective PF after Base ${sets.pfBase.base.pf.toFixed(2)} (${sets.pfBase.base.sets} valid) · before Base ${sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)` : ""}
       </p>
       {gate?.reasons?.length ? (
         <p className="mb-3 font-mono text-xs text-danger">{gate.reasons.join(" · ")}</p>
