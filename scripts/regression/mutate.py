@@ -134,6 +134,9 @@ MUTATIONS = [
      "pulse_trader.py", '    for key in ("executedQty", "quantity", "origQty"):', '    for key in ("quantity", "origQty"):'),
     ("trader: the indicator reads the padded series",
      "pulse_trader.py", "        return bars[-n:] if n > 0 else []", "        return bars"),
+    ("trader: a partial close fill is reported as a full close",
+     "pulse_trader.py", '                if ex is not None and "quantity" in body and ex < float(pos.qty) * 0.999:',
+     '                if False:'),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]

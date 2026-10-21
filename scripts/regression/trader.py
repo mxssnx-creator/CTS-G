@@ -269,7 +269,75 @@ def entry_lifecycle_with_a_stub_exchange():
                 f"protective batches={len(api.batches) if api else 0}")
 
 
+class _PartialCloseVenue(_StubExchange):
+    """Entry fills fully; the first close order fills 40% of its quantity, the next close is accepted in full unless
+    fail_rest is set, in which case it is refused."""
+
+    def __init__(self, fail_rest: bool = False) -> None:
+        super().__init__(executed="1", requested="1")
+        self.fail_rest = fail_rest
+        self.closes: list = []
+
+    def post(self, path, body):
+        if path.endswith("/trade/order") and body.get("side") == "SELL":
+            self.closes.append(dict(body))
+            if len(self.closes) == 1 and "quantity" in body:
+                q = float(body["quantity"])
+                return {"code": 0, "data": {"order": {"orderId": "c1", "avgPrice": "101",
+                                                      "executedQty": str(q * 0.4), "quantity": str(q)}}}
+            if self.fail_rest:
+                return {"code": 100400, "msg": "temporary refusal"}
+            return {"code": 0, "data": {"order": {"orderId": "c2", "avgPrice": "102"}}}
+        return super().post(path, body)
+
+
+def _enter(venue):
+    sym = "BTC-USDT"
+    contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+    p = pt.Pulse(venue, contracts)
+    p.boot_ts = 0.0
+    p.px[sym] = 100.0
+    p.available = 50.0
+    p.halted = False
+    p.entry_sense = lambda *a, **k: None
+    p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+    return p, sym
+
+
+def partial_close_fill_closes_the_remainder():
+    """A close that fills only part of its quantity must not be reported as a full close. The remainder is closed with
+    the closePosition form, the returned price blends the two fills, and if the remainder is refused the position stays
+    open at the size that is left."""
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings)
+    with tempfile.TemporaryDirectory() as td:
+        pt.BLOCK_PATH = os.path.join(td, "block.json")
+        pt.LEV_PATH = os.path.join(td, "lev.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            venue = _PartialCloseVenue()
+            p, sym = _enter(venue)
+            pos = p.open[sym]
+            q0 = float(pos.qty)
+            ok1, px1 = p.market_close(pos)
+            second_is_close_position = len(venue.closes) == 2 and venue.closes[1].get("closePosition") == "true" \
+                and "quantity" not in venue.closes[1]
+            blended = 101.0 * 0.4 * q0 + 102.0 * 0.6 * q0
+            blended_px = blended / q0
+            venue2 = _PartialCloseVenue(fail_rest=True)
+            p2, sym2 = _enter(venue2)
+            pos2 = p2.open[sym2]
+            q2 = float(pos2.qty)
+            ok2, _ = p2.market_close(pos2)
+            kept = abs(float(pos2.qty) - q2 * 0.6) < 1e-9
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings = saved
+    ok = ok1 and second_is_close_position and abs(px1 - blended_px) < 1e-6 and (not ok2) and kept
+    return ok, (f"full close={ok1} remainder via closePosition={second_is_close_position} price={px1:.4f} "
+                f"(want {blended_px:.4f}); refused remainder -> closed={ok2} qty kept={kept}")
+
+
 CHECKS = [
+    ("trader.partial-close-closes-the-remainder", partial_close_fill_closes_the_remainder),
     ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),
     ("trader.partial-fill-sized-from-executed", partial_fill_is_sized_from_the_executed_quantity),
     ("trader.indicator-sees-only-real-bars", indicator_sees_only_real_bars),

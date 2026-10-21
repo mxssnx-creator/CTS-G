@@ -248,6 +248,17 @@ def filled_qty(data: Any, requested: float) -> float:
     return float(requested or 0)
 
 
+def executed_qty(data: Any) -> Optional[float]:
+    """The quantity a close order reports as executed, or None when the venue reports none (then the order counts
+    as fully filled, as before)."""
+    d = data if isinstance(data, dict) else {}
+    try:
+        v = float(d.get("executedQty") or 0)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 def extract_oid(r: Any) -> str:
     if not isinstance(r, dict):
         return real_oid(r)
@@ -2513,6 +2524,8 @@ class Pulse:
         if pid:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
         r: Dict[str, Any] = {}
+        done_qty = 0.0       # closed by earlier partial fills of this close
+        done_val = 0.0
         for extra in forms:
             body = {
                 "symbol": pos.symbol,
@@ -2528,6 +2541,18 @@ class Pulse:
             if self.ok(r):
                 data = (r.get("data") or {}).get("order") or r.get("data") or {}
                 px = float(data.get("avgPrice") or data.get("price") or 0) or (self.px.get(pos.symbol) or pos.entry)
+                ex = executed_qty(data)
+                if ex is not None and "quantity" in body and ex < float(pos.qty) * 0.999:
+                    # partial close fill: the rest is still open on the venue. Keep the position at what is left and
+                    # close the remainder with the next form instead of reporting a full close.
+                    done_qty += ex
+                    done_val += ex * px
+                    pos.qty = max(0.0, float(pos.qty) - ex)
+                    continue
+                if done_qty > 0:
+                    rest = ex if ex is not None else float(pos.qty)
+                    total = done_qty + rest
+                    px = (done_val + rest * px) / total if total > 0 else px
                 return True, px
             msg = str(r.get("msg") or "")
             if ctrl_err_kind(msg) == "qty_close":
@@ -2536,7 +2561,7 @@ class Pulse:
                 return True, self.px.get(pos.symbol) or pos.entry
         self.errors += 1
         self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
-        return False, self.px.get(pos.symbol) or pos.entry
+        return False, self.px.get(pos.symbol) or pos.entry     # pos.qty already holds what a partial close left
 
     def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
         """Max 1 position per symbol, and per (symbol, direction, pack, Set)."""
