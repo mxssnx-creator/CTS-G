@@ -185,7 +185,7 @@ class DcaBook:
 
     def score(self) -> Dict[str, Any]:
         pc = last_n_cost_pf(self.closes, self.pf_n, self.cost_pct)
-        last25 = self.closes[-self.deact_n :]
+        last25 = [r for r in self.closes if r.get("pnl_pct") is not None][-self.deact_n :]   # a missing value is not a loss
         avg_r = 0.0
         if last25:
             avg_r = sum(signed_result_r(float(r.get("pnl_pct") or 0), self.cost_pct) for r in last25) / len(last25)

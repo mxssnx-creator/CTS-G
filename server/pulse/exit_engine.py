@@ -252,6 +252,8 @@ class ExitBook:
         return ExitDecision("hold", "hold")
 
     def on_close(self, rec: Any) -> None:
+        if (rec.get("pnl_pct") if isinstance(rec, dict) else getattr(rec, "pnl_pct", None)) is None:
+            return   # no gross move recorded: not a loss, not scored (as in position_cost and the Set tapes)
         if isinstance(rec, dict):
             reason = str(rec.get("reason") or "")
             row = {

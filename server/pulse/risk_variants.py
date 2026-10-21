@@ -168,6 +168,12 @@ class VariantBook:
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
+        try:
+            c = float(ov.get("positionCostPct") or 0)
+        except (TypeError, ValueError):
+            c = 0.0
+        if c > 0:
+            self.cost_pct = c   # the engine's PositionCost, so lane scores and net rows use the same cost
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
         raw_ratios = ov.get("slToTpRatios") or list(SL_TP_RATIOS)
         ratios: List[float] = []
@@ -271,7 +277,8 @@ class VariantBook:
         self.trail_closes = 0
         self.maybe_recalc(force=True)
 
-    def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: float = 0.15) -> LaneScore:
+    def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: Optional[float] = None) -> LaneScore:
+        cost_pct = self.cost_pct if cost_pct is None else cost_pct
         wins = sum(1 for r in rows if r["pnl"] > 0)
         exp = (sum(r["pnl"] for r in rows) / len(rows)) if rows else 0.0
         hold = (sum(r.get("hold_s", 0) for r in rows) / len(rows)) if rows else 0.0

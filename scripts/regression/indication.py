@@ -258,7 +258,35 @@ def bars_to_entry_reason_round_trip():
     return same and nothing, f"picked {pick.kind}/{pick.mode} -> matched={same}; all types off -> no pick={nothing}"
 
 
+def match_follows_the_timeframe_lane_of_the_pick():
+    """Rows from different timeframe lanes share kind and mode. The entry reason ends with the pick's sources, and
+    match must return the row of that lane, not the first row of the kind."""
+    from indication_engine import Indication, IndicationBook
+    def row(direction, conf, src):
+        return Indication(symbol="X-USDT", direction=direction, mode="direct_tf", confidence=conf, strength=1.0,
+                          agreement=1.0, stop_loss_pct=1.0, take_profit_pct=2.0, reward_risk=2.0, last_price=1.0,
+                          sources=[src], votes_long=1, votes_short=0, primary=False, t=T0, timeframe="", kind="signals")
+    b = IndicationBook()
+    b.last["X-USDT"] = [row("short", 0.65, "bingx-1m"), row("long", 0.70, "bingx-5m"), row("long", 0.80, "bingx-15m")]
+    got = b.match("X-USDT", "ind:signals:direct_tf:1.00:a1:bingx-15m")
+    return got.direction == "long" and got.sources == ["bingx-15m"], f"matched {got.direction} {got.sources}"
+
+
+def a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca():
+    from exit_engine import ExitBook
+    from dca_engine import DcaBook
+    e = ExitBook()
+    e.on_close({"t": 1.0, "pnl": -0.1, "reason": "exit:peak"})
+    d = DcaBook()
+    d.closes = [{"pnl_pct": None}] * 30
+    sc = d.score()
+    ok = not any(ln.n for ln in e.lanes.values()) and d.active
+    return ok, f"exit lanes scored={[ (k, v.n) for k, v in e.lanes.items()]} dca active={d.active}"
+
+
 CHECKS = [
+    ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
+    ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
     ("indication.bars-to-entry-reason-round-trip", bars_to_entry_reason_round_trip),
     ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),

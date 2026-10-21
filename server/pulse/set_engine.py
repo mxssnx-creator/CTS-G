@@ -700,6 +700,7 @@ class SetBook:
         self.min_step = STEP_MIN
         self.step_max = STEP_MAX
         self.step_adapt = True
+        self.hist_honor_tp = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
@@ -847,6 +848,10 @@ class SetBook:
         idx = 0
         def _put(st: SetState) -> None:
             nonlocal idx
+            if not st.active and st.deact_reason.startswith("out of grid"):
+                st.active = True        # back on the grid: eligible again once it is re-scored
+                st.deact_reason = ""
+                st.evaluated_at = 0.0
             st.idx = idx
             next_sets[st.id] = st
             by_idx.append(st)
@@ -1195,7 +1200,7 @@ class SetBook:
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
         base_ts = now - (n - 1) * BAR_S
-        salt = hash(json.dumps(self.ind_settings, sort_keys=True, default=str))
+        salt = hash((json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs))))   # a memo entry holds only its packs
         cache = self._sig_cache.setdefault(symbol, {})
         signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step, cache=cache, salt=salt)
         cfg = {

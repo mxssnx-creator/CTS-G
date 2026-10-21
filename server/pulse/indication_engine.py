@@ -1238,7 +1238,9 @@ class IndicationBook:
         named = parts[0] == "ind" and len(parts) > 2
         kind = parts[1] if named else ""
         mode = parts[2] if named else ""
+        srcs = ":".join(parts[5:]) if named and len(parts) > 5 else ""   # the entry reason ends with the pick's sources
         rules = (
+            bool(kind and mode and srcs) and (lambda i: i.kind == kind and i.mode == mode and ",".join(i.sources[:3]) == srcs),
             bool(kind and mode) and (lambda i: i.kind == kind and i.mode == mode),
             bool(mode) and (lambda i: i.mode == mode),
             bool(kind) and (lambda i: i.kind == kind),

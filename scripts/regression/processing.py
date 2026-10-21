@@ -447,7 +447,20 @@ def effective_pf_is_pooled_over_valid_sets_only():
     return ok, f"base pf={snap['base']['pf']} over {snap['base']['sets']} Sets; unfiltered pf={snap['unfiltered']['pf']} over {snap['unfiltered']['sets']}"
 
 
+def pack_change_does_not_poison_the_signal_memo():
+    """The signal memo is kept across a reload. A reload that switches a pack on must not find memo entries written
+    without that pack: the replay has to complete, not fail with a missing pack on every symbol."""
+    b = _book(n_syms=2, bars=600, stratGeneral=False, **SMALL)
+    b.replay_all(now=T0)
+    b.load(overlay(stratGeneral=True, **SMALL))
+    b.replay_all(now=T0)
+    errs = [st.last_error for st in b.by_idx if st.last_error]
+    ok = b.progress.phase != "error" and not errs and "general" in b.packs
+    return ok, f"phase={b.progress.phase} packs={b.packs} errors={errs[:1]}"
+
+
 CHECKS = [
+    ("processing.pack-change-keeps-memo-sound", pack_change_does_not_poison_the_signal_memo),
     ("processing.effective-pf-pooled-over-valid-sets", effective_pf_is_pooled_over_valid_sets_only),
     ("processing.pick-any-no-gap-between-lookups", pick_any_has_no_gap_between_lookups),
     ("processing.departed-symbols-leave-caches", departed_symbols_leave_every_cache),
