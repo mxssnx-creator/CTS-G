@@ -54,7 +54,7 @@ if ! pgrep -f "python3 -O pulse_trader.py" >/dev/null; then
   echo "started pulse_trader pid $!"
 fi
 if ! pgrep -f "python3 -O pulse_http.py" >/dev/null; then
-  PULSE_HTTP_TOKEN="$PULSE_HTTP_TOKEN" PYTHONUNBUFFERED=1 nohup python3 -O pulse_http.py >>"$LOG_DIR/pulse-http.log" 2>&1 &
+  PULSE_HTTP_TOKEN="$PULSE_HTTP_TOKEN" PULSE_HALT_ON_INACTIVE=0 PYTHONUNBUFFERED=1 nohup python3 -O pulse_http.py >>"$LOG_DIR/pulse-http.log" 2>&1 &
   echo "started pulse_http pid $!"
 fi
 
