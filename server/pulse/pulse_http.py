@@ -23,6 +23,9 @@ HTTP_HOST = os.environ.get("PULSE_HTTP_HOST", "127.0.0.1")
 HTTP_PORT = int(os.environ.get("PULSE_HTTP_PORT", "3015"))
 HTTP_TOKEN = os.environ.get("PULSE_HTTP_TOKEN", "")
 CORS_ORIGINS = {o.strip() for o in os.environ.get("PULSE_HTTP_CORS_ORIGINS", "").split(",") if o.strip()}
+# 0 on hosts without systemd: the unit is not consulted, so "service inactive" never halts the desk. Liveness is
+# then the stats-file age check (stats stale after 20 s), which still halts a dead or frozen engine.
+HALT_ON_INACTIVE = os.environ.get("PULSE_HALT_ON_INACTIVE", "1") != "0"
 MUTATING_PATHS = ("/control.json", "/control", "/config.json", "/config")
 CONFIG_LOCK = threading.Lock()   # one config save at a time: load, merge and write as one step
 
@@ -261,6 +264,8 @@ CONTROL_LOCK = threading.Lock()
 
 def unit_state(cid: str, fresh: bool = False) -> str:
     """systemd is-active state, cached briefly — the desk polls several times a second."""
+    if not HALT_ON_INACTIVE:
+        return "active"
     now = time.time()
     hit = _STATE_CACHE.get(cid)
     if not fresh and hit and now - hit[0] < 3.0:
