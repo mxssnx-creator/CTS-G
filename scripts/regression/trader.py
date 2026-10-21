@@ -13,6 +13,14 @@ import types
 from common import PULSE, Skip  # noqa: F401
 import pulse_trader as pt
 
+# Every state file the trader writes or reads goes to a private directory: a check must never touch (or read back)
+# the live engine's state in the pulse directory.
+_STATE_DIR = tempfile.mkdtemp(prefix="ctsg-trader-test-")
+for _name in ("STATS_PATH", "TRADES_PATH", "STOP_PATH", "PAUSE_PATH", "LOG_PATH", "BLOCK_PATH", "OVERLAY_PATH",
+              "OPEN_PATH", "CTS_PATH", "ERR_PATH", "LEV_PATH", "START_EQ_PATH", "RESET_EQ_PATH", "UNIVERSE_PATH"):
+    if hasattr(pt, _name):
+        setattr(pt, _name, os.path.join(_STATE_DIR, os.path.basename(getattr(pt, _name))))
+
 SRC = os.path.join(PULSE, "pulse_trader.py")
 
 
@@ -372,7 +380,84 @@ def symbol_cap_applies_under_a_wildcard():
     return ok, f"wildcard cap 30 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 30 + one open -> {out.get('with_open')}"
 
 
+class _RefusingCloseVenue(_StubExchange):
+    """Entry fills fully; every closing order is refused."""
+
+    def post(self, path, body):
+        if path.endswith("/trade/order") and body.get("side") == "SELL":
+            return {"code": 100400, "msg": "temporary refusal"}
+        return super().post(path, body)
+
+
+class _LostAnswerVenue(_StubExchange):
+    """The entry request fails on the wire: the caller cannot know whether the order filled."""
+
+    def post(self, path, body):
+        if path.endswith("/trade/order"):
+            return {"code": -1, "msg": "timed out", "error": True}
+        return super().post(path, body)
+
+
+def _isolated(fn):
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    with tempfile.TemporaryDirectory() as td:
+        pt.BLOCK_PATH = os.path.join(td, "block.json")
+        pt.LEV_PATH = os.path.join(td, "lev.json")
+        pt.OPEN_PATH = os.path.join(td, "open.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            return fn()
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+
+
+def failed_close_keeps_the_position_protected():
+    """A close the venue refuses must leave the position in the book with its stops re-armable: the stops were
+    cancelled before the close, so their ids are dropped and missing_controls is true. A symbol banned for a no-ctrl
+    close is blocked for new entries, not erased from the book."""
+    def run():
+        p, sym = _enter(_RefusingCloseVenue(executed="1", requested="1"))
+        pos = p.open[sym]
+        had = not p.missing_controls(pos)
+        p.close_pos(pos, 100.0, "no-ctrl-test")
+        return had, sym in p.open, p.missing_controls(pos), sym in p.ignore_syms
+    had, kept, missing, banned = _isolated(run)
+    return had and kept and missing and banned, f"stops before={had} kept in book={kept} stops re-armable={missing} banned={banned}"
+
+
+def partial_close_is_recorded_at_the_full_size():
+    def run():
+        venue = _PartialCloseVenue()
+        p, sym = _enter(venue)
+        pos = p.open[sym]
+        q0 = float(pos.qty)
+        p.close_pos(pos, 100.0, "test-close")
+        return q0, [float(c.qty) for c in p.closed]
+    q0, qs = _isolated(run)
+    return qs == [q0], f"entry qty={q0} recorded close qty={qs}"
+
+
+def lost_entry_answer_is_remembered_for_adoption():
+    def run():
+        sym = "BTC-USDT"
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0,
+                                      max_lev=150)}
+        p = pt.Pulse(_LostAnswerVenue(), contracts)
+        p.boot_ts = 0.0
+        p.px[sym] = 100.0
+        p.available = 50.0
+        p.halted = False
+        p.entry_sense = lambda *a, **k: None
+        p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+        return sym in p.open, dict(getattr(p, "unknown_entry", {}))
+    opened, unk = _isolated(run)
+    return (not opened) and any(k.startswith("BTC-USDT:") for k in unk), f"in book={opened} unknown entries={list(unk)}"
+
+
 CHECKS = [
+    ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
+    ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
+    ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
     ("trader.symbol-cap-applies-under-a-wildcard", symbol_cap_applies_under_a_wildcard),
     ("trader.partial-close-closes-the-remainder", partial_close_fill_closes_the_remainder),
     ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),

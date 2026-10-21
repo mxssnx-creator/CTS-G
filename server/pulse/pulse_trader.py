@@ -1907,6 +1907,8 @@ class Pulse:
 
     def cancel_controls(self, symbol: str, keep: Optional[set] = None) -> None:
         keep = keep or set()
+        self._oo_cache.pop("*", None)   # controls placed in the last seconds must be visible to this sweep
+        self._oo_cache.pop(symbol, None)
         for o in self.list_orders(symbol):
             if not self.order_is_ours(o):
                 continue
@@ -2320,6 +2322,8 @@ class Pulse:
         pos.close_position = True
         pos.ctrl_qty = pos.qty
         pos.ctrl_verified = pos.controls_ok
+        self._oo_cache.pop("*", None)
+        self._oo_cache.pop(pos.symbol, None)
 
     def ensure_controls(self, pos: Position) -> None:
         now = time.time()
@@ -2496,6 +2500,8 @@ class Pulse:
                 pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
                 pos.sl = pos.sec_sl = new_sl
                 replaced = True
+                self._oo_cache.pop("*", None)
+                self._oo_cache.pop(pos.symbol, None)
         if not replaced:
             if pos.sl_oid:
                 self.cancel_order(pos.symbol, pos.sl_oid)
@@ -2759,6 +2765,11 @@ class Pulse:
                 if "order size" in low or "available amount" in low:
                     self.cooldown[sym] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
+                if r.get("error") or r.get("code") == -1:
+                    # transport failure: the order may have filled. Adopt the position if it shows up.
+                    if not hasattr(self, "unknown_entry"):
+                        self.unknown_entry = {}
+                    self.unknown_entry[f"{sym}:{side}"] = time.time()
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     return
@@ -2885,6 +2896,7 @@ class Pulse:
             log(f"GHOST skip still-live {pos.symbol} {pos.side} {why}", every=20.0, key=f"ghost:{pos.symbol}")
             return
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
+        self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
@@ -2892,11 +2904,19 @@ class Pulse:
         if exchange:
             self.cancel_controls(pos.symbol)
             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
+            q_full = pos.qty   # market_close shrinks pos.qty on a partial fill; the close is recorded at the full size
             ok, exit_px = self.market_close(pos)
             if not ok:
+                # the stops were just cancelled and the position is still open: forget their ids so the next cycle
+                # re-places them, and keep the position in the book (a banned symbol only blocks new entries)
+                pos.sl_oid = pos.sec_sl_oid = pos.tp_oid = pos.sec_tp_oid = ""
+                pos.controls_ok = False
+                pos.ctrl_verified = False
+                self.ctrl_skip.pop(pos.symbol, None)
                 if skip_eval:
-                    self.ban_sym(pos.symbol)
+                    self.ignore_syms[pos.symbol] = time.time() + 1800.0
                 return
+            pos.qty = q_full
         else:
             exit_px = px if px > 0 else (self.px.get(pos.symbol) or pos.entry)
         if pos.side == "LONG":
@@ -3642,6 +3662,7 @@ class Pulse:
             pos.notional = pos.qty * pos.entry
             self.available = max(0.0, self.available - margin)
             if getattr(self, "control_orders", True):
+                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                 pos.ctrl_verified = False
                 self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
@@ -3758,6 +3779,7 @@ class Pulse:
                 pass
             self.available = max(0.0, self.available - margin)
             if getattr(self, "control_orders", True):
+                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                 pos.ctrl_verified = False
                 self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
@@ -4086,8 +4108,22 @@ class Pulse:
             except Exception:
                 pass
         if live_n == 0 and self.open:
+            # an empty list can be lag or a rate limit: only the third empty pass in a row, and only a position the
+            # direction-aware check confirms flat, leaves the book
+            self._adopt_empty_n = int(getattr(self, "_adopt_empty_n", 0) or 0) + 1
+            if self._adopt_empty_n >= 3:
+                for sym in list(self.open):
+                    pos = self.open.get(sym)
+                    if not pos or time.time() - float(pos.opened_at or 0) < 180.0 or not self._exchange_flat(pos):
+                        continue
+                    log(f"DROP stale local {sym} (exchange flat)")
+                    self.cancel_controls(sym)
+                    self.open.pop(sym, None)
+                    self.cooldown[sym] = time.time() + 90.0
+                self.save_open_book()
             log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
             return
+        self._adopt_empty_n = 0
         live = set()
         foreign = set()
         for p in rows:
@@ -4116,7 +4152,8 @@ class Pulse:
             except Exception:
                 tagged = []
             owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
-            if not tagged and not owned:
+            unknown = time.time() - float((getattr(self, "unknown_entry", {}) or {}).get(f"{sym}:{side}", 0) or 0) < 180.0
+            if not tagged and not owned and not unknown:
                 foreign.add(f"{sym}:{side}")
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
@@ -4197,6 +4234,7 @@ class Pulse:
                 if not self._exchange_flat(pos):
                     continue
             log(f"DROP stale local {sym} age={age:.0f}s")
+            self.cancel_controls(sym)
             self.open.pop(sym, None)
             self.cooldown[sym] = time.time() + 90.0
         self.ignored_foreign = len(foreign)
