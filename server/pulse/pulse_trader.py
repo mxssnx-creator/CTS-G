@@ -1515,7 +1515,7 @@ class Pulse:
             for s in SYMBOLS:
                 if s not in set(chosen):
                     chosen.append(s)
-        elif wild or cap <= 0:
+        elif cap <= 0:
             # every ranked name, plus any symbol that still has an open position: a position must keep being managed
             chosen = list(names) + [s for s in open_syms if s not in set(names)]
         else:

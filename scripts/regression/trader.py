@@ -240,13 +240,14 @@ def entry_lifecycle_with_a_stub_exchange():
     requested size, the position is recorded at the executed size, and one protective batch goes out. The state files
     are redirected to a temporary directory, and the settings dump and contract source are replaced."""
     sym = "BTC-USDT"
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
     orders: list = []
     pos = None
     api = None
     with tempfile.TemporaryDirectory() as td:
         pt.BLOCK_PATH = os.path.join(td, "block.json")
         pt.LEV_PATH = os.path.join(td, "lev.json")
+        pt.OPEN_PATH = os.path.join(td, "open.json")
         pt.dump_cts_settings = lambda: {}
         try:
             api = _StubExchange(executed="0.4", requested="1")
@@ -264,7 +265,7 @@ def entry_lifecycle_with_a_stub_exchange():
             ok = (len(orders) == 1 and pos is not None and abs(float(pos.qty) - 0.4) < 1e-12
                   and len(api.batches) == 1 and len(api.batches[0]) == 2)
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
     return ok, (f"entry orders={len(orders)} position qty={getattr(pos, 'qty', None)} "
                 f"protective batches={len(api.batches) if api else 0}")
 
@@ -308,10 +309,11 @@ def partial_close_fill_closes_the_remainder():
     """A close that fills only part of its quantity must not be reported as a full close. The remainder is closed with
     the closePosition form, the returned price blends the two fills, and if the remainder is refused the position stays
     open at the size that is left."""
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
     with tempfile.TemporaryDirectory() as td:
         pt.BLOCK_PATH = os.path.join(td, "block.json")
         pt.LEV_PATH = os.path.join(td, "lev.json")
+        pt.OPEN_PATH = os.path.join(td, "open.json")
         pt.dump_cts_settings = lambda: {}
         try:
             venue = _PartialCloseVenue()
@@ -330,13 +332,48 @@ def partial_close_fill_closes_the_remainder():
             ok2, _ = p2.market_close(pos2)
             kept = abs(float(pos2.qty) - q2 * 0.6) < 1e-9
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
     ok = ok1 and second_is_close_position and abs(px1 - blended_px) < 1e-6 and (not ok2) and kept
     return ok, (f"full close={ok1} remainder via closePosition={second_is_close_position} price={px1:.4f} "
                 f"(want {blended_px:.4f}); refused remainder -> closed={ok2} qty kept={kept}")
 
 
+def symbol_cap_applies_under_a_wildcard():
+    """symbolCap cuts the ranked universe, also when the overlay is a wildcard ("*"). Cap 0 keeps every name. A symbol
+    with an open position stays in the book above the cap."""
+    saved_syms = list(pt.SYMBOLS)
+    p = _bare_pulse()
+    p.symbol_sort = "vol1h"
+    p.symbols_dynamic = True
+    p.overlay_wild = True
+    p.open = {}
+    p.universe = [{"symbol": f"S{i:02d}-USDT", "vol1h": float(100 - i), "maxLeverage": 50, "quoteVolume": 1.0,
+                   "vol24h": 0.0, "changePct": 0.0} for i in range(60)]
+    p.last_dyn_sel = 0.0
+    p.contracts = {}
+    p.sets = types.SimpleNamespace(set_symbols=lambda *a, **k: None, enabled=False)
+    out = {}
+    try:
+        p.symbol_cap = 30
+        p.apply_dynamic_symbols(force=True)
+        out["capped"] = len(pt.SYMBOLS)
+        p.symbol_cap = 0
+        p.apply_dynamic_symbols(force=True)
+        out["uncapped"] = len(pt.SYMBOLS)
+        p.symbol_cap = 30
+        p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
+        p.apply_dynamic_symbols(force=True)
+        out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"raised {type(exc).__name__}: {exc}"
+    finally:
+        pt.SYMBOLS[:] = saved_syms
+    ok = out.get("capped") == 30 and out.get("uncapped") == 60 and out.get("with_open") == (30, True)
+    return ok, f"wildcard cap 30 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 30 + one open -> {out.get('with_open')}"
+
+
 CHECKS = [
+    ("trader.symbol-cap-applies-under-a-wildcard", symbol_cap_applies_under_a_wildcard),
     ("trader.partial-close-closes-the-remainder", partial_close_fill_closes_the_remainder),
     ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),
     ("trader.partial-fill-sized-from-executed", partial_fill_is_sized_from_the_executed_quantity),

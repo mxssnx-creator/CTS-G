@@ -102,6 +102,8 @@ MUTATIONS = [
      "pulse_trader.py", "            if gap > 0:\n                time.sleep(gap)", "            if gap > 0:\n                self.wake_ev.wait(timeout=gap)"),
     ("trader: the pacing gap is dropped",
      "pulse_trader.py", "    return max(0.0, cycle_started + scan_s - now)", "    return 0.0"),
+    ("trader: a wildcard overlay ignores the symbol cap",
+     "pulse_trader.py", "        elif cap <= 0:\n            # every ranked name", "        elif wild or cap <= 0:\n            # every ranked name"),
     ("trader: the overlay's max-leverage toggle is ignored",
      "pulse_trader.py", '    use_max = bool(ov.get("useMaxLeverage", True))', "    use_max = True"),
     ("trader: the pulse leverage is never read",

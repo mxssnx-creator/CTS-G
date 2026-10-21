@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..9415279 100644
+index b3a9ff3..09635ad 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
@@ -280,11 +280,13 @@ index b3a9ff3..9415279 100644
              self.halted = True
              self.halt_reason = f"equity {self.equity:.4f} below min"
              self._pre_pause_halt = None
-@@ -1383,7 +1516,8 @@ class Pulse:
+@@ -1382,8 +1515,9 @@ class Pulse:
+             for s in SYMBOLS:
                  if s not in set(chosen):
                      chosen.append(s)
-         elif wild or cap <= 0:
+-        elif wild or cap <= 0:
 -            chosen = names
++        elif cap <= 0:
 +            # every ranked name, plus any symbol that still has an open position: a position must keep being managed
 +            chosen = list(names) + [s for s in open_syms if s not in set(names)]
          else:
