@@ -24,3 +24,4 @@ public/live-stats.json
 /tmp/
 .preview.pid
 preview.log
+.claude/settings.local.json
