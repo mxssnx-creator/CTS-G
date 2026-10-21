@@ -246,7 +246,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsAll: false,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: 0,
+  symbolCap: 30,
   slPct: 0.48,
   tpPct: 0.75,
   trailArmPct: 0.3,

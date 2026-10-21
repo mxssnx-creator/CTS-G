@@ -8,7 +8,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 0,
+  "symbolCap": 30,
   "symbols": [
     "*"
   ],
