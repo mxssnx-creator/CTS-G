@@ -453,6 +453,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
 
     # R14: a lane that loses every close reads PF 0.0, not the neutral 1.0; the lane PF is one function
     zb = VariantBook()
+    zb.cost_pct = 0.15   # the fixtures below are written for 0.15%
     losers = [{"pnl": -0.002, "pnl_pct": -0.0005, "hold_s": 20}] * 4
     zs = zb._score_rows(losers, 0.15)
     want = last_n_cost_pf(losers, 4, 0.15)

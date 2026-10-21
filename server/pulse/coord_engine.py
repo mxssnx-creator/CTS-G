@@ -102,7 +102,7 @@ class Coordinator:
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
-        # percent everywhere (0.15 = 0.15%), the same unit as position_cost.cost_as_frac; no magnitude guessing
+        # percent everywhere (0.12 = 0.12%), the same unit as position_cost.cost_as_frac; no magnitude guessing
         if not self.position_cost_pct > 0:  # zero, negative or NaN is a config error: default, nothing else is guessed
             self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = float(ov.get("noise") or cts.get("activeNoiseFilter") or 0.05)

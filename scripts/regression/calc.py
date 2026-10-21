@@ -114,8 +114,8 @@ def cost_inputs_are_percent_everywhere():
         ("normalize(0.15)", normalize_cost_pct(0.15) == 0.15),
         ("normalize(3.0) keeps 3%", normalize_cost_pct(3.0) == 3.0),
         ("normalize(0.04)", normalize_cost_pct(0.04) == 0.04),
-        ("normalize(0) -> default", normalize_cost_pct(0) == 0.15),
-        ("normalize(nan) -> default", normalize_cost_pct(float("nan")) == 0.15),
+        ("normalize(0) -> default", normalize_cost_pct(0) == 0.12),
+        ("normalize(nan) -> default", normalize_cost_pct(float("nan")) == 0.12),
         ("cost_as_frac(3.0)=0.03", abs(cost_as_frac(3.0) - 0.03) < 1e-12),
         ("step_tp_pct(2,0.15)=0.30%", abs(step_tp_pct(2, 0.15) - 0.003) < 1e-12),
     ]

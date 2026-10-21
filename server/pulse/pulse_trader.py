@@ -3179,7 +3179,7 @@ class Pulse:
             COOLDOWN_S = float(ov["cooldownS"])
         if ov.get("staggerS"):
             STAGGER_S = float(ov["staggerS"])
-        self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
+        self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
         self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%

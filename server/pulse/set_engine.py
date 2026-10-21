@@ -1860,7 +1860,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     w = SetBook()
     w.load(
         {
-            "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
+            "positionCostPct": 0.15, "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
             "setMinSamples": 5, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5],
             "trailVariants": ["0.3:0.1"],
@@ -1887,7 +1887,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g2 = SetBook()
     g2.load(
         {
-            "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
+            "positionCostPct": 0.15, "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
             "setMinSamples": 8, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
             "trailVariants": ["0.3:0.1"],
@@ -1963,7 +1963,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
         return rows
     gb = SetBook()
-    gb.load({"setMinPf": 1.10, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    gb.load({"positionCostPct": 0.15, "setMinPf": 1.10, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sg = next(iter(gb.by_idx))
     sg.active = True
     def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:
@@ -2014,7 +2014,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # R6: one cost default, shared by indication settings and position cost
     from indication_engine import DEFAULT_SETTINGS as IND_DEFAULTS
     from position_cost import POSITION_COST_PCT_DEFAULT as PCD
-    out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD == 0.15, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
+    out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD == 0.12, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
     # perf: scan() is the lane loop used by the replay and the simulator; step() is its reference.
     import random as _random
     _rnd = _random.Random(11)

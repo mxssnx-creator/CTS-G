@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..ec3b78b 100644
+index b3a9ff3..5c3d8ff 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
@@ -632,8 +632,12 @@ index b3a9ff3..ec3b78b 100644
          if ov.get("maxOpen") is not None:
              MAX_OPEN = int(ov["maxOpen"])
          if ov.get("maxPerGroup") is not None:
-@@ -2995,9 +3182,9 @@ class Pulse:
-         self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
+@@ -2992,12 +3179,12 @@ class Pulse:
+             COOLDOWN_S = float(ov["cooldownS"])
+         if ov.get("staggerS"):
+             STAGGER_S = float(ov["staggerS"])
+-        self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
++        self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
          self.pf_window = int(ov.get("pfWindow") or 15)
          self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
 -        self.sl_max = float(ov.get("slMaxPct") or 1.20) / 100.0
