@@ -229,7 +229,37 @@ def extra_book_fetches_a_key_once_while_in_flight():
     return ok, f"venue requests for one in-flight key={calls}; both callers returned={'a' in out and 'b' in out}"
 
 
+def bars_to_entry_reason_round_trip():
+    """Indications end to end: bars go through process, pick_entry chooses the row, the entry reason is built the way the
+    trader builds it, and match returns that same row. A row switched off by its type switch cannot be picked."""
+    from indication_engine import IndicationBook
+
+    bars = synth_bars(48, 400, drift=0.0003)
+    rows = {"1m": bars[-60:], "5m": aggregate_bars(bars, 5), "15m": aggregate_bars(bars, 15)}
+
+    def run(**ov):
+        b = IndicationBook()
+        b.load(overlay(**ov))
+        b.process("BTC-USDT", bars[-60:], pulse_dir=1, pulse_conf=0.7, px=float(bars[-1][3]), sl_pct=0.005,
+                  tp_pct=0.0075, want_extra=False, bars_by_tf=rows)
+        return b
+
+    b = run()
+    got = b.pick_entry("BTC-USDT", 0.5)
+    if got is None:
+        return False, "pick_entry found no row on a clear uptrend"
+    pick, _conf, agree_n = got
+    why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
+    row = b.match("BTC-USDT", why)
+    same = row is not None and row.kind == pick.kind and row.mode == pick.mode and row.direction == pick.direction
+    off = run(indTypeSignals=False, indTypeState=False, indTypeDirection=False, indTypeMove=False,
+              indTypeCommon=False, indTypeActive=False)
+    nothing = off.pick_entry("BTC-USDT", 0.0) is None
+    return same and nothing, f"picked {pick.kind}/{pick.mode} -> matched={same}; all types off -> no pick={nothing}"
+
+
 CHECKS = [
+    ("indication.bars-to-entry-reason-round-trip", bars_to_entry_reason_round_trip),
     ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
