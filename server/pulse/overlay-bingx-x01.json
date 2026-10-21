@@ -56,7 +56,7 @@
   "axisPauseEnabled": true,
   "axisPauseMaxWindow": 8,
   "minPf": 1.2,
-  "positionCostPct": 0.15,
+  "positionCostPct": 0.12,
   "pfWindow": 15,
   "slMinPct": 0.2,
   "slMaxPct": 15.75,

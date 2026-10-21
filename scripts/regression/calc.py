@@ -8,7 +8,9 @@ from __future__ import annotations
 import math
 import random
 
-from common import COST, SMALL, T0, overlay, synth_bars  # noqa: F401
+from common import SMALL, T0, overlay, synth_bars  # noqa: F401
+
+COST = 0.15   # arithmetic examples below are written for 0.15%; independent of the shipped overlay cost
 from set_engine import SetBook, SetLane, TRAIL_SL_RATIO, step_tp_pct
 from position_cost import GATE_MIN_PF_DEFAULT, cost_as_frac, last_n_cost_pf, net_pnl_pct, normalize_cost_pct, ratio_from_r, signed_result_r
 

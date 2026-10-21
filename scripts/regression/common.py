@@ -22,7 +22,7 @@ if PULSE not in sys.path:
     sys.path.insert(0, PULSE)
 
 T0 = float((1_700_000_000 // 60) * 60)     # minute-aligned origin for every replay
-COST = 0.15                                 # PositionCost in percent, the engine default
+COST = 0.12                                 # PositionCost in percent, as shipped in the overlays
 SMALL = {                                   # a small Set grid for checks that test behaviour, not grid size
     "setSlRatios": [0.5, 1.0],
     "setMinStep": 2,
