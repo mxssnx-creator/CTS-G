@@ -1,6 +1,6 @@
 {
   "targetNotional": 2.15,
-  "volumeFactor": 1,
+  "volumeFactor": 1.5,
   "leverage": 150,
   "useMaxLeverage": true,
   "maxOpen": 0,
@@ -8,7 +8,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 30,
+  "symbolCap": 0,
   "symbols": [
     "*"
   ],

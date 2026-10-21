@@ -238,7 +238,7 @@ export type PulseOverlay = {
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
-  volumeFactor: 1,
+  volumeFactor: 1.5,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,
@@ -246,7 +246,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsAll: false,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: 30,
+  symbolCap: 0,
   slPct: 0.48,
   tpPct: 0.75,
   trailArmPct: 0.3,
