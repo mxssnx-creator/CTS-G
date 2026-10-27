@@ -2964,11 +2964,50 @@ class Pulse:
                 return False
         return True
 
+    def venue_exit(self, pos: Position) -> Optional[Tuple[str, float]]:
+        """The venue fill that closed this position: ("sl" or "tp", fill price) when its own stop or TP order FILLED,
+        else None. A position the venue closed is a real close of its lane, not a ghost."""
+        for kind, oids in (("sl", (pos.sl_oid, getattr(pos, "sec_sl_oid", ""))), ("tp", (pos.tp_oid, getattr(pos, "sec_tp_oid", "")))):
+            for oid in oids:
+                if not real_oid(oid):
+                    continue
+                try:
+                    r = self.api.get("/openApi/swap/v2/trade/order", {"symbol": pos.symbol, "orderId": str(oid)})
+                except Exception:
+                    continue
+                data = r.get("data") if isinstance(r, dict) else None
+                o = (data.get("order") if isinstance(data, dict) and isinstance(data.get("order"), dict) else data) or {}
+                if not isinstance(o, dict):
+                    continue
+                status = str(o.get("status") or o.get("orderStatus") or "").upper()
+                if status not in ("FILLED", "FINISHED", "FILLED_FULLY"):
+                    continue
+                try:
+                    px = float(o.get("avgPrice") or o.get("price") or o.get("stopPrice") or 0)
+                except Exception:
+                    px = 0.0
+                if px > 0:
+                    return kind, px
+        return None
+
+    def close_from_venue(self, pos: Position, why: str) -> bool:
+        """Record a position the venue closed by its own stop or TP as a normal close of its lane (reason sl or tp, the
+        fill price). False when no such fill is found."""
+        hit = self.venue_exit(pos)
+        if not hit:
+            return False
+        log(f"VENUE {hit[0]} {pos.symbol} {pos.side} @{hit[1]} ({why})")
+        self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
+        self.close_pos(pos, hit[1], hit[0], exchange=False)
+        return True
+
     def drop_ghost(self, pos: Position, why: str) -> None:
         if self.open.get(pos.symbol) is None:
             return
         if not self._exchange_flat(pos):
             log(f"GHOST skip still-live {pos.symbol} {pos.side} {why}", every=20.0, key=f"ghost:{pos.symbol}")
+            return
+        if self.close_from_venue(pos, why):
             return
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
         self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
@@ -4307,6 +4346,9 @@ class Pulse:
                     pos = self.open.get(sym)
                     if not pos or time.time() - float(pos.opened_at or 0) < 180.0 or not self._exchange_flat(pos):
                         continue
+                    if self.close_from_venue(pos, "stale"):
+                        self.cooldown[sym] = time.time() + 90.0
+                        continue
                     log(f"DROP stale local {sym} (exchange flat)")
                     self.cancel_controls(sym)
                     self.open.pop(sym, None)
@@ -4438,6 +4480,9 @@ class Pulse:
             if pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""):
                 if not self._exchange_flat(pos):
                     continue
+            if self.close_from_venue(pos, "stale"):
+                self.cooldown[sym] = time.time() + 90.0
+                continue
             log(f"DROP stale local {sym} age={age:.0f}s")
             self.cancel_controls(sym)
             self.open.pop(sym, None)
@@ -4499,6 +4544,17 @@ class Pulse:
             except Exception:
                 continue
             if qty <= 0 or px <= 0:
+                continue
+            oid = str(o.get("orderId") or o.get("orderID") or "")
+            held = next((p for p in self.open.values() if oid and kind in ("s", "t")
+                         and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
+            if held is not None:
+                # the venue closed a position we still hold: record it as that lane's close (once; close_pos marks the
+                # stop and TP ids as seen and feeds the Set itself)
+                self.seen_fill_cids.add(cid)
+                self.cancel_controls(held.symbol)
+                self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
+                n += 1
                 continue
             pnl_pct = pnl / (qty * px) if qty * px else 0.0
             rec = {

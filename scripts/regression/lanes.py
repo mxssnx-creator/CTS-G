@@ -666,11 +666,78 @@ def a_venue_order_at_the_level_is_left_to_fill():
     return ok, f"closed by software: {out}; 'No position to close' counts as closed={ok_closed}"
 
 
+class _FilledOrderVenue(_Venue):
+    """The venue after a position's own stop or TP filled: the position is gone, the order reports FILLED."""
+
+    def __init__(self, filled_oid: str, fill_px: float) -> None:
+        super().__init__()
+        self.filled_oid = filled_oid
+        self.fill_px = fill_px
+        self.flat = False
+
+    def get(self, path, extra=None):
+        if path.endswith("/user/positions"):
+            return {"code": 0, "data": [] if self.flat else [{"symbol": SYM, "positionSide": "LONG", "positionAmt": "1"}]}
+        if path.endswith("/trade/order"):
+            oid = str((extra or {}).get("orderId") or "")
+            st = "FILLED" if oid == self.filled_oid else "NEW"
+            return {"code": 0, "data": {"order": {"orderId": oid, "status": st, "avgPrice": str(self.fill_px)}}}
+        if path.endswith("/trade/allOrders"):
+            return {"code": 0, "data": {"orders": [{"orderId": self.filled_oid, "status": "FILLED", "symbol": SYM,
+                                                    "positionSide": "LONG", "executedQty": "1", "avgPrice": str(self.fill_px),
+                                                    "clientOrderID": self.cid}]}}
+        return _Venue.get(self, path, extra)
+
+
+def a_venue_close_is_recorded_as_its_lanes_close():
+    """When the venue closes a position by its own stop or TP, the trader records a normal close of that lane: reason sl
+    or tp at the fill price, in the trade book and the stats, and the Set gets exactly one live close. This holds on all
+    three paths that find the position gone: the ghost check, the stale-book drop and the fill sync."""
+    out = {}
+    for path in ("ghost", "stale", "stale-other-live", "sync"):
+        with _Env() as e:
+            pos = e.pos
+            st = e.p.sets.by_idx[3]
+            pos.set_id, pos.pack = st.id, st.pack
+            pos.sl_oid, pos.tp_oid = "501", "502"
+            pos.opened_at = _real_time.time() - 600
+            venue = _FilledOrderVenue("502", 101.3)
+            venue.cid = e.p.cid("t", pos=pos)
+            e.p.api = venue
+            e.p.control_orders = True
+            seen = []
+            orig = e.p.sets.on_live_close
+            e.p.sets.on_live_close = lambda rec, _o=orig: (seen.append(rec), _o(rec))[1]
+            if path == "ghost":
+                venue.flat = True
+                e.p.drop_ghost(pos, "ctrl-no-position")
+            elif path == "stale":                      # the venue lists no position at all (third empty pass)
+                venue.flat = True
+                e.p._adopt_empty_n = 2
+                e.p.adopt_exchange_positions()
+            elif path == "stale-other-live":           # the venue lists other positions, not this one
+                base_get = venue.get
+                other = {"code": 0, "data": [{"symbol": "ETH-USDT", "positionSide": "LONG", "positionAmt": "1"}]}
+                venue.get = lambda p_, x=None, _b=base_get: other if p_.endswith("/user/positions") else _b(p_, x)
+                e.p.our_orders = lambda s_: []
+                e.p.adopt_exchange_positions()
+            else:
+                e.p.sync_own_fills()
+                e.p.sync_own_fills()                       # a second pass must not count it again
+                venue.flat = True
+                e.p.drop_ghost(pos, "ctrl-no-position")    # nor a later ghost check
+            rec = [c for c in e.p.closed if c.symbol == SYM]
+            out[path] = (SYM in e.p.open, [(c.reason, round(c.exit, 4)) for c in rec], len(seen))
+    ok = all(v == (False, [("tp", 101.3)], 1) for v in out.values())
+    return ok, f"(still open, recorded closes, Set live closes): {out}"
+
+
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
     ("trader.lanes-own-stop-level", set_lane_stops_at_its_own_level_when_the_venue_stop_sits_farther),
     ("trader.lanes-venue-order-left-to-fill", a_venue_order_at_the_level_is_left_to_fill),
+    ("trader.lanes-venue-close-recorded", a_venue_close_is_recorded_as_its_lanes_close),
     ("trader.lanes-recovered-set-keeps-its-lane", a_recovered_set_position_keeps_its_own_lane),
     ("processing.explicit-trail-variants-keep-their-arm", explicit_trail_variants_keep_their_own_arm),
     ("trader.block-stacks-only-on-its-own-proven-lane", block_stacks_only_on_its_own_proven_lane),
