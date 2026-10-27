@@ -627,10 +627,50 @@ def block_min_order_bump_does_not_break_the_book_cap():
     return ok, f"qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400 (+5 %)"
 
 
+def a_venue_order_at_the_level_is_left_to_fill():
+    """With a live venue stop (or TP) at the lane's level, a tick at the level sends no market close: the venue fills
+    there, and a second close would race it ("position not exist" errors, which the venue counts toward an order-API ban).
+    One PositionCost beyond the level the software close acts as a backstop. A venue stop that sits farther out than the
+    lane's level does not hold the lane back. A close the venue answers "No position to close" counts as closed."""
+    out = {}
+    for case in ("stop at level", "stop backstop", "stop farther out", "tp at level", "tp backstop"):
+        with _Env() as e:
+            e.p.control_orders = True
+            pos = e.pos
+            pos.set_id = "indications:1m:sl1.00:st3"
+            pos.sl_pct, pos.tp_pct = 0.004, 0.004
+            pos.entry = 100.0
+            pos.sl, pos.tp = 99.6, 100.4
+            pos.sl_oid = pos.tp_oid = "123"
+            e.p.sets.hist_honor_tp = True
+            cost = 0.0012
+            if case == "stop at level":
+                px = 99.6
+            elif case == "stop backstop":
+                px = 99.6 * (1 - cost) - 1e-6
+            elif case == "stop farther out":
+                pos.sl = 99.0                         # the venue stop was pushed out by the 0.2 % clamp
+                px = 99.6
+            elif case == "tp at level":
+                px = 100.4
+            else:
+                px = 100.4 * (1 + cost) + 1e-6
+            e.p.px[SYM] = px
+            e.p.manage()
+            out[case] = SYM not in e.p.open
+    with _Env() as e:
+        e.venue.post = lambda path, body: {"code": 101205, "msg": "No position to close"}
+        ok_closed, _ = e.p.market_close(e.pos)
+    want = {"stop at level": False, "stop backstop": True, "stop farther out": True, "tp at level": False, "tp backstop": True}
+    ok = out == want and ok_closed
+    return ok, f"closed by software: {out}; 'No position to close' counts as closed={ok_closed}"
+
+
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
     ("trader.lanes-own-stop-level", set_lane_stops_at_its_own_level_when_the_venue_stop_sits_farther),
+    ("trader.lanes-venue-order-left-to-fill", a_venue_order_at_the_level_is_left_to_fill),
     ("trader.lanes-recovered-set-keeps-its-lane", a_recovered_set_position_keeps_its_own_lane),
     ("processing.explicit-trail-variants-keep-their-arm", explicit_trail_variants_keep_their_own_arm),
     ("trader.block-stacks-only-on-its-own-proven-lane", block_stacks_only_on_its_own_proven_lane),

@@ -2627,8 +2627,8 @@ class Pulse:
             msg = str(r.get("msg") or "")
             if ctrl_err_kind(msg) == "qty_close":
                 continue
-            if "position not exist" in msg.lower():
-                return True, self.px.get(pos.symbol) or pos.entry
+            if "position not exist" in msg.lower() or "no position to close" in msg.lower():
+                return True, self.px.get(pos.symbol) or pos.entry     # the venue already closed it (its stop or TP)
         self.errors += 1
         self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
         return False, self.px.get(pos.symbol) or pos.entry     # pos.qty already holds what a partial close left
@@ -3084,13 +3084,13 @@ class Pulse:
         stop = e * (1 - side * sl_f) if sl_f > 0 else 0.0
         if stop and pos.trail is not None:
             stop = max(stop, pos.trail) if side > 0 else min(stop, pos.trail)
-        if stop and ((side > 0 and px <= stop) or (side < 0 and px >= stop)):
+        if stop and self.software_exit(pos, "sl", stop, px):
             self.close_pos(pos, px, "sl")
             return
         tp_f = float(pos.tp_pct or 0)
         if self.lane_honors_tp() and tp_f > 0:
             tp = e * (1 + side * tp_f)
-            if (side > 0 and px >= tp) or (side < 0 and px <= tp):
+            if self.software_exit(pos, "tp", tp, px):
                 self.close_pos(pos, px, "tp")
                 return
         arm = float(pos.trail_arm or 0.0)
@@ -3147,10 +3147,10 @@ class Pulse:
             else:
                 pnl_pct = (pos.entry - px) / pos.entry
                 pos.peak = min(pos.peak, px) if pos.peak else px
-            if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and px <= pos.sl:
+            if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and self.software_exit(pos, "sl", pos.sl, px):
                 self.close_pos(pos, px, "sl")
                 continue
-            if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and px >= pos.sl:
+            if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and self.software_exit(pos, "sl", pos.sl, px):
                 self.close_pos(pos, px, "sl")
                 continue
             if pos.set_id:
@@ -3159,10 +3159,7 @@ class Pulse:
                 self.manage_set_lane(pos, px, now, age, pnl_pct)
                 continue
             if not (self.exits.enabled and self.exits.ignore_tp):
-                if pos.side == "LONG" and px >= pos.tp:
-                    self.close_pos(pos, px, "tp")
-                    continue
-                if pos.side == "SHORT" and px <= pos.tp:
+                if self.software_exit(pos, "tp", pos.tp, px):
                     self.close_pos(pos, px, "tp")
                     continue
             sig = 0
@@ -3637,6 +3634,38 @@ class Pulse:
             "symbolSort": getattr(self, "symbol_sort", "vol1h"),
             "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
         }
+
+    def software_exit(self, pos: Position, kind: str, level: float, px: float) -> bool:
+        """Whether the software check closes at market when the price reaches a stop (kind "sl") or target ("tp") level.
+        When a live venue order of that kind sits at or inside the level, the venue fills it there: a market close as well
+        would race it and draw "position not exist" errors, which the venue counts toward a ban of the whole order API.
+        The software close then acts only as a backstop, one PositionCost beyond the level."""
+        if level <= 0:
+            return False
+        long_ = pos.side == "LONG"
+        if kind == "sl":
+            hit = px <= level if long_ else px >= level
+        else:
+            hit = px >= level if long_ else px <= level
+        if not hit:
+            return False
+        if not getattr(self, "control_orders", True):
+            return True
+        if kind == "sl":
+            oids, venue = (pos.sl_oid, getattr(pos, "sec_sl_oid", "")), float(pos.sl or 0)
+        else:
+            oids, venue = (pos.tp_oid, getattr(pos, "sec_tp_oid", "")), float(pos.tp or 0)
+        if not any(real_oid(o) for o in oids) or venue <= 0:
+            return True                       # no venue order to rely on
+        tol = level * 1e-6
+        if kind == "sl":
+            covers = venue >= level - tol if long_ else venue <= level + tol
+        else:
+            covers = venue <= level + tol if long_ else venue >= level - tol
+        if not covers:
+            return True                       # the venue order sits farther out: the lane's own level decides
+        beyond = (level - px) / level if (kind == "sl") == long_ else (px - level) / level
+        return beyond >= cost_as_frac(self.position_cost_pct)
 
     def exit_lane_pf(self) -> float:
         """Net PF (after PositionCost) of the last Block-window closes of positions without a Set, or 0 with fewer than
