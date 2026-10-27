@@ -20,7 +20,7 @@
   "staggerS": 0.12,
   "controlOrders": true,
   "blockEnabled": true,
-  "blockMaxStack": 0,
+  "blockMaxStack": 8,
   "blockVolumeRatio": 1,
   "blockProfitFactorRatio": 0.8,
   "blockPauseCountRatio": 1,
