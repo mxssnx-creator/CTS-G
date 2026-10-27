@@ -668,6 +668,7 @@ class Pulse:
         self.halt_reason: Optional[str] = None
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
+        self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
         self.regime = "neutral"
         self.consec_loss = 0
         self.wins = 0
@@ -970,7 +971,14 @@ class Pulse:
         return s
 
     def sized_notional(self) -> float:
+        """One position's notional: the balance x sizePctOfBalance % x volumeFactor, so the size follows the account both
+        ways. Without a balance read yet (or with sizePctOfBalance 0) the fixed targetNotional x volumeFactor applies.
+        size_qty raises it to the venue's minimum order."""
         vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
+        pct = float(getattr(self, "size_pct", 0.0) or 0.0)
+        bal = float(getattr(self, "equity", 0.0) or 0.0)
+        if pct > 0 and bal > 0:
+            return max(0.2, bal * pct / 100.0 * vf)
         return max(0.2, float(TARGET_NOTIONAL) * vf)
 
     def notional_cap(self) -> float:
@@ -3335,6 +3343,11 @@ class Pulse:
             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
         except Exception:
             self.volume_factor = 1.0
+        try:   # percent of the balance per position before the volume factor; 0 = the fixed targetNotional
+            raw_pct = ov.get("sizePctOfBalance")
+            self.size_pct = max(0.0, min(25.0, float(raw_pct if raw_pct is not None else 1.0)))
+        except Exception:
+            self.size_pct = 1.0
         self.use_max_leverage, LEVERAGE = leverage_settings(ov)
         USE_MAX_LEVERAGE = self.use_max_leverage
         if ov.get("maxOpen") is not None:
@@ -3545,6 +3558,7 @@ class Pulse:
         return {
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
             "leverage": LEVERAGE,
             "useMaxLeverage": bool(self.use_max_leverage),
             "leverageMap": dict(getattr(self, "lev_map", {})),
@@ -4778,6 +4792,8 @@ class Pulse:
             "tpPct": TP_PCT * 100,
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
+            "sizedNotional": round(self.sized_notional(), 6),
             "paused": os.path.exists(PAUSE_PATH),
             "activityPerMin": round(per_min, 2),
             "consecLoss": self.consec_loss,

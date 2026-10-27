@@ -1145,9 +1145,22 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("targetNotional", v)}
                 />
+                <Num
+                  label="Size % of balance"
+                  value={overlay.sizePctOfBalance ?? 1}
+                  min={0}
+                  max={25}
+                  step={0.1}
+                  hint="Position notional = balance x this % x volume factor (raised to the exchange minimum). 0 = fixed pulse notional."
+                  onChange={(v) => patch("sizePctOfBalance", v)}
+                />
                 <KV
                   k="Effective notional"
-                  v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)}
+                  v={
+                    (overlay.sizePctOfBalance ?? 1) > 0 && Number(stats?.equity) > 0
+                      ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 1)) / 100 * (overlay.volumeFactor || 1)).toFixed(2)
+                      : (overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)
+                  }
                 />
                 <Toggle
                   label="Always max leverage"

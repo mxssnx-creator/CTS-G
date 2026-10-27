@@ -1063,6 +1063,32 @@ def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
     return ok, f"close calls during the ban={banned} after={free} refusal logged={logged} position kept={kept}"
 
 
+def position_size_follows_the_balance_and_the_volume_factor():
+    """Position notional = balance x sizePctOfBalance % x volumeFactor: it doubles with the balance and with the factor,
+    falls back to targetNotional x volumeFactor before a balance is read (or with the percentage at 0), and size_qty raises
+    it to the venue's minimum order on a small account."""
+    p = _bare_pulse()
+    p.volume_factor, p.size_pct = 1.5, 1.0
+    out = {}
+    for bal in (0.0, 8.92, 1000.0, 2000.0):
+        p.equity = bal
+        out[bal] = round(p.sized_notional(), 6)
+    p.equity, p.volume_factor = 1000.0, 3.0
+    doubled_factor = round(p.sized_notional(), 6)
+    p.size_pct = 0.0
+    fixed = round(p.sized_notional(), 6)
+    # a 9 USDT account: 1 % x 1.5 = 0.13 USDT, under a 5 USDT minimum order -> the minimum
+    p.size_pct, p.volume_factor, p.equity, p.available = 1.0, 1.5, 8.92, 8.92
+    c = pt.Contract(symbol="X-USDT", min_qty=0.001, step=0.001, qprec=3, pprec=4, min_usdt=5.0, max_lev=50)
+    p.leverage_for = lambda c_: 50
+    q = p.size_qty(c, 100.0)
+    ok = (out[0.0] == round(pt.TARGET_NOTIONAL * 1.5, 6) and abs(out[1000.0] - 15.0) < 1e-9
+          and abs(out[2000.0] - 30.0) < 1e-9 and abs(doubled_factor - 30.0) < 1e-9
+          and fixed == round(pt.TARGET_NOTIONAL * 3.0, 6) and abs(q * 100.0 - 5.0) < 1e-6)
+    return ok, (f"notional by balance={out}; factor 3 at 1000={doubled_factor}; pct 0={fixed}; "
+                f"9 USDT account order={round(q * 100.0, 4)} USDT (venue minimum 5)")
+
+
 def no_entry_on_a_symbol_that_failed_the_data_check():
     import types
     p = _bare_pulse()
@@ -1077,6 +1103,7 @@ def no_entry_on_a_symbol_that_failed_the_data_check():
 
 
 CHECKS = [
+    ("trader.size-follows-balance-and-volume-factor", position_size_follows_the_balance_and_the_volume_factor),
     ("trader.venue-ban-pauses-flatten-and-refusal-logged", a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged),
     ("trader.lanes-no-other-lane-touches-a-set-position", no_other_lane_touches_a_set_position),
     ("trader.lanes-set-position-gets-no-add-on-lane", a_set_position_gets_no_add_on_lane),

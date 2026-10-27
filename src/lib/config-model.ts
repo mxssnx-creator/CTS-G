@@ -100,6 +100,8 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 export type PulseOverlay = {
   targetNotional: number;
   volumeFactor: number;
+  /** Percent of the balance per position before the volume factor; 0 = the fixed targetNotional. */
+  sizePctOfBalance: number;
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -249,6 +251,7 @@ export type PulseOverlay = {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
   volumeFactor: 1.5,
+  sizePctOfBalance: 1,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,

@@ -1,6 +1,7 @@
 {
   "targetNotional": 2.15,
   "volumeFactor": 1,
+  "sizePctOfBalance": 1.0,
   "leverage": 150,
   "maxOpen": 0,
   "maxPerGroup": 0,
