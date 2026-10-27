@@ -164,5 +164,10 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  }
+  },
+  "stratShortRange": false,
+  "shortRangeStepMin": 2,
+  "shortRangeStepMax": 6,
+  "slMinSteps": 1,
+  "trailMinSteps": 2
 }

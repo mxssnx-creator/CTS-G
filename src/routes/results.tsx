@@ -9,6 +9,7 @@ import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
 import { DEFAULT_OVERLAY, GATE_MIN_PF_DEFAULT } from "@/lib/config-model";
 import { CoveragePanel } from "@/components/coverage-overview";
+import { BaseValidationPanel } from "@/components/base-validation-panel";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
@@ -56,6 +57,7 @@ function ResultsPage() {
         {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · {stats?.openCount ?? 0} open · {closed.length} closed
       </p>
       <StatsOverview data={overview} live={stats} />
+      <BaseValidationPanel live={stats} minPf={stats?.sets?.minPf ?? GATE_MIN_PF_DEFAULT} />
 
       <div className="flex flex-wrap gap-2">
         <a

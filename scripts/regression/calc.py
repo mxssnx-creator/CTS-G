@@ -168,7 +168,7 @@ def set_floors_follow_the_configured_cost():
     o = lane.open
     cost = 0.0004
     tp_frac = 2 * cost                                   # k = 2 TP at 0.04% cost = 0.08%
-    sl_frac = max(cost, st.tp_pct * st.sl_ratio)         # stop floor is one PositionCost at 0.04%
+    sl_frac = max(2 * cost, st.tp_pct * st.sl_ratio)     # overall minimum stop: PositionCost + one step = 2 x cost
     ok = (o is not None and abs(o["tp"] - 100.0 * (1 + tp_frac)) < 1e-9
           and abs(o["sl"] - 100.0 * (1 - sl_frac)) < 1e-9)
     return ok, f"cost=0.04 entry sl={o['sl']:.5f} tp={o['tp']:.5f}" if o else "no entry"

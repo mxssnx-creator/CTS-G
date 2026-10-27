@@ -156,5 +156,10 @@
   "setGateWindow": 50,
   "setGateMinTrades": 30,
   "loadPartial": true,
-  "exitMinPf": 1.2
+  "exitMinPf": 1.2,
+  "stratShortRange": false,
+  "shortRangeStepMin": 2,
+  "shortRangeStepMax": 6,
+  "slMinSteps": 1,
+  "trailMinSteps": 2
 }

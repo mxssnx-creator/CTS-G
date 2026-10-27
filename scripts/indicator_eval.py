@@ -30,6 +30,17 @@ EXITS: Dict[str, Tuple[float, float]] = {   # name: (tp %, sl %)
     "tp1.44/sl.72": (1.44, 0.72),
     "tp.72/sl.36": (0.72, 0.36),
 }
+def step_exits(cost: float) -> Dict[str, Tuple[float, float]]:
+    """Exit shapes in the engine's own units: target = step x PositionCost, stop = SL ratio x target, never under the
+    overall minimum of one PositionCost plus one step (two PositionCosts)."""
+    out: Dict[str, Tuple[float, float]] = {}
+    for step in (2, 3, 4, 6):
+        for ratio in (0.5, 1.0, 2.0, 3.5):
+            tp = step * cost
+            out[f"s{step}/r{ratio}"] = (tp, max(ratio * tp, 2.0 * cost))
+    return out
+
+
 TIME_BARS = 60
 ENTRY_CONF = 0.58
 WARM = 100
@@ -48,10 +59,9 @@ def _simulate(bars: List[List[float]], i: int, side: int, tp_pct: float, sl_pct:
     return side * (px - entry) / entry * 100.0, last
 
 
-def _one_symbol(args: Tuple[str, List[List[float]], int, float]) -> Dict[str, Any]:
-    sym, bars, step, cost = args
+def _one_symbol(args: Tuple[str, List[List[float]], int, float, List[str], Dict[str, Tuple[float, float]]]) -> Dict[str, Any]:
+    sym, bars, step, cost, names, EXITS = args
     n = len(bars)
-    names = list(ix.INDICATORS)
     # trades[(indicator, exit)] = list of (entry_index, net %)
     trades: Dict[str, List[Tuple[int, float]]] = {f"{nm}|{ex}": [] for nm in names for ex in EXITS}
     busy: Dict[str, int] = {k: -1 for k in trades}
@@ -90,13 +100,17 @@ def main() -> int:
     ap.add_argument("--step", type=int, default=3)
     ap.add_argument("--cost", type=float, default=0.12)
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--exits", choices=("legacy", "steps"), default="legacy")
+    ap.add_argument("--only", default="", help="comma list of indicator names (default: all)")
     a = ap.parse_args()
+    names = [x for x in a.only.split(",") if x] or list(ix.INDICATORS)
+    exits = step_exits(a.cost) if a.exits == "steps" else dict(EXITS)
     jobs = []
     for f in sorted(glob.glob(os.path.join(a.data, "*.json"))):
         if os.path.basename(f).startswith("_"):
             continue
         rows = json.load(open(f))
-        jobs.append((os.path.basename(f)[:-5], [[r[1], r[2], r[3], r[4], r[5]] for r in rows], a.step, a.cost))
+        jobs.append((os.path.basename(f)[:-5], [[r[1], r[2], r[3], r[4], r[5]] for r in rows], a.step, a.cost, names, exits))
     with Pool(a.workers) as pool:
         res = pool.map(_one_symbol, jobs)
     parts: Dict[str, Dict[str, List[float]]] = {}

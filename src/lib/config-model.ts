@@ -176,6 +176,14 @@ export type PulseOverlay = {
   stratBlock: boolean;
   stratTrailing: boolean;
   stratGeneral: boolean;
+  /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
+  stratShortRange: boolean;
+  shortRangeStepMin: number;
+  shortRangeStepMax: number;
+  /** Overall minimum stop = PositionCost + slMinSteps steps (one step = one PositionCost). */
+  slMinSteps: number;
+  /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
+  trailMinSteps: number;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -328,6 +336,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratGeneral: true,
+  stratShortRange: false,
+  shortRangeStepMin: 2,
+  shortRangeStepMax: 6,
+  slMinSteps: 1,
+  trailMinSteps: 2,
   stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
@@ -472,6 +485,11 @@ export type CtsSettings = {
   stratBlock?: boolean;
   stratTrailing?: boolean;
   stratGeneral?: boolean;
+  stratShortRange?: boolean;
+  shortRangeStepMin?: number;
+  shortRangeStepMax?: number;
+  slMinSteps?: number;
+  trailMinSteps?: number;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -638,6 +656,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
     stratGeneral: bool(cts.stratGeneral, true),
+    stratShortRange: bool(cts.stratShortRange, false),
+    shortRangeStepMin: num(cts.shortRangeStepMin, 2),
+    shortRangeStepMax: num(cts.shortRangeStepMax, 6),
+    slMinSteps: num(cts.slMinSteps, 1),
+    trailMinSteps: num(cts.trailMinSteps, 2),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),

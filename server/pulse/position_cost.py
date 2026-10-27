@@ -36,6 +36,32 @@ TRAIL_STEP_SETTING_MIN = 2
 TRAIL_STEP_SETTING_MAX = 8
 TRAIL_STEP_DEFAULT = 3
 TRAIL_STEP_MAX = 22
+# Overall minimum distances, in PositionCost units, counted as "PositionCost + n steps" (one step = one PositionCost):
+# a stop is never tighter than PositionCost + SL_MIN_STEPS steps, and a trailing stop never trails closer than
+# PositionCost + TRAIL_MIN_STEPS steps. Defaults: 1 and 2, i.e. 2 x and 3 x PositionCost.
+SL_MIN_STEPS_DEFAULT = 1
+TRAIL_MIN_STEPS_DEFAULT = 2
+_MIN_STEPS = {"sl": SL_MIN_STEPS_DEFAULT, "trail": TRAIL_MIN_STEPS_DEFAULT}
+
+
+def configure_min_steps(sl: Any = None, trail: Any = None) -> Dict[str, int]:
+    """Set the overall minimums (the overlay keys slMinSteps and trailMinSteps). None keeps the current value."""
+    if sl is not None:
+        _MIN_STEPS["sl"] = int(max(0, min(5, round(finite(sl, SL_MIN_STEPS_DEFAULT)))))
+    if trail is not None:
+        _MIN_STEPS["trail"] = int(max(1, min(7, round(finite(trail, TRAIL_MIN_STEPS_DEFAULT)))))
+    return dict(_MIN_STEPS)
+
+
+def sl_floor_frac(cost_pct: float, steps: Optional[int] = None) -> float:
+    """The smallest stop distance as a fraction of price: (1 + steps) x PositionCost."""
+    n = _MIN_STEPS["sl"] if steps is None else int(steps)
+    return (1 + n) * max(0.0, float(cost_pct)) / 100.0
+
+
+def trail_floor_steps(steps: Optional[int] = None) -> int:
+    """The smallest trailing distance in PositionCost units: 1 + steps."""
+    return 1 + (_MIN_STEPS["trail"] if steps is None else int(steps))
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
@@ -200,8 +226,9 @@ def resolve_sl_tp(
     else:
         tp = clamp_pct(cost_tp, tp_min, tp_max)
         src = "cost"
+    floor = sl_floor_frac(cost_pct)
     if bind_sl_to_tp:
-        sl = clamp_pct(tp * ratio, sl_min, sl_max)
+        sl = max(floor, clamp_pct(tp * ratio, sl_min, sl_max))   # never under PositionCost + SL_MIN_STEPS steps
         src = f"{src}:r{ratio:.1f}"
         return sl, tp, src
     cost_sl = max(sl_min, cost_tp * ratio)
@@ -214,6 +241,7 @@ def resolve_sl_tp(
         sl = clamp_pct(base_sl if base_sl > 0 else cost_sl, sl_min, sl_max)
         chosen_tp = clamp_pct(base_tp if base_tp > 0 else cost_tp, tp_min, tp_max)
         src = "overlay"
+    sl = max(floor, sl)
     if chosen_tp < sl * 1.05:
         chosen_tp = clamp_pct(sl * rr, tp_min, tp_max)
     return sl, chosen_tp, src

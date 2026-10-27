@@ -444,7 +444,13 @@ def effective_pf_is_pooled_over_valid_sets_only():
     ok = (snap["base"]["sets"] == len(valid) and snap["unfiltered"]["sets"] == len(b.by_idx)
           and snap["base"]["pf"] == pf(valid) and snap["unfiltered"]["pf"] == pf(b.by_idx)
           and 0 < snap["base"]["sets"] < snap["unfiltered"]["sets"])
-    return ok, f"base pf={snap['base']['pf']} over {snap['base']['sets']} Sets; unfiltered pf={snap['unfiltered']['pf']} over {snap['unfiltered']['sets']}"
+    want_pct = round(100.0 * len(valid) / len(b.by_idx), 2)
+    packs = snap["byPack"]
+    ok = ok and snap["validatedPct"] == want_pct and snap["valid"] == len(valid) and snap["total"] == len(b.by_idx) \
+        and sum(v["valid"] for v in packs.values()) == len(valid) and sum(v["total"] for v in packs.values()) == len(b.by_idx) \
+        and set(packs) == set(b.packs)
+    return ok, (f"base pf={snap['base']['pf']} over {snap['base']['sets']} Sets; unfiltered pf={snap['unfiltered']['pf']} "
+                f"over {snap['unfiltered']['sets']}; validated {snap['validatedPct']}% ({snap['valid']}/{snap['total']}) packs={list(packs)}")
 
 
 def pack_change_does_not_poison_the_signal_memo():

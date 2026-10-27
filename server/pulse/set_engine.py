@@ -31,9 +31,14 @@ from position_cost import (
     TRAIL_STEP_DEFAULT,
     TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN,
+    SL_MIN_STEPS_DEFAULT,
+    TRAIL_MIN_STEPS_DEFAULT,
+    configure_min_steps,
     cost_as_frac,
     net_pnl_pct,
+    sl_floor_frac,
     snap_sl_ratio,
+    trail_floor_steps,
 )
 from indication_engine import (
     aggregate_bars,
@@ -50,6 +55,9 @@ from indication_extra import INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_L
 from risk_variants import parse_trail, trail_grid, trail_key
 
 PACKS = ("indications", "general")
+SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
+SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
+SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
 GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
@@ -284,6 +292,21 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
     return 0, max(long_w, short_w), "split"
 
 
+def short_range_signal(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Short Range pack: the Low-Range variants named in settings["shortRangeVariants"]. One variant firing is a
+    signal; several firing the same way take the strongest confidence; opposite directions cancel (no signal)."""
+    names = settings.get("shortRangeVariants") or list(SHORT_VARIANTS_DEFAULT)
+    votes = extra_votes(rows, names)
+    if not votes:
+        return 0, 0.0, "flat"
+    longs = [v for v in votes if v[0] > 0]
+    shorts = [v for v in votes if v[0] < 0]
+    if longs and shorts:
+        return 0, 0.0, "split"
+    side = longs or shorts
+    return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
+
+
 def pack_signals(
     bars: Sequence[Sequence[float]],
     packs: Sequence[str],
@@ -328,6 +351,8 @@ def pack_signals(
         if "indications" in packs:
             lo = i + 1 - IND_WINDOW_BARS
             row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+        if SHORT_PACK in packs:
+            row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_LOOKBACK) : i + 1], ind_settings)
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:
@@ -535,7 +560,7 @@ class SetLane:
             return None
         close = float(bar[3])
         cost_frac = cost_as_frac(cfg["cost_pct"])
-        sl_frac = max(cost_frac, self.sl_base)           # a stop is never tighter than one PositionCost
+        sl_frac = max(sl_floor_frac(cfg["cost_pct"], cfg.get("sl_floor_steps")), self.sl_base)   # never under PositionCost + steps
         tp_frac = max(2 * cost_frac, self.tp_frac)       # TP grid starts at 2 x PositionCost
         if d > 0:
             sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
@@ -571,6 +596,7 @@ class SetLane:
         cooldown = cfg["cooldown"]
         cost_pct = cfg["cost_pct"]
         cost_frac = cost_as_frac(cost_pct)
+        sl_floor = sl_floor_frac(cost_pct, cfg.get("sl_floor_steps"))
         honor_tp = bool(cfg["honor_tp"])
         use_trail = self.use_trail
         arm = self.arm
@@ -662,7 +688,7 @@ class SetLane:
             elif allowed:
                 d = int(dirs[j])
                 close = float(bars[j][3])
-                sl_frac = max(cost_frac, sl_base)
+                sl_frac = max(sl_floor, sl_base)
                 tp_use = max(2 * cost_frac, tp_frac)
                 if d > 0:
                     sl, tp = close * (1 - sl_frac), close * (1 + tp_use)
@@ -704,6 +730,9 @@ class SetBook:
         self.min_step = STEP_MIN
         self.step_max = STEP_MAX
         self.step_adapt = True
+        self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
+        self.sl_min_steps = SL_MIN_STEPS_DEFAULT
+        self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
         self.hist_honor_tp = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
         self.packs: List[str] = list(PACKS)
@@ -778,7 +807,19 @@ class SetBook:
             packs.append("indications")
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
+        if bool(ov.get("stratShortRange", False)):
+            packs.append(SHORT_PACK)
         self.packs = packs or ["indications"]
+        lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
+        hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
+        self.short_steps = list(range(lo, hi + 1))
+        # overall minimum stop and trailing distance, "PositionCost + n steps" (one step = one PositionCost)
+        sl_ms = ov.get("slMinSteps")
+        tr_ms = ov.get("trailMinSteps")
+        mins = configure_min_steps(SL_MIN_STEPS_DEFAULT if sl_ms is None else sl_ms,
+                                   TRAIL_MIN_STEPS_DEFAULT if tr_ms is None else tr_ms)
+        self.sl_min_steps = mins["sl"]
+        self.trail_min_steps = mins["trail"]
         # Set grid: every SL ratio in setSlRatios (default 0.5..3.5 step 0.25) x every TP step x every pack.
         raw_ratios = ov.get("setSlRatios") or list(SL_RATIOS)
         ratios: List[float] = []
@@ -790,7 +831,8 @@ class SetBook:
         self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
         # Trailing grid: every (arm, give) from trailMinStep up, in PositionCost units (trail_grid).
         # An explicit trailVariants list ("arm:give" in percent) still overrides the grid.
-        self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))))
+        self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))),
+                                  min(TRAIL_STEP_SETTING_MAX, trail_floor_steps(self.trail_min_steps)))
         raw_tr = ov.get("trailVariants")
         if raw_tr:
             if isinstance(raw_tr, str):
@@ -829,6 +871,7 @@ class SetBook:
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
             # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
+            "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
             "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if str(x) in EXTRA_INDICATORS}),
         }
         with self._lock:
@@ -863,8 +906,13 @@ class SetBook:
             by_idx.append(st)
             idx += 1
         for pack_i, pack in enumerate(self.packs):
+            pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
+            pack_trails = trails
+            if pack == SHORT_PACK and self.hist_honor_tp:
+                short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
+                pack_trails = [t for t in (list(self.trails) or [("0.3:0.1", 0.3, 0.1)]) if t[1] < short_mid - 1e-9]
             for sl_i, sl in enumerate(self.sl_ratios):
-                for step_i, step in enumerate(self.steps):
+                for step_i, step in enumerate(pack_steps):
                     sid = make_set_id(pack, sl, "", step)
                     tp = step_tp_pct(step, self.cost_pct)
                     prev = keep.get(sid)
@@ -890,10 +938,10 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-            for tr_i, (tkey, arm, give) in enumerate(trails):
+            for tr_i, (tkey, arm, give) in enumerate(pack_trails):
                 sid = make_trail_id(pack, tkey)
                 prev = keep.get(sid)
-                mid_step = self.steps[len(self.steps) // 2] if self.steps else 8
+                mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
                 tp = step_tp_pct(mid_step, self.cost_pct)
                 if prev:
                     st = prev
@@ -1217,6 +1265,7 @@ class SetBook:
             "cooldown": self.cooldown_bars,
             "cost_pct": self.cost_pct,
             "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
+            "sl_floor_steps": self.sl_min_steps,
         }
         # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
         dirs: Dict[str, List[int]] = {}
@@ -1381,6 +1430,9 @@ class SetBook:
                 "step": len(self.steps),
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
+            "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
+                           "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
+            "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
             "product": len(self.by_idx),
             "indexed": True,
             "independentTrail": True,
@@ -1460,15 +1512,26 @@ class SetBook:
             return self._snapshot()
 
     def _pf_split(self) -> Dict[str, Any]:
-        """Pooled net PF of the Sets that pass Base validation (the effective one) and of every Set (unfiltered, before
-        Base). The unfiltered figure sits under 1 by design: Base validation exists to drop the losing Sets."""
+        """The post-Base standard figures. `base` is the pooled net PF of the Sets that pass Base validation (the
+        effective PF, the one to judge a strategy by); `unfiltered` is every Set before Base (under 1 by design: Base
+        exists to drop the losing Sets). `validatedPct` is the share of configured Sets that pass Base validation, and
+        `byPack` repeats base/validated per strategy pack."""
         def pool(sts: List[SetState]) -> Dict[str, Any]:
             gp = sum(x.gp for x in sts)
             gl = sum(x.gl for x in sts)
             pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
             return {"pf": pf, "n": sum(x.n for x in sts), "sets": len(sts)}
-        valid = [x for x in self.by_idx if not self.gate_reason(x)]
-        return {"base": pool(valid), "unfiltered": pool(list(self.by_idx))}
+        allsets = list(self.by_idx)
+        valid = [x for x in allsets if not self.gate_reason(x)]
+        total = len(allsets)
+        by_pack: Dict[str, Any] = {}
+        for pack in self.packs:
+            ps = [x for x in allsets if x.pack == pack]
+            pv = [x for x in ps if not self.gate_reason(x)]
+            by_pack[pack] = {"base": pool(pv), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv),
+                             "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0}
+        return {"base": pool(valid), "unfiltered": pool(allsets), "total": total, "valid": len(valid),
+                "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack}
 
     def _snapshot(self) -> Dict[str, Any]:
         rows = []

@@ -123,3 +123,70 @@ CHECKS = [
     ("extra.failing-indicator-isolated", a_failing_indicator_is_isolated),
     ("extra.overlay-list-reaches-vote", the_overlay_list_reaches_the_vote_and_default_is_off),
 ]
+
+
+def _short_book(**extra):
+    b = SetBook()
+    b.load(overlay(stratShortRange=True, stratIndications=False, stratGeneral=False, **extra))
+    return b
+
+
+def short_range_grid_is_steps_2_to_6():
+    from set_engine import SHORT_PACK
+    b = _short_book()
+    base = [s for s in b.by_idx if s.pack == SHORT_PACK and s.kind == "base"]
+    steps = sorted({s.step for s in base})
+    ratios = sorted({s.sl_ratio for s in base})
+    off = SetBook()
+    off.load(overlay())
+    wide = _short_book(shortRangeStepMin=3, shortRangeStepMax=5)
+    ok = (steps == [2, 3, 4, 5, 6] and ratios == [0.5 + 0.25 * i for i in range(13)] and len(base) == 65
+          and SHORT_PACK not in off.packs
+          and sorted({s.step for s in wide.by_idx if s.kind == "base"}) == [3, 4, 5])
+    return ok, f"steps={steps} ratios={len(ratios)} base Sets={len(base)} off by default={SHORT_PACK not in off.packs}"
+
+
+def short_range_signal_cancels_opposite_votes():
+    import indication_extra as ixm
+    from set_engine import short_range_signal
+    saved = dict(ixm.INDICATORS)
+    try:
+        ixm.INDICATORS["lr_fade"] = lambda r: (1, 0.7)
+        ixm.INDICATORS["lr_break"] = lambda r: (-1, 0.65)
+        ixm.INDICATORS["lr_nr7"] = lambda r: (1, 0.9)
+        both = short_range_signal([[1, 1, 1, 1, 1]] * 3, {"shortRangeVariants": ["lr_fade", "lr_break"]})
+        same = short_range_signal([[1, 1, 1, 1, 1]] * 3, {"shortRangeVariants": ["lr_fade", "lr_nr7"]})
+        none = short_range_signal([[1, 1, 1, 1, 1]] * 3, {"shortRangeVariants": ["unknown"]})
+    finally:
+        ixm.INDICATORS.clear()
+        ixm.INDICATORS.update(saved)
+    ok = both[0] == 0 and same == (1, 0.9, "lr_fade+lr_nr7") and none[0] == 0
+    return ok, f"opposite={both} same={same} none={none}"
+
+
+def minimum_stop_and_trail_follow_cost_plus_steps():
+    import position_cost as pc
+    from set_engine import SetLane
+    saved = dict(pc._MIN_STEPS)
+    try:
+        pc.configure_min_steps(1, 2)
+        floor = pc.sl_floor_frac(0.12)
+        sl, tp, _ = pc.resolve_sl_tp(base_sl=0.0, base_tp=0.0036, sl_min=0.0001, sl_max=0.05, tp_min=0.0001, tp_max=0.05,
+                                      cost_pct=0.12, sl_to_tp=0.3, bind_sl_to_tp=True)
+        pc.configure_min_steps(3, 4)
+        floor3, trail3 = pc.sl_floor_frac(0.12), pc.trail_floor_steps()
+        pc.configure_min_steps(99, 99)           # clamped, never unbounded
+        clamped = dict(pc._MIN_STEPS)
+    finally:
+        pc._MIN_STEPS.clear()
+        pc._MIN_STEPS.update(saved)
+    ok = (abs(floor - 0.0024) < 1e-12 and abs(sl - 0.0024) < 1e-12 and abs(floor3 - 0.0048) < 1e-12 and trail3 == 5
+          and clamped == {"sl": 5, "trail": 7})
+    return ok, f"floor={floor} resolved sl={sl} (ratio 0.3 x TP 0.36% = 0.108% is under it) floor(3)={floor3} trail(4)={trail3} clamp={clamped}"
+
+
+CHECKS += [
+    ("extra.short-range-grid-steps-2-6", short_range_grid_is_steps_2_to_6),
+    ("extra.short-range-signal-cancels-opposites", short_range_signal_cancels_opposite_votes),
+    ("extra.minimum-stop-and-trail-follow-cost-plus-steps", minimum_stop_and_trail_follow_cost_plus_steps),
+]

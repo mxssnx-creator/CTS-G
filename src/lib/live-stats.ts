@@ -64,6 +64,18 @@ export type LiveClosed = {
   unit?: string;
 };
 
+/** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
+ * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
+export type PfPool = { pf: number; n: number; sets: number };
+export type PfBase = {
+  base: PfPool;
+  unfiltered: PfPool;
+  total?: number;
+  valid?: number;
+  validatedPct?: number;
+  byPack?: Record<string, { base: PfPool; unfiltered: PfPool; total: number; valid: number; validatedPct: number }>;
+};
+
 export type LiveStats = {
   running: boolean;
   mode: string;
@@ -462,7 +474,9 @@ export type LiveStats = {
     useHistoricGate?: boolean;
     setCount?: number;
     /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
-    pfBase?: { base: { pf: number; n: number; sets: number }; unfiltered: { pf: number; n: number; sets: number } };
+    pfBase?: PfBase;
+    counts?: { valid: number; invalid: number; locked: number; error: number; configured: number; retired?: number;
+      reasons?: Record<string, number> };
     minStep?: number;
     minStepCfg?: number;
     stepMax?: number;

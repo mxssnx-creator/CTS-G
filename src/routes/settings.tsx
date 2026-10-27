@@ -204,6 +204,7 @@ function SettingsPage() {
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -530,6 +531,41 @@ function SettingsPage() {
                   max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
+                />
+                <Slider
+                  label="Short Range · TP step min"
+                  value={overlay.shortRangeStepMin}
+                  min={2}
+                  max={6}
+                  step={1}
+                  hint="Short Range (Low-Range signals) trades TP steps min..max, one step = one PositionCost. Default 2–6."
+                  onChange={(v) => patch("shortRangeStepMin", Math.max(2, Math.min(overlay.shortRangeStepMax || 6, Math.round(v))))}
+                />
+                <Slider
+                  label="Short Range · TP step max"
+                  value={overlay.shortRangeStepMax}
+                  min={2}
+                  max={6}
+                  step={1}
+                  onChange={(v) => patch("shortRangeStepMax", Math.max(overlay.shortRangeStepMin || 2, Math.min(6, Math.round(v))))}
+                />
+                <Slider
+                  label="Min stop · steps over cost"
+                  value={overlay.slMinSteps}
+                  min={0}
+                  max={5}
+                  step={1}
+                  hint={`Overall minimum stop = PositionCost + n steps = ${(((overlay.slMinSteps ?? 1) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 1).`}
+                  onChange={(v) => patch("slMinSteps", Math.max(0, Math.min(5, Math.round(v))))}
+                />
+                <Slider
+                  label="Min trailing distance · steps over cost"
+                  value={overlay.trailMinSteps}
+                  min={1}
+                  max={7}
+                  step={1}
+                  hint={`Minimum trailing distance = PositionCost + n steps = ${(((overlay.trailMinSteps ?? 2) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 2).`}
+                  onChange={(v) => patch("trailMinSteps", Math.max(1, Math.min(7, Math.round(v))))}
                 />
               </Grid>
               <SetsLiveTable stats={stats} overlay={overlay} />

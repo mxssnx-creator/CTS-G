@@ -458,6 +458,140 @@ def streak_exhaustion(rows: Sequence[Row], n: int = 6) -> Signal:
     return None
 
 
+# ---- Low-Range family ---------------------------------------------------------------------------------------------
+# A low range is a stretch where the last n bars span only a few ATR and the Bollinger bandwidth sits at the bottom
+# of its own recent distribution. Three tactics read it: fade the box edges, take the break of the box (alone, and
+# only in the direction of the slope of a slower EMA), and the narrow-range bar (NR7, inside bar) break. All are
+# causal and read only the newest LOOKBACK bars.
+
+
+def low_range_state(rows: Sequence[Row], n: int = 24, bw_len: int = 20, rank_len: int = 120) -> Optional[Dict[str, float]]:
+    """Measures of the current range: box width in percent and in ATR, the close's position in the box, the
+    percentile rank of the Bollinger bandwidth over `rank_len` bars (0 = the narrowest seen), and the slope of EMA50
+    in percent over 10 bars. None when there are not enough bars."""
+    r = _tail(rows)
+    if len(r) < max(n, rank_len // 2) + 12:
+        return None
+    box = r[-n - 1 : -1]            # the box is the n bars BEFORE the current bar: a break is outside it
+    hi = max(float(b[1]) for b in box)
+    lo = min(float(b[2]) for b in box)
+    c = float(r[-1][3])
+    if lo <= 0 or hi <= lo:
+        return None
+    atr = _atr(r)
+    closes = [float(b[3]) for b in r]
+    widths: List[float] = []
+    for i in range(bw_len - 1, len(closes)):
+        w = closes[i - bw_len + 1 : i + 1]
+        m = sum(w) / bw_len
+        sd = math.sqrt(sum((x - m) ** 2 for x in w) / bw_len)
+        widths.append(4.0 * sd / m if m > 0 else 0.0)
+    hist = widths[-rank_len:]
+    rank = sum(1 for x in hist if x <= hist[-1]) / len(hist)
+    e50 = _ema_list(closes, 50)
+    slope = (e50[-1] - e50[-11]) / e50[-11] * 100.0 if e50[-11] > 0 else 0.0
+    return {
+        "hi": hi, "lo": lo, "close": c,
+        "width_pct": (hi - lo) / lo * 100.0,
+        "width_atr": (hi - lo) / atr if atr > 0 else 99.0,
+        "pos": (c - lo) / (hi - lo),
+        "bw_rank": rank,
+        "slope_pct": slope,
+        "atr_pct": atr / c * 100.0 if c > 0 else 0.0,
+    }
+
+
+def low_range_levels(rows: Sequence[Row], cost_pct: float, step: int = 2) -> Optional[Dict[str, float]]:
+    """Stop and target distances (percent of price) for a low-range entry, each with the PositionCost added: the
+    stop is the box width plus one PositionCost (never under the overall minimum of two), the target is `step`
+    PositionCosts on top of the cost."""
+    st = low_range_state(rows)
+    if st is None:
+        return None
+    sl = max(st["width_pct"] + cost_pct, 2.0 * cost_pct)
+    return {"range_pct": st["width_pct"], "sl_pct": sl, "tp_pct": step * cost_pct + cost_pct}
+
+
+def lr_fade(rows: Sequence[Row], max_atr: float = 3.0, edge: float = 0.12) -> Signal:
+    """Inside a low range (box no wider than max_atr ATR, bandwidth in the bottom 35%) the close touches the lower or
+    upper edge of the box with RSI(14) leaning the same way: fade it."""
+    s = low_range_state(rows)
+    if s is None or s["width_atr"] > max_atr or s["bw_rank"] > 0.35:
+        return None
+    if abs(s["slope_pct"]) > 0.25:      # a sloping market is a trend, not a range
+        return None
+    rsi = _rsi_series([float(b[3]) for b in _tail(rows)], 14)[-1]
+    if s["pos"] <= edge and rsi < 40:
+        return 1, _conf(0.6, (0.5 - s["pos"]) * 0.2)
+    if s["pos"] >= 1.0 - edge and rsi > 60:
+        return -1, _conf(0.6, (s["pos"] - 0.5) * 0.2)
+    return None
+
+
+def lr_break(rows: Sequence[Row], max_atr: float = 3.0, vol_mult: float = 1.2) -> Signal:
+    """A close outside the box of a low range, on a volume above the box average: the break."""
+    s = low_range_state(rows)
+    if s is None or s["width_atr"] > max_atr or s["bw_rank"] > 0.35:
+        return None
+    r = _tail(rows)
+    avg_v = sum(float(b[4]) for b in r[-25:-1]) / 24.0
+    if avg_v <= 0 or float(r[-1][4]) < vol_mult * avg_v:
+        return None
+    if s["close"] > s["hi"]:
+        return 1, _conf(0.62, 0.0)
+    if s["close"] < s["lo"]:
+        return -1, _conf(0.62, 0.0)
+    return None
+
+
+def lr_trendbreak(rows: Sequence[Row], max_atr: float = 3.5) -> Signal:
+    """The box break, taken only in the direction of the EMA50 slope (the trend the range paused)."""
+    s = low_range_state(rows)
+    if s is None or s["width_atr"] > max_atr or s["bw_rank"] > 0.5:
+        return None
+    if s["close"] > s["hi"] and s["slope_pct"] > 0.02:
+        return 1, _conf(0.62, min(0.15, s["slope_pct"] * 0.2))
+    if s["close"] < s["lo"] and s["slope_pct"] < -0.02:
+        return -1, _conf(0.62, min(0.15, -s["slope_pct"] * 0.2))
+    return None
+
+
+def lr_nr7(rows: Sequence[Row]) -> Signal:
+    """NR7 (Crabel: the narrowest high-low of the last 7 bars, true range not used) one bar ago, and this bar closes
+    beyond that bar's high or low."""
+    r = _tail(rows)
+    if len(r) < 10:
+        return None
+    sig = r[-2]
+    rng = float(sig[1]) - float(sig[2])
+    prior = [float(b[1]) - float(b[2]) for b in r[-8:-2]] + [rng]
+    if rng <= 0 or rng > min(prior):
+        return None
+    c = float(r[-1][3])
+    if c > float(sig[1]):
+        return 1, 0.62
+    if c < float(sig[2]):
+        return -1, 0.62
+    return None
+
+
+def lr_inside(rows: Sequence[Row]) -> Signal:
+    """Inside bar inside a low range: the break of the mother bar."""
+    s = low_range_state(rows)
+    if s is None or s["width_atr"] > 4.0 or s["bw_rank"] > 0.5:
+        return None
+    r = _tail(rows)
+    mother, inner = r[-3], r[-2]
+    if not (float(inner[1]) < float(mother[1]) and float(inner[2]) > float(mother[2])):
+        return None
+    c = float(r[-1][3])
+    if c > float(mother[1]):
+        return 1, 0.62
+    if c < float(mother[2]):
+        return -1, 0.62
+    return None
+
+
 INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "supertrend": supertrend,
     "adx_trend": adx_trend,
@@ -476,6 +610,11 @@ INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "move_fade": move_fade,
     "engulfing": engulfing,
     "streak_exhaustion": streak_exhaustion,
+    "lr_fade": lr_fade,
+    "lr_break": lr_break,
+    "lr_trendbreak": lr_trendbreak,
+    "lr_nr7": lr_nr7,
+    "lr_inside": lr_inside,
 }
 
 
