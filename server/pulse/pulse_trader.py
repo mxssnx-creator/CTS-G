@@ -155,6 +155,7 @@ def leverage_settings(ov: Dict[str, Any]) -> Tuple[bool, int]:
 KLINE_EVERY = 2.4
 KLINE_WORKERS = 4
 KLINE_LIMIT = 60
+HIST_PAGE = 1000   # the venue refuses a klines limit above 1000 bars per request (109400)
 KLINE_BATCH = 12
 TF_EVERY = {"1m": 2.0, "5m": 6.0, "15m": 12.0}
 TF_BATCH = {"1m": 8, "5m": 12, "15m": 8}
@@ -5006,28 +5007,64 @@ class Pulse:
             str(tr_g),
         )
 
+    @staticmethod
+    def _kline_time(row: Any) -> int:
+        try:
+            return int(row["time"] if isinstance(row, dict) else row[0])
+        except Exception:
+            return 0
+
     def _hist_fetch(self) -> None:
+        """Fill every Set history from the exchange. One klines request is capped at 1000 bars by the venue (a larger
+        limit is refused with code 109400 and returns nothing), so a symbol that is short of its lookback gets the
+        newest HIST_PAGE bars and then older pages through endTime; a symbol that already has its history only needs the
+        newest minutes, which the join onto the stored series takes care of."""
         if not self.sets.enabled:
             return
         self.sets.progress.phase = "fetch"
-        limit = str(self.sets.lookback)
-        reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
+        lookback = int(self.sets.lookback)
+        page = HIST_PAGE
         stored = 0
         chunk = 4
-        for i in range(0, len(reqs), chunk):
-            self.sets.progress.detail = f"fetch {i}/{len(reqs)}"
-            self.sets.progress.pct = (i / max(1, len(reqs))) * 8.0
-            batch = reqs[i : i + chunk]
-            rows = []
+
+        def _gather(batch: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
             if hasattr(self.api, "gather_public"):
-                rows = self.api.gather_public(batch, timeout=6.0)
-            else:
-                for path, extra in batch:
-                    body = self.api.public(path, extra)
-                    rows.append((path, extra, body))
-            for _path, extra, body in rows:
-                s = extra.get("symbol")
-                bars = self._parse_klines((body or {}).get("data"))
+                return self.api.gather_public(batch, timeout=6.0)
+            return [(path, extra, self.api.public(path, extra)) for path, extra in batch]
+
+        path = "/openApi/swap/v2/quote/klines"
+        for i in range(0, len(SYMBOLS), chunk):
+            self.sets.progress.detail = f"fetch {i}/{len(SYMBOLS)}"
+            self.sets.progress.pct = (i / max(1, len(SYMBOLS))) * 8.0
+            names = list(SYMBOLS[i : i + chunk])
+            short = {s: len(self.sets.bars.get(s) or []) < int(lookback * 0.9) for s in names}
+            first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(min(page, lookback) if short[s] else 120)}) for s in names])
+            rows_by: Dict[str, List[Any]] = {}
+            for _p, extra, body in first:
+                data = (body or {}).get("data")
+                rows_by[str(extra.get("symbol"))] = sorted(data, key=self._kline_time) if isinstance(data, list) else []
+            # a full page means older bars may exist: page backwards (endTime just before the oldest bar held) until the
+            # lookback is filled or the venue has no more
+            pending = [s for s in names if short[s] and len(rows_by.get(s) or []) >= page and lookback > page]
+            while pending:
+                reqs = []
+                for s in pending:
+                    want = lookback - len(rows_by[s])
+                    oldest = self._kline_time(rows_by[s][0])
+                    if want > 0 and oldest > 0:
+                        reqs.append((path, {"symbol": s, "interval": "1m", "limit": str(min(page, want)), "endTime": str(oldest - 1)}))
+                if not reqs:
+                    break
+                pending = []
+                for _p, extra, body in _gather(reqs):
+                    sym = str(extra.get("symbol"))
+                    data = (body or {}).get("data")
+                    old = sorted(data, key=self._kline_time) if isinstance(data, list) else []
+                    rows_by[sym] = old + rows_by[sym]
+                    if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
+                        pending.append(sym)
+            for s in names:
+                bars = self._parse_klines(rows_by.get(s) or [])
                 if s and bars:
                     self.sets.ingest_bars(s, bars)
                     stored += 1

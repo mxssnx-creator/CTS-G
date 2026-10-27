@@ -454,7 +454,59 @@ def lost_entry_answer_is_remembered_for_adoption():
     return (not opened) and any(k.startswith("BTC-USDT:") for k in unk), f"in book={opened} unknown entries={list(unk)}"
 
 
+class _PagedKlines:
+    """A venue that serves 1m klines like the real one: at most 1000 bars per request (a larger limit is refused with code
+    109400 and no data), oldest first, endTime inclusive. The series is 3000 minutes long and its closes count 0, 1, 2..."""
+
+    def __init__(self, n: int = 3000, t_end: int = 1_800_000_000_000) -> None:
+        self.rows = [{"open": str(i + 0.0), "high": str(i + 0.5), "low": str(i - 0.5), "close": str(i + 0.0), "volume": "1",
+                      "time": t_end - (n - 1 - i) * 60_000} for i in range(n)]
+        self.requests: list = []
+
+    def gather_public(self, reqs, timeout=4.2):
+        out = []
+        for path, extra in reqs:
+            self.requests.append(dict(extra))
+            lim = int(extra.get("limit") or 500)
+            if lim > 1000:
+                out.append((path, extra, {"code": 109400, "msg": "Invalid parameters, err:limit: This field must be less than"}))
+                continue
+            end = int(extra.get("endTime") or 10 ** 18)
+            rows = [r for r in self.rows if r["time"] <= end][-lim:]
+            out.append((path, extra, {"code": 0, "data": rows}))
+        return out
+
+
+def history_is_fetched_in_pages_within_the_venue_limit():
+    """The Set history asks for 1920 bars, which the venue refuses in one request. The fetch pages backwards with
+    endTime, so the series arrives whole, in order and without a gap; once a symbol holds its history, the next refresh
+    asks only for the newest minutes."""
+    import set_engine as se
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
+        p = _bare_pulse()
+        venue = _PagedKlines()
+        p.api = venue
+        p.sets = se.SetBook()
+        p.sets.lookback = 1920
+        p._hist_fetch()
+        first_requests = list(venue.requests)
+        have = {s: len(p.sets.bars.get(s) or []) for s in pt.SYMBOLS}
+        closes = [b[3] for b in (p.sets.bars.get("A-USDT") or [])]
+        contiguous = closes == [float(x) for x in range(3000 - 1920, 3000)]
+        venue.requests.clear()
+        p._hist_fetch()
+        refresh_limits = sorted({int(r["limit"]) for r in venue.requests})
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = (all(n == 1920 for n in have.values()) and contiguous and all(int(r["limit"]) <= 1000 for r in first_requests)
+          and any("endTime" in r for r in first_requests) and refresh_limits == [120])
+    return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
+
+
 CHECKS = [
+    ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
