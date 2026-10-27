@@ -65,7 +65,6 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     rows.push({ name: "error", n: counts.error, color: "var(--color-danger, #e5484d)" });
     return rows.filter((r) => r.n > 0);
   }, [counts]);
-  if (!pb) return null;
   const progress = useMemo(
     () =>
       (pb?.history ?? []).map((h) => ({
@@ -75,6 +74,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
       })),
     [pb],
   );
+  if (!pb) return null;
   const hoursWithTrades = hourly.filter((h) => h.n > 0);
   const hoursPositive = hoursWithTrades.filter((h) => (h.pf ?? 0) >= 1).length;
   return (

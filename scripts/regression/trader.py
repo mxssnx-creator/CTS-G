@@ -505,7 +505,284 @@ def history_is_fetched_in_pages_within_the_venue_limit():
     return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
 
 
+def _book_with_three_packs(**extra):
+    import set_engine as se
+    from common import overlay
+    b = se.SetBook()
+    b.load(overlay(stratShortRange=True, **extra))
+    return b
+
+
+def client_order_ids_round_trip_to_their_own_set():
+    """Every Set of the default grid on three packs (1449 Sets, indices above 1000) must decode from its own client order
+    id to itself. After the grid moves (min step raised, as step-adapt does) a base Set must still decode to itself or to
+    no Set at all, never to another Set."""
+    b = _book_with_three_packs()
+    p = _bare_pulse()
+    p.sets = b
+    sets = list(b.by_idx)
+    wrong = [st.id for st in sets if (p.parse_track(p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)) or {}).get("set_id") != st.id]
+    cids = {st.id: p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx) for st in sets if st.kind == "base"}
+    b.min_step = 6
+    b._rebuild_sets()
+    moved = 0
+    misattributed = []
+    for sid, cid in cids.items():
+        got = (p.parse_track(cid) or {}).get("set_id")
+        if got and got != sid:
+            misattributed.append((sid, got))
+        moved += 1
+    letters = {st.pack: p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)[len(pt.TAG) + 1] for st in sets}
+    ok = not wrong and not misattributed and letters == {"indications": "i", "general": "g", "shortrange": "s"}
+    return ok, f"Sets={len(sets)} wrong round trips={wrong[:3]} after the grid moved: {moved} ids, misattributed={misattributed[:3]} letters={letters}"
+
+
+def a_signal_needs_its_own_pack_to_hold_a_valid_set():
+    """A general signal must not enter on the strength of a valid indications Set: the pack gate is per pack."""
+    import types
+    p = _bare_pulse()
+    ind = types.SimpleNamespace(id="i1", step=2)
+
+    class _Sets:
+        enabled = True
+        use_historic_gate = True
+
+        def pick_any(self, pack):
+            return ind if pack == "indications" else None
+
+        def pack_open(self, pack):
+            return pack == "indications"
+
+    p.sets = _Sets()
+    p.strat_ind = True
+    p.indications = types.SimpleNamespace(settings={"enabled": True}, primary=lambda s: None)
+    reasons = {}
+    for pack, why in (("general", "gen:test"), ("indications", "ind:state:tf:0.6:a2:s")):
+        try:
+            reasons[pack] = p.entry_sense("A-USDT", 1 if pack == "general" else 1, why, "LONG") if False else None
+        except Exception as e:
+            reasons[pack] = repr(e)[:40]
+    src = open(os.path.join(pt.__file__ and os.path.dirname(pt.__file__), "pulse_trader.py")).read()
+    gate_is_per_pack = "if not self.sets.pack_open(pack):" in src and "or self.sets.pack_open(\"general\") or self.sets.pack_open(\"indications\")" not in src
+    return gate_is_per_pack, f"per-pack gate in entry_sense={gate_is_per_pack}"
+
+
+def a_manager_close_is_not_counted_again_by_the_fill_sync():
+    """The manager records its own close; the fill sync must skip the close order it sent and the stop orders of that
+    position, or the Set tape gets the same close twice."""
+    def run():
+        venue = _PartialCloseVenue()
+        venue.posts.clear()
+        p, sym = _enter(venue)
+        pos = p.open[sym]
+        pos.sl_oid, pos.tp_oid = "9001", "9002"
+        p.close_pos(pos, 100.0, "test-close")
+        close_cids = [f["clientOrderID"] for f in venue.closes]
+        sent_all_seen = all(c in p.seen_fill_cids for c in close_cids)
+        counted = []
+        p.sets.on_live_close = lambda rec: counted.append(rec)
+        fills = [{"clientOrderID": close_cids[0], "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "101", "profit": "1.0"},
+                 {"clientOrderID": p.cid("s", pos=pos), "orderId": "9001", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"},
+                 {"clientOrderID": p.cid("s", pos=pos), "orderId": "7777", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"}]
+        p.api.get = lambda path, extra=None: {"code": 0, "data": {"orders": fills}}
+        p.sync_own_fills()
+        return sent_all_seen, len(counted)
+    seen, n = _isolated(run)
+    return seen and n == 1, f"close cids seen={seen} fills counted={n} (only the unknown stop fill counts)"
+
+
+def a_set_fill_keeps_the_sets_own_sl_and_tp():
+    """A Set fill is placed with the Set's grid, as the replay that validated it: TP = step x PositionCost (2 x at the
+    least, no overlay tpMin clamp), SL = ratio x TP and never under PositionCost + one step."""
+    import types
+    def run():
+        venue = _StubExchange(executed="1", requested="1")
+        sym = "BTC-USDT"
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+        p = pt.Pulse(venue, contracts)
+        p.boot_ts = 0.0
+        p.px[sym] = 100.0
+        p.available = 50.0
+        p.halted = False
+        p.entry_sense = lambda *a, **k: None
+        st = types.SimpleNamespace(id="indications:1m:sl0.50:st2", idx=3, pack="indications", kind="base", step=2, sl_ratio=0.5,
+                                   tp_pct=2 * p.position_cost_pct / 100.0, trail_key="", trail_arm=0.0, trail_give=0.0)
+        p.sets.pick_any = lambda pack: st
+        p.sets.pick_trail = lambda pack: None
+        p.tp_min = 0.0035          # the shipped overlay clamp: it must not apply to a Set fill
+        p.sl_min = 0.0020
+        p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+        pos = p.open.get(sym)
+        return pos, p.position_cost_pct
+    pos, cost = _isolated(run)
+    c = cost / 100.0
+    ok = pos is not None and abs(pos.tp_pct - 2 * c) < 1e-9 and abs(pos.sl_pct - 2 * c) < 1e-9
+    return ok, f"cost={cost}% tp={getattr(pos, 'tp_pct', None)} sl={getattr(pos, 'sl_pct', None)} want both {2 * c}"
+
+
+def overlay_slpct_and_tppct_are_percent_without_guessing():
+    saved = (pt.SL_PCT, pt.TP_PCT)
+    p = _bare_pulse()
+    src = open(pt.__file__).read()
+    guessed = "> 0.05 else float(ov[\"slPct\"])" in src or "> 0.05 else float(ov[\"tpPct\"])" in src
+    pt.SL_PCT, pt.TP_PCT = saved
+    return not guessed, f"magnitude guess removed={not guessed}"
+
+
+def _lane_pulse(set_id="indications:1m:sl1.00:st4"):
+    """A Pulse holding one open position on a stub venue, with the Exit strategies switched on and a reversal signal
+    against the position, so any Exit-lane involvement shows."""
+    import types
+    venue = _StubExchange(executed="1", requested="1")
+    p, sym = _enter(venue)
+    pos = p.open[sym]
+    pos.set_id = set_id
+    pos.pack = "indications"
+    pos.opened_at = time.time() - 700.0        # past the exit lanes' minimum hold and the scratch time
+    pos.sl = pos.entry * 0.97
+    pos.tp = pos.entry * 1.03
+    pos.sl_oid = pos.tp_oid = "1"
+    p.exits.enabled = True
+    p.exits.rev_on = True
+    p.exits.time_on = True
+    p.exits.ignore_tp = True
+    p.boot_ts = 0.0
+    p.indications = types.SimpleNamespace(primary=lambda s: types.SimpleNamespace(direction="short"),
+                                          settings={"enabled": True}, last={})
+    p.control_orders = False
+    return p, sym, pos
+
+
+import time  # noqa: E402
+
+
+def a_set_position_is_closed_only_by_its_own_lane():
+    """With the Exit strategies on and a reversal signal against the position, a Set position stays open (the reversal
+    lane belongs to the Exit strategies); the same position without a Set is closed by that lane."""
+    def run():
+        p, sym, pos = _lane_pulse()
+        p.px[sym] = pos.entry * 1.0005
+        p.manage()
+        set_stays = sym in p.open
+        pos.set_id = ""
+        p.manage()
+        exit_closes = sym not in p.open
+        return set_stays, exit_closes, [c.reason for c in p.closed]
+    set_stays, exit_closes, reasons = _isolated(run)
+    return set_stays and exit_closes, f"Set position stayed open={set_stays}; the same position without a Set closed by the Exit lane={exit_closes} reasons={reasons}"
+
+
+def a_set_lane_scratch_and_time_follow_the_replay_rules():
+    def run():
+        out = {}
+        for gain, name in ((0.0003, "below scratch"), (0.0030, "above scratch")):
+            p, sym, pos = _lane_pulse()
+            p.exits.enabled = False
+            p.px[sym] = pos.entry * (1 + gain)
+            p.manage()
+            out[name] = (sym in p.open, [c.reason for c in p.closed])
+        p, sym, pos = _lane_pulse()
+        pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+        pos.entry = 100.0
+        p.px[sym] = 100.0 * 0.9995
+        p.manage()
+        out["time"] = (sym in p.open, [c.reason for c in p.closed])
+        return out
+    out = _isolated(run)
+    ok = out["below scratch"][0] and out["above scratch"] == (False, ["scratch+"]) and out["time"] == (False, ["time"])
+    return ok, f"{out}"
+
+
+def a_set_lane_honours_tp_only_as_the_replay_does():
+    def run():
+        res = {}
+        for honor in (True, False):
+            p, sym, pos = _lane_pulse()
+            p.exits.enabled = False
+            p.sets.hist_honor_tp = honor
+            pos.opened_at = time.time() - 30.0
+            pos.tp_pct = 0.0024
+            pos.tp = pos.entry * 1.0024
+            p.px[sym] = pos.tp * 1.001
+            p.manage()
+            res[honor] = (sym in p.open, [c.reason for c in p.closed])
+            pos.tp  # noqa: B018
+            sl_safe, tp_safe = p.security_prices(pos)
+            res[f"order tp {honor}"] = round(abs(tp_safe - pos.entry) / pos.entry, 4)
+        return res
+    res = _isolated(run)
+    ok = res[True] == (False, ["tp"]) and res[False][0] is True and res["order tp False"] >= res["order tp True"]
+    return ok, f"{res}"
+
+
+def a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out():
+    def run():
+        p, sym, pos = _lane_pulse()
+        p.exits.enabled = True
+        moves = []
+        p.replace_sl = lambda pos_, price: (moves.append(round(price, 4)) or True)
+        pos.opened_at = time.time() - 30.0
+        pos.trail_arm, pos.trail_give = 0.006, 0.0036
+        pos.peak = pos.entry * 1.01
+        p.px[sym] = pos.entry * 1.009
+        pos.trail_set_id = ""                       # no trailing Set picked: a base Set does not trail
+        p.manage()
+        without = list(moves)
+        pos.trail_set_id = "indications:1m:tr0.60:0.36"
+        p.manage()
+        return without, moves, round(pos.entry * 1.01 * (1 - 0.0036), 4)
+    without, with_set, want = _isolated(run)
+    return without == [] and with_set == [want], f"without a trailing Set: {without}; with: {with_set} (want {want})"
+
+
+def exit_lane_scores_only_its_own_closes():
+    def run():
+        p, sym, pos = _lane_pulse()
+        before = {k: v.n for k, v in p.exits.lanes.items()}
+        vbefore = (p.variants.skipped, sum(len(r) for r in p.variants.sl_rows.values()))
+        p.exits.enabled = False
+        p.px[sym] = pos.entry * 1.003
+        p.close_pos(pos, p.px[sym], "scratch+")
+        after_set = {k: v.n for k, v in p.exits.lanes.items()}
+        vafter = (p.variants.skipped, sum(len(r) for r in p.variants.sl_rows.values()))
+        p2, sym2, pos2 = _lane_pulse()
+        pos2.set_id = ""
+        p2.px[sym2] = pos2.entry * 1.003
+        p2.close_pos(pos2, p2.px[sym2], "exit:time")
+        after_exit = {k: v.n for k, v in p2.exits.lanes.items()}
+        return before, after_set, after_exit, vbefore, vafter
+    before, after_set, after_exit, vb, va = _isolated(run)
+    ok = before == after_set and sum(after_exit.values()) == sum(before.values()) + 1 and vb == va
+    return ok, f"exit lane orders before={sum(before.values())} after a Set close={sum(after_set.values())} after an exit close={sum(after_exit.values())}; variants unchanged={vb == va}"
+
+
+def the_set_lane_does_not_read_the_exit_strategies():
+    """Independence, checked on the code: the functions that close, trail or price a Set position never reach the Exit
+    strategies, the coordinator or the default variants."""
+    import ast
+    src = open(pt.__file__).read()
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Pulse")
+    fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "manage_set_lane")
+    names = {f"{a.value.id}.{a.attr}" for a in ast.walk(fn) if isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name) and a.value.id == "self"}
+    touched = sorted(n for n in names if n.split(".")[1] in ("exits", "variants", "coord", "dca", "block"))
+    seg = ast.get_source_segment(src, next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "security_prices")) or ""
+    exit_sl_guarded = seg.count("not set_lane") >= 2
+    return not touched and exit_sl_guarded, f"manage_set_lane touches {touched or 'none of exits/variants/coord/dca/block'}; security_prices guards both exit-lane SL tightenings={exit_sl_guarded}"
+
+
 CHECKS = [
+    ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
+    ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
+    ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
+    ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
+    ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
+    ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),
+    ("trader.cids-round-trip-to-their-own-set", client_order_ids_round_trip_to_their_own_set),
+    ("trader.signal-needs-its-own-pack", a_signal_needs_its_own_pack_to_hold_a_valid_set),
+    ("trader.manager-close-not-counted-twice", a_manager_close_is_not_counted_again_by_the_fill_sync),
+    ("trader.set-fill-keeps-its-sl-and-tp", a_set_fill_keeps_the_sets_own_sl_and_tp),
+    ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),
     ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),

@@ -522,7 +522,48 @@ def pf_progress_history_is_continuous_and_bounded():
     return ok, f"points after one pass={len(h1)} after two={len(h2)} bounded={len(b.pf_history)} snapshot={len(snap['history'])}"
 
 
+def legacy_pick_prefers_judged_sets_over_a_single_lucky_order():
+    b = SetBook()
+    b.load(overlay(setUseHistoricGate=False, **SMALL))
+    base = [s for s in b.by_idx if s.kind == "base" and s.pack == b.packs[0]]
+    lucky, solid = base[0], base[1]
+    for st, n, pf in ((lucky, 1, 99.0), (solid, 40, 4.0)):
+        st.gate_n, st.gate_pf, st.active, st.last_error, st.locked = n, pf, True, "", False
+    for st in base[2:]:
+        st.gate_n, st.gate_pf = 0, 0.0
+    got = b.pick(b.packs[0])
+    return got is solid, f"picked {got and got.id} (n={got and got.gate_n}, pf={got and got.gate_pf}) over the one-order Set"
+
+
+def step_adapt_waits_for_the_pass_in_flight():
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    losing = [{"pnl": 0.001, "pnl_pct": 0.003, "t": float(i)} for i in range(4)] + \
+             [{"pnl": -0.01, "pnl_pct": 0.0001, "t": float(10 + i)} for i in range(16)]   # a losing average with 4 good fills
+    gen0, step0 = b._topo_gen, b.min_step
+    b._running = True                                   # a pass is in flight
+    b.adapt_from_live(losing)
+    unchanged = b._topo_gen == gen0 and b.min_step == step0 and b._adapt_pending is not None
+    b._running = False
+    b._after_pass()
+    applied = b._topo_gen == gen0 + 1 and b._adapt_pending is None
+    return unchanged and applied, f"during the pass: topology {gen0}->{gen0} min_step {step0}; after it: topology {b._topo_gen} min_step {b.min_step}"
+
+
+def short_range_trailing_stays_inside_its_steps():
+    from set_engine import SHORT_PACK
+    b = SetBook()
+    b.load(overlay(stratShortRange=True, exitIgnoreTp=True))
+    arms = sorted({s.trail_arm for s in b.by_idx if s.pack == SHORT_PACK and s.kind == "trail"})
+    others = sorted({s.trail_arm for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "trail"})
+    cap = max(b.short_steps) * b.cost_pct
+    return bool(arms) and max(arms) <= cap + 1e-9 and max(others) > cap, f"short range arms {arms[0]}..{arms[-1]} cap {cap}; other packs reach {others[-1]}"
+
+
 CHECKS = [
+    ("processing.legacy-pick-prefers-judged-sets", legacy_pick_prefers_judged_sets_over_a_single_lucky_order),
+    ("processing.step-adapt-waits-for-the-pass", step_adapt_waits_for_the_pass_in_flight),
+    ("processing.short-range-trailing-inside-its-steps", short_range_trailing_stays_inside_its_steps),
     ("processing.effective-pf-rolling-window", effective_pf_uses_the_rolling_window_not_the_whole_tape),
     ("processing.short-range-own-pf-floor", short_range_has_its_own_pf_floor),
     ("processing.pf-progress-history", pf_progress_history_is_continuous_and_bounded),

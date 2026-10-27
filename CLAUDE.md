@@ -25,6 +25,22 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
   PositionCost + `trailMinSteps` steps (default 2, so 3 x cost).
 - Short Range strategy (pack `shortrange`, overlay `stratShortRange`): the Low-Range signals, TP steps 2-6.
 
+## Independent lanes (standard)
+
+Every strategy type runs its own lane; none may close, tighten or score another's positions.
+
+- **Set lane.** A position opened under a Set (`pos.set_id`) is closed only by its Set's own rules, the ones the replay
+  validated: stop (kept on the exchange), TP when the lane honours it (`setHonorTp` / `exitIgnoreTp` decide, in the replay
+  and live alike), trailing only from an independent trailing Set (`trail_set_id`; a base Set does not trail), the time
+  exit after `hist_time_bars`, the scratch exit. Live code: `Pulse.manage_set_lane`. The Exit strategies, the
+  coordinator and the default variants never read or move these positions (`security_prices` skips the exit-lane stop
+  tightening for them).
+- **Exit lane.** The Exit strategies (lock, peak, rev, time, hard) manage only positions that have no Set. They score only
+  their own closes (`exits.on_close` and `variants.on_close` get closes without a set_id).
+- **Why.** A Set is validated on its own lane; an Exit strategy closing the same position early makes the live result
+  something the Base validation never measured (the PF after Base then does not carry over to live).
+- **Known open point.** Block and DCA add-ons can still add to a Set position and re-anchor its stop and target.
+
 ## Live safety
 
 - x01 runs real money. The drawdown halt is a protection: never clear it or reset the start equity without an explicit

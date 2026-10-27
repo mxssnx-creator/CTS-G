@@ -715,6 +715,7 @@ class SetBook:
         self.min_pf = GATE_MIN_PF_DEFAULT
         self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
         self.pf_history: List[Dict[str, Any]] = []
+        self._adapt_pending: Optional[List[Any]] = None
         self.gate_window = GATE_WINDOW_DEFAULT
         self.gate_min = GATE_MIN_DEFAULT
         self.max_dd_s = 420.0
@@ -845,7 +846,14 @@ class SetBook:
         if raw_tr:
             if isinstance(raw_tr, str):
                 raw_tr = [p.strip() for p in raw_tr.split(",") if p.strip()]
-            self.trails = [(trail_key(a, g), a, g) for a, g in (parse_trail(x) for x in raw_tr)]
+            # an explicit list obeys the overall minimum trailing distance too: a give under PositionCost + n steps is lifted
+            gfloor = trail_floor_steps(self.trail_min_steps) * self.cost_pct
+            seen_tr: Dict[str, Tuple[str, float, float]] = {}
+            for a_, g_ in (parse_trail(x) for x in raw_tr):
+                g2 = round(max(g_, gfloor), 4)
+                a2 = round(max(a_, g2), 4)
+                seen_tr.setdefault(trail_key(a2, g2), (trail_key(a2, g2), a2, g2))
+            self.trails = list(seen_tr.values())
         else:
             self.trails = trail_grid(self.trail_min_step, self.cost_pct)
         try:
@@ -919,6 +927,9 @@ class SetBook:
             if pack == SHORT_PACK and self.hist_honor_tp:
                 short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
                 pack_trails = [t for t in (list(self.trails) or [("0.3:0.1", 0.3, 0.1)]) if t[1] < short_mid - 1e-9]
+            if pack == SHORT_PACK and pack_steps:
+                # Short Range works with TP steps 2-6: no trailing arm beyond its largest step
+                pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * self.cost_pct + 1e-9]
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(pack_steps):
                     sid = make_set_id(pack, sl, "", step)
@@ -989,6 +1000,9 @@ class SetBook:
 
     def _adapt_from_live(self, closed: Sequence[Any]) -> None:
         """If live average is a loss, raise min step to # of positive/successful fills."""
+        if self._running:
+            self._adapt_pending = list(closed)      # applied when the pass in flight ends
+            return
         floor = self.min_step_cfg
         if not self.step_adapt:
             nxt = floor
@@ -1020,6 +1034,13 @@ class SetBook:
         if nxt != self.min_step:
             self.min_step = nxt
             self._rebuild_sets()
+
+    def _after_pass(self) -> None:
+        """Apply a step-adapt that arrived while a replay pass was running. Rebuilding mid-pass would discard that pass
+        (the topology changed under it), leave the Sets unrefreshed and, past the freshness limit, mark every Set stale."""
+        pending, self._adapt_pending = self._adapt_pending, None
+        if pending is not None:
+            self.adapt_from_live(pending)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
         if not bars:
@@ -1258,6 +1279,7 @@ class SetBook:
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
+            self._after_pass()
 
     def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> None:
         bars = self.bars[symbol]
@@ -1486,7 +1508,9 @@ class SetBook:
         if not rows:
             return None
         rows = [s for s in rows if s.active] or rows
-        rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        # a Set with fewer orders than the gate floor is not judged: its PF (99 after one winning order) must not outrank a
+        # Set that has the orders
+        rows.sort(key=lambda s: (s.gate_n >= self.gate_min, s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
         return rows[0]
 
     def pick_trail(self, pack: str) -> Optional[SetState]:

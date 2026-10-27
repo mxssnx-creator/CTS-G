@@ -25,7 +25,7 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
+from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test
@@ -685,6 +685,7 @@ class Pulse:
         self.track_prefix = TAG
         self.boot_ts = time.time()
         self.seen_fill_cids = BoundedSet(4000)
+        self.seen_fill_oids = BoundedSet(4000)
         self.owned_syms = BoundedSet(800)
         self.load = LoadGovernor()
         self._scan_keep: List[str] = []
@@ -1094,7 +1095,8 @@ class Pulse:
             pack = pack or pos.pack
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
-        p = "i" if str(pack or set_id).startswith("ind") else "g"
+        pk = str(pack or set_id)
+        p = "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
         m = re.search(r"sl([0-9.]+)", set_id or "")
         if m:
@@ -1111,12 +1113,14 @@ class Pulse:
         m = re.search(r":st(\d+)", set_id or "")
         if m:
             st = f"{int(m.group(1)):02d}"
+        elif re.search(r"tr[0-9.]+:[0-9.]+", set_id or ""):
+            st = "00"                      # a trailing Set has no TP step
         if idx < 0:
             try:
                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
             except Exception:
                 idx = -1
-        ix = f"{max(0, idx):03d}"
+        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
         nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
@@ -1134,6 +1138,11 @@ class Pulse:
         return str(o.get("clientOrderID") or o.get("clientOrderId") or "")
 
     def parse_track(self, cid: str) -> Optional[Dict[str, Any]]:
+        """Decode a client order id into the Set it belongs to. The id carries pack, SL ratio, trailing arm, TP step and
+        the Set's grid index. The index is trusted only when the Set at that index agrees on pack, step, SL ratio (base
+        Sets) or arm (trailing Sets): a grid that moved since the order (step-adapt, a pack toggled) shifts indices.
+        Otherwise the Set is found by content, and when that is ambiguous the Set is left unknown (set_id ""), never
+        guessed: a close credited to the wrong Set corrupts its validation tape."""
         if not self.cid_ours(cid):
             return None
         s = str(cid)
@@ -1143,7 +1152,7 @@ class Pulse:
         if len(rest) < 6:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
-        pack = "indications" if rest[1:2] == "i" else "general"
+        pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
         try:
             sl = int(rest[2:4]) / 10.0
             arm = int(rest[4:6]) / 10.0
@@ -1156,32 +1165,39 @@ class Pulse:
                 step = int(rest[6:8])
             except Exception:
                 step = 0
-        if len(rest) >= 11:
-            try:
-                idx = int(rest[8:11])
-            except Exception:
-                idx = -1
+        if len(rest) >= 12 and rest[8:12].isdigit():
+            idx = int(rest[8:12])
+        elif len(rest) >= 11 and rest[8:11].isdigit():
+            idx = int(rest[8:11])          # an id written before the index had four digits
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
-        st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
-        if st_obj is not None:
-            pack_ok = str(getattr(st_obj, "pack", "")) == str(pack)
+
+        def _row(st_obj: Any) -> Dict[str, Any]:
+            return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
+                    "idx": st_obj.idx, "set_id": st_obj.id}
+
+        def _agrees(st_obj: Any) -> bool:
             try:
-                sl_ok = abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
+                if str(getattr(st_obj, "pack", "")) != pack:
+                    return False
+                if st_obj.kind == "trail":
+                    return step == 0 and abs(float(st_obj.trail_arm) - arm) < 0.06
+                return step == int(st_obj.step) and abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
             except Exception:
-                sl_ok = False
-            if pack_ok and sl_ok:
-                return {
-                    "kind": kind,
-                    "pack": st_obj.pack,
-                    "sl": st_obj.sl_ratio,
-                    "trail": st_obj.trail_key,
-                    "step": st_obj.step,
-                    "idx": st_obj.idx,
-                    "set_id": st_obj.id,
-                }
-        from set_engine import make_set_id
-        return {"kind": kind, "pack": pack, "sl": sl, "trail": tr, "step": step, "idx": idx, "set_id": make_set_id(pack, sl, tr, step)}
+                return False
+
+        sets_obj = getattr(self, "sets", None)
+        st_obj = sets_obj.get_idx(idx) if idx >= 0 and sets_obj is not None else None
+        if st_obj is not None and _agrees(st_obj):
+            return _row(st_obj)
+        cands = [x for x in (getattr(sets_obj, "sets", None) or {}).values() if x.pack == pack and _agrees(x)]
+        if step > 0:                                # base Sets: the nearest SL ratio at that step is unique
+            cands.sort(key=lambda x: abs(float(x.sl_ratio) - sl))
+            if cands and (len(cands) == 1 or abs(float(cands[0].sl_ratio) - sl) < abs(float(cands[1].sl_ratio) - sl)):
+                return _row(cands[0])
+        elif len(cands) == 1:
+            return _row(cands[0])
+        return {"kind": kind, "pack": pack, "sl": sl, "trail": tr, "step": step, "idx": -1, "set_id": ""}
 
     def ok(self, r: Dict[str, Any]) -> bool:
         return (not r.get("error")) and r.get("code") in (0, None)
@@ -1955,18 +1971,21 @@ class Pulse:
     def security_prices(self, pos: Position) -> Tuple[float, float]:
         """Qty-matched order SL/TP from the Set's own range."""
         sl_f, tp_f, _, _ = self.opt_fracs(pos)
+        set_lane = bool(pos.set_id)
+        if set_lane and not self.lane_honors_tp():
+            tp_f = max(tp_f, float(self.tp_max))      # the lane that validated this Set has no TP exit: the order is only a safety
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
             return pos.sl, pos.tp
         if pos.side == "LONG":
             sl = e * (1.0 - sl_f)
             tp = e * (1.0 + tp_f)
-            if self.exits.enabled and pos.peak > e:
+            if self.exits.enabled and pos.peak > e and not set_lane:
                 sl = max(sl, self.exits.optimal_sl("LONG", e, pos.peak, sl))
         else:
             sl = e * (1.0 + sl_f)
             tp = e * (1.0 - tp_f)
-            if self.exits.enabled and pos.peak and pos.peak < e:
+            if self.exits.enabled and pos.peak and pos.peak < e and not set_lane:
                 sl = min(sl, self.exits.optimal_sl("SHORT", e, pos.peak, sl))
         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
 
@@ -2530,6 +2549,8 @@ class Pulse:
         pid = str(getattr(pos, "position_id", "") or "")
         if pid:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
+        for f in forms:                       # the manager records this close itself: the fill sync must not count it again
+            self.seen_fill_cids.add(f["clientOrderID"])
         r: Dict[str, Any] = {}
         done_qty = 0.0       # closed by earlier partial fills of this close
         done_val = 0.0
@@ -2619,8 +2640,8 @@ class Pulse:
                 return "set-slot"
             return None
         elif self.sets.enabled and self.sets.use_historic_gate:
-            if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
-                # Positive-PF-only: gate ready and every pack closed -> no entry.
+            if not self.sets.pack_open(pack):
+                # Positive-PF-only: a signal binds to its own pack, and a pack with no validated Set takes no entry.
                 return "set-gate"
         return None
 
@@ -2682,7 +2703,11 @@ class Pulse:
             sl_ratio = chosen.sl_ratio
             set_id = chosen.id
             set_idx = int(getattr(chosen, "idx", -1))
-            trail_key, trail_arm, trail_give = chosen.trail_key or "0.3:0.1", chosen.trail_arm, chosen.trail_give
+            # a base Set has no trailing of its own; only a trailing Set (the chosen one or the independent pick) trails
+            if getattr(chosen, "kind", "base") == "trail":
+                trail_key, trail_arm, trail_give = chosen.trail_key, chosen.trail_arm, chosen.trail_give
+            else:
+                trail_key, trail_arm, trail_give = "", 0.0, 0.0
         else:
             sl_ratio = self.variants.current_sl()
             trail_key, trail_arm, trail_give = self.variants.current_trail()
@@ -2817,8 +2842,10 @@ class Pulse:
             bind_sl_to_tp=True,
         )
         if chosen and getattr(chosen, "step", 0):
-            tp_pct = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
-            sl_pct = max(self.sl_min, min(self.sl_max, tp_pct * sl_ratio))
+            # the Set's own grid, as the replay that validated it: TP = step x PositionCost (never under 2 x), SL = ratio x TP
+            # and never under PositionCost + the overall minimum steps; the overlay tpMin/slMin clamps do not apply
+            tp_pct = max(2 * cost_as_frac(self.position_cost_pct), min(self.tp_max, chosen.tp_pct))
+            sl_pct = max(sl_floor_frac(self.position_cost_pct), min(self.sl_max, tp_pct * sl_ratio))
             src = f"step{chosen.step}xcost"
         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
@@ -2902,6 +2929,9 @@ class Pulse:
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+        for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", "")):
+            if real_oid(oid):                 # an exchange-side stop fill of this position is the close recorded below
+                self.seen_fill_oids.add(str(oid))
         if exchange:
             self.cancel_controls(pos.symbol)
             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
@@ -2942,7 +2972,8 @@ class Pulse:
             return
         self.closed.append(rec)
         try:
-            self.variants.on_close(rec)
+            if not rec.set_id:                 # the default variants learn from default-variant positions only
+                self.variants.on_close(rec)
         except Exception:
             pass
         try:
@@ -2951,7 +2982,8 @@ class Pulse:
         except Exception:
             pass
         try:
-            self.exits.on_close(rec)
+            if not rec.set_id:                 # the Exit lanes score only the closes they made themselves
+                self.exits.on_close(rec)
         except Exception:
             pass
         try:
@@ -2984,6 +3016,37 @@ class Pulse:
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
 
+    def lane_honors_tp(self) -> bool:
+        """Whether the Set lane exits on its TP: the setting the replay used, so live and validation agree."""
+        return bool(getattr(self.sets, "hist_honor_tp", True))
+
+    def manage_set_lane(self, pos: Position, px: float, now: float, age: float, pnl_pct: float) -> None:
+        """The close rules of a Set position, one for one with set_engine.SetLane: stop (kept on the exchange and guarded
+        in software before this), TP when the lane honours it, trailing from the independent trailing Set, the time exit
+        after the lane's time bars and the scratch exit. Nothing here reads the Exit strategies."""
+        if self.lane_honors_tp():
+            if (pos.side == "LONG" and px >= pos.tp) or (pos.side == "SHORT" and px <= pos.tp):
+                self.close_pos(pos, px, "tp")
+                return
+        arm = float(pos.trail_arm or 0.0)
+        give = float(pos.trail_give or 0.0)
+        if self.strat_trail and pos.trail_set_id and arm > 0 and give > 0:
+            fav = (pos.peak - pos.entry) / pos.entry if pos.side == "LONG" else (pos.entry - pos.peak) / pos.entry
+            if fav >= arm:
+                pos.trail_armed = True
+                trail = pos.peak * (1 - give) if pos.side == "LONG" else pos.peak * (1 + give)
+                better = pos.trail is None or (trail > pos.trail + 1e-12 if pos.side == "LONG" else trail < pos.trail - 1e-12)
+                if better:
+                    prev = pos.trail
+                    pos.trail = trail      # committed only when the exchange stop moved
+                    if not self.replace_sl(pos, trail):
+                        pos.trail = prev
+        if age >= float(self.sets.hist_time_bars) * 60.0:
+            self.close_pos(pos, px, "time")
+            return
+        if age >= float(self.sets.scratch_s) and pnl_pct >= float(self.sets.scratch_min):
+            self.close_pos(pos, px, "scratch+")
+
     def manage(self) -> None:
         now = time.time()
         self.ingest_ws_px()
@@ -3010,6 +3073,11 @@ class Pulse:
                 continue
             if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and px >= pos.sl:
                 self.close_pos(pos, px, "sl")
+                continue
+            if pos.set_id:
+                # a Set position is closed by its own lane only (SL, TP, trailing, time, scratch), exactly as the replay that
+                # validated the Set: the Exit strategies never touch it
+                self.manage_set_lane(pos, px, now, age, pnl_pct)
                 continue
             if not (self.exits.enabled and self.exits.ignore_tp):
                 if pos.side == "LONG" and px >= pos.tp:
@@ -3159,9 +3227,9 @@ class Pulse:
         if ov.get("maxPerGroup") is not None:
             MAX_PER_GROUP = int(ov["maxPerGroup"])
         if ov.get("slPct"):
-            SL_PCT = float(ov["slPct"]) / 100.0 if float(ov["slPct"]) > 0.05 else float(ov["slPct"])
+            SL_PCT = float(ov["slPct"]) / 100.0       # percent everywhere, no magnitude guessing
         if ov.get("tpPct"):
-            TP_PCT = float(ov["tpPct"]) / 100.0 if float(ov["tpPct"]) > 0.05 else float(ov["tpPct"])
+            TP_PCT = float(ov["tpPct"]) / 100.0
         if ov.get("trailArmPct") is not None:
             TRAIL_ARM = float(ov["trailArmPct"]) / 100.0 if float(ov["trailArmPct"]) > 0.02 else float(ov["trailArmPct"])
         if ov.get("trailGivePct") is not None:
@@ -4201,6 +4269,13 @@ class Pulse:
                 sl_to_tp=sl_ratio, bind_sl_to_tp=True,
                 cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
             )
+            rec_set = (getattr(self.sets, "sets", None) or {}).get(str(track.get("set_id") or ""))
+            if rec_set is not None and getattr(rec_set, "kind", "") == "base" and getattr(rec_set, "step", 0):
+                # a recovered Set position keeps its own grid (step x cost, ratio x TP), not the legacy 0.3-1.5 ratio grid
+                tp_pct = max(2 * cost_as_frac(self.position_cost_pct), min(self.tp_max, rec_set.tp_pct))
+                sl_pct = max(sl_floor_frac(self.position_cost_pct), min(self.sl_max, tp_pct * float(rec_set.sl_ratio)))
+                sl_ratio = float(rec_set.sl_ratio)
+                src = f"step{rec_set.step}xcost"
             sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
             tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
             cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
@@ -4273,6 +4348,9 @@ class Pulse:
         for o in orders:
             cid = self.order_cid(o)
             if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
+                continue
+            if str(o.get("orderId") or o.get("orderID") or "") in self.seen_fill_oids:
+                self.seen_fill_cids.add(cid)
                 continue
             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
             if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
@@ -4391,9 +4469,13 @@ class Pulse:
         other = "Gx02oig060308000aaaaa" if TAG.lower() == "gx01" else "Gx01oig060308000aaaaa"
         self.record_test("cid-conn-only", not self.cid_ours(other) and not self.cid_ours("ctsbingxx02secbtc") and not self.cid_ours("ctsbingxx01tp"), f"other={other}")
         self.record_test("cid-set-bits", "g06" in sample or "g0603" in sample[4:14], sample)
-        tr = self.parse_track(sample)
-        self.record_test("cid-parse", bool(tr and tr.get("pack") == "general" and abs(float(tr.get("sl") or 0) - 0.6) < 1e-9), str(tr))
-        self.record_test("cid-idx", int((tr or {}).get("idx", -1)) == 0 and int((tr or {}).get("step", 0)) == 8, str(tr))
+        real = next((x for x in getattr(self.sets, "sets", {}).values() if x.pack == "general" and x.kind == "base" and x.step == 8 and abs(float(x.sl_ratio) - 1.0) < 1e-9), None)
+        tr = self.parse_track(self.cid("o", set_id=real.id, pack=real.pack, set_idx=real.idx)) if real is not None else None
+        self.record_test("cid-parse", real is None or bool(tr and tr.get("set_id") == real.id), str(tr))
+        self.record_test("cid-idx", real is None or (int((tr or {}).get("idx", -1)) == real.idx and int((tr or {}).get("step", 0)) == 8), str(tr))
+        rt = [x for x in list(getattr(self.sets, "sets", {}).values())[:: max(1, len(getattr(self.sets, "sets", {})) // 40 or 1)]]
+        bad_rt = [x.id for x in rt if (self.parse_track(self.cid("o", set_id=x.id, pack=x.pack, set_idx=x.idx)) or {}).get("set_id") != x.id]
+        self.record_test("cid-roundtrip", not bad_rt, f"checked={len(rt)} wrong={bad_rt[:3]}")
         dummy = Position("BTC-USDT", "LONG", 0.001, 80000.0, time.time(), 0, 0, 80000.0, sl_pct=0.006, tp_pct=0.01)
         dummy.peak = 80000.0
         slp, tpp = self.security_prices(dummy)
@@ -4683,7 +4765,7 @@ class Pulse:
             "sets": {
                 "families": scov.get("families"),
                 "setCount": len(self.sets.sets),
-                "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
+                "activeCount": int(self.sets.counts().get("valid", 0)),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "trailCover": scov.get("trailCover"),
                 "slCover": scov.get("slCover"),
@@ -4994,18 +5076,10 @@ class Pulse:
             bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
             f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
         )
-        sample_g = self.cid("o", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
-        tr_g = self.parse_track(sample_g)
-        self.record_test(
-            "qa-cid-parse",
-            bool(tr_g and tr_g.get("pack") == "general" and abs(float(tr_g.get("sl") or 0) - 0.6) < 1e-9),
-            str(tr_g),
-        )
-        self.record_test(
-            "qa-cid-idx",
-            int((tr_g or {}).get("idx", -1)) == 0 and int((tr_g or {}).get("step", 0)) == 8,
-            str(tr_g),
-        )
+        real_g = next((x for x in getattr(self.sets, "sets", {}).values() if x.pack == "general" and x.kind == "base" and x.step == 8 and abs(float(x.sl_ratio) - 1.0) < 1e-9), None)
+        tr_g = self.parse_track(self.cid("o", set_id=real_g.id, pack=real_g.pack, set_idx=real_g.idx)) if real_g is not None else None
+        self.record_test("qa-cid-parse", real_g is None or bool(tr_g and tr_g.get("set_id") == real_g.id), str(tr_g))
+        self.record_test("qa-cid-idx", real_g is None or (int((tr_g or {}).get("idx", -1)) == real_g.idx and int((tr_g or {}).get("step", 0)) == 8), str(tr_g))
 
     @staticmethod
     def _kline_time(row: Any) -> int:

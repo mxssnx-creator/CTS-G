@@ -4,7 +4,7 @@ Lanes are driven with hand-built bars so every expected price and reason is know
 """
 from __future__ import annotations
 
-from common import PULSE, lane_cfg  # noqa: F401
+from common import COST, PULSE, lane_cfg  # noqa: F401
 from set_engine import SetBook, SetLane
 
 
@@ -124,14 +124,24 @@ def entry_long_levels_sit_around_close():
 def trail_arms_then_gives_back():
     b = SetBook()
     b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
-            "setSlRatios": [3.5], "trailVariants": ["0.3:0.1"]})
+            "setSlRatios": [3.5], "exitIgnoreTp": True, "trailVariants": ["0.6:0.36"]})
     st = next(s for s in b.by_idx if s.kind == "trail")
     lane = SetLane(st, "X")
-    bars = [_bar(100, 100, 100, 100), _bar(100, 100.4, 100.0, 100.35), _bar(100.3, 100.31, 100.1, 100.2)]
+    bars = [_bar(100, 100, 100, 100), _bar(100, 100.8, 100.0, 100.75), _bar(100.7, 100.71, 100.3, 100.4)]
     recs = _run(lane, bars, [1, 0, 0], [0.9, 0, 0], lane_cfg(time_bars=99, scratch_bars=99))
-    # arm 0.3%: peak 100.4 arms the stop at 100.4 * (1 - 0.1%) = 100.2996, the low 100.1 gives it back
-    ok = len(recs) == 1 and recs[0]["reason"] == "sl" and abs(recs[0]["exit_px"] - 100.4 * 0.999) < 1e-6
+    # arm 0.6%: peak 100.8 arms the stop at 100.8 * (1 - 0.36%) = 100.437, the low 100.3 gives it back
+    ok = len(recs) == 1 and recs[0]["reason"] == "sl" and abs(recs[0]["exit_px"] - 100.8 * (1 - 0.0036)) < 1e-6
     return ok, f"reason={recs[0]['reason'] if recs else None} px={recs[0]['exit_px'] if recs else None}"
+
+
+def explicit_trail_list_obeys_the_minimum_distance():
+    b = SetBook()
+    b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
+            "setSlRatios": [3.5], "trailVariants": ["0.3:0.1", "0.2:0.1", "0.9:0.5"]})
+    trails = sorted((s.trail_arm, s.trail_give) for s in b.by_idx if s.kind == "trail")
+    floor = 3 * COST          # PositionCost + 2 steps
+    ok = trails and all(g >= floor - 1e-9 and a >= g - 1e-9 for a, g in trails) and len(trails) == len(set(trails))
+    return bool(ok), f"trail Sets (arm, give)={trails} floor={floor}"
 
 
 def gate_boundary_and_sample():
@@ -174,6 +184,7 @@ CHECKS = [
     ("lane.entry-confidence-and-direction", entry_needs_confidence_and_direction),
     ("lane.entry-levels-around-close", entry_long_levels_sit_around_close),
     ("lane.trail-arms-then-gives-back", trail_arms_then_gives_back),
+    ("lane.explicit-trail-list-obeys-minimum-distance", explicit_trail_list_obeys_the_minimum_distance),
     ("gate.boundary-pf-and-sample", gate_boundary_and_sample),
     ("gate.window-caps-sample", gate_window_caps_sample),
 ]
