@@ -477,6 +477,30 @@ def redis_hget(field: str) -> str:
     return (p.stdout or "").strip()
 
 
+def cred_file_path() -> str:
+    """A connection can be read from a JSON file instead of Redis: PULSE_CRED_FILE, or cred-<conn>.json in the state
+    directory. The file must be private (no group or other permission bits); a readable file is ignored."""
+    return os.environ.get("PULSE_CRED_FILE") or os.path.join(DIR, f"cred-{CONN_SHORT}.json")
+
+
+def connection_field(field: str) -> str:
+    """One field of this connection (api_key, api_secret, base_url, is_testnet): from the private credential file when
+    it has it, otherwise from Redis. With the file in place no Redis server is needed to start."""
+    path = cred_file_path()
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o077 == 0:
+            data = load_json_file(path)
+            if field in data and str(data[field]).strip():
+                return str(data[field]).strip()
+    except OSError:
+        pass
+    try:
+        return redis_hget(field)
+    except Exception:
+        return ""
+
+
 def load_json_file(path: str) -> dict:
     try:
         with open(path) as f:
@@ -486,8 +510,20 @@ def load_json_file(path: str) -> dict:
         return {}
 
 
+_CTS_CACHE: Dict[str, Any] = {"t": 0.0, "data": {}}
+
+
 def dump_cts_settings() -> dict:
-    p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True)
+    """The connection settings hash from Redis, read at most once a minute (every overlay reload used to start a
+    redis-cli process). Without Redis the result is an empty dict and the overlay alone configures the engine."""
+    now = time.time()
+    if now - float(_CTS_CACHE["t"]) < 60.0:
+        return dict(_CTS_CACHE["data"])
+    try:
+        p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True, timeout=3)
+    except Exception:
+        _CTS_CACHE.update(t=now, data={})
+        return {}
     lines = (p.stdout or "").splitlines()
     out = {}
     for i in range(0, len(lines) - 1, 2):
@@ -512,6 +548,7 @@ def dump_cts_settings() -> dict:
         os.replace(tmp, CTS_PATH)
     except Exception:
         pass
+    _CTS_CACHE.update(t=now, data=dict(out))
     return out
 
 
@@ -5149,39 +5186,42 @@ class Pulse:
             f"{sizes[0] if sizes else 0}/{sizes[len(sizes) // 2] if sizes else 0}/{sizes[-1] if sizes else 0} of {lookback}",
             every=30.0, key="hist-fetch")
 
+    def _hist_tick(self) -> None:
+        """One pass of the history thread: real minutes join the Set history, the history is fetched when most symbols
+        lack it (or refreshed on schedule), and a chunk of symbols is replayed and scored."""
+        for s in SYMBOLS:
+            # only real minutes join the Set history: the seed padding (flat rows) would be replayed as bars
+            bars = self.real_bars_1m(s)
+            if bars:
+                self.sets.ingest_bars(s, bars)
+        if not self.sets.due():
+            return
+        full = int(self.sets.lookback * 0.9)
+        have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= full)
+        if have < max(4, len(SYMBOLS) // 2):
+            # most symbols lack their history: fetch it now. Live minutes alone take the lookback (32 h) to fill it,
+            # and waiting for them first left every Set unvalidated after each start.
+            self._hist_fetch()
+        elif time.time() - self.sets.last_run >= self.sets.refresh_s:
+            self._hist_fetch()
+        self.hist_busy = True
+        try:
+            b = self._budget()
+            names = list(SYMBOLS)
+            if b.scan_chunk and len(names) > b.hist_chunk:
+                names, self.load.cursor_hist = self.load.scan_window(
+                    names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
+                )
+            if b.hist_run:
+                self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names,
+                                     abort=lambda: self.load.last_budget.level == "critical")
+        finally:
+            self.hist_busy = False
+
     def _hist_loop(self) -> None:
         while not self._hist_stop:
             try:
-                for s in SYMBOLS:
-                    bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
-                    if bars:
-                        self.sets.ingest_bars(s, bars)
-                if self.sets.due():
-                    have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
-                    live = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
-                    if live < min(80, max(12, len(SYMBOLS) // 8)):
-                        log(f"HIST waiting for live minutes: {live} symbols have 20 real 1m bars, need {min(80, max(12, len(SYMBOLS) // 8))}",
-                            every=120.0, key="hist-wait")
-                    elif have < max(4, len(SYMBOLS) // 2):
-                        self._hist_fetch()
-                    elif time.time() - self.sets.last_run >= self.sets.refresh_s:
-                        self._hist_fetch()
-                    self.hist_busy = True
-                    nbar = [0]
-                    def _hist_step():
-                        nbar[0] += 1
-                        time.sleep(0)
-                    try:
-                        b = self._budget()
-                        names = list(SYMBOLS)
-                        if b.scan_chunk and len(names) > b.hist_chunk:
-                            names, self.load.cursor_hist = self.load.scan_window(
-                                names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
-                            )
-                        if b.hist_run:
-                            self.sets.replay_all(on_step=_hist_step, symbols=names, abort=lambda: self.load.last_budget.level == "critical")
-                    finally:
-                        self.hist_busy = False
+                self._hist_tick()
             except Exception:
                 self.hist_busy = False
                 self.sets.progress.phase = "error"
@@ -5445,12 +5485,12 @@ def main() -> None:
     global BASE
     os.makedirs(DIR, exist_ok=True)
     seed_overlay()
-    key = redis_hget("api_key")
-    secret = redis_hget("api_secret")
+    key = connection_field("api_key")
+    secret = connection_field("api_secret")
     if not key or not secret:
         raise SystemExit(f"missing {CONN_SHORT} credentials")
     try:  # the environment is pinned per connection; a stored or env setting that contradicts it refuses to start
-        BASE, _mode = resolve_base(CONN_SHORT, redis_hget("base_url") or "", redis_hget("is_testnet") or "",
+        BASE, _mode = resolve_base(CONN_SHORT, connection_field("base_url") or "", connection_field("is_testnet") or "",
                                    os.environ.get("PULSE_BASE", ""))
     except ConnGuardError as exc:
         raise SystemExit(f"refusing to start: {exc}")

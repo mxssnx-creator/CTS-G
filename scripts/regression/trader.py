@@ -773,7 +773,73 @@ def the_set_lane_does_not_read_the_exit_strategies():
     return not touched and exit_sl_guarded, f"manage_set_lane touches {touched or 'none of exits/variants/coord/dca/block'}; security_prices guards both exit-lane SL tightenings={exit_sl_guarded}"
 
 
+def credentials_come_from_a_private_file_without_redis():
+    """With a private credential file in place the engine needs no Redis: no redis-cli process is started. A file that
+    others can read is ignored."""
+    import json as _json
+    import subprocess as _sp
+    saved_run, saved_env = _sp.run, os.environ.get("PULSE_CRED_FILE")
+    calls = []
+    def no_redis(*a, **k):
+        calls.append(a)
+        raise FileNotFoundError("redis-cli")
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "cred.json")
+        with open(path, "w") as f:
+            _json.dump({"api_key": "K1", "api_secret": "S1", "base_url": "https://open-api-vst.bingx.com"}, f)
+        try:
+            pt.subprocess.run = no_redis
+            os.environ["PULSE_CRED_FILE"] = path
+            os.chmod(path, 0o600)
+            private = (pt.connection_field("api_key"), pt.connection_field("api_secret"), pt.connection_field("base_url"))
+            spawned_private = len(calls)
+            os.chmod(path, 0o644)
+            open_file = pt.connection_field("api_key")
+        finally:
+            pt.subprocess.run = saved_run
+            if saved_env is None:
+                os.environ.pop("PULSE_CRED_FILE", None)
+            else:
+                os.environ["PULSE_CRED_FILE"] = saved_env
+    ok = private == ("K1", "S1", "https://open-api-vst.bingx.com") and spawned_private == 0 and open_file == ""
+    return ok, f"private file read={private[0] == 'K1'} redis processes={spawned_private}; world-readable file ignored={open_file == ''}"
+
+
+def history_thread_fetches_at_start_and_never_replays_padding():
+    """At start every symbol holds only padded live rows (flat seed rows, no real minutes). One pass of the history
+    thread must fetch the real history at once (no wait for live minutes), keep the padding out of the Set bars, and
+    replay the symbols."""
+    import types
+    import set_engine as se
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
+        p = _bare_pulse()
+        p.api = _PagedKlines()
+        p.sets = se.SetBook()
+        from common import overlay, SMALL
+        p.sets.load(overlay(**SMALL))
+        p.sets.lookback = 1920
+        for s_ in pt.SYMBOLS:
+            p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 60       # the seed padding
+            p.real_1m[s_] = 0
+        p.open = {}
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        sizes = {s_: len(p.sets.bars.get(s_) or []) for s_ in pt.SYMBOLS}
+        flat = sum(1 for s_ in pt.SYMBOLS for b in (p.sets.bars.get(s_) or []) if b[0] == b[1] == b[2] == b[3] == 100.0)
+        replayed = p.sets.progress.symbols_total
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = all(n == 1920 for n in sizes.values()) and flat == 0 and replayed == 4
+    return ok, f"bars={sizes} padded rows in the Set history={flat} symbols replayed={replayed}"
+
+
 CHECKS = [
+    ("trader.history-thread-fetches-at-start", history_thread_fetches_at_start_and_never_replays_padding),
+    ("trader.credentials-from-private-file", credentials_come_from_a_private_file_without_redis),
     ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
     ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
