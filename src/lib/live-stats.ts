@@ -73,7 +73,11 @@ export type PfBase = {
   total?: number;
   valid?: number;
   validatedPct?: number;
-  byPack?: Record<string, { base: PfPool; unfiltered: PfPool; total: number; valid: number; validatedPct: number }>;
+  byPack?: Record<string, { base: PfPool; unfiltered: PfPool; total: number; valid: number; validatedPct: number; minPf?: number }>;
+  /** "gate-window": pooled over each Set's last setGateWindow orders, never the whole tape. */
+  basis?: string;
+  /** Continuous progress of the effective PF and the validated share, one point per scoring pass (oldest first). */
+  history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number }>;
 };
 
 export type LiveStats = {

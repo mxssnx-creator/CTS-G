@@ -57,6 +57,7 @@ from risk_variants import parse_trail, trail_grid, trail_key
 PACKS = ("indications", "general")
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
+SHORT_MIN_PF_DEFAULT = 1.1
 SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
 GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
@@ -446,6 +447,8 @@ class SetState:
     last15_ratio: float = 1.0       # 1 + 0.10 x avgR: display only, never compared with a PF threshold
     gate_pf: float = 0.0            # net PF over the last setGateWindow orders: the eligibility metric
     gate_n: int = 0
+    gate_gp: float = 0.0            # gross profit / loss (net fractions) inside that same window: the rolling pool inputs
+    gate_gl: float = 0.0
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
     last15_r: float = 0.0
@@ -710,6 +713,8 @@ class SetBook:
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = GATE_MIN_PF_DEFAULT
+        self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
+        self.pf_history: List[Dict[str, Any]] = []
         self.gate_window = GATE_WINDOW_DEFAULT
         self.gate_min = GATE_MIN_DEFAULT
         self.max_dd_s = 420.0
@@ -771,6 +776,9 @@ class SetBook:
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
         self.gate_min = max(5, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
         self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
+        # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
+        sr_min = ov.get("shortRangeMinPf")
+        self.pack_min_pf = {SHORT_PACK: float(sr_min) if sr_min is not None else SHORT_MIN_PF_DEFAULT}
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
         # hours. setMaxDdtHours is 2..36 in steps of 2, default 12. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
@@ -1233,6 +1241,8 @@ class SetBook:
                 self.progress.phase = "ready"
                 self.progress.pct = 100.0
                 self.progress.ready = True
+                with self._lock:
+                    self._record_pf_progress()
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
@@ -1311,6 +1321,10 @@ class SetBook:
         gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
+        cf = cost_as_frac(self.cost_pct)
+        win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-self.gate_window:]
+        st.gate_gp = round(sum(x for x in win if x > 0), 8)
+        st.gate_gl = round(-sum(x for x in win if x < 0), 8)
         last25 = tape[-self.deact_n :]
         st.last25_n = len(last25)
         if last25:
@@ -1344,7 +1358,7 @@ class SetBook:
             return "error"
         if st.gate_n < self.gate_min:
             return "n<min"
-        if st.gate_pf + 1e-9 < self.min_pf:
+        if st.gate_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf):
             return "pf<min"
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
@@ -1512,15 +1526,17 @@ class SetBook:
             return self._snapshot()
 
     def _pf_split(self) -> Dict[str, Any]:
-        """The post-Base standard figures. `base` is the pooled net PF of the Sets that pass Base validation (the
-        effective PF, the one to judge a strategy by); `unfiltered` is every Set before Base (under 1 by design: Base
-        exists to drop the losing Sets). `validatedPct` is the share of configured Sets that pass Base validation, and
-        `byPack` repeats base/validated per strategy pack."""
+        """The post-Base standard figures, on each Set's rolling gate window (its last `setGateWindow` orders), never on
+        the whole tape: a Set that was good long ago and is bad now does not carry the pool. `base` is the pooled net
+        PF of the Sets that pass Base validation (the effective PF, the one to judge a strategy by); `unfiltered` is
+        every Set on the same basis (under 1 by design: Base exists to drop the losing Sets). `validatedPct` is the
+        share of configured Sets that pass Base validation, and `byPack` repeats base/validated per strategy pack.
+        `history` is the continuous progress of the effective PF and the validated share, one point per scoring pass."""
         def pool(sts: List[SetState]) -> Dict[str, Any]:
-            gp = sum(x.gp for x in sts)
-            gl = sum(x.gl for x in sts)
+            gp = sum(x.gate_gp for x in sts)
+            gl = sum(x.gate_gl for x in sts)
             pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-            return {"pf": pf, "n": sum(x.n for x in sts), "sets": len(sts)}
+            return {"pf": pf, "n": sum(x.gate_n for x in sts), "sets": len(sts)}
         allsets = list(self.by_idx)
         valid = [x for x in allsets if not self.gate_reason(x)]
         total = len(allsets)
@@ -1529,9 +1545,29 @@ class SetBook:
             ps = [x for x in allsets if x.pack == pack]
             pv = [x for x in ps if not self.gate_reason(x)]
             by_pack[pack] = {"base": pool(pv), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv),
-                             "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0}
+                             "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
+                             "minPf": self.pack_min_pf.get(pack, self.min_pf)}
         return {"base": pool(valid), "unfiltered": pool(allsets), "total": total, "valid": len(valid),
-                "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack}
+                "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack,
+                "basis": "gate-window", "history": list(self.pf_history[-240:])}
+
+    def _record_pf_progress(self) -> None:
+        """One point per scoring pass (at most one per 20 s): the effective PF and the validated share over time."""
+        now = time.time()
+        if self.pf_history and now - self.pf_history[-1]["t"] < 20.0:
+            return
+        split = self._pf_split_nohist()
+        self.pf_history.append({"t": round(now, 1), "pf": split["base"]["pf"], "n": split["base"]["n"],
+                                "valid": split["valid"], "validatedPct": split["validatedPct"],
+                                "unfiltered": split["unfiltered"]["pf"]})
+        del self.pf_history[:-720]
+
+    def _pf_split_nohist(self) -> Dict[str, Any]:
+        saved, self.pf_history = self.pf_history, []
+        try:
+            return self._pf_split()
+        finally:
+            self.pf_history = saved
 
     def _snapshot(self) -> Dict[str, Any]:
         rows = []

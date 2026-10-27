@@ -550,6 +550,15 @@ function SettingsPage() {
                   onChange={(v) => patch("shortRangeStepMax", Math.max(overlay.shortRangeStepMin || 2, Math.min(6, Math.round(v))))}
                 />
                 <Slider
+                  label="Short Range · min PF"
+                  value={overlay.shortRangeMinPf}
+                  min={1}
+                  max={2.3}
+                  step={0.02}
+                  hint="Base PF floor of the Short Range strategy alone (default 1.10); the other strategies use the Set min PF above."
+                  onChange={(v) => patch("shortRangeMinPf", v)}
+                />
+                <Slider
                   label="Min stop · steps over cost"
                   value={overlay.slMinSteps}
                   min={0}

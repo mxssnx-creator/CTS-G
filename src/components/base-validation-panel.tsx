@@ -66,6 +66,15 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     return rows.filter((r) => r.n > 0);
   }, [counts]);
   if (!pb) return null;
+  const progress = useMemo(
+    () =>
+      (pb?.history ?? []).map((h) => ({
+        time: new Date(h.t * 1000).toISOString().slice(11, 16),
+        pf: Math.min(h.pf, 9.99),
+        validated: h.validatedPct,
+      })),
+    [pb],
+  );
   const hoursWithTrades = hourly.filter((h) => h.n > 0);
   const hoursPositive = hoursWithTrades.filter((h) => (h.pf ?? 0) >= 1).length;
   return (
@@ -112,6 +121,24 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
             <ReferenceLine y={1} stroke="#8a93a6" strokeDasharray="4 2" />
             <ReferenceLine y={minPf} stroke="#e0a030" strokeDasharray="4 2" />
             <Line type="monotone" dataKey="pf" name="PF" stroke="#4c8dff" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
+          </LineChart>
+        </ClientChart>
+      </Panel>
+      <Panel
+        title="Continuous progress"
+        hint={`Effective PF (rolling gate window of each validated Set) and the validated share over time, one point per scoring pass${pb.basis ? " · basis: " + pb.basis : ""}`}
+      >
+        <ClientChart height={200}>
+          <LineChart data={progress} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #2a2f3a)" />
+            <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={24} />
+            <YAxis yAxisId="pf" tick={{ fontSize: 11 }} domain={[0, "auto"]} />
+            <YAxis yAxisId="pct" orientation="right" tick={{ fontSize: 11 }} unit="%" domain={[0, 100]} />
+            <Tooltip />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <ReferenceLine yAxisId="pf" y={minPf} stroke="#e0a030" strokeDasharray="4 2" />
+            <Line yAxisId="pf" type="monotone" dataKey="pf" name="Effective PF" stroke="#1f9d5c" strokeWidth={2} dot={false} />
+            <Line yAxisId="pct" type="monotone" dataKey="validated" name="Validated %" stroke="#4c8dff" strokeWidth={1.5} dot={false} />
           </LineChart>
         </ClientChart>
       </Panel>

@@ -594,6 +594,208 @@ def lr_inside(rows: Sequence[Row]) -> Signal:
     return None
 
 
+# ---- Trend, breakout and prior-move relations ----------------------------------------------------------------------
+# The research found intraday momentum at the half-hour scale and a short reversal at the quarter-hour scale in crypto
+# futures, thin and mixed evidence on retests against immediate breaks (false breaks run 15-26%), and no measured gain
+# from a higher-timeframe filter. These indicators put each of those relations to the test; none is trusted before it
+# has been measured after Base validation.
+
+
+def _closes(rows: Sequence[Row]) -> List[float]:
+    return [float(b[3]) for b in rows]
+
+
+def htf_align(rows: Sequence[Row]) -> Signal:
+    """The 5, 15 and 60 bar moves agree in direction and are large against ATR; one pullback bar has just resumed."""
+    r = _tail(rows)
+    if len(r) < 70:
+        return None
+    c = _closes(r)
+    atr = _atr(r)
+    if atr <= 0:
+        return None
+    m5, m15, m60 = (c[-1] - c[-6]) / atr, (c[-1] - c[-16]) / atr, (c[-1] - c[-61]) / atr
+    e9 = _ema_list(c, 9)[-1]
+    if m60 >= 2.0 and m15 >= 1.2 and m5 > 0 and c[-2] < c[-3] and c[-1] > c[-2] and c[-1] > e9:
+        return 1, _conf(0.62, min(0.15, (m60 - 2.0) * 0.02))
+    if m60 <= -2.0 and m15 <= -1.2 and m5 < 0 and c[-2] > c[-3] and c[-1] < c[-2] and c[-1] < e9:
+        return -1, _conf(0.62, min(0.15, (-m60 - 2.0) * 0.02))
+    return None
+
+
+def half_hour_continuation(rows: Sequence[Row]) -> Signal:
+    """The last 30 bars and the 30 before them moved the same way (the second at least one ATR, the first at least two
+    and a half), and the last three bars resume: the half-hour momentum goes on."""
+    r = _tail(rows)
+    if len(r) < 70:
+        return None
+    c = _closes(r)
+    atr = _atr(r)
+    if atr <= 0:
+        return None
+    a, b = c[-1] - c[-31], c[-31] - c[-61]
+    if a >= 2.5 * atr and b >= atr and c[-1] > c[-4] and c[-1] >= c[-2]:
+        return 1, _conf(0.6, min(0.15, (a / atr - 2.5) * 0.02))
+    if a <= -2.5 * atr and b <= -atr and c[-1] < c[-4] and c[-1] <= c[-2]:
+        return -1, _conf(0.6, min(0.15, (-a / atr - 2.5) * 0.02))
+    return None
+
+
+def quarter_reversal(rows: Sequence[Row]) -> Signal:
+    """A 15-bar move of three ATR or more that ended three bars ago, and the last three bars have given back at least
+    35% of it: the short reversal after an imbalance, taken once it is under way."""
+    r = _tail(rows)
+    if len(r) < 40:
+        return None
+    c = _closes(r)
+    atr = _atr(r)
+    if atr <= 0:
+        return None
+    m = c[-4] - c[-19]
+    back = c[-1] - c[-4]
+    if m <= -3.0 * atr and back >= 0.35 * -m:
+        return 1, _conf(0.6, min(0.15, (-m / atr - 3.0) * 0.02))
+    if m >= 3.0 * atr and back <= -0.35 * m:
+        return -1, _conf(0.6, min(0.15, (m / atr - 3.0) * 0.02))
+    return None
+
+
+def breakout_retest(rows: Sequence[Row]) -> Signal:
+    """A close above the 30-bar high within the last 8 bars, a pullback in the last 4 bars that touches the old high
+    (within 0.25 ATR above to 0.5 ATR below) and a close that holds above it, with EMA50 sloping up."""
+    r = _tail(rows)
+    if len(r) < 70:
+        return None
+    atr = _atr(r)
+    if atr <= 0:
+        return None
+    c = _closes(r)
+    e50 = _ema_list(c, 50)
+    up = e50[-1] > e50[-8]
+    dn = e50[-1] < e50[-8]
+    ref_hi = max(float(b[1]) for b in r[-40:-8])
+    ref_lo = min(float(b[2]) for b in r[-40:-8])
+    if up and any(float(b[3]) > ref_hi for b in r[-8:-2]):
+        touch = any(ref_hi - 0.5 * atr <= float(b[2]) <= ref_hi + 0.25 * atr for b in r[-4:])
+        if touch and c[-1] > ref_hi + 0.1 * atr and c[-1] > c[-2]:
+            return 1, 0.64
+    if dn and any(float(b[3]) < ref_lo for b in r[-8:-2]):
+        touch = any(ref_lo - 0.25 * atr <= float(b[1]) <= ref_lo + 0.5 * atr for b in r[-4:])
+        if touch and c[-1] < ref_lo - 0.1 * atr and c[-1] < c[-2]:
+            return -1, 0.64
+    return None
+
+
+def failed_breakout(rows: Sequence[Row]) -> Signal:
+    """A bar pokes through the 30-bar high but closes back under it, and the next close is lower still: the false break
+    (15-26% of breaks on 1m) is faded. Mirrored for the low."""
+    r = _tail(rows)
+    if len(r) < 40:
+        return None
+    ref_hi = max(float(b[1]) for b in r[-32:-2])
+    ref_lo = min(float(b[2]) for b in r[-32:-2])
+    p, last = r[-2], r[-1]
+    if float(p[1]) > ref_hi and float(p[3]) < ref_hi and float(last[3]) < float(p[3]):
+        return -1, 0.62
+    if float(p[2]) < ref_lo and float(p[3]) > ref_lo and float(last[3]) > float(p[3]):
+        return 1, 0.62
+    return None
+
+
+def vol_expansion_trend(rows: Sequence[Row]) -> Signal:
+    """The 5-bar ATR was at most 0.8 of the 60-bar ATR five bars ago and is now at least 1.3 of it: volatility expands,
+    and the move is taken in the direction of the close against EMA20 when EMA20 slopes the same way."""
+    r = _tail(rows)
+    if len(r) < 80:
+        return None
+    a60 = _atr(r, 60)
+    if a60 <= 0:
+        return None
+    before, now = _atr(r[:-5], 5) / a60, _atr(r, 5) / a60
+    if before > 0.8 or now < 1.3:
+        return None
+    c = _closes(r)
+    e20 = _ema_list(c, 20)
+    if c[-1] > e20[-1] and e20[-1] > e20[-6]:
+        return 1, _conf(0.62, min(0.15, (now - 1.3) * 0.1))
+    if c[-1] < e20[-1] and e20[-1] < e20[-6]:
+        return -1, _conf(0.62, min(0.15, (now - 1.3) * 0.1))
+    return None
+
+
+def trend_breakout_combo(rows: Sequence[Row]) -> Signal:
+    """The trend and the breakout together: a close beyond the prior 30-bar extreme, EMA9 > EMA21 > EMA55 (or the
+    reverse), and ADX(14) at least 20 in the same direction."""
+    r = _tail(rows)
+    if len(r) < 80:
+        return None
+    c = _closes(r)
+    prior = r[-31:-1]
+    hi, lo = max(float(b[1]) for b in prior), min(float(b[2]) for b in prior)
+    e9, e21, e55 = _ema_list(c, 9)[-1], _ema_list(c, 21)[-1], _ema_list(c, 55)[-1]
+    adx = adx_trend(r, floor=20.0)
+    if adx is None:
+        return None
+    if c[-1] > hi and e9 > e21 > e55 and adx[0] == 1:
+        return 1, _conf(0.64, adx[1] - 0.6)
+    if c[-1] < lo and e9 < e21 < e55 and adx[0] == -1:
+        return -1, _conf(0.64, adx[1] - 0.6)
+    return None
+
+
+def _prior_move_break(rows: Sequence[Row], same_direction: bool) -> Signal:
+    s = low_range_state(rows, lag=1)
+    if s is None or s["width_atr"] > 3.5 or s["bw_rank"] > 0.5:
+        return None
+    r = _tail(rows)
+    if len(r) < 100:
+        return None
+    atr = _atr(r)
+    c = _closes(r)
+    before = c[-26] - c[-86]            # the 60 bars before the 24-bar box
+    if atr <= 0 or abs(before) < 2.0 * atr:
+        return None
+    avg_v = sum(float(b[4]) for b in r[-25:-1]) / 24.0
+    if avg_v <= 0 or float(r[-1][4]) < avg_v:
+        return None
+    brk = 1 if s["close"] > s["hi"] else -1 if s["close"] < s["lo"] else 0
+    if brk == 0:
+        return None
+    prev = 1 if before > 0 else -1
+    if (brk == prev) == same_direction:
+        return brk, _conf(0.62, 0.0)
+    return None
+
+
+def lr_prevmove_break(rows: Sequence[Row]) -> Signal:
+    """A low-range break in the direction of the move that came before the range: the prior move resumes."""
+    return _prior_move_break(rows, True)
+
+
+def lr_prevmove_reverse(rows: Sequence[Row]) -> Signal:
+    """A low-range break against the move that came before the range: the prior move has ended."""
+    return _prior_move_break(rows, False)
+
+
+def mean_stretch_revert(rows: Sequence[Row], n: int = 120, z: float = 2.5) -> Signal:
+    """The close two standard deviations and a half away from the 120-bar mean and a candle back toward it."""
+    r = _tail(rows)
+    if len(r) < n:
+        return None
+    c = _closes(r)[-n:]
+    m = sum(c) / n
+    sd = math.sqrt(sum((x - m) ** 2 for x in c) / n)
+    if sd <= 0:
+        return None
+    zz = (c[-1] - m) / sd
+    o, cl = float(r[-1][0]), float(r[-1][3])
+    if zz <= -z and cl > o:
+        return 1, _conf(0.6, min(0.15, (-zz - z) * 0.05))
+    if zz >= z and cl < o:
+        return -1, _conf(0.6, min(0.15, (zz - z) * 0.05))
+    return None
+
+
 INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "supertrend": supertrend,
     "adx_trend": adx_trend,
@@ -617,6 +819,16 @@ INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "lr_trendbreak": lr_trendbreak,
     "lr_nr7": lr_nr7,
     "lr_inside": lr_inside,
+    "htf_align": htf_align,
+    "half_hour_continuation": half_hour_continuation,
+    "quarter_reversal": quarter_reversal,
+    "breakout_retest": breakout_retest,
+    "failed_breakout": failed_breakout,
+    "vol_expansion_trend": vol_expansion_trend,
+    "trend_breakout_combo": trend_breakout_combo,
+    "lr_prevmove_break": lr_prevmove_break,
+    "lr_prevmove_reverse": lr_prevmove_reverse,
+    "mean_stretch_revert": mean_stretch_revert,
 }
 
 

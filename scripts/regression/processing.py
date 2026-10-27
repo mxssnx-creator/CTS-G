@@ -439,7 +439,7 @@ def effective_pf_is_pooled_over_valid_sets_only():
     snap = b.snapshot()["pfBase"]
     valid = [st for st in b.by_idx if not b.gate_reason(st)]
     def pf(sts):
-        gp = sum(x.gp for x in sts); gl = sum(x.gl for x in sts)
+        gp = sum(x.gate_gp for x in sts); gl = sum(x.gate_gl for x in sts)
         return round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
     ok = (snap["base"]["sets"] == len(valid) and snap["unfiltered"]["sets"] == len(b.by_idx)
           and snap["base"]["pf"] == pf(valid) and snap["unfiltered"]["pf"] == pf(b.by_idx)
@@ -465,7 +465,67 @@ def pack_change_does_not_poison_the_signal_memo():
     return ok, f"phase={b.progress.phase} packs={b.packs} errors={errs[:1]}"
 
 
+def effective_pf_uses_the_rolling_window_not_the_whole_tape():
+    """A Set that earned its profit long ago and loses now must not carry the pool: the pooled PF is taken over each
+    Set's last gate-window orders only."""
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    st = b.by_idx[0]
+    good = [{"t": 1000.0 + i, "pnl": 0.01, "pnl_pct": 0.0112, "symbol": "X", "side": "LONG", "hold_s": 60, "reason": "tp", "exit_i": i}
+            for i in range(40)]
+    bad = [{"t": 2000.0 + i, "pnl": -0.003, "pnl_pct": 0.0, "symbol": "X", "side": "LONG", "hold_s": 60, "reason": "sl", "exit_i": 100 + i}
+           for i in range(10)]
+    b.gate_window = 10
+    st.hist = good + bad
+    st.live = []
+    b._score_one(st)
+    # whole tape: 40 wins of +1% against 10 losses of -0.12%: PF far above 1; last 10 orders: all losses
+    ok = st.gate_pf == 0.0 and st.gate_gp == 0.0 and st.gate_gl > 0 and st.gp > 0 and st.n >= 0
+    return ok, f"gate pf={st.gate_pf} gate gp={st.gate_gp} gl={st.gate_gl}; whole tape gp={st.gp:.4f}"
+
+
+def short_range_has_its_own_pf_floor():
+    from set_engine import SHORT_PACK
+    b = SetBook()
+    b.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
+    sr = next(s for s in b.by_idx if s.pack == SHORT_PACK and s.kind == "base")
+    other = next(s for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "base")
+    for st in (sr, other):
+        st.gate_n = b.gate_min
+        st.gate_pf = 1.2          # above Short Range's 1.1, below the global 2.0
+        st.max_dd_s = 0.0
+        st.active = True
+        st.last_error = ""
+        st.locked = False
+    b.load(overlay(stratShortRange=True, setMinPf=2.0, shortRangeMinPf=1.5, **SMALL))
+    reason_default = None
+    b2 = SetBook()
+    b2.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
+    ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.1
+          and b2.gate_reason(sr) == "" and b2.gate_reason(other) == "pf<min")
+    return ok, f"short range floor default={b2.pack_min_pf[SHORT_PACK]} set={b.pack_min_pf[SHORT_PACK]}; PF 1.2: short range='{b2.gate_reason(sr)}' other='{b2.gate_reason(other)}'"
+
+
+def pf_progress_history_is_continuous_and_bounded():
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    h1 = list(b.pf_history)
+    b.pf_history[-1]["t"] -= 30.0           # a later pass, outside the 20 s throttle
+    b._record_pf_progress()
+    b._record_pf_progress()                 # inside the throttle: no second point
+    h2 = list(b.pf_history)
+    for i in range(800):
+        b.pf_history.append({"t": 1.0 + i, "pf": 1.0, "n": 1, "valid": 1, "validatedPct": 1.0, "unfiltered": 1.0})
+    b._record_pf_progress()
+    snap = b.snapshot()["pfBase"]
+    ok = len(h1) == 1 and len(h2) == 2 and len(b.pf_history) <= 720 and len(snap["history"]) <= 240 and snap["basis"] == "gate-window"
+    return ok, f"points after one pass={len(h1)} after two={len(h2)} bounded={len(b.pf_history)} snapshot={len(snap['history'])}"
+
+
 CHECKS = [
+    ("processing.effective-pf-rolling-window", effective_pf_uses_the_rolling_window_not_the_whole_tape),
+    ("processing.short-range-own-pf-floor", short_range_has_its_own_pf_floor),
+    ("processing.pf-progress-history", pf_progress_history_is_continuous_and_bounded),
     ("processing.pack-change-keeps-memo-sound", pack_change_does_not_poison_the_signal_memo),
     ("processing.effective-pf-pooled-over-valid-sets", effective_pf_is_pooled_over_valid_sets_only),
     ("processing.pick-any-no-gap-between-lookups", pick_any_has_no_gap_between_lookups),

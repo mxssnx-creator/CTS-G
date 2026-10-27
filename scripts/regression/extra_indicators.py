@@ -292,3 +292,66 @@ CHECKS += [
     ("extra.nr7-and-inside-bar-both-ways", narrow_range_bar_and_inside_bar_both_ways),
     ("extra.low-range-levels-add-the-position-cost", low_range_levels_add_the_position_cost),
 ]
+
+
+# ---- trend, breakout and prior-move relations ------------------------------------------------------------------------
+
+
+def _mirror(rows, m=100.0):
+    return [[2 * m - o, 2 * m - l, 2 * m - h, 2 * m - c, v] for o, h, l, c, v in rows]
+
+
+def _relation_fixtures():
+    fx = {}
+    rise = [100 + 0.1 * i for i in range(80)]
+    fx["htf_align"] = (_mk(rise + [rise[-1] - 0.15, rise[-1] + 0.05], sp=0.05), 1)
+    fx["half_hour_continuation"] = (_mk(rise + [rise[-1] + 0.1], sp=0.05), 1)
+    drop = [100.0 - 0.06 * i for i in range(16)]
+    fx["quarter_reversal"] = (_mk([100.0] * 60 + drop + [drop[-1] + 0.11, drop[-1] + 0.22, drop[-1] + 0.33], sp=0.05), 1)
+    base = [100 + 0.01 * i for i in range(60)]
+    box = [base[-1] + 0.01 * ((-1) ** i) for i in range(30)]
+    ref = max(r[1] for r in _mk(base + box, sp=0.05)[-32:])
+    fx["breakout_retest"] = (_mk(base + box + [ref + 0.5, ref + 0.4, ref + 0.3, ref + 0.1, ref + 0.02, ref + 0.05, ref + 0.2], sp=0.05), 1)
+    fl = _mk([100 + 0.03 * ((-1) ** i) for i in range(60)], sp=0.05)
+    hi = max(r[1] for r in fl[-32:])
+    fx["failed_breakout"] = (fl + [[100.0, hi + 0.3, 99.95, hi - 0.05, 1.0], [hi - 0.05, hi - 0.04, 99.7, 99.75, 1.0]], -1)
+    quiet = [100 + 0.01 * ((-1) ** i) for i in range(75)]
+    loud = [quiet[-1] + 0.3 * k for k in range(1, 6)]
+    fx["vol_expansion_trend"] = (_mk(quiet, sp=0.02) + _mk(loud, sp=0.2), 1)
+    fx["trend_breakout_combo"] = (_mk([100 + 0.15 * i for i in range(120)], sp=0.05), 1)
+    b0 = [100.0 + 0.01 * ((-1) ** i) for i in range(40)]
+    up = [100 + 0.1 * i for i in range(61)]
+    bx = [up[-1] + 0.01 * ((-1) ** i) for i in range(24)]
+    fx["lr_prevmove_break"] = (_mk(b0 + up + bx, sp=0.05) + [[bx[-1], bx[-1] + 0.6, bx[-1] - 0.02, bx[-1] + 0.5, 4.0]], 1)
+    dn = [100 - 0.1 * i for i in range(61)]
+    bx2 = [dn[-1] + 0.01 * ((-1) ** i) for i in range(24)]
+    fx["lr_prevmove_reverse"] = (_mk(b0 + dn + bx2, sp=0.05) + [[bx2[-1], bx2[-1] + 0.6, bx2[-1] - 0.02, bx2[-1] + 0.5, 4.0]], 1)
+    alt = [100 + 0.1 * ((-1) ** i) for i in range(119)]
+    fx["mean_stretch_revert"] = (_mk(alt, sp=0.05) + [[98.9, 99.25, 98.85, 99.0, 1.0]], 1)
+    return fx
+
+
+def relation_indicators_fire_both_ways_and_stay_quiet_on_a_flat_tape():
+    flat = _mk([100.0 + 0.02 * ((-1) ** i) for i in range(160)], sp=0.05)
+    bad = {}
+    for name, (rows, sign) in _relation_fixtures().items():
+        fn = ix.INDICATORS[name]
+        a, b, c = fn(rows), fn(_mirror(rows)), fn(flat)
+        if not (a and a[0] == sign and b and b[0] == -sign and c is None):
+            bad[name] = (a, b, c)
+    return not bad, f"checked={len(_relation_fixtures())} wrong={bad}"
+
+
+def prior_move_relation_separates_continuation_from_reversal():
+    fx = _relation_fixtures()
+    up_after_up, up_after_down = fx["lr_prevmove_break"][0], fx["lr_prevmove_reverse"][0]
+    r = {"up/up break": ix.lr_prevmove_break(up_after_up), "up/up reverse": ix.lr_prevmove_reverse(up_after_up),
+         "up after down break": ix.lr_prevmove_break(up_after_down), "up after down reverse": ix.lr_prevmove_reverse(up_after_down)}
+    ok = r["up/up break"] and r["up/up reverse"] is None and r["up after down break"] is None and r["up after down reverse"]
+    return bool(ok), f"{r}"
+
+
+CHECKS += [
+    ("extra.relation-indicators-both-ways-and-quiet-when-flat", relation_indicators_fire_both_ways_and_stay_quiet_on_a_flat_tape),
+    ("extra.prior-move-continuation-vs-reversal", prior_move_relation_separates_continuation_from_reversal),
+]

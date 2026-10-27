@@ -169,5 +169,6 @@
   "shortRangeStepMin": 2,
   "shortRangeStepMax": 6,
   "slMinSteps": 1,
-  "trailMinSteps": 2
+  "trailMinSteps": 2,
+  "shortRangeMinPf": 1.1
 }

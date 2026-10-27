@@ -180,6 +180,8 @@ export type PulseOverlay = {
   stratShortRange: boolean;
   shortRangeStepMin: number;
   shortRangeStepMax: number;
+  /** Short Range has its own Base PF floor, whatever the global setMinPf is (default 1.1). */
+  shortRangeMinPf: number;
   /** Overall minimum stop = PositionCost + slMinSteps steps (one step = one PositionCost). */
   slMinSteps: number;
   /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
@@ -339,6 +341,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratShortRange: false,
   shortRangeStepMin: 2,
   shortRangeStepMax: 6,
+  shortRangeMinPf: 1.1,
   slMinSteps: 1,
   trailMinSteps: 2,
   stratDca: false,
@@ -488,6 +491,7 @@ export type CtsSettings = {
   stratShortRange?: boolean;
   shortRangeStepMin?: number;
   shortRangeStepMax?: number;
+  shortRangeMinPf?: number;
   slMinSteps?: number;
   trailMinSteps?: number;
   stratDca?: boolean;
@@ -659,6 +663,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratShortRange: bool(cts.stratShortRange, false),
     shortRangeStepMin: num(cts.shortRangeStepMin, 2),
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
+    shortRangeMinPf: num(cts.shortRangeMinPf, 1.1),
     slMinSteps: num(cts.slMinSteps, 1),
     trailMinSteps: num(cts.trailMinSteps, 2),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
