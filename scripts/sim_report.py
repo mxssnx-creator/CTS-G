@@ -51,11 +51,12 @@ def load_bars(data_dir: str, n_symbols: int) -> Tuple[List[str], Dict[str, List[
     return syms, bars, times
 
 
-def build_book(cost: float) -> SetBook:
+def build_book(cost: float, sl_min_steps: int = 1, trail_min_steps: int = 2) -> SetBook:
     ov = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json")))
     ov.update({"stratShortRange": True, "stratIndications": True, "stratGeneral": True,
                "setMinStep": 2, "setStepMax": 6, "shortRangeStepMin": 2, "shortRangeStepMax": 6,
-               "setStepAdapt": False, "positionCostPct": cost})
+               "setStepAdapt": False, "positionCostPct": cost, "slMinSteps": sl_min_steps,
+               "trailMinSteps": trail_min_steps})
     b = SetBook()
     b.load(ov)
     se.HIST_CAP = 10 ** 9
@@ -73,10 +74,11 @@ def run(a: argparse.Namespace) -> Dict[str, Any]:
     syms, bars_all, times_all = load_bars(a.data, a.symbols)
     w_bars = a.hours * 60
     L = BURN + w_bars
-    sb = build_book(a.cost)
+    sb = build_book(a.cost, a.sl_min_steps, a.trail_min_steps)
     sets = [st for st in sb.by_idx]
-    bars = {s: bars_all[s][-L:] for s in syms}
-    tms = {s: times_all[s][-L:] for s in syms}
+    off = int(a.offset_h * 60)       # the window ends `offset_h` hours before the end of the data
+    bars = {s: bars_all[s][len(bars_all[s]) - off - L : len(bars_all[s]) - off] for s in syms}
+    tms = {s: times_all[s][len(times_all[s]) - off - L : len(times_all[s]) - off] for s in syms}
     base_ts = tms[syms[0]][0] / 1000.0
     cfg = {"entry_conf": sb.entry_conf, "time_bars": max(8, min(sb.hist_time_bars, 360)),
            "scratch_bars": max(8, int(sb.scratch_s / BAR_S)), "scratch_min": sb.scratch_min,
@@ -242,18 +244,22 @@ def summarize(res: Dict[str, Any]) -> Dict[str, Any]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default="", help="HTML report path (omit for JSON only)")
     ap.add_argument("--json", default="")
     ap.add_argument("--hours", type=int, default=24)
     ap.add_argument("--symbols", type=int, default=20)
     ap.add_argument("--cost", type=float, default=0.12)
+    ap.add_argument("--sl-min-steps", type=int, default=1)
+    ap.add_argument("--trail-min-steps", type=int, default=2)
+    ap.add_argument("--offset-h", type=float, default=0.0)
     a = ap.parse_args()
     res = run(a)
     res["summary"] = summarize(res)
     if a.json:
         json.dump(res, open(a.json, "w"))
-    import sim_report_html as H
-    open(a.out, "w", encoding="utf-8").write(H.render(res))
+    if a.out:
+        import sim_report_html as H
+        open(a.out, "w", encoding="utf-8").write(H.render(res))
     ov = res["summary"]["overall"]
     print(f"{res['meta']['sets']} Sets, {len(res['meta']['symbols'])} symbols, {a.hours} h: {ov['orders']} orders, PF {ov['pf']}, "
           f"net {ov['net_pct']}%  ({res['meta']['runtime_s']} s) -> {a.out}")
