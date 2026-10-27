@@ -46,6 +46,7 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
+from indication_extra import INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes
 from risk_variants import parse_trail, trail_grid, trail_key
 
 PACKS = ("indications", "general")
@@ -269,6 +270,9 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
             votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
     except Exception:
         pass
+    extras = settings.get("extraIndicators") or []
+    if extras:
+        votes.extend(extra_votes(rows[-EXTRA_LOOKBACK:], extras))
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -824,6 +828,8 @@ class SetBook:
             "typeDirection": bool(ov.get("indTypeDirection", True)),
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
+            # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
+            "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if str(x) in EXTRA_INDICATORS}),
         }
         with self._lock:
             self._rebuild_sets()
