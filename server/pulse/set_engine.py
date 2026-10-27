@@ -52,7 +52,7 @@ from indication_engine import (
     timeframe_evals,
 )
 from indication_extra import INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes
-from risk_variants import parse_trail, trail_grid, trail_key
+from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
@@ -553,6 +553,14 @@ class BarIndex:
         return b
 
 
+def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None) -> Tuple[float, float]:
+    """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
+    ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under 2 x PositionCost.
+    The live trader takes a Set position's levels from here, so live and replay share one formula."""
+    sl_base = st.tp_pct * (st.sl_ratio if st.kind == "base" else TRAIL_SL_RATIO)
+    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)
+
+
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
@@ -995,7 +1003,8 @@ class SetBook:
             for a_, g_ in (parse_trail(x) for x in raw_tr):
                 g2 = round(max(g_, gfloor), 4)
                 a2 = round(max(a_, g2), 4)
-                seen_tr.setdefault(trail_key(a2, g2), (trail_key(a2, g2), a2, g2))
+                key = f"{a2:.2f}:{g2:.2f}"      # the trail_grid format: exact to the cent, so lifted variants never merge
+                seen_tr.setdefault(key, (key, a2, g2))
             self.trails = list(seen_tr.values())
         else:
             self.trails = trail_grid(self.trail_min_step, self.cost_pct)
@@ -1475,7 +1484,7 @@ class SetBook:
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
-            "scratch_bars": max(8, int(self.scratch_s / BAR_S)),
+            "scratch_bars": self.scratch_bars,
             "scratch_min": self.scratch_min,
             "cooldown": self.cooldown_bars,
             "cost_pct": self.cost_pct,
@@ -1706,6 +1715,15 @@ class SetBook:
         # Set that has the orders
         rows.sort(key=lambda s: (s.gate_n >= self.gate_min, s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
         return rows[0]
+
+    @property
+    def scratch_bars(self) -> int:
+        """Bars after the entry before the scratch exit may fire; the replay and the live Set lane both read this."""
+        return max(8, int(self.scratch_s / BAR_S))
+
+    def lane_fracs(self, st: SetState) -> Tuple[float, float]:
+        """(sl_frac, tp_frac) of a Set's lane with this book's PositionCost and minimum stop steps (the replay's cfg)."""
+        return lane_fracs(st, self.cost_pct, self.sl_min_steps)
 
     def pick_trail(self, pack: str) -> Optional[SetState]:
         return self.pick(pack, kind="trail")

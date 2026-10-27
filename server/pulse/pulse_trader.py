@@ -1664,6 +1664,9 @@ class Pulse:
             rec = self.bar_min.get(s)
             if not rec or int(rec[0]) != minute:
                 if rec:
+                    if not hasattr(self, "last_closed_1m"):
+                        self.last_closed_1m = {}
+                    self.last_closed_1m[s] = (int(rec[0]), float(rec[4]))   # the minute that just completed and its close
                     bars = self.klines_tf["1m"].setdefault(s, [])
                     bars.append([rec[1], rec[2], rec[3], rec[4], 0.0])
                     del bars[:-KLINE_LIMIT]
@@ -2735,30 +2738,33 @@ class Pulse:
         except Exception:
             chosen = None
         set_idx = -1
-        trail_st = None
-        try:
-            trail_st = self.sets.pick_trail(pack)
-        except Exception:
-            trail_st = None
+        trail_set_id = ""
+        trail_idx = -1
         if chosen:
+            # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
+            # own arm and give. The independent trailing pick never reaches a Set position.
             sl_ratio = chosen.sl_ratio
             set_id = chosen.id
             set_idx = int(getattr(chosen, "idx", -1))
-            # a base Set has no trailing of its own; only a trailing Set (the chosen one or the independent pick) trails
             if getattr(chosen, "kind", "base") == "trail":
                 trail_key, trail_arm, trail_give = chosen.trail_key, chosen.trail_arm, chosen.trail_give
+                trail_set_id = chosen.id
+                trail_idx = set_idx
             else:
                 trail_key, trail_arm, trail_give = "", 0.0, 0.0
         else:
             sl_ratio = self.variants.current_sl()
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             set_id = ""
-        trail_set_id = ""
-        trail_idx = -1
-        if trail_st:
-            trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
-            trail_set_id = trail_st.id
-            trail_idx = int(getattr(trail_st, "idx", -1))
+            trail_st = None
+            try:
+                trail_st = self.sets.pick_trail(pack)
+            except Exception:
+                trail_st = None
+            if trail_st:
+                trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
+                trail_set_id = trail_st.id
+                trail_idx = int(getattr(trail_st, "idx", -1))
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -2882,15 +2888,14 @@ class Pulse:
             rr=float(self.indications.settings.get("takeProfitRewardRisk") or 1.8),
             bind_sl_to_tp=True,
         )
-        if chosen and getattr(chosen, "step", 0):
-            # the Set's own grid, as the replay that validated it: TP = step x PositionCost (never under 2 x), SL = ratio x TP
-            # and never under PositionCost + the overall minimum steps; the overlay tpMin/slMin clamps do not apply
-            tp_pct = max(2 * cost_as_frac(self.position_cost_pct), min(self.tp_max, chosen.tp_pct))
-            sl_pct = max(sl_floor_frac(self.position_cost_pct), min(self.sl_max, tp_pct * sl_ratio))
-            src = f"step{chosen.step}xcost"
+        if chosen:
+            # the Set's own lane levels, from the same formula the replay that validated it uses (set_engine.lane_fracs):
+            # base and trailing Sets alike; no overlay clamp applies
+            sl_pct, tp_pct = self.sets.lane_fracs(chosen)
+            src = f"step{chosen.step}xcost" if getattr(chosen, "step", 0) else "trailset"
         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
-        if self.exits.enabled and self.exits.ignore_tp and not (chosen and getattr(chosen, "step", 0)):
+        if self.exits.enabled and self.exits.ignore_tp and not chosen:
             tp_pct = max(tp_pct, sl_pct * 3.0, self.tp_max)
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
@@ -3030,11 +3035,12 @@ class Pulse:
         except Exception:
             pass
         try:
-            self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
-                "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
-                "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
-            })
-            self.dca.drop(pos.symbol, pos.side)
+            if not rec.set_id:                 # DCA scores and drops only the positions it may add to
+                self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
+                    "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
+                    "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
+                })
+                self.dca.drop(pos.symbol, pos.side)
         except Exception:
             pass
         if pnl >= 0:
@@ -3048,7 +3054,9 @@ class Pulse:
                 self.consec_loss = 4
                 log("pause new entries 120s after cold streak")
         self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
-        self.block.on_parent_close(pos.symbol, pos.side, pnl)
+        if not pos.set_id:
+            # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
+            self.block.on_parent_close(pos.symbol, pos.side, pnl)
         self.open.pop(pos.symbol, None)
         self.save_open_book()
         try:
@@ -3064,21 +3072,36 @@ class Pulse:
         return bool(getattr(self.sets, "hist_honor_tp", True))
 
     def manage_set_lane(self, pos: Position, px: float, now: float, age: float, pnl_pct: float) -> None:
-        """The close rules of a Set position, one for one with set_engine.SetLane: stop (kept on the exchange and guarded
-        in software before this), TP when the lane honours it, trailing from the independent trailing Set, the time exit
-        after the lane's time bars and the scratch exit. Nothing here reads the Exit strategies."""
-        if self.lane_honors_tp():
-            if (pos.side == "LONG" and px >= pos.tp) or (pos.side == "SHORT" and px <= pos.tp):
+        """The close rules of a Set position, one for one with set_engine.SetLane: the stop at the Set's own level (raised by
+        the trailing of a trailing Set), TP when the lane honours it, the time exit after the lane's time bars and the
+        scratch exit on a completed 1m close. The venue stop and TP stay in place as a safety; they may sit farther out
+        (clamp_ctrl_price), so the lane checks its own levels. Nothing here reads the Exit strategies."""
+        side = 1 if pos.side == "LONG" else -1
+        e = float(pos.entry or 0)
+        if e <= 0:
+            return
+        sl_f = float(pos.sl_pct or 0)
+        stop = e * (1 - side * sl_f) if sl_f > 0 else 0.0
+        if stop and pos.trail is not None:
+            stop = max(stop, pos.trail) if side > 0 else min(stop, pos.trail)
+        if stop and ((side > 0 and px <= stop) or (side < 0 and px >= stop)):
+            self.close_pos(pos, px, "sl")
+            return
+        tp_f = float(pos.tp_pct or 0)
+        if self.lane_honors_tp() and tp_f > 0:
+            tp = e * (1 + side * tp_f)
+            if (side > 0 and px >= tp) or (side < 0 and px <= tp):
                 self.close_pos(pos, px, "tp")
                 return
         arm = float(pos.trail_arm or 0.0)
         give = float(pos.trail_give or 0.0)
-        if self.strat_trail and pos.trail_set_id and arm > 0 and give > 0:
-            fav = (pos.peak - pos.entry) / pos.entry if pos.side == "LONG" else (pos.entry - pos.peak) / pos.entry
+        # only a trailing Set trails (its own arm and give, as replayed); the Trailing strategy switch does not decide it
+        if pos.trail_set_id and pos.trail_set_id == pos.set_id and arm > 0 and give > 0:
+            fav = (pos.peak - e) / e if side > 0 else (e - pos.peak) / e
             if fav >= arm:
                 pos.trail_armed = True
-                trail = pos.peak * (1 - give) if pos.side == "LONG" else pos.peak * (1 + give)
-                better = pos.trail is None or (trail > pos.trail + 1e-12 if pos.side == "LONG" else trail < pos.trail - 1e-12)
+                trail = pos.peak * (1 - give) if side > 0 else pos.peak * (1 + give)
+                better = pos.trail is None or (trail > pos.trail + 1e-12 if side > 0 else trail < pos.trail - 1e-12)
                 if better:
                     prev = pos.trail
                     pos.trail = trail      # committed only when the exchange stop moved
@@ -3087,8 +3110,20 @@ class Pulse:
         if age >= float(self.sets.hist_time_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return
-        if age >= float(self.sets.scratch_s) and pnl_pct >= float(self.sets.scratch_min):
-            self.close_pos(pos, px, "scratch+")
+        # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m
+        # bar once, with that bar's close and its end time, never an intrabar tick.
+        closed = (getattr(self, "last_closed_1m", None) or {}).get(pos.symbol)
+        if closed:
+            minute, close = int(closed[0]), float(closed[1])
+            seen = getattr(self, "_scratch_seen", None)
+            if seen is None:
+                seen = self._scratch_seen = {}
+            key = f"{pos.symbol}:{pos.client_id}"
+            if seen.get(key) != minute:
+                seen[key] = minute
+                held = (minute + 1) * 60.0 - float(pos.opened_at)
+                if held >= float(self.sets.scratch_bars) * 60.0 and (close - e) / e * side >= float(self.sets.scratch_min):
+                    self.close_pos(pos, px, "scratch+")
 
     def manage(self) -> None:
         now = time.time()
@@ -3603,6 +3638,16 @@ class Pulse:
             "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
         }
 
+    def exit_lane_pf(self) -> float:
+        """Net PF (after PositionCost) of the last Block-window closes of positions without a Set, or 0 with fewer than
+        Block's minimum samples. The evidence Block stacks on."""
+        rows = [c for c in self.closed if not getattr(c, "set_id", "")]
+        n = int(getattr(self.block, "window", 25) or 25)
+        res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
+            return 0.0
+        return float(res.get("pf") or 0.0)
+
     def rearrange_opens(self) -> List[Dict[str, Any]]:
         """The positions the coordinator may swap out for a stronger signal: Exit-lane positions only. A Set position is
         closed by its own lane (stop, TP, trailing, time, scratch), never swapped out."""
@@ -3661,17 +3706,9 @@ class Pulse:
             lane = self.block.lanes.get(k)
             if not lane or lane.base_qty <= 0:
                 continue
-            # Parent still valid only if pulse score agrees with side (continuation).
-            intern_pf = 0.0   # no resolvable Set: no pass (was a fabricated 1.2)
-            try:
-                st = self.sets.sets.get(pos.set_id) if pos.set_id else None
-                if st is None:
-                    st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
-                if st is not None:
-                    # the real PF; a Set with few closes is already excluded by the coordinator sample rule (no fabricated pass)
-                    intern_pf = float(getattr(st, "gate_pf", 0.0) or 0.0)   # the same PF the entry gate uses
-            except Exception:
-                intern_pf = 0.0   # an error is never a pass
+            # Block's evidence is the lane it stacks on: the net PF of the recent closes of positions without a Set (the
+            # Exit lane). A Set's PF says nothing about these positions. Too few closes: no pass (cold start needs proof).
+            intern_pf = self.exit_lane_pf()
             d, why, conf = self.score(pos.symbol)
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
             if not same:
@@ -3683,11 +3720,12 @@ class Pulse:
                     same = True
             if not same:
                 continue
-            # Don't stack into a losing parent.
+            # Stack only into strength: the parent is at least one step (one PositionCost) in profit, so the averaged entry
+            # stays behind the price and the re-anchored stop does not put the whole stack at risk at once.
             px_now = self.px.get(pos.symbol) or pos.entry
             if px_now > 0 and pos.entry > 0:
                 u = ((px_now - pos.entry) / pos.entry) * (1 if pos.side == "LONG" else -1)
-                if u < -0.0015:
+                if u < cost_as_frac(self.position_cost_pct):
                     continue
             rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
             row = self.block.pick_emit(rows)
@@ -4325,12 +4363,18 @@ class Pulse:
                 cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
             )
             rec_set = (getattr(self.sets, "sets", None) or {}).get(str(track.get("set_id") or ""))
-            if rec_set is not None and getattr(rec_set, "kind", "") == "base" and getattr(rec_set, "step", 0):
-                # a recovered Set position keeps its own grid (step x cost, ratio x TP), not the legacy 0.3-1.5 ratio grid
-                tp_pct = max(2 * cost_as_frac(self.position_cost_pct), min(self.tp_max, rec_set.tp_pct))
-                sl_pct = max(sl_floor_frac(self.position_cost_pct), min(self.sl_max, tp_pct * float(rec_set.sl_ratio)))
+            rec_trail_id = ""
+            if rec_set is not None:
+                # a recovered Set position keeps its own lane: the Set's levels (set_engine.lane_fracs) and its own trailing
+                # (a trailing Set) or none (a base Set), never the default variants' trail
+                sl_pct, tp_pct = self.sets.lane_fracs(rec_set)
                 sl_ratio = float(rec_set.sl_ratio)
-                src = f"step{rec_set.step}xcost"
+                src = f"step{rec_set.step}xcost" if getattr(rec_set, "step", 0) else "trailset"
+                if getattr(rec_set, "kind", "base") == "trail":
+                    trail_key, trail_arm, trail_give = rec_set.trail_key, rec_set.trail_arm, rec_set.trail_give
+                    rec_trail_id = rec_set.id
+                else:
+                    trail_key, trail_arm, trail_give = "", 0.0, 0.0
             sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
             tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
             cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
@@ -4344,6 +4388,7 @@ class Pulse:
                 sl_pct=sl_pct, tp_pct=tp_pct, client_id=cid, ours=True,
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
+                trail_set_id=rec_trail_id,
                 liq=liq, position_id=pid,
             )
             rec_pos = self.open[sym]

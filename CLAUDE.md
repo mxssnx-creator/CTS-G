@@ -42,6 +42,16 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **No cross-lane actions on a Set position.** The Block and DCA add-ons never add to it (no parent or DCA lane is
   attached at open), the coordinator's rearrange never swaps it out (`Pulse.rearrange_opens`), and the global 6 h hold
   cap leaves it to its own time exit. Each rule has a `trader.lanes-*` check and a mutant.
+- **Live = replay for a Set position.** Its SL and TP come from `set_engine.lane_fracs` (the replay's formula, no overlay
+  clamp); a base Set never trails, a trailing Set trails with its own arm and give (the independent trailing pick is for
+  positions without a Set); the lane stops at its own level even when the venue stop sits farther out; scratch is judged
+  on a completed 1m close after `SetBook.scratch_bars`. The same holds for a position recovered after a restart.
+  `scripts/regression/lanes.py` drives the live trader through the replay's bars and requires the same exit (reason, bar,
+  price), and the same outcome with every other strategy switched on (differential check).
+- **Block stacks on its own lane.** Only positions without a Set; its evidence is the net PF of those positions' closes
+  (`Pulse.exit_lane_pf`, at least Block's minimum samples); it adds only to a parent at least one step in profit, within
+  the book cap; Set closes never reach Block's or DCA's scores. DCA is hard-off (`dca_engine.DCA_HARD_OFF`) until it is
+  re-approved.
 
 ## Live safety
 

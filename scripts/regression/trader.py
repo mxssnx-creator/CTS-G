@@ -21,6 +21,15 @@ for _name in ("STATS_PATH", "TRADES_PATH", "STOP_PATH", "PAUSE_PATH", "LOG_PATH"
     if hasattr(pt, _name):
         setattr(pt, _name, os.path.join(_STATE_DIR, os.path.basename(getattr(pt, _name))))
 
+
+def _offline_contracts(want=None):
+    """Tests never reach the venue: the contract list is a fixed, offline one (the requested names, else two)."""
+    names = sorted(want) if want else ["BTC-USDT", "ETH-USDT"]
+    return {s: pt.Contract(symbol=s, min_qty=0.001, step=0.001, qprec=3, pprec=6, min_usdt=5.0, max_lev=50) for s in names}
+
+
+pt.load_contracts = _offline_contracts
+
 SRC = os.path.join(PULSE, "pulse_trader.py")
 
 
@@ -248,7 +257,7 @@ def entry_lifecycle_with_a_stub_exchange():
     requested size, the position is recorded at the executed size, and one protective batch goes out. The state files
     are redirected to a temporary directory, and the settings dump and contract source are replaced."""
     sym = "BTC-USDT"
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
     orders: list = []
     pos = None
     api = None
@@ -273,7 +282,7 @@ def entry_lifecycle_with_a_stub_exchange():
             ok = (len(orders) == 1 and pos is not None and abs(float(pos.qty) - 0.4) < 1e-12
                   and len(api.batches) == 1 and len(api.batches[0]) == 2)
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
     return ok, (f"entry orders={len(orders)} position qty={getattr(pos, 'qty', None)} "
                 f"protective batches={len(api.batches) if api else 0}")
 
@@ -317,11 +326,12 @@ def partial_close_fill_closes_the_remainder():
     """A close that fills only part of its quantity must not be reported as a full close. The remainder is closed with
     the closePosition form, the returned price blends the two fills, and if the remainder is refused the position stays
     open at the size that is left."""
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
     with tempfile.TemporaryDirectory() as td:
         pt.BLOCK_PATH = os.path.join(td, "block.json")
         pt.LEV_PATH = os.path.join(td, "lev.json")
         pt.OPEN_PATH = os.path.join(td, "open.json")
+        pt.TRADES_PATH = os.path.join(td, "trades.jsonl")
         pt.dump_cts_settings = lambda: {}
         try:
             venue = _PartialCloseVenue()
@@ -340,7 +350,7 @@ def partial_close_fill_closes_the_remainder():
             ok2, _ = p2.market_close(pos2)
             kept = abs(float(pos2.qty) - q2 * 0.6) < 1e-9
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
     ok = ok1 and second_is_close_position and abs(px1 - blended_px) < 1e-6 and (not ok2) and kept
     return ok, (f"full close={ok1} remainder via closePosition={second_is_close_position} price={px1:.4f} "
                 f"(want {blended_px:.4f}); refused remainder -> closed={ok2} qty kept={kept}")
@@ -399,16 +409,17 @@ class _LostAnswerVenue(_StubExchange):
 
 
 def _isolated(fn):
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.TRADES_PATH, pt.dump_cts_settings)
     with tempfile.TemporaryDirectory() as td:
         pt.BLOCK_PATH = os.path.join(td, "block.json")
         pt.LEV_PATH = os.path.join(td, "lev.json")
         pt.OPEN_PATH = os.path.join(td, "open.json")
+        pt.TRADES_PATH = os.path.join(td, "trades.jsonl")      # no closes carried over from another check
         pt.dump_cts_settings = lambda: {}
         try:
             return fn()
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.TRADES_PATH, pt.dump_cts_settings = saved
 
 
 def failed_close_keeps_the_position_protected():
@@ -643,6 +654,7 @@ def _lane_pulse(set_id="indications:1m:sl1.00:st4"):
     pos.opened_at = time.time() - 700.0        # past the exit lanes' minimum hold and the scratch time
     pos.sl = pos.entry * 0.97
     pos.tp = pos.entry * 1.03
+    pos.sl_pct = pos.tp_pct = 0.03              # the lane's own levels (manage_set_lane reads these)
     pos.sl_oid = pos.tp_oid = "1"
     p.exits.enabled = True
     p.exits.rev_on = True
@@ -677,10 +689,13 @@ def a_set_position_is_closed_only_by_its_own_lane():
 def a_set_lane_scratch_and_time_follow_the_replay_rules():
     def run():
         out = {}
-        for gain, name in ((0.0003, "below scratch"), (0.0030, "above scratch")):
+        # the replay scratches on a bar close: live judges each completed 1m bar's close once, never an intrabar tick
+        for tick, close, name in ((0.0003, 0.0003, "below scratch"), (0.0030, 0.0030, "above scratch"),
+                                  (0.0030, 0.0003, "tick above, close below")):
             p, sym, pos = _lane_pulse()
             p.exits.enabled = False
-            p.px[sym] = pos.entry * (1 + gain)
+            p.px[sym] = pos.entry * (1 + tick)
+            p.last_closed_1m = {sym: (int(time.time() // 60) - 1, pos.entry * (1 + close))}
             p.manage()
             out[name] = (sym in p.open, [c.reason for c in p.closed])
         p, sym, pos = _lane_pulse()
@@ -691,7 +706,8 @@ def a_set_lane_scratch_and_time_follow_the_replay_rules():
         out["time"] = (sym in p.open, [c.reason for c in p.closed])
         return out
     out = _isolated(run)
-    ok = out["below scratch"][0] and out["above scratch"] == (False, ["scratch+"]) and out["time"] == (False, ["time"])
+    ok = out["below scratch"][0] and out["above scratch"] == (False, ["scratch+"]) and out["tick above, close below"][0] \
+        and out["time"] == (False, ["time"])
     return ok, f"{out}"
 
 
@@ -727,14 +743,18 @@ def a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out():
         pos.trail_arm, pos.trail_give = 0.006, 0.0036
         pos.peak = pos.entry * 1.01
         p.px[sym] = pos.entry * 1.009
-        pos.trail_set_id = ""                       # no trailing Set picked: a base Set does not trail
+        pos.trail_set_id = ""                       # a base Set does not trail
         p.manage()
         without = list(moves)
-        pos.trail_set_id = "indications:1m:tr0.60:0.36"
+        pos.trail_set_id = "indications:1m:tr0.60:0.36"   # a foreign trailing Set on a base Set position: still no trailing
         p.manage()
-        return without, moves, round(pos.entry * 1.01 * (1 - 0.0036), 4)
-    without, with_set, want = _isolated(run)
-    return without == [] and with_set == [want], f"without a trailing Set: {without}; with: {with_set} (want {want})"
+        foreign = list(moves)
+        pos.set_id = pos.trail_set_id                       # the position's own Set is the trailing Set: it trails
+        p.manage()
+        return without, foreign, moves, round(pos.entry * 1.01 * (1 - 0.0036), 4)
+    without, foreign, with_set, want = _isolated(run)
+    ok = without == [] and foreign == [] and with_set == [want]
+    return ok, f"base Set: {without}; base Set with a foreign trailing Set: {foreign}; own trailing Set: {with_set} (want {want})"
 
 
 def exit_lane_scores_only_its_own_closes():
@@ -891,7 +911,7 @@ def no_other_lane_touches_a_set_position():
     def run():
         out = {}
         p, sym, pos = _lane_pulse()
-        p.px[sym] = pos.entry * 1.0005
+        p.px[sym] = pos.entry * 1.002         # one step and more in profit: Block may stack on a position without a Set
         out["rearrange"] = (len(p.rearrange_opens()), None)
         # Block: an add-on candidate reaches evaluate_counts; a Set position must never get there
         seen = {"block": 0, "dca": 0}

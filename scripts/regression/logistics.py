@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "3e2f6a489d7950cca1b51bf8727df21127486dfb"
+PIN_WANT = "1b1d61c23c93314fa3da93023771e0c2a7769465"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -307,7 +307,7 @@ def no_fabricated_pass_and_one_entry_conf():
     fabricated = "intern_pf = 1.2" in src
     literal_conf = re.search(r"if conf < 0\.50:", src) is not None
     one_key = "if conf < self.sets.entry_conf" in src
-    set_fill_override = "not (chosen and getattr(chosen, \"step\", 0))" in src
+    set_fill_override = "if self.exits.enabled and self.exits.ignore_tp and not chosen:" in src   # every Set fill, base or trailing
     ok = (not fabricated) and (not literal_conf) and one_key and set_fill_override
     return ok, f"fabricated_pass={fabricated} literal_0.50={literal_conf} one_key={one_key} set_fill_tp_kept={set_fill_override}"
 
