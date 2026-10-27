@@ -465,10 +465,11 @@ def streak_exhaustion(rows: Sequence[Row], n: int = 6) -> Signal:
 # causal and read only the newest LOOKBACK bars.
 
 
-def low_range_state(rows: Sequence[Row], n: int = 24, bw_len: int = 20, rank_len: int = 120) -> Optional[Dict[str, float]]:
+def low_range_state(rows: Sequence[Row], n: int = 24, bw_len: int = 20, rank_len: int = 120, lag: int = 0) -> Optional[Dict[str, float]]:
     """Measures of the current range: box width in percent and in ATR, the close's position in the box, the
     percentile rank of the Bollinger bandwidth over `rank_len` bars (0 = the narrowest seen), and the slope of EMA50
-    in percent over 10 bars. None when there are not enough bars."""
+    in percent over 10 bars. `lag` reads the bandwidth rank `lag` bars back: a break reads the regime BEFORE the bar
+    that breaks it, because that bar widens the bandwidth itself. None when there are not enough bars."""
     r = _tail(rows)
     if len(r) < max(n, rank_len // 2) + 12:
         return None
@@ -486,7 +487,8 @@ def low_range_state(rows: Sequence[Row], n: int = 24, bw_len: int = 20, rank_len
         m = sum(w) / bw_len
         sd = math.sqrt(sum((x - m) ** 2 for x in w) / bw_len)
         widths.append(4.0 * sd / m if m > 0 else 0.0)
-    hist = widths[-rank_len:]
+    used = widths[: len(widths) - lag] if lag else widths
+    hist = used[-rank_len:]
     rank = sum(1 for x in hist if x <= hist[-1]) / len(hist)
     e50 = _ema_list(closes, 50)
     slope = (e50[-1] - e50[-11]) / e50[-11] * 100.0 if e50[-11] > 0 else 0.0
@@ -515,7 +517,7 @@ def low_range_levels(rows: Sequence[Row], cost_pct: float, step: int = 2) -> Opt
 def lr_fade(rows: Sequence[Row], max_atr: float = 3.0, edge: float = 0.12) -> Signal:
     """Inside a low range (box no wider than max_atr ATR, bandwidth in the bottom 35%) the close touches the lower or
     upper edge of the box with RSI(14) leaning the same way: fade it."""
-    s = low_range_state(rows)
+    s = low_range_state(rows, lag=1)
     if s is None or s["width_atr"] > max_atr or s["bw_rank"] > 0.35:
         return None
     if abs(s["slope_pct"]) > 0.25:      # a sloping market is a trend, not a range
@@ -530,7 +532,7 @@ def lr_fade(rows: Sequence[Row], max_atr: float = 3.0, edge: float = 0.12) -> Si
 
 def lr_break(rows: Sequence[Row], max_atr: float = 3.0, vol_mult: float = 1.2) -> Signal:
     """A close outside the box of a low range, on a volume above the box average: the break."""
-    s = low_range_state(rows)
+    s = low_range_state(rows, lag=1)
     if s is None or s["width_atr"] > max_atr or s["bw_rank"] > 0.35:
         return None
     r = _tail(rows)
@@ -546,7 +548,7 @@ def lr_break(rows: Sequence[Row], max_atr: float = 3.0, vol_mult: float = 1.2) -
 
 def lr_trendbreak(rows: Sequence[Row], max_atr: float = 3.5) -> Signal:
     """The box break, taken only in the direction of the EMA50 slope (the trend the range paused)."""
-    s = low_range_state(rows)
+    s = low_range_state(rows, lag=1)
     if s is None or s["width_atr"] > max_atr or s["bw_rank"] > 0.5:
         return None
     if s["close"] > s["hi"] and s["slope_pct"] > 0.02:
@@ -564,8 +566,8 @@ def lr_nr7(rows: Sequence[Row]) -> Signal:
         return None
     sig = r[-2]
     rng = float(sig[1]) - float(sig[2])
-    prior = [float(b[1]) - float(b[2]) for b in r[-8:-2]] + [rng]
-    if rng <= 0 or rng > min(prior):
+    prior = [float(b[1]) - float(b[2]) for b in r[-8:-2]]
+    if rng <= 0 or rng >= min(prior):      # strictly the narrowest of the last 7: a tie is not an NR7
         return None
     c = float(r[-1][3])
     if c > float(sig[1]):
@@ -577,7 +579,7 @@ def lr_nr7(rows: Sequence[Row]) -> Signal:
 
 def lr_inside(rows: Sequence[Row]) -> Signal:
     """Inside bar inside a low range: the break of the mother bar."""
-    s = low_range_state(rows)
+    s = low_range_state(rows, lag=1)
     if s is None or s["width_atr"] > 4.0 or s["bw_rank"] > 0.5:
         return None
     r = _tail(rows)

@@ -190,3 +190,105 @@ CHECKS += [
     ("extra.short-range-signal-cancels-opposites", short_range_signal_cancels_opposite_votes),
     ("extra.minimum-stop-and-trail-follow-cost-plus-steps", minimum_stop_and_trail_follow_cost_plus_steps),
 ]
+
+
+# ---- Low-Range family ---------------------------------------------------------------------------------------------
+
+
+def _mk(closes, vol=1.0, sp=0.02):
+    out, prev = [], closes[0]
+    for c in closes:
+        out.append([prev, max(prev, c) + sp, min(prev, c) - sp, c, vol])
+        prev = c
+    return out
+
+
+def _tight_after_wide():
+    wide = [100 + 0.6 * ((i % 10) - 5) / 5 for i in range(80)]
+    tight = [100 + 0.15 * ((i % 10) - 5) / 5 for i in range(40)]
+    return wide + tight
+
+
+def low_range_state_hand_values():
+    base = _tight_after_wide()
+    rows = _mk(base + [99.76], sp=0.1)
+    st = ix.low_range_state(rows, lag=1)
+    box = rows[-25:-1]
+    hi, lo = max(r[1] for r in box), min(r[2] for r in box)
+    ok = (st is not None and abs(st["hi"] - hi) < 1e-9 and abs(st["lo"] - lo) < 1e-9
+          and abs(st["width_pct"] - (hi - lo) / lo * 100.0) < 1e-9 and abs(st["pos"] - (99.76 - lo) / (hi - lo)) < 1e-9
+          and 0.0 <= st["bw_rank"] <= 1.0 and ix.low_range_state(rows[:20]) is None)
+    return ok, f"hi={st and st['hi']} lo={st and st['lo']} width%={st and round(st['width_pct'], 4)} pos={st and round(st['pos'], 3)}"
+
+
+def low_range_fade_both_ways():
+    base = _tight_after_wide()
+    lo = min(r[2] for r in _mk(base, sp=0.1)[-24:])
+    hi = max(r[1] for r in _mk(base, sp=0.1)[-24:])
+    long_fx = _mk(base + [lo + 0.01], sp=0.1)
+    short_fx = _mk([200 - x for x in base] + [200 - (lo + 0.01)], sp=0.1)
+    mid = _mk(base + [100.0], sp=0.1)
+    a, b, c = ix.lr_fade(long_fx), ix.lr_fade(short_fx), ix.lr_fade(mid)
+    # a close that pokes through the box edge widens the bandwidth itself: the regime is read one bar back, so it still fades
+    shrink = [100 + (0.4 - 0.3 * i / 120) * (((i % 10) - 5) / 5) for i in range(120)]    # ever tighter: the bandwidth is at its low
+    lo2 = min(r[2] for r in _mk(shrink, sp=0.1)[-24:])
+    poke = ix.lr_fade(_mk(shrink + [lo2 - 0.3], sp=0.1))
+    return (a and a[0] == 1 and b and b[0] == -1 and c is None and poke and poke[0] == 1,
+            f"edge long={a} edge short={b} mid={c} poke through={poke}")
+
+
+def low_range_break_and_trendbreak_both_ways():
+    up = [100 + 0.05 * i for i in range(90)]
+    box = [up[-1] + 0.01 * ((-1) ** i) for i in range(30)]
+    rows = _mk(up + box)
+    brk_up = rows + [[box[-1], box[-1] + 0.5, box[-1] - 0.01, box[-1] + 0.45, 4.0]]
+    brk_dn = rows + [[box[-1], box[-1] + 0.01, box[-1] - 0.5, box[-1] - 0.45, 4.0]]
+    weak = rows + [[box[-1], box[-1] + 0.5, box[-1] - 0.01, box[-1] + 0.45, 0.5]]      # no volume: no break
+    dtr = [200 - x for x in up]
+    dbox = [200 - x for x in box]
+    drows = _mk(dtr + dbox)
+    d_dn = drows + [[dbox[-1], dbox[-1] + 0.01, dbox[-1] - 0.5, dbox[-1] - 0.45, 4.0]]
+    d_up = drows + [[dbox[-1], dbox[-1] + 0.5, dbox[-1] - 0.01, dbox[-1] + 0.45, 4.0]]
+    r = {"break up": ix.lr_break(brk_up), "break down": ix.lr_break(brk_dn), "break weak": ix.lr_break(weak),
+         "trend up": ix.lr_trendbreak(brk_up), "trend: down break in an uptrend": ix.lr_trendbreak(brk_dn),
+         "trend down": ix.lr_trendbreak(d_dn), "trend: up break in a downtrend": ix.lr_trendbreak(d_up)}
+    ok = (r["break up"][0] == 1 and r["break down"][0] == -1 and r["break weak"] is None and r["trend up"][0] == 1
+          and r["trend: down break in an uptrend"] is None and r["trend down"][0] == -1 and r["trend: up break in a downtrend"] is None)
+    return ok, f"{r}"
+
+
+def narrow_range_bar_and_inside_bar_both_ways():
+    base = [[100, 100.25, 99.75, 100, 1]] * 30
+    nr = [[100, 100.25, 99.75, 100.1, 1]] * 6 + [[100.05, 100.1, 100.0, 100.05, 1]]
+    up = base + nr + [[100.05, 100.4, 100.05, 100.35, 1]]
+    dn = base + nr + [[100.05, 100.05, 99.7, 99.72, 1]]
+    not_narrow = base + [[100, 100.25, 99.75, 100.1, 1]] * 7 + [[100.05, 100.4, 100.05, 100.35, 1]]
+    box = _mk([100 + 0.02 * ((-1) ** i) for i in range(100)], sp=0.1)
+    mother, inner = [100.0, 100.3, 99.8, 100.0, 1], [100.0, 100.2, 99.9, 100.0, 1]
+    i_up = box + [mother, inner, [100.0, 100.5, 100.0, 100.4, 1]]
+    i_dn = box + [mother, inner, [100.0, 100.0, 99.5, 99.6, 1]]
+    not_inside = box + [mother, [100.0, 100.4, 99.9, 100.0, 1], [100.0, 100.5, 100.0, 100.4, 1]]
+    r = {"nr7 up": ix.lr_nr7(up), "nr7 down": ix.lr_nr7(dn), "nr7 not narrow": ix.lr_nr7(not_narrow),
+         "inside up": ix.lr_inside(i_up), "inside down": ix.lr_inside(i_dn), "not inside": ix.lr_inside(not_inside)}
+    ok = (r["nr7 up"][0] == 1 and r["nr7 down"][0] == -1 and r["nr7 not narrow"] is None
+          and r["inside up"][0] == 1 and r["inside down"][0] == -1 and r["not inside"] is None)
+    return ok, f"{r}"
+
+
+def low_range_levels_add_the_position_cost():
+    rows = _mk(_tight_after_wide() + [99.76], sp=0.1)
+    lv = ix.low_range_levels(rows, 0.12, step=3)
+    narrow = _mk([100.0] * 120, sp=0.0001)            # a box far narrower than the cost: the overall minimum holds
+    lv2 = ix.low_range_levels(narrow, 0.12, step=2)
+    ok = (lv is not None and abs(lv["sl_pct"] - (lv["range_pct"] + 0.12)) < 1e-9 and abs(lv["tp_pct"] - (3 * 0.12 + 0.12)) < 1e-9
+          and lv2 is not None and abs(lv2["sl_pct"] - 2 * 0.12) < 1e-9 and abs(lv2["tp_pct"] - 3 * 0.12) < 1e-9)
+    return ok, f"levels={lv} floor case={lv2}"
+
+
+CHECKS += [
+    ("extra.low-range-state-hand-values", low_range_state_hand_values),
+    ("extra.low-range-fade-both-ways", low_range_fade_both_ways),
+    ("extra.low-range-break-and-trendbreak-both-ways", low_range_break_and_trendbreak_both_ways),
+    ("extra.nr7-and-inside-bar-both-ways", narrow_range_bar_and_inside_bar_both_ways),
+    ("extra.low-range-levels-add-the-position-cost", low_range_levels_add_the_position_cost),
+]
