@@ -182,6 +182,8 @@ MUTATIONS = [
      "pulse_trader.py", "            bars = self.real_bars_1m(s)\n            if bars:\n                self.sets.ingest_bars(s, bars)", "            bars = self.klines_tf.get(\"1m\", {}).get(s) or []\n            if bars:\n                self.sets.ingest_bars(s, bars)"),
     ("trader: a padded symbol counts as having its history",
      "pulse_trader.py", "        full = int(self.sets.lookback * 0.9)\n", "        full = self.sets.min_bars\n"),
+    ("exchange: an offline bridge returns empty rows",
+     "bingx_fast.py", "            return self._gather_threads(reqs, timeout)\n", "            pass\n"),
     ("trader: a wildcard overlay ignores the symbol cap",
      "pulse_trader.py", "        elif cap <= 0:\n            # every ranked name", "        elif wild or cap <= 0:\n            # every ranked name"),
     ("trader: the overlay's max-leverage toggle is ignored",

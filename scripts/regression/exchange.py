@@ -177,7 +177,26 @@ def batch_orders_carry_numbers_not_numeric_strings():
     return ok, f"batch rows={rows}"
 
 
+def gather_without_the_async_bridge_runs_in_parallel_threads():
+    """httpx missing: the bridge is offline. A batched public GET must still return every response, in request order,
+    fetched in parallel (four 0.3 s requests well under 1.2 s), not an empty "async-offline" row per request."""
+    import types
+    c = _client("/tmp/unused-err3.jsonl")
+    c.bridge = types.SimpleNamespace(ok=False)
+    def slow_public(path, extra=None):
+        time.sleep(0.3)
+        return {"code": 0, "data": [extra["symbol"]]}
+    c.public = slow_public
+    reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s}) for s in ("A", "B", "C", "D")]
+    t0 = time.monotonic()
+    rows = c.gather_public(reqs, timeout=2.0)
+    dt = time.monotonic() - t0
+    ok = [r[2].get("data") for r in rows] == [["A"], ["B"], ["C"], ["D"]] and dt < 0.9
+    return ok, f"rows={[r[2].get('data') for r in rows]} took {dt:.2f}s"
+
+
 CHECKS = [
+    ("exchange.gather-without-bridge-uses-threads", gather_without_the_async_bridge_runs_in_parallel_threads),
     ("exchange.batch-orders-carry-numbers", batch_orders_carry_numbers_not_numeric_strings),
     ("exchange.signature-raw-values-encoded-query", signature_covers_raw_values_and_the_query_is_encoded),
     ("exchange.public-cooldown-blocks-http", public_cooldown_blocks_http),

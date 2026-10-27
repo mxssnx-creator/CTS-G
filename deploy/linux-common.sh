@@ -131,6 +131,9 @@ ensure_base_packages() {
   pkg_install_missing ca-certificates curl git rsync python3 "$redis"
   if [[ "$kind" == apt ]]; then
     pkg_install_missing gnupg redis-tools python3-venv || true
+    # engine extras: httpx (parallel public GETs) and websocket-client (the price stream). The engine runs without them
+    # (thread-pool GETs, REST prices), only slower, so a missing package is not fatal.
+    pkg_install_missing python3-httpx python3-websocket || true
   fi
   have python3 || die "python3 is required"
   have git || die "git is required"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import concurrent.futures
 import hmac
 import hashlib
 import json
@@ -478,6 +479,10 @@ class FastBingX:
         return self.post("/openApi/swap/v2/trade/order/cancelReplace", extra or {})
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        if not getattr(getattr(self, "bridge", None), "ok", False):
+            # no asyncio bridge (httpx is not installed): the same requests in parallel on a small thread pool, through
+            # the sync client's own rate gate. Without this every batched public GET (klines, history) came back empty.
+            return self._gather_threads(reqs, timeout)
         self.stats["rest"] += len(reqs)
         self.stats["asyncN"] += len(reqs)
         rows = self.bridge.gather(reqs, timeout=timeout)
@@ -485,6 +490,22 @@ class FastBingX:
         if snap:
             self.stats["asyncP50"] = snap
         return rows
+
+    def _gather_threads(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        if not reqs:
+            return []
+        pool = getattr(self, "_pub_pool", None)
+        if pool is None:
+            pool = self._pub_pool = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="bx-pub")
+        futs = [(p, e, pool.submit(self.public, p, e)) for p, e in reqs]
+        out: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        end = time.monotonic() + max(0.5, float(timeout)) + 5.0      # each GET has its own 5 s socket timeout
+        for p, e, f in futs:
+            try:
+                out.append((p, e, f.result(timeout=max(0.05, end - time.monotonic()))))
+            except Exception as exc:
+                out.append((p, e, {"error": True, "msg": f"thread-gather: {str(exc)[:80]}"}))
+        return out
 
     def snapshot(self) -> Dict[str, Any]:
         return {
