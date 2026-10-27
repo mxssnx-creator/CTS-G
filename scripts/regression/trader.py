@@ -969,6 +969,46 @@ def a_set_position_gets_no_add_on_lane():
     return ok, f"Set position opened={set_open} Block parents={set_parents}; position without a Set parents={free_parents}"
 
 
+def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
+    """While the venue bans the order path (path_cd), the unprotected-position flatten waits instead of cancelling stops
+    and calling the close every cycle. Once the ban is over the flatten runs, and a close the venue refuses is logged with
+    the venue's reason."""
+    def run():
+        p, sym = _enter(_StubExchange(executed="1", requested="1"))
+        pos = p.open[sym]
+        pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
+        pos.opened_at = time.time() - 900.0
+        p.ensure_controls = lambda _p: None
+        p.ctrl_skip = {}
+        calls = []
+
+        def refused(_p):
+            calls.append(_p.symbol)
+            p.last_error = f"close {_p.symbol} over 20 error code:109420 requests"
+            return False, _p.entry
+        p.market_close = refused
+        p.cancel_controls = lambda s_: None
+        lines = []
+        saved_log = pt.log
+        pt.log = lambda msg, *a, **k: lines.append(msg)
+        try:
+            if not hasattr(p.api, "path_cd"):
+                p.api.path_cd = {}
+            p.api.path_cd["/openApi/swap/v2/trade/order"] = time.time() + 300.0
+            p.priority_controls()
+            banned = len(calls)
+            p.api.path_cd["/openApi/swap/v2/trade/order"] = 0.0
+            p.priority_controls()
+            free = len(calls)
+        finally:
+            pt.log = saved_log
+        logged = any(l.startswith(f"CLOSE FAIL {sym}") and "109420" in l for l in lines)
+        return banned, free, logged, sym in p.open
+    banned, free, logged, kept = _isolated(run)
+    ok = banned == 0 and free == 1 and logged and kept
+    return ok, f"close calls during the ban={banned} after={free} refusal logged={logged} position kept={kept}"
+
+
 def no_entry_on_a_symbol_that_failed_the_data_check():
     import types
     p = _bare_pulse()
@@ -983,6 +1023,7 @@ def no_entry_on_a_symbol_that_failed_the_data_check():
 
 
 CHECKS = [
+    ("trader.venue-ban-pauses-flatten-and-refusal-logged", a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged),
     ("trader.lanes-no-other-lane-touches-a-set-position", no_other_lane_touches_a_set_position),
     ("trader.lanes-set-position-gets-no-add-on-lane", a_set_position_gets_no_add_on_lane),
     ("trader.no-entry-on-a-failed-data-check", no_entry_on_a_symbol_that_failed_the_data_check),

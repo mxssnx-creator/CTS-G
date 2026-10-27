@@ -2296,7 +2296,8 @@ class Pulse:
                 miss += 1
                 age = time.time() - float(pos.opened_at or 0)
                 bare = not (pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
-                if bare and age > 300.0 and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
+                cooling = float(self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) or 0) > time.time()
+                if bare and age > 300.0 and not cooling and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
                     log(f"CTRL flatten unprotected {pos.symbol} age={age:.0f}s")
                     self.close_pos(pos, px or pos.entry, "no-ctrl")
                 else:
@@ -2987,6 +2988,7 @@ class Pulse:
                 self.ctrl_skip.pop(pos.symbol, None)
                 if skip_eval:
                     self.ignore_syms[pos.symbol] = time.time() + 1800.0
+                log(f"CLOSE FAIL {pos.symbol} {pos.side} {reason}: {self.last_error}", every=30.0, key=f"close-fail:{pos.symbol}")
                 return
             pos.qty = q_full
         else:
