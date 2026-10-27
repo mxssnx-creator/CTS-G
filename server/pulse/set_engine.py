@@ -447,6 +447,8 @@ class SetState:
     last15_ratio: float = 1.0       # 1 + 0.10 x avgR: display only, never compared with a PF threshold
     gate_pf: float = 0.0            # net PF over the last setGateWindow orders: the eligibility metric
     gate_n: int = 0
+    gate_pf_old: float = 0.0        # PF of the older / newer half of that window: the stability check (setGateConsistencyPf)
+    gate_pf_new: float = 0.0
     gate_gp: float = 0.0            # gross profit / loss (net fractions) inside that same window: the rolling pool inputs
     gate_gl: float = 0.0
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
@@ -714,6 +716,7 @@ class SetBook:
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = GATE_MIN_PF_DEFAULT
         self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
+        self.consistency_pf = 0.0
         self.pf_history: List[Dict[str, Any]] = []
         self._adapt_pending: Optional[List[Any]] = None
         self.gate_window = GATE_WINDOW_DEFAULT
@@ -778,6 +781,8 @@ class SetBook:
         self.gate_min = max(5, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
         self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
         # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
+        cons = ov.get("setGateConsistencyPf")
+        self.consistency_pf = float(cons) if cons is not None else 0.0     # 0 = off
         sr_min = ov.get("shortRangeMinPf")
         self.pack_min_pf = {SHORT_PACK: float(sr_min) if sr_min is not None else SHORT_MIN_PF_DEFAULT}
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
@@ -1345,6 +1350,14 @@ class SetBook:
         st.gate_n = int(gate["count"])
         cf = cost_as_frac(self.cost_pct)
         win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-self.gate_window:]
+        half = len(win) // 2
+        if half >= 1:
+            def _pf(v: List[float]) -> float:
+                gp_, gl_ = sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
+                return gp_ / gl_ if gl_ > 0 else (99.0 if gp_ > 0 else 0.0)
+            st.gate_pf_old, st.gate_pf_new = round(_pf(win[:half]), 4), round(_pf(win[half:]), 4)
+        else:
+            st.gate_pf_old = st.gate_pf_new = 0.0
         st.gate_gp = round(sum(x for x in win if x > 0), 8)
         st.gate_gl = round(-sum(x for x in win if x < 0), 8)
         last25 = tape[-self.deact_n :]
@@ -1382,6 +1395,8 @@ class SetBook:
             return "n<min"
         if st.gate_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf):
             return "pf<min"
+        if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:
+            return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
         if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:

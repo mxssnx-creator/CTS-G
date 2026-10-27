@@ -51,12 +51,12 @@ def load_bars(data_dir: str, n_symbols: int) -> Tuple[List[str], Dict[str, List[
     return syms, bars, times
 
 
-def build_book(cost: float, sl_min_steps: int = 1, trail_min_steps: int = 2) -> SetBook:
+def build_book(cost: float, sl_min_steps: int = 1, trail_min_steps: int = 2, extra: Dict[str, Any] = None) -> SetBook:
     ov = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json")))
     ov.update({"stratShortRange": True, "stratIndications": True, "stratGeneral": True,
                "setMinStep": 2, "setStepMax": 6, "shortRangeStepMin": 2, "shortRangeStepMax": 6,
                "setStepAdapt": False, "positionCostPct": cost, "slMinSteps": sl_min_steps,
-               "trailMinSteps": trail_min_steps})
+               "trailMinSteps": trail_min_steps, **(extra or {})})
     b = SetBook()
     b.load(ov)
     se.HIST_CAP = 10 ** 9
@@ -74,7 +74,19 @@ def run(a: argparse.Namespace) -> Dict[str, Any]:
     syms, bars_all, times_all = load_bars(a.data, a.symbols)
     w_bars = a.hours * 60
     L = BURN + w_bars
-    sb = build_book(a.cost, a.sl_min_steps, a.trail_min_steps)
+    extra: Dict[str, Any] = {}
+    if a.gate_window:
+        extra["setGateWindow"] = a.gate_window
+    if a.gate_min:
+        extra["setGateMinTrades"] = a.gate_min
+    if a.min_pf:
+        extra["setMinPf"] = a.min_pf
+        extra["shortRangeMinPf"] = a.min_pf
+    if a.ddt_h:
+        extra["setMaxDdtHours"] = a.ddt_h
+    if a.consistency:
+        extra["setGateConsistencyPf"] = a.consistency
+    sb = build_book(a.cost, a.sl_min_steps, a.trail_min_steps, extra)
     sets = [st for st in sb.by_idx]
     off = int(a.offset_h * 60)       # the window ends `offset_h` hours before the end of the data
     bars = {s: bars_all[s][len(bars_all[s]) - off - L : len(bars_all[s]) - off] for s in syms}
@@ -252,6 +264,11 @@ def main() -> int:
     ap.add_argument("--sl-min-steps", type=int, default=1)
     ap.add_argument("--trail-min-steps", type=int, default=2)
     ap.add_argument("--offset-h", type=float, default=0.0)
+    ap.add_argument("--gate-window", type=int, default=0)
+    ap.add_argument("--gate-min", type=int, default=0)
+    ap.add_argument("--min-pf", type=float, default=0.0)
+    ap.add_argument("--ddt-h", type=float, default=0.0)
+    ap.add_argument("--consistency", type=float, default=0.0, help="PF both halves of the gate window must reach")
     a = ap.parse_args()
     res = run(a)
     res["summary"] = summarize(res)

@@ -560,7 +560,32 @@ def short_range_trailing_stays_inside_its_steps():
     return bool(arms) and max(arms) <= cap + 1e-9 and max(others) > cap, f"short range arms {arms[0]}..{arms[-1]} cap {cap}; other packs reach {others[-1]}"
 
 
+def a_set_must_pass_on_both_halves_of_its_window_when_asked():
+    """A Set whose window PF clears the floor only because the newer half is excellent is "unstable" when the
+    consistency floor is on, and valid when it is off (the default)."""
+    def tape(first, second):
+        rows = []
+        for i, g in enumerate(first + second):
+            rows.append({"t": 1000.0 + i, "pnl": g - 0.0012, "pnl_pct": g, "symbol": "X", "side": "LONG", "hold_s": 60,
+                         "reason": "tp" if g > 0.0012 else "sl", "exit_i": i})
+        return rows
+    first = [0.0000] * 20 + [0.0040] * 5          # older half: PF well under 1
+    second = [0.0100] * 22 + [0.0000] * 3          # newer half: excellent
+    out = {}
+    for cons in (0.0, 1.0):
+        b = SetBook()
+        b.load(overlay(setGateWindow=50, setGateMinTrades=30, setMinPf=1.1, setGateConsistencyPf=cons, **SMALL))
+        st = next(x for x in b.by_idx if x.kind == "base")
+        st.hist = tape(first, second)
+        st.live = []
+        b._score_one(st)
+        out[cons] = (b.gate_reason(st), round(st.gate_pf, 2), st.gate_pf_old, st.gate_pf_new)
+    ok = out[0.0][0] == "" and out[1.0][0] == "unstable" and out[1.0][2] < 1.0 < out[1.0][3]
+    return ok, f"off={out[0.0]} on={out[1.0]} (reason, window PF, old half PF, new half PF)"
+
+
 CHECKS = [
+    ("processing.consistency-both-halves", a_set_must_pass_on_both_halves_of_its_window_when_asked),
     ("processing.legacy-pick-prefers-judged-sets", legacy_pick_prefers_judged_sets_over_a_single_lucky_order),
     ("processing.step-adapt-waits-for-the-pass", step_adapt_waits_for_the_pass_in_flight),
     ("processing.short-range-trailing-inside-its-steps", short_range_trailing_stays_inside_its_steps),

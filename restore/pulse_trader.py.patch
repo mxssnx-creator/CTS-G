@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..ac67c0d 100644
+index b3a9ff3..d12399b 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
@@ -1324,7 +1324,7 @@ index b3a9ff3..ac67c0d 100644
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4786,42 +5076,69 @@ class Pulse:
+@@ -4786,47 +5076,78 @@ class Pulse:
              bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
              f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
          )
@@ -1422,16 +1422,29 @@ index b3a9ff3..ac67c0d 100644
                  if s and bars:
                      self.sets.ingest_bars(s, bars)
                      stored += 1
-@@ -4837,7 +5154,7 @@ class Pulse:
+             time.sleep(0.12)
+         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
++        sizes = sorted(len(self.sets.bars.get(s) or []) for s in SYMBOLS)
++        log(f"HIST fetched {stored}/{len(SYMBOLS)} symbols; bars min/median/max "
++            f"{sizes[0] if sizes else 0}/{sizes[len(sizes) // 2] if sizes else 0}/{sizes[-1] if sizes else 0} of {lookback}",
++            every=30.0, key="hist-fetch")
+ 
+     def _hist_loop(self) -> None:
+         while not self._hist_stop:
+@@ -4837,9 +5158,10 @@ class Pulse:
                          self.sets.ingest_bars(s, bars)
                  if self.sets.due():
                      have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
 -                    live = sum(1 for s in SYMBOLS if len(self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []) >= 20)
 +                    live = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
                      if live < min(80, max(12, len(SYMBOLS) // 8)):
-                         pass
+-                        pass
++                        log(f"HIST waiting for live minutes: {live} symbols have 20 real 1m bars, need {min(80, max(12, len(SYMBOLS) // 8))}",
++                            every=120.0, key="hist-wait")
                      elif have < max(4, len(SYMBOLS) // 2):
-@@ -4848,7 +5165,6 @@ class Pulse:
+                         self._hist_fetch()
+                     elif time.time() - self.sets.last_run >= self.sets.refresh_s:
+@@ -4848,7 +5170,6 @@ class Pulse:
                      nbar = [0]
                      def _hist_step():
                          nbar[0] += 1
@@ -1439,7 +1452,7 @@ index b3a9ff3..ac67c0d 100644
                          time.sleep(0)
                      try:
                          b = self._budget()
-@@ -4888,11 +5204,26 @@ class Pulse:
+@@ -4888,11 +5209,26 @@ class Pulse:
                  if hasattr(self.api, "err"):
                      self.api.err.write("warm", msg=self.last_error[:220])
              self.warm_ms = (time.time() - t0) * 1000
@@ -1467,7 +1480,7 @@ index b3a9ff3..ac67c0d 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4902,9 +5233,13 @@ class Pulse:
+@@ -4902,9 +5238,13 @@ class Pulse:
                  self._pre_pause_halt = self.halt_reason
              self.halted = True
              self.halt_reason = "stopped"
@@ -1482,7 +1495,7 @@ index b3a9ff3..ac67c0d 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5251,17 @@ class Pulse:
+@@ -4916,11 +5256,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -1501,7 +1514,7 @@ index b3a9ff3..ac67c0d 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5342,8 @@ class Pulse:
+@@ -5001,6 +5347,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -1510,7 +1523,7 @@ index b3a9ff3..ac67c0d 100644
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5029,12 +5372,12 @@ class Pulse:
+@@ -5029,12 +5377,12 @@ class Pulse:
                  pass
              sd_notify("WATCHDOG=1")
              wall = time.perf_counter() - t0
@@ -1528,7 +1541,7 @@ index b3a9ff3..ac67c0d 100644
              elif wall > SCAN_S:
                  self._stats_force = True
  
-@@ -5086,6 +5429,13 @@ def seed_overlay() -> None:
+@@ -5086,6 +5434,13 @@ def seed_overlay() -> None:
              pass
  
  
@@ -1542,7 +1555,7 @@ index b3a9ff3..ac67c0d 100644
  def main() -> None:
      global BASE
      os.makedirs(DIR, exist_ok=True)
-@@ -5094,11 +5444,11 @@ def main() -> None:
+@@ -5094,11 +5449,11 @@ def main() -> None:
      secret = redis_hget("api_secret")
      if not key or not secret:
          raise SystemExit(f"missing {CONN_SHORT} credentials")

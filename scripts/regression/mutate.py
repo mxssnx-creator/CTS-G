@@ -176,6 +176,8 @@ MUTATIONS = [
      "bingx_fast.py", "sig = hmac.new(self.secret.encode(), raw.encode(), hashlib.sha256).hexdigest()\n        qs = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)", "qs = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)\n        sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()"),
     ("exchange: batch orders keep their numeric strings",
      "bingx_fast.py", "chunk = [_batch_numbers(o) for o in orders[:5]]", "chunk = list(orders[:5])"),
+    ("sets: the consistency floor is ignored",
+     "set_engine.py", "if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:", "if False:"),
     ("trader: a wildcard overlay ignores the symbol cap",
      "pulse_trader.py", "        elif cap <= 0:\n            # every ranked name", "        elif wild or cap <= 0:\n            # every ranked name"),
     ("trader: the overlay's max-leverage toggle is ignored",

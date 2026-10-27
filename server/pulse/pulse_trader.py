@@ -5144,6 +5144,10 @@ class Pulse:
                     stored += 1
             time.sleep(0.12)
         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
+        sizes = sorted(len(self.sets.bars.get(s) or []) for s in SYMBOLS)
+        log(f"HIST fetched {stored}/{len(SYMBOLS)} symbols; bars min/median/max "
+            f"{sizes[0] if sizes else 0}/{sizes[len(sizes) // 2] if sizes else 0}/{sizes[-1] if sizes else 0} of {lookback}",
+            every=30.0, key="hist-fetch")
 
     def _hist_loop(self) -> None:
         while not self._hist_stop:
@@ -5156,7 +5160,8 @@ class Pulse:
                     have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
                     live = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
                     if live < min(80, max(12, len(SYMBOLS) // 8)):
-                        pass
+                        log(f"HIST waiting for live minutes: {live} symbols have 20 real 1m bars, need {min(80, max(12, len(SYMBOLS) // 8))}",
+                            every=120.0, key="hist-wait")
                     elif have < max(4, len(SYMBOLS) // 2):
                         self._hist_fetch()
                     elif time.time() - self.sets.last_run >= self.sets.refresh_s:
