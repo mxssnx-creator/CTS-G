@@ -610,6 +610,23 @@ def block_stack_stays_inside_the_book_cap():
     return ok, f"stack qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400"
 
 
+def block_min_order_bump_does_not_break_the_book_cap():
+    """Near the cap the computed add is under the venue's minimum order, so the add is bumped to the minimum. A bump that
+    would carry the position more than 5 % over the book cap is refused."""
+    with _Env() as e:
+        e.exit_closes(10, 0.01)
+        e.p.contracts[SYM].min_qty = 0.3              # a 30 USDT minimum order at 100
+        e.p.max_book_notional = lambda: 400.0
+        e.p.notional_cap = lambda: 150.0
+        e.pos.qty = 3.98                              # 398 USDT: the room is 2 USDT, the bump would end at about 430
+        e.p.block.lanes[e.p.block.key(SYM, "LONG")].base_qty = 3.98
+        e.p.px[SYM] = 100.5
+        e.p.maybe_block_adds()
+        notional = e.pos.qty * e.p.px[SYM]
+    ok = abs(e.pos.qty - 3.98) < 1e-9 and notional <= 400.0 * 1.05
+    return ok, f"qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400 (+5 %)"
+
+
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
@@ -621,6 +638,7 @@ CHECKS = [
     ("trader.block-fill-updates-position-and-stop", block_fill_updates_the_position_and_its_stop),
     ("trader.block-lane-resets-and-ignores-set-closes", block_lane_resets_on_its_parent_close_and_ignores_set_closes),
     ("trader.block-stack-inside-book-cap", block_stack_stays_inside_the_book_cap),
+    ("trader.block-min-order-bump-inside-book-cap", block_min_order_bump_does_not_break_the_book_cap),
     ("trader.lanes-differential-independence", other_strategies_never_change_a_set_position),
     ("trader.lanes-set-stats-own-closes-only", exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own),
     ("trader.lanes-effective-pf-is-validated-pool", effective_pf_is_the_pool_of_the_validated_sets),
