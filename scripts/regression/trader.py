@@ -857,6 +857,40 @@ def history_thread_fetches_at_start_and_never_replays_padding():
     return ok, f"bars={sizes} padded rows in the Set history={flat} symbols replayed={replayed}"
 
 
+def a_symbol_that_left_the_universe_leaves_the_set_history():
+    """The universe rotates. A symbol that left it keeps no Set bars, so after the next scoring pass its trades are in no
+    Set's tape (the simulator and a fresh start see the current universe only) and its memory is freed. A symbol with an
+    open position stays."""
+    import types
+    import set_engine as se
+    from common import overlay, SMALL, synth_bars
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
+        p = _bare_pulse()
+        p.api = types.SimpleNamespace(gather_public=lambda reqs, timeout=4.2: [(x, y, {"code": 0, "data": []}) for x, y in reqs])
+        p.sets = se.SetBook()
+        p.sets.load(overlay(**SMALL))
+        for k, s_ in enumerate(("A-USDT", "B-USDT", "GONE-USDT", "HELD-USDT")):
+            p.sets.bars[s_] = synth_bars(70 + k, 1920, start=50.0 + k, vol=0.003)
+            p.real_1m[s_] = 0
+        p.sets.replay_all()
+        before = sorted(p.sets._hist_rows)
+        p.open = {"HELD-USDT": types.SimpleNamespace(symbol="HELD-USDT")}
+        p.sets.last_run = 0.0                      # a scoring pass is due
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        after_bars = sorted(p.sets.bars)
+        after_rows = sorted(p.sets._hist_rows)
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = "GONE-USDT" in before and "GONE-USDT" not in after_bars and "GONE-USDT" not in after_rows \
+        and "HELD-USDT" in after_bars and {"A-USDT", "B-USDT"} <= set(after_bars)
+    return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}"
+
+
 def history_thread_keeps_real_history_and_tops_up_a_partial_one():
     """Two states the start-up check does not reach. (a) Every symbol holds its full real history and the venue is
     offline: the seed padding must not replace it (no fetch can repair it). (b) Every symbol holds a partial real
@@ -1049,6 +1083,7 @@ CHECKS = [
     ("trader.no-entry-on-a-failed-data-check", no_entry_on_a_symbol_that_failed_the_data_check),
     ("trader.history-thread-fetches-at-start", history_thread_fetches_at_start_and_never_replays_padding),
     ("trader.history-kept-offline-and-topped-up", history_thread_keeps_real_history_and_tops_up_a_partial_one),
+    ("trader.departed-symbol-leaves-set-history", a_symbol_that_left_the_universe_leaves_the_set_history),
     ("trader.credentials-from-private-file", credentials_come_from_a_private_file_without_redis),
     ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),

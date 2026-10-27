@@ -266,6 +266,8 @@ MUTATIONS = [
      "pulse_trader.py", "            if held is not None:\n                # the venue closed", "            if False:\n                # the venue closed"),
     ("trader: venue: an unfilled order counts as the exit",
      "pulse_trader.py", "                if status not in (\"FILLED\", \"FINISHED\", \"FILLED_FULLY\"):\n                    continue\n", ""),
+    ("trader: departed symbols keep their Set bars and trades",
+     "pulse_trader.py", "        self.sets.trim_bars(list(SYMBOLS) + [p.symbol for p in self.open.values()])\n", ""),
     ("trader: a wildcard overlay ignores the symbol cap",
      "pulse_trader.py", "        elif cap <= 0:\n            # every ranked name", "        elif wild or cap <= 0:\n            # every ranked name"),
     ("trader: the overlay's max-leverage toggle is ignored",

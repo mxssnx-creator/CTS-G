@@ -5337,6 +5337,9 @@ class Pulse:
     def _hist_tick(self) -> None:
         """One pass of the history thread: real minutes join the Set history, the history is fetched when most symbols
         lack it (or refreshed on schedule), and a chunk of symbols is replayed and scored."""
+        # the Set history holds the current universe (and symbols with an open position) only: a symbol that left the
+        # universe keeps no bars, so its old trades leave every Set's tape and its memory is freed
+        self.sets.trim_bars(list(SYMBOLS) + [p.symbol for p in self.open.values()])
         for s in SYMBOLS:
             # only real minutes join the Set history: the seed padding (flat rows) would be replayed as bars
             bars = self.real_bars_1m(s)
