@@ -616,8 +616,10 @@ def a_set_fill_keeps_the_sets_own_sl_and_tp():
         return pos, p.position_cost_pct
     pos, cost = _isolated(run)
     c = cost / 100.0
-    ok = pos is not None and abs(pos.tp_pct - 2 * c) < 1e-9 and abs(pos.sl_pct - 2 * c) < 1e-9
-    return ok, f"cost={cost}% tp={getattr(pos, 'tp_pct', None)} sl={getattr(pos, 'sl_pct', None)} want both {2 * c}"
+    ok = (pos is not None and abs(pos.tp_pct - 2 * c) < 1e-9 and abs(pos.sl_pct - 2 * c) < 1e-9
+          and pos.trail_arm == 0.0 and pos.trail_give == 0.0 and not pos.trail_set_id)     # a base Set does not trail
+    return ok, (f"cost={cost}% tp={getattr(pos, 'tp_pct', None)} sl={getattr(pos, 'sl_pct', None)} want both {2 * c}; "
+                f"trailing arm={getattr(pos, 'trail_arm', None)} give={getattr(pos, 'trail_give', None)} (none for a base Set)")
 
 
 def overlay_slpct_and_tppct_are_percent_without_guessing():
