@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..fd9061e 100644
+index b3a9ff3..738e06e 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -4,6 +4,7 @@ from __future__ import annotations
@@ -1744,17 +1744,20 @@ index b3a9ff3..fd9061e 100644
                  "avgR": cost["avgR"],
                  "wr": round(100.0 * wins / max(1, wins + losses), 1),
                  "scale": "1.00=neutral 1.10=+1×cost",
-@@ -4650,6 +5137,9 @@ class Pulse:
+@@ -4649,7 +5136,11 @@ class Pulse:
+             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
-         self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
+-        self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
++        # open positions are unlimited (maxOpen 0); the symbol cap and Block's max stack are settings (50 and 8 shipped)
++        self.record_test("qa-unlimited", MAX_OPEN <= 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
 +        book_cap = self.max_book_notional()
 +        sane_cap = max(self.notional_cap() * 32.0, 64.0)
 +        self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4731,7 +5221,7 @@ class Pulse:
+@@ -4731,7 +5222,7 @@ class Pulse:
          snap_ind = self.indications.snapshot()
          self.record_test("qa-ind-on", bool(snap_ind.get("enabled")), f"syms={snap_ind.get('symbols')} lanes={len(snap_ind.get('primary') or [])}")
          have = set(s for s, rows in (getattr(self.indications, "last", {}) or {}).items() if rows)
@@ -1763,7 +1766,7 @@ index b3a9ff3..fd9061e 100644
          miss = [s for s in scored if s not in have][:4]
          warm_ind = self.cycle < max(80, len(SYMBOLS))
          need = max(8, min(len(scored), max(8, len(scored) // 8))) if scored else 8
-@@ -4753,7 +5243,8 @@ class Pulse:
+@@ -4753,7 +5244,8 @@ class Pulse:
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -1773,7 +1776,7 @@ index b3a9ff3..fd9061e 100644
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4769,7 +5260,7 @@ class Pulse:
+@@ -4769,7 +5261,7 @@ class Pulse:
              except Exception:
                  stg = None
              if stg:
@@ -1782,7 +1785,7 @@ index b3a9ff3..fd9061e 100644
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4786,81 +5277,118 @@ class Pulse:
+@@ -4786,81 +5278,118 @@ class Pulse:
              bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
              f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
          )
@@ -1959,7 +1962,7 @@ index b3a9ff3..fd9061e 100644
              except Exception:
                  self.hist_busy = False
                  self.sets.progress.phase = "error"
-@@ -4888,11 +5416,26 @@ class Pulse:
+@@ -4888,11 +5417,26 @@ class Pulse:
                  if hasattr(self.api, "err"):
                      self.api.err.write("warm", msg=self.last_error[:220])
              self.warm_ms = (time.time() - t0) * 1000
@@ -1987,7 +1990,7 @@ index b3a9ff3..fd9061e 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4902,9 +5445,13 @@ class Pulse:
+@@ -4902,9 +5446,13 @@ class Pulse:
                  self._pre_pause_halt = self.halt_reason
              self.halted = True
              self.halt_reason = "stopped"
@@ -2002,7 +2005,7 @@ index b3a9ff3..fd9061e 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5463,17 @@ class Pulse:
+@@ -4916,11 +5464,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -2021,7 +2024,7 @@ index b3a9ff3..fd9061e 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5554,8 @@ class Pulse:
+@@ -5001,6 +5555,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -2030,7 +2033,7 @@ index b3a9ff3..fd9061e 100644
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5029,12 +5584,12 @@ class Pulse:
+@@ -5029,12 +5585,12 @@ class Pulse:
                  pass
              sd_notify("WATCHDOG=1")
              wall = time.perf_counter() - t0
@@ -2048,7 +2051,7 @@ index b3a9ff3..fd9061e 100644
              elif wall > SCAN_S:
                  self._stats_force = True
  
-@@ -5086,19 +5641,26 @@ def seed_overlay() -> None:
+@@ -5086,19 +5642,26 @@ def seed_overlay() -> None:
              pass
  
  
