@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import collections
 import json
 import math
 import os
@@ -2667,6 +2668,8 @@ class Pulse:
             want = 1 if ind.direction == "long" else -1
             if want != direction:
                 return "ind-mismatch"
+        if self.sets.enabled and not self.sets.symbol_ok(sym):
+            return "data-quality"          # the symbol's history failed the data check: no Set was validated on it
         chosen = None
         try:
             chosen = self.sets.pick_any(pack) if self.sets.enabled else None   # a signal binds to its own pack only
@@ -2924,11 +2927,12 @@ class Pulse:
                 self.close_pos(pos, avg, "no-ctrl")
                 return
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
-        self.block.register_parent(sym, side, filled, avg)
-        try:
-            self.dca.attach(sym, side, filled, avg)
-        except Exception:
-            pass
+        if not pos.set_id:         # the add-on lanes belong to positions without a Set
+            self.block.register_parent(sym, side, filled, avg)
+            try:
+                self.dca.attach(sym, side, filled, avg)
+            except Exception:
+                pass
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
         self._stats_force = True
 
@@ -3092,7 +3096,8 @@ class Pulse:
             if px <= 0:
                 continue
             age = now - pos.opened_at
-            if age >= MAX_HOLD_S:
+            if age >= MAX_HOLD_S and not pos.set_id:
+                # a Set position leaves on its own time exit (hist_time_bars), the one the replay validated
                 self.close_pos(pos, px, "max-hold-6h")
                 continue
             if getattr(self, "control_orders", True):
@@ -3192,7 +3197,7 @@ class Pulse:
             return
         try:
             with open(TRADES_PATH) as f:
-                lines = f.readlines()[-80:]
+                lines = collections.deque(f, maxlen=80)   # streams the file: memory stays at 80 lines however long it grows
             for line in lines:
                 rec = json.loads(line)
                 c = Closed(
@@ -3596,6 +3601,18 @@ class Pulse:
             "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
         }
 
+    def rearrange_opens(self) -> List[Dict[str, Any]]:
+        """The positions the coordinator may swap out for a stronger signal: Exit-lane positions only. A Set position is
+        closed by its own lane (stop, TP, trailing, time, scratch), never swapped out."""
+        opens = []
+        for p in self.open.values():
+            if p.set_id:
+                continue
+            px = self.px.get(p.symbol) or p.entry
+            u = ((px - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100
+            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
+        return opens
+
     def maybe_block_adds(self) -> None:
         """CTS Block Live: add-on only against an existing same-side parent."""
         if self.halted or not self.block.enabled or not self.strat_block:
@@ -3632,6 +3649,8 @@ class Pulse:
         for pos in list(self.open.values()):
             if emitted >= add_budget:
                 break
+            if pos.set_id:
+                continue           # no add-on to a Set position: it would re-anchor the entry, stop and target the Set validated
             if self.missing_controls(pos):
                 self.ensure_controls(pos)
                 if self.missing_controls(pos):
@@ -3796,6 +3815,8 @@ class Pulse:
         for pos in list(self.open.values()):
             if emitted >= add_budget:
                 break
+            if pos.set_id:
+                continue           # no add-on to a Set position (its own lane, as validated)
             if time.time() < self.dca_fail_cd.get(pos.symbol, 0):
                 continue
             if self.missing_controls(pos):
@@ -4128,12 +4149,7 @@ class Pulse:
             if ranked and (time.time() - self.skip_log.get("gate", 0) > 45):
                 log("COORD soft " + "; ".join(reasons)[:160] + f" intern={intern}", every=45.0, key="coord-pause", quiet=True)
                 self.skip_log["gate"] = time.time()
-        opens = []
-        for p in self.open.values():
-            px = self.px.get(p.symbol) or p.entry
-            u = ((px - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100
-            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
-        swap = self.coord.pick_rearrange(opens, ranked, slot_cap)
+        swap = self.coord.pick_rearrange(self.rearrange_opens(), ranked, slot_cap)
         if swap and swap["from"] in self.open:
             pos = self.open[swap["from"]]
             self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")

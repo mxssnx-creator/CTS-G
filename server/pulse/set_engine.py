@@ -502,6 +502,57 @@ class Progress:
     errors: int = 0                  # symbols + Sets that failed in the last pass; the others still ran
 
 
+_ROW_KEYS = ("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id")
+
+
+def _row_t(r: Tuple[Any, ...]) -> float:
+    return r[0]
+
+
+class BarIndex:
+    """Range-min/max lookups over one symbol's bars (sparse tables), built once per replay of that symbol. A base lane
+    (no trailing) then finds its exit bar with a few lookups instead of walking every bar it holds. The answers are the
+    same bars the walk finds; the walk stays for trailing lanes, whose stop moves with every bar."""
+    __slots__ = ("n", "lo", "hi", "cl_min", "cl_max", "close")
+
+    def __init__(self, bars: Sequence[Sequence[float]]) -> None:
+        self.n = len(bars)
+        lows = [float(b[2]) for b in bars]
+        highs = [float(b[1]) for b in bars]
+        self.close = [float(b[3]) for b in bars]
+        self.lo = self._table(lows, min)
+        self.hi = self._table(highs, max)
+        self.cl_min = self._table(self.close, min)
+        self.cl_max = self._table(self.close, max)
+
+    @staticmethod
+    def _table(arr: List[float], fn: Callable[[float, float], float]) -> List[List[float]]:
+        t = [arr]
+        k = 1
+        while (1 << k) <= len(arr):
+            prev = t[-1]
+            half = 1 << (k - 1)
+            t.append([fn(prev[i], prev[i + half]) for i in range(len(arr) - (1 << k) + 1)])
+            k += 1
+        return t
+
+    @staticmethod
+    def first(t: List[List[float]], a: int, b: int, x: float, le: bool) -> int:
+        """Smallest j in [a, b) with arr[j] <= x (le) or arr[j] >= x (not le); b when there is none."""
+        while a < b:
+            k = (b - a).bit_length() - 1
+            while k >= 0:
+                v = t[k][a]
+                if (v <= x) if le else (v >= x):
+                    k -= 1
+                else:
+                    break
+            if k < 0:
+                return a                     # arr[a] itself meets the condition
+            a += 1 << k                      # the whole block [a, a + 2^k) misses: skip it
+        return b
+
+
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
@@ -584,8 +635,10 @@ class SetLane:
         allowed: bool,
         cfg: Dict[str, Any],
         cand: Optional[Sequence[int]] = None,
+        acc: Optional["BarIndex"] = None,
     ) -> List[Dict[str, Any]]:
         """Advance over bars[i0:i1]. Same rules as step(), applied to the whole range in one loop.
+        acc: the symbol's BarIndex; with it a base lane finds its exit by lookup (same result as the walk).
 
         cand: sorted bar indices where an entry is possible (dir != 0 and conf >= entry_conf). A flat lane
         jumps between them; the bars in between can only spend cooldown, which is applied in one step.
@@ -615,6 +668,86 @@ class SetLane:
         out: List[Dict[str, Any]] = []
         i = i0
         while i < i1:
+            if o is not None and acc is not None and (not use_trail or o.get("trail") is None):
+                # an unarmed position (every base lane, and a trailing lane until its arm is reached) exits like a base
+                # lane: find the exit bar by lookup. A trailing lane that arms first hands over to the walk at that bar.
+                side = o["side"]
+                entry = o["entry"]
+                sl = o["sl"]
+                tp = o["tp"]
+                oi = o["i"]
+                first = acc.first
+                end = i1
+                if use_trail:
+                    peak0 = o["peak"]
+                    loose_arm = entry * (1 + side * arm) * (1 - side * 1e-9)
+                    a_ = i
+                    while a_ < i1:
+                        a_ = first(acc.hi, a_, i1, loose_arm, False) if side > 0 else first(acc.lo, a_, i1, loose_arm, True)
+                        if a_ >= i1:
+                            break
+                        pk = max(peak0, float(bars[a_][1])) if side > 0 else min(peak0, float(bars[a_][2]))
+                        if ((pk - entry) / entry if side > 0 else (entry - pk) / entry) >= arm:
+                            break
+                        a_ += 1
+                    end = min(a_, i1)         # the arming bar: from there the stop trails
+                if side > 0:
+                    j_sl = first(acc.lo, i, end, sl, True)
+                    j_tp = first(acc.hi, i, end, tp, False) if honor_tp else end
+                else:
+                    j_sl = first(acc.hi, i, end, sl, False)
+                    j_tp = first(acc.lo, i, end, tp, True) if honor_tp else end
+                j_time = max(i, oi + time_bars)
+                if j_time >= end:
+                    j_time = end
+                # scratch: the first bar from oi + scratch_bars whose close clears scratch_min; the lookup narrows with a
+                # slightly loose level, the exact expression decides
+                j_scr = end
+                a = max(i, oi + scratch_bars)
+                lim = min(end, j_sl, j_tp, j_time)
+                loose = entry * (1 + side * scratch_min) * (1 - side * 1e-9)
+                while a < lim:
+                    a = first(acc.cl_max, a, lim, loose, False) if side > 0 else first(acc.cl_min, a, lim, loose, True)
+                    if a >= lim:
+                        break
+                    if (acc.close[a] - entry) / entry * side >= scratch_min:
+                        j_scr = a
+                        break
+                    a += 1
+                j = min(j_sl, j_tp, j_time, j_scr)
+                if j >= end:
+                    # no exit before `end`: carry the peak over the bars walked past
+                    if i < end:
+                        if side > 0:
+                            o["peak"] = max(o["peak"], max(float(bars[x][1]) for x in range(i, end)))
+                        else:
+                            o["peak"] = min(o["peak"], min(float(bars[x][2]) for x in range(i, end)))
+                    i = end
+                    if end >= i1:
+                        continue
+                    # a trailing lane reached its arm at bar `end`: the walk below takes over from that bar
+                else:
+                    close = acc.close[j]
+                    if j == j_sl:
+                        why, px = "sl", sl
+                    elif j == j_tp:
+                        why, px = "tp", tp
+                    elif j == j_time:
+                        why, px = "time", close
+                    else:
+                        why, px = "scratch+", close
+                    held = j - oi
+                    raw = (px - entry) / entry * side
+                    out.append({
+                        "set_id": sid, "symbol": symbol, "side": "LONG" if side > 0 else "SHORT",
+                        "dir": side, "entry_i": int(oi), "exit_i": j, "entry_px": entry, "exit_px": float(px),
+                        "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cost_pct),
+                        "hold_s": held * BAR_S, "hold_bars": held,
+                    })
+                    o = None
+                    cool = cooldown
+                    i = j + 1
+                    continue
             if o is not None:
                 side = o["side"]
                 entry = o["entry"]
@@ -719,6 +852,9 @@ class SetBook:
         self.consistency_pf = 0.0
         self.pf_history: List[Dict[str, Any]] = []
         self._adapt_pending: Optional[List[Any]] = None
+        self.quality: Dict[str, str] = {}
+        self.max_flat_share = 0.35
+        self.max_jump = 0.5
         self.gate_window = GATE_WINDOW_DEFAULT
         self.gate_min = GATE_MIN_DEFAULT
         self.max_dd_s = 420.0
@@ -773,6 +909,8 @@ class SetBook:
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
+        self.max_flat_share = min(1.0, max(0.0, num(ov, "histMaxFlatShare", 0.35)))
+        self.max_jump = max(0.01, num(ov, "histMaxJumpPct", 50.0) / 100.0)
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
@@ -1047,6 +1185,46 @@ class SetBook:
         if pending is not None:
             self.adapt_from_live(pending)
 
+    def bar_quality(self, symbol: str) -> str:
+        """'' when the symbol's history is fit to validate Sets on, otherwise why not. A series that is mostly flat bars
+        (no trade in the minute) or that jumps by more than histMaxJumpPct in one minute (a broken print, as the demo venue
+        shows on illiquid names) would validate Sets on prices nobody could trade."""
+        rows = self.bars.get(symbol) or []
+        if len(rows) < self.min_bars:
+            return "short"
+        flat = 0
+        jump = 0.0
+        prev = 0.0
+        try:
+            for r in rows:
+                if r[1] <= r[2]:
+                    flat += 1
+                c = float(r[3])
+                if prev > 0:
+                    d = abs(c / prev - 1.0)
+                    if d > jump:
+                        jump = d
+                prev = c
+        except (TypeError, ValueError, IndexError, ZeroDivisionError):
+            return ""        # malformed rows: the replay reports this symbol's error itself
+        if flat / len(rows) > self.max_flat_share:
+            return "flat"
+        if jump > self.max_jump:
+            return "spike"
+        return ""
+
+    def usable(self, symbol: str) -> bool:
+        why = self.bar_quality(symbol)
+        if why and why != "short":
+            self.quality[symbol] = why
+        else:
+            self.quality.pop(symbol, None)
+        return not why
+
+    def symbol_ok(self, symbol: str) -> bool:
+        """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
+        return symbol not in self.quality
+
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
         if not bars:
             return
@@ -1180,9 +1358,9 @@ class SetBook:
         now = now or float((int(t0 // BAR_S) + 1) * BAR_S)
         try:
             if symbols is None:
-                names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
+                names = [s for s in self.bars if self.usable(s)]
             else:
-                names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
+                names = [s for s in symbols if self.usable(s)]
             was_ready = self.progress.ready
             self.progress = Progress(
                 phase="replay",
@@ -1215,8 +1393,11 @@ class SetBook:
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
                     continue
+                packed = {sid: [(r["t"], r["symbol"], r["side"], r["pnl"], r["pnl_pct"], r["hold_s"], r["reason"], r["set_id"])
+                                for r in rows] for sid, rows in per_set.items() if rows}
+                per_set = {}                          # rows are kept as tuples: about a third of the memory of dicts
                 with self._lock:
-                    self._hist_rows[symbol] = per_set
+                    self._hist_rows[symbol] = packed
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
                     on_step()
@@ -1224,9 +1405,9 @@ class SetBook:
             self.progress.pct = 90.0
             cutoff = now - self.lookback * BAR_S
             with self._lock:
-                live = {s for s, b in self.bars.items() if len(b) >= self.min_bars}
+                live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
-                    del self._hist_rows[s]          # symbols that left the universe drop their rows
+                    del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
                 for s in [s for s in self._sig_cache if s not in live]:
                     del self._sig_cache[s]          # and so do their signal memo entries
                 stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
@@ -1235,14 +1416,11 @@ class SetBook:
                     self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
                 for st in ([] if stale else self.by_idx):
                     try:
-                        rows = [
-                            r
-                            for s, per_set in self._hist_rows.items()
-                            for r in per_set.get(st.id, [])
-                            if finite(r.get("t")) >= cutoff
-                        ]
-                        full = sorted(rows, key=lambda r: finite(r.get("t")))
-                        st.hist = full[-max(40, self.gate_window):]
+                        full = sorted(
+                            (r for per_set in self._hist_rows.values() for r in per_set.get(st.id, ()) if r[0] >= cutoff),
+                            key=_row_t,
+                        )
+                        st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=now)
                         st.n = len(full) + st.live_n   # a replay pass recounts history; live closes stay counted
@@ -1313,11 +1491,12 @@ class SetBook:
             dirs[p] = [x[0] for x in sig]
             confs[p] = [x[1] for x in sig]
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
+        acc = BarIndex(bars)          # one index per symbol, shared by every lane
         for st in self.by_idx:
             if st.pack not in self.packs:
                 continue
             lane = SetLane(st, symbol)
-            for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack]):
+            for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc):
                 hist[st.id].append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
                                     "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
                                     "reason": done["reason"], "set_id": st.id})
@@ -1714,6 +1893,8 @@ class SetBook:
             "steps": list(self.steps),
             "histFills": sum(s.n for s in self.sets.values()),
             "barsSymbols": len(self.bars),
+            "quality": {"excluded": len(self.quality), "maxFlatShare": self.max_flat_share, "maxJumpPct": self.max_jump * 100.0,
+                        "symbols": dict(sorted(self.quality.items())[:24])},
             "progress": {
                 "phase": p.phase,
                 "pct": round(p.pct, 1),

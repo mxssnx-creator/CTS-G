@@ -837,8 +837,157 @@ def history_thread_fetches_at_start_and_never_replays_padding():
     return ok, f"bars={sizes} padded rows in the Set history={flat} symbols replayed={replayed}"
 
 
+def history_thread_keeps_real_history_and_tops_up_a_partial_one():
+    """Two states the start-up check does not reach. (a) Every symbol holds its full real history and the venue is
+    offline: the seed padding must not replace it (no fetch can repair it). (b) Every symbol holds a partial real
+    history (above min_bars, under 90 % of the lookback): the thread must fetch the rest, not take it as complete."""
+    import types
+    import set_engine as se
+    from common import overlay, SMALL
+
+    class _Offline:
+        def gather_public(self, reqs, timeout=4.2):
+            return [(path, extra, {"code": 0, "data": []}) for path, extra in reqs]
+
+    def run(api, real_n):
+        p = _bare_pulse()
+        p.api = api
+        p.sets = se.SetBook()
+        p.sets.load(overlay(**SMALL))
+        p.sets.lookback = 1920
+        p.sets.refresh_s = 10 ** 6
+        p.sets.last_run = time.time() - p.sets.retry_s - 1     # due on the retry clock, not on the refresh clock
+        for k, s_ in enumerate(pt.SYMBOLS):
+            p.sets.bars[s_] = [[50.0 + k + i * 0.01, 50.2 + k + i * 0.01, 49.8 + k + i * 0.01, 50.1 + k + i * 0.01, 1.0]
+                               for i in range(real_n)]
+            p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 60       # the seed padding
+            p.real_1m[s_] = 0
+        p.open = {}
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=False)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        sizes = [len(p.sets.bars.get(s_) or []) for s_ in pt.SYMBOLS]
+        flat = sum(1 for s_ in pt.SYMBOLS for b in (p.sets.bars.get(s_) or []) if b[0] == b[1] == b[2] == b[3] == 100.0)
+        return sizes, flat
+
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
+        kept, kept_flat = run(_Offline(), 1920)
+        topped, topped_flat = run(_PagedKlines(), 500)
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0
+    return ok, f"offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
+
+
+def no_other_lane_touches_a_set_position():
+    """Independent lanes: the coordinator's rearrange may not swap out a Set position, the Block and DCA add-ons may not
+    add to it (an add-on re-anchors the entry, stop and target the Set validated), and the global 6 h hold cap leaves it
+    to its own time exit. The same position without a Set stays open to all of them."""
+    import types
+
+    def run():
+        out = {}
+        p, sym, pos = _lane_pulse()
+        p.px[sym] = pos.entry * 1.0005
+        out["rearrange"] = (len(p.rearrange_opens()), None)
+        # Block: an add-on candidate reaches evaluate_counts; a Set position must never get there
+        seen = {"block": 0, "dca": 0}
+        lane = types.SimpleNamespace(active=True, base_qty=1.0, confirmed_add=0.0, legs=[], satisfied={})
+        p.block = types.SimpleNamespace(
+            enabled=True, lanes={f"{sym}:{pos.side}": lane}, key=lambda s_, side: f"{s_}:{side}", save=lambda: None,
+            evaluate_counts=lambda *a, **k: seen.__setitem__("block", seen["block"] + 1) or [], pick_emit=lambda rows: None,
+            on_parent_close=lambda *a, **k: None, register_parent=lambda *a, **k: None)
+        p.strat_block = True
+        p.halted = False
+        p.block_last_emit = 0.0
+        p.cooldown = {}
+        p.entries_blocked = lambda: False
+        p.missing_controls = lambda _p: False
+        p.score = lambda s_: (1 if pos.side == "LONG" else -1, "x", 0.9)
+        p.dca = types.SimpleNamespace(
+            enabled=True, lanes={}, key=lambda s_, side: f"{s_}:{side}", skips=0,
+            due=lambda *a, **k: seen.__setitem__("dca", seen["dca"] + 1) or None,
+            on_close=lambda *a, **k: None, drop=lambda *a, **k: None, attach=lambda *a, **k: None)
+        p.dca_last_emit = 0.0
+        p.dca_fail_cd = {}
+        p.max_book_notional = lambda: 1e9
+        p.maybe_block_adds()
+        p.maybe_dca_adds()
+        set_adds = dict(seen)
+        # hold cap: a Set position past 6 h with a 12 h time exit stays open
+        p.sets.hist_time_bars = 720
+        p.sets.scratch_min = 0.05
+        pos.opened_at = time.time() - pt.MAX_HOLD_S - 60
+        p.manage()
+        set_held = sym in p.open
+        # the same position without a Set: every lane may act
+        pos.set_id = ""
+        out["rearrange_free"] = len(p.rearrange_opens())
+        seen["block"] = seen["dca"] = 0
+        p.maybe_block_adds()
+        p.maybe_dca_adds()
+        free_adds = dict(seen)
+        return out["rearrange"][0], out["rearrange_free"], set_adds, free_adds, set_held
+
+    set_swap, free_swap, set_adds, free_adds, set_held = _isolated(run)
+    ok = set_swap == 0 and free_swap == 1 and set_adds == {"block": 0, "dca": 0} \
+        and free_adds["block"] == 1 and free_adds["dca"] == 1 and set_held
+    return ok, (f"Set position: rearrange candidates={set_swap} add-on checks={set_adds} held past 6 h={set_held}; "
+                f"without a Set: rearrange candidates={free_swap} add-on checks={free_adds}")
+
+
+def a_set_position_gets_no_add_on_lane():
+    """Opening a Set position registers no Block parent and no DCA lane: the add-on lanes belong to positions without a
+    Set. A position without a Set still gets its Block parent."""
+    def run():
+        sym = "BTC-USDT"
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+        res = []
+        for with_set in (True, False):
+            if os.path.exists(pt.OPEN_PATH):
+                os.remove(pt.OPEN_PATH)          # each run starts with an empty book
+            p = pt.Pulse(_StubExchange(executed="1", requested="1"), contracts)
+            p.boot_ts = 0.0
+            p.px[sym] = 100.0
+            p.available = 50.0
+            p.halted = False
+            p.entry_sense = lambda *a, **k: None
+            st = p.sets.by_idx[0] if (with_set and p.sets.by_idx) else None
+            p.sets.pick_any = lambda pack, _st=st: _st
+            p.sets.pick_trail = lambda pack: None
+            parents = []
+            p.block.register_parent = lambda *a: parents.append(a)
+            p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+            pos = p.open.get(sym)
+            res.append((bool(pos and pos.set_id), len(parents)))
+        return res
+    (set_open, set_parents), (free_open, free_parents) = _isolated(run)
+    ok = set_open and set_parents == 0 and not free_open and free_parents == 1
+    return ok, f"Set position opened={set_open} Block parents={set_parents}; position without a Set parents={free_parents}"
+
+
+def no_entry_on_a_symbol_that_failed_the_data_check():
+    import types
+    p = _bare_pulse()
+    p.sets = types.SimpleNamespace(enabled=True, use_historic_gate=True, symbol_ok=lambda s: s != "BAD-USDT", entry_conf=0.5,
+                                   pick_any=lambda pack: types.SimpleNamespace(id="x"), pack_open=lambda pack: True)
+    p.strat_ind = False
+    p.px = {"BAD-USDT": 1.0, "OK-USDT": 1.0}
+    p.occupying = lambda *a, **k: False
+    bad = p.entry_sense("BAD-USDT", 1, "gen:x", 0.9, "general")
+    good = p.entry_sense("OK-USDT", 1, "gen:x", 0.9, "general")
+    return bad == "data-quality" and good != "data-quality", f"failed symbol -> {bad}; clean symbol -> {good}"
+
+
 CHECKS = [
+    ("trader.lanes-no-other-lane-touches-a-set-position", no_other_lane_touches_a_set_position),
+    ("trader.lanes-set-position-gets-no-add-on-lane", a_set_position_gets_no_add_on_lane),
+    ("trader.no-entry-on-a-failed-data-check", no_entry_on_a_symbol_that_failed_the_data_check),
     ("trader.history-thread-fetches-at-start", history_thread_fetches_at_start_and_never_replays_padding),
+    ("trader.history-kept-offline-and-topped-up", history_thread_keeps_real_history_and_tops_up_a_partial_one),
     ("trader.credentials-from-private-file", credentials_come_from_a_private_file_without_redis),
     ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
     ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),

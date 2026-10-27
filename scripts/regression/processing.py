@@ -584,7 +584,83 @@ def a_set_must_pass_on_both_halves_of_its_window_when_asked():
     return ok, f"off={out[0.0]} on={out[1.0]} (reason, window PF, old half PF, new half PF)"
 
 
+def base_lane_lookup_equals_the_walk():
+    """The indexed exit search (base lanes, and trailing lanes until they arm) must give exactly the walk's trades, open position and cooldown, in one
+    range and in chunks, with TP honoured and ignored, both directions, on several seeds."""
+    import random
+    from set_engine import BarIndex, SetLane
+    diffs = 0
+    checked = 0
+    for seed in (3, 7, 11):
+        rnd = random.Random(seed)
+        bars = synth_bars(seed, 900, drift=0.0003 if seed % 2 else -0.0003)
+        acc = BarIndex(bars)
+        dirs = [rnd.choice((0, 0, 0, 1, -1)) for _ in bars]
+        confs = [0.9 if d else 0.0 for d in dirs]
+        cand = [i for i, d in enumerate(dirs) if d]
+        for honor in (True, False):
+            b = SetBook()
+            b.load(overlay(exitIgnoreTp=not honor, **SMALL))
+            cfg = {"entry_conf": 0.58, "time_bars": 45, "scratch_bars": 10, "scratch_min": 0.0016, "cooldown": 2,
+                   "cost_pct": COST, "honor_tp": honor}
+            for st in list(b.by_idx):
+                for chunks in ((0, 900), (0, 300, 301, 650, 900)):
+                    l1, l2 = SetLane(st, "X"), SetLane(st, "X")
+                    a1, a2 = [], []
+                    for c0, c1 in zip(chunks[:-1], chunks[1:]):
+                        a1 += l1.scan(c0, c1, bars, dirs, confs, True, cfg, cand)
+                        a2 += l2.scan(c0, c1, bars, dirs, confs, True, cfg, cand, acc)
+                    checked += 1
+                    if a1 != a2 or l1.open != l2.open or l1.cool != l2.cool:
+                        diffs += 1
+    return diffs == 0 and checked > 0, f"lanes compared={checked} differing={diffs}"
+
+
+def scratch_lookup_keeps_the_exact_level():
+    """The scratch lookup narrows with a level 1e-9 looser than the exact one. A close inside that gap (just under the
+    exact scratch level) must not scratch: the lookup gives the walk's result, here no exit until the time bar."""
+    from set_engine import BarIndex, SetLane
+    b = SetBook()
+    b.load(overlay(**SMALL))
+    st = b.by_idx[0]
+    cfg = {"entry_conf": 0.58, "time_bars": 45, "scratch_bars": 10, "scratch_min": 0.0016, "cooldown": 2,
+           "cost_pct": COST, "honor_tp": True}
+    near = 100.0 * (1 + 0.0016) * (1 - 3e-10)      # under the exact level, over the loose one
+    bars = [[100.0, 100.01, 99.99, 100.0, 1.0] for _ in range(16)] + [[near, near + 0.01, near - 0.01, near, 1.0]] * 64
+    dirs = [0] * len(bars)
+    dirs[5] = 1
+    confs = [0.9 if d else 0.0 for d in dirs]
+    l1, l2 = SetLane(st, "X"), SetLane(st, "X")
+    a1 = l1.scan(0, len(bars), bars, dirs, confs, True, cfg, [5])
+    a2 = l2.scan(0, len(bars), bars, dirs, confs, True, cfg, [5], BarIndex(bars))
+    reasons = [t.get("reason") if isinstance(t, dict) else t for t in a2]
+    return a1 == a2 and l1.open == l2.open, f"walk={a1} lookup={a2} reasons={reasons}"
+
+
+def broken_or_flat_series_are_not_replayed():
+    """A symbol with a broken print (a one-minute jump beyond histMaxJumpPct) or a mostly flat series (no trades in the
+    minute) is left out of the replay and of entries, and it shows in the snapshot with its reason."""
+    b = _book(n_syms=3, bars=600, **SMALL)
+    spike = [list(r) for r in b.bars["S1-USDT"]]
+    spike[300] = [spike[299][3], spike[299][3] * 3, spike[299][3], spike[299][3] * 3, 1.0]      # +200% in one minute
+    b.bars["S1-USDT"] = spike
+    flat = [list(r) for r in b.bars["S2-USDT"]]
+    for k in range(0, 600, 2):
+        c = flat[k][3]
+        flat[k] = [c, c, c, c, 0.0]                  # half the minutes without a trade
+    b.bars["S2-USDT"] = flat
+    b.replay_all(now=T0)
+    q = b.snapshot()["quality"]["symbols"]
+    ok = (q.get("S1-USDT") == "spike" and q.get("S2-USDT") == "flat" and "S0-USDT" not in q
+          and "S1-USDT" not in b._hist_rows and "S2-USDT" not in b._hist_rows and "S0-USDT" in b._hist_rows
+          and not b.symbol_ok("S1-USDT") and b.symbol_ok("S0-USDT"))
+    return ok, f"excluded={q} replayed={sorted(b._hist_rows)}"
+
+
 CHECKS = [
+    ("processing.broken-or-flat-series-not-replayed", broken_or_flat_series_are_not_replayed),
+    ("processing.base-lane-lookup-equals-walk", base_lane_lookup_equals_the_walk),
+    ("processing.scratch-lookup-keeps-exact-level", scratch_lookup_keeps_the_exact_level),
     ("processing.consistency-both-halves", a_set_must_pass_on_both_halves_of_its_window_when_asked),
     ("processing.legacy-pick-prefers-judged-sets", legacy_pick_prefers_judged_sets_over_a_single_lucky_order),
     ("processing.step-adapt-waits-for-the-pass", step_adapt_waits_for_the_pass_in_flight),

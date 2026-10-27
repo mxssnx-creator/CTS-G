@@ -39,7 +39,9 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   their own closes (`exits.on_close` and `variants.on_close` get closes without a set_id).
 - **Why.** A Set is validated on its own lane; an Exit strategy closing the same position early makes the live result
   something the Base validation never measured (the PF after Base then does not carry over to live).
-- **Known open point.** Block and DCA add-ons can still add to a Set position and re-anchor its stop and target.
+- **No cross-lane actions on a Set position.** The Block and DCA add-ons never add to it (no parent or DCA lane is
+  attached at open), the coordinator's rearrange never swaps it out (`Pulse.rearrange_opens`), and the global 6 h hold
+  cap leaves it to its own time exit. Each rule has a `trader.lanes-*` check and a mutant.
 
 ## Live safety
 
