@@ -80,6 +80,22 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   back to equal (>= 0) the next parent opens at the base volume. The lane's observed PF, pauses and parent ring persist
   across parents. Checks: `block.*` and `trader.block-*`.
 
+## Indication library and extra packs
+
+- `server/pulse/indication_lib.py`: 37 causal indicator families (trend, breakout, reversion, volume and flow; relations and
+  ratios such as higher-high counts, close location, up/down volume, ATR expansion, last-part acceleration), each at ranges
+  5, 8 (minimal) and 14, 21 (medial) on the 1m, 5m and 15m series (`<family>_n<range>_t<minutes>`), the three timeframes
+  combined (`<family>_c<range>`, at least two agree, none disagrees) and group votes (`g_<group>_<min|med>`). They are in
+  `indication_extra.INDICATORS` next to the older ones, so any name works in `extraIndicators` (a vote of the
+  indications pack) or in a pack's variant list. The 15m series is limited by the 300-row window (ranges up to about 17).
+- Extra packs (`set_engine.EXTRA_PACKS`: trend, breakout, reversion, flow, multi): each its own Sets and its own Base
+  validation, switched by `stratTrend` etc. (off by default), indicator names by `trendVariants` etc. They exist in the Set
+  engine and the evaluation scripts (`scripts/indicator_postbase.py`: effective PF, validated share and orders per pack and
+  per variant, development window only, `--sealed` once for finalists). The live trader does not open positions from them.
+- Measured so far (8 and 30 day walk-forward, 20 symbols): every single indicator has an unfiltered PF of 0.4 to 0.65; the
+  effective PF after Base reads 1.3 to 1.7 in-sample and the executed PF of the walk-forward stays under 1 (best 0.87 on 459
+  orders). Choose on development windows; do not read these as an edge until an executed PF above 1 holds on the sealed window.
+
 ## Live safety
 
 - x01 runs real money. The drawdown halt is a protection: never clear it or reset the start equity without an explicit

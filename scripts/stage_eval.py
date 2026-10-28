@@ -191,7 +191,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
 
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
-def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None) -> List[Dict[str, Any]]:
+def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None) -> List[Dict[str, Any]]:
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -241,7 +241,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     pool = keep
                 if not pool:
                     continue
-                if axis and not axis_allows(closes, float(t), axis, cf):
+                if axis and not axis_allows(closes if axis_evidence is None else axis_evidence, float(t), axis, cf):
                     continue
                 st = pool[0]
                 lane = se.SetLane(st, s)

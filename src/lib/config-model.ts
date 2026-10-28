@@ -190,6 +190,11 @@ export type PulseOverlay = {
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
+  stratTrend: boolean;
+  stratBreakout: boolean;
+  stratReversion: boolean;
+  stratFlow: boolean;
+  stratMulti: boolean;
   shortRangeStepMin: number;
   shortRangeStepMax: number;
   /** Short Range has its own Base PF floor, whatever the global setMinPf is (default 1.1). */
@@ -359,6 +364,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratTrailing: true,
   stratGeneral: true,
   stratShortRange: false,
+  stratTrend: false,
+  stratBreakout: false,
+  stratReversion: false,
+  stratFlow: false,
+  stratMulti: false,
   shortRangeStepMin: 2,
   shortRangeStepMax: 6,
   shortRangeMinPf: 1.1,
@@ -513,6 +523,11 @@ export type CtsSettings = {
   stratTrailing?: boolean;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
+  stratTrend?: boolean;
+  stratBreakout?: boolean;
+  stratReversion?: boolean;
+  stratFlow?: boolean;
+  stratMulti?: boolean;
   shortRangeStepMin?: number;
   shortRangeStepMax?: number;
   shortRangeMinPf?: number;
@@ -689,6 +704,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratTrailing: bool(cts.stratTrailing, true),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
+    stratTrend: bool(cts.stratTrend, false),
+    stratBreakout: bool(cts.stratBreakout, false),
+    stratReversion: bool(cts.stratReversion, false),
+    stratFlow: bool(cts.stratFlow, false),
+    stratMulti: bool(cts.stratMulti, false),
     shortRangeStepMin: num(cts.shortRangeStepMin, 2),
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
     shortRangeMinPf: num(cts.shortRangeMinPf, 1.1),

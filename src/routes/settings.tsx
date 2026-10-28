@@ -206,6 +206,11 @@ function SettingsPage() {
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
+                <EnableSlider label="Trend (Sets and Base evaluation)" on={overlay.stratTrend} onChange={(v) => patch("stratTrend", v)} />
+                <EnableSlider label="Breakout (Sets and Base evaluation)" on={overlay.stratBreakout} onChange={(v) => patch("stratBreakout", v)} />
+                <EnableSlider label="Reversion (Sets and Base evaluation)" on={overlay.stratReversion} onChange={(v) => patch("stratReversion", v)} />
+                <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
+                <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
