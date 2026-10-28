@@ -63,6 +63,15 @@ TREND_PACK = "trend"                  # additional strategy: the Trend family (i
 BREAK_PACK = "breakout"               # additional strategy: the Breakout family
 TREND_VARIANTS_DEFAULT = ("trend_c6", "trend_c10", "trend_c20")      # combined across 1m / 5m / 15m, by range
 BREAK_VARIANTS_DEFAULT = ("brk_c6", "brk_c10", "brk_c20")
+# Additional strategies built from named indicators (indication_extra / indication_lib), each its own pack: its own Sets, its
+# own Base validation. pack: (overlay switch, overlay key for the indicator names, default names). All off by default.
+EXTRA_PACKS = {
+    TREND_PACK: ("stratTrend", "trendVariants", TREND_VARIANTS_DEFAULT),
+    BREAK_PACK: ("stratBreakout", "breakoutVariants", BREAK_VARIANTS_DEFAULT),
+    "reversion": ("stratReversion", "reversionVariants", ("g_revert_min", "g_revert_med")),
+    "flow": ("stratFlow", "flowVariants", ("g_volume_min", "g_volume_med")),
+    "multi": ("stratMulti", "multiVariants", ("g_all_min", "g_all_med")),
+}
 GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
@@ -377,10 +386,9 @@ def pack_signals(
             row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
         if SHORT_PACK in packs:
             row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_LOOKBACK) : i + 1], ind_settings)
-        if TREND_PACK in packs:
-            row[TREND_PACK] = trend_signal_pack(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)
-        if BREAK_PACK in packs:
-            row[BREAK_PACK] = breakout_signal_pack(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)
+        for pk, (_sw, key, default) in EXTRA_PACKS.items():
+            if pk in packs:
+                row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(key) or list(default))
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:
@@ -996,10 +1004,9 @@ class SetBook:
             packs.append("general")
         if bool(ov.get("stratShortRange", False)):
             packs.append(SHORT_PACK)
-        if bool(ov.get("stratTrend", False)):
-            packs.append(TREND_PACK)
-        if bool(ov.get("stratBreakout", False)):
-            packs.append(BREAK_PACK)
+        for pk, (sw, _key, _default) in EXTRA_PACKS.items():
+            if bool(ov.get(sw, False)):
+                packs.append(pk)
         self.packs = packs or ["indications"]
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
@@ -1071,8 +1078,7 @@ class SetBook:
             "typeSignals": bool(ov.get("indTypeSignals", True)),
             # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
             "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
-            "trendVariants": [str(x) for x in (ov.get("trendVariants") or TREND_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
-            "breakoutVariants": [str(x) for x in (ov.get("breakoutVariants") or BREAK_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
+            **{key: [str(x) for x in (ov.get(key) or default) if str(x) in EXTRA_INDICATORS] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
             "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if str(x) in EXTRA_INDICATORS}),
         }
         with self._lock:

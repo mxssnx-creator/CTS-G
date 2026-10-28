@@ -955,18 +955,25 @@ INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "mean_stretch_revert": mean_stretch_revert,
 }
 INDICATORS.update(FAMILY)
+from indication_lib import LIB as _LIB, WINDOW as _LIB_WINDOW  # noqa: E402  (the library imports nothing from this module)
+INDICATORS.update(_LIB)
+WINDOWS.update({name: _LIB_WINDOW for name in _LIB})
 
 
 def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, float, str]]:
     """(direction, confidence, name) for each listed indicator that has a signal. Unknown names are ignored; one
     indicator failing never takes the others down."""
     out: List[Tuple[int, float, str]] = []
+    slices: Dict[int, Sequence[Row]] = {}          # one slice per window size: the library memoises on the rows object
     for name in names:
         fn = INDICATORS.get(str(name))
         if fn is None:
             continue
+        w = window_of(str(name))
+        if w not in slices:
+            slices[w] = rows[-w:]
         try:
-            sig = fn(rows[-window_of(str(name)):])
+            sig = fn(slices[w])
         except Exception:
             sig = None
         if sig:

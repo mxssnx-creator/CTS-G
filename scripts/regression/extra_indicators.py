@@ -449,3 +449,151 @@ CHECKS += [
     ("extra.combined-needs-agreement", combined_needs_agreement_across_timeframes),
     ("extra.family-wires-into-the-set-vote", family_wires_into_the_set_vote_by_name),
 ]
+
+
+# ---- indication library (indication_lib): every family, range and timeframe -------------------------------------------------
+
+def _lib_noise(n=300, seed=1, vol=0.0004, drift=0.0, v=10.0, up_v=None):
+    import random
+    r = random.Random(seed)
+    out, p = [], 100.0
+    for _ in range(n):
+        o = p
+        p = p * (1 + drift + r.uniform(-vol, vol))
+        c = p
+        out.append([o, max(o, c) * 1.0002, min(o, c) * 0.9998, c, v if up_v is None or c <= o else up_v])
+    return out
+
+
+def _lib_tapes():
+    t = {"trend": _lib_noise(drift=0.0006, vol=0.0003)}
+    b = _lib_noise(280, 2, 0.0002)
+    p = b[-1][3]
+    for _ in range(20):
+        o = p
+        p = p * 1.0012
+        b.append([o, p * 1.0003, o * 0.9998, p, 40.0])
+    t["break"] = b
+    r = _lib_noise(285, 3, 0.0004, drift=-0.0004)
+    p = r[-1][3]
+    for k in range(14):
+        o = p
+        p = p * 0.992 if k < 12 else p * 1.003
+        r.append([o, max(o, p) * 1.0002, min(o, p) * 0.9998, p, 12.0])
+    t["revert"] = r
+    t["volume"] = _lib_noise(drift=0.0004, vol=0.0004, v=5.0, up_v=20.0)
+    return t
+
+
+def _mirror(b, k=400.0):
+    return [[k - x[0], k - x[2], k - x[1], k - x[3], x[4]] for x in b]
+
+
+def _fires(tape, fams):
+    """{family: set of directions} over ranges 8/14/21 on the 1m and 5m series."""
+    import indication_lib as lib
+    out = {}
+    for fam in fams:
+        ds = set()
+        for n in (8, 14, 21):
+            for tf in (1, 5):
+                s = lib.LIB[f"{fam}_n{n}_t{tf}"](tape)
+                if s:
+                    ds.add(s[0])
+        out[fam] = ds
+    return out
+
+
+def lib_is_registered_for_every_family_range_and_timeframe():
+    import indication_lib as lib
+    missing = []
+    for fam in lib.FAMILIES:
+        for ns in lib.RANGES.values():
+            for n in ns:
+                for nm in [f"{fam}_n{n}_t{tf}" for tf in lib.TFS] + [f"{fam}_c{n}"]:
+                    if nm not in ix.INDICATORS or ix.window_of(nm) != lib.WINDOW:
+                        missing.append(nm)
+    for g in ("trend", "break", "revert", "volume", "all"):
+        for r in lib.RANGES:
+            if f"g_{g}_{r}" not in ix.INDICATORS:
+                missing.append(f"g_{g}_{r}")
+    ok = not missing and lib.RANGES == {"min": (5, 8), "med": (14, 21)} and lib.TFS == (1, 5, 15) and len(lib.FAMILIES) >= 35
+    return ok, f"{len(lib.FAMILIES)} families x 4 ranges x (3 timeframes + combined) + 10 group votes; missing: {missing[:5]}"
+
+
+def lib_trend_families_follow_a_trend_both_ways():
+    import indication_lib as lib
+    fams = [f for f, (g, _) in lib.FAMILIES.items() if g == "trend"]
+    tape = _lib_tapes()["trend"]
+    up, dn = _fires(tape, fams), _fires(_mirror(tape), fams)
+    up_n = sorted(f for f, d in up.items() if d == {1})
+    dn_n = sorted(f for f, d in dn.items() if d == {-1})
+    wrong = [f for f in fams if -1 in up[f] or 1 in dn[f]]
+    return len(up_n) >= 8 and up_n == dn_n and not wrong, f"long on a rising tape: {up_n}; short on its mirror: {dn_n}; opposite signals: {wrong}"
+
+
+def lib_breakout_families_fire_on_a_range_break_both_ways():
+    tape = _lib_tapes()["break"]
+    want = ["donch", "atrx", "rvol", "maru"]
+    up, dn = _fires(tape, want), _fires(_mirror(tape), want)
+    ok = all(up[f] == {1} for f in want) and all(dn[f] == {-1} for f in want)
+    return ok, f"up={up} mirror={dn}"
+
+
+def lib_reversion_families_fade_a_plunge_both_ways():
+    tape = _lib_tapes()["revert"]
+    want = ["rsirev", "stoch", "mfi", "zrev"]
+    up, dn = _fires(tape, want), _fires(_mirror(tape), want)
+    ok = all(up[f] == {1} for f in want) and all(dn[f] == {-1} for f in want)
+    return ok, f"long after a plunge: {up}; short after a spike: {dn}"
+
+
+def lib_volume_families_read_flow_both_ways():
+    tape = _lib_tapes()["volume"]
+    want = ["obv", "cmf", "udvol", "closeloc"]
+    up, dn = _fires(tape, want), _fires(_mirror(tape), want)
+    ok = all(up[f] == {1} for f in want) and all(dn[f] == {-1} for f in want)
+    return ok, f"up={up} mirror={dn}"
+
+
+def lib_is_mirror_symmetric_and_quiet_on_a_flat_tape():
+    """Mirroring the prices (low <-> high) flips every direction and keeps the confidence: no family prefers one side. A flat
+    tape gives no signal from any single indicator."""
+    import indication_lib as lib
+    bad, fired = [], 0
+    for seed in (4, 5):
+        tape = _lib_noise(300, seed, 0.0009, drift=0.0002 * (1 if seed % 2 else -1))
+        mir = _mirror(tape)
+        for name, fn in lib.LIB.items():
+            if name.startswith("g_"):
+                continue
+            a, b = fn(tape), fn(mir)
+            if a:
+                fired += 1
+                if not b or b[0] != -a[0] or abs(b[1] - a[1]) > 0.06:
+                    bad.append(name)
+    flat = [[100.0, 100.0, 100.0, 100.0, 5.0]] * 300
+    loud = [n for n, f in lib.LIB.items() if not n.startswith("g_") and f(flat)]
+    rate = len(bad) / max(1, fired)
+    return rate <= 0.06 and not loud, f"fired={fired} asymmetric={len(bad)} ({rate:.1%}) e.g. {sorted(set(bad))[:6]}; signals on a flat tape: {loud[:4]}"
+
+
+def lib_group_votes_need_agreement():
+    import indication_lib as lib
+    tapes = _lib_tapes()
+    up = lib.LIB["g_trend_med"](tapes["trend"])
+    dn = lib.LIB["g_trend_med"](_mirror(tapes["trend"]))
+    flat = lib.LIB["g_all_med"]([[100.0, 100.0, 100.0, 100.0, 5.0]] * 300)
+    ok = up and up[0] == 1 and dn and dn[0] == -1 and flat is None
+    return bool(ok), f"trend group on a rising tape={up}, on its mirror={dn}, on a flat tape={flat}"
+
+
+CHECKS += [
+    ("extra.lib-registered-every-family-range-timeframe", lib_is_registered_for_every_family_range_and_timeframe),
+    ("extra.lib-trend-both-ways", lib_trend_families_follow_a_trend_both_ways),
+    ("extra.lib-breakout-both-ways", lib_breakout_families_fire_on_a_range_break_both_ways),
+    ("extra.lib-reversion-both-ways", lib_reversion_families_fade_a_plunge_both_ways),
+    ("extra.lib-volume-both-ways", lib_volume_families_read_flow_both_ways),
+    ("extra.lib-mirror-symmetric-and-flat-quiet", lib_is_mirror_symmetric_and_quiet_on_a_flat_tape),
+    ("extra.lib-group-votes-need-agreement", lib_group_votes_need_agreement),
+]
