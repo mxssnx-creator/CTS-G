@@ -114,6 +114,11 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   as before / 8 / 12 / 15 / 20 / 25: majors 1.08/1.14/1.04/1.04/1.44/1.13, small caps 0.99/1.03/1.03/1.09/1.01/0.92. No N wins in both
   universes and the differences are inside the noise of one 12-hour window, so the shipped default is the minimum, 8 (windows linked to
   the overall N). Do not tune these on a 12-hour window.
+- Base gate last N (`setGateWindow`, 2 days, 20 symbols, `window_eval.py --gate-window`, Base gate alone; N = 50 / 25 / 30 / 35): development
+  executed PF majors 0.40/0.53/0.47/0.56, small caps 1.20/1.08/1.19/1.14; validated share 9.5/16.2/14.5/12.7 % and 27.1/33.5/31.4/29.1 %.
+  Sealed third (read once for 50, 30, 35): majors 1.54/1.08/1.18, small caps 0.98/1.10/0.98. 12 h sim (`sim12h.py --overlay`): majors
+  1.08/0.99/1.01/0.94, small caps 0.99/1.19/1.06/1.02. The development ranking flips on the sealed window and between universes, so the
+  default stays 50 (shorter windows validate more Sets and read higher in-sample, not a better executed result).
 
 ## Indication library and extra packs
 
