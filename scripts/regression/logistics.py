@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "5c3d8ff7e72490210f1518902bdfb2e37213c4ac"
+PIN_WANT = "6936a0b9a17fae8ef56b43d405b8815c2bc2ff32"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -23,7 +23,7 @@ def overlays_share_grid_contract():
     for path in (X01, X02):
         ov = json.load(open(path))
         want = {"setMinStep": 2, "setStepMax": 30, "trailMinStep": 3, "histLookbackBars": 1920,
-                "setMinPf": 1.1, "setGateWindow": 50, "setGateMinTrades": 30}
+                "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 30}
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")
@@ -76,7 +76,7 @@ def _ts_default(raw):
     if raw in ("true", "false"):
         return raw == "true"
     if raw == "GATE_MIN_PF_DEFAULT":
-        return 1.1
+        return 1.25
     if raw.startswith("["):
         inner = raw.strip("[]").strip()
         try:
@@ -94,7 +94,26 @@ def _ts_default(raw):
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
+    # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
+    # balance-based size and the 18 % halt for every other connection
+    "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
+    "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
+    "ddHaltPct": "x01 drawdown halt switched off by the owner; desk default 18 %",
 }
+
+
+def shipped_overlays_run_the_base_gate():
+    """The Base gate is the standard: both shipped overlays and the desk default open entries only under a Base-validated
+    Set (setUseHistoricGate true). x02 ran without it from 01e842b until the owner switched it back on."""
+    out = {}
+    for conn in ("x01", "x02"):
+        ov = json.load(open(os.path.join(PULSE, f"overlay-bingx-{conn}.json"), encoding="utf-8"))
+        out[conn] = ov.get("setUseHistoricGate", True)
+    src = open(CONFIG_MODEL, encoding="utf-8").read()
+    start = src.index("export const DEFAULT_OVERLAY")
+    desk = re.search(r"^  setUseHistoricGate: (true|false)", src[start:src.index("\n};", start)], re.M)
+    out["desk"] = desk.group(1) == "true" if desk else None
+    return all(v is True for v in out.values()), f"setUseHistoricGate: {out}"
 
 
 def desk_default_overlay_equals_shipped_x01():
@@ -187,14 +206,18 @@ def engine_absent_defaults_agree():
     return not problems, f"problems={problems}" if problems else "absent defaults agree: scratchMin 0.16%, minStep 6"
 
 
-def dca_is_off_everywhere():
+def dca_is_on_with_set_and_axis_options_off_everywhere():
     dca_src = open(os.path.join(PULSE, "dca_engine.py"), encoding="utf-8").read()
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
-    hard = re.search(r"DCA_HARD_OFF\s*=\s*True", dca_src) is not None
-    flag = re.search(r'"strategy\.dca"\s*:\s*False', mod_src) is not None
-    x01 = overlay()
-    ok = hard and flag and not x01.get("dcaEnabled", False)
-    return ok, f"hard_off={hard} module_flag_off={flag} overlay_dcaEnabled={x01.get('dcaEnabled', False)}"
+    hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
+    ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
+    for path in (X01, X02):
+        ov = json.load(open(path))
+        good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
+                and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
+        ok_all = ok_all and good
+        detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
+    return ok_all, " ".join(detail)
 
 
 def deploy_pin_matches_engine():
@@ -307,7 +330,7 @@ def no_fabricated_pass_and_one_entry_conf():
     fabricated = "intern_pf = 1.2" in src
     literal_conf = re.search(r"if conf < 0\.50:", src) is not None
     one_key = "if conf < self.sets.entry_conf" in src
-    set_fill_override = "not (chosen and getattr(chosen, \"step\", 0))" in src
+    set_fill_override = "if self.exits.enabled and self.exits.ignore_tp and not chosen:" in src   # every Set fill, base or trailing
     ok = (not fabricated) and (not literal_conf) and one_key and set_fill_override
     return ok, f"fabricated_pass={fabricated} literal_0.50={literal_conf} one_key={one_key} set_fill_tp_kept={set_fill_override}"
 
@@ -357,13 +380,14 @@ CHECKS = [
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
     ("logistics.desk-defaults-equal-shipped-overlay", desk_defaults_equal_shipped_overlay),
     ("logistics.desk-default-overlay-equals-shipped-x01", desk_default_overlay_equals_shipped_x01),
+    ("logistics.shipped-overlays-run-the-base-gate", shipped_overlays_run_the_base_gate),
     ("logistics.desk-symbols-equal-engine-fixed-list", desk_symbols_equal_engine_fixed_list),
     ("logistics.desk-cards-read-effective-overlay", desk_cards_read_effective_overlay),
     ("logistics.engine-absent-defaults-agree", engine_absent_defaults_agree),
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),
-    ("logistics.dca-off-everywhere", dca_is_off_everywhere),
+    ("logistics.dca-on-with-set-and-axis-options-off", dca_is_on_with_set_and_axis_options_off_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),
     ("logistics.no-leftover-zest-names", no_leftover_zest_names),

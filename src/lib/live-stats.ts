@@ -1,3 +1,4 @@
+import type { SetIndexRow } from "./sets-view.ts";
 export type LiveOpen = {
   symbol: string;
   side: string;
@@ -62,6 +63,22 @@ export type LiveClosed = {
   connection?: string;
   connType?: string;
   unit?: string;
+};
+
+/** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
+ * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
+export type PfPool = { pf: number; n: number; sets: number };
+export type PfBase = {
+  base: PfPool;
+  unfiltered: PfPool;
+  total?: number;
+  valid?: number;
+  validatedPct?: number;
+  byPack?: Record<string, { base: PfPool; unfiltered: PfPool; total: number; valid: number; validatedPct: number; minPf?: number }>;
+  /** "gate-window": pooled over each Set's last setGateWindow orders, never the whole tape. */
+  basis?: string;
+  /** Continuous progress of the effective PF and the validated share, one point per scoring pass (oldest first). */
+  history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number }>;
 };
 
 export type LiveStats = {
@@ -461,8 +478,12 @@ export type LiveStats = {
     maxDdS?: number;
     useHistoricGate?: boolean;
     setCount?: number;
+    /** Every configured Set in compact form, with the gate-window fields that pool the PF of any selection. */
+    index?: SetIndexRow[];
     /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
-    pfBase?: { base: { pf: number; n: number; sets: number }; unfiltered: { pf: number; n: number; sets: number } };
+    pfBase?: PfBase;
+    counts?: { valid: number; invalid: number; locked: number; error: number; configured: number; retired?: number;
+      reasons?: Record<string, number> };
     minStep?: number;
     minStepCfg?: number;
     stepMax?: number;

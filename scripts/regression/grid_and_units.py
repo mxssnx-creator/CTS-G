@@ -56,11 +56,13 @@ def trail_rules_default():
 
 
 def trail_min_step_clamp():
-    lo = _book(trailMinStep=1)
+    lo = _book(trailMinStep=1, trailMinSteps=1)       # one step over PositionCost: the setting floor of 2
+    floored = _book(trailMinStep=1)                   # default trailMinSteps=2: the overall minimum is PositionCost + 2 steps
     hi = _book(trailMinStep=99)
-    ok = (lo.trail_min_step == TRAIL_STEP_SETTING_MIN and hi.trail_min_step == TRAIL_STEP_SETTING_MAX
-          and abs(min(st.trail_arm for st in lo.by_idx if st.kind == "trail") - 2 * COST) < 1e-9)
-    return ok, f"clamp(1)={lo.trail_min_step} clamp(99)={hi.trail_min_step} default={TRAIL_STEP_DEFAULT}"
+    ok = (lo.trail_min_step == TRAIL_STEP_SETTING_MIN and floored.trail_min_step == 3 and hi.trail_min_step == TRAIL_STEP_SETTING_MAX
+          and abs(min(st.trail_arm for st in lo.by_idx if st.kind == "trail") - 2 * COST) < 1e-9
+          and abs(min(st.trail_arm for st in floored.by_idx if st.kind == "trail") - 3 * COST) < 1e-9)
+    return ok, f"clamp(1)={lo.trail_min_step} default floor={floored.trail_min_step} clamp(99)={hi.trail_min_step} default={TRAIL_STEP_DEFAULT}"
 
 
 def trail_grid_pure():

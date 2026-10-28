@@ -439,12 +439,34 @@ def effective_pf_is_pooled_over_valid_sets_only():
     snap = b.snapshot()["pfBase"]
     valid = [st for st in b.by_idx if not b.gate_reason(st)]
     def pf(sts):
-        gp = sum(x.gp for x in sts); gl = sum(x.gl for x in sts)
+        gp = sum(x.gate_gp for x in sts); gl = sum(x.gate_gl for x in sts)
         return round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
     ok = (snap["base"]["sets"] == len(valid) and snap["unfiltered"]["sets"] == len(b.by_idx)
           and snap["base"]["pf"] == pf(valid) and snap["unfiltered"]["pf"] == pf(b.by_idx)
           and 0 < snap["base"]["sets"] < snap["unfiltered"]["sets"])
-    return ok, f"base pf={snap['base']['pf']} over {snap['base']['sets']} Sets; unfiltered pf={snap['unfiltered']['pf']} over {snap['unfiltered']['sets']}"
+    want_pct = round(100.0 * len(valid) / len(b.by_idx), 2)
+    packs = snap["byPack"]
+    ok = ok and snap["validatedPct"] == want_pct and snap["valid"] == len(valid) and snap["total"] == len(b.by_idx) \
+        and sum(v["valid"] for v in packs.values()) == len(valid) and sum(v["total"] for v in packs.values()) == len(b.by_idx) \
+        and set(packs) == set(b.packs)
+    return ok, (f"base pf={snap['base']['pf']} over {snap['base']['sets']} Sets; unfiltered pf={snap['unfiltered']['pf']} "
+                f"over {snap['unfiltered']['sets']}; validated {snap['validatedPct']}% ({snap['valid']}/{snap['total']}) packs={list(packs)}")
+
+
+def the_signal_memo_holds_one_entry_per_bar_for_every_pack():
+    """pack_signals memoises each bar's signals under that bar's window key. An extra pack's loop once reused the memo key name
+    and stored every bar under one entry: no hit was ever possible. One entry per scored bar, and a second pass reads them."""
+    import set_engine as se
+    b = SetBook()
+    b.load(overlay(stratMulti=True, stratTrend=True, **SMALL))
+    bars = synth_bars(9, 420)
+    cache = {}
+    first = se.pack_signals(bars, b.packs, b.ind_settings, 0.0, 100, cache=cache, salt=7)
+    n = len(cache)
+    keys = set(cache)
+    second = se.pack_signals(bars, b.packs, b.ind_settings, 0.0, 100, cache=cache, salt=7)
+    ok = n == len(bars) - 100 and set(cache) == keys and first == second and {"multi", "trend", "indications"} <= set(b.packs)
+    return ok, f"memo entries={n} (scored bars {len(bars) - 100}); same keys on the second pass={set(cache) == keys}; identical signals={first == second}"
 
 
 def pack_change_does_not_poison_the_signal_memo():
@@ -459,8 +481,220 @@ def pack_change_does_not_poison_the_signal_memo():
     return ok, f"phase={b.progress.phase} packs={b.packs} errors={errs[:1]}"
 
 
+def effective_pf_uses_the_rolling_window_not_the_whole_tape():
+    """A Set that earned its profit long ago and loses now must not carry the pool: the pooled PF is taken over each
+    Set's last gate-window orders only."""
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    st = b.by_idx[0]
+    good = [{"t": 1000.0 + i, "pnl": 0.01, "pnl_pct": 0.0112, "symbol": "X", "side": "LONG", "hold_s": 60, "reason": "tp", "exit_i": i}
+            for i in range(40)]
+    bad = [{"t": 2000.0 + i, "pnl": -0.003, "pnl_pct": 0.0, "symbol": "X", "side": "LONG", "hold_s": 60, "reason": "sl", "exit_i": 100 + i}
+           for i in range(10)]
+    b.gate_window = 10
+    st.hist = good + bad
+    st.live = []
+    b._score_one(st)
+    # whole tape: 40 wins of +1% against 10 losses of -0.12%: PF far above 1; last 10 orders: all losses
+    ok = st.gate_pf == 0.0 and st.gate_gp == 0.0 and st.gate_gl > 0 and st.gp > 0 and st.n >= 0
+    return ok, f"gate pf={st.gate_pf} gate gp={st.gate_gp} gl={st.gate_gl}; whole tape gp={st.gp:.4f}"
+
+
+def short_range_has_its_own_pf_floor():
+    from set_engine import SHORT_PACK
+    b = SetBook()
+    b.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
+    sr = next(s for s in b.by_idx if s.pack == SHORT_PACK and s.kind == "base")
+    other = next(s for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "base")
+    for st in (sr, other):
+        st.gate_n = b.gate_min
+        st.gate_pf = 1.3          # above Short Range's 1.25, below the global 2.0
+        st.max_dd_s = 0.0
+        st.active = True
+        st.last_error = ""
+        st.locked = False
+    b.load(overlay(stratShortRange=True, setMinPf=2.0, shortRangeMinPf=1.5, **SMALL))
+    reason_default = None
+    b2 = SetBook()
+    b2.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
+    ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.25
+          and b2.gate_reason(sr) == "" and b2.gate_reason(other) == "pf<min")
+    return ok, f"short range floor default={b2.pack_min_pf[SHORT_PACK]} set={b.pack_min_pf[SHORT_PACK]}; PF 1.2: short range='{b2.gate_reason(sr)}' other='{b2.gate_reason(other)}'"
+
+
+def pf_progress_history_is_continuous_and_bounded():
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    h1 = list(b.pf_history)
+    b.pf_history[-1]["t"] -= 30.0           # a later pass, outside the 20 s throttle
+    b._record_pf_progress()
+    b._record_pf_progress()                 # inside the throttle: no second point
+    h2 = list(b.pf_history)
+    for i in range(800):
+        b.pf_history.append({"t": 1.0 + i, "pf": 1.0, "n": 1, "valid": 1, "validatedPct": 1.0, "unfiltered": 1.0})
+    b._record_pf_progress()
+    snap = b.snapshot()["pfBase"]
+    ok = len(h1) == 1 and len(h2) == 2 and len(b.pf_history) <= 720 and len(snap["history"]) <= 240 and snap["basis"] == "gate-window"
+    return ok, f"points after one pass={len(h1)} after two={len(h2)} bounded={len(b.pf_history)} snapshot={len(snap['history'])}"
+
+
+def legacy_pick_prefers_judged_sets_over_a_single_lucky_order():
+    b = SetBook()
+    b.load(overlay(setUseHistoricGate=False, **SMALL))
+    base = [s for s in b.by_idx if s.kind == "base" and s.pack == b.packs[0]]
+    lucky, solid = base[0], base[1]
+    for st, n, pf in ((lucky, 1, 99.0), (solid, 40, 4.0)):
+        st.gate_n, st.gate_pf, st.active, st.last_error, st.locked = n, pf, True, "", False
+    for st in base[2:]:
+        st.gate_n, st.gate_pf = 0, 0.0
+    got = b.pick(b.packs[0])
+    return got is solid, f"picked {got and got.id} (n={got and got.gate_n}, pf={got and got.gate_pf}) over the one-order Set"
+
+
+def the_base_gate_cannot_be_switched_off():
+    """Base evaluation gates are always enabled: an overlay that says otherwise is ignored."""
+    b = SetBook()
+    b.load(overlay(setUseHistoricGate=False, **SMALL))
+    on = b.use_historic_gate is True and b.snapshot()["useHistoricGate"] is True
+    return on, f"overlay setUseHistoricGate=false -> engine gate on={on}"
+
+
+def step_adapt_waits_for_the_pass_in_flight():
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    losing = [{"pnl": 0.001, "pnl_pct": 0.003, "t": float(i)} for i in range(4)] + \
+             [{"pnl": -0.01, "pnl_pct": 0.0001, "t": float(10 + i)} for i in range(16)]   # a losing average with 4 good fills
+    gen0, step0 = b._topo_gen, b.min_step
+    b._running = True                                   # a pass is in flight
+    b.adapt_from_live(losing)
+    unchanged = b._topo_gen == gen0 and b.min_step == step0 and b._adapt_pending is not None
+    b._running = False
+    b._after_pass()
+    applied = b._topo_gen == gen0 + 1 and b._adapt_pending is None
+    return unchanged and applied, f"during the pass: topology {gen0}->{gen0} min_step {step0}; after it: topology {b._topo_gen} min_step {b.min_step}"
+
+
+def short_range_trailing_stays_inside_its_steps():
+    from set_engine import SHORT_PACK
+    b = SetBook()
+    b.load(overlay(stratShortRange=True, exitIgnoreTp=True))
+    arms = sorted({s.trail_arm for s in b.by_idx if s.pack == SHORT_PACK and s.kind == "trail"})
+    others = sorted({s.trail_arm for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "trail"})
+    cap = max(b.short_steps) * b.cost_pct
+    return bool(arms) and max(arms) <= cap + 1e-9 and max(others) > cap, f"short range arms {arms[0]}..{arms[-1]} cap {cap}; other packs reach {others[-1]}"
+
+
+def a_set_must_pass_on_both_halves_of_its_window_when_asked():
+    """A Set whose window PF clears the floor only because the newer half is excellent is "unstable" when the
+    consistency floor is on, and valid when it is off (the default)."""
+    def tape(first, second):
+        rows = []
+        for i, g in enumerate(first + second):
+            rows.append({"t": 1000.0 + i, "pnl": g - 0.0012, "pnl_pct": g, "symbol": "X", "side": "LONG", "hold_s": 60,
+                         "reason": "tp" if g > 0.0012 else "sl", "exit_i": i})
+        return rows
+    first = [0.0000] * 20 + [0.0040] * 5          # older half: PF well under 1
+    second = [0.0100] * 22 + [0.0000] * 3          # newer half: excellent
+    out = {}
+    for cons in (0.0, 1.0):
+        b = SetBook()
+        b.load(overlay(setGateWindow=50, setGateMinTrades=30, setMinPf=1.1, setGateConsistencyPf=cons, **SMALL))
+        st = next(x for x in b.by_idx if x.kind == "base")
+        st.hist = tape(first, second)
+        st.live = []
+        b._score_one(st)
+        out[cons] = (b.gate_reason(st), round(st.gate_pf, 2), st.gate_pf_old, st.gate_pf_new)
+    ok = out[0.0][0] == "" and out[1.0][0] == "unstable" and out[1.0][2] < 1.0 < out[1.0][3]
+    return ok, f"off={out[0.0]} on={out[1.0]} (reason, window PF, old half PF, new half PF)"
+
+
+def base_lane_lookup_equals_the_walk():
+    """The indexed exit search (base lanes, and trailing lanes until they arm) must give exactly the walk's trades, open position and cooldown, in one
+    range and in chunks, with TP honoured and ignored, both directions, on several seeds."""
+    import random
+    from set_engine import BarIndex, SetLane
+    diffs = 0
+    checked = 0
+    for seed in (3, 7, 11):
+        rnd = random.Random(seed)
+        bars = synth_bars(seed, 900, drift=0.0003 if seed % 2 else -0.0003)
+        acc = BarIndex(bars)
+        dirs = [rnd.choice((0, 0, 0, 1, -1)) for _ in bars]
+        confs = [0.9 if d else 0.0 for d in dirs]
+        cand = [i for i, d in enumerate(dirs) if d]
+        for honor in (True, False):
+            b = SetBook()
+            b.load(overlay(exitIgnoreTp=not honor, **SMALL))
+            cfg = {"entry_conf": 0.58, "time_bars": 45, "scratch_bars": 10, "scratch_min": 0.0016, "cooldown": 2,
+                   "cost_pct": COST, "honor_tp": honor}
+            for st in list(b.by_idx):
+                for chunks in ((0, 900), (0, 300, 301, 650, 900)):
+                    l1, l2 = SetLane(st, "X"), SetLane(st, "X")
+                    a1, a2 = [], []
+                    for c0, c1 in zip(chunks[:-1], chunks[1:]):
+                        a1 += l1.scan(c0, c1, bars, dirs, confs, True, cfg, cand)
+                        a2 += l2.scan(c0, c1, bars, dirs, confs, True, cfg, cand, acc)
+                    checked += 1
+                    if a1 != a2 or l1.open != l2.open or l1.cool != l2.cool:
+                        diffs += 1
+    return diffs == 0 and checked > 0, f"lanes compared={checked} differing={diffs}"
+
+
+def scratch_lookup_keeps_the_exact_level():
+    """The scratch lookup narrows with a level 1e-9 looser than the exact one. A close inside that gap (just under the
+    exact scratch level) must not scratch: the lookup gives the walk's result, here no exit until the time bar."""
+    from set_engine import BarIndex, SetLane
+    b = SetBook()
+    b.load(overlay(**SMALL))
+    st = b.by_idx[0]
+    cfg = {"entry_conf": 0.58, "time_bars": 45, "scratch_bars": 10, "scratch_min": 0.0016, "cooldown": 2,
+           "cost_pct": COST, "honor_tp": True}
+    near = 100.0 * (1 + 0.0016) * (1 - 3e-10)      # under the exact level, over the loose one
+    bars = [[100.0, 100.01, 99.99, 100.0, 1.0] for _ in range(16)] + [[near, near + 0.01, near - 0.01, near, 1.0]] * 64
+    dirs = [0] * len(bars)
+    dirs[5] = 1
+    confs = [0.9 if d else 0.0 for d in dirs]
+    l1, l2 = SetLane(st, "X"), SetLane(st, "X")
+    a1 = l1.scan(0, len(bars), bars, dirs, confs, True, cfg, [5])
+    a2 = l2.scan(0, len(bars), bars, dirs, confs, True, cfg, [5], BarIndex(bars))
+    reasons = [t.get("reason") if isinstance(t, dict) else t for t in a2]
+    return a1 == a2 and l1.open == l2.open, f"walk={a1} lookup={a2} reasons={reasons}"
+
+
+def broken_or_flat_series_are_not_replayed():
+    """A symbol with a broken print (a one-minute jump beyond histMaxJumpPct) or a mostly flat series (no trades in the
+    minute) is left out of the replay and of entries, and it shows in the snapshot with its reason."""
+    b = _book(n_syms=3, bars=600, **SMALL)
+    spike = [list(r) for r in b.bars["S1-USDT"]]
+    spike[300] = [spike[299][3], spike[299][3] * 3, spike[299][3], spike[299][3] * 3, 1.0]      # +200% in one minute
+    b.bars["S1-USDT"] = spike
+    flat = [list(r) for r in b.bars["S2-USDT"]]
+    for k in range(0, 600, 2):
+        c = flat[k][3]
+        flat[k] = [c, c, c, c, 0.0]                  # half the minutes without a trade
+    b.bars["S2-USDT"] = flat
+    b.replay_all(now=T0)
+    q = b.snapshot()["quality"]["symbols"]
+    ok = (q.get("S1-USDT") == "spike" and q.get("S2-USDT") == "flat" and "S0-USDT" not in q
+          and "S1-USDT" not in b._hist_rows and "S2-USDT" not in b._hist_rows and "S0-USDT" in b._hist_rows
+          and not b.symbol_ok("S1-USDT") and b.symbol_ok("S0-USDT"))
+    return ok, f"excluded={q} replayed={sorted(b._hist_rows)}"
+
+
 CHECKS = [
+    ("processing.broken-or-flat-series-not-replayed", broken_or_flat_series_are_not_replayed),
+    ("processing.base-lane-lookup-equals-walk", base_lane_lookup_equals_the_walk),
+    ("processing.scratch-lookup-keeps-exact-level", scratch_lookup_keeps_the_exact_level),
+    ("processing.consistency-both-halves", a_set_must_pass_on_both_halves_of_its_window_when_asked),
+    ("processing.legacy-pick-prefers-judged-sets", legacy_pick_prefers_judged_sets_over_a_single_lucky_order),
+    ("processing.step-adapt-waits-for-the-pass", step_adapt_waits_for_the_pass_in_flight),
+    ("processing.short-range-trailing-inside-its-steps", short_range_trailing_stays_inside_its_steps),
+    ("processing.effective-pf-rolling-window", effective_pf_uses_the_rolling_window_not_the_whole_tape),
+    ("processing.short-range-own-pf-floor", short_range_has_its_own_pf_floor),
+    ("processing.base-gate-always-on", the_base_gate_cannot_be_switched_off),
+    ("processing.pf-progress-history", pf_progress_history_is_continuous_and_bounded),
     ("processing.pack-change-keeps-memo-sound", pack_change_does_not_poison_the_signal_memo),
+    ("processing.signal-memo-one-entry-per-bar", the_signal_memo_holds_one_entry_per_bar_for_every_pack),
     ("processing.effective-pf-pooled-over-valid-sets", effective_pf_is_pooled_over_valid_sets_only),
     ("processing.pick-any-no-gap-between-lookups", pick_any_has_no_gap_between_lookups),
     ("processing.departed-symbols-leave-caches", departed_symbols_leave_every_cache),

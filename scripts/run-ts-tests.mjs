@@ -28,8 +28,10 @@ const files = [
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
   "src/lib/poll.test.ts",
+  "src/lib/sets-view.test.ts",
   "src/lib/live-stats.test.ts",
   "src/lib/poll-http.test.ts",
+  "src/lib/hourly-pf.test.ts",
 ];
 const run = spawnSync(
   process.execPath,

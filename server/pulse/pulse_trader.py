@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import collections
 import json
 import math
 import os
@@ -19,13 +20,13 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field, replace as dc_replace
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
+from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test
@@ -155,6 +156,7 @@ def leverage_settings(ov: Dict[str, Any]) -> Tuple[bool, int]:
 KLINE_EVERY = 2.4
 KLINE_WORKERS = 4
 KLINE_LIMIT = 60
+HIST_PAGE = 1000   # the venue refuses a klines limit above 1000 bars per request (109400)
 KLINE_BATCH = 12
 TF_EVERY = {"1m": 2.0, "5m": 6.0, "15m": 12.0}
 TF_BATCH = {"1m": 8, "5m": 12, "15m": 8}
@@ -165,6 +167,7 @@ SYMBOL_SORTS = ("vol1h", "vol24h", "quoteVolume", "changeAbs", "changePct", "lev
 BALANCE_EVERY = 6.0
 QA_EVERY = 5
 COOLDOWN_S = 9.0
+SYM_BAN_S = 1800.0       # a symbol that stops out within 30 s, or fills far from its reference price, rests this long
 STAGGER_S = 0.12
 DD_HALT = 0.18
 EQ_MIN = 0.20
@@ -476,6 +479,30 @@ def redis_hget(field: str) -> str:
     return (p.stdout or "").strip()
 
 
+def cred_file_path() -> str:
+    """A connection can be read from a JSON file instead of Redis: PULSE_CRED_FILE, or cred-<conn>.json in the state
+    directory. The file must be private (no group or other permission bits); a readable file is ignored."""
+    return os.environ.get("PULSE_CRED_FILE") or os.path.join(DIR, f"cred-{CONN_SHORT}.json")
+
+
+def connection_field(field: str) -> str:
+    """One field of this connection (api_key, api_secret, base_url, is_testnet): from the private credential file when
+    it has it, otherwise from Redis. With the file in place no Redis server is needed to start."""
+    path = cred_file_path()
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o077 == 0:
+            data = load_json_file(path)
+            if field in data and str(data[field]).strip():
+                return str(data[field]).strip()
+    except OSError:
+        pass
+    try:
+        return redis_hget(field)
+    except Exception:
+        return ""
+
+
 def load_json_file(path: str) -> dict:
     try:
         with open(path) as f:
@@ -485,8 +512,20 @@ def load_json_file(path: str) -> dict:
         return {}
 
 
+_CTS_CACHE: Dict[str, Any] = {"t": 0.0, "data": {}}
+
+
 def dump_cts_settings() -> dict:
-    p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True)
+    """The connection settings hash from Redis, read at most once a minute (every overlay reload used to start a
+    redis-cli process). Without Redis the result is an empty dict and the overlay alone configures the engine."""
+    now = time.time()
+    if now - float(_CTS_CACHE["t"]) < 60.0:
+        return dict(_CTS_CACHE["data"])
+    try:
+        p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True, timeout=3)
+    except Exception:
+        _CTS_CACHE.update(t=now, data={})
+        return {}
     lines = (p.stdout or "").splitlines()
     out = {}
     for i in range(0, len(lines) - 1, 2):
@@ -511,6 +550,7 @@ def dump_cts_settings() -> dict:
         os.replace(tmp, CTS_PATH)
     except Exception:
         pass
+    _CTS_CACHE.update(t=now, data=dict(out))
     return out
 
 
@@ -574,6 +614,8 @@ class Position:
     liq: float = 0.0
     position_id: str = ""
     ctrl_verified: bool = False
+    dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
+    dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
 
 
 @dataclass
@@ -629,6 +671,10 @@ class Pulse:
         self.halt_reason: Optional[str] = None
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
+        self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
+        self.dd_halt = DD_HALT        # drawdown from the start equity that halts entries (fraction); 0 = off (ddHaltPct)
+        self.size_max = 25.0          # ceiling for one position's notional in USDT (sizeMaxNotional)
+        self.max_entry_slip = 0.0075  # fill vs reference price beyond this (fraction, maxEntrySlipPct) closes the entry
         self.regime = "neutral"
         self.consec_loss = 0
         self.wins = 0
@@ -684,6 +730,7 @@ class Pulse:
         self.track_prefix = TAG
         self.boot_ts = time.time()
         self.seen_fill_cids = BoundedSet(4000)
+        self.seen_fill_oids = BoundedSet(4000)
         self.owned_syms = BoundedSet(800)
         self.load = LoadGovernor()
         self._scan_keep: List[str] = []
@@ -695,7 +742,7 @@ class Pulse:
         self._load_open_book()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
-            "blockMaxStack": 0,
+            "blockMaxStack": 6,
             "blockVolumeRatio": 1.0,
             "blockProfitFactorRatio": 0.8,
             "blockPauseCountRatio": 1,
@@ -930,8 +977,19 @@ class Pulse:
         return s
 
     def sized_notional(self) -> float:
+        """One position's notional: the balance x sizePctOfBalance % x volumeFactor, so the size follows the account both
+        ways. Without a balance read yet (or with sizePctOfBalance 0) the fixed targetNotional x volumeFactor applies.
+        size_qty raises it to the venue's minimum order."""
         vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
-        return max(0.2, float(TARGET_NOTIONAL) * vf)
+        pct = float(getattr(self, "size_pct", 0.0) or 0.0)
+        bal = float(getattr(self, "equity", 0.0) or 0.0)
+        if pct > 0 and bal > 0:
+            n = bal * pct / 100.0 * vf
+        else:
+            n = float(TARGET_NOTIONAL) * vf
+        # a hard ceiling whatever the balance (sizeMaxNotional): a large or demo balance must never scale one entry into
+        # an exposure the strategy was not validated at
+        return max(0.2, min(n, float(getattr(self, "size_max", 25.0) or 25.0)))
 
     def notional_cap(self) -> float:
         return max(self.sized_notional(), 2.0)
@@ -1093,7 +1151,8 @@ class Pulse:
             pack = pack or pos.pack
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
-        p = "i" if str(pack or set_id).startswith("ind") else "g"
+        pk = str(pack or set_id)
+        p = "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
         m = re.search(r"sl([0-9.]+)", set_id or "")
         if m:
@@ -1110,12 +1169,14 @@ class Pulse:
         m = re.search(r":st(\d+)", set_id or "")
         if m:
             st = f"{int(m.group(1)):02d}"
+        elif re.search(r"tr[0-9.]+:[0-9.]+", set_id or ""):
+            st = "00"                      # a trailing Set has no TP step
         if idx < 0:
             try:
                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
             except Exception:
                 idx = -1
-        ix = f"{max(0, idx):03d}"
+        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
         nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
@@ -1133,6 +1194,11 @@ class Pulse:
         return str(o.get("clientOrderID") or o.get("clientOrderId") or "")
 
     def parse_track(self, cid: str) -> Optional[Dict[str, Any]]:
+        """Decode a client order id into the Set it belongs to. The id carries pack, SL ratio, trailing arm, TP step and
+        the Set's grid index. The index is trusted only when the Set at that index agrees on pack, step, SL ratio (base
+        Sets) or arm (trailing Sets): a grid that moved since the order (step-adapt, a pack toggled) shifts indices.
+        Otherwise the Set is found by content, and when that is ambiguous the Set is left unknown (set_id ""), never
+        guessed: a close credited to the wrong Set corrupts its validation tape."""
         if not self.cid_ours(cid):
             return None
         s = str(cid)
@@ -1142,7 +1208,7 @@ class Pulse:
         if len(rest) < 6:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
-        pack = "indications" if rest[1:2] == "i" else "general"
+        pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
         try:
             sl = int(rest[2:4]) / 10.0
             arm = int(rest[4:6]) / 10.0
@@ -1155,32 +1221,39 @@ class Pulse:
                 step = int(rest[6:8])
             except Exception:
                 step = 0
-        if len(rest) >= 11:
-            try:
-                idx = int(rest[8:11])
-            except Exception:
-                idx = -1
+        if len(rest) >= 12 and rest[8:12].isdigit():
+            idx = int(rest[8:12])
+        elif len(rest) >= 11 and rest[8:11].isdigit():
+            idx = int(rest[8:11])          # an id written before the index had four digits
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
-        st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
-        if st_obj is not None:
-            pack_ok = str(getattr(st_obj, "pack", "")) == str(pack)
+
+        def _row(st_obj: Any) -> Dict[str, Any]:
+            return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
+                    "idx": st_obj.idx, "set_id": st_obj.id}
+
+        def _agrees(st_obj: Any) -> bool:
             try:
-                sl_ok = abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
+                if str(getattr(st_obj, "pack", "")) != pack:
+                    return False
+                if st_obj.kind == "trail":
+                    return step == 0 and abs(float(st_obj.trail_arm) - arm) < 0.06
+                return step == int(st_obj.step) and abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
             except Exception:
-                sl_ok = False
-            if pack_ok and sl_ok:
-                return {
-                    "kind": kind,
-                    "pack": st_obj.pack,
-                    "sl": st_obj.sl_ratio,
-                    "trail": st_obj.trail_key,
-                    "step": st_obj.step,
-                    "idx": st_obj.idx,
-                    "set_id": st_obj.id,
-                }
-        from set_engine import make_set_id
-        return {"kind": kind, "pack": pack, "sl": sl, "trail": tr, "step": step, "idx": idx, "set_id": make_set_id(pack, sl, tr, step)}
+                return False
+
+        sets_obj = getattr(self, "sets", None)
+        st_obj = sets_obj.get_idx(idx) if idx >= 0 and sets_obj is not None else None
+        if st_obj is not None and _agrees(st_obj):
+            return _row(st_obj)
+        cands = [x for x in (getattr(sets_obj, "sets", None) or {}).values() if x.pack == pack and _agrees(x)]
+        if step > 0:                                # base Sets: the nearest SL ratio at that step is unique
+            cands.sort(key=lambda x: abs(float(x.sl_ratio) - sl))
+            if cands and (len(cands) == 1 or abs(float(cands[0].sl_ratio) - sl) < abs(float(cands[1].sl_ratio) - sl)):
+                return _row(cands[0])
+        elif len(cands) == 1:
+            return _row(cands[0])
+        return {"kind": kind, "pack": pack, "sl": sl, "trail": tr, "step": step, "idx": -1, "set_id": ""}
 
     def ok(self, r: Dict[str, Any]) -> bool:
         return (not r.get("error")) and r.get("code") in (0, None)
@@ -1281,7 +1354,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+        elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
             if not self.halted:
                 self._halt_eq = self.equity
             self.halted = True
@@ -1293,7 +1366,9 @@ class Pulse:
             self.halted = True
             self.halt_reason = f"equity {self.equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.equity >= EQ_MIN and self.start_eq > 0 and (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6:
+        elif self.equity >= EQ_MIN and self.start_eq > 0 and (
+            self.dd_halt <= 0 or (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < self.dd_halt * 0.6
+        ):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
@@ -1609,6 +1684,9 @@ class Pulse:
             rec = self.bar_min.get(s)
             if not rec or int(rec[0]) != minute:
                 if rec:
+                    if not hasattr(self, "last_closed_1m"):
+                        self.last_closed_1m = {}
+                    self.last_closed_1m[s] = (int(rec[0]), float(rec[4]))   # the minute that just completed and its close
                     bars = self.klines_tf["1m"].setdefault(s, [])
                     bars.append([rec[1], rec[2], rec[3], rec[4], 0.0])
                     del bars[:-KLINE_LIMIT]
@@ -1954,18 +2032,21 @@ class Pulse:
     def security_prices(self, pos: Position) -> Tuple[float, float]:
         """Qty-matched order SL/TP from the Set's own range."""
         sl_f, tp_f, _, _ = self.opt_fracs(pos)
+        set_lane = bool(pos.set_id)
+        if set_lane and not self.lane_honors_tp():
+            tp_f = max(tp_f, float(self.tp_max))      # the lane that validated this Set has no TP exit: the order is only a safety
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
             return pos.sl, pos.tp
         if pos.side == "LONG":
             sl = e * (1.0 - sl_f)
             tp = e * (1.0 + tp_f)
-            if self.exits.enabled and pos.peak > e:
+            if self.exits.enabled and pos.peak > e and not set_lane:
                 sl = max(sl, self.exits.optimal_sl("LONG", e, pos.peak, sl))
         else:
             sl = e * (1.0 + sl_f)
             tp = e * (1.0 - tp_f)
-            if self.exits.enabled and pos.peak and pos.peak < e:
+            if self.exits.enabled and pos.peak and pos.peak < e and not set_lane:
                 sl = min(sl, self.exits.optimal_sl("SHORT", e, pos.peak, sl))
         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
 
@@ -2238,7 +2319,8 @@ class Pulse:
                 miss += 1
                 age = time.time() - float(pos.opened_at or 0)
                 bare = not (pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
-                if bare and age > 300.0 and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
+                cooling = float(self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) or 0) > time.time()
+                if bare and age > 300.0 and not cooling and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
                     log(f"CTRL flatten unprotected {pos.symbol} age={age:.0f}s")
                     self.close_pos(pos, px or pos.entry, "no-ctrl")
                 else:
@@ -2529,6 +2611,8 @@ class Pulse:
         pid = str(getattr(pos, "position_id", "") or "")
         if pid:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
+        for f in forms:                       # the manager records this close itself: the fill sync must not count it again
+            self.seen_fill_cids.add(f["clientOrderID"])
         r: Dict[str, Any] = {}
         done_qty = 0.0       # closed by earlier partial fills of this close
         done_val = 0.0
@@ -2563,8 +2647,8 @@ class Pulse:
             msg = str(r.get("msg") or "")
             if ctrl_err_kind(msg) == "qty_close":
                 continue
-            if "position not exist" in msg.lower():
-                return True, self.px.get(pos.symbol) or pos.entry
+            if "position not exist" in msg.lower() or "no position to close" in msg.lower():
+                return True, self.px.get(pos.symbol) or pos.entry     # the venue already closed it (its stop or TP)
         self.errors += 1
         self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
         return False, self.px.get(pos.symbol) or pos.entry     # pos.qty already holds what a partial close left
@@ -2608,6 +2692,8 @@ class Pulse:
             want = 1 if ind.direction == "long" else -1
             if want != direction:
                 return "ind-mismatch"
+        if self.sets.enabled and not self.sets.symbol_ok(sym):
+            return "data-quality"          # the symbol's history failed the data check: no Set was validated on it
         chosen = None
         try:
             chosen = self.sets.pick_any(pack) if self.sets.enabled else None   # a signal binds to its own pack only
@@ -2618,8 +2704,8 @@ class Pulse:
                 return "set-slot"
             return None
         elif self.sets.enabled and self.sets.use_historic_gate:
-            if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
-                # Positive-PF-only: gate ready and every pack closed -> no entry.
+            if not self.sets.pack_open(pack):
+                # Positive-PF-only: a signal binds to its own pack, and a pack with no validated Set takes no entry.
                 return "set-gate"
         return None
 
@@ -2672,26 +2758,44 @@ class Pulse:
         except Exception:
             chosen = None
         set_idx = -1
-        trail_st = None
-        try:
-            trail_st = self.sets.pick_trail(pack)
-        except Exception:
-            trail_st = None
+        trail_set_id = ""
+        trail_idx = -1
         if chosen:
+            # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
+            # own arm and give. The independent trailing pick never reaches a Set position.
             sl_ratio = chosen.sl_ratio
             set_id = chosen.id
             set_idx = int(getattr(chosen, "idx", -1))
-            trail_key, trail_arm, trail_give = chosen.trail_key or "0.3:0.1", chosen.trail_arm, chosen.trail_give
+            if getattr(chosen, "kind", "base") == "trail":
+                trail_key, trail_arm, trail_give = chosen.trail_key, chosen.trail_arm, chosen.trail_give
+                trail_set_id = chosen.id
+                trail_idx = set_idx
+            else:
+                trail_key, trail_arm, trail_give = "", 0.0, 0.0
         else:
             sl_ratio = self.variants.current_sl()
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             set_id = ""
-        trail_set_id = ""
-        trail_idx = -1
-        if trail_st:
-            trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
-            trail_set_id = trail_st.id
-            trail_idx = int(getattr(trail_st, "idx", -1))
+            trail_st = None
+            try:
+                trail_st = self.sets.pick_trail(pack)
+            except Exception:
+                trail_st = None
+            if trail_st:
+                trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
+                trail_set_id = trail_st.id
+                trail_idx = int(getattr(trail_st, "idx", -1))
+        if not chosen and self.block.enabled and self.strat_block:
+            # a Block stack that was increased stays increased: the parent opens at V0 x (1 + carried x ratio) until the
+            # group's net is back to equal, within the book and what the balance can carry
+            scale = self.block.parent_scale(sym, side)
+            if scale > 1.0:
+                scaled = self.cap_order_qty(c, px, qty * scale, min(self.max_book_notional(), self.avail_notional(c)))
+                if scaled > qty:
+                    log(f"BLOCK carry {sym} {side} x{scale:.2f} qty {qty} -> {scaled}", every=30.0, key=f"bcarry:{sym}")
+                    qty = scaled
+                    notional = qty * px
+                    margin = notional / max(1, lev)
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -2815,13 +2919,14 @@ class Pulse:
             rr=float(self.indications.settings.get("takeProfitRewardRisk") or 1.8),
             bind_sl_to_tp=True,
         )
-        if chosen and getattr(chosen, "step", 0):
-            tp_pct = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
-            sl_pct = max(self.sl_min, min(self.sl_max, tp_pct * sl_ratio))
-            src = f"step{chosen.step}xcost"
+        if chosen:
+            # the Set's own lane levels, from the same formula the replay that validated it uses (set_engine.lane_fracs):
+            # base and trailing Sets alike; no overlay clamp applies
+            sl_pct, tp_pct = self.sets.lane_fracs(chosen)
+            src = f"step{chosen.step}xcost" if getattr(chosen, "step", 0) else "trailset"
         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
-        if self.exits.enabled and self.exits.ignore_tp and not (chosen and getattr(chosen, "step", 0)):
+        if self.exits.enabled and self.exits.ignore_tp and not chosen:
             tp_pct = max(tp_pct, sl_pct * 3.0, self.tp_max)
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
@@ -2844,6 +2949,14 @@ class Pulse:
         self.save_open_book()
         if cid:
             self.seen_fill_cids.add(cid)
+        slip = abs(avg - px) / px if px > 0 else 0.0
+        slip_limit = max(2.0 * cost_as_frac(self.position_cost_pct), min(self.max_entry_slip, 0.5 * float(sl_pct or 0.0)))
+        if slip > slip_limit:
+            # the fill is far from the price the decision was made at (a broken or empty book): the stop and target would
+            # be measured from a price the market never gave. Leave at once, do not score the Set, and keep off the symbol.
+            log(f"BADFILL {sym} {side} fill={avg} ref={px} slip={slip * 100:.2f}% limit={slip_limit * 100:.2f}%")
+            self.close_pos(pos, avg, "bad-fill")      # a skip-eval close bans the symbol, closed or not
+            return
         self.last_entry_ts = time.time()
         self.fees_est += filled * avg * 0.0005
         self.available = max(0.0, self.available - margin)
@@ -2859,11 +2972,12 @@ class Pulse:
                 self.close_pos(pos, avg, "no-ctrl")
                 return
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
-        self.block.register_parent(sym, side, filled, avg)
-        try:
-            self.dca.attach(sym, side, filled, avg)
-        except Exception:
-            pass
+        if not pos.set_id:         # the add-on lanes belong to positions without a Set
+            self.block.register_parent(sym, side, filled, avg)
+            try:
+                self.dca.attach(sym, side, filled, avg)
+            except Exception:
+                pass
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
         self._stats_force = True
 
@@ -2889,18 +3003,114 @@ class Pulse:
                 return False
         return True
 
+    def venue_exit(self, pos: Position) -> Optional[Tuple[str, float]]:
+        """The venue fill that closed this position: ("sl" or "tp", fill price) when its own stop or TP order FILLED,
+        else None. A position the venue closed is a real close of its lane, not a ghost."""
+        for kind, oids in (("sl", (pos.sl_oid, getattr(pos, "sec_sl_oid", ""))), ("tp", (pos.tp_oid, getattr(pos, "sec_tp_oid", "")))):
+            for oid in oids:
+                if not real_oid(oid):
+                    continue
+                try:
+                    r = self.api.get("/openApi/swap/v2/trade/order", {"symbol": pos.symbol, "orderId": str(oid)})
+                except Exception:
+                    continue
+                data = r.get("data") if isinstance(r, dict) else None
+                o = (data.get("order") if isinstance(data, dict) and isinstance(data.get("order"), dict) else data) or {}
+                if not isinstance(o, dict):
+                    continue
+                status = str(o.get("status") or o.get("orderStatus") or "").upper()
+                if status not in ("FILLED", "FINISHED", "FILLED_FULLY"):
+                    continue
+                try:
+                    px = float(o.get("avgPrice") or o.get("price") or o.get("stopPrice") or 0)
+                except Exception:
+                    px = 0.0
+                if px > 0:
+                    return kind, px
+        return None
+
+    def reconcile_restored_book(self) -> None:
+        """Positions in the saved book that the venue no longer holds were closed there (by their own stop or TP) while the
+        engine was down. Settle them from one positions read before the first cycle, sending no order: a close or a stop for
+        a position that does not exist draws "position not exist", and 20 of those in 8 minutes ban the whole order API
+        (x02 lost its order path for minutes after every restart this way). A venue fill is recorded as that lane's close;
+        a position with no fill found is dropped only when the venue lists other positions (an empty list can be lag)."""
+        if not self.open:
+            return
+        try:
+            r = self.api.get("/openApi/swap/v2/user/positions")
+        except Exception:
+            return
+        rows = r.get("data") if self.ok(r) else None
+        if not isinstance(rows, list):
+            return
+        held = set()
+        for p in rows:
+            try:
+                amt = abs(float(p.get("positionAmt") or p.get("availableAmt") or 0))
+            except Exception:
+                continue
+            if amt > 1e-12:
+                side = (p.get("positionSide") or "").upper()
+                if side not in ("LONG", "SHORT"):          # one-way mode reports BOTH: the sign of the amount is the side
+                    side = "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT"
+                held.add((str(p.get("symbol") or ""), side))
+        confirmed = None                                    # a second read, before a position without a fill is dropped
+        for pos in list(self.open.values()):
+            if (pos.symbol, pos.side) in held:
+                continue
+            if self.close_from_venue(pos, "restart"):
+                self.cooldown[pos.symbol] = time.time() + 90.0
+                continue
+            if not held:
+                continue
+            if confirmed is None:
+                time.sleep(2.0)
+                try:
+                    r2 = self.api.get("/openApi/swap/v2/user/positions")
+                except Exception:
+                    return
+                rows2 = r2.get("data") if self.ok(r2) else None
+                if not isinstance(rows2, list):
+                    return
+                confirmed = {(str(p.get("symbol") or ""), "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT")
+                             for p in rows2 if abs(float(p.get("positionAmt") or 0)) > 1e-12}
+            if (pos.symbol, pos.side) in confirmed:
+                continue
+            log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
+            self.cancel_controls(pos.symbol)
+            self.open.pop(pos.symbol, None)
+            self.cooldown[pos.symbol] = time.time() + 90.0
+        self.save_open_book()
+
+    def close_from_venue(self, pos: Position, why: str) -> bool:
+        """Record a position the venue closed by its own stop or TP as a normal close of its lane (reason sl or tp, the
+        fill price). False when no such fill is found."""
+        hit = self.venue_exit(pos)
+        if not hit:
+            return False
+        log(f"VENUE {hit[0]} {pos.symbol} {pos.side} @{hit[1]} ({why})")
+        self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
+        self.close_pos(pos, hit[1], hit[0], exchange=False)
+        return True
+
     def drop_ghost(self, pos: Position, why: str) -> None:
         if self.open.get(pos.symbol) is None:
             return
         if not self._exchange_flat(pos):
             log(f"GHOST skip still-live {pos.symbol} {pos.side} {why}", every=20.0, key=f"ghost:{pos.symbol}")
             return
+        if self.close_from_venue(pos, why):
+            return
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
         self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
-        skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+        skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
+        for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", "")):
+            if real_oid(oid):                 # an exchange-side stop fill of this position is the close recorded below
+                self.seen_fill_oids.add(str(oid))
         if exchange:
             self.cancel_controls(pos.symbol)
             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
@@ -2915,6 +3125,7 @@ class Pulse:
                 self.ctrl_skip.pop(pos.symbol, None)
                 if skip_eval:
                     self.ignore_syms[pos.symbol] = time.time() + 1800.0
+                log(f"CLOSE FAIL {pos.symbol} {pos.side} {reason}: {self.last_error}", every=30.0, key=f"close-fail:{pos.symbol}")
                 return
             pos.qty = q_full
         else:
@@ -2925,6 +3136,17 @@ class Pulse:
             pnl_pct = (pos.entry - exit_px) / pos.entry
         pnl = net_pnl_usdt(pnl_pct, pos.qty, pos.entry, self.position_cost_pct)
         hold = time.time() - pos.opened_at
+        dca_pct = None          # the DCA add-on's own return (on the notional it added)
+        base_pct = None         # what the Set lane alone made: exit against the entry the Set opened at
+        if pos.dca_fills:
+            sd = 1 if pos.side == "LONG" else -1
+            add_q = sum(float(q) for _, q in pos.dca_fills)
+            if add_q > 0:
+                dca_pct = sum(float(q) * ((exit_px - float(p)) / float(p) * sd) for p, q in pos.dca_fills) / add_q
+            ref = float(pos.dca_ref or 0.0)
+            base_qty = max(0.0, pos.qty - add_q)
+            if ref > 0:
+                base_pct = (exit_px - ref) / ref * sd
         rec = Closed(
             time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
@@ -2941,23 +3163,25 @@ class Pulse:
             return
         self.closed.append(rec)
         try:
-            self.variants.on_close(rec)
+            if not rec.set_id:                 # the default variants learn from default-variant positions only
+                self.variants.on_close(rec)
         except Exception:
             pass
         try:
-            self.sets.on_live_close(rec)
+            # a Set is judged on its own lane: with DCA adds the Set sees the base result, the add-on its own
+            self.sets.on_live_close(dc_replace(rec, entry=float(pos.dca_ref), pnl_pct=base_pct, qty=base_qty, pnl=net_pnl_usdt(base_pct, base_qty, float(pos.dca_ref), self.position_cost_pct)) if (pos.dca_fills and base_pct is not None) else rec)
             self.sets.adapt_from_live(self.strategy_closes())
         except Exception:
             pass
         try:
-            self.exits.on_close(rec)
+            if not rec.set_id:                 # the Exit lanes score only the closes they made themselves
+                self.exits.on_close(rec)
         except Exception:
             pass
         try:
-            self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
-                "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
-                "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
-            })
+            if dca_pct is not None:            # the DCA lane scores its own adds only, whatever lane the parent was
+                self.dca.on_close({"symbol": rec.symbol, "side": rec.side, "reason": rec.reason, "client_id": rec.client_id,
+                                   "dca_n": len(pos.dca_fills), "pnl": rec.pnl, "pnl_pct": dca_pct})
             self.dca.drop(pos.symbol, pos.side)
         except Exception:
             pass
@@ -2971,8 +3195,10 @@ class Pulse:
                 self.cooldown["__book__"] = time.time() + 120
                 self.consec_loss = 4
                 log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
-        self.block.on_parent_close(pos.symbol, pos.side, pnl)
+        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason)
+        if not pos.set_id:
+            # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
+            self.block.on_parent_close(pos.symbol, pos.side, pnl)
         self.open.pop(pos.symbol, None)
         self.save_open_book()
         try:
@@ -2983,6 +3209,81 @@ class Pulse:
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
 
+    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str) -> float:
+        """Seconds before this symbol may be entered again. A win resets it to COOLDOWN_S. Each loss in a row on the symbol
+        multiplies it by four (9 s, 36 s, 2.4 min, 9.6 min, capped at 30 min), and a stop-out within 30 s of the entry
+        (a book that moves faster than the strategy can act on) bans the symbol for SYM_BAN_S."""
+        net = float(pnl_pct) - cost_as_frac(self.position_cost_pct)
+        fails = getattr(self, "sym_fails", None)
+        if fails is None:
+            fails = self.sym_fails = {}
+        if net >= 0:
+            fails.pop(sym, None)
+            return COOLDOWN_S
+        n = fails[sym] = int(fails.get(sym, 0)) + 1
+        if str(reason) == "sl" and float(hold_s) < 30.0:
+            self.ignore_syms[sym] = max(self.ignore_syms.get(sym, 0.0), time.time() + SYM_BAN_S)
+            log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s ({n} losses in a row)")
+        return min(1800.0, COOLDOWN_S * (4 ** (n - 1)))
+
+    def lane_honors_tp(self) -> bool:
+        """Whether the Set lane exits on its TP: the setting the replay used, so live and validation agree."""
+        return bool(getattr(self.sets, "hist_honor_tp", True))
+
+    def manage_set_lane(self, pos: Position, px: float, now: float, age: float, pnl_pct: float) -> None:
+        """The close rules of a Set position, one for one with set_engine.SetLane: the stop at the Set's own level (raised by
+        the trailing of a trailing Set), TP when the lane honours it, the time exit after the lane's time bars and the
+        scratch exit on a completed 1m close. The venue stop and TP stay in place as a safety; they may sit farther out
+        (clamp_ctrl_price), so the lane checks its own levels. Nothing here reads the Exit strategies."""
+        side = 1 if pos.side == "LONG" else -1
+        e = float(pos.dca_ref or pos.entry or 0)      # the Set's levels stay where it opened, whatever a DCA add did to the average
+        if e <= 0:
+            return
+        sl_f = float(pos.sl_pct or 0)
+        stop = e * (1 - side * sl_f) if sl_f > 0 else 0.0
+        if stop and pos.trail is not None:
+            stop = max(stop, pos.trail) if side > 0 else min(stop, pos.trail)
+        if stop and self.software_exit(pos, "sl", stop, px):
+            self.close_pos(pos, px, "sl")
+            return
+        tp_f = float(pos.tp_pct or 0)
+        if self.lane_honors_tp() and tp_f > 0:
+            tp = e * (1 + side * tp_f)
+            if self.software_exit(pos, "tp", tp, px):
+                self.close_pos(pos, px, "tp")
+                return
+        arm = float(pos.trail_arm or 0.0)
+        give = float(pos.trail_give or 0.0)
+        # only a trailing Set trails (its own arm and give, as replayed); the Trailing strategy switch does not decide it
+        if pos.trail_set_id and pos.trail_set_id == pos.set_id and arm > 0 and give > 0:
+            fav = (pos.peak - e) / e if side > 0 else (e - pos.peak) / e
+            if fav >= arm:
+                pos.trail_armed = True
+                trail = pos.peak * (1 - give) if side > 0 else pos.peak * (1 + give)
+                better = pos.trail is None or (trail > pos.trail + 1e-12 if side > 0 else trail < pos.trail - 1e-12)
+                if better:
+                    prev = pos.trail
+                    pos.trail = trail      # committed only when the exchange stop moved
+                    if not self.replace_sl(pos, trail):
+                        pos.trail = prev
+        if age >= float(self.sets.hist_time_bars) * 60.0:
+            self.close_pos(pos, px, "time")
+            return
+        # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m
+        # bar once, with that bar's close and its end time, never an intrabar tick.
+        closed = (getattr(self, "last_closed_1m", None) or {}).get(pos.symbol)
+        if closed:
+            minute, close = int(closed[0]), float(closed[1])
+            seen = getattr(self, "_scratch_seen", None)
+            if seen is None:
+                seen = self._scratch_seen = {}
+            key = f"{pos.symbol}:{pos.client_id}"
+            if seen.get(key) != minute:
+                seen[key] = minute
+                held = (minute + 1) * 60.0 - float(pos.opened_at)
+                if held >= float(self.sets.scratch_bars) * 60.0 and (close - e) / e * side >= float(self.sets.scratch_min):
+                    self.close_pos(pos, px, "scratch+")
+
     def manage(self) -> None:
         now = time.time()
         self.ingest_ws_px()
@@ -2991,7 +3292,8 @@ class Pulse:
             if px <= 0:
                 continue
             age = now - pos.opened_at
-            if age >= MAX_HOLD_S:
+            if age >= MAX_HOLD_S and not pos.set_id:
+                # a Set position leaves on its own time exit (hist_time_bars), the one the replay validated
                 self.close_pos(pos, px, "max-hold-6h")
                 continue
             if getattr(self, "control_orders", True):
@@ -3004,17 +3306,19 @@ class Pulse:
             else:
                 pnl_pct = (pos.entry - px) / pos.entry
                 pos.peak = min(pos.peak, px) if pos.peak else px
-            if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and px <= pos.sl:
+            if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and self.software_exit(pos, "sl", pos.sl, px):
                 self.close_pos(pos, px, "sl")
                 continue
-            if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and px >= pos.sl:
+            if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and self.software_exit(pos, "sl", pos.sl, px):
                 self.close_pos(pos, px, "sl")
+                continue
+            if pos.set_id:
+                # a Set position is closed by its own lane only (SL, TP, trailing, time, scratch), exactly as the replay that
+                # validated the Set: the Exit strategies never touch it
+                self.manage_set_lane(pos, px, now, age, pnl_pct)
                 continue
             if not (self.exits.enabled and self.exits.ignore_tp):
-                if pos.side == "LONG" and px >= pos.tp:
-                    self.close_pos(pos, px, "tp")
-                    continue
-                if pos.side == "SHORT" and px <= pos.tp:
+                if self.software_exit(pos, "tp", pos.tp, px):
                     self.close_pos(pos, px, "tp")
                     continue
             sig = 0
@@ -3086,9 +3390,11 @@ class Pulse:
             return
         try:
             with open(TRADES_PATH) as f:
-                lines = f.readlines()[-80:]
+                lines = collections.deque(f, maxlen=80)   # streams the file: memory stays at 80 lines however long it grows
             for line in lines:
                 rec = json.loads(line)
+                if not (1.6e9 < float(rec.get("t") or 0) <= time.time() + 300.0):
+                    continue          # a record from the future (or from before the engine existed) is not a trade
                 c = Closed(
                     t=float(rec.get("t") or 0),
                     symbol=str(rec.get("symbol") or ""),
@@ -3151,6 +3457,24 @@ class Pulse:
             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
         except Exception:
             self.volume_factor = 1.0
+        try:
+            self.size_max = max(0.2, float(ov.get("sizeMaxNotional") if ov.get("sizeMaxNotional") is not None else 25.0))
+        except Exception:
+            self.size_max = 25.0
+        try:
+            self.max_entry_slip = max(0.0005, min(0.05, float(ov.get("maxEntrySlipPct") if ov.get("maxEntrySlipPct") is not None else 0.75) / 100.0))
+        except Exception:
+            self.max_entry_slip = 0.0075
+        try:   # the drawdown halt in percent of the start equity; 0 switches it off (an explicit owner setting)
+            raw_dd = ov.get("ddHaltPct")
+            self.dd_halt = max(0.0, min(90.0, float(raw_dd if raw_dd is not None else DD_HALT * 100.0))) / 100.0
+        except Exception:
+            self.dd_halt = DD_HALT
+        try:   # percent of the balance per position before the volume factor; 0 = the fixed targetNotional
+            raw_pct = ov.get("sizePctOfBalance")
+            self.size_pct = max(0.0, min(25.0, float(raw_pct if raw_pct is not None else 1.0)))
+        except Exception:
+            self.size_pct = 1.0
         self.use_max_leverage, LEVERAGE = leverage_settings(ov)
         USE_MAX_LEVERAGE = self.use_max_leverage
         if ov.get("maxOpen") is not None:
@@ -3158,9 +3482,9 @@ class Pulse:
         if ov.get("maxPerGroup") is not None:
             MAX_PER_GROUP = int(ov["maxPerGroup"])
         if ov.get("slPct"):
-            SL_PCT = float(ov["slPct"]) / 100.0 if float(ov["slPct"]) > 0.05 else float(ov["slPct"])
+            SL_PCT = float(ov["slPct"]) / 100.0       # percent everywhere, no magnitude guessing
         if ov.get("tpPct"):
-            TP_PCT = float(ov["tpPct"]) / 100.0 if float(ov["tpPct"]) > 0.05 else float(ov["tpPct"])
+            TP_PCT = float(ov["tpPct"]) / 100.0
         if ov.get("trailArmPct") is not None:
             TRAIL_ARM = float(ov["trailArmPct"]) / 100.0 if float(ov["trailArmPct"]) > 0.02 else float(ov["trailArmPct"])
         if ov.get("trailGivePct") is not None:
@@ -3245,9 +3569,9 @@ class Pulse:
         # CTS Block defaults, overlay wins
         b_en = ov.get("blockEnabled", cts.get("variantBlockEnabled", True))
         try:
-            b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") or 0))
+            b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") if cts.get("blockMaxStack") is not None else 6))
         except Exception:
-            b_stack = 0
+            b_stack = 6                      # default stack: 6 groups (0 in the overlay = unlimited)
         b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
         b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 0.8)
         b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
@@ -3361,6 +3685,7 @@ class Pulse:
         return {
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
             "leverage": LEVERAGE,
             "useMaxLeverage": bool(self.use_max_leverage),
             "leverageMap": dict(getattr(self, "lev_map", {})),
@@ -3490,6 +3815,60 @@ class Pulse:
             "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
         }
 
+    def software_exit(self, pos: Position, kind: str, level: float, px: float) -> bool:
+        """Whether the software check closes at market when the price reaches a stop (kind "sl") or target ("tp") level.
+        When a live venue order of that kind sits at or inside the level, the venue fills it there: a market close as well
+        would race it and draw "position not exist" errors, which the venue counts toward a ban of the whole order API.
+        The software close then acts only as a backstop, one PositionCost beyond the level."""
+        if level <= 0:
+            return False
+        long_ = pos.side == "LONG"
+        if kind == "sl":
+            hit = px <= level if long_ else px >= level
+        else:
+            hit = px >= level if long_ else px <= level
+        if not hit:
+            return False
+        if not getattr(self, "control_orders", True):
+            return True
+        if kind == "sl":
+            oids, venue = (pos.sl_oid, getattr(pos, "sec_sl_oid", "")), float(pos.sl or 0)
+        else:
+            oids, venue = (pos.tp_oid, getattr(pos, "sec_tp_oid", "")), float(pos.tp or 0)
+        if not any(real_oid(o) for o in oids) or venue <= 0:
+            return True                       # no venue order to rely on
+        tol = level * 1e-6
+        if kind == "sl":
+            covers = venue >= level - tol if long_ else venue <= level + tol
+        else:
+            covers = venue <= level + tol if long_ else venue >= level - tol
+        if not covers:
+            return True                       # the venue order sits farther out: the lane's own level decides
+        beyond = (level - px) / level if (kind == "sl") == long_ else (px - level) / level
+        return beyond >= cost_as_frac(self.position_cost_pct)
+
+    def exit_lane_pf(self) -> float:
+        """Net PF (after PositionCost) of the last Block-window closes of positions without a Set, or 0 with fewer than
+        Block's minimum samples. The evidence Block stacks on."""
+        rows = [c for c in self.closed if not getattr(c, "set_id", "")]
+        n = int(getattr(self.block, "window", 25) or 25)
+        res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
+            return 0.0
+        return float(res.get("pf") or 0.0)
+
+    def rearrange_opens(self) -> List[Dict[str, Any]]:
+        """The positions the coordinator may swap out for a stronger signal: Exit-lane positions only. A Set position is
+        closed by its own lane (stop, TP, trailing, time, scratch), never swapped out."""
+        opens = []
+        for p in self.open.values():
+            if p.set_id:
+                continue
+            px = self.px.get(p.symbol) or p.entry
+            u = ((px - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100
+            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
+        return opens
+
     def maybe_block_adds(self) -> None:
         """CTS Block Live: add-on only against an existing same-side parent."""
         if self.halted or not self.block.enabled or not self.strat_block:
@@ -3526,6 +3905,8 @@ class Pulse:
         for pos in list(self.open.values()):
             if emitted >= add_budget:
                 break
+            if pos.set_id:
+                continue           # no add-on to a Set position: it would re-anchor the entry, stop and target the Set validated
             if self.missing_controls(pos):
                 self.ensure_controls(pos)
                 if self.missing_controls(pos):
@@ -3534,17 +3915,9 @@ class Pulse:
             lane = self.block.lanes.get(k)
             if not lane or lane.base_qty <= 0:
                 continue
-            # Parent still valid only if pulse score agrees with side (continuation).
-            intern_pf = 0.0   # no resolvable Set: no pass (was a fabricated 1.2)
-            try:
-                st = self.sets.sets.get(pos.set_id) if pos.set_id else None
-                if st is None:
-                    st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
-                if st is not None:
-                    # the real PF; a Set with few closes is already excluded by the coordinator sample rule (no fabricated pass)
-                    intern_pf = float(getattr(st, "gate_pf", 0.0) or 0.0)   # the same PF the entry gate uses
-            except Exception:
-                intern_pf = 0.0   # an error is never a pass
+            # Block's evidence is the lane it stacks on: the net PF of the recent closes of positions without a Set (the
+            # Exit lane). A Set's PF says nothing about these positions. Too few closes: no pass (cold start needs proof).
+            intern_pf = self.exit_lane_pf()
             d, why, conf = self.score(pos.symbol)
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
             if not same:
@@ -3556,11 +3929,12 @@ class Pulse:
                     same = True
             if not same:
                 continue
-            # Don't stack into a losing parent.
+            # Stack only into strength: the parent is at least one step (one PositionCost) in profit, so the averaged entry
+            # stays behind the price and the re-anchored stop does not put the whole stack at risk at once.
             px_now = self.px.get(pos.symbol) or pos.entry
             if px_now > 0 and pos.entry > 0:
                 u = ((px_now - pos.entry) / pos.entry) * (1 if pos.side == "LONG" else -1)
-                if u < -0.0015:
+                if u < cost_as_frac(self.position_cost_pct):
                     continue
             rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
             row = self.block.pick_emit(rows)
@@ -3571,13 +3945,10 @@ class Pulse:
             if not c or px <= 0:
                 continue
             raw = row["requestedAddQty"]
-            parent = self.size_qty(c, px)
-            inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
+            # (Block's evaluation already limits one order to one partial: ratio x V0)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
-            add_cap = min(self.notional_cap() * max(1.0, inc), room)
+            add_cap = min(self.notional_cap() * max(1.0, float(self.block.volume_ratio)), room)
             qty = self.cap_order_qty(c, px, raw, add_cap)
-            if parent > 0 and qty > parent * inc * 1.05:
-                qty = self.cap_order_qty(c, px, parent * inc, add_cap)
             if qty < c.min_qty or qty <= 0:
                 bumped = self.min_order_qty(c, px)
                 if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:
@@ -3677,6 +4048,17 @@ class Pulse:
                 f"minPF={row['blockMinPF']:.3f} {row['setKey']}"
             )
 
+    def dca_eligible(self, pos: Position) -> bool:
+        """A position without a Set is the DCA lane's own. A Set position only when dcaOnSets is on, or when dcaOnAxis is on
+        and an Axis is enabled and the coordinator is allowing entries right now."""
+        if not pos.set_id:
+            return True
+        if getattr(self.dca, "on_sets", False):
+            return True
+        if getattr(self.dca, "on_axis", False) and any(ax.enabled for ax in self.coord.axes.values()):
+            return bool((self.coord.last or {}).get("allow", True))
+        return False
+
     def maybe_dca_adds(self) -> None:
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
         if not getattr(self.dca, "enabled", False) or self.halted:
@@ -3690,6 +4072,8 @@ class Pulse:
         for pos in list(self.open.values()):
             if emitted >= add_budget:
                 break
+            if not self.dca_eligible(pos):
+                continue           # a Set position is added to only when dcaOnSets / dcaOnAxis say so (both off by default)
             if time.time() < self.dca_fail_cd.get(pos.symbol, 0):
                 continue
             if self.missing_controls(pos):
@@ -3710,7 +4094,7 @@ class Pulse:
                 continue
             parent = float(getattr(self.dca.lanes.get(self.dca.key(pos.symbol, pos.side), None), "parent_qty", 0) or 0)
             seed = parent if parent > 0 else pos.qty
-            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px)
+            row = self.dca.due(pos.symbol, pos.side, seed, float(pos.dca_ref or pos.entry), px, sl_frac=sl_pct)
             if not row:
                 continue
             c = self.contracts.get(pos.symbol)
@@ -3721,7 +4105,10 @@ class Pulse:
             qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
             floor = self.min_order_qty(c, px)
             if qty < floor:
-                if floor * px > add_cap * 1.08:
+                # the exchange minimum is larger than the partial: the auto plan rounds up to it while the whole position
+                # stays under its exposure ceiling; the static plan keeps its notional cap
+                within_ceiling = bool(getattr(self.dca, "auto", False)) and (pos.qty + floor) <= float(self.dca.max_expo) * seed * 1.05
+                if floor * px > add_cap * 1.08 and not within_ceiling:
                     self.dca.skips += 1
                     continue
                 qty = floor
@@ -3762,19 +4149,23 @@ class Pulse:
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
             filled = filled_qty(data, qty)
             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
+            if not pos.dca_ref:
+                pos.dca_ref = pos.entry
+            pos.dca_fills.append([avg, filled])
             pos.qty += filled
             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
             pos.notional = pos.qty * pos.entry
             try:
-                mode = str(getattr(self.dca, "tp_mode", "average") or "average").lower()
-                if mode in ("breakeven", "be"):
-                    be = max(float(getattr(self.dca, "be_pct", 0.002) or 0.002), 0.0004)
-                    pos.tp = pos.entry * (1 + be) if pos.side == "LONG" else pos.entry * (1 - be)
-                else:
-                    tp_pct = pos.tp_pct or TP_PCT
-                    pos.tp = pos.entry * (1 + tp_pct) if pos.side == "LONG" else pos.entry * (1 - tp_pct)
-                sl_pct = pos.sl_pct or SL_PCT
-                pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
+                if not pos.set_id and not getattr(self.dca, "auto", False):   # a Set position, and the auto plan, keep the stop and TP of the entry
+                    mode = str(getattr(self.dca, "tp_mode", "average") or "average").lower()
+                    if mode in ("breakeven", "be"):
+                        be = max(float(getattr(self.dca, "be_pct", 0.002) or 0.002), 0.0004)
+                        pos.tp = pos.entry * (1 + be) if pos.side == "LONG" else pos.entry * (1 - be)
+                    else:
+                        tp_pct = pos.tp_pct or TP_PCT
+                        pos.tp = pos.entry * (1 + tp_pct) if pos.side == "LONG" else pos.entry * (1 - tp_pct)
+                    sl_pct = pos.sl_pct or SL_PCT
+                    pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
             except Exception:
                 pass
             self.available = max(0.0, self.available - margin)
@@ -4022,12 +4413,7 @@ class Pulse:
             if ranked and (time.time() - self.skip_log.get("gate", 0) > 45):
                 log("COORD soft " + "; ".join(reasons)[:160] + f" intern={intern}", every=45.0, key="coord-pause", quiet=True)
                 self.skip_log["gate"] = time.time()
-        opens = []
-        for p in self.open.values():
-            px = self.px.get(p.symbol) or p.entry
-            u = ((px - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100
-            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
-        swap = self.coord.pick_rearrange(opens, ranked, slot_cap)
+        swap = self.coord.pick_rearrange(self.rearrange_opens(), ranked, slot_cap)
         if swap and swap["from"] in self.open:
             pos = self.open[swap["from"]]
             self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
@@ -4116,6 +4502,9 @@ class Pulse:
                     pos = self.open.get(sym)
                     if not pos or time.time() - float(pos.opened_at or 0) < 180.0 or not self._exchange_flat(pos):
                         continue
+                    if self.close_from_venue(pos, "stale"):
+                        self.cooldown[sym] = time.time() + 90.0
+                        continue
                     log(f"DROP stale local {sym} (exchange flat)")
                     self.cancel_controls(sym)
                     self.open.pop(sym, None)
@@ -4200,6 +4589,19 @@ class Pulse:
                 sl_to_tp=sl_ratio, bind_sl_to_tp=True,
                 cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
             )
+            rec_set = (getattr(self.sets, "sets", None) or {}).get(str(track.get("set_id") or ""))
+            rec_trail_id = ""
+            if rec_set is not None:
+                # a recovered Set position keeps its own lane: the Set's levels (set_engine.lane_fracs) and its own trailing
+                # (a trailing Set) or none (a base Set), never the default variants' trail
+                sl_pct, tp_pct = self.sets.lane_fracs(rec_set)
+                sl_ratio = float(rec_set.sl_ratio)
+                src = f"step{rec_set.step}xcost" if getattr(rec_set, "step", 0) else "trailset"
+                if getattr(rec_set, "kind", "base") == "trail":
+                    trail_key, trail_arm, trail_give = rec_set.trail_key, rec_set.trail_arm, rec_set.trail_give
+                    rec_trail_id = rec_set.id
+                else:
+                    trail_key, trail_arm, trail_give = "", 0.0, 0.0
             sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
             tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
             cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
@@ -4213,6 +4615,7 @@ class Pulse:
                 sl_pct=sl_pct, tp_pct=tp_pct, client_id=cid, ours=True,
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
+                trail_set_id=rec_trail_id,
                 liq=liq, position_id=pid,
             )
             rec_pos = self.open[sym]
@@ -4233,6 +4636,9 @@ class Pulse:
             if pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""):
                 if not self._exchange_flat(pos):
                     continue
+            if self.close_from_venue(pos, "stale"):
+                self.cooldown[sym] = time.time() + 90.0
+                continue
             log(f"DROP stale local {sym} age={age:.0f}s")
             self.cancel_controls(sym)
             self.open.pop(sym, None)
@@ -4273,6 +4679,9 @@ class Pulse:
             cid = self.order_cid(o)
             if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
                 continue
+            if str(o.get("orderId") or o.get("orderID") or "") in self.seen_fill_oids:
+                self.seen_fill_cids.add(cid)
+                continue
             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
             if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
                 continue
@@ -4291,6 +4700,17 @@ class Pulse:
             except Exception:
                 continue
             if qty <= 0 or px <= 0:
+                continue
+            oid = str(o.get("orderId") or o.get("orderID") or "")
+            held = next((p for p in self.open.values() if oid and kind in ("s", "t")
+                         and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
+            if held is not None:
+                # the venue closed a position we still hold: record it as that lane's close (once; close_pos marks the
+                # stop and TP ids as seen and feeds the Set itself)
+                self.seen_fill_cids.add(cid)
+                self.cancel_controls(held.symbol)
+                self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
+                n += 1
                 continue
             pnl_pct = pnl / (qty * px) if qty * px else 0.0
             rec = {
@@ -4390,9 +4810,13 @@ class Pulse:
         other = "Gx02oig060308000aaaaa" if TAG.lower() == "gx01" else "Gx01oig060308000aaaaa"
         self.record_test("cid-conn-only", not self.cid_ours(other) and not self.cid_ours("ctsbingxx02secbtc") and not self.cid_ours("ctsbingxx01tp"), f"other={other}")
         self.record_test("cid-set-bits", "g06" in sample or "g0603" in sample[4:14], sample)
-        tr = self.parse_track(sample)
-        self.record_test("cid-parse", bool(tr and tr.get("pack") == "general" and abs(float(tr.get("sl") or 0) - 0.6) < 1e-9), str(tr))
-        self.record_test("cid-idx", int((tr or {}).get("idx", -1)) == 0 and int((tr or {}).get("step", 0)) == 8, str(tr))
+        real = next((x for x in getattr(self.sets, "sets", {}).values() if x.pack == "general" and x.kind == "base" and x.step == 8 and abs(float(x.sl_ratio) - 1.0) < 1e-9), None)
+        tr = self.parse_track(self.cid("o", set_id=real.id, pack=real.pack, set_idx=real.idx)) if real is not None else None
+        self.record_test("cid-parse", real is None or bool(tr and tr.get("set_id") == real.id), str(tr))
+        self.record_test("cid-idx", real is None or (int((tr or {}).get("idx", -1)) == real.idx and int((tr or {}).get("step", 0)) == 8), str(tr))
+        rt = [x for x in list(getattr(self.sets, "sets", {}).values())[:: max(1, len(getattr(self.sets, "sets", {})) // 40 or 1)]]
+        bad_rt = [x.id for x in rt if (self.parse_track(self.cid("o", set_id=x.id, pack=x.pack, set_idx=x.idx)) or {}).get("set_id") != x.id]
+        self.record_test("cid-roundtrip", not bad_rt, f"checked={len(rt)} wrong={bad_rt[:3]}")
         dummy = Position("BTC-USDT", "LONG", 0.001, 80000.0, time.time(), 0, 0, 80000.0, sl_pct=0.006, tp_pct=0.01)
         dummy.peak = 80000.0
         slp, tpp = self.security_prices(dummy)
@@ -4510,6 +4934,11 @@ class Pulse:
             "tpPct": TP_PCT * 100,
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
+            "sizeMaxNotional": float(getattr(self, "size_max", 25.0) or 25.0),
+            "maxEntrySlipPct": round(float(getattr(self, "max_entry_slip", 0.0075)) * 100.0, 4),
+            "sizedNotional": round(self.sized_notional(), 6),
+            "ddHaltPct": round(float(getattr(self, "dd_halt", DD_HALT)) * 100.0, 4),
             "paused": os.path.exists(PAUSE_PATH),
             "activityPerMin": round(per_min, 2),
             "consecLoss": self.consec_loss,
@@ -4682,7 +5111,7 @@ class Pulse:
             "sets": {
                 "families": scov.get("families"),
                 "setCount": len(self.sets.sets),
-                "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
+                "activeCount": int(self.sets.counts().get("valid", 0)),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "trailCover": scov.get("trailCover"),
                 "slCover": scov.get("slCover"),
@@ -4852,7 +5281,8 @@ class Pulse:
             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
             f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
         )
-        self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
+        # open positions are unlimited (maxOpen 0); the symbol cap and Block's max stack are settings (50 and 8 shipped)
+        self.record_test("qa-unlimited", MAX_OPEN <= 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
         book_cap = self.max_book_notional()
         sane_cap = max(self.notional_cap() * 32.0, 64.0)
         self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
@@ -4993,79 +5423,122 @@ class Pulse:
             bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
             f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
         )
-        sample_g = self.cid("o", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
-        tr_g = self.parse_track(sample_g)
-        self.record_test(
-            "qa-cid-parse",
-            bool(tr_g and tr_g.get("pack") == "general" and abs(float(tr_g.get("sl") or 0) - 0.6) < 1e-9),
-            str(tr_g),
-        )
-        self.record_test(
-            "qa-cid-idx",
-            int((tr_g or {}).get("idx", -1)) == 0 and int((tr_g or {}).get("step", 0)) == 8,
-            str(tr_g),
-        )
+        real_g = next((x for x in getattr(self.sets, "sets", {}).values() if x.pack == "general" and x.kind == "base" and x.step == 8 and abs(float(x.sl_ratio) - 1.0) < 1e-9), None)
+        tr_g = self.parse_track(self.cid("o", set_id=real_g.id, pack=real_g.pack, set_idx=real_g.idx)) if real_g is not None else None
+        self.record_test("qa-cid-parse", real_g is None or bool(tr_g and tr_g.get("set_id") == real_g.id), str(tr_g))
+        self.record_test("qa-cid-idx", real_g is None or (int((tr_g or {}).get("idx", -1)) == real_g.idx and int((tr_g or {}).get("step", 0)) == 8), str(tr_g))
+
+    @staticmethod
+    def _kline_time(row: Any) -> int:
+        try:
+            return int(row["time"] if isinstance(row, dict) else row[0])
+        except Exception:
+            return 0
 
     def _hist_fetch(self) -> None:
+        """Fill every Set history from the exchange. One klines request is capped at 1000 bars by the venue (a larger
+        limit is refused with code 109400 and returns nothing), so a symbol that is short of its lookback gets the
+        newest HIST_PAGE bars and then older pages through endTime; a symbol that already has its history only needs the
+        newest minutes, which the join onto the stored series takes care of."""
         if not self.sets.enabled:
             return
         self.sets.progress.phase = "fetch"
-        limit = str(self.sets.lookback)
-        reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
+        lookback = int(self.sets.lookback)
+        page = HIST_PAGE
         stored = 0
         chunk = 4
-        for i in range(0, len(reqs), chunk):
-            self.sets.progress.detail = f"fetch {i}/{len(reqs)}"
-            self.sets.progress.pct = (i / max(1, len(reqs))) * 8.0
-            batch = reqs[i : i + chunk]
-            rows = []
+
+        def _gather(batch: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
             if hasattr(self.api, "gather_public"):
-                rows = self.api.gather_public(batch, timeout=6.0)
-            else:
-                for path, extra in batch:
-                    body = self.api.public(path, extra)
-                    rows.append((path, extra, body))
-            for _path, extra, body in rows:
-                s = extra.get("symbol")
-                bars = self._parse_klines((body or {}).get("data"))
+                return self.api.gather_public(batch, timeout=6.0)
+            return [(path, extra, self.api.public(path, extra)) for path, extra in batch]
+
+        path = "/openApi/swap/v2/quote/klines"
+        for i in range(0, len(SYMBOLS), chunk):
+            self.sets.progress.detail = f"fetch {i}/{len(SYMBOLS)}"
+            self.sets.progress.pct = (i / max(1, len(SYMBOLS))) * 8.0
+            names = list(SYMBOLS[i : i + chunk])
+            short = {s: len(self.sets.bars.get(s) or []) < int(lookback * 0.9) for s in names}
+            first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(min(page, lookback) if short[s] else 120)}) for s in names])
+            rows_by: Dict[str, List[Any]] = {}
+            for _p, extra, body in first:
+                data = (body or {}).get("data")
+                rows_by[str(extra.get("symbol"))] = sorted(data, key=self._kline_time) if isinstance(data, list) else []
+            # a full page means older bars may exist: page backwards (endTime just before the oldest bar held) until the
+            # lookback is filled or the venue has no more
+            pending = [s for s in names if short[s] and len(rows_by.get(s) or []) >= page and lookback > page]
+            while pending:
+                reqs = []
+                for s in pending:
+                    want = lookback - len(rows_by[s])
+                    oldest = self._kline_time(rows_by[s][0])
+                    if want > 0 and oldest > 0:
+                        reqs.append((path, {"symbol": s, "interval": "1m", "limit": str(min(page, want)), "endTime": str(oldest - 1)}))
+                if not reqs:
+                    break
+                pending = []
+                for _p, extra, body in _gather(reqs):
+                    sym = str(extra.get("symbol"))
+                    data = (body or {}).get("data")
+                    old = sorted(data, key=self._kline_time) if isinstance(data, list) else []
+                    rows_by[sym] = old + rows_by[sym]
+                    if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
+                        pending.append(sym)
+            for s in names:
+                bars = self._parse_klines(rows_by.get(s) or [])
                 if s and bars:
                     self.sets.ingest_bars(s, bars)
                     stored += 1
             time.sleep(0.12)
         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
+        sizes = sorted(len(self.sets.bars.get(s) or []) for s in SYMBOLS)
+        log(f"HIST fetched {stored}/{len(SYMBOLS)} symbols; bars min/median/max "
+            f"{sizes[0] if sizes else 0}/{sizes[len(sizes) // 2] if sizes else 0}/{sizes[-1] if sizes else 0} of {lookback}",
+            every=30.0, key="hist-fetch")
+
+    def _hist_tick(self) -> None:
+        """One pass of the history thread: real minutes join the Set history, the history is fetched when most symbols
+        lack it (or refreshed on schedule), and a chunk of symbols is replayed and scored."""
+        # the Set history holds the current universe (and symbols with an open position) only: a symbol that left the
+        # universe keeps no bars, so its old trades leave every Set's tape and its memory is freed
+        self.sets.trim_bars(list(SYMBOLS) + [p.symbol for p in self.open.values()])
+        for s in SYMBOLS:
+            # The exchange history (REST) is the Set history and the fetch below keeps it current. The 1m rows built from
+            # live ticks (zero volume, sampled highs and lows) are only a bootstrap for a symbol that has no history yet,
+            # and never replace one: ingesting them every tick cut a 1,920-bar history to the minutes since start.
+            if len(self.sets.bars.get(s) or []) >= self.sets.min_bars:
+                continue
+            bars = self.real_bars_1m(s)      # real minutes only: the seed padding (flat rows) would be replayed as bars
+            if bars:
+                self.sets.ingest_bars(s, bars, tail=True)
+        if not self.sets.due():
+            return
+        full = int(self.sets.lookback * 0.9)
+        have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= full)
+        if have < max(4, len(SYMBOLS) // 2):
+            # most symbols lack their history: fetch it now. Live minutes alone take the lookback (32 h) to fill it,
+            # and waiting for them first left every Set unvalidated after each start.
+            self._hist_fetch()
+        elif time.time() - self.sets.last_run >= self.sets.refresh_s:
+            self._hist_fetch()
+        self.hist_busy = True
+        try:
+            b = self._budget()
+            names = list(SYMBOLS)
+            if b.scan_chunk and len(names) > b.hist_chunk:
+                names, self.load.cursor_hist = self.load.scan_window(
+                    names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
+                )
+            if b.hist_run:
+                self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names,
+                                     abort=lambda: self.load.last_budget.level == "critical")
+        finally:
+            self.hist_busy = False
 
     def _hist_loop(self) -> None:
         while not self._hist_stop:
             try:
-                for s in SYMBOLS:
-                    bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
-                    if bars:
-                        self.sets.ingest_bars(s, bars)
-                if self.sets.due():
-                    have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
-                    live = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
-                    if live < min(80, max(12, len(SYMBOLS) // 8)):
-                        pass
-                    elif have < max(4, len(SYMBOLS) // 2):
-                        self._hist_fetch()
-                    elif time.time() - self.sets.last_run >= self.sets.refresh_s:
-                        self._hist_fetch()
-                    self.hist_busy = True
-                    nbar = [0]
-                    def _hist_step():
-                        nbar[0] += 1
-                        time.sleep(0)
-                    try:
-                        b = self._budget()
-                        names = list(SYMBOLS)
-                        if b.scan_chunk and len(names) > b.hist_chunk:
-                            names, self.load.cursor_hist = self.load.scan_window(
-                                names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
-                            )
-                        if b.hist_run:
-                            self.sets.replay_all(on_step=_hist_step, symbols=names, abort=lambda: self.load.last_budget.level == "critical")
-                    finally:
-                        self.hist_busy = False
+                self._hist_tick()
             except Exception:
                 self.hist_busy = False
                 self.sets.progress.phase = "error"
@@ -5157,7 +5630,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+            elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:
@@ -5214,6 +5687,10 @@ class Pulse:
         except Exception:
             pass
         sd_notify("WATCHDOG=1")
+        try:
+            self.reconcile_restored_book()
+        except Exception:
+            log("reconcile_restored_book failed: " + traceback.format_exc()[-160:])
         self.adopt_exchange_positions()
         sd_notify("WATCHDOG=1")
         try:
@@ -5329,12 +5806,12 @@ def main() -> None:
     global BASE
     os.makedirs(DIR, exist_ok=True)
     seed_overlay()
-    key = redis_hget("api_key")
-    secret = redis_hget("api_secret")
+    key = connection_field("api_key")
+    secret = connection_field("api_secret")
     if not key or not secret:
         raise SystemExit(f"missing {CONN_SHORT} credentials")
     try:  # the environment is pinned per connection; a stored or env setting that contradicts it refuses to start
-        BASE, _mode = resolve_base(CONN_SHORT, redis_hget("base_url") or "", redis_hget("is_testnet") or "",
+        BASE, _mode = resolve_base(CONN_SHORT, connection_field("base_url") or "", connection_field("is_testnet") or "",
                                    os.environ.get("PULSE_BASE", ""))
     except ConnGuardError as exc:
         raise SystemExit(f"refusing to start: {exc}")

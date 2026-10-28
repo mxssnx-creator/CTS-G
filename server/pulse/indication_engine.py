@@ -808,16 +808,23 @@ def aggregate_bars(rows: Sequence[Sequence[float]], minutes: int) -> List[List[f
     m = max(1, int(minutes))
     k = len(rows) // m
     out: List[List[float]] = []
+    n = len(rows)
     for j in range(k):
-        hi = len(rows) - (k - 1 - j) * m
-        blk = rows[hi - m : hi]
-        out.append([
-            float(blk[0][0]),
-            max(float(b[1]) for b in blk),
-            min(float(b[2]) for b in blk),
-            float(blk[-1][3]),
-            sum(float(b[4]) for b in blk),
-        ])
+        hi = n - (k - 1 - j) * m
+        first = rows[hi - m]
+        h = float(first[1])
+        lo = float(first[2])
+        v = 0
+        for x in range(hi - m, hi):      # one pass per block: the same max, min and left-to-right volume sum as before
+            b = rows[x]
+            bh = float(b[1])
+            bl = float(b[2])
+            if bh > h:
+                h = bh
+            if bl < lo:
+                lo = bl
+            v = v + float(b[4])
+        out.append([float(first[0]), h, lo, float(rows[hi - 1][3]), v])
     return out
 
 

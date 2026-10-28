@@ -31,9 +31,14 @@ from position_cost import (
     TRAIL_STEP_DEFAULT,
     TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN,
+    SL_MIN_STEPS_DEFAULT,
+    TRAIL_MIN_STEPS_DEFAULT,
+    configure_min_steps,
     cost_as_frac,
     net_pnl_pct,
+    sl_floor_frac,
     snap_sl_ratio,
+    trail_floor_steps,
 )
 from indication_engine import (
     aggregate_bars,
@@ -46,9 +51,27 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from risk_variants import parse_trail, trail_grid, trail_key
+from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes
+from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
+SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
+SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
+SHORT_MIN_PF_DEFAULT = 1.25
+SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
+TREND_PACK = "trend"                  # additional strategy: the Trend family (indication_extra), judged by Base on its own Sets
+BREAK_PACK = "breakout"               # additional strategy: the Breakout family
+TREND_VARIANTS_DEFAULT = ("trend_c6", "trend_c10", "trend_c20")      # combined across 1m / 5m / 15m, by range
+BREAK_VARIANTS_DEFAULT = ("brk_c6", "brk_c10", "brk_c20")
+# Additional strategies built from named indicators (indication_extra / indication_lib), each its own pack: its own Sets, its
+# own Base validation. pack: (overlay switch, overlay key for the indicator names, default names). All off by default.
+EXTRA_PACKS = {
+    TREND_PACK: ("stratTrend", "trendVariants", TREND_VARIANTS_DEFAULT),
+    BREAK_PACK: ("stratBreakout", "breakoutVariants", BREAK_VARIANTS_DEFAULT),
+    "reversion": ("stratReversion", "reversionVariants", ("g_revert_min", "g_revert_med")),
+    "flow": ("stratFlow", "flowVariants", ("g_volume_min", "g_volume_med")),
+    "multi": ("stratMulti", "multiVariants", ("g_all_min", "g_all_med")),
+}
 GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
@@ -66,13 +89,17 @@ STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
+RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
+RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
 
 
-def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]]) -> List[List[float]]:
+def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]], keep_on_gap: bool = False) -> List[List[float]]:
     """Join a newer 1-minute window onto a stored series. Rows carry no timestamps, so the join finds where the new
     window's first row sits in the stored series and checks the overlap row by row. The stored history before that
     point is kept, and the new rows (including a still-forming last bar) replace the overlapped tail. With no overlap
-    the new window stands, because a gap cannot be filled from rows that do not line up."""
+    the new window stands, because a gap cannot be filled from rows that do not line up. keep_on_gap: a window that does not
+    line up is dropped and the stored series kept (rows built from live ticks never equal the exchange's rows, and a short
+    window of them must not replace a long history)."""
     if not old:
         return [list(r) for r in new]
     head = list(new[0])
@@ -82,6 +109,8 @@ def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]]) -
             if all(list(old[p + i]) == list(new[i]) for i in range(span - 1)):
                 return [list(r) for r in old[:p]] + [list(r) for r in new]
             break
+    if keep_on_gap and old:
+        return [list(r) for r in old]
     return [list(r) for r in new]
 
 
@@ -269,6 +298,9 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
             votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
     except Exception:
         pass
+    extras = settings.get("extraIndicators") or []
+    if extras:
+        votes.extend(extra_votes(rows[-EXTRA_WINDOW:], extras))
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -278,6 +310,34 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
     if short_w > long_w and short_w >= 0.6:
         return -1, min(1.0, short_w / max(1, len(votes))), "+".join(w for d, _, w in votes if d < 0)
     return 0, max(long_w, short_w), "split"
+
+
+def short_range_signal(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Short Range pack: the Low-Range variants named in settings["shortRangeVariants"]. One variant firing is a
+    signal; several firing the same way take the strongest confidence; opposite directions cancel (no signal)."""
+    return _variant_signal(rows, settings.get("shortRangeVariants") or list(SHORT_VARIANTS_DEFAULT))
+
+
+def trend_signal_pack(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Trend pack: the trend variants named in settings["trendVariants"], combined as the Short Range pack does."""
+    return _variant_signal(rows, settings.get("trendVariants") or list(TREND_VARIANTS_DEFAULT))
+
+
+def breakout_signal_pack(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Breakout pack: the breakout variants named in settings["breakoutVariants"]."""
+    return _variant_signal(rows, settings.get("breakoutVariants") or list(BREAK_VARIANTS_DEFAULT))
+
+
+def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tuple[int, float, str]:
+    votes = extra_votes(rows, names)
+    if not votes:
+        return 0, 0.0, "flat"
+    longs = [v for v in votes if v[0] > 0]
+    shorts = [v for v in votes if v[0] < 0]
+    if longs and shorts:
+        return 0, 0.0, "split"
+    side = longs or shorts
+    return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
 
 
 def pack_signals(
@@ -324,6 +384,11 @@ def pack_signals(
         if "indications" in packs:
             lo = i + 1 - IND_WINDOW_BARS
             row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+        if SHORT_PACK in packs:
+            row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)    # each name reads its own window
+        for pk, (_sw, vkey, default) in EXTRA_PACKS.items():          # (not `key`: that is this bar's memo key)
+            if pk in packs:
+                row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(vkey) or list(default))
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:
@@ -417,6 +482,10 @@ class SetState:
     last15_ratio: float = 1.0       # 1 + 0.10 x avgR: display only, never compared with a PF threshold
     gate_pf: float = 0.0            # net PF over the last setGateWindow orders: the eligibility metric
     gate_n: int = 0
+    gate_pf_old: float = 0.0        # PF of the older / newer half of that window: the stability check (setGateConsistencyPf)
+    gate_pf_new: float = 0.0
+    gate_gp: float = 0.0            # gross profit / loss (net fractions) inside that same window: the rolling pool inputs
+    gate_gl: float = 0.0
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
     last15_r: float = 0.0
@@ -466,6 +535,65 @@ class Progress:
     ready: bool = False
     error: str = ""
     errors: int = 0                  # symbols + Sets that failed in the last pass; the others still ran
+
+
+_ROW_KEYS = ("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id")
+
+
+def _row_t(r: Tuple[Any, ...]) -> float:
+    return r[0]
+
+
+class BarIndex:
+    """Range-min/max lookups over one symbol's bars (sparse tables), built once per replay of that symbol. A base lane
+    (no trailing) then finds its exit bar with a few lookups instead of walking every bar it holds. The answers are the
+    same bars the walk finds; the walk stays for trailing lanes, whose stop moves with every bar."""
+    __slots__ = ("n", "lo", "hi", "cl_min", "cl_max", "close")
+
+    def __init__(self, bars: Sequence[Sequence[float]]) -> None:
+        self.n = len(bars)
+        lows = [float(b[2]) for b in bars]
+        highs = [float(b[1]) for b in bars]
+        self.close = [float(b[3]) for b in bars]
+        self.lo = self._table(lows, min)
+        self.hi = self._table(highs, max)
+        self.cl_min = self._table(self.close, min)
+        self.cl_max = self._table(self.close, max)
+
+    @staticmethod
+    def _table(arr: List[float], fn: Callable[[float, float], float]) -> List[List[float]]:
+        t = [arr]
+        k = 1
+        while (1 << k) <= len(arr):
+            prev = t[-1]
+            half = 1 << (k - 1)
+            t.append([fn(prev[i], prev[i + half]) for i in range(len(arr) - (1 << k) + 1)])
+            k += 1
+        return t
+
+    @staticmethod
+    def first(t: List[List[float]], a: int, b: int, x: float, le: bool) -> int:
+        """Smallest j in [a, b) with arr[j] <= x (le) or arr[j] >= x (not le); b when there is none."""
+        while a < b:
+            k = (b - a).bit_length() - 1
+            while k >= 0:
+                v = t[k][a]
+                if (v <= x) if le else (v >= x):
+                    k -= 1
+                else:
+                    break
+            if k < 0:
+                return a                     # arr[a] itself meets the condition
+            a += 1 << k                      # the whole block [a, a + 2^k) misses: skip it
+        return b
+
+
+def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None) -> Tuple[float, float]:
+    """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
+    ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under 2 x PositionCost.
+    The live trader takes a Set position's levels from here, so live and replay share one formula."""
+    sl_base = st.tp_pct * (st.sl_ratio if st.kind == "base" else TRAIL_SL_RATIO)
+    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)
 
 
 class SetLane:
@@ -531,7 +659,7 @@ class SetLane:
             return None
         close = float(bar[3])
         cost_frac = cost_as_frac(cfg["cost_pct"])
-        sl_frac = max(cost_frac, self.sl_base)           # a stop is never tighter than one PositionCost
+        sl_frac = max(sl_floor_frac(cfg["cost_pct"], cfg.get("sl_floor_steps")), self.sl_base)   # never under PositionCost + steps
         tp_frac = max(2 * cost_frac, self.tp_frac)       # TP grid starts at 2 x PositionCost
         if d > 0:
             sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
@@ -550,8 +678,10 @@ class SetLane:
         allowed: bool,
         cfg: Dict[str, Any],
         cand: Optional[Sequence[int]] = None,
+        acc: Optional["BarIndex"] = None,
     ) -> List[Dict[str, Any]]:
         """Advance over bars[i0:i1]. Same rules as step(), applied to the whole range in one loop.
+        acc: the symbol's BarIndex; with it a base lane finds its exit by lookup (same result as the walk).
 
         cand: sorted bar indices where an entry is possible (dir != 0 and conf >= entry_conf). A flat lane
         jumps between them; the bars in between can only spend cooldown, which is applied in one step.
@@ -567,6 +697,7 @@ class SetLane:
         cooldown = cfg["cooldown"]
         cost_pct = cfg["cost_pct"]
         cost_frac = cost_as_frac(cost_pct)
+        sl_floor = sl_floor_frac(cost_pct, cfg.get("sl_floor_steps"))
         honor_tp = bool(cfg["honor_tp"])
         use_trail = self.use_trail
         arm = self.arm
@@ -580,6 +711,86 @@ class SetLane:
         out: List[Dict[str, Any]] = []
         i = i0
         while i < i1:
+            if o is not None and acc is not None and (not use_trail or o.get("trail") is None):
+                # an unarmed position (every base lane, and a trailing lane until its arm is reached) exits like a base
+                # lane: find the exit bar by lookup. A trailing lane that arms first hands over to the walk at that bar.
+                side = o["side"]
+                entry = o["entry"]
+                sl = o["sl"]
+                tp = o["tp"]
+                oi = o["i"]
+                first = acc.first
+                end = i1
+                if use_trail:
+                    peak0 = o["peak"]
+                    loose_arm = entry * (1 + side * arm) * (1 - side * 1e-9)
+                    a_ = i
+                    while a_ < i1:
+                        a_ = first(acc.hi, a_, i1, loose_arm, False) if side > 0 else first(acc.lo, a_, i1, loose_arm, True)
+                        if a_ >= i1:
+                            break
+                        pk = max(peak0, float(bars[a_][1])) if side > 0 else min(peak0, float(bars[a_][2]))
+                        if ((pk - entry) / entry if side > 0 else (entry - pk) / entry) >= arm:
+                            break
+                        a_ += 1
+                    end = min(a_, i1)         # the arming bar: from there the stop trails
+                if side > 0:
+                    j_sl = first(acc.lo, i, end, sl, True)
+                    j_tp = first(acc.hi, i, end, tp, False) if honor_tp else end
+                else:
+                    j_sl = first(acc.hi, i, end, sl, False)
+                    j_tp = first(acc.lo, i, end, tp, True) if honor_tp else end
+                j_time = max(i, oi + time_bars)
+                if j_time >= end:
+                    j_time = end
+                # scratch: the first bar from oi + scratch_bars whose close clears scratch_min; the lookup narrows with a
+                # slightly loose level, the exact expression decides
+                j_scr = end
+                a = max(i, oi + scratch_bars)
+                lim = min(end, j_sl, j_tp, j_time)
+                loose = entry * (1 + side * scratch_min) * (1 - side * 1e-9)
+                while a < lim:
+                    a = first(acc.cl_max, a, lim, loose, False) if side > 0 else first(acc.cl_min, a, lim, loose, True)
+                    if a >= lim:
+                        break
+                    if (acc.close[a] - entry) / entry * side >= scratch_min:
+                        j_scr = a
+                        break
+                    a += 1
+                j = min(j_sl, j_tp, j_time, j_scr)
+                if j >= end:
+                    # no exit before `end`: carry the peak over the bars walked past
+                    if i < end:
+                        if side > 0:
+                            o["peak"] = max(o["peak"], max(float(bars[x][1]) for x in range(i, end)))
+                        else:
+                            o["peak"] = min(o["peak"], min(float(bars[x][2]) for x in range(i, end)))
+                    i = end
+                    if end >= i1:
+                        continue
+                    # a trailing lane reached its arm at bar `end`: the walk below takes over from that bar
+                else:
+                    close = acc.close[j]
+                    if j == j_sl:
+                        why, px = "sl", sl
+                    elif j == j_tp:
+                        why, px = "tp", tp
+                    elif j == j_time:
+                        why, px = "time", close
+                    else:
+                        why, px = "scratch+", close
+                    held = j - oi
+                    raw = (px - entry) / entry * side
+                    out.append({
+                        "set_id": sid, "symbol": symbol, "side": "LONG" if side > 0 else "SHORT",
+                        "dir": side, "entry_i": int(oi), "exit_i": j, "entry_px": entry, "exit_px": float(px),
+                        "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cost_pct),
+                        "hold_s": held * BAR_S, "hold_bars": held,
+                    })
+                    o = None
+                    cool = cooldown
+                    i = j + 1
+                    continue
             if o is not None:
                 side = o["side"]
                 entry = o["entry"]
@@ -658,7 +869,7 @@ class SetLane:
             elif allowed:
                 d = int(dirs[j])
                 close = float(bars[j][3])
-                sl_frac = max(cost_frac, sl_base)
+                sl_frac = max(sl_floor, sl_base)
                 tp_use = max(2 * cost_frac, tp_frac)
                 if d > 0:
                     sl, tp = close * (1 - sl_frac), close * (1 + tp_use)
@@ -680,6 +891,13 @@ class SetBook:
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = GATE_MIN_PF_DEFAULT
+        self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
+        self.consistency_pf = 0.0
+        self.pf_history: List[Dict[str, Any]] = []
+        self._adapt_pending: Optional[List[Any]] = None
+        self.quality: Dict[str, str] = {}
+        self.max_flat_share = 0.35
+        self.max_jump = 0.5
         self.gate_window = GATE_WINDOW_DEFAULT
         self.gate_min = GATE_MIN_DEFAULT
         self.max_dd_s = 420.0
@@ -700,6 +918,9 @@ class SetBook:
         self.min_step = STEP_MIN
         self.step_max = STEP_MAX
         self.step_adapt = True
+        self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
+        self.sl_min_steps = SL_MIN_STEPS_DEFAULT
+        self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
         self.hist_honor_tp = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
         self.packs: List[str] = list(PACKS)
@@ -731,6 +952,8 @@ class SetBook:
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
+        self.max_flat_share = min(1.0, max(0.0, num(ov, "histMaxFlatShare", 0.35)))
+        self.max_jump = max(0.01, num(ov, "histMaxJumpPct", 50.0) / 100.0)
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
@@ -738,6 +961,11 @@ class SetBook:
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
         self.gate_min = max(5, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
         self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
+        # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
+        cons = ov.get("setGateConsistencyPf")
+        self.consistency_pf = float(cons) if cons is not None else 0.0     # 0 = off
+        sr_min = ov.get("shortRangeMinPf")
+        self.pack_min_pf = {SHORT_PACK: float(sr_min) if sr_min is not None else SHORT_MIN_PF_DEFAULT}
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
         # hours. setMaxDdtHours is 2..36 in steps of 2, default 12. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
@@ -745,7 +973,7 @@ class SetBook:
         hrs = max(2.0, min(36.0, round(hrs / 2.0) * 2.0))
         self.max_ddt_h = hrs
         self.max_dd_s = hrs * 3600.0
-        self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
+        self.use_historic_gate = True      # the Base gate is always on: entries open only under a Base-validated Set (the overlay key is ignored)
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
         self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))
         if ov.get("timeStopS") is not None:
@@ -774,7 +1002,22 @@ class SetBook:
             packs.append("indications")
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
+        if bool(ov.get("stratShortRange", False)):
+            packs.append(SHORT_PACK)
+        for pk, (sw, _key, _default) in EXTRA_PACKS.items():
+            if bool(ov.get(sw, False)):
+                packs.append(pk)
         self.packs = packs or ["indications"]
+        lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
+        hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
+        self.short_steps = list(range(lo, hi + 1))
+        # overall minimum stop and trailing distance, "PositionCost + n steps" (one step = one PositionCost)
+        sl_ms = ov.get("slMinSteps")
+        tr_ms = ov.get("trailMinSteps")
+        mins = configure_min_steps(SL_MIN_STEPS_DEFAULT if sl_ms is None else sl_ms,
+                                   TRAIL_MIN_STEPS_DEFAULT if tr_ms is None else tr_ms)
+        self.sl_min_steps = mins["sl"]
+        self.trail_min_steps = mins["trail"]
         # Set grid: every SL ratio in setSlRatios (default 0.5..3.5 step 0.25) x every TP step x every pack.
         raw_ratios = ov.get("setSlRatios") or list(SL_RATIOS)
         ratios: List[float] = []
@@ -786,12 +1029,21 @@ class SetBook:
         self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
         # Trailing grid: every (arm, give) from trailMinStep up, in PositionCost units (trail_grid).
         # An explicit trailVariants list ("arm:give" in percent) still overrides the grid.
-        self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))))
+        self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))),
+                                  min(TRAIL_STEP_SETTING_MAX, trail_floor_steps(self.trail_min_steps)))
         raw_tr = ov.get("trailVariants")
         if raw_tr:
             if isinstance(raw_tr, str):
                 raw_tr = [p.strip() for p in raw_tr.split(",") if p.strip()]
-            self.trails = [(trail_key(a, g), a, g) for a, g in (parse_trail(x) for x in raw_tr)]
+            # an explicit list obeys the overall minimum trailing distance too: a give under PositionCost + n steps is lifted
+            gfloor = trail_floor_steps(self.trail_min_steps) * self.cost_pct
+            seen_tr: Dict[str, Tuple[str, float, float]] = {}
+            for a_, g_ in (parse_trail(x) for x in raw_tr):
+                g2 = round(max(g_, gfloor), 4)
+                a2 = round(max(a_, g2), 4)
+                key = f"{a2:.2f}:{g2:.2f}"      # the trail_grid format: exact to the cent, so lifted variants never merge
+                seen_tr.setdefault(key, (key, a2, g2))
+            self.trails = list(seen_tr.values())
         else:
             self.trails = trail_grid(self.trail_min_step, self.cost_pct)
         try:
@@ -824,6 +1076,10 @@ class SetBook:
             "typeDirection": bool(ov.get("indTypeDirection", True)),
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
+            # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
+            "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
+            **{key: [str(x) for x in (ov.get(key) or default) if str(x) in EXTRA_INDICATORS] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
+            "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if str(x) in EXTRA_INDICATORS}),
         }
         with self._lock:
             self._rebuild_sets()
@@ -857,8 +1113,16 @@ class SetBook:
             by_idx.append(st)
             idx += 1
         for pack_i, pack in enumerate(self.packs):
+            pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
+            pack_trails = trails
+            if pack == SHORT_PACK and self.hist_honor_tp:
+                short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
+                pack_trails = [t for t in (list(self.trails) or [("0.3:0.1", 0.3, 0.1)]) if t[1] < short_mid - 1e-9]
+            if pack == SHORT_PACK and pack_steps:
+                # Short Range works with TP steps 2-6: no trailing arm beyond its largest step
+                pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * self.cost_pct + 1e-9]
             for sl_i, sl in enumerate(self.sl_ratios):
-                for step_i, step in enumerate(self.steps):
+                for step_i, step in enumerate(pack_steps):
                     sid = make_set_id(pack, sl, "", step)
                     tp = step_tp_pct(step, self.cost_pct)
                     prev = keep.get(sid)
@@ -884,10 +1148,10 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-            for tr_i, (tkey, arm, give) in enumerate(trails):
+            for tr_i, (tkey, arm, give) in enumerate(pack_trails):
                 sid = make_trail_id(pack, tkey)
                 prev = keep.get(sid)
-                mid_step = self.steps[len(self.steps) // 2] if self.steps else 8
+                mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
                 tp = step_tp_pct(mid_step, self.cost_pct)
                 if prev:
                     st = prev
@@ -927,6 +1191,9 @@ class SetBook:
 
     def _adapt_from_live(self, closed: Sequence[Any]) -> None:
         """If live average is a loss, raise min step to # of positive/successful fills."""
+        if self._running:
+            self._adapt_pending = list(closed)      # applied when the pass in flight ends
+            return
         floor = self.min_step_cfg
         if not self.step_adapt:
             nxt = floor
@@ -959,7 +1226,56 @@ class SetBook:
             self.min_step = nxt
             self._rebuild_sets()
 
-    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
+    def _after_pass(self) -> None:
+        """Apply a step-adapt that arrived while a replay pass was running. Rebuilding mid-pass would discard that pass
+        (the topology changed under it), leave the Sets unrefreshed and, past the freshness limit, mark every Set stale."""
+        pending, self._adapt_pending = self._adapt_pending, None
+        if pending is not None:
+            self.adapt_from_live(pending)
+
+    def bar_quality(self, symbol: str) -> str:
+        """'' when the symbol's history is fit to validate Sets on, otherwise why not. A series that is mostly flat bars
+        (no trade in the minute) or that jumps by more than histMaxJumpPct in one minute (a broken print, as the demo venue
+        shows on illiquid names) would validate Sets on prices nobody could trade."""
+        rows = self.bars.get(symbol) or []
+        if len(rows) < self.min_bars:
+            return "short"
+        flat = 0
+        jump = 0.0
+        prev = 0.0
+        try:
+            for r in rows:
+                if r[1] <= r[2]:
+                    flat += 1
+                c = float(r[3])
+                if prev > 0:
+                    d = abs(c / prev - 1.0)
+                    if d > jump:
+                        jump = d
+                prev = c
+        except (TypeError, ValueError, IndexError, ZeroDivisionError):
+            return ""        # malformed rows: the replay reports this symbol's error itself
+        if flat / len(rows) > self.max_flat_share:
+            return "flat"
+        if jump > self.max_jump:
+            return "spike"
+        return ""
+
+    def usable(self, symbol: str) -> bool:
+        why = self.bar_quality(symbol)
+        if why and why != "short":
+            self.quality[symbol] = why
+        else:
+            self.quality.pop(symbol, None)
+        return not why
+
+    def symbol_ok(self, symbol: str) -> bool:
+        """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
+        return symbol not in self.quality
+
+    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False) -> None:
+        """Join bars onto the symbol's history. tail=True: rows built from live ticks, joined only where they line up with
+        the stored series; they never replace a history they do not overlap."""
         if not bars:
             return
         cleaned: List[List[float]] = []
@@ -971,7 +1287,7 @@ class SetBook:
                 continue
             cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
-            self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned)[-self.lookback :]
+            self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned, keep_on_gap=tail)[-self.lookback :]
 
     def trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)
@@ -1092,9 +1408,12 @@ class SetBook:
         now = now or float((int(t0 // BAR_S) + 1) * BAR_S)
         try:
             if symbols is None:
-                names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
+                names = [s for s in self.bars if self.usable(s)]
             else:
-                names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
+                names = [s for s in symbols if self.usable(s)]
+            # the symbols that already hold the most orders go first: a pass that is cut short (load) still refreshed the
+            # tapes the Sets are judged on most; the sort is stable, so a first pass keeps the given order
+            names.sort(key=lambda s: -sum(len(v) for v in (self._hist_rows.get(s) or {}).values()))
             was_ready = self.progress.ready
             self.progress = Progress(
                 phase="replay",
@@ -1127,8 +1446,11 @@ class SetBook:
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
                     continue
+                packed = {sid: [(r["t"], r["symbol"], r["side"], r["pnl"], r["pnl_pct"], r["hold_s"], r["reason"], r["set_id"])
+                                for r in rows] for sid, rows in per_set.items() if rows}
+                per_set = {}                          # rows are kept as tuples: about a third of the memory of dicts
                 with self._lock:
-                    self._hist_rows[symbol] = per_set
+                    self._hist_rows[symbol] = packed
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
                     on_step()
@@ -1136,25 +1458,23 @@ class SetBook:
             self.progress.pct = 90.0
             cutoff = now - self.lookback * BAR_S
             with self._lock:
-                live = {s for s, b in self.bars.items() if len(b) >= self.min_bars}
+                live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
-                    del self._hist_rows[s]          # symbols that left the universe drop their rows
+                    del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
                 for s in [s for s in self._sig_cache if s not in live]:
                     del self._sig_cache[s]          # and so do their signal memo entries
                 stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
                 if stale:
                     aborted = True                  # keep each Set's last complete scores; the next pass redoes them
                     self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
+                tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
                 for st in ([] if stale else self.by_idx):
                     try:
-                        rows = [
-                            r
-                            for s, per_set in self._hist_rows.items()
-                            for r in per_set.get(st.id, [])
-                            if finite(r.get("t")) >= cutoff
-                        ]
-                        full = sorted(rows, key=lambda r: finite(r.get("t")))
-                        st.hist = full[-max(40, self.gate_window):]
+                        full = sorted(
+                            (r for sym_ in tape_order for r in self._hist_rows[sym_].get(st.id, ()) if r[0] >= cutoff),
+                            key=_row_t,
+                        )
+                        st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=now)
                         st.n = len(full) + st.live_n   # a replay pass recounts history; live closes stay counted
@@ -1179,6 +1499,8 @@ class SetBook:
                 self.progress.phase = "ready"
                 self.progress.pct = 100.0
                 self.progress.ready = True
+                with self._lock:
+                    self._record_pf_progress()
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
@@ -1194,6 +1516,7 @@ class SetBook:
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
+            self._after_pass()
 
     def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> None:
         bars = self.bars[symbol]
@@ -1206,11 +1529,12 @@ class SetBook:
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
-            "scratch_bars": max(8, int(self.scratch_s / BAR_S)),
+            "scratch_bars": self.scratch_bars,
             "scratch_min": self.scratch_min,
             "cooldown": self.cooldown_bars,
             "cost_pct": self.cost_pct,
             "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
+            "sl_floor_steps": self.sl_min_steps,
         }
         # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
         dirs: Dict[str, List[int]] = {}
@@ -1221,11 +1545,12 @@ class SetBook:
             dirs[p] = [x[0] for x in sig]
             confs[p] = [x[1] for x in sig]
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
+        acc = BarIndex(bars)          # one index per symbol, shared by every lane
         for st in self.by_idx:
             if st.pack not in self.packs:
                 continue
             lane = SetLane(st, symbol)
-            for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack]):
+            for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc):
                 hist[st.id].append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
                                     "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
                                     "reason": done["reason"], "set_id": st.id})
@@ -1256,6 +1581,18 @@ class SetBook:
         gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
+        cf = cost_as_frac(self.cost_pct)
+        win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-self.gate_window:]
+        half = len(win) // 2
+        if half >= 1:
+            def _pf(v: List[float]) -> float:
+                gp_, gl_ = sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
+                return gp_ / gl_ if gl_ > 0 else (99.0 if gp_ > 0 else 0.0)
+            st.gate_pf_old, st.gate_pf_new = round(_pf(win[:half]), 4), round(_pf(win[half:]), 4)
+        else:
+            st.gate_pf_old = st.gate_pf_new = 0.0
+        st.gate_gp = round(sum(x for x in win if x > 0), 8)
+        st.gate_gl = round(-sum(x for x in win if x < 0), 8)
         last25 = tape[-self.deact_n :]
         st.last25_n = len(last25)
         if last25:
@@ -1289,8 +1626,10 @@ class SetBook:
             return "error"
         if st.gate_n < self.gate_min:
             return "n<min"
-        if st.gate_pf + 1e-9 < self.min_pf:
+        if st.gate_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf):
             return "pf<min"
+        if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:
+            return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
         if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
@@ -1375,6 +1714,9 @@ class SetBook:
                 "step": len(self.steps),
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
+            "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
+                           "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
+            "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
             "product": len(self.by_idx),
             "indexed": True,
             "independentTrail": True,
@@ -1400,9 +1742,23 @@ class SetBook:
         with self._lock:
             return self._valid_for(pack, kind)
 
+    def rank_key(self, st: SetState) -> Tuple[Any, ...]:
+        """Order of choice among the eligible Sets, best first (sort descending):
+        1. stable: the PF of both halves of the gate window is at or above the pack's PF floor, so the Set did not pass
+           on one lucky stretch;
+        2. the gate PF shrunk toward 1 by the orders behind it (n / (n + RANK_SHRINK_N)): a PF on 35 orders weighs less
+           than the same PF on 350;
+        3. more orders;
+        4. the better recent R, then the shorter drawdown time."""
+        floor = self.pack_min_pf.get(st.pack, self.min_pf)
+        halves = min(st.gate_pf_old, st.gate_pf_new) if (st.gate_pf_old or st.gate_pf_new) else st.gate_pf
+        n = max(0, int(st.n))
+        shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
+        return (halves + 1e-9 >= floor, round(shrunk, 4), n, st.last25_avg_r, -st.max_dd_s)
+
     def _valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and self.is_eligible(s)]
-        rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        rows.sort(key=self.rank_key, reverse=True)
         return rows
 
     def _pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
@@ -1414,8 +1770,19 @@ class SetBook:
         if not rows:
             return None
         rows = [s for s in rows if s.active] or rows
-        rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        # a Set with fewer orders than the gate floor is not judged: its PF (99 after one winning order) must not outrank a
+        # Set that has the orders
+        rows.sort(key=lambda s: (s.gate_n >= self.gate_min,) + self.rank_key(s), reverse=True)
         return rows[0]
+
+    @property
+    def scratch_bars(self) -> int:
+        """Bars after the entry before the scratch exit may fire; the replay and the live Set lane both read this."""
+        return max(8, int(self.scratch_s / BAR_S))
+
+    def lane_fracs(self, st: SetState) -> Tuple[float, float]:
+        """(sl_frac, tp_frac) of a Set's lane with this book's PositionCost and minimum stop steps (the replay's cfg)."""
+        return lane_fracs(st, self.cost_pct, self.sl_min_steps)
 
     def pick_trail(self, pack: str) -> Optional[SetState]:
         return self.pick(pack, kind="trail")
@@ -1454,15 +1821,48 @@ class SetBook:
             return self._snapshot()
 
     def _pf_split(self) -> Dict[str, Any]:
-        """Pooled net PF of the Sets that pass Base validation (the effective one) and of every Set (unfiltered, before
-        Base). The unfiltered figure sits under 1 by design: Base validation exists to drop the losing Sets."""
+        """The post-Base standard figures, on each Set's rolling gate window (its last `setGateWindow` orders), never on
+        the whole tape: a Set that was good long ago and is bad now does not carry the pool. `base` is the pooled net
+        PF of the Sets that pass Base validation (the effective PF, the one to judge a strategy by); `unfiltered` is
+        every Set on the same basis (under 1 by design: Base exists to drop the losing Sets). `validatedPct` is the
+        share of configured Sets that pass Base validation, and `byPack` repeats base/validated per strategy pack.
+        `history` is the continuous progress of the effective PF and the validated share, one point per scoring pass."""
         def pool(sts: List[SetState]) -> Dict[str, Any]:
-            gp = sum(x.gp for x in sts)
-            gl = sum(x.gl for x in sts)
+            gp = sum(x.gate_gp for x in sts)
+            gl = sum(x.gate_gl for x in sts)
             pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-            return {"pf": pf, "n": sum(x.n for x in sts), "sets": len(sts)}
-        valid = [x for x in self.by_idx if not self.gate_reason(x)]
-        return {"base": pool(valid), "unfiltered": pool(list(self.by_idx))}
+            return {"pf": pf, "n": sum(x.gate_n for x in sts), "sets": len(sts)}
+        allsets = list(self.by_idx)
+        valid = [x for x in allsets if not self.gate_reason(x)]
+        total = len(allsets)
+        by_pack: Dict[str, Any] = {}
+        for pack in self.packs:
+            ps = [x for x in allsets if x.pack == pack]
+            pv = [x for x in ps if not self.gate_reason(x)]
+            by_pack[pack] = {"base": pool(pv), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv),
+                             "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
+                             "minPf": self.pack_min_pf.get(pack, self.min_pf)}
+        return {"base": pool(valid), "unfiltered": pool(allsets), "total": total, "valid": len(valid),
+                "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack,
+                "basis": "gate-window", "history": list(self.pf_history[-240:])}
+
+    def _record_pf_progress(self) -> None:
+        """One point per scoring pass (at most one per 20 s): the effective PF and the validated share over time."""
+        now = time.time()
+        if self.pf_history and now - self.pf_history[-1]["t"] < 20.0:
+            return
+        split = self._pf_split_nohist()
+        self.pf_history.append({"t": round(now, 1), "pf": split["base"]["pf"], "n": split["base"]["n"],
+                                "valid": split["valid"], "validatedPct": split["validatedPct"],
+                                "unfiltered": split["unfiltered"]["pf"]})
+        del self.pf_history[:-720]
+
+    def _pf_split_nohist(self) -> Dict[str, Any]:
+        saved, self.pf_history = self.pf_history, []
+        try:
+            return self._pf_split()
+        finally:
+            self.pf_history = saved
 
     def _snapshot(self) -> Dict[str, Any]:
         rows = []
@@ -1531,6 +1931,7 @@ class SetBook:
         rows = rows[:24]
         p = self.progress
         cover = self.coverage()
+        rank = {id(st): k for k, st in enumerate(sorted((s for s in self.by_idx if self.is_eligible(s)), key=self.rank_key, reverse=True))}
         index = [
             {
                 "i": st.idx,
@@ -1543,6 +1944,19 @@ class SetBook:
                 "on": int(self.is_eligible(st)),
                 "pf": round(st.gate_pf, 4),
                 "dd": st.max_dd_s,
+                # what the desk needs to pool the PF of any selection like _pf_split: orders, gate-window orders and
+                # gross profit / loss, plus the table columns and the engine's own rank among the valid Sets
+                "n": st.n,
+                "gn": st.gate_n,
+                "gp": st.gate_gp,
+                "gl": st.gate_gl,
+                "p15": round(st.last15_pf, 4),
+                "r25": round(st.last25_avg_r, 3),
+                "wr": round(st.wr, 1),
+                "e": round(st.expectancy, 5),
+                "h": round(st.avg_hold_s),
+                "da": round(st.avg_dd_s),
+                "rk": rank.get(id(st), -1),
             }
             for st in self.by_idx
         ]
@@ -1570,6 +1984,8 @@ class SetBook:
             "steps": list(self.steps),
             "histFills": sum(s.n for s in self.sets.values()),
             "barsSymbols": len(self.bars),
+            "quality": {"excluded": len(self.quality), "maxFlatShare": self.max_flat_share, "maxJumpPct": self.max_jump * 100.0,
+                        "symbols": dict(sorted(self.quality.items())[:24])},
             "progress": {
                 "phase": p.phase,
                 "pct": round(p.pct, 1),

@@ -140,7 +140,65 @@ def async_bridge_waits_on_the_loop_for_the_bucket():
     return ok, f"requests={len(client.calls)} ticks_during_gather={ticks}"
 
 
+def signature_covers_raw_values_and_the_query_is_encoded():
+    """The signature is the HMAC of the sorted RAW parameters (what the exchange verifies); the request carries the
+    percent-encoded query. A JSON batchOrders value must not be signed in its encoded form."""
+    import hashlib
+    import hmac
+    import json
+    import urllib.parse
+    c = _client("/tmp/unused-err.jsonl")
+    c.secret = "unit-secret"
+    batch = json.dumps([{"symbol": "BTC-USDT", "type": "STOP_MARKET", "side": "SELL", "stopPrice": 99.5, "quantity": 0.01}], separators=(",", ":"))
+    params = {"timestamp": "1700000000000", "recvWindow": "5000", "batchOrders": batch}
+    qs = c._sign(params)
+    body, sig = qs.rsplit("&signature=", 1)
+    raw = "&".join(f"{k}={params[k]}" for k in sorted(params))
+    want = hmac.new(b"unit-secret", raw.encode(), hashlib.sha256).hexdigest()
+    decoded = dict(urllib.parse.parse_qsl(body))
+    plain = {"timestamp": "1700000000000", "symbol": "BTC-USDT"}
+    plain_ok = c._sign(plain).rsplit("&signature=", 1)[1] == hmac.new(b"unit-secret", b"symbol=BTC-USDT&timestamp=1700000000000", hashlib.sha256).hexdigest()
+    ok = sig == want and decoded["batchOrders"] == batch and "%7B" in body and plain_ok
+    return ok, f"signature over raw values={sig == want} query encoded={'%7B' in body} round-trips={decoded.get('batchOrders') == batch} plain params unchanged={plain_ok}"
+
+
+def batch_orders_carry_numbers_not_numeric_strings():
+    """batchOrders is refused when its JSON price or quantity is a string. The sync client turns the numeric fields into
+    numbers and leaves the rest (closePosition "true", ids) as they were."""
+    import json
+    c = _client("/tmp/unused-err2.jsonl")
+    sent = []
+    c.post = lambda path, extra=None: (sent.append((path, extra)) or {"code": 0, "data": {"orders": []}})
+    c.batch_place([{"symbol": "BTC-USDT", "type": "STOP_MARKET", "stopPrice": "60000.5", "quantity": "0.01", "closePosition": "true", "clientOrderID": "c1"},
+                   {"symbol": "BTC-USDT", "type": "TAKE_PROFIT_MARKET", "stopPrice": "x", "clientOrderID": "c2"}])
+    rows = json.loads(sent[0][1]["batchOrders"])
+    ok = (sent[0][0].endswith("/trade/batchOrders") and rows[0]["stopPrice"] == 60000.5 and rows[0]["quantity"] == 0.01
+          and rows[0]["closePosition"] == "true" and rows[0]["clientOrderID"] == "c1" and rows[1]["stopPrice"] == "x")
+    return ok, f"batch rows={rows}"
+
+
+def gather_without_the_async_bridge_runs_in_parallel_threads():
+    """httpx missing: the bridge is offline. A batched public GET must still return every response, in request order,
+    fetched in parallel (four 0.3 s requests well under 1.2 s), not an empty "async-offline" row per request."""
+    import types
+    c = _client("/tmp/unused-err3.jsonl")
+    c.bridge = types.SimpleNamespace(ok=False)
+    def slow_public(path, extra=None):
+        time.sleep(0.3)
+        return {"code": 0, "data": [extra["symbol"]]}
+    c.public = slow_public
+    reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s}) for s in ("A", "B", "C", "D")]
+    t0 = time.monotonic()
+    rows = c.gather_public(reqs, timeout=2.0)
+    dt = time.monotonic() - t0
+    ok = [r[2].get("data") for r in rows] == [["A"], ["B"], ["C"], ["D"]] and dt < 0.9
+    return ok, f"rows={[r[2].get('data') for r in rows]} took {dt:.2f}s"
+
+
 CHECKS = [
+    ("exchange.gather-without-bridge-uses-threads", gather_without_the_async_bridge_runs_in_parallel_threads),
+    ("exchange.batch-orders-carry-numbers", batch_orders_carry_numbers_not_numeric_strings),
+    ("exchange.signature-raw-values-encoded-query", signature_covers_raw_values_and_the_query_is_encoded),
     ("exchange.public-cooldown-blocks-http", public_cooldown_blocks_http),
     ("exchange.public-ok-path-not-blocked", public_ok_path_is_not_blocked),
     ("exchange.token-bucket-reserve-never-sleeps", token_bucket_reserve_never_sleeps),

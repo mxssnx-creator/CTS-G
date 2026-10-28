@@ -1,4 +1,18 @@
-"""CTS Block strategy — formulas and lifecycle as in BLOCK_STRATEGY_SYSTEM.md / block-count-state.ts."""
+"""CTS Block strategy — formulas and lifecycle as in BLOCK_STRATEGY_SYSTEM.md / block-count-state.ts.
+
+Volume (additive, from the original base volume V0 of the group):
+- A group k = 1..maxStack is one partial add of ratio r = volumeRatio, worth r x V0. V0 is fixed for the whole group; no
+  partial is computed on the grown volume.
+- Stacking is by the number of VALID groups (groups whose PF decision passes and that are not paused), not by their
+  index: with groups 1 and 3 valid and group 2 not, the stack after group 3 is V0 x (1 + 2r), and group 3 adds one
+  partial (r x V0), never the cumulative 3 x r x V0 in one order. The stack never exceeds V0 x (1 + maxStack x r).
+- The k-th valid group must pass the PF threshold of the stack it would create (1 + (minPf - 1) x pfRatio x k x r).
+- A stack that was increased stays increased: when the parent closes at a net loss the lane keeps its level (the number
+  of partials) and the original V0, the next parent opens at V0 x (1 + level x r), and the group's net accumulates over
+  its parents. When that net is back to equal (>= 0) the level resets to the base volume. The level never shrinks while
+  the net is negative.
+- Observed PF and pauses per group persist across parents (they are the lane's memory, not the parent's).
+"""
 from __future__ import annotations
 
 import json
@@ -88,6 +102,11 @@ class BlockLane:
     parent_pf_ring: List[float] = field(default_factory=list)
     satisfied: Dict[int, bool] = field(default_factory=dict)
     active: bool = True
+    # the stack that stays increased across parents until the group's net is back to equal
+    carried: int = 0        # partials (valid groups) carried into the next parent
+    top: int = 0            # the highest group index in the carried stack (those groups count as already valid)
+    v0: float = 0.0         # the group's original base volume
+    net: float = 0.0        # net result (USDT) of the group's parents since it first increased
 
 
 class BlockBook:
@@ -97,12 +116,12 @@ class BlockBook:
         self.path = path
         cfg = cfg or {}
         self.enabled = bool(cfg.get("variantBlockEnabled", True))
-        raw_stack = cfg.get("blockMaxStack", 0)
+        raw_stack = cfg.get("blockMaxStack", 6)
         try:
             stack_n = int(raw_stack if raw_stack is not None else 0)
         except Exception:
             stack_n = 0
-        # 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
+        # default 6 groups, 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
         self.max_stack = 0 if stack_n <= 0 else max(1, stack_n)
         self.volume_ratio = clamp(float(cfg.get("blockVolumeRatio", 1) or 1), 0.25, 3.0)
         self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 0.8) or 0.8), 0.2, 5.0)
@@ -140,6 +159,10 @@ class BlockBook:
                 parent_pf_ring=list(v.get("parent_pf_ring") or []),
                 satisfied={int(a): bool(b) for a, b in (v.get("satisfied") or {}).items()},
                 active=bool(v.get("active", True)),
+                carried=int(v.get("carried") or 0),
+                top=int(v.get("top") or 0),
+                v0=float(v.get("v0") or 0),
+                net=float(v.get("net") or 0),
             )
             self.lanes[k] = lane
 
@@ -170,6 +193,10 @@ class BlockBook:
                 "parent_pf_ring": lane.parent_pf_ring[-self.window :],
                 "satisfied": {str(a): b for a, b in lane.satisfied.items()},
                 "active": lane.active,
+                "carried": lane.carried,
+                "top": lane.top,
+                "v0": lane.v0,
+                "net": lane.net,
             }
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
@@ -177,15 +204,38 @@ class BlockBook:
         os.replace(tmp, self.path)
 
     def register_parent(self, symbol: str, side: str, qty: float, entry: float) -> BlockLane:
+        """A parent opened. The lane object is reused so its observed PF, pauses and parent ring survive; only the
+        parent's own state starts over. With a carried stack the parent already holds the carried partials: V0 stays the
+        group's original volume and the carried part counts as confirmed."""
         k = self.key(symbol, side)
         lane = self.lanes.get(k)
         if lane and lane.base_qty > 0:
             lane.active = True
             return lane
-        lane = BlockLane(symbol=symbol, side=side, base_qty=qty, base_entry=entry, active=True)
-        self.lanes[k] = lane
+        if lane is None:
+            lane = BlockLane(symbol=symbol, side=side, base_qty=qty, base_entry=entry, active=True)
+            self.lanes[k] = lane
+        carried = lane.carried > 0 and lane.v0 > 0
+        lane.base_qty = lane.v0 if carried else qty
+        lane.v0 = lane.base_qty
+        lane.base_entry = entry
+        lane.confirmed_add = lane.carried * self.volume_ratio * lane.v0 if carried else 0.0
+        if not carried:
+            lane.carried, lane.top, lane.net = 0, 0, 0.0
+        lane.legs = []
+        lane.satisfied = {}
+        lane.active = True
         self.save()
         return lane
+
+    def parent_scale(self, symbol: str, side: str) -> float:
+        """Multiplier of the base volume for the next parent of this lane: 1 + carried partials x ratio, at most the full
+        stack. 1.0 when nothing is carried."""
+        lane = self.lanes.get(self.key(symbol, side))
+        if not self.enabled or lane is None or lane.carried <= 0:
+            return 1.0
+        n = lane.carried if self.unlimited() else min(lane.carried, int(self.max_stack))
+        return 1.0 + n * self.volume_ratio
 
     def formula(self, base_qty: float, count: int) -> Dict[str, float]:
         inc = calculate_block_volume_increment_ratio(count, self.volume_ratio)
@@ -220,8 +270,10 @@ class BlockBook:
         pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
         return pf, len(ring)
 
-    def pf_decision(self, lane: BlockLane, count: int, intern_pf: float = 1.0) -> Dict[str, Any]:
-        inc = calculate_block_volume_increment_ratio(count, self.volume_ratio)
+    def pf_decision(self, lane: BlockLane, count: int, intern_pf: float = 1.0, rank: Optional[int] = None) -> Dict[str, Any]:
+        """The PF decision of group `count`. `rank` is the number of valid groups the stack would have with it (the k-th
+        valid group); its threshold is that of the stack it creates. Without a rank the count itself is used."""
+        inc = calculate_block_volume_increment_ratio(rank if rank is not None else count, self.volume_ratio)
         configured = calculate_block_minimum_profit_factor(self.default_min_pf, self.pf_ratio, inc)
         normal = self.normal_pf(lane)
         observed, n = self.observed_pf(lane, count)
@@ -264,17 +316,39 @@ class BlockBook:
         return max(0.0, f["targetAddQty"] - lane.confirmed_add)
 
     def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = 1.0) -> List[Dict[str, Any]]:
-        """Evaluate every 1..maxStack independently + active overlay. No emission here."""
-        rows = []
+        """Evaluate every group 1..maxStack and the active overlay row. No emission here.
+
+        Groups are walked in order. A group whose PF decision passes (and is not paused) is VALID and becomes the k-th
+        valid group: its cumulative target is k x ratio x V0 and it is satisfied once the confirmed adds reach it, so it
+        requests one partial (ratio x V0) after the previous valid group, however many groups before it were not valid.
+        """
+        rows: List[Dict[str, Any]] = []
         if not self.enabled or not lane.active or lane.base_qty <= 0:
             return rows
         now = time.time()
+        v0 = lane.base_qty
+        carried_top = lane.top if lane.carried > 0 else 0
+        valid = lane.carried if carried_top else 0           # the carried partials are already valid groups
         for n in self._count_range(lane):
-            f = self.formula(lane.base_qty, n)
+            if n <= carried_top:
+                f = self.formula(v0, max(1, valid))
+                rows.append({
+                    "setKey": f"{lane.symbol}:{lane.side.lower()}#block:{n}", "blockCount": n, "kind": "regular",
+                    "paused": False, "targetSatisfied": True, "requestedAddQty": 0.0, "validRank": 0, **f,
+                    "volumeIncrement": self.volume_ratio, "cumulativeRatio": 0.0, "carried": True,
+                    **self.pf_decision(lane, n, intern_pf=intern_pf, rank=max(1, valid)), "evaluated": 1, "emitted": 0,
+                })
+                continue
+            rank = valid + 1
+            f = self.formula(v0, rank)
             paused = lane.pause_remaining.get(n, 0) > 0 or now < lane.pause_until.get(n, 0)
-            sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
-            pf = self.pf_decision(lane, n, intern_pf=intern_pf)
-            requested = 0.0 if sat or paused or not pf["passesProfitFactor"] else max(0.0, f["targetAddQty"] - lane.confirmed_add)
+            pf = self.pf_decision(lane, n, intern_pf=intern_pf, rank=rank)
+            ok = bool(pf["passesProfitFactor"]) and not paused
+            if ok:
+                valid += 1
+            sat = ok and lane.confirmed_add + 1e-12 >= f["targetAddQty"]
+            # one order adds at most one partial (ratio x V0); the rest of a cumulative gap comes with the next order
+            requested = min(max(0.0, f["targetAddQty"] - lane.confirmed_add), self.volume_ratio * v0) if ok and not sat else 0.0
             rows.append({
                 "setKey": f"{lane.symbol}:{lane.side.lower()}#block:{n}",
                 "blockCount": n,
@@ -282,32 +356,21 @@ class BlockBook:
                 "paused": paused,
                 "targetSatisfied": sat,
                 "requestedAddQty": requested,
+                "validRank": rank if ok else 0,
                 **f,
+                "volumeIncrement": self.volume_ratio,          # the partial this group adds (x V0)
+                "cumulativeRatio": rank * self.volume_ratio if ok else 0.0,
                 **pf,
                 "evaluated": 1,
                 "emitted": 0,
             })
-        if self.active_real and self.active_live and live_n >= 1:
+        if self.active_real and self.active_live and live_n >= 1 and rows:
             n = max(1, live_n)
             if not self.unlimited():
-                n = min(self.max_stack, n)
-            f = self.formula(lane.base_qty, n)
-            pf = self.pf_decision(lane, n, intern_pf=intern_pf)
-            paused = lane.pause_remaining.get(n, 0) > 0 or now < lane.pause_until.get(n, 0)
-            sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
-            requested = 0.0 if sat or paused or not pf["passesProfitFactor"] else max(0.0, f["targetAddQty"] - lane.confirmed_add)
-            rows.append({
-                "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:{n}",
-                "blockCount": n,
-                "kind": "active-live",
-                "paused": paused,
-                "targetSatisfied": sat,
-                "requestedAddQty": requested,
-                **f,
-                **pf,
-                "evaluated": 1,
-                "emitted": 0,
-            })
+                n = min(int(self.max_stack), n)
+            src = next((r for r in rows if r["blockCount"] == n), None)
+            if src is not None:
+                rows.append({**src, "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:{n}", "kind": "active-live"})
         return rows
 
     def pick_emit(self, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -325,16 +388,12 @@ class BlockBook:
 
     def record_fill(self, lane: BlockLane, row: Dict[str, Any], filled: float, cid: str, oid: str) -> None:
         n = int(row["blockCount"])
-        f = self.formula(lane.base_qty, n)
+        f = {"volumeIncrement": self.volume_ratio, "targetAddQty": float(row["targetAddQty"]),
+             "targetBlockQty": float(row["targetBlockQty"])}
         before = lane.confirmed_add
         lane.confirmed_add += filled
         sat = lane.confirmed_add + 1e-12 >= f["targetAddQty"]
         lane.satisfied[n] = sat
-        # lower counts already covered
-        for c in range(1, n):
-            fc = self.formula(lane.base_qty, c)
-            if lane.confirmed_add + 1e-12 >= fc["targetAddQty"]:
-                lane.satisfied[c] = True
         lane.legs.append(
             BlockLeg(
                 set_key=row["setKey"],
@@ -381,6 +440,16 @@ class BlockBook:
                 lane.pf_ring[n] = lane.pf_ring[n][-self.window :]
                 lane.pause_remaining[n] = self.pause_ratio
                 lane.pause_until[n] = time.time() + 45 * max(1, self.pause_ratio)
+        # the stack stays increased until the group's net is back to equal
+        partials = lane.carried + len(lane.legs)
+        if partials > 0:
+            lane.net += float(pnl)
+            if lane.net >= 0:
+                lane.carried, lane.top, lane.v0, lane.net = 0, 0, 0.0, 0.0   # back to equal: the next parent opens at the base volume
+            else:
+                cap = partials if self.unlimited() else min(partials, int(self.max_stack))
+                lane.carried = max(lane.carried, cap)             # never shrinks while the net is negative
+                lane.top = max([lane.top] + [int(leg.block_count) for leg in lane.legs])
         lane.active = False
         lane.confirmed_add = 0.0
         lane.legs = []
@@ -391,13 +460,15 @@ class BlockBook:
     def snapshot(self) -> Dict[str, Any]:
         lanes = []
         for lane in self.lanes.values():
-            if not lane.active and not lane.legs:
+            if not lane.active and not lane.legs and lane.carried <= 0:
                 continue
             rows = self.evaluate_counts(lane, live_n=1 if lane.active else 0, intern_pf=1.2)
             lanes.append({
                 "symbol": lane.symbol,
                 "side": lane.side,
                 "baseQty": lane.base_qty,
+                "carried": lane.carried,
+                "groupNet": round(lane.net, 6),
                 "confirmedAdd": round(lane.confirmed_add, 8),
                 "aggregate": round(lane.base_qty + lane.confirmed_add, 8),
                 "legs": [asdict(x) for x in lane.legs[-8:]],
@@ -408,6 +479,7 @@ class BlockBook:
                         "inc": r["volumeIncrement"],
                         "targetAdd": round(r["targetAddQty"], 8),
                         "requested": round(r["requestedAddQty"], 8),
+                        "rank": r["validRank"],
                         "minPF": round(r["blockMinPF"], 4),
                         "obsPF": round(r["observedProfitFactor"], 4),
                         "pass": r["passesProfitFactor"],

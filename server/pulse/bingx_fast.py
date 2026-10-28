@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import concurrent.futures
 import hmac
 import hashlib
 import json
@@ -267,6 +268,23 @@ def _apply_px(data: Any, on_px: Callable[[str, float], None]) -> None:
         on_px(str(sym), f)
 
 
+BATCH_NUMERIC = ("price", "stopPrice", "quantity", "triggerPrice", "activationPrice")
+
+
+def _batch_numbers(order: Dict[str, Any]) -> Dict[str, Any]:
+    """batchOrders takes its JSON price and quantity fields as numbers (a numeric string is refused with 109400);
+    the single-order endpoints take query strings. Other fields (closePosition "true", ids) stay as they are."""
+    out = dict(order)
+    for k in BATCH_NUMERIC:
+        v = out.get(k)
+        if isinstance(v, str):
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+    return out
+
+
 class FastBingX:
     def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: str = WS_URL) -> None:
         self.key = key
@@ -328,9 +346,13 @@ class FastBingX:
         return "public"
 
     def _sign(self, params: Dict[str, Any]) -> str:
+        """The signature covers the sorted parameters with their RAW values; the request carries the percent-encoded
+        query. Signing the encoded text is only right while every value is plain, and a JSON value (batchOrders) is not:
+        the exchange then answers 100001 signature mismatch."""
         items = sorted((k, params[k]) for k in params)
+        raw = "&".join(f"{k}={v}" for k, v in items)
+        sig = hmac.new(self.secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
         qs = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
-        sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
         return qs + "&signature=" + sig
 
     def _take(self, lane: str, path: str = "") -> bool:
@@ -450,13 +472,17 @@ class FastBingX:
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not orders:
             return {"code": 0, "data": {"orders": []}}
-        chunk = orders[:5]
+        chunk = [_batch_numbers(o) for o in orders[:5]]
         return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
 
     def cancel_replace(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.post("/openApi/swap/v2/trade/order/cancelReplace", extra or {})
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        if not getattr(getattr(self, "bridge", None), "ok", False):
+            # no asyncio bridge (httpx is not installed): the same requests in parallel on a small thread pool, through
+            # the sync client's own rate gate. Without this every batched public GET (klines, history) came back empty.
+            return self._gather_threads(reqs, timeout)
         self.stats["rest"] += len(reqs)
         self.stats["asyncN"] += len(reqs)
         rows = self.bridge.gather(reqs, timeout=timeout)
@@ -464,6 +490,22 @@ class FastBingX:
         if snap:
             self.stats["asyncP50"] = snap
         return rows
+
+    def _gather_threads(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        if not reqs:
+            return []
+        pool = getattr(self, "_pub_pool", None)
+        if pool is None:
+            pool = self._pub_pool = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="bx-pub")
+        futs = [(p, e, pool.submit(self.public, p, e)) for p, e in reqs]
+        out: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        end = time.monotonic() + max(0.5, float(timeout)) + 5.0      # each GET has its own 5 s socket timeout
+        for p, e, f in futs:
+            try:
+                out.append((p, e, f.result(timeout=max(0.05, end - time.monotonic()))))
+            except Exception as exc:
+                out.append((p, e, {"error": True, "msg": f"thread-gather: {str(exc)[:80]}"}))
+        return out
 
     def snapshot(self) -> Dict[str, Any]:
         return {

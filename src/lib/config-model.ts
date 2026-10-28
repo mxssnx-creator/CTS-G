@@ -80,8 +80,8 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
-// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.10).
-export const GATE_MIN_PF_DEFAULT = 1.1;
+// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
+export const GATE_MIN_PF_DEFAULT = 1.25;
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
@@ -100,6 +100,14 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 export type PulseOverlay = {
   targetNotional: number;
   volumeFactor: number;
+  /** Percent of the balance per position before the volume factor; 0 = the fixed targetNotional. */
+  sizePctOfBalance: number;
+  /** Hard ceiling for one position's notional in USDT, whatever the balance. */
+  sizeMaxNotional: number;
+  /** A fill farther than this (percent) from the price the entry was decided at is closed at once and the symbol rests. */
+  maxEntrySlipPct: number;
+  /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
+  ddHaltPct: number;
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -134,6 +142,10 @@ export type PulseOverlay = {
   dcaStepDistancesPct: number[];
   dcaStepVolumeMultipliers: number[];
   dcaAutoDeact: boolean;
+  dcaAuto: boolean;
+  dcaOnSets: boolean;
+  dcaOnAxis: boolean;
+  dcaMaxExposureX: number;
   dcaMinPf: number;
   dcaPfWindow: number;
   dcaDeactN: number;
@@ -176,6 +188,21 @@ export type PulseOverlay = {
   stratBlock: boolean;
   stratTrailing: boolean;
   stratGeneral: boolean;
+  /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
+  stratShortRange: boolean;
+  stratTrend: boolean;
+  stratBreakout: boolean;
+  stratReversion: boolean;
+  stratFlow: boolean;
+  stratMulti: boolean;
+  shortRangeStepMin: number;
+  shortRangeStepMax: number;
+  /** Short Range has its own Base PF floor, whatever the global setMinPf is (default 1.1). */
+  shortRangeMinPf: number;
+  /** Overall minimum stop = PositionCost + slMinSteps steps (one step = one PositionCost). */
+  slMinSteps: number;
+  /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
+  trailMinSteps: number;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -238,7 +265,11 @@ export type PulseOverlay = {
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
-  volumeFactor: 1.5,
+  volumeFactor: 0.05,
+  sizePctOfBalance: 0,
+  sizeMaxNotional: 25,
+  maxEntrySlipPct: 0.75,
+  ddHaltPct: 18,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,
@@ -246,7 +277,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsAll: false,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: 0,
+  symbolCap: 50,
   slPct: 0.48,
   tpPct: 0.75,
   trailArmPct: 0.3,
@@ -259,20 +290,24 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   staggerS: 0.12,
   controlOrders: true,
   blockEnabled: true,
-  blockMaxStack: 0,
+  blockMaxStack: 6,
   blockVolumeRatio: 1,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
   blockActiveReal: true,
-  dcaEnabled: false,
+  dcaEnabled: true,
   dcaMaxSteps: 0,
-  dcaCooldownSeconds: 45,
+  dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
   dcaTakeProfitMode: "average",
-  dcaStepDistancesPct: [0.5, 0.9],
-  dcaStepVolumeMultipliers: [1.5, 2],
+  dcaStepDistancesPct: [0.5, 1, 1.5, 2],
+  dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
+  dcaAuto: true,
+  dcaOnSets: false,
+  dcaOnAxis: false,
+  dcaMaxExposureX: 2,
   dcaMinPf: 1.2,
   dcaPfWindow: 15,
   dcaDeactN: 25,
@@ -290,17 +325,17 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   "1000PEPE-USDT",
   "KAS-USDT",
   ],
-  axisPrevEnabled: true,
+  axisPrevEnabled: false,
   axisPrevMaxWindow: 12,
-  axisLastEnabled: true,
+  axisLastEnabled: false,
   axisLastMaxWindow: 4,
-  axisContEnabled: true,
+  axisContEnabled: false,
   axisContMaxWindow: 8,
-  axisPauseEnabled: true,
+  axisPauseEnabled: false,
   axisPauseMaxWindow: 8,
-  minPf: 1.2,
+  minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.12,
-  pfWindow: 15,
+  pfWindow: 6,
   slMinPct: 0.2,
   slMaxPct: 15.75,
   tpMinPct: 0.35,
@@ -317,7 +352,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmMax: 1.5,
   trailGiveMin: 0.1,
   trailGiveMax: 0.5,
-  trailGiveFactor: 0.333,
+  trailGiveFactor: 0.3333333333333333,
   trailRecalcGive: true,
   tf1m: true,
   tf5m: true,
@@ -328,7 +363,18 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratGeneral: true,
-  stratDca: false,
+  stratShortRange: false,
+  stratTrend: false,
+  stratBreakout: false,
+  stratReversion: false,
+  stratFlow: false,
+  stratMulti: false,
+  shortRangeStepMin: 2,
+  shortRangeStepMax: 6,
+  shortRangeMinPf: 1.25,
+  slMinSteps: 1,
+  trailMinSteps: 2,
+  stratDca: true,
   indTypeState: true,
   indTypeDirection: true,
   indTypeMove: true,
@@ -337,7 +383,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeSignals: true,
   noise: 0.05,
   volWeight: 0.3,
-  minStep: 8,
+  minStep: 10,
   maxStopLossRatio: 2.5,
   trailingMinStep: 6,
   posCountsVolumeRatio: 0.05,
@@ -358,7 +404,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 120,
-  setPfWindow: 15,
+  setPfWindow: 6,
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
@@ -381,7 +427,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
-  exitPfWindow: 15,
+  exitPfWindow: 6,
   exitDeactN: 25,
   exitMinPf: 1.2,
   exitAutoDeact: true,
@@ -428,6 +474,10 @@ export type CtsSettings = {
   dcaStepDistancesPct?: number[];
   dcaStepVolumeMultipliers?: number[];
   dcaAutoDeact?: boolean;
+  dcaAuto?: boolean;
+  dcaOnSets?: boolean;
+  dcaOnAxis?: boolean;
+  dcaMaxExposureX?: number;
   dcaMinPf?: number;
   dcaPfWindow?: number;
   dcaDeactN?: number;
@@ -472,6 +522,17 @@ export type CtsSettings = {
   stratBlock?: boolean;
   stratTrailing?: boolean;
   stratGeneral?: boolean;
+  stratShortRange?: boolean;
+  stratTrend?: boolean;
+  stratBreakout?: boolean;
+  stratReversion?: boolean;
+  stratFlow?: boolean;
+  stratMulti?: boolean;
+  shortRangeStepMin?: number;
+  shortRangeStepMax?: number;
+  shortRangeMinPf?: number;
+  slMinSteps?: number;
+  trailMinSteps?: number;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -582,7 +643,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
-    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 0),
+    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
@@ -596,17 +657,21 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
+    dcaAuto: bool(cts.dcaAuto, true),
+    dcaOnSets: bool(cts.dcaOnSets, false),
+    dcaOnAxis: bool(cts.dcaOnAxis, false),
+    dcaMaxExposureX: num(cts.dcaMaxExposureX, 2),
     dcaMinPf: num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
+    volumeFactor: num(cts.volumeFactor, 0.05),
+    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
-    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),
+    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
     axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
-    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), true),
+    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
-    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
+    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),
@@ -638,6 +703,17 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
     stratGeneral: bool(cts.stratGeneral, true),
+    stratShortRange: bool(cts.stratShortRange, false),
+    stratTrend: bool(cts.stratTrend, false),
+    stratBreakout: bool(cts.stratBreakout, false),
+    stratReversion: bool(cts.stratReversion, false),
+    stratFlow: bool(cts.stratFlow, false),
+    stratMulti: bool(cts.stratMulti, false),
+    shortRangeStepMin: num(cts.shortRangeStepMin, 2),
+    shortRangeStepMax: num(cts.shortRangeStepMax, 6),
+    shortRangeMinPf: num(cts.shortRangeMinPf, 1.25),
+    slMinSteps: num(cts.slMinSteps, 1),
+    trailMinSteps: num(cts.trailMinSteps, 2),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),

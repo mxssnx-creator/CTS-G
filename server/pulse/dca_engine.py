@@ -11,9 +11,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# DCA is disabled for now. While True, load() never enables the book and due() never returns an add,
-# whatever the overlay, the UI, or the restored engine says. Flip only when DCA is re-approved.
-DCA_HARD_OFF = True
+# DCA is an opt-in add-on lane: the overlay switch `dcaEnabled` (off by default) turns it on. The hard-off constant stays
+# as a build-time kill switch (True: never enabled, whatever the overlay says).
+DCA_HARD_OFF = False
+
+# Auto plan (dcaAuto, on by default): rungs as fractions of the position's own stop distance, with a size multiple of the
+# base size, chosen from scripts/dca_eval.py (walk-forward on executed Base positions): one late small rung is the least
+# harmful shape on every window measured (more rungs and larger multiples only scale the losing trades), the stop stays at
+# the original level, and the lane's own add-on PF switches it off when the adds do not pay (score()).
+AUTO_RUNG_FRACS = [0.4]
+AUTO_RUNG_MULT = 0.5
+AUTO_MAX_EXPOSURE_X = 2.0       # base size + all adds never above this multiple of the base size
 
 from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_cost_pct, signed_result_r
 
@@ -79,11 +87,16 @@ class DcaLane:
     steps: List[DcaStep] = field(default_factory=list)
     last_add: float = 0.0
     filled_n: int = 0
+    ref_entry: float = 0.0       # the entry the position opened at (auto plan measures its rungs from here, not the average)
 
 
 class DcaBook:
     def __init__(self) -> None:
         self.enabled = False  # DCA off by default — desk overlay can enable it
+        self.auto = True               # dcaAuto: the rung plan is calculated (AUTO_*), else the static lists below
+        self.on_sets = False           # dcaOnSets: Set positions may be added to (the add-on is scored on its own fills)
+        self.on_axis = False           # dcaOnAxis: Set positions admitted through an enabled Axis may be added to
+        self.max_expo = AUTO_MAX_EXPOSURE_X
         self.max_steps = 0
         self.distances = [d / 100.0 for d in DEFAULT_DIST]
         self.mults = list(DEFAULT_MULT)
@@ -110,6 +123,13 @@ class DcaBook:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
         self.enabled = bool(ov.get("dcaEnabled", False)) and not DCA_HARD_OFF
+        self.auto = bool(ov.get("dcaAuto", True))
+        self.on_sets = bool(ov.get("dcaOnSets", False))
+        self.on_axis = bool(ov.get("dcaOnAxis", False))
+        try:
+            self.max_expo = max(1.0, min(8.0, float(ov.get("dcaMaxExposureX") or AUTO_MAX_EXPOSURE_X)))
+        except Exception:
+            self.max_expo = AUTO_MAX_EXPOSURE_X
         try:
             raw_steps = ov.get("dcaMaxSteps")
             if raw_steps is None:
@@ -164,16 +184,32 @@ class DcaBook:
             return self.max_steps
         return max(len(self.distances), len(self.mults), 4)
 
-    def attach(self, symbol: str, side: str, qty: float, entry: float) -> DcaLane:
+    def auto_steps(self, sl_frac: float) -> List[DcaStep]:
+        """The calculated rungs for a position whose stop sits sl_frac (a fraction of the entry) away: each rung a fraction
+        of that distance, never nearer than one PositionCost and never at the stop."""
+        cf = self.cost_pct / 100.0
+        sl = float(sl_frac or 0.0)
+        if sl <= 0:
+            sl = 4 * cf                 # no stop known: a nominal four PositionCosts
+        out = []
+        for i, f in enumerate(AUTO_RUNG_FRACS):
+            d = min(max(f * sl, cf), 0.9 * sl)
+            out.append(DcaStep(n=i + 1, distance_pct=d, mult=AUTO_RUNG_MULT))
+        return out
+
+    def attach(self, symbol: str, side: str, qty: float, entry: float, sl_frac: float = 0.0) -> DcaLane:
         k = self.key(symbol, side)
         lane = self.lanes.get(k)
         if lane is None:
-            n = self._seed_n()
-            steps = [
-                DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
-                for i in range(n)
-            ]
-            lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps)
+            if self.auto:
+                steps = self.auto_steps(sl_frac)
+            else:
+                n = self._seed_n()
+                steps = [
+                    DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
+                    for i in range(n)
+                ]
+            lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps, ref_entry=entry)
             self.lanes[k] = lane
         else:
             if lane.parent_qty <= 0 and qty > 0:
@@ -204,7 +240,7 @@ class DcaBook:
         pc["deactReason"] = self.deact_reason
         return pc
 
-    def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None, sl_frac: float = 0.0) -> Optional[Dict[str, Any]]:
         if DCA_HARD_OFF or not self.enabled:
             return None
         self.score()
@@ -212,10 +248,10 @@ class DcaBook:
             self.skips += 1
             return None
         now = time.time() if now is None else float(now)
-        lane = self.attach(symbol, side, qty, entry)
+        lane = self.attach(symbol, side, qty, entry, sl_frac)
         if self.cooldown_s > 0 and now - lane.last_add < self.cooldown_s:
             return None
-        adv = adverse_pct(side, lane.avg_entry or entry, px)
+        adv = adverse_pct(side, (lane.ref_entry or entry) if self.auto else (lane.avg_entry or entry), px)
         nxt = None
         for st in lane.steps:
             if st.filled or st.paused:
@@ -223,7 +259,7 @@ class DcaBook:
             nxt = st
             break
         if nxt is None:
-            if self.unlimited():
+            if self.unlimited() and not self.auto:
                 i = len(lane.steps)
                 nxt = DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
                 lane.steps.append(nxt)
@@ -232,6 +268,11 @@ class DcaBook:
         if adv + 1e-12 < nxt.distance_pct:
             return None
         add_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
+        added = sum(x.qty for x in lane.steps if x.filled)
+        if self.auto:      # the calculated plan keeps the whole position under max_expo x the base size
+            add_qty = min(add_qty, max(0.0, (lane.parent_qty or qty) * (self.max_expo - 1.0) - added))
+        if add_qty <= 0:
+            return None
         self.last_pick = f"{symbol}#{nxt.n}"
         return {
             "n": nxt.n,
@@ -263,7 +304,7 @@ class DcaBook:
     def on_close(self, rec: Dict[str, Any]) -> None:
         why = str(rec.get("reason") or "")
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
-        if "dca" not in why.lower() and not (len(cid) > 4 and cid[4:5] == "d"):
+        if not rec.get("dca_n") and "dca" not in why.lower() and not (len(cid) > 4 and cid[4:5] == "d"):
             return
         self.closes.append(rec)
         if len(self.closes) > 80:
@@ -295,6 +336,10 @@ class DcaBook:
             })
         return {
             "enabled": self.enabled,
+            "auto": self.auto,
+            "onSets": self.on_sets,
+            "onAxis": self.on_axis,
+            "maxExposureX": self.max_expo,
             "active": self.active,
             "deactReason": self.deact_reason,
             "maxSteps": self.max_steps,
@@ -316,7 +361,7 @@ class DcaBook:
 
 def _math_self_test() -> List[Tuple[str, bool, str]]:
     b = DcaBook()
-    b.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
+    b.load({"dcaEnabled": True, "dcaAuto": False, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
     t0 = time.time()
     # no add at entry
     r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 100.0, now=t0)
@@ -350,7 +395,7 @@ def _math_self_test() -> List[Tuple[str, bool, str]]:
     snap = b.snapshot()
     t10 = (snap["enabled"] and snap["maxSteps"] == 4 and "distancesPct" in snap, str(snap.get("distancesPct")))
     u = DcaBook()
-    u.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
+    u.load({"dcaEnabled": True, "dcaAuto": False, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
     t11 = (u.max_steps <= 0 and u.unlimited(), f"steps={u.max_steps}")
     ulane = u.attach("UUU-USDT", "LONG", 1.0, 100.0)
     t12 = (len(ulane.steps) >= 2, f"seed={len(ulane.steps)}")
@@ -379,18 +424,47 @@ def _math_self_test() -> List[Tuple[str, bool, str]]:
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
-    # The step math is tested with the switch lifted; the hard-off check is tested with it in force.
+    out = _math_self_test()
     global DCA_HARD_OFF
+    # off by default, kill switch wins over the overlay
+    d = DcaBook()
+    d.load({})
+    off_default = (not d.enabled) and d.due("AAA-USDT", "LONG", 1.0, 100.0, 90.0, now=time.time()) is None
     saved = DCA_HARD_OFF
-    DCA_HARD_OFF = False
+    DCA_HARD_OFF = True
     try:
-        out = _math_self_test()
+        k = DcaBook()
+        k.load({"dcaEnabled": True})
+        killed = (not k.enabled) and k.due("AAA-USDT", "LONG", 1.0, 100.0, 90.0, now=time.time()) is None
     finally:
         DCA_HARD_OFF = saved
-    b = DcaBook()
-    b.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
-    r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=time.time())
-    out.append(("dca-hard-off", DCA_HARD_OFF and r is None and not b.enabled, f"hard_off={DCA_HARD_OFF} enabled={b.enabled} due={r}"))
+    out.append(("dca-off-by-default-and-kill-switch", off_default and killed, f"default off={off_default} kill switch={killed}"))
+    # auto plan: rungs scale with the position's own stop distance, below the stop, one small rung, exposure ceiling
+    a = DcaBook()
+    a.load({"dcaEnabled": True, "dcaCooldownSeconds": 0})
+    wide = a.due("AAA-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)      # 0.4 x 1 % = 0.4 % rung, price 1 % down
+    near = DcaBook()
+    near.load({"dcaEnabled": True, "dcaCooldownSeconds": 0})
+    not_yet = near.due("BBB-USDT", "LONG", 1.0, 100.0, 99.8, now=1.0, sl_frac=0.01)  # only 0.2 % down: rung at 0.4 % not reached
+    ok_auto = bool(wide) and abs(wide["distancePct"] - 0.004) < 1e-9 and abs(wide["qty"] - AUTO_RUNG_MULT) < 1e-9 and not_yet is None
+    out.append(("dca-auto-plan-scales-with-the-stop", ok_auto, f"rung={wide and wide['distancePct']} qty={wide and wide['qty']} early={not_yet}"))
+    lane = wide["lane"] if wide else None
+    capped = False
+    if lane:
+        a.record_fill(lane, wide["step"], wide["qty"], 99.0, "c1", now=1.0)
+        again = a.due("AAA-USDT", "LONG", 1.0, 100.0, 90.0, now=2.0, sl_frac=0.01)
+        capped = again is None          # the only auto rung is filled
+    out.append(("dca-auto-single-rung-and-ceiling", capped, f"second add={'none' if capped else 'offered'}"))
+    e = DcaBook()
+    e.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaMaxExposureX": 1.2})
+    capped_add = e.due("EEE-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)
+    out.append(("dca-auto-exposure-ceiling", bool(capped_add) and abs(capped_add["qty"] - 0.2) < 1e-9, f"qty under a 1.2x ceiling={capped_add and capped_add['qty']} (partial 0.5)"))
+    # the lane is scored on its own add-on results and switches off when they lose
+    c = DcaBook()
+    c.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaPfWindow": 8, "dcaMinPf": 1.2})
+    for i in range(10):
+        c.on_close({"symbol": "S%d-USDT" % i, "side": "LONG", "reason": "sl", "client_id": "", "dca_n": 1, "pnl_pct": -0.004})
+    out.append(("dca-add-on-lane-switches-off-on-losses", (not c.active) and c.due("S-USDT", "LONG", 1.0, 100.0, 99.0, now=3.0, sl_frac=0.01) is None, f"active={c.active} {c.deact_reason}"))
     return out
 
 

@@ -21,6 +21,15 @@ for _name in ("STATS_PATH", "TRADES_PATH", "STOP_PATH", "PAUSE_PATH", "LOG_PATH"
     if hasattr(pt, _name):
         setattr(pt, _name, os.path.join(_STATE_DIR, os.path.basename(getattr(pt, _name))))
 
+
+def _offline_contracts(want=None):
+    """Tests never reach the venue: the contract list is a fixed, offline one (the requested names, else two)."""
+    names = sorted(want) if want else ["BTC-USDT", "ETH-USDT"]
+    return {s: pt.Contract(symbol=s, min_qty=0.001, step=0.001, qprec=3, pprec=6, min_usdt=5.0, max_lev=50) for s in names}
+
+
+pt.load_contracts = _offline_contracts
+
 SRC = os.path.join(PULSE, "pulse_trader.py")
 
 
@@ -35,6 +44,45 @@ def _bare_pulse():
     p.bar_min = {}
     p.real_1m = {}
     return p
+
+
+def restored_book_drops_a_position_only_when_two_reads_agree():
+    """A position in the saved book that the venue does not list at start is dropped only when a second read agrees (a lagging
+    positions list must not unprotect a live position); one the venue still lists, in either mode, stays."""
+    def pos(sym, side):
+        return pt.Position(symbol=sym, side=side, qty=1.0, entry=10.0, opened_at=1.0, sl=9.0, tp=11.0, peak=10.0)
+
+    def run(first, second, saved):
+        p = _bare_pulse()
+        p.open = {s_: pos(s_, sd) for s_, sd in saved}
+        reads = [first, second]
+
+        class Api:
+            def get(self, path, extra=None):
+                rows = reads.pop(0) if reads else second
+                return {"code": 0, "data": rows}
+        p.api = Api()
+        p.cooldown = {}
+        p.close_from_venue = lambda pos_, why: False
+        p.cancel_controls = lambda sym: None
+        p.save_open_book = lambda: None
+        real_sleep = pt.time.sleep
+        pt.time.sleep = lambda s_: None
+        try:
+            p.reconcile_restored_book()
+        finally:
+            pt.time.sleep = real_sleep
+        return sorted(p.open)
+    other = {"symbol": "OTHER-USDT", "positionSide": "LONG", "positionAmt": "1"}
+    mine = {"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "1"}
+    oneway = {"symbol": "A-USDT", "positionSide": "BOTH", "positionAmt": "-2"}
+    lag = run([other], [other, mine], [("A-USDT", "LONG")])                  # the second read lists it: kept
+    gone = run([other], [other], [("A-USDT", "LONG")])                       # two reads agree: dropped
+    held = run([other, mine], [other, mine], [("A-USDT", "LONG")])           # listed: kept
+    both = run([oneway], [oneway], [("A-USDT", "SHORT")])                    # one-way mode: the sign of the amount is the side
+    empty = run([], [], [("A-USDT", "LONG")])                                # an empty list can be lag: nothing is dropped
+    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == ["A-USDT"]
+    return ok, f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, empty list kept={empty}"
 
 
 def cycles_start_at_least_scan_apart():
@@ -248,7 +296,7 @@ def entry_lifecycle_with_a_stub_exchange():
     requested size, the position is recorded at the executed size, and one protective batch goes out. The state files
     are redirected to a temporary directory, and the settings dump and contract source are replaced."""
     sym = "BTC-USDT"
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
     orders: list = []
     pos = None
     api = None
@@ -273,7 +321,7 @@ def entry_lifecycle_with_a_stub_exchange():
             ok = (len(orders) == 1 and pos is not None and abs(float(pos.qty) - 0.4) < 1e-12
                   and len(api.batches) == 1 and len(api.batches[0]) == 2)
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
     return ok, (f"entry orders={len(orders)} position qty={getattr(pos, 'qty', None)} "
                 f"protective batches={len(api.batches) if api else 0}")
 
@@ -317,11 +365,12 @@ def partial_close_fill_closes_the_remainder():
     """A close that fills only part of its quantity must not be reported as a full close. The remainder is closed with
     the closePosition form, the returned price blends the two fills, and if the remainder is refused the position stays
     open at the size that is left."""
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
     with tempfile.TemporaryDirectory() as td:
         pt.BLOCK_PATH = os.path.join(td, "block.json")
         pt.LEV_PATH = os.path.join(td, "lev.json")
         pt.OPEN_PATH = os.path.join(td, "open.json")
+        pt.TRADES_PATH = os.path.join(td, "trades.jsonl")
         pt.dump_cts_settings = lambda: {}
         try:
             venue = _PartialCloseVenue()
@@ -340,7 +389,7 @@ def partial_close_fill_closes_the_remainder():
             ok2, _ = p2.market_close(pos2)
             kept = abs(float(pos2.qty) - q2 * 0.6) < 1e-9
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
     ok = ok1 and second_is_close_position and abs(px1 - blended_px) < 1e-6 and (not ok2) and kept
     return ok, (f"full close={ok1} remainder via closePosition={second_is_close_position} price={px1:.4f} "
                 f"(want {blended_px:.4f}); refused remainder -> closed={ok2} qty kept={kept}")
@@ -399,16 +448,17 @@ class _LostAnswerVenue(_StubExchange):
 
 
 def _isolated(fn):
-    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.TRADES_PATH, pt.dump_cts_settings)
     with tempfile.TemporaryDirectory() as td:
         pt.BLOCK_PATH = os.path.join(td, "block.json")
         pt.LEV_PATH = os.path.join(td, "lev.json")
         pt.OPEN_PATH = os.path.join(td, "open.json")
+        pt.TRADES_PATH = os.path.join(td, "trades.jsonl")      # no closes carried over from another check
         pt.dump_cts_settings = lambda: {}
         try:
             return fn()
         finally:
-            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings = saved
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.TRADES_PATH, pt.dump_cts_settings = saved
 
 
 def failed_close_keeps_the_position_protected():
@@ -454,7 +504,695 @@ def lost_entry_answer_is_remembered_for_adoption():
     return (not opened) and any(k.startswith("BTC-USDT:") for k in unk), f"in book={opened} unknown entries={list(unk)}"
 
 
+class _PagedKlines:
+    """A venue that serves 1m klines like the real one: at most 1000 bars per request (a larger limit is refused with code
+    109400 and no data), oldest first, endTime inclusive. The series is 3000 minutes long and its closes count 0, 1, 2..."""
+
+    def __init__(self, n: int = 3000, t_end: int = 1_800_000_000_000) -> None:
+        self.rows = [{"open": str(i + 0.0), "high": str(i + 0.5), "low": str(i - 0.5), "close": str(i + 0.0), "volume": "1",
+                      "time": t_end - (n - 1 - i) * 60_000} for i in range(n)]
+        self.requests: list = []
+
+    def gather_public(self, reqs, timeout=4.2):
+        out = []
+        for path, extra in reqs:
+            self.requests.append(dict(extra))
+            lim = int(extra.get("limit") or 500)
+            if lim > 1000:
+                out.append((path, extra, {"code": 109400, "msg": "Invalid parameters, err:limit: This field must be less than"}))
+                continue
+            end = int(extra.get("endTime") or 10 ** 18)
+            rows = [r for r in self.rows if r["time"] <= end][-lim:]
+            out.append((path, extra, {"code": 0, "data": rows}))
+        return out
+
+
+def history_is_fetched_in_pages_within_the_venue_limit():
+    """The Set history asks for 1920 bars, which the venue refuses in one request. The fetch pages backwards with
+    endTime, so the series arrives whole, in order and without a gap; once a symbol holds its history, the next refresh
+    asks only for the newest minutes."""
+    import set_engine as se
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
+        p = _bare_pulse()
+        venue = _PagedKlines()
+        p.api = venue
+        p.sets = se.SetBook()
+        p.sets.lookback = 1920
+        p._hist_fetch()
+        first_requests = list(venue.requests)
+        have = {s: len(p.sets.bars.get(s) or []) for s in pt.SYMBOLS}
+        closes = [b[3] for b in (p.sets.bars.get("A-USDT") or [])]
+        contiguous = closes == [float(x) for x in range(3000 - 1920, 3000)]
+        venue.requests.clear()
+        p._hist_fetch()
+        refresh_limits = sorted({int(r["limit"]) for r in venue.requests})
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = (all(n == 1920 for n in have.values()) and contiguous and all(int(r["limit"]) <= 1000 for r in first_requests)
+          and any("endTime" in r for r in first_requests) and refresh_limits == [120])
+    return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
+
+
+def _book_with_three_packs(**extra):
+    import set_engine as se
+    from common import overlay
+    b = se.SetBook()
+    b.load(overlay(stratShortRange=True, **extra))
+    return b
+
+
+def client_order_ids_round_trip_to_their_own_set():
+    """Every Set of the default grid on three packs (1449 Sets, indices above 1000) must decode from its own client order
+    id to itself. After the grid moves (min step raised, as step-adapt does) a base Set must still decode to itself or to
+    no Set at all, never to another Set."""
+    b = _book_with_three_packs()
+    p = _bare_pulse()
+    p.sets = b
+    sets = list(b.by_idx)
+    wrong = [st.id for st in sets if (p.parse_track(p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)) or {}).get("set_id") != st.id]
+    cids = {st.id: p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx) for st in sets if st.kind == "base"}
+    b.min_step = 6
+    b._rebuild_sets()
+    moved = 0
+    misattributed = []
+    for sid, cid in cids.items():
+        got = (p.parse_track(cid) or {}).get("set_id")
+        if got and got != sid:
+            misattributed.append((sid, got))
+        moved += 1
+    letters = {st.pack: p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)[len(pt.TAG) + 1] for st in sets}
+    ok = not wrong and not misattributed and letters == {"indications": "i", "general": "g", "shortrange": "s"}
+    return ok, f"Sets={len(sets)} wrong round trips={wrong[:3]} after the grid moved: {moved} ids, misattributed={misattributed[:3]} letters={letters}"
+
+
+def a_signal_needs_its_own_pack_to_hold_a_valid_set():
+    """A general signal must not enter on the strength of a valid indications Set: the pack gate is per pack."""
+    import types
+    p = _bare_pulse()
+    ind = types.SimpleNamespace(id="i1", step=2)
+
+    class _Sets:
+        enabled = True
+        use_historic_gate = True
+
+        def pick_any(self, pack):
+            return ind if pack == "indications" else None
+
+        def pack_open(self, pack):
+            return pack == "indications"
+
+    p.sets = _Sets()
+    p.strat_ind = True
+    p.indications = types.SimpleNamespace(settings={"enabled": True}, primary=lambda s: None)
+    reasons = {}
+    for pack, why in (("general", "gen:test"), ("indications", "ind:state:tf:0.6:a2:s")):
+        try:
+            reasons[pack] = p.entry_sense("A-USDT", 1 if pack == "general" else 1, why, "LONG") if False else None
+        except Exception as e:
+            reasons[pack] = repr(e)[:40]
+    src = open(os.path.join(pt.__file__ and os.path.dirname(pt.__file__), "pulse_trader.py")).read()
+    gate_is_per_pack = "if not self.sets.pack_open(pack):" in src and "or self.sets.pack_open(\"general\") or self.sets.pack_open(\"indications\")" not in src
+    return gate_is_per_pack, f"per-pack gate in entry_sense={gate_is_per_pack}"
+
+
+def a_manager_close_is_not_counted_again_by_the_fill_sync():
+    """The manager records its own close; the fill sync must skip the close order it sent and the stop orders of that
+    position, or the Set tape gets the same close twice."""
+    def run():
+        venue = _PartialCloseVenue()
+        venue.posts.clear()
+        p, sym = _enter(venue)
+        pos = p.open[sym]
+        pos.sl_oid, pos.tp_oid = "9001", "9002"
+        p.close_pos(pos, 100.0, "test-close")
+        close_cids = [f["clientOrderID"] for f in venue.closes]
+        sent_all_seen = all(c in p.seen_fill_cids for c in close_cids)
+        counted = []
+        p.sets.on_live_close = lambda rec: counted.append(rec)
+        fills = [{"clientOrderID": close_cids[0], "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "101", "profit": "1.0"},
+                 {"clientOrderID": p.cid("s", pos=pos), "orderId": "9001", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"},
+                 {"clientOrderID": p.cid("s", pos=pos), "orderId": "7777", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"}]
+        p.api.get = lambda path, extra=None: {"code": 0, "data": {"orders": fills}}
+        p.sync_own_fills()
+        return sent_all_seen, len(counted)
+    seen, n = _isolated(run)
+    return seen and n == 1, f"close cids seen={seen} fills counted={n} (only the unknown stop fill counts)"
+
+
+def a_set_fill_keeps_the_sets_own_sl_and_tp():
+    """A Set fill is placed with the Set's grid, as the replay that validated it: TP = step x PositionCost (2 x at the
+    least, no overlay tpMin clamp), SL = ratio x TP and never under PositionCost + one step."""
+    import types
+    def run():
+        venue = _StubExchange(executed="1", requested="1")
+        sym = "BTC-USDT"
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+        p = pt.Pulse(venue, contracts)
+        p.boot_ts = 0.0
+        p.px[sym] = 100.0
+        p.available = 50.0
+        p.halted = False
+        p.entry_sense = lambda *a, **k: None
+        st = types.SimpleNamespace(id="indications:1m:sl0.50:st2", idx=3, pack="indications", kind="base", step=2, sl_ratio=0.5,
+                                   tp_pct=2 * p.position_cost_pct / 100.0, trail_key="", trail_arm=0.0, trail_give=0.0)
+        p.sets.pick_any = lambda pack: st
+        p.sets.pick_trail = lambda pack: None
+        p.tp_min = 0.0035          # the shipped overlay clamp: it must not apply to a Set fill
+        p.sl_min = 0.0020
+        p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+        pos = p.open.get(sym)
+        return pos, p.position_cost_pct
+    pos, cost = _isolated(run)
+    c = cost / 100.0
+    ok = (pos is not None and abs(pos.tp_pct - 2 * c) < 1e-9 and abs(pos.sl_pct - 2 * c) < 1e-9
+          and pos.trail_arm == 0.0 and pos.trail_give == 0.0 and not pos.trail_set_id)     # a base Set does not trail
+    return ok, (f"cost={cost}% tp={getattr(pos, 'tp_pct', None)} sl={getattr(pos, 'sl_pct', None)} want both {2 * c}; "
+                f"trailing arm={getattr(pos, 'trail_arm', None)} give={getattr(pos, 'trail_give', None)} (none for a base Set)")
+
+
+def overlay_slpct_and_tppct_are_percent_without_guessing():
+    saved = (pt.SL_PCT, pt.TP_PCT)
+    p = _bare_pulse()
+    src = open(pt.__file__).read()
+    guessed = "> 0.05 else float(ov[\"slPct\"])" in src or "> 0.05 else float(ov[\"tpPct\"])" in src
+    pt.SL_PCT, pt.TP_PCT = saved
+    return not guessed, f"magnitude guess removed={not guessed}"
+
+
+def _lane_pulse(set_id="indications:1m:sl1.00:st4"):
+    """A Pulse holding one open position on a stub venue, with the Exit strategies switched on and a reversal signal
+    against the position, so any Exit-lane involvement shows."""
+    import types
+    venue = _StubExchange(executed="1", requested="1")
+    p, sym = _enter(venue)
+    pos = p.open[sym]
+    pos.set_id = set_id
+    pos.pack = "indications"
+    pos.opened_at = time.time() - 700.0        # past the exit lanes' minimum hold and the scratch time
+    pos.sl = pos.entry * 0.97
+    pos.tp = pos.entry * 1.03
+    pos.sl_pct = pos.tp_pct = 0.03              # the lane's own levels (manage_set_lane reads these)
+    pos.sl_oid = pos.tp_oid = "1"
+    p.exits.enabled = True
+    p.exits.rev_on = True
+    p.exits.time_on = True
+    p.exits.ignore_tp = True
+    p.boot_ts = 0.0
+    p.indications = types.SimpleNamespace(primary=lambda s: types.SimpleNamespace(direction="short"),
+                                          settings={"enabled": True}, last={})
+    p.control_orders = False
+    return p, sym, pos
+
+
+import time  # noqa: E402
+
+
+def a_set_position_is_closed_only_by_its_own_lane():
+    """With the Exit strategies on and a reversal signal against the position, a Set position stays open (the reversal
+    lane belongs to the Exit strategies); the same position without a Set is closed by that lane."""
+    def run():
+        p, sym, pos = _lane_pulse()
+        p.px[sym] = pos.entry * 1.0005
+        p.manage()
+        set_stays = sym in p.open
+        pos.set_id = ""
+        p.manage()
+        exit_closes = sym not in p.open
+        return set_stays, exit_closes, [c.reason for c in p.closed]
+    set_stays, exit_closes, reasons = _isolated(run)
+    return set_stays and exit_closes, f"Set position stayed open={set_stays}; the same position without a Set closed by the Exit lane={exit_closes} reasons={reasons}"
+
+
+def a_set_lane_scratch_and_time_follow_the_replay_rules():
+    def run():
+        out = {}
+        # the replay scratches on a bar close: live judges each completed 1m bar's close once, never an intrabar tick
+        for tick, close, name in ((0.0003, 0.0003, "below scratch"), (0.0030, 0.0030, "above scratch"),
+                                  (0.0030, 0.0003, "tick above, close below")):
+            p, sym, pos = _lane_pulse()
+            p.exits.enabled = False
+            p.px[sym] = pos.entry * (1 + tick)
+            p.last_closed_1m = {sym: (int(time.time() // 60) - 1, pos.entry * (1 + close))}
+            p.manage()
+            out[name] = (sym in p.open, [c.reason for c in p.closed])
+        p, sym, pos = _lane_pulse()
+        pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
+        pos.entry = 100.0
+        p.px[sym] = 100.0 * 0.9995
+        p.manage()
+        out["time"] = (sym in p.open, [c.reason for c in p.closed])
+        return out
+    out = _isolated(run)
+    ok = out["below scratch"][0] and out["above scratch"] == (False, ["scratch+"]) and out["tick above, close below"][0] \
+        and out["time"] == (False, ["time"])
+    return ok, f"{out}"
+
+
+def a_set_lane_honours_tp_only_as_the_replay_does():
+    def run():
+        res = {}
+        for honor in (True, False):
+            p, sym, pos = _lane_pulse()
+            p.exits.enabled = False
+            p.sets.hist_honor_tp = honor
+            pos.opened_at = time.time() - 30.0
+            pos.tp_pct = 0.0024
+            pos.tp = pos.entry * 1.0024
+            p.px[sym] = pos.tp * 1.001
+            p.manage()
+            res[honor] = (sym in p.open, [c.reason for c in p.closed])
+            pos.tp  # noqa: B018
+            sl_safe, tp_safe = p.security_prices(pos)
+            res[f"order tp {honor}"] = round(abs(tp_safe - pos.entry) / pos.entry, 4)
+        return res
+    res = _isolated(run)
+    ok = res[True] == (False, ["tp"]) and res[False][0] is True and res["order tp False"] >= res["order tp True"]
+    return ok, f"{res}"
+
+
+def a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out():
+    def run():
+        p, sym, pos = _lane_pulse()
+        p.exits.enabled = True
+        moves = []
+        p.replace_sl = lambda pos_, price: (moves.append(round(price, 4)) or True)
+        pos.opened_at = time.time() - 30.0
+        pos.trail_arm, pos.trail_give = 0.006, 0.0036
+        pos.peak = pos.entry * 1.01
+        p.px[sym] = pos.entry * 1.009
+        pos.trail_set_id = ""                       # a base Set does not trail
+        p.manage()
+        without = list(moves)
+        pos.trail_set_id = "indications:1m:tr0.60:0.36"   # a foreign trailing Set on a base Set position: still no trailing
+        p.manage()
+        foreign = list(moves)
+        pos.set_id = pos.trail_set_id                       # the position's own Set is the trailing Set: it trails
+        p.manage()
+        return without, foreign, moves, round(pos.entry * 1.01 * (1 - 0.0036), 4)
+    without, foreign, with_set, want = _isolated(run)
+    ok = without == [] and foreign == [] and with_set == [want]
+    return ok, f"base Set: {without}; base Set with a foreign trailing Set: {foreign}; own trailing Set: {with_set} (want {want})"
+
+
+def exit_lane_scores_only_its_own_closes():
+    def run():
+        p, sym, pos = _lane_pulse()
+        before = {k: v.n for k, v in p.exits.lanes.items()}
+        vbefore = (p.variants.skipped, sum(len(r) for r in p.variants.sl_rows.values()))
+        p.exits.enabled = False
+        p.px[sym] = pos.entry * 1.003
+        p.close_pos(pos, p.px[sym], "scratch+")
+        after_set = {k: v.n for k, v in p.exits.lanes.items()}
+        vafter = (p.variants.skipped, sum(len(r) for r in p.variants.sl_rows.values()))
+        p2, sym2, pos2 = _lane_pulse()
+        pos2.set_id = ""
+        p2.px[sym2] = pos2.entry * 1.003
+        p2.close_pos(pos2, p2.px[sym2], "exit:time")
+        after_exit = {k: v.n for k, v in p2.exits.lanes.items()}
+        return before, after_set, after_exit, vbefore, vafter
+    before, after_set, after_exit, vb, va = _isolated(run)
+    ok = before == after_set and sum(after_exit.values()) == sum(before.values()) + 1 and vb == va
+    return ok, f"exit lane orders before={sum(before.values())} after a Set close={sum(after_set.values())} after an exit close={sum(after_exit.values())}; variants unchanged={vb == va}"
+
+
+def the_set_lane_does_not_read_the_exit_strategies():
+    """Independence, checked on the code: the functions that close, trail or price a Set position never reach the Exit
+    strategies, the coordinator or the default variants."""
+    import ast
+    src = open(pt.__file__).read()
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Pulse")
+    fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "manage_set_lane")
+    names = {f"{a.value.id}.{a.attr}" for a in ast.walk(fn) if isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name) and a.value.id == "self"}
+    touched = sorted(n for n in names if n.split(".")[1] in ("exits", "variants", "coord", "dca", "block"))
+    seg = ast.get_source_segment(src, next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "security_prices")) or ""
+    exit_sl_guarded = seg.count("not set_lane") >= 2
+    return not touched and exit_sl_guarded, f"manage_set_lane touches {touched or 'none of exits/variants/coord/dca/block'}; security_prices guards both exit-lane SL tightenings={exit_sl_guarded}"
+
+
+def credentials_come_from_a_private_file_without_redis():
+    """With a private credential file in place the engine needs no Redis: no redis-cli process is started. A file that
+    others can read is ignored."""
+    import json as _json
+    import subprocess as _sp
+    saved_run, saved_env = _sp.run, os.environ.get("PULSE_CRED_FILE")
+    calls = []
+    def no_redis(*a, **k):
+        calls.append(a)
+        raise FileNotFoundError("redis-cli")
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "cred.json")
+        with open(path, "w") as f:
+            _json.dump({"api_key": "K1", "api_secret": "S1", "base_url": "https://open-api-vst.bingx.com"}, f)
+        try:
+            pt.subprocess.run = no_redis
+            os.environ["PULSE_CRED_FILE"] = path
+            os.chmod(path, 0o600)
+            private = (pt.connection_field("api_key"), pt.connection_field("api_secret"), pt.connection_field("base_url"))
+            spawned_private = len(calls)
+            os.chmod(path, 0o644)
+            open_file = pt.connection_field("api_key")
+        finally:
+            pt.subprocess.run = saved_run
+            if saved_env is None:
+                os.environ.pop("PULSE_CRED_FILE", None)
+            else:
+                os.environ["PULSE_CRED_FILE"] = saved_env
+    ok = private == ("K1", "S1", "https://open-api-vst.bingx.com") and spawned_private == 0 and open_file == ""
+    return ok, f"private file read={private[0] == 'K1'} redis processes={spawned_private}; world-readable file ignored={open_file == ''}"
+
+
+def history_thread_fetches_at_start_and_never_replays_padding():
+    """At start every symbol holds only padded live rows (flat seed rows, no real minutes). One pass of the history
+    thread must fetch the real history at once (no wait for live minutes), keep the padding out of the Set bars, and
+    replay the symbols."""
+    import types
+    import set_engine as se
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
+        p = _bare_pulse()
+        p.api = _PagedKlines()
+        p.sets = se.SetBook()
+        from common import overlay, SMALL
+        p.sets.load(overlay(**SMALL))
+        p.sets.lookback = 1920
+        for s_ in pt.SYMBOLS:
+            p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 60       # the seed padding
+            p.real_1m[s_] = 0
+        p.open = {}
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        sizes = {s_: len(p.sets.bars.get(s_) or []) for s_ in pt.SYMBOLS}
+        flat = sum(1 for s_ in pt.SYMBOLS for b in (p.sets.bars.get(s_) or []) if b[0] == b[1] == b[2] == b[3] == 100.0)
+        replayed = p.sets.progress.symbols_total
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = all(n == 1920 for n in sizes.values()) and flat == 0 and replayed == 4
+    return ok, f"bars={sizes} padded rows in the Set history={flat} symbols replayed={replayed}"
+
+
+def a_symbol_that_left_the_universe_leaves_the_set_history():
+    """The universe rotates. A symbol that left it keeps no Set bars, so after the next scoring pass its trades are in no
+    Set's tape (the simulator and a fresh start see the current universe only) and its memory is freed. A symbol with an
+    open position stays."""
+    import types
+    import set_engine as se
+    from common import overlay, SMALL, synth_bars
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
+        p = _bare_pulse()
+        p.api = types.SimpleNamespace(gather_public=lambda reqs, timeout=4.2: [(x, y, {"code": 0, "data": []}) for x, y in reqs])
+        p.sets = se.SetBook()
+        p.sets.load(overlay(**SMALL))
+        for k, s_ in enumerate(("A-USDT", "B-USDT", "GONE-USDT", "HELD-USDT")):
+            p.sets.bars[s_] = synth_bars(70 + k, 1920, start=50.0 + k, vol=0.003)
+            p.real_1m[s_] = 0
+        p.sets.replay_all()
+        before = sorted(p.sets._hist_rows)
+        p.open = {"HELD-USDT": types.SimpleNamespace(symbol="HELD-USDT")}
+        p.sets.last_run = 0.0                      # a scoring pass is due
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        after_bars = sorted(p.sets.bars)
+        after_rows = sorted(p.sets._hist_rows)
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = "GONE-USDT" in before and "GONE-USDT" not in after_bars and "GONE-USDT" not in after_rows \
+        and "HELD-USDT" in after_bars and {"A-USDT", "B-USDT"} <= set(after_bars)
+    return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}"
+
+
+def history_thread_keeps_real_history_and_tops_up_a_partial_one():
+    """Two states the start-up check does not reach. (a) Every symbol holds its full real history and the venue is
+    offline: the seed padding must not replace it (no fetch can repair it). (b) Every symbol holds a partial real
+    history (above min_bars, under 90 % of the lookback): the thread must fetch the rest, not take it as complete."""
+    import types
+    import set_engine as se
+    from common import overlay, SMALL
+
+    class _Offline:
+        def gather_public(self, reqs, timeout=4.2):
+            return [(path, extra, {"code": 0, "data": []}) for path, extra in reqs]
+
+    def run(api, real_n, live=False):
+        p = _bare_pulse()
+        p.api = api
+        p.sets = se.SetBook()
+        p.sets.load(overlay(**SMALL))
+        p.sets.lookback = 1920
+        p.sets.refresh_s = 10 ** 6
+        p.sets.last_run = time.time() - p.sets.retry_s - 1     # due on the retry clock, not on the refresh clock
+        for k, s_ in enumerate(pt.SYMBOLS):
+            p.sets.bars[s_] = [[50.0 + k + i * 0.01, 50.2 + k + i * 0.01, 49.8 + k + i * 0.01, 50.1 + k + i * 0.01, 1.0]
+                               for i in range(real_n)]
+            p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 60       # the seed padding
+            p.real_1m[s_] = 0
+            if live:      # rows built from live ticks since start: zero volume, never equal to the exchange's rows
+                p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 20 + [[70.0 + i * 0.003, 70.2, 69.9, 70.1, 0.0] for i in range(40)]
+                p.real_1m[s_] = 40
+        p.open = {}
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=False)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        sizes = [len(p.sets.bars.get(s_) or []) for s_ in pt.SYMBOLS]
+        flat = sum(1 for s_ in pt.SYMBOLS for b in (p.sets.bars.get(s_) or []) if b[0] == b[1] == b[2] == b[3] == 100.0)
+        return sizes, flat
+
+    saved = list(pt.SYMBOLS)
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
+        kept, kept_flat = run(_Offline(), 1920)
+        topped, topped_flat = run(_PagedKlines(), 500)
+        livetail, _ = run(_Offline(), 1920, live=True)
+        boot_live, boot_flat = run(_Offline(), 0, live=True)      # no history yet: the live-built real rows bootstrap it, never the padding
+        boot_none, _ = run(_Offline(), 0)                          # no history and no real rows: nothing is ingested
+    finally:
+        pt.SYMBOLS[:] = saved
+    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0 and all(n == 1920 for n in livetail) \
+         and all(n == 40 for n in boot_live) and boot_flat == 0 and all(n == 0 for n in boot_none)
+    return ok, f"bootstrap from live-built rows {boot_live} (no real rows {boot_none}); live-built tail on a full history -> {livetail}; offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
+
+
+def no_other_lane_touches_a_set_position():
+    """Independent lanes: the coordinator's rearrange may not swap out a Set position, the Block and DCA add-ons may not
+    add to it (an add-on re-anchors the entry, stop and target the Set validated), and the global 6 h hold cap leaves it
+    to its own time exit. The same position without a Set stays open to all of them."""
+    import types
+
+    def run():
+        out = {}
+        p, sym, pos = _lane_pulse()
+        p.px[sym] = pos.entry * 1.002         # one step and more in profit: Block may stack on a position without a Set
+        out["rearrange"] = (len(p.rearrange_opens()), None)
+        # Block: an add-on candidate reaches evaluate_counts; a Set position must never get there
+        seen = {"block": 0, "dca": 0}
+        lane = types.SimpleNamespace(active=True, base_qty=1.0, confirmed_add=0.0, legs=[], satisfied={})
+        p.block = types.SimpleNamespace(
+            enabled=True, lanes={f"{sym}:{pos.side}": lane}, key=lambda s_, side: f"{s_}:{side}", save=lambda: None,
+            evaluate_counts=lambda *a, **k: seen.__setitem__("block", seen["block"] + 1) or [], pick_emit=lambda rows: None,
+            on_parent_close=lambda *a, **k: None, register_parent=lambda *a, **k: None)
+        p.strat_block = True
+        p.halted = False
+        p.block_last_emit = 0.0
+        p.cooldown = {}
+        p.entries_blocked = lambda: False
+        p.missing_controls = lambda _p: False
+        p.score = lambda s_: (1 if pos.side == "LONG" else -1, "x", 0.9)
+        p.dca = types.SimpleNamespace(
+            enabled=True, lanes={}, key=lambda s_, side: f"{s_}:{side}", skips=0,
+            due=lambda *a, **k: seen.__setitem__("dca", seen["dca"] + 1) or None,
+            on_close=lambda *a, **k: None, drop=lambda *a, **k: None, attach=lambda *a, **k: None)
+        p.dca_last_emit = 0.0
+        p.dca_fail_cd = {}
+        p.max_book_notional = lambda: 1e9
+        p.maybe_block_adds()
+        p.maybe_dca_adds()
+        set_adds = dict(seen)
+        # hold cap: a Set position past 6 h with a 12 h time exit stays open
+        p.sets.hist_time_bars = 720
+        p.sets.scratch_min = 0.05
+        pos.opened_at = time.time() - pt.MAX_HOLD_S - 60
+        p.manage()
+        set_held = sym in p.open
+        # the same position without a Set: every lane may act
+        pos.set_id = ""
+        out["rearrange_free"] = len(p.rearrange_opens())
+        seen["block"] = seen["dca"] = 0
+        p.maybe_block_adds()
+        p.maybe_dca_adds()
+        free_adds = dict(seen)
+        return out["rearrange"][0], out["rearrange_free"], set_adds, free_adds, set_held
+
+    set_swap, free_swap, set_adds, free_adds, set_held = _isolated(run)
+    ok = set_swap == 0 and free_swap == 1 and set_adds == {"block": 0, "dca": 0} \
+        and free_adds["block"] == 1 and free_adds["dca"] == 1 and set_held
+    return ok, (f"Set position: rearrange candidates={set_swap} add-on checks={set_adds} held past 6 h={set_held}; "
+                f"without a Set: rearrange candidates={free_swap} add-on checks={free_adds}")
+
+
+def a_set_position_gets_no_add_on_lane():
+    """Opening a Set position registers no Block parent and no DCA lane: the add-on lanes belong to positions without a
+    Set. A position without a Set still gets its Block parent."""
+    def run():
+        sym = "BTC-USDT"
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+        res = []
+        for with_set in (True, False):
+            if os.path.exists(pt.OPEN_PATH):
+                os.remove(pt.OPEN_PATH)          # each run starts with an empty book
+            p = pt.Pulse(_StubExchange(executed="1", requested="1"), contracts)
+            p.boot_ts = 0.0
+            p.px[sym] = 100.0
+            p.available = 50.0
+            p.halted = False
+            p.entry_sense = lambda *a, **k: None
+            st = p.sets.by_idx[0] if (with_set and p.sets.by_idx) else None
+            p.sets.pick_any = lambda pack, _st=st: _st
+            p.sets.pick_trail = lambda pack: None
+            parents = []
+            p.block.register_parent = lambda *a: parents.append(a)
+            p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+            pos = p.open.get(sym)
+            res.append((bool(pos and pos.set_id), len(parents)))
+        return res
+    (set_open, set_parents), (free_open, free_parents) = _isolated(run)
+    ok = set_open and set_parents == 0 and not free_open and free_parents == 1
+    return ok, f"Set position opened={set_open} Block parents={set_parents}; position without a Set parents={free_parents}"
+
+
+def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
+    """While the venue bans the order path (path_cd), the unprotected-position flatten waits instead of cancelling stops
+    and calling the close every cycle. Once the ban is over the flatten runs, and a close the venue refuses is logged with
+    the venue's reason."""
+    def run():
+        p, sym = _enter(_StubExchange(executed="1", requested="1"))
+        pos = p.open[sym]
+        pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
+        pos.opened_at = time.time() - 900.0
+        p.ensure_controls = lambda _p: None
+        p.ctrl_skip = {}
+        calls = []
+
+        def refused(_p):
+            calls.append(_p.symbol)
+            p.last_error = f"close {_p.symbol} over 20 error code:109420 requests"
+            return False, _p.entry
+        p.market_close = refused
+        p.cancel_controls = lambda s_: None
+        lines = []
+        saved_log = pt.log
+        pt.log = lambda msg, *a, **k: lines.append(msg)
+        try:
+            if not hasattr(p.api, "path_cd"):
+                p.api.path_cd = {}
+            p.api.path_cd["/openApi/swap/v2/trade/order"] = time.time() + 300.0
+            p.priority_controls()
+            banned = len(calls)
+            p.api.path_cd["/openApi/swap/v2/trade/order"] = 0.0
+            p.priority_controls()
+            free = len(calls)
+        finally:
+            pt.log = saved_log
+        logged = any(l.startswith(f"CLOSE FAIL {sym}") and "109420" in l for l in lines)
+        return banned, free, logged, sym in p.open
+    banned, free, logged, kept = _isolated(run)
+    ok = banned == 0 and free == 1 and logged and kept
+    return ok, f"close calls during the ban={banned} after={free} refusal logged={logged} position kept={kept}"
+
+
+def position_size_follows_the_balance_and_the_volume_factor():
+    """Position notional = balance x sizePctOfBalance % x volumeFactor: it doubles with the balance and with the factor,
+    falls back to targetNotional x volumeFactor before a balance is read (or with the percentage at 0), and size_qty raises
+    it to the venue's minimum order on a small account."""
+    p = _bare_pulse()
+    p.volume_factor, p.size_pct = 1.5, 1.0
+    p.size_max = 1e9                              # the ceiling has its own check
+    out = {}
+    for bal in (0.0, 8.92, 1000.0, 2000.0):
+        p.equity = bal
+        out[bal] = round(p.sized_notional(), 6)
+    p.equity, p.volume_factor = 1000.0, 3.0
+    doubled_factor = round(p.sized_notional(), 6)
+    p.size_pct = 0.0
+    fixed = round(p.sized_notional(), 6)
+    # a 9 USDT account: 1 % x 1.5 = 0.13 USDT, under a 5 USDT minimum order -> the minimum
+    p.size_pct, p.volume_factor, p.equity, p.available = 1.0, 1.5, 8.92, 8.92
+    c = pt.Contract(symbol="X-USDT", min_qty=0.001, step=0.001, qprec=3, pprec=4, min_usdt=5.0, max_lev=50)
+    p.leverage_for = lambda c_: 50
+    q = p.size_qty(c, 100.0)
+    ok = (out[0.0] == round(pt.TARGET_NOTIONAL * 1.5, 6) and abs(out[1000.0] - 15.0) < 1e-9
+          and abs(out[2000.0] - 30.0) < 1e-9 and abs(doubled_factor - 30.0) < 1e-9
+          and fixed == round(pt.TARGET_NOTIONAL * 3.0, 6) and abs(q * 100.0 - 5.0) < 1e-6)
+    return ok, (f"notional by balance={out}; factor 3 at 1000={doubled_factor}; pct 0={fixed}; "
+                f"9 USDT account order={round(q * 100.0, 4)} USDT (venue minimum 5)")
+
+
+def drawdown_halt_follows_its_setting():
+    """ddHaltPct (percent of the start equity, default 18) halts entries on a drawdown; 0 switches the halt off, and a
+    drawdown halt already latched clears on the next balance read. The minimum-equity guard stays on either way."""
+    def run():
+        out = {}
+        for pct, eq in ((None, 30.0), (0.0, 30.0), (0.0, 0.1)):
+            p, sym = _enter(_StubExchange(executed="1", requested="1"))
+            p.start_eq = 100.0
+            p.dd_halt = pt.DD_HALT if pct is None else pct / 100.0
+            p.halted, p.halt_reason = (True, "drawdown halt") if pct == 0.0 else (False, None)   # latched from before
+            p.api.get = lambda path, extra=None, _e=eq: {"code": 0, "data": {"balance": {"equity": str(_e), "availableMargin": str(_e)}}}
+            p.refresh_balance()
+            out[f"{pct}:{eq}"] = (p.halted, p.halt_reason)
+        return out
+    out = _isolated(run)
+    ok = out["None:30.0"] == (True, "drawdown halt") and out["0.0:30.0"] == (False, None) and out["0.0:0.1"][0] is True \
+        and "below min" in str(out["0.0:0.1"][1])
+    return ok, f"(halted, reason) by (ddHaltPct, equity from start 100): {out}"
+
+
+def no_entry_on_a_symbol_that_failed_the_data_check():
+    import types
+    p = _bare_pulse()
+    p.sets = types.SimpleNamespace(enabled=True, use_historic_gate=True, symbol_ok=lambda s: s != "BAD-USDT", entry_conf=0.5,
+                                   pick_any=lambda pack: types.SimpleNamespace(id="x"), pack_open=lambda pack: True)
+    p.strat_ind = False
+    p.px = {"BAD-USDT": 1.0, "OK-USDT": 1.0}
+    p.occupying = lambda *a, **k: False
+    bad = p.entry_sense("BAD-USDT", 1, "gen:x", 0.9, "general")
+    good = p.entry_sense("OK-USDT", 1, "gen:x", 0.9, "general")
+    return bad == "data-quality" and good != "data-quality", f"failed symbol -> {bad}; clean symbol -> {good}"
+
+
 CHECKS = [
+    ("trader.drawdown-halt-follows-its-setting", drawdown_halt_follows_its_setting),
+    ("trader.size-follows-balance-and-volume-factor", position_size_follows_the_balance_and_the_volume_factor),
+    ("trader.venue-ban-pauses-flatten-and-refusal-logged", a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged),
+    ("trader.lanes-no-other-lane-touches-a-set-position", no_other_lane_touches_a_set_position),
+    ("trader.lanes-set-position-gets-no-add-on-lane", a_set_position_gets_no_add_on_lane),
+    ("trader.no-entry-on-a-failed-data-check", no_entry_on_a_symbol_that_failed_the_data_check),
+    ("trader.history-thread-fetches-at-start", history_thread_fetches_at_start_and_never_replays_padding),
+    ("trader.restored-book-drop-needs-two-reads", restored_book_drops_a_position_only_when_two_reads_agree),
+    ("trader.history-kept-offline-and-topped-up", history_thread_keeps_real_history_and_tops_up_a_partial_one),
+    ("trader.departed-symbol-leaves-set-history", a_symbol_that_left_the_universe_leaves_the_set_history),
+    ("trader.credentials-from-private-file", credentials_come_from_a_private_file_without_redis),
+    ("trader.set-lane-does-not-read-the-exit-strategies", the_set_lane_does_not_read_the_exit_strategies),
+    ("trader.set-position-closed-only-by-its-lane", a_set_position_is_closed_only_by_its_own_lane),
+    ("trader.set-lane-scratch-and-time-follow-replay", a_set_lane_scratch_and_time_follow_the_replay_rules),
+    ("trader.set-lane-honours-tp-as-the-replay-does", a_set_lane_honours_tp_only_as_the_replay_does),
+    ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
+    ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),
+    ("trader.cids-round-trip-to-their-own-set", client_order_ids_round_trip_to_their_own_set),
+    ("trader.signal-needs-its-own-pack", a_signal_needs_its_own_pack_to_hold_a_valid_set),
+    ("trader.manager-close-not-counted-twice", a_manager_close_is_not_counted_again_by_the_fill_sync),
+    ("trader.set-fill-keeps-its-sl-and-tp", a_set_fill_keeps_the_sets_own_sl_and_tp),
+    ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),
+    ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),

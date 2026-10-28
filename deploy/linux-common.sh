@@ -131,6 +131,9 @@ ensure_base_packages() {
   pkg_install_missing ca-certificates curl git rsync python3 "$redis"
   if [[ "$kind" == apt ]]; then
     pkg_install_missing gnupg redis-tools python3-venv || true
+    # engine extras: httpx (parallel public GETs) and websocket-client (the price stream). The engine runs without them
+    # (thread-pool GETs, REST prices), only slower, so a missing package is not fatal.
+    pkg_install_missing python3-httpx python3-websocket || true
   fi
   have python3 || die "python3 is required"
   have git || die "git is required"
@@ -274,7 +277,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="5c3d8ff7e72490210f1518902bdfb2e37213c4ac"
+  local pt_want="6936a0b9a17fae8ef56b43d405b8815c2bc2ff32"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then

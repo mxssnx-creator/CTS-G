@@ -1,3 +1,4 @@
+import { SetsOverview } from "@/components/sets-overview";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -204,6 +205,12 @@ function SettingsPage() {
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
+                <EnableSlider label="Trend (Sets and Base evaluation)" on={overlay.stratTrend} onChange={(v) => patch("stratTrend", v)} />
+                <EnableSlider label="Breakout (Sets and Base evaluation)" on={overlay.stratBreakout} onChange={(v) => patch("stratBreakout", v)} />
+                <EnableSlider label="Reversion (Sets and Base evaluation)" on={overlay.stratReversion} onChange={(v) => patch("stratReversion", v)} />
+                <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
+                <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -421,6 +428,7 @@ function SettingsPage() {
             </Card>
           )}
 
+          {section === "sets" && <SetsOverview stats={stats} />}
           {section === "sets" && (
             <Card
               title="Independent Sets · 1m historic"
@@ -428,7 +436,7 @@ function SettingsPage() {
             >
               <Grid>
                 <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
-                <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
+                <Toggle label="Base gate (always on: entries open only under a Base-validated Set)" on={true} onChange={() => patch("setUseHistoricGate", true)} />
                 <Slider
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
@@ -530,6 +538,50 @@ function SettingsPage() {
                   max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
+                />
+                <Slider
+                  label="Short Range · TP step min"
+                  value={overlay.shortRangeStepMin}
+                  min={2}
+                  max={6}
+                  step={1}
+                  hint="Short Range (Low-Range signals) trades TP steps min..max, one step = one PositionCost. Default 2–6."
+                  onChange={(v) => patch("shortRangeStepMin", Math.max(2, Math.min(overlay.shortRangeStepMax || 6, Math.round(v))))}
+                />
+                <Slider
+                  label="Short Range · TP step max"
+                  value={overlay.shortRangeStepMax}
+                  min={2}
+                  max={6}
+                  step={1}
+                  onChange={(v) => patch("shortRangeStepMax", Math.max(overlay.shortRangeStepMin || 2, Math.min(6, Math.round(v))))}
+                />
+                <Slider
+                  label="Short Range · min PF"
+                  value={overlay.shortRangeMinPf}
+                  min={1}
+                  max={2.3}
+                  step={0.02}
+                  hint="Base PF floor of the Short Range strategy alone (default 1.10); the other strategies use the Set min PF above."
+                  onChange={(v) => patch("shortRangeMinPf", v)}
+                />
+                <Slider
+                  label="Min stop · steps over cost"
+                  value={overlay.slMinSteps}
+                  min={0}
+                  max={5}
+                  step={1}
+                  hint={`Overall minimum stop = PositionCost + n steps = ${(((overlay.slMinSteps ?? 1) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 1).`}
+                  onChange={(v) => patch("slMinSteps", Math.max(0, Math.min(5, Math.round(v))))}
+                />
+                <Slider
+                  label="Min trailing distance · steps over cost"
+                  value={overlay.trailMinSteps}
+                  min={1}
+                  max={7}
+                  step={1}
+                  hint={`Minimum trailing distance = PositionCost + n steps = ${(((overlay.trailMinSteps ?? 2) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 2).`}
+                  onChange={(v) => patch("trailMinSteps", Math.max(1, Math.min(7, Math.round(v))))}
                 />
               </Grid>
               <SetsLiveTable stats={stats} overlay={overlay} />
@@ -672,7 +724,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="0 = unlimited"
+                  hint="default 6 groups; 0 = unlimited"
                   onChange={(v) => patch("blockMaxStack", v)}
                 />
                 <Num
@@ -876,17 +928,44 @@ function SettingsPage() {
           )}
 
           {section === "dca" && (
-            <Card title="DCA" hint="Independent of Block · fires on adverse % from average entry · own last-15 PF / last-25 deact">
+            <Card title="DCA" hint="Independent of Block · adds against a position · scored on its own adds (last-15 PF / last-25 deact) · off by default">
               <Toggle
                 label="DCA enabled"
                 on={overlay.dcaEnabled === true}
-                onChange={(v) => patch("dcaEnabled", v)}
+                onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }}
               />
+              <Toggle
+                label="Auto calculation (rungs from each position's own stop, one small rung, exposure ceiling)"
+                on={overlay.dcaAuto !== false}
+                onChange={(v) => patch("dcaAuto", v)}
+              />
+              <Toggle
+                label="Also on Set positions (the Set keeps its own stop and TP; the Set is scored on its base result)"
+                on={overlay.dcaOnSets === true}
+                onChange={(v) => patch("dcaOnSets", v)}
+              />
+              <Toggle
+                label="Also on Axis-admitted positions (only while an Axis is on and the coordinator allows)"
+                on={overlay.dcaOnAxis === true}
+                onChange={(v) => patch("dcaOnAxis", v)}
+              />
+              <Grid>
+                <Num
+                  label="Max exposure × base size (auto)"
+                  value={overlay.dcaMaxExposureX}
+                  min={1}
+                  max={8}
+                  step={0.5}
+                  onChange={(v) => patch("dcaMaxExposureX", v)}
+                />
+              </Grid>
               <Toggle
                 label="Auto-deact on last-25 avg loss"
                 on={overlay.dcaAutoDeact !== false}
                 onChange={(v) => patch("dcaAutoDeact", v)}
               />
+              <details className="mt-3" open={overlay.dcaAuto === false} data-testid="dca-manual">
+              <summary className="cursor-pointer font-mono text-xs text-muted">Manual static settings (used when Auto calculation is off)</summary>
               <Grid>
                 <Num
                   label="Max steps"
@@ -989,6 +1068,7 @@ function SettingsPage() {
                   />
                 ))}
               </Grid>
+              </details>
             </Card>
           )}
 
@@ -1100,9 +1180,52 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("targetNotional", v)}
                 />
+                <Num
+                  label="Max position USDT"
+                  value={overlay.sizeMaxNotional ?? 25}
+                  min={0.2}
+                  max={5000}
+                  step={0.5}
+                  hint="Hard ceiling for one position's notional, whatever the balance or the factor."
+                  onChange={(v) => patch("sizeMaxNotional", v)}
+                />
+                <Num
+                  label="Max entry slippage %"
+                  value={overlay.maxEntrySlipPct ?? 0.75}
+                  min={0.05}
+                  max={5}
+                  step={0.05}
+                  hint="A fill farther than this from the price the entry was decided at is closed at once and the symbol rests 30 min."
+                  onChange={(v) => patch("maxEntrySlipPct", v)}
+                />
+                <Num
+                  label="Drawdown halt %"
+                  value={overlay.ddHaltPct ?? 18}
+                  min={0}
+                  max={90}
+                  step={1}
+                  hint="Entries halt when equity falls this far below the start equity. 0 = off (no drawdown protection)."
+                  onChange={(v) => patch("ddHaltPct", v)}
+                />
+                <Num
+                  label="Size % of balance"
+                  value={overlay.sizePctOfBalance ?? 1}
+                  min={0}
+                  max={25}
+                  step={0.1}
+                  hint="Position notional = balance x this % x volume factor (raised to the exchange minimum). 0 = fixed pulse notional."
+                  onChange={(v) => patch("sizePctOfBalance", v)}
+                />
                 <KV
                   k="Effective notional"
-                  v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)}
+                  v={
+                    Math.min(
+                      (overlay.sizePctOfBalance ?? 0) > 0 && Number(stats?.equity) > 0
+                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor || 1)
+                        : overlay.targetNotional * (overlay.volumeFactor || 1),
+                      overlay.sizeMaxNotional ?? 25,
+                    ).toFixed(2)
+                  }
                 />
                 <Toggle
                   label="Always max leverage"

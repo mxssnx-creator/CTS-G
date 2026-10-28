@@ -9,6 +9,8 @@ import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
 import { DEFAULT_OVERLAY, GATE_MIN_PF_DEFAULT } from "@/lib/config-model";
 import { CoveragePanel } from "@/components/coverage-overview";
+import { BaseValidationPanel } from "@/components/base-validation-panel";
+import { SetsOverview } from "@/components/sets-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
@@ -56,6 +58,7 @@ function ResultsPage() {
         {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · {stats?.openCount ?? 0} open · {closed.length} closed
       </p>
       <StatsOverview data={overview} live={stats} />
+      <BaseValidationPanel live={stats} minPf={stats?.sets?.minPf ?? GATE_MIN_PF_DEFAULT} />
 
       <div className="flex flex-wrap gap-2">
         <a
@@ -87,10 +90,8 @@ function ResultsPage() {
 
       <CoveragePanel live={stats} />
       <InternResults stats={stats} />
-      <SetResults stats={stats} />
+      <SetsOverview stats={stats} />
       <ExitResults stats={stats} />
-      <BlockResults stats={stats} />
-      <DcaResults stats={stats} />
 
       <section className="grid gap-3 lg:grid-cols-2">
         <Card title="Equity curve">
@@ -269,61 +270,6 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
   );
 }
 
-function SetResults({ stats }: { stats: LiveStats | null }) {
-  const rows = stats?.sets?.rows ?? [];
-  return (
-    <Card title="Independent Sets · last 15 PF · max DD time · last 25 R">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-sm">
-          <thead className="font-mono text-[11px] text-muted">
-            <tr>
-              <th className="pb-2 font-medium">Set</th>
-              <th className="pb-2 font-medium">On</th>
-              <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last 15 PF</th>
-              <th className="pb-2 text-right font-medium">Last 25 R</th>
-              <th className="pb-2 text-right font-medium">WR</th>
-              <th className="pb-2 text-right font-medium">E</th>
-              <th className="pb-2 text-right font-medium">Hold</th>
-              <th className="pb-2 text-right font-medium">Max DDt</th>
-              <th className="pb-2 text-right font-medium">Avg DDt</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={10} className="py-8 text-center text-muted">
-                  1m historic replay fills each Set independently
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => (
-                <tr key={r.id} className="border-t border-border font-mono text-xs">
-                  <td className="py-1.5">
-                    {r.pack} sl{r.slRatio.toFixed(1)} st{r.step ?? "—"} {r.trailKey}
-                  </td>
-                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
-                  <td className="py-1.5 text-right">
-                    {r.n}
-                    {r.liveN ? `+${r.liveN}` : ""}
-                  </td>
-                  <td className="py-1.5 text-right">{r.pf15.toFixed(2)}</td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
-                  <td className="py-1.5 text-right">{Number(r.wr ?? 0).toFixed(0)}%</td>
-                  <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{Number(r.expectancy ?? 0).toFixed(4)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(Number(r.avgHoldS ?? 0) * 1000)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(r.avgDdS * 1000)}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  );
-}
-
 function ExitResults({ stats }: { stats: LiveStats | null }) {
   const lanes = stats?.exits?.lanes ?? [];
   return (
@@ -365,100 +311,6 @@ function ExitResults({ stats }: { stats: LiveStats | null }) {
           </tbody>
         </table>
       </div>
-    </Card>
-  );
-}
-
-function BlockResults({ stats }: { stats: LiveStats | null }) {
-  const blk = stats?.block;
-  const lanes = blk?.lanes ?? [];
-  return (
-    <Card title="Block strategy · CTS counts · PF gate">
-      <p className="mb-3 text-sm text-muted">
-        stack {blk?.maxStack ?? "—"} · vol {blk?.volumeRatio ?? "—"} · pfRatio {blk?.profitFactorRatio ?? "—"} · minPF {blk?.defaultMinPF ?? "—"} · live {blk?.activeLive ? "on" : "off"}
-      </p>
-      {lanes.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted">Block lanes appear when a parent is open</p>
-      ) : (
-        <div className="space-y-4">
-          {lanes.map((lane) => (
-            <div key={`${lane.symbol}-${lane.side}`} className="rounded-lg border border-border p-3">
-              <div className="mb-2 flex flex-wrap justify-between gap-2 text-sm">
-                <span className="font-medium">
-                  {lane.symbol.replace("-USDT", "")} {lane.side}
-                </span>
-                <span className="font-mono text-xs text-muted">
-                  base {lane.baseQty} · add {lane.confirmedAdd} · agg {lane.aggregate}
-                </span>
-              </div>
-              <table className="w-full text-left text-xs">
-                <thead className="font-mono text-muted">
-                  <tr>
-                    <th className="pb-1 font-medium">#</th>
-                    <th className="pb-1 text-right font-medium">inc</th>
-                    <th className="pb-1 text-right font-medium">min PF</th>
-                    <th className="pb-1 text-right font-medium">obs PF</th>
-                    <th className="pb-1 font-medium">pass</th>
-                    <th className="pb-1 font-medium">paused</th>
-                    <th className="pb-1 font-medium">sat</th>
-                  </tr>
-                </thead>
-                <tbody className="font-mono">
-                  {lane.counts.map((c) => (
-                    <tr key={c.n} className="border-t border-border">
-                      <td className="py-1">{c.n}</td>
-                      <td className="py-1 text-right">{c.inc}</td>
-                      <td className="py-1 text-right">{c.minPF}</td>
-                      <td className="py-1 text-right">{c.obsPF}</td>
-                      <td className={c.pass ? "py-1 text-primary" : "py-1 text-danger"}>{c.pass ? "yes" : "no"}</td>
-                      <td className={c.paused ? "py-1 text-danger" : "py-1"}>{c.paused ? "yes" : "no"}</td>
-                      <td className="py-1">{c.satisfied ? "yes" : "no"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
-  );
-}
-
-function DcaResults({ stats }: { stats: LiveStats | null }) {
-  const dca = stats?.dca;
-  const lanes = dca?.lanes ?? [];
-  return (
-    <Card title="DCA · independent CTS steps">
-      <p className="mb-3 text-sm text-muted">
-        {dca?.enabled ? "on" : "off"} · {dca?.active ? "active" : dca?.deactReason || "idle"} · steps {dca?.maxSteps ?? "—"} · PF15 {Number(dca?.pf15 ?? 1).toFixed(2)} · last25 R {Number(dca?.last25AvgR ?? 0).toFixed(2)} · dist {(dca?.distancesPct ?? []).join("/")}
-      </p>
-      {lanes.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted">Lanes attach when a parent is open</p>
-      ) : (
-        <div className="space-y-3">
-          {lanes.map((lane) => (
-            <div key={`${lane.symbol}-${lane.side}`} className="rounded-lg border border-border p-3 font-mono text-xs">
-              <div className="mb-2 flex justify-between gap-2">
-                <span>
-                  {lane.symbol.replace("-USDT", "")} {lane.side}
-                </span>
-                <span className="text-muted">
-                  parent {lane.parentQty} · avg {lane.avgEntry} · filled {lane.filledN}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {lane.steps.map((s) => (
-                  <span key={s.n} className={s.filled ? "text-primary" : "text-muted"}>
-                    #{s.n} {s.distancePct}% ×{s.mult}
-                    {s.filled ? " filled" : ""}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </Card>
   );
 }
