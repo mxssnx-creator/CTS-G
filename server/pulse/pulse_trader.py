@@ -3515,7 +3515,7 @@ class Pulse:
                 row["underInvalidSet"] += 1
         n = self.__dict__.setdefault("exec_n", {})
         return {
-            "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0), "baseValid": counts.get("valid", 0) + int(reasons.get("real", 0)),
+            "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0), "baseValid": counts.get("valid", 0) + int(reasons.get("main", 0)),
                      "invalid": counts.get("invalid", 0), "reasons": dict(reasons)},
             "open": {"positions": len(self.open), "setPositions": len(self.open) - no_set, "noSet": no_set, "sets": len(open_sets),
                      "underInvalidSet": under_invalid, "setRetired": retired, "byPack": by_pack},

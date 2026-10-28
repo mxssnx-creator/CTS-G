@@ -179,11 +179,11 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     if valid and book.consistency_pf > 0 and n >= 2:
         valid = min(old, new) + 1e-9 >= book.consistency_pf
-    if valid and getattr(book, "real_on", False):       # the Real gate: the same minimum PF over the Set's last realGateN processed orders
-        rw = processed_tail(book, tapes, st, now, book.real_n)
+    if valid and getattr(book, "main_on", False):       # the Main gate: the same minimum PF over the Set's last mainGateN processed orders
+        rw = processed_tail(book, tapes, st, now, book.main_n)
         g_ = sum(x for x in rw if x > 0)
         l_ = -sum(x for x in rw if x < 0)
-        valid = len(rw) >= book.real_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= floor
+        valid = len(rw) >= book.main_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= floor
     halves = min(old, new) if (old or new) else pf
     shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * n_all / (n_all + se.RANK_SHRINK_N)
     rank = (halves + 1e-9 >= floor, round(shrunk, 4), n_all, r25, -max_s)      # SetBook.rank_key
@@ -239,7 +239,7 @@ def gate_until(book, tapes: Tapes, st, now: float) -> float:
 
 def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) -> Tuple[int, int]:
     """The direct gate against the engine's own scoring on sampled (Set, hour) pairs; half of them are pairs that pass the Base
-    gate, so the Real gate on the processed orders is compared too."""
+    gate, so the Main gate on the processed orders is compared too."""
     import random
     rnd = random.Random(5)
     bad = 0

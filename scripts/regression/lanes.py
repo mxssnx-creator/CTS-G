@@ -80,7 +80,7 @@ class _Venue:
 
 def _book(**extra):
     b = se.SetBook()
-    b.load(overlay(**{**SMALL, "realGateEnabled": False, **extra}))     # lane and rank fixtures set the Base numbers directly
+    b.load(overlay(**{**SMALL, "mainGateEnabled": False, **extra}))     # lane and rank fixtures set the Base numbers directly
     return b
 
 
@@ -441,24 +441,24 @@ def block_samples_are_its_own_and_independent_of_the_window_calcs():
 
 def a_set_that_stops_passing_keeps_its_open_position_handled_and_counted():
     """A position opened under a valid Set stays handled by that Set's own lane until it closes, even when the Set stops passing a gate (the
-    Real gate here) while the position is open: the execution figures show it under an invalid Set while it runs, the close leaves by the
+    Main gate here) while the position is open: the execution figures show it under an invalid Set while it runs, the close leaves by the
     Set's own rule on the replay's bar, and the order is counted once in the Set lane (and nowhere in the Exit lane)."""
     seen = {}
 
     def hook(p, pos):
         st = p.sets.sets[pos.set_id]
         before = p.execution_snapshot()
-        st.real_pf, st.real_n, st.real_on = 0.0, p.sets.real_n, True      # the Set now fails the Real gate
-        p.sets.real_on = True
+        st.main_pf, st.main_n, st.main_on = 0.0, p.sets.main_n, True      # the Set now fails the Main gate
+        p.sets.main_on = True
         seen["before"] = before
         seen["during"] = p.execution_snapshot()
         seen["reason"] = p.sets.gate_reason(st)
 
     b0 = _book()
     st0 = _pick(b0, "time")
-    b = _book(realGateEnabled=True)
+    b = _book(mainGateEnabled=True)
     st = b.sets[st0.id]
-    st.gate_n, st.gate_pf, st.real_n, st.real_pf, st.active, st.max_dd_s = b.gate_min, 2.0, b.real_n, 2.0, True, 0.0
+    st.gate_n, st.gate_pf, st.main_n, st.main_pf, st.active, st.max_dd_s = b.gate_min, 2.0, b.main_n, 2.0, True, 0.0
     bars = _scenario_bars("time", 1)
     (rsl, rtp), rep = replay(b0, st0, bars, 5, 1)
     lv, liv, _ = live(b, st, bars, 5, 1, others=False, after_open=hook)
@@ -466,7 +466,7 @@ def a_set_that_stops_passing_keeps_its_open_position_handled_and_counted():
     after = p.execution_snapshot()
     ok = (rep is not None and liv is not None and liv[0] == rep["reason"] and liv[1] == rep["exit_i"]
           and seen["before"]["open"]["positions"] == 1 and seen["before"]["open"]["underInvalidSet"] == 0
-          and seen["reason"] == "real" and seen["during"]["open"]["underInvalidSet"] == 1 and seen["during"]["open"]["sets"] == 1
+          and seen["reason"] == "main" and seen["during"]["open"]["underInvalidSet"] == 1 and seen["during"]["open"]["sets"] == 1
           and after["open"]["positions"] == 0 and after["closed"]["setLane"] == 1 and after["closed"]["exitLane"] == 0
           and after["closed"]["orders"] == 1 and after["closed"]["setsThatTraded"] == 1)
     return ok, f"exit replay {rep and (rep['reason'], rep['exit_i'])} live {liv and liv[:2]}; open under invalid Set while running {seen['during']['open']['underInvalidSet']}; closed {after['closed']}"

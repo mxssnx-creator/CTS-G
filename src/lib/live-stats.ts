@@ -69,11 +69,16 @@ export type LiveClosed = {
  * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
 export type PfPool = { pf: number; n: number; sets: number };
 export type PfBase = {
-  /** The end figure: the pool of the Sets that pass every gate (Base and Real). */
+  /** The end figure: the pool of the Sets that pass every gate (Base and Main). */
   base: PfPool;
-  /** The pool of the Sets that pass the Base gate alone, and the end Sets over their Real gate window. */
+  /** The pool of the Sets that pass the Base gate alone. */
   baseOnly?: PfPool;
-  real?: PfPool & { on: boolean; lastN: number };
+  /** Main stage: the end Sets over the Main gate's last N of their Main Sets (orders opened while Base passed). */
+  main?: PfPool & { on: boolean; lastN: number };
+  /** The Main Sets of every Base-passing Set. */
+  processed?: PfPool & { orders: number; lastN: number };
+  /** Real stage: the Real Sets (orders opened while Base and Main passed) of the end Sets. */
+  real?: { pf: number; sets: number; orders: number; stages: string[] };
   validatedBasePct?: number;
   unfiltered: PfPool;
   total?: number;

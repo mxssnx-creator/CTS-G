@@ -21,8 +21,8 @@ GATE = dict(setGateWindow=15, setGateMinTrades=12, setMinPf=1.10)
 
 
 def _book(**extra):
-    # the lifecycle checks are about the Base gate on short fixture tapes; the Real gate (on the processed orders) has its own checks
-    extra.setdefault("realGateEnabled", False)
+    # the lifecycle checks are about the Base gate on short fixture tapes; the Main gate (on the processed orders) has its own checks
+    extra.setdefault("mainGateEnabled", False)
     b = SetBook()
     b.load(overlay(**extra))
     b.cost_pct = 0.15

@@ -42,6 +42,13 @@ export type SetIndexRow = {
   da?: number;
   /** Engine rank among the valid Sets (0 = first choice), -1 when not valid. */
   rk?: number;
+  /** The Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set (opened while Base and Main passed). */
+  mainId?: string;
+  mainN?: number;
+  mainPf?: number;
+  realId?: string;
+  realN?: number;
+  realPf?: number;
 };
 
 export type StrategyType = "normal" | "exit" | "trailing" | "axis" | "block" | "dca";

@@ -182,8 +182,8 @@
   "exitMinSamples": 8,
   "blockMinSamples": 8,
   "blockWindow": 25,
-  "realGateEnabled": true,
-  "realGateN": 8,
+  "mainGateEnabled": true,
+  "mainGateN": 8,
   "minPfLinked": true,
   "histLookbackAuto": true,
   "histLookbackMax": 2880

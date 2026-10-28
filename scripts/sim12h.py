@@ -90,9 +90,9 @@ def run(a):
     shadow = sg.build(names, bars, times, a.jobs)
     book = sg.make_book()
     book.lookback = a.pre * 60                                   # Base validation reads the pre-history window
-    if getattr(a, "real", None) is not None:                     # --real N: the Real gate's last N (0 = off); default = the engine's shipped value
-        book.real_on = a.real > 0
-        book.real_n = a.real or book.real_n
+    if getattr(a, "real", None) is not None:                     # --real N: the Main gate's last N (0 = off); default = the engine's shipped value
+        book.main_on = a.real > 0
+        book.main_n = a.real or book.main_n
     tapes = sg.Tapes(book, names, times, shadow)
     hours = [float(t_sim0 + k * 3600) for k in range(a.hours)]
     n_chk, bad = sg.self_check(book, tapes, hours)
@@ -224,7 +224,7 @@ def main():
     ap.add_argument("--notional", type=float, default=2.15)
     ap.add_argument("--alt-notional", dest="alt_notional", type=float, default=0.2)
     ap.add_argument("--jobs", type=int, default=4)
-    ap.add_argument("--real", type=int, default=None, help="the Real gate's last N (0 = off); omitted = the shipped overlay")
+    ap.add_argument("--real", type=int, default=None, help="the Main gate's last N (0 = off); omitted = the shipped overlay")
     ap.add_argument("--counts", type=int, default=0, help="0 = as before; N = the Axis last-N and Block's evidence at N")
     run(ap.parse_args())
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What the secondary last-N windows (pfWindow and friends) do as a validation on top of the Base gate. Arms (--arms): 'none' = the Base gate alone (Real gate off)
+"""What the secondary last-N windows (pfWindow and friends) do as a validation on top of the Base gate. Arms (--arms): 'none' = the Base gate alone (Main gate off)
 (every window follows the overall validation N, nothing extra), and N = 6 (the old shipped value, below the floor of 8), 8, 12, 15, 20, 25: a Base-valid
 Set must in addition have its last N orders at or above the minimum PF. Same hours, tapes and execution as stage_eval; development window
 only (--sealed reads the last third once). Per arm: validated share, post-Base effective PF with its orders, executed PF with orders,
@@ -25,7 +25,7 @@ def main():
     ap.add_argument("--symbols", type=int, default=20)
     ap.add_argument("--sealed", action="store_true")
     ap.add_argument("--arms", default="none,6,8,12,15,20,25")
-    ap.add_argument("--base-list", default="", help="grid: Base last N values (e.g. 10,15,20,25,30,35); with --arms the Real gate N values")
+    ap.add_argument("--base-list", default="", help="grid: Base last N values (e.g. 10,15,20,25,30,35); with --arms the Main gate N values")
     ap.add_argument("--gate-window", type=int, default=0, help="the Base gate's last N (setGateWindow); 0 = the shipped overlay value")
     a = ap.parse_args()
     os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"holdEnabled": False, **({"setGateWindow": a.gate_window} if a.gate_window else {})})
@@ -53,20 +53,20 @@ def main():
         for arm in arms_all:
             if arm != "none" and int(arm) >= book.gate_window:
                 continue                                  # a Real N at or over the Base window is the Base gate itself
-            book.real_on = arm != "none"
-            book.real_n = max(8, int(arm)) if arm != "none" else book.real_n
+            book.main_on = arm != "none"
+            book.main_n = max(8, int(arm)) if arm != "none" else book.main_n
             pools = [ha.pool(book, tapes, h) for h in sample]
             rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours)
             r = sg.summarize(rows, lo, hi, False)
             eff = [p["pf_post"] for p in pools if p["pf_post"] is not None]
             tot = pools[0]["total"]
-            name = f"Base {book.gate_window} / Real {'off' if arm == 'none' else book.real_n}"
-            res[name] = {"base_n": book.gate_window, "real_n": None if arm == "none" else book.real_n,
+            name = f"Base {book.gate_window} / Real {'off' if arm == 'none' else book.main_n}"
+            res[name] = {"base_n": book.gate_window, "main_n": None if arm == "none" else book.main_n,
                          "valid_pct": round(100 * sum(p["valid"] for p in pools) / max(1, tot * len(pools)), 2), "eff_pf": round(statistics.median(eff), 3) if eff else None,
                          "eff_orders_per_hour": round(sum(p["orders"] for p in pools) / len(pools)), "exec_pf": r["pf"], "exec_orders": r["orders"],
                          "net_pct": r["net_pct"], "max_dd_pct": r["max_dd_pct"], "hours_pos": r["hours_positive"]}
             v = res[name]
-            print(f"{book.gate_window:>6d} {'off' if arm == 'none' else book.real_n:>7} {v['valid_pct']:>8} {v['eff_pf']!s:>7s} {v['eff_orders_per_hour']:>12} {v['exec_pf']!s:>8s} {v['exec_orders']:>7} {v['net_pct']:>9} {v['max_dd_pct']:>9} {v['hours_pos']:>9s}", flush=True)
+            print(f"{book.gate_window:>6d} {'off' if arm == 'none' else book.main_n:>7} {v['valid_pct']:>8} {v['eff_pf']!s:>7s} {v['eff_orders_per_hour']:>12} {v['exec_pf']!s:>8s} {v['exec_orders']:>7} {v['net_pct']:>9} {v['max_dd_pct']:>9} {v['hours_pos']:>9s}", flush=True)
     if a.out:
         json.dump(res, open(a.out, "w"), indent=1)
 

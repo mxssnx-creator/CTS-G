@@ -196,12 +196,14 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
               <th className="pb-2 text-right font-medium">Hold</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 text-right font-medium">Avg DDt</th>
+              <th className="pb-2 text-right font-medium" title="Main Set: orders opened while Base passed · the Main gate's PF on its last N">Main Set n · PF</th>
+              <th className="pb-2 text-right font-medium" title="Real Set: orders opened while Base and Main passed · PF on its last N">Real Set n · PF</th>
             </tr>
           </thead>
           <tbody>
             {shown.length === 0 ? (
               <tr>
-                <td colSpan={12} className="py-8 text-center text-muted">
+                <td colSpan={14} className="py-8 text-center text-muted">
                   No Set in this step range.
                 </td>
               </tr>
@@ -220,6 +222,8 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
                   <td className="py-1.5 text-right">{r.h === undefined ? "—" : formatDuration(r.h * 1000)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.dd * 1000)}</td>
                   <td className="py-1.5 text-right">{r.da === undefined ? "—" : formatDuration(r.da * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.mainN === undefined ? "—" : `${r.mainN} · ${formatPf(r.mainPf ?? 0)}`}</td>
+                  <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} · ${formatPf(r.realPf ?? 0)}`}</td>
                 </tr>
               ))
             )}

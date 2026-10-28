@@ -626,15 +626,15 @@ function SettingsPage() {
                   hint="fewer orders than this: not judged (at most the last N)"
                   onChange={(v) => patch("setGateMinTrades", v)}
                 />
-                <Toggle label="Real gate (last-N validation of each Set's processed lane; execution uses Sets that pass both)" on={overlay.realGateEnabled !== false} onChange={(v) => patch("realGateEnabled", v)} />
+                <Toggle label="Main stage gate (last-N validation of each Set's Main Set: orders opened while Base passed; execution uses Sets that pass Base and Main)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
                 <Slider
-                  label="Real gate · last N orders"
-                  value={overlay.realGateN}
+                  label="Main stage · last N orders"
+                  value={overlay.mainGateN}
                   min={8}
                   max={50}
                   step={1}
                   hint="default 8 · reads each Set's processed lane (orders it opened while it passed Base) · same minimum PF as Base"
-                  onChange={(v) => patch("realGateN", v)}
+                  onChange={(v) => patch("mainGateN", v)}
                 />
                 <Toggle label="All validation gates use the Base minimum PF (Real, Exit, DCA, Block, coordinator)" on={overlay.minPfLinked !== false} onChange={(v) => patch("minPfLinked", v)} />
                 <Toggle label="Pre-history grows when too many Sets lack orders" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />

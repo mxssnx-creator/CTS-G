@@ -247,8 +247,8 @@ export type PulseOverlay = {
   setMaxDdtHours: number;
   setGateWindow: number;
   setGateMinTrades: number;
-  realGateEnabled: boolean;
-  realGateN: number;
+  mainGateEnabled: boolean;
+  mainGateN: number;
   minPfLinked: boolean;
   histLookbackAuto: boolean;
   histLookbackMax: number;
@@ -439,8 +439,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMaxDdtHours: 12,
   setGateWindow: 30,
   setGateMinTrades: 25,
-  realGateEnabled: true,
-  realGateN: 8,
+  mainGateEnabled: true,
+  mainGateN: 8,
   minPfLinked: true,
   histLookbackAuto: true,
   histLookbackMax: 2880,
@@ -602,6 +602,9 @@ export type CtsSettings = {
   setMaxDdtHours?: number;
   setGateWindow?: number;
   setGateMinTrades?: number;
+  mainGateEnabled?: boolean;
+  mainGateN?: number;
+  /** legacy names of mainGateEnabled / mainGateN */
   realGateEnabled?: boolean;
   realGateN?: number;
   minPfLinked?: boolean;
@@ -807,8 +810,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMaxDdtHours: num(cts.setMaxDdtHours, 12),
     setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 30)))),
     setGateMinTrades: Math.max(8, Math.min(200, Math.round(num(cts.setGateMinTrades, 25)))),
-    realGateEnabled: bool(cts.realGateEnabled, true),
-    realGateN: Math.max(8, Math.min(200, Math.round(num(cts.realGateN, 8)))),
+    mainGateEnabled: bool(cts.mainGateEnabled ?? cts.realGateEnabled, true),      // realGate* = the legacy keys
+    mainGateN: Math.max(8, Math.min(200, Math.round(num(cts.mainGateN ?? cts.realGateN, 8)))),
     minPfLinked: bool(cts.minPfLinked, true),
     histLookbackAuto: bool(cts.histLookbackAuto, true),
     histLookbackMax: Math.max(120, Math.min(2880, Math.round(num(cts.histLookbackMax, 2880)))),
