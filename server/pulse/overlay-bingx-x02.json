@@ -170,5 +170,9 @@
   "shortRangeStepMax": 6,
   "slMinSteps": 1,
   "trailMinSteps": 2,
-  "shortRangeMinPf": 1.25
+  "shortRangeMinPf": 1.25,
+  "holdEnabled": true,
+  "holdAuto": true,
+  "holdAutoMax": 50,
+  "holdAutoMin": 10
 }

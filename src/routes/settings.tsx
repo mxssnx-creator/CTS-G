@@ -431,6 +431,78 @@ function SettingsPage() {
           {section === "sets" && <SetsOverview stats={stats} />}
           {section === "sets" && (
             <Card
+              title="Hold time per step"
+              hint="Hold time on: positions leave on a time exit of their own. Auto Mode picks it for every Set (pack × range × step, trailing pair) from that Set's own last orders (as many as it has, at most the limit); a step with its manual hold on keeps the manual value. Steps 1–5: 1–50 min; steps 6–12: 30–350 min. Replay and live use the same hold."
+            >
+              <Grid>
+                <Toggle label="Hold time" on={overlay.holdEnabled !== false} onChange={(v) => patch("holdEnabled", v)} />
+                <Toggle label="Auto Mode (best hold per Set)" on={overlay.holdEnabled !== false && overlay.holdAuto !== false} onChange={(v) => patch("holdAuto", v)} />
+                <Slider
+                  label="Auto: orders judged (max)"
+                  value={overlay.holdAutoMax ?? 50}
+                  min={10}
+                  max={50}
+                  step={1}
+                  hint={`last ${overlay.holdAutoMax ?? 50} orders of the Set at most`}
+                  onChange={(v) => patch("holdAutoMax", v)}
+                />
+                <Slider
+                  label="Auto: orders needed (min)"
+                  value={overlay.holdAutoMin ?? 10}
+                  min={3}
+                  max={50}
+                  step={1}
+                  hint={`below ${overlay.holdAutoMin ?? 10} orders a Set keeps the global stop`}
+                  onChange={(v) => patch("holdAutoMin", v)}
+                />
+              </Grid>
+              <div className="grid gap-2 sm:grid-cols-2" data-testid="step-hold">
+                {Array.from({ length: 12 }, (_, i) => {
+                  const step = i + 1;
+                  const [lo, hi] = step <= 5 ? [1, 50] : [30, 350];
+                  const on = overlay.stepHoldOn?.[i] === true;
+                  const raw = Number(overlay.stepHoldMin?.[i] ?? lo);
+                  const minutes = Math.max(lo, Math.min(hi, Math.round(raw)));
+                  const setAt = <T,>(arr: T[] | undefined, v: T, fill: T): T[] => {
+                    const next = Array.from({ length: 12 }, (_, j) => (arr?.[j] ?? fill));
+                    next[i] = v;
+                    return next;
+                  };
+                  return (
+                    <div key={step} className="rounded-lg border border-border bg-bg2 px-3 py-2" data-testid={`step-hold-${step}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs">Step {step}</span>
+                        <label className="flex items-center gap-2 font-mono text-xs text-muted">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            data-testid={`step-hold-on-${step}`}
+                            onChange={(e) => patch("stepHoldOn", setAt(overlay.stepHoldOn, e.target.checked, false))}
+                          />
+                          hold {on ? "on" : "off"}
+                        </label>
+                        <span className="font-mono text-xs">{on ? `${minutes} min` : "global"}</span>
+                      </div>
+                      <input
+                        type="range"
+                        className="mt-2 w-full"
+                        min={lo}
+                        max={hi}
+                        step={1}
+                        value={minutes}
+                        disabled={!on}
+                        data-testid={`step-hold-min-${step}`}
+                        aria-label={`Step ${step} hold minutes`}
+                        onChange={(e) => patch("stepHoldMin", setAt(overlay.stepHoldMin, Number(e.target.value), lo))}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
+          {section === "sets" && (
+            <Card
               title="Independent Sets · 1m historic"
               hint="Each pack × SL:TP × TP-step (2–30 × position cost) is its own book. Sets below Minimal Step Range are not calculated. Live losses raise min step to the count of positive/successful fills."
             >

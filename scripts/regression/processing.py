@@ -681,6 +681,83 @@ def broken_or_flat_series_are_not_replayed():
     return ok, f"excluded={q} replayed={sorted(b._hist_rows)}"
 
 
+def _rows(sid, wins, losses, t0=1000.0):
+    """Rows in time order: losses first, wins last (so the newest orders are the wins) unless the caller reverses."""
+    out, t = [], t0
+    for _ in range(losses):
+        t += 60
+        out.append((t, "S0-USDT", "LONG", -0.0032, -0.002, 600.0, "sl", sid))
+    for _ in range(wins):
+        t += 60
+        out.append((t, "S0-USDT", "LONG", 0.0028, 0.004, 600.0, "tp", sid))
+    return out
+
+
+def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
+    """Auto Mode: every Set (not its step, not its pack) keeps the hold whose own tape has the best cost PF over its last orders,
+    at most holdAutoMax (50), at least holdAutoMin; the global time stop is the reference and a candidate must beat it by the
+    margin. A manual step hold and the master switch override it."""
+    from set_engine import HOLD_KEY
+    b = _book(n_syms=1, bars=300)
+    lo = next(x for x in b.by_idx if x.kind == "base" and x.step == 3)
+    hi = next(x for x in b.by_idx if x.kind == "base" and x.step == 8)
+
+    def run(st, base, cands):
+        b._hist_rows = {"S0-USDT": {st.id: base, **{f"{st.id}{HOLD_KEY}{h}": r for h, r in cands.items()}}}
+        rows = b._choose_hold(st, b._tape_rows(st.id, ["S0-USDT"], 0.0), ["S0-USDT"], 0.0)
+        return st.hold_bars, st.hold_auto_n, len(rows)
+
+    got = {}
+    ref = _rows(lo.id, 20, 30)                                          # PF 0.9 at the global stop
+    got["best"] = run(lo, ref, {10: _rows(lo.id, 10, 40), 20: _rows(lo.id, 45, 5), 30: _rows(lo.id, 25, 25)})
+    # the last 50 orders decide: 40 old wins then 50 losses is a bad hold, 40 old losses then 50 wins a good one
+    got["cap"] = run(lo, ref, {30: _rows(lo.id, 40, 0) + _rows(lo.id, 0, 50, t0=5000.0)})
+    got["cap_good"] = run(lo, ref, {30: _rows(lo.id, 0, 40) + _rows(lo.id, 50, 0, t0=5000.0)})
+    got["few"] = run(lo, ref, {15: _rows(lo.id, 5, 0)})                 # 5 orders, all wins: below holdAutoMin
+    got["tie"] = run(lo, _rows(lo.id, 30, 20), {15: _rows(lo.id, 30, 20)})      # an equal PF keeps the global stop
+    got["better"] = run(lo, _rows(lo.id, 30, 20), {15: _rows(lo.id, 31, 19)})   # +9%: replaces it
+    got["high"] = run(hi, _rows(hi.id, 10, 30), {120: _rows(hi.id, 40, 10), 10: _rows(hi.id, 50, 0)})   # 10 min is not a step-8 candidate
+    man = _book(n_syms=1, bars=300, stepHoldOn=[False, False, True] + [False] * 9, stepHoldMin=[10, 10, 17] + [10] * 9)
+    off = _book(n_syms=1, bars=300, holdEnabled=False, stepHoldOn=[True] * 12, stepHoldMin=[30] * 12)
+    auto_off = _book(n_syms=1, bars=300, holdAuto=False)
+    m3 = next(x for x in man.by_idx if x.kind == "base" and x.step == 3)
+    m4 = next(x for x in man.by_idx if x.kind == "base" and x.step == 4)
+    from set_engine import HOLD_AUTO_HIGH, HOLD_AUTO_LOW
+    s5 = next(x for x in b.by_idx if x.kind == "base" and x.step == 5)
+    s6 = next(x for x in b.by_idx if x.kind == "base" and x.step == 6)
+    tr = next(x for x in b.by_idx if x.kind == "trail" and b.step_of(x) >= 6)
+    ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH
+    ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50 and got["best"][2] == 50
+          and got["cap"][0] == 0 and got["cap_good"][0] == 30 and got["cap_good"][1] == 50
+          and got["few"][0] == 0 and got["tie"][0] == 0 and got["better"][0] == 15 and got["high"][0] == 120
+          and lo.hold_auto and man.auto_holds(m3) == () and m3.hold_bars == 17 and not m3.hold_auto and man.auto_holds(m4) != ()
+          and not off.auto_holds(off.by_idx[0]) and all(x.hold_bars == 0 for x in off.by_idx)
+          and not auto_off.auto_holds(auto_off.by_idx[0]) and all(x.hold_bars == 0 for x in auto_off.by_idx))
+    return ok, f"(hold, orders judged, tape rows) {got}; manual step 3 -> {m3.hold_bars} min, master off and auto off keep the global stop"
+
+
+def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
+    """After a full pass each auto Set carries one of its candidate holds, its tape is the one of that hold (no time exit later
+    than it), and the Sets stay deterministic across two passes."""
+    from set_engine import HOLD_AUTO_HIGH, HOLD_AUTO_LOW
+    b = _book(n_syms=3, bars=1200)
+    b.replay_all(now=T0)
+    first = {st.id: st.hold_bars for st in b.by_idx}
+    bad, chosen = [], 0
+    for st in b.by_idx:
+        allowed = {0, *(HOLD_AUTO_LOW if b.step_of(st) <= 5 else HOLD_AUTO_HIGH)}
+        if st.hold_bars not in allowed or not st.hold_auto:
+            bad.append((st.id, st.hold_bars))
+        if st.hold_bars:
+            chosen += 1
+            late = [r for r in st.hist if r["reason"] == "time" and r["hold_s"] > st.hold_bars * 60 + 1]
+            if late:
+                bad.append((st.id, "time exit after the chosen hold", late[0]["hold_s"]))
+    b.replay_all(now=T0)
+    same = first == {st.id: st.hold_bars for st in b.by_idx}
+    return not bad and chosen > 0 and same, f"sets={len(first)} with an own hold={chosen} bad={bad[:3]} same_on_second_pass={same}"
+
+
 CHECKS = [
     ("processing.broken-or-flat-series-not-replayed", broken_or_flat_series_are_not_replayed),
     ("processing.base-lane-lookup-equals-walk", base_lane_lookup_equals_the_walk),
@@ -712,6 +789,8 @@ CHECKS = [
     ("processing.symbol-failure-isolated-and-recovers", memo.memoized(symbol_failure_isolated_and_recovers)),
     ("processing.set-failure-isolated", memo.memoized(set_failure_isolated)),
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
+    ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
+    ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
     ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized

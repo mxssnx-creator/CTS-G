@@ -69,7 +69,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   the book cap; Set closes never reach Block's or DCA's scores. With the Base gate on (the standard) every entry is a
   Set position, so Block has nothing to stack on and is idle; it only acts when a position has no Set. Block defaults:
   max stack 6 groups, volume ratio 1 of the original volume (`blockMaxStack`, `blockVolumeRatio`).
-- **DCA is an opt-in lane** (off by default: `dcaEnabled`; `dca_engine.DCA_HARD_OFF` is only a build-time kill switch).
+- **DCA is an opt-in lane** (the lane is enabled by default, `dcaEnabled`, but its Set and Axis options `dcaOnSets` / `dcaOnAxis` are off, so under the Base gate it is idle; `dca_engine.DCA_HARD_OFF` is only a build-time kill switch).
   Independent of Block. `dcaAuto` (on by default) calculates the plan from each position's own stop distance (rungs as
   fractions of it, one small rung, exposure ceiling `dcaMaxExposureX`, stop kept at the original level; the measured
   least-harmful shape, `scripts/dca_eval.py`); off = the static lists (`dcaMaxSteps`, distances, multipliers).
@@ -86,6 +86,21 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   x ratio) (`Pulse.place`, `BlockBook.parent_scale`), and the group's net accumulates over its parents; once that net is
   back to equal (>= 0) the next parent opens at the base volume. The lane's observed PF, pauses and parent ring persist
   across parents. Checks: `block.*` and `trader.block-*`.
+
+## Hold time (per step, per Set, Auto Mode)
+
+- Overlay keys: `holdEnabled` (master, default on), `holdAuto` (Auto Mode, default on), `holdAutoMax` (orders judged, at most 50, default
+  50), `holdAutoMin` (orders needed, default 10), `stepHoldOn[i]` / `stepHoldMin[i]` (manual hold of step i + 1; desk sliders 1-50 min for
+  steps 1-5, 30-350 min for steps 6-12; the engine accepts 1..720). Master off = only the global time stop (`hist_time_bars`).
+- Manual: an "on" step leaves every Set of that step on its own time exit after that many minutes. Auto: every Set without a manual step
+  hold (pack x range x SL ratio x TP step, or trailing pair, so each indication, coordination, range and step on its own) replays the
+  candidates (`HOLD_AUTO_LOW` for steps 1-5, `HOLD_AUTO_HIGH` for steps 6-12) next to the global stop on the same bars and keeps the one
+  with the best cost PF over its last orders (as many as it has, at most `holdAutoMax`; a candidate needs `holdAutoMin` orders and
+  `HOLD_AUTO_MARGIN` x the global stop's PF). `SetBook._choose_hold`; the Set is validated on the tape of its chosen hold; live reads
+  `st.hold_bars` (`Pulse.manage_set_lane`), the same bar as the replay (`trader.auto-hold-same-in-replay-and-live`).
+- The choice is made on the orders the Set is then judged on, so the effective PF after Base is in-sample (higher than the executed PF).
+  Measured results: `scripts/hold_eval.py` (fixed hold per step), `scripts/hold_auto_eval.py` (Auto Mode against the global stop, both
+  PFs, development window; `--sealed` once). Do not read a better effective PF as an edge without the executed PF.
 
 ## Indication library and extra packs
 

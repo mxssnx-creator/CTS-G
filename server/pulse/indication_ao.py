@@ -392,7 +392,27 @@ def a_cmpx(b, n):
     return None
 
 
+def a_axisrev(b, n):
+    """CTS-A-O's Axis entry: a mean-reversion signal around an axis (EMA centre of the series). The signal points back to the axis
+    (price below it: long, above it: short) while the displacement from the axis is between 0.8 and 3 ATR. The target the A-O ladder uses
+    is the axis price itself; here the Set lane (TP step, SL ratio, hold) decides the exit and Base validates the Set."""
+    if len(b) < n + 6:
+        return None
+    c = _cl(b)
+    centre = _ema(c, n)[-1]
+    atr = _atr(b, max(5, min(14, n)))
+    if atr <= 0:
+        return None
+    disp = (c[-1] - centre) / atr
+    if -3.0 <= disp <= -0.8 and c[-1] >= c[-2]:
+        return 1, _conf(0.58, (-disp - 0.8) * 0.08)
+    if 0.8 <= disp <= 3.0 and c[-1] <= c[-2]:
+        return -1, _conf(0.58, (disp - 0.8) * 0.08)
+    return None
+
+
 AO_FAMILIES: Dict[str, Tuple[str, Callable]] = {
+    "axisrev": ("revert", a_axisrev),
     "laguerre": ("revert", a_laguerre), "ultimate": ("revert", a_ultimate), "klinger": ("volume", a_klinger),
     "rvi": ("trend", a_rvi), "frama": ("trend", a_frama), "apz": ("revert", a_apz), "stpb": ("trend", a_stpb),
     "cfltrend": ("trend", a_cfltrend), "cflbrk": ("break", a_cflbrk), "htfpb": ("trend", a_htfpb),

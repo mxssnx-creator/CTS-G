@@ -613,7 +613,7 @@ def ao_is_registered_and_windowed():
     for r in ao.RANGES:
         if f"g_ao_{r}" not in ix.INDICATORS:
             missing.append(f"g_ao_{r}")
-    return not missing and len(ao.AO_FAMILIES) == 12, f"{len(ao.AO_FAMILIES)} families; missing: {missing[:4]}"
+    return not missing and len(ao.AO_FAMILIES) == 13, f"{len(ao.AO_FAMILIES)} families; missing: {missing[:4]}"
 
 
 def ao_follows_a_trend_and_a_plunge_both_ways():

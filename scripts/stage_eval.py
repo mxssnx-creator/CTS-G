@@ -191,7 +191,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
 
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
-def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None) -> List[Dict[str, Any]]:
+def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None) -> List[Dict[str, Any]]:
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -204,6 +204,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         ranked: Dict[Tuple[str, str], List[Any]] = {}
         valid_n = 0
         for st in book.by_idx:
+            if only_steps is not None and (st.kind != "base" or st.step not in only_steps):
+                continue                      # an evaluation of one step's Sets alone
             ok, key, _, _ = gate_metrics(book, tapes, st, h)
             if ok:
                 valid_n += 1

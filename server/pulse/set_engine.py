@@ -471,7 +471,10 @@ class SetState:
     trail_give: float
     step: int = 3
     tp_pct: float = 0.0045
-    hold_bars: int = 0              # this Set's own time exit in bars (minutes); 0 = the global time stop (stepHoldOn / stepHoldMin)
+    hold_bars: int = 0              # this Set's own time exit in bars (minutes); 0 = the global time stop (stepHoldOn / stepHoldMin / auto)
+    hold_auto: bool = False         # hold_bars was chosen by the Auto Mode from this Set's own last orders (holdAuto)
+    hold_auto_pf: float = 0.0       # cost PF of the chosen hold over the orders it was judged on
+    hold_auto_n: int = 0            # how many orders (at most holdAutoMax) that judgement read
     idx: int = 0
     pack_i: int = 0
     sl_i: int = 0
@@ -883,7 +886,13 @@ class SetLane:
         self.cool = cool
         return out
 
+HOLD_KEY = "@h"                                       # _hist_rows key of an Auto Mode candidate tape: "<set id>@h<minutes>"
 STEP_HOLD_STEPS = 12
+HOLD_AUTO_LOW = (10, 15, 20, 30, 40, 50)              # Auto Mode candidates in minutes, steps 1..5 (the desk range 1-50)
+HOLD_AUTO_HIGH = (30, 60, 90, 120, 180, 240, 350)      # steps 6..12 (the desk range 30-350)
+HOLD_AUTO_MAX_ORDERS = 50                              # a Set is judged on its existing orders, never more than this many
+HOLD_AUTO_MIN_ORDERS = 10
+HOLD_AUTO_MARGIN = 1.02                                # a candidate must beat the global time stop's PF by 2% to replace it
 STEP_HOLD_LOW = (1, 50)        # allowed minutes for steps 1..5 (the desk slider); the engine itself accepts 1..720
 STEP_HOLD_HIGH = (30, 350)     # steps 6..12
 
@@ -1014,7 +1023,13 @@ class SetBook:
             self.hist_honor_tp = bool(ov.get("setHonorTp", True))
         # per-step hold times: stepHoldOn[i] / stepHoldMin[i] belong to step i + 1 (steps 1..12); an "on" step leaves on its own
         # time exit after that many minutes, an "off" step keeps the global time stop. Replay and live read the same table.
-        self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin"))
+        # holdEnabled is the master switch (off: no per-step and no auto hold, only the global time stop); holdAuto lets every Set
+        # without a manual step hold choose its own hold from its last holdAutoMax orders (at most 50, at least holdAutoMin)
+        self.hold_on = bool(ov.get("holdEnabled", True))
+        self.hold_auto = self.hold_on and bool(ov.get("holdAuto", True))
+        self.hold_auto_max = int(max(HOLD_AUTO_MIN_ORDERS, min(HOLD_AUTO_MAX_ORDERS, num(ov, "holdAutoMax", HOLD_AUTO_MAX_ORDERS))))
+        self.hold_auto_min = int(max(3, min(self.hold_auto_max, num(ov, "holdAutoMin", HOLD_AUTO_MIN_ORDERS))))
+        self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin")) if self.hold_on else {}
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
@@ -1208,7 +1223,11 @@ class SetBook:
         self.sets = next_sets
         self.by_idx = by_idx
         for st_ in by_idx:
-            st_.hold_bars = self.hold_bars_for(st_)
+            manual = self.hold_bars_for(st_)
+            if manual or not self.hold_auto:
+                st_.hold_bars, st_.hold_auto = manual, False      # a manual step hold wins; auto off clears an earlier choice
+            elif not self.auto_holds(st_):
+                st_.hold_bars, st_.hold_auto = 0, False
         self.progress.sets_total = len(self.sets)
         self._topo_gen += 1
 
@@ -1497,10 +1516,8 @@ class SetBook:
                 tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
                 for st in ([] if stale else self.by_idx):
                     try:
-                        full = sorted(
-                            (r for sym_ in tape_order for r in self._hist_rows[sym_].get(st.id, ()) if r[0] >= cutoff),
-                            key=_row_t,
-                        )
+                        full = self._tape_rows(st.id, tape_order, cutoff)
+                        full = self._choose_hold(st, full, tape_order, cutoff)
                         st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=now)
@@ -1576,12 +1593,49 @@ class SetBook:
         for st in self.by_idx:
             if st.pack not in self.packs:
                 continue
-            lane = SetLane(st, symbol)
-            for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc):
-                hist[st.id].append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
-                                    "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
-                                    "reason": done["reason"], "set_id": st.id})
+            holds = self.auto_holds(st)
+            for h in (0,) + holds if holds else (None,):
+                lane = SetLane(st, symbol)
+                key = st.id
+                if h is not None:
+                    lane.hold = h                    # 0 = the global time stop; the Set's chosen hold never feeds its own judgement
+                    key = st.id if h == 0 else f"{st.id}{HOLD_KEY}{h}"
+                out = hist.setdefault(key, [])
+                for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc):
+                    out.append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
+                                "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
+                                "reason": done["reason"], "set_id": st.id})
+                if h:
+                    del out[:-HOLD_AUTO_MAX_ORDERS]  # only the newest orders of a candidate can be among the last 50 overall
             self.progress.set_id = st.id
+
+    def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float) -> List[tuple]:
+        return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff), key=_row_t)
+
+    def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float) -> List[tuple]:
+        """Auto Mode: the hold (minutes) whose own tape has the best cost PF over this Set's last orders, as many as it has but at most
+        holdAutoMax. The global time stop is the reference; a candidate needs holdAutoMin orders and a PF margin over it to replace
+        it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
+        holds = self.auto_holds(st)
+        if not holds:
+            return base
+        cf = cost_as_frac(self.cost_pct)
+
+        def judge(rows: List[tuple]) -> Tuple[float, int]:
+            w = [finite(r[4]) - cf for r in rows[-self.hold_auto_max:]]
+            gp_, gl_ = sum(x for x in w if x > 0), -sum(x for x in w if x < 0)
+            return (gp_ / gl_ if gl_ > 0 else (99.0 if gp_ > 0 else 0.0)), len(w)
+
+        ref_pf, ref_n = judge(base)
+        best = (ref_pf, 0, base, ref_n)
+        for h in holds:
+            rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff)
+            pf, n = judge(rows)
+            if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
+                best = (pf, h, rows, n)
+        st.hold_bars, st.hold_auto = best[1], True
+        st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
+        return best[2]
 
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
         tape = sorted(st.tape(), key=lambda r: finite(r.get("t")))   # last-N and drawdown read one time order
@@ -1802,14 +1856,21 @@ class SetBook:
         rows.sort(key=lambda s: (s.gate_n >= self.gate_min,) + self.rank_key(s), reverse=True)
         return rows[0]
 
+    def step_of(self, st: "SetState") -> int:
+        """The TP step of a Set; a trailing Set takes the step of its arm (arm % over PositionCost)."""
+        return int(st.step) if st.kind == "base" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
+
     def hold_bars_for(self, st: "SetState") -> int:
-        """The Set's own time exit in bars (one bar = one minute), 0 when its step has no hold of its own. A trailing Set takes the
-        step of its arm (arm % over PositionCost)."""
+        """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
         table = getattr(self, "step_hold", None) or {}
-        if not table:
-            return 0
-        step = int(st.step) if st.kind == "base" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
-        return int(table.get(step, 0))
+        return int(table.get(self.step_of(st), 0)) if table else 0
+
+    def auto_holds(self, st: "SetState") -> Tuple[int, ...]:
+        """The hold candidates (minutes) the Auto Mode tries on this Set; empty when auto is off or its step has a manual hold.
+        Each Set (pack x range x step, or trailing pair) is judged alone: the candidates change only its own exit."""
+        if not getattr(self, "hold_auto", False) or self.hold_bars_for(st):
+            return ()
+        return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
 
     @property
     def scratch_bars(self) -> int:
@@ -1939,6 +2000,8 @@ class SetBook:
                     "wr": st.wr,
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
+                    "holdMin": st.hold_bars,
+                    "holdAuto": st.hold_auto,
                     "pfAll": st.pf_all,
                     "gp": st.gp,
                     "gl": st.gl,

@@ -238,6 +238,12 @@ export type PulseOverlay = {
   setMinPf: number;
   setMaxDdtHours: number;
   setUseHistoricGate: boolean;
+  holdEnabled: boolean;
+  holdAuto: boolean;
+  holdAutoMax: number;
+  holdAutoMin: number;
+  stepHoldOn: boolean[];
+  stepHoldMin: number[];
   setMinSamples: number;
   setMinStep: number;
   setStepMax: number;
@@ -409,6 +415,12 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
   setUseHistoricGate: true,
+  holdEnabled: true,
+  holdAuto: true,
+  holdAutoMax: 50,
+  holdAutoMin: 10,
+  stepHoldOn: [false, false, false, false, false, false, false, false, false, false, false, false],
+  stepHoldMin: [15, 15, 15, 15, 15, 120, 120, 120, 120, 120, 120, 120],
   setMinSamples: 12,
   setMinStep: 2,
   setStepMax: 30,
@@ -555,6 +567,12 @@ export type CtsSettings = {
   setMinPf?: number;
   setMaxDdtHours?: number;
   setUseHistoricGate?: boolean;
+  holdEnabled?: boolean;
+  holdAuto?: boolean;
+  holdAutoMax?: number;
+  holdAutoMin?: number;
+  stepHoldOn?: boolean[];
+  stepHoldMin?: number[];
   setMinSamples?: number;
   setMinStep?: number;
   minStepRange?: number;
@@ -739,6 +757,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     setMaxDdtHours: num(cts.setMaxDdtHours, 12),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
+    holdEnabled: bool(cts.holdEnabled, true),
+    holdAuto: bool(cts.holdAuto, true),
+    holdAutoMax: Math.max(10, Math.min(50, Math.round(num(cts.holdAutoMax, 50)))),
+    holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
+    stepHoldOn: Array.isArray(cts.stepHoldOn) ? cts.stepHoldOn.slice(0, 12).map(Boolean) : DEFAULT_OVERLAY.stepHoldOn,
+    stepHoldMin: Array.isArray(cts.stepHoldMin) ? cts.stepHoldMin.slice(0, 12).map((x) => Math.round(Number(x) || 0)) : DEFAULT_OVERLAY.stepHoldMin,
     setMinSamples: num(cts.setMinSamples, 12),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
     setStepMax: num(cts.setStepMax, 30),

@@ -405,6 +405,29 @@ def per_step_hold_time_is_the_same_in_replay_and_live():
     return not bad and off_ok, f"step {step}: bars held (replay, live) by hold and side {out}; hold off keeps global={off_ok}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live():
+    """The hold the Auto Mode chose for one Set (st.hold_bars, hold_auto) is the time exit of the live position and of the replay on
+    the same bar; another Set of the same step keeps the global time stop."""
+    out, bad = {}, []
+    for hold in (4, 20):
+        for d in (1, -1):
+            b, bl = _book(), _book()
+            st, stl = _pick(b, "time"), None
+            stl = bl.sets[st.id]
+            other = next(x for x in b.by_idx if x.step == st.step and x.kind == "base" and x.id != st.id)
+            st.hold_bars, st.hold_auto = hold, True
+            stl.hold_bars, stl.hold_auto = hold, True
+            bars = _scenario_bars("time", d)
+            (rsl, rtp), rep = replay(b, st, bars, 5, d)
+            lv, liv, _ = live(bl, stl, bars, 5, d, others=False)
+            ok = rep is not None and liv is not None and rep["reason"] == "time" and liv[0] == "time" and liv[1] == rep["exit_i"] \
+                and rep["exit_i"] - 5 == hold and other.hold_bars == 0
+            out[f"{hold}{'+' if d > 0 else '-'}"] = (rep and rep["exit_i"] - 5, liv and liv[1] - 5)
+            if not ok:
+                bad.append((hold, d, rep and (rep["reason"], rep["exit_i"]), liv and liv[:2]))
+    return not bad, f"bars held (replay, live) by chosen hold and side {out}" + (f" MISMATCH {bad}" if bad else "")
+
+
 def other_strategies_never_change_a_set_position():
     """Differential: the same Set position on the same random series, once alone and once with the Exit lanes, Block, DCA
     and rearrange all active around it. Exit, every tick's size, entry, levels and trailing stop are identical."""
@@ -1214,6 +1237,7 @@ CHECKS = [
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
     ("trader.per-step-hold-same-in-replay-and-live", per_step_hold_time_is_the_same_in_replay_and_live),
+    ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
     ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),
