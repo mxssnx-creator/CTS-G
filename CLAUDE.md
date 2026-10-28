@@ -134,8 +134,8 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Validation windows (`position_cost.window_n`, `MIN_VALIDATION_N` = 8): with `windowsLinked` (default on) `pfWindow`, `setPfWindow`,
   `exitPfWindow`, `slToTpRecalcN` and `trailRecalcN` follow the overall validation's last N (`setGateWindow`, 50); unlinked each is its
   own value, at least 8 (shipped 8). The floor of 8 applies to these windows, the Base gate minimum (`setGateMinTrades`) and the hold Auto
-  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount`, `realEvalPosCount`, `prevPosMinCount`,
-  `exitMinSamples` and Block's `blockMinSamples` are 8 (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
+  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount` (20) and `realEvalPosCount` (15, owner, 2026-10-28), and of `prevPosMinCount`,
+  `exitMinSamples` and Block's `blockMinSamples` (8) (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
   `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
 - Measured (2 days, 20 symbols, development window = first 2/3; `scripts/window_eval.py`, extra last-N PF check on top of the Base gate; "none" =
   the Base gate alone, all windows at the overall N): majors executed PF none 0.40, N = 6/8/12/15/20/25: 0.42/0.43/0.41/0.42/0.41/0.43;
@@ -144,6 +144,11 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   as before / 8 / 12 / 15 / 20 / 25: majors 1.08/1.14/1.04/1.04/1.44/1.13, small caps 0.99/1.03/1.03/1.09/1.01/0.92. No N wins in both
   universes and the differences are inside the noise of one 12-hour window, so the shipped default is the minimum, 8 (windows linked to
   the overall N). Do not tune these on a 12-hour window.
+- Base gate last N (`setGateWindow`, 2 days, 20 symbols, `window_eval.py --gate-window`, Base gate alone; N = 50 / 25 / 30 / 35): development
+  executed PF majors 0.40/0.53/0.47/0.56, small caps 1.20/1.08/1.19/1.14; validated share 9.5/16.2/14.5/12.7 % and 27.1/33.5/31.4/29.1 %.
+  Sealed third (read once for 50, 30, 35): majors 1.54/1.08/1.18, small caps 0.98/1.10/0.98. 12 h sim (`sim12h.py --overlay`): majors
+  1.08/0.99/1.01/0.94, small caps 0.99/1.19/1.06/1.02. The development ranking flips on the sealed window and between universes, so the
+  default stays 50 (shorter windows validate more Sets and read higher in-sample, not a better executed result).
 
 ## Indication library and extra packs
 

@@ -435,7 +435,7 @@ def block_samples_are_its_own_and_independent_of_the_window_calcs():
     ex = ExitBook(); ex.load({})
     defaults = (co.main_eval, co.real_eval, co.prev_min_count, ex.min_samples)
     ok = ((own.min_samples, own.window) == (9, 31) and (dflt.min_samples, dflt.window) == (8, 25)
-          and live_vals == {"own": (11, 30), "linked": (8, 25), "empty": (8, 25)} and defaults == (8, 8, 8, 8))
+          and live_vals == {"own": (11, 30), "linked": (8, 25), "empty": (8, 25)} and defaults == (20, 15, 8, 8))
     return ok, f"BlockBook own {(own.min_samples, own.window)} default {(dflt.min_samples, dflt.window)}; live trader {live_vals}; (main, real, prev, exit) defaults {defaults}"
 
 
