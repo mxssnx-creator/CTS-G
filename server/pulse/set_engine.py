@@ -51,7 +51,7 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from indication_extra import INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes
+from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes
 from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
@@ -287,7 +287,7 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
         pass
     extras = settings.get("extraIndicators") or []
     if extras:
-        votes.extend(extra_votes(rows[-EXTRA_LOOKBACK:], extras))
+        votes.extend(extra_votes(rows[-EXTRA_WINDOW:], extras))
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)

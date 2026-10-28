@@ -66,10 +66,9 @@ def _one_symbol(args: Tuple[str, List[List[float]], int, float, List[str], Dict[
     trades: Dict[str, List[Tuple[int, float]]] = {f"{nm}|{ex}": [] for nm in names for ex in EXITS}
     busy: Dict[str, int] = {k: -1 for k in trades}
     for i in range(WARM, n - 2, step):
-        win = bars[max(0, i + 1 - ix.LOOKBACK) : i + 1]
         for nm in names:
             try:
-                sig = ix.INDICATORS[nm](win)
+                sig = ix.INDICATORS[nm](bars[max(0, i + 1 - ix.window_of(nm)) : i + 1])
             except Exception:
                 sig = None
             if not sig or sig[1] < ENTRY_CONF:

@@ -29,11 +29,12 @@ def hand_computed_rsi_and_atr():
 
 
 def only_the_tail_is_read():
-    bars = synth_bars(11, 600, drift=0.0003)
+    bars = synth_bars(11, 900, drift=0.0003)
     bad = []
     for name, fn in ix.INDICATORS.items():
-        for m in range(ix.LOOKBACK + 5, 600, 37):
-            if fn(bars[:m]) != fn(bars[m - ix.LOOKBACK : m]):
+        w = ix.window_of(name)
+        for m in range(w + 5, 900, 37):
+            if fn(bars[:m]) != fn(bars[m - w : m]):
                 bad.append((name, m))
                 break
     return not bad, f"indicators={len(ix.INDICATORS)} reading beyond the window: {bad}"
@@ -45,7 +46,7 @@ def outputs_stay_in_their_domain():
         bars = synth_bars(seed, 700, drift=0.0005 if seed % 2 else -0.0005)
         for i in range(120, 700, 3):
             for name, fn in ix.INDICATORS.items():
-                s = fn(bars[i - 150 : i + 1])
+                s = fn(bars[max(0, i - max(150, ix.window_of(name) - 1)) : i + 1])
                 if s is None:
                     continue
                 fired[name] = fired.get(name, 0) + 1
@@ -354,4 +355,97 @@ def prior_move_relation_separates_continuation_from_reversal():
 CHECKS += [
     ("extra.relation-indicators-both-ways-and-quiet-when-flat", relation_indicators_fire_both_ways_and_stay_quiet_on_a_flat_tape),
     ("extra.prior-move-continuation-vs-reversal", prior_move_relation_separates_continuation_from_reversal),
+]
+
+
+# ---- trend and breakout families -----------------------------------------------------------------------------------------
+
+def _drift_tape(trend, n=300, seed=1, noise=0.03):
+    import random
+    r = random.Random(seed)
+    out, p = [], 100.0
+    for _ in range(n):
+        o = p
+        p = p * (1 + trend) + r.uniform(-noise, noise) * 0.1
+        out.append([o, max(o, p) + 0.02, min(o, p) - 0.02, p, 10.0])
+    return out
+
+
+def _break_tape(sgn):
+    t = _drift_tape(0.0, noise=0.5)
+    p = t[-1][3]
+    for _ in range(15):
+        o = p
+        p = p * (1 + sgn * 0.0012)
+        t.append([o, max(o, p) + 0.01, min(o, p) - 0.01, p, 40.0])
+    return t
+
+
+def family_is_registered_in_every_range_and_timeframe():
+    names = [f"{fam}_n{n}_t{tf}" for fam in ("trend", "brk") for n in ix.FAMILY_RANGES for tf in ix.FAMILY_TFS]
+    combos = [f"{fam}_c{n}" for fam in ("trend", "brk", "tb") for n in ix.FAMILY_RANGES]
+    missing = [x for x in names + combos if x not in ix.INDICATORS or ix.window_of(x) != ix.FAMILY_WINDOW]
+    ok = not missing and ix.FAMILY_RANGES == (6, 10, 20, 40) and ix.FAMILY_TFS == (1, 5, 15)
+    return ok, f"{len(names)} single + {len(combos)} combined; missing/other window: {missing}"
+
+
+def hand_computed_fit_and_aggregate():
+    slope, r2 = ix._fit([1.0, 2.0, 3.0, 4.0, 5.0])
+    s2, r22 = ix._fit([1.0, 3.0, 2.0, 4.0, 3.0])             # mean 2.6, slope 0.5, r2 = 0.5^2*10 / 5.2 = 0.4808
+    rows = [[float(i), float(i) + 2, float(i) - 1, float(i) + 1, 2.0] for i in range(10)]
+    a = ix._agg(rows, 5)                                      # two 5-bar blocks, aligned to the newest row
+    ok = (abs(slope - 1.0) < 1e-12 and abs(r2 - 1.0) < 1e-12 and abs(s2 - 0.5) < 1e-12 and abs(r22 - 0.5 ** 2 * 10 / 5.2) < 1e-9
+          and len(a) == 2 and a[1] == [5.0, 11.0, 4.0, 10.0, 10.0] and a[0] == [0.0, 6.0, -1.0, 5.0, 10.0])
+    return ok, f"slope={slope} r2={r2} noisy slope={s2:.3f} r2={r22:.4f} agg={a}"
+
+
+def trend_family_fires_both_ways_and_is_quiet_on_noise():
+    up, dn = _drift_tape(0.0006), _drift_tape(-0.0006)
+    flat = _drift_tape(0.0, noise=1.0)
+    res = {nm: (ix.INDICATORS[nm](up), ix.INDICATORS[nm](dn)) for nm in ("trend_n10_t1", "trend_n6_t1")}
+    bad = {k: v for k, v in res.items() if not (v[0] and v[0][0] == 1 and v[1] and v[1][0] == -1)}
+    loud = [n for n, f in ix.FAMILY.items() if n.startswith("trend") and f(flat)]
+    return not bad and not loud, f"fires={ {k: v for k, v in res.items()} } wrong={bad} signals on noise={loud}"
+
+
+def breakout_family_fires_both_ways_and_needs_the_close_and_volume():
+    up, dn = _break_tape(1), _break_tape(-1)
+    res = {nm: (ix.INDICATORS[nm](up), ix.INDICATORS[nm](dn)) for nm in ("brk_n6_t5", "brk_n10_t15", "brk_c10")}
+    bad = {k: v for k, v in res.items() if not (v[0] and v[0][0] == 1 and v[1] and v[1][0] == -1)}
+    # the same breakout without volume support, and a bar that closes back inside its range, give no signal
+    weak = _break_tape(1)
+    for r in weak[-15:]:
+        r[4] = 1.0
+    fade = _break_tape(1)
+    fade[-1] = [fade[-1][0], fade[-1][1] + 3.0, fade[-1][2], fade[-1][0] + 0.001, 40.0]      # long upper wick, close near the open
+    quiet = ix.INDICATORS["brk_n10_t15"](weak) is None
+    return not bad and quiet, f"fires={res} wrong={bad} no-volume breakout quiet={quiet}"
+
+
+def combined_needs_agreement_across_timeframes():
+    same = ix._combine([(1, 0.7), (1, 0.8), None])
+    split = ix._combine([(1, 0.7), (-1, 0.8), (1, 0.7)])
+    lone = ix._combine([(1, 0.9), None, None])
+    three = ix._combine([(-1, 0.7), (-1, 0.7), (-1, 0.7)])
+    ok = (same and same[0] == 1 and 0.8 < same[1] <= 0.95) and split is None and lone is None and three and three[0] == -1
+    return bool(ok), f"agree={same} split={split} lone={lone} three={three}"
+
+
+def family_wires_into_the_set_vote_by_name():
+    b = SetBook()
+    b.load(overlay(extraIndicators=["trend_c10", "brk_n10_t5", "brk_n10_t5", "trend_nope"]))
+    names = b.ind_settings["extraIndicators"]
+    tape = _break_tape(1)
+    on = indication_signal(tape, dict(b.ind_settings), T0)
+    off = indication_signal(tape, dict(b.ind_settings, extraIndicators=[]), T0)
+    return names == ["brk_n10_t5", "trend_c10"] and "brk_n10_t5" in on[2] and "brk_n10_t5" not in off[2], f"names={names} on={on} off={off}"
+
+
+CHECKS += [
+    ("extra.family-registered-every-range-and-timeframe", family_is_registered_in_every_range_and_timeframe),
+    ("extra.family-hand-computed-fit-and-aggregate", hand_computed_fit_and_aggregate),
+    ("extra.trend-family-both-ways-quiet-on-noise", trend_family_fires_both_ways_and_is_quiet_on_noise),
+    ("extra.breakout-family-both-ways-needs-close-and-volume", breakout_family_fires_both_ways_and_needs_the_close_and_volume),
+    ("extra.combined-needs-agreement", combined_needs_agreement_across_timeframes),
+    ("extra.family-wires-into-the-set-vote", family_wires_into_the_set_vote_by_name),
 ]

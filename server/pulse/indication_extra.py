@@ -796,6 +796,130 @@ def mean_stretch_revert(rows: Sequence[Row], n: int = 120, z: float = 2.5) -> Si
     return None
 
 
+# ---- trend and breakout families: ranges 6..40 bars on the 1m, 5m and 15m series, single and combined -------------------
+
+FAMILY_WINDOW = 300              # 1m rows the family reads (a 40-bar range on 15m needs 600; 300 covers ranges up to 20 there)
+FAMILY_RANGES = (6, 10, 20, 40)  # bars of the timeframe series: from the lowest to the highest range
+FAMILY_TFS = (1, 5, 15)          # minutes per bar
+
+
+def _agg(rows: Sequence[Row], minutes: int) -> List[List[float]]:
+    """Causal N-minute bars aligned to the newest row (the newest bar ends on the newest row), as indication_engine does."""
+    m = max(1, int(minutes))
+    if m == 1:
+        return [list(r[:5]) for r in rows]
+    k = len(rows) // m
+    n = len(rows)
+    out: List[List[float]] = []
+    for j in range(k):
+        hi = n - (k - 1 - j) * m
+        blk = rows[hi - m : hi]
+        out.append([float(blk[0][0]), max(float(b[1]) for b in blk), min(float(b[2]) for b in blk), float(blk[-1][3]),
+                    sum(float(b[4]) for b in blk)])
+    return out
+
+
+def _fit(c: Sequence[float]) -> Tuple[float, float]:
+    """Least-squares slope per bar and R^2 of the closes against the bar index."""
+    n = len(c)
+    xm = (n - 1) / 2.0
+    ym = sum(c) / n
+    sxx = sum((i - xm) ** 2 for i in range(n))
+    sxy = sum((i - xm) * (c[i] - ym) for i in range(n))
+    syy = sum((v - ym) ** 2 for v in c)
+    if sxx <= 0 or syy <= 0:
+        return 0.0, 0.0
+    return sxy / sxx, (sxy * sxy) / (sxx * syy)
+
+
+def trend_signal(rows: Sequence[Row], n: int, tf: int, r2_min: float = 0.55, er_min: float = 0.30) -> Signal:
+    """Quality trend over the last n bars of the tf-minute series: a straight, efficient move (R^2 of the closes against
+    time and Kaufman's efficiency ratio both high), the close on the trend side of EMA(n) with EMA(n/2) leading it, and not
+    stretched more than 3 ATR from EMA(n). Direction is the slope's; confidence grows with the straightness."""
+    b = _agg(rows[-FAMILY_WINDOW:], tf)
+    if len(b) < n + 3:
+        return None
+    c = [float(x[3]) for x in b[-n:]]
+    slope, r2 = _fit(c)
+    path = sum(abs(c[i] - c[i - 1]) for i in range(1, n))
+    if path <= 0:
+        return None
+    er = abs(c[-1] - c[0]) / path
+    if r2 < r2_min or er < er_min:
+        return None
+    side = 1 if slope > 0 else -1
+    allc = [float(x[3]) for x in b]
+    e_n = _ema_list(allc, n)[-1]
+    e_h = _ema_list(allc, max(2, n // 2))[-1]
+    atr = _atr(b, max(3, min(14, n)))
+    if atr <= 0:
+        return None
+    if side * (c[-1] - e_n) <= 0 or side * (e_h - e_n) <= 0 or abs(c[-1] - e_n) > 3.0 * atr:
+        return None
+    return side, _conf(0.58, 0.25 * (r2 - r2_min) / (1 - r2_min) + 0.15 * (er - er_min), 0.92)
+
+
+def breakout_signal(rows: Sequence[Row], n: int, tf: int, vol_mult: float = 1.1) -> Signal:
+    """Range breakout on the tf-minute series: the close beyond the prior n-bar extreme, on a bar at least as wide as the
+    ATR that closes in the outer 30 % of its own range, out of a range that was not itself a wild swing (prior range under
+    4 ATR x sqrt(n)), with volume at least vol_mult x the prior average when volume is reported."""
+    b = _agg(rows[-FAMILY_WINDOW:], tf)
+    if len(b) < n + 3:
+        return None
+    prior = b[-n - 1 : -1]
+    hi = max(float(x[1]) for x in prior)
+    lo = min(float(x[2]) for x in prior)
+    last = b[-1]
+    c, h, l = float(last[3]), float(last[1]), float(last[2])
+    atr = _atr(b[:-1], max(3, min(14, n)))
+    if atr <= 0 or h - l < atr or (hi - lo) > 4.0 * atr * math.sqrt(n):
+        return None
+    loc = (c - l) / (h - l) if h > l else 0.5
+    avg_v = sum(float(x[4]) for x in prior) / n
+    vr = float(last[4]) / avg_v if avg_v > 0 else 1.0
+    if avg_v > 0 and vr < vol_mult:
+        return None
+    if c > hi and loc >= 0.7:
+        return 1, _conf(0.6, min(0.22, (c - hi) / atr * 0.1 + max(0.0, vr - vol_mult) * 0.04), 0.92)
+    if c < lo and loc <= 0.3:
+        return -1, _conf(0.6, min(0.22, (lo - c) / atr * 0.1 + max(0.0, vr - vol_mult) * 0.04), 0.92)
+    return None
+
+
+def _combine(sigs: List[Signal], need: int = 2) -> Signal:
+    """Timeframes (or families) agreeing: at least `need` fire the same way and none fires the other way."""
+    fired = [s for s in sigs if s]
+    up = [s for s in fired if s[0] > 0]
+    dn = [s for s in fired if s[0] < 0]
+    if up and dn:
+        return None
+    side = up or dn
+    if len(side) < need:
+        return None
+    return side[0][0], _conf(max(x[1] for x in side), 0.04 * (len(side) - 1), 0.95)
+
+
+def _make_family() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
+    out: Dict[str, Callable[[Sequence[Row]], Signal]] = {}
+    for n in FAMILY_RANGES:
+        for tf in FAMILY_TFS:
+            out[f"trend_n{n}_t{tf}"] = (lambda r, n=n, tf=tf: trend_signal(r, n, tf))
+            out[f"brk_n{n}_t{tf}"] = (lambda r, n=n, tf=tf: breakout_signal(r, n, tf))
+        out[f"trend_c{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, tf) for tf in FAMILY_TFS]))
+        out[f"brk_c{n}"] = (lambda r, n=n: _combine([breakout_signal(r, n, tf) for tf in FAMILY_TFS]))
+        out[f"tb_c{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, 5), breakout_signal(r, n, 1), breakout_signal(r, n, 5)]))
+    return out
+
+
+FAMILY = _make_family()
+WINDOWS: Dict[str, int] = {name: FAMILY_WINDOW for name in FAMILY}
+
+
+def window_of(name: str) -> int:
+    """1m rows an indicator reads (the family reads more than the classic ones)."""
+    return WINDOWS.get(name, LOOKBACK)
+
+
 INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "supertrend": supertrend,
     "adx_trend": adx_trend,
@@ -830,6 +954,7 @@ INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
     "lr_prevmove_reverse": lr_prevmove_reverse,
     "mean_stretch_revert": mean_stretch_revert,
 }
+INDICATORS.update(FAMILY)
 
 
 def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, float, str]]:
@@ -841,7 +966,7 @@ def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, fl
         if fn is None:
             continue
         try:
-            sig = fn(rows)
+            sig = fn(rows[-window_of(str(name)):])
         except Exception:
             sig = None
         if sig:
