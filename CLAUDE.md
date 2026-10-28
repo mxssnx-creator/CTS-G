@@ -16,6 +16,11 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
   Sets or orders is noise.
 - Choose on the development windows only; read the sealed window once, for the finalists. Report the numbers as they
   come out, positive or not. Do not tune on the sealed window.
+- **Read the effective PF next to the executed PF.** The effective PF is measured on the tapes the Sets were selected on, so
+  it is in-sample: tightening the gate (higher minimum PF, shorter windows, a consistency floor) pushes it from 1.5 to over 10
+  while the walk-forward executed PF of the validated Sets stays at 0.6 to 0.7 (30 days, 20 symbols, `scripts/gate_eval.py`).
+  `scripts/stage_eval.py`, `axis_eval.py`, `gate_eval.py` and `indicator_postbase.py` report both; do not raise a gate to
+  chase the effective PF.
 
 ## Defaults decided by the owner (2026-10-28)
 
@@ -24,7 +29,9 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
 - Block and DCA are enabled (DCA auto plan; its Set and Axis options `dcaOnSets` / `dcaOnAxis` stay off, so under the Base
   gate, where every position is a Set position, both add-ons are idle until a position without a Set exists or an option is
   turned on).
-- The Axis gates (prev, last, cont, pause) are disabled until a configuration is shown to improve the post-Base result.
+- The Axis gates (prev, last, cont, pause) are disabled. Measured (30-day walk-forward, `scripts/axis_eval.py`): gating on the
+  last 6 closes of the unfiltered stream at PF 1.0 lifts the executed PF from 0.645 to 0.705 and cuts the loss by a third, still
+  under 1. A gate that reads only the positions it let through never reopens (no new closes), so the Axis must read a paper stream.
 
 ## Units and defaults
 
