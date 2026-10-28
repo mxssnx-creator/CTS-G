@@ -17,6 +17,9 @@ client ID fenced for reconciliation. A Block level is not increased merely
 because its request was accepted, and a pending add blocks a duplicate add.
 Offline exchange fixtures that intend to simulate fills provide explicit
 executed quantities rather than relying on the former inferred-fill behavior.
+The offline engine suite passed 505 checks and Python regression passed 1,148
+tests (one skipped). A further end-to-end close regression covers both sides
+and both control modes, retaining protection when the close is only accepted.
 
 This change does not prove actual realized profit factor. Execution prices,
 fees and exchange fill histories require separate confirmed evidence; existing

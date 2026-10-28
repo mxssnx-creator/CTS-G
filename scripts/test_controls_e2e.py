@@ -516,6 +516,24 @@ def matrix(test):
 
 class Scenarios(ControlsE2E):
     @matrix
+    def test_unfilled_close_keeps_the_position_and_protection_until_reconciled(self, mode, side):
+        p, ex = self.make(mode)
+        pos = self.enter(side, 0)
+        before = pos.qty
+        ids = {pos.sl_oid, pos.tp_oid}
+        ex.inject(lambda method, path, body: method == 'POST' and body.get('type') == 'MARKET',
+                  {'code': 0, 'data': {'order': {}}})
+        p.close_pos(pos, ex.mark[SYM], 'test-exit')
+        self.assertIn(pos, p.open.values())
+        self.assertEqual(pos.qty, before)
+        self.assertEqual({pos.sl_oid, pos.tp_oid}, ids)
+        self.assertEqual(p._next_fill_poll, 0.0)
+        pending = [row for row in p.pending_orders.values() if row.get('kind') == 'close']
+        self.assertEqual(len(pending), 1)
+        self.assertTrue(pending[0]['metadata'].get('ambiguous_since'))
+        self.assert_protected(side)
+
+    @matrix
     def test_01_new_entry_gets_exactly_one_pair(self, mode, side):
         p, ex = self.make(mode)
         pos = self.enter(side, 0)
