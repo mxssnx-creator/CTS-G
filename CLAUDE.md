@@ -63,10 +63,12 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
 ## Measured edge (30 days, 20 symbols, development window, `scripts/trade_sim.py`)
 
 - Every Set group's average gross result per order is at most +0.034 % (indications trail +0.025 %, Exit +0.014 %, base
-  +0.008 %, general about 0) against a PositionCost of 0.12 %. Effective PF after Base reads 2.1 to 2.6 (in-sample); the
-  validated Sets' next 8 and next 50 orders and the executed positions stay at 0.6 to 0.8. No gate or ranking can carry a
-  PF above 1 out of sample while the signals' gross move per order is under the cost: an edge has to come from the
-  signals or the exits. `trade_sim.py` reports per type and range, in orders (never hours).
+  +0.008 %, general about 0) against a PositionCost of 0.12 %. Effective PF after Base 2.33 (in-sample, 15 % validated);
+  the validated Sets' next 8 orders PF 0.46, next 50 orders 0.50 (below the ungated average of about 0.58: a Set passes
+  at the end of a lucky stretch); executed 0.64 on 9,822 orders, 53 of 196 blocks of 50 orders at PF 1 or more; no type,
+  step or SL ratio above 1 on its next orders. No gate or ranking can carry a PF above 1 out of sample while the signals'
+  gross move per order is under the cost: an edge has to come from the signals or the exits. `trade_sim.py` reports per
+  type and range, in orders (never hours); `reports/trade_sim_dev.txt` holds the full listing.
 
 ## Independent lanes (standard)
 

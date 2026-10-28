@@ -177,6 +177,33 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     return valid, rank, n, pf
 
 
+def gate_until(book, tapes: Tapes, st, now: float) -> float:
+    """The last moment gate_metrics(st, now) is known to keep its verdict: the Set's next close (it joins the last N), its
+    oldest order in the lookback leaving it, and an open drawdown reaching the maximum drawdown time. A walk-forward that
+    re-reads a Set only after this validates every order on the Set's last N orders at that order's own minute."""
+    lb = book.lookback * 60.0
+    tx = tapes.by_set[st.idx][0]
+    end = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - lb)
+    until = float(tx[end]) if end < len(tx) else float("inf")
+    if lo < end:
+        until = min(until, float(tx[lo]) + lb)
+    _, _, pp = tapes.window(st.idx, now, lb, book.gate_window)
+    wt = tx[max(lo, end - book.gate_window):end]
+    eq = peak = 0.0
+    peak_t = wt[0] if len(wt) else now
+    in_dd = False
+    for t, x in zip(wt, pp):
+        eq += x - tapes.cf
+        if eq >= peak - 1e-12:
+            peak, peak_t, in_dd = max(peak, eq), t, False
+        else:
+            in_dd = True
+    if in_dd and now - peak_t < book.max_dd_s:
+        until = min(until, peak_t + book.max_dd_s)
+    return until
+
+
 def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) -> Tuple[int, int]:
     """The direct gate against the engine's own scoring on sampled (Set, hour) pairs."""
     import random
@@ -216,7 +243,18 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
     cf = cost_as_frac(book.cost_pct)
     lb = book.lookback * 60.0
-    every = max(1, int(refresh_s) // 60)
+    every = max(1, int(refresh_s) // 60) if refresh_s else 1
+    cache: Dict[int, Tuple[float, bool, Any]] = {}       # refresh_s 0: per order, each Set re-read only when its verdict can change
+
+    def verdict(st, now: float):
+        if not refresh_s:
+            c = cache.get(st.idx)
+            if c is None or now > c[0]:
+                ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
+                c = cache[st.idx] = (gate_until(book, tapes, st, now), ok_, key_)
+            return c[1], c[2]
+        ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
+        return ok_, key_
 
     def rank_at(now: float):
         ranked_: Dict[Tuple[str, str], List[Any]] = {}
@@ -224,7 +262,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         for st in book.by_idx:
             if only_steps is not None and (st.kind == "trail" or st.step not in only_steps):
                 continue                      # an evaluation of one step's Sets alone
-            ok, key, _, _ = gate_metrics(book, tapes, st, now)
+            ok, key = verdict(st, now)
             if ok:
                 valid_ += 1
             if ok or control == "all":
@@ -236,9 +274,10 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     for h in hours:
         ranked, valid_n = rank_at(h)
         executed.append({"hour": h, "valid": valid_n, "total": len(book.by_idx)})
+        ranked_t = float(h)
         for minute in range(60):
             t = int(h) + minute * 60
-            if minute and minute % every == 0:
+            if refresh_s and minute and minute % every == 0:
                 ranked, _ = rank_at(float(t))
             for s in names:
                 i = idx_of[s].get(t)
@@ -255,6 +294,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if best is None:
                     continue
                 pack, conf, d = best
+                if not refresh_s and ranked_t != float(t):
+                    ranked, ranked_t = rank_at(float(t))[0], float(t)      # per order: every Set's last N at this minute
                 # SetBook.pick_any: base and Exit Sets ranked together, else the trailing Sets
                 pool = sorted(ranked.get((pack, "base"), []) + ranked.get((pack, "exit"), []), key=lambda r: r[0], reverse=True)
                 pool = [st for _, st in pool] or [st for _, st in ranked.get((pack, "trail"), [])]

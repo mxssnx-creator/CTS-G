@@ -3,8 +3,9 @@
 engine's own gate and ranking, checked against SetBook on samples).
 
 Everything is counted in orders, never in hours: a Set is validated on its last N orders (the Base gate window), and what a
-validation is worth is read on the orders that follow it. The gate and the ranking are recomputed every --refresh seconds
-(the live engine: histRefreshS, 120 s).
+validation is worth is read on the orders that follow it. Executed positions are validated per order: at each entry every
+Set's verdict is its last N orders at that minute (--refresh 0, the default; stage_eval.gate_until re-reads a Set only when
+its window can change). The listing samples the validations every --eval-every seconds.
 
 For every strategy type (pack x kind: base = TP step, exit = no TP, trail = trailing pair) and every range (TP step, SL
 ratio, trailing pair) it reports, on the development window (the first two thirds; --sealed reads the last third once):
@@ -19,7 +20,8 @@ ratio, trailing pair) it reports, on the development window (the first two third
   blk50 >= 1    consecutive blocks of 50 executed orders whose PF is at least 1 (stability, in orders)
   min n         the fewest gate-window orders behind any validation of the group (the last-N count; must be >= 8)
 
-usage: trade_sim.py --data DIR --cache shadow.pkl [--symbols 20] [--out FILE] [--sealed] [--patch JSON] [--refresh 600]
+usage: trade_sim.py --data DIR --cache shadow.pkl [--symbols 20] [--out FILE] [--sealed | --last-hours 12] [--patch JSON]
+                    [--refresh 0] [--eval-every 600] [--trades]
 """
 from __future__ import annotations
 
@@ -62,9 +64,12 @@ def main() -> int:
     ap.add_argument("--out", default="")
     ap.add_argument("--sealed", action="store_true", help="read the sealed window (finalists only, once)")
     ap.add_argument("--patch", default="", help="overlay patch (JSON) applied to the x01 overlay")
-    ap.add_argument("--refresh", type=int, default=600, help="seconds between gate evaluations (live: 120)")
+    ap.add_argument("--refresh", type=int, default=0, help="seconds between gate evaluations of the execution; 0 = per order")
+    ap.add_argument("--eval-every", type=int, default=600, help="seconds between the listing's validation samples")
+    ap.add_argument("--last-hours", type=int, default=0, help="simulate only the last N hours of the data (a report window)")
+    ap.add_argument("--trades", action="store_true", help="print every executed position")
     a = ap.parse_args()
-    args_refresh = max(60, min(3600, int(a.refresh)))
+    args_refresh = max(60, min(3600, int(a.eval_every)))
     if a.patch:
         os.environ["STAGE_OVERLAY_PATCH"] = a.patch
     import stage_eval as sg  # noqa: E402  (reads STAGE_OVERLAY_PATCH)
@@ -87,9 +92,12 @@ def main() -> int:
     hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
     split = hours[len(hours) * 2 // 3]
     lo, hi = (split, hours[-1] + 3600) if a.sealed else (hours[0], split)
+    if a.last_hours:
+        lo, hi = hours[-a.last_hours], hours[-1] + 3600
     run_hours = [h for h in hours if lo <= h < hi]
     n_chk, bad = sg.self_check(book, tapes, run_hours, samples=60)
-    print(f"symbols={len(names)} sets={len(book.by_idx)} hours={len(run_hours)} ({'sealed' if a.sealed else 'development'}) "
+    print(f"symbols={len(names)} sets={len(book.by_idx)} hours={len(run_hours)} ({'last %d h' % a.last_hours if a.last_hours else 'sealed' if a.sealed else 'development'}) "
+          f"{time.strftime('%m-%d %H:%M', time.gmtime(lo))}..{time.strftime('%m-%d %H:%M', time.gmtime(hi))} UTC "
           f"self-check {n_chk - bad}/{n_chk} gate+rank match the engine  [{time.time() - t0:.0f}s]", flush=True)
     if bad:
         print("the simulated gate or ranking differs from the engine: numbers below would not be the engine's")
@@ -143,7 +151,7 @@ def main() -> int:
                       "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0)})
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
 
-    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=args_refresh)
+    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)))
     trades = [r for r in rows if "net" in r and lo <= r["t_in"] < hi]
     by_id = {st.id: st for st in book.by_idx}
     trades.sort(key=lambda r: r["t_in"])
@@ -175,7 +183,7 @@ def main() -> int:
                 "blocks50_min_pf": min((x for x in bl if x is not None), default=None),
                 "min_n": int(g["min_n"]) if g["min_n"] < 1e9 else None}
 
-    out = {"window": "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
+    out = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
            "hours": len(run_hours), "gate": {"window": book.gate_window, "min": book.gate_min, "min_pf": book.min_pf,
                                               "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
@@ -204,6 +212,11 @@ def main() -> int:
         if r["orders"] or r["valid_pct"]:
             print(line(r))
     print("-- exits", out["exits"])
+    if a.trades:
+        print("-- trades (entry UTC, symbol, Set, kind, exit reason, net %)")
+        for r in out["trades"]:
+            print(f"{time.strftime('%m-%d %H:%M', time.gmtime(r['t_in']))}  {r['symbol']:14s} {r['set']:38s} {r['kind']:5s} "
+                  f"{r['reason']:8s} {r['net_pct']:+.4f}")
     vmin = [x["min_n"] for x in evals if x["valid"]]
     print(f"-- last-N: fewest gate-window orders behind a validation {min(vmin) if vmin else None} (gate minimum {book.gate_min})")
     if a.out:

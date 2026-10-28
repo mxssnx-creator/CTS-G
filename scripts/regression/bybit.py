@@ -1098,13 +1098,14 @@ def batch_item_with_a_used_link_id_resolves_to_the_existing_order():
 
 def bring_up_script_writes_a_private_credential_file_and_never_prints_it():
     import subprocess
-    sh = os.path.join(os.path.dirname(PULSE), "..", "deploy", "bybit-up.sh")
+    # the repository's deploy script, not one next to the pulse copy under test (a fault-injection copy has no deploy/)
+    sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "deploy", "bybit-up.sh")
     sh = os.path.abspath(sh)
     syntax = subprocess.run(["bash", "-n", sh], capture_output=True, text=True)
     with tempfile.TemporaryDirectory() as td:
         pdir = os.path.join(td, "pulse")
         env_ = {**os.environ, "BYBIT_API_KEY": "KEY-NEVER-PRINT", "BYBIT_API_SECRET": "SECRET-NEVER-PRINT", "PULSE_DIR": pdir, "LOG_DIR": os.path.join(td, "log"),
-                "REPO": os.path.abspath(os.path.join(PULSE, "..", ".."))}
+                "REPO": os.path.abspath(os.path.join(os.path.dirname(sh), ".."))}
         out = subprocess.run(["bash", sh, "x02"], capture_output=True, text=True, env=env_, timeout=120)
         cred = os.path.join(pdir, "cred-bybit-x02.json")
         data = json.load(open(cred)) if os.path.exists(cred) else {}

@@ -1267,9 +1267,16 @@ def an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does():
     round_trip = all((p.parse_track(p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)) or {}).get("set_id") == st.id
                      for st in (base, twin, trail))
     same = next(x for x in b.by_idx if x.kind == "exit" and x.pack == base.pack and x.step == base.step and abs(x.sl_ratio - base.sl_ratio) < 1e-9)
-    no_idx = (p.parse_track(p.cid("o", set_id=same.id, pack=same.pack, set_idx=-1)) or {}).get("set_id")
-    ok = honor == {"base": True, "exit": False, "trail": not b.exit_sets} and round_trip and no_idx == same.id
-    return ok, f"honours TP {honor} cid round trip={round_trip} twin by content={no_idx}"
+
+    def by_content(st_):
+        """Decode with a grid index that points at another Set (as after a grid change): only the content can decide."""
+        cid = p.cid("o", set_id=st_.id, pack=st_.pack, set_idx=st_.idx)
+        k = len(pt.TAG) + 8
+        cid = cid[:k] + f"{trail.idx:04d}" + cid[k + 4:]
+        return (p.parse_track(cid) or {}).get("set_id")
+    twins = {"base": by_content(base), "exit": by_content(same)}
+    ok = honor == {"base": True, "exit": False, "trail": not b.exit_sets} and round_trip and twins == {"base": base.id, "exit": same.id}
+    return ok, f"honours TP {honor} cid round trip={round_trip} twins by content={twins}"
 
 
 def the_entry_loop_places_the_set_signal_and_not_the_live_score():
@@ -1322,8 +1329,35 @@ def the_entry_loop_places_the_set_signal_and_not_the_live_score():
     return ok, f"placed={placed} set signal={sig[:3]}"
 
 
+def a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes():
+    """No cross-lane wait on a Set: after a Set close the symbol waits the Set lane's own cooldown (setCooldownBars, as the
+    replay), however many losses came before, and a run of Set losses never pauses the book. The Exit lane keeps its
+    escalating backoff and its cold-streak pause. A stop-out within 30 s bans the symbol on either lane (venue safety)."""
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.position_cost_pct = 0.12
+    p.ignore_syms = {}
+    p.sets = types.SimpleNamespace(cooldown_bars=2)
+    set_waits = [p.symbol_backoff("A-USDT", -0.01, 300.0, "sl", set_lane=True) for _ in range(5)]
+    exit_waits = [p.symbol_backoff("B-USDT", -0.01, 300.0, "sl") for _ in range(3)]
+    p.symbol_backoff("C-USDT", -0.1, 3.0, "sl", set_lane=True)
+    fast_ban = p.ignore_syms.get("C-USDT", 0.0) - time.time() > 1700
+
+    def run(set_id):
+        q, sym, pos = _lane_pulse(set_id)
+        q.consec_loss = 7
+        q.cooldown.pop("__book__", None)
+        q.close_pos(pos, pos.entry * 0.99, "sl")
+        return q.cooldown.get("__book__", 0.0) > time.time()
+    paused_by_set = _isolated(lambda: run("indications:1m:sl1.00:st4"))
+    paused_by_exit_lane = _isolated(lambda: run(""))
+    ok = set_waits == [120.0] * 5 and exit_waits == [9.0, 36.0, 144.0] and fast_ban and not paused_by_set and paused_by_exit_lane
+    return ok, (f"Set lane waits={set_waits}; Exit lane waits={exit_waits}; fast stop-out ban={fast_ban}; "
+                f"8th loss pauses the book: Set close={paused_by_set}, Exit-lane close={paused_by_exit_lane}")
+
+
 CHECKS = [
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
+    ("trader.lanes-set-close-waits-only-its-own-cooldown", a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes),
     ("trader.entry-loop-places-the-set-signal", the_entry_loop_places_the_set_signal_and_not_the_live_score),
     ("trader.only-completed-minutes-reach-set-history", completed_minutes_only_reach_the_set_history),
     ("trader.exit-set-never-takes-tp-base-always", an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does),
