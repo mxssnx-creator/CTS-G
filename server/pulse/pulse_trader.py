@@ -3051,8 +3051,11 @@ class Pulse:
             except Exception:
                 continue
             if amt > 1e-12:
-                side = (p.get("positionSide") or "").upper() or ("LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT")
+                side = (p.get("positionSide") or "").upper()
+                if side not in ("LONG", "SHORT"):          # one-way mode reports BOTH: the sign of the amount is the side
+                    side = "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT"
                 held.add((str(p.get("symbol") or ""), side))
+        confirmed = None                                    # a second read, before a position without a fill is dropped
         for pos in list(self.open.values()):
             if (pos.symbol, pos.side) in held:
                 continue
@@ -3061,7 +3064,20 @@ class Pulse:
                 continue
             if not held:
                 continue
-            log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it")
+            if confirmed is None:
+                time.sleep(2.0)
+                try:
+                    r2 = self.api.get("/openApi/swap/v2/user/positions")
+                except Exception:
+                    return
+                rows2 = r2.get("data") if self.ok(r2) else None
+                if not isinstance(rows2, list):
+                    return
+                confirmed = {(str(p.get("symbol") or ""), "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT")
+                             for p in rows2 if abs(float(p.get("positionAmt") or 0)) > 1e-12}
+            if (pos.symbol, pos.side) in confirmed:
+                continue
+            log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
             self.cancel_controls(pos.symbol)
             self.open.pop(pos.symbol, None)
             self.cooldown[pos.symbol] = time.time() + 90.0
@@ -3128,6 +3144,7 @@ class Pulse:
             if add_q > 0:
                 dca_pct = sum(float(q) * ((exit_px - float(p)) / float(p) * sd) for p, q in pos.dca_fills) / add_q
             ref = float(pos.dca_ref or 0.0)
+            base_qty = max(0.0, pos.qty - add_q)
             if ref > 0:
                 base_pct = (exit_px - ref) / ref * sd
         rec = Closed(
@@ -3152,7 +3169,7 @@ class Pulse:
             pass
         try:
             # a Set is judged on its own lane: with DCA adds the Set sees the base result, the add-on its own
-            self.sets.on_live_close(dc_replace(rec, entry=float(pos.dca_ref), pnl_pct=base_pct) if (pos.dca_fills and base_pct is not None) else rec)
+            self.sets.on_live_close(dc_replace(rec, entry=float(pos.dca_ref), pnl_pct=base_pct, qty=base_qty, pnl=net_pnl_usdt(base_pct, base_qty, float(pos.dca_ref), self.position_cost_pct)) if (pos.dca_fills and base_pct is not None) else rec)
             self.sets.adapt_from_live(self.strategy_closes())
         except Exception:
             pass
@@ -4139,7 +4156,7 @@ class Pulse:
             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
             pos.notional = pos.qty * pos.entry
             try:
-                if not pos.set_id:            # a Set position keeps its own stop and TP (set at the entry it opened at)
+                if not pos.set_id and not getattr(self.dca, "auto", False):   # a Set position, and the auto plan, keep the stop and TP of the entry
                     mode = str(getattr(self.dca, "tp_mode", "average") or "average").lower()
                     if mode in ("breakeven", "be"):
                         be = max(float(getattr(self.dca, "be_pct", 0.002) or 0.002), 0.0004)

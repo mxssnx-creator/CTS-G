@@ -80,7 +80,7 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
-// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.10).
+// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
 export const GATE_MIN_PF_DEFAULT = 1.25;
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
@@ -371,7 +371,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratMulti: false,
   shortRangeStepMin: 2,
   shortRangeStepMax: 6,
-  shortRangeMinPf: 1.1,
+  shortRangeMinPf: 1.25,
   slMinSteps: 1,
   trailMinSteps: 2,
   stratDca: true,
@@ -711,7 +711,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratMulti: bool(cts.stratMulti, false),
     shortRangeStepMin: num(cts.shortRangeStepMin, 2),
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
-    shortRangeMinPf: num(cts.shortRangeMinPf, 1.1),
+    shortRangeMinPf: num(cts.shortRangeMinPf, 1.25),
     slMinSteps: num(cts.slMinSteps, 1),
     trailMinSteps: num(cts.trailMinSteps, 2),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),

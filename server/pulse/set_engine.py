@@ -385,7 +385,7 @@ def pack_signals(
             lo = i + 1 - IND_WINDOW_BARS
             row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
         if SHORT_PACK in packs:
-            row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_LOOKBACK) : i + 1], ind_settings)
+            row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)    # each name reads its own window
         for pk, (_sw, key, default) in EXTRA_PACKS.items():
             if pk in packs:
                 row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(key) or list(default))

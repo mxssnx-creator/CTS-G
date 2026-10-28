@@ -109,7 +109,7 @@ def replay(b, st, bars, i, d):
     return (o.get("sl"), o.get("tp")), (trades[0] if trades else None)
 
 
-def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None):
+def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=None):
     """The live trader on the same bars. others=True switches every other strategy on around the Set position: the Exit
     lanes (with a reversal signal against it), Block and DCA add-ons with a lane on the same symbol and side, and the
     coordinator's rearrange with a stronger signal waiting. Returns (levels at entry, (reason, bar, px) or None, trace)."""
@@ -142,6 +142,8 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None):
             pos = p.open.get(SYM)
             if pos is None:
                 return None, None, []
+            if after_open is not None:
+                after_open(p, pos)
             side = 1 if pos.side == "LONG" else -1
             levels = (pos.entry * (1 - side * pos.sl_pct), pos.entry * (1 + side * pos.tp_pct))
             if others:
@@ -310,7 +312,11 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
         out[name] = {"exit": liv and liv[:2], "qty": qtys, "dca closes": len(p.dca.closes), "set n": st.n if False else None,
                      "dca pnl": [round(r.get("pnl_pct"), 5) for r in p.dca.closes]}
     # on: the stop and TP on the position never move, and the DCA lane is scored on its add alone
-    lv2, liv2, trace2 = live(_book(), st, bars, 5, 1, dca={"dcaOnSets": True})
+    b2 = _book()
+    seen = []
+    orig = b2.on_live_close
+    b2.on_live_close = lambda r: (seen.append(r), orig(r))[1]
+    lv2, liv2, trace2 = live(b2, st, bars, 5, 1, dca={"dcaOnSets": True})
     p2 = live.pulse
     levels_fixed = len({(t[6], t[7]) for t in trace2}) == 1
     c = p2.closed[-1]
@@ -319,6 +325,11 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
     fill = (c.entry * c.qty - 100.0 * q0) / qa if qa > 0 else 0.0
     expect = (c.exit - fill) / fill if fill else None
     scored = bool(p2.dca.closes) and expect is not None and abs(p2.dca.closes[-1]["pnl_pct"] - expect) < 1e-9 and abs(expect - c.pnl_pct) > 1e-5
+    # the Set is scored on its own lane: exit against the entry it opened at, the base size, and the USDT result of that size
+    sr = seen[-1] if seen else None
+    base_ok = sr is not None and abs(sr.entry - 100.0) < 1e-9 and abs(sr.qty - q0) < 1e-9 and abs(sr.pnl_pct - (c.exit - 100.0) / 100.0) < 1e-9 \
+        and abs(sr.pnl - pt.net_pnl_usdt(sr.pnl_pct, q0, 100.0, p2.position_cost_pct)) < 1e-12
+    scored = scored and base_ok
     same_exit = levels_fixed and scored and all(v["exit"] == (rep["reason"], rep["exit_i"]) for v in out.values())
     untouched = len(out["off"]["qty"]) == 1 and len(out["on, Sets not allowed"]["qty"]) == 1 and out["on, Sets not allowed"]["dca closes"] == 0
     added = len(out["on, onSets"]["qty"]) == 2 and out["on, onSets"]["dca closes"] == 1 and out["on, onSets"]["dca pnl"][0] < 0
@@ -338,6 +349,29 @@ def dca_switch_reaches_the_module_flag():
     finally:
         dca_engine.DCA_HARD_OFF = saved
     return on is True and off is False and killed is False, f"overlay on={on} default={off} kill switch={killed}"
+
+
+def dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average():
+    """Auto plan: the stop and TP of the entry stay put after an add (bounded risk, as the walk-forward measured it). The static
+    plan keeps its documented behaviour: the stop and TP are rebuilt around the new average entry."""
+    b0 = _book()
+    st = _pick(b0, "sl")
+    sl_f, _ = se.lane_fracs(st, b0.cost_pct, b0.sl_min_steps)
+    flat = [[100.0, 100.01, 99.99, 100.0, 1.0] for _ in range(6)]
+    rung = 100 * (1 - 0.5 * sl_f)
+    path = [100 - (100 - rung) * k / 6 for k in range(1, 7)] + [rung] * 6
+    bars = flat + [[c, c + 0.01, c - 0.01, c, 1.0] for c in path]
+
+    def no_set(p, pos):                         # an Exit-lane position: it has no Set
+        pos.set_id, pos.set_idx = "", -1
+    out = {}
+    for name, cfg in (("auto", {}), ("manual", {"dcaAuto": False, "dcaMaxSteps": 1, "dcaStepDistancesPct": [0.1], "dcaStepVolumeMultipliers": [3.0]})):
+        lv, liv, trace = live(_book(), st, bars, 5, 1, dca=cfg, after_open=no_set)
+        qty = sorted({t[2] for t in trace})
+        levels = {(t[6], t[7]) for t in trace}
+        out[name] = (len(qty), len(levels))
+    ok = out["auto"] == (2, 1) and out["manual"][0] == 2 and out["manual"][1] >= 2
+    return ok, f"(sizes seen, distinct (stop, TP) pairs) auto={out['auto']} manual={out['manual']}"
 
 
 def other_strategies_never_change_a_set_position():
@@ -1148,6 +1182,7 @@ CHECKS = [
     ("trader.block-carried-parent-and-partial-add", a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial),
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
+    ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
     ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),
     ("block.stack-capped-at-six-groups", block_stack_is_capped_at_six_groups),
