@@ -128,9 +128,12 @@ class Tapes:
 
 
 def gate_metrics(book, tapes: Tapes, st, now: float):
-    """gate_n, gate_pf, max drawdown time and the ranking terms, as SetBook._score_one computes them."""
+    """(valid, rank, gate_n, gate_pf): the gate and the ranking key exactly as SetBook._score_one / gate_reason /
+    rank_key compute them (self_check compares both with the engine)."""
     lb = book.lookback * 60.0
     tx, te, pp = tapes.window(st.idx, now, lb, max(book.gate_window, book.deact_n))
+    txa = tapes.by_set[st.idx][0]
+    n_all = bisect.bisect_left(txa, now) - bisect.bisect_left(txa, now - lb)     # SetState.n: every order in the lookback
     cf = tapes.cf
     w = pp[-book.gate_window:]
     wt = tx[-book.gate_window:]
@@ -157,20 +160,53 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
         max_s = max(max_s, now - peak_t)
     last25 = pp[-book.deact_n:]
     r25 = sum(signed_result_r(x, book.cost_pct) for x in last25) / len(last25) if len(last25) else 0.0
-    valid = n >= book.gate_min and pf + 1e-9 >= book.pack_min_pf.get(st.pack, book.min_pf) and max_s < book.max_dd_s
+    floor = book.pack_min_pf.get(st.pack, book.min_pf)
+    valid = n >= book.gate_min and pf + 1e-9 >= floor and max_s < book.max_dd_s
+
+    def _pf(v):
+        g = sum(x - cf for x in v if x - cf > 0)
+        l_ = -sum(x - cf for x in v if x - cf < 0)
+        return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
+    h = n // 2
+    old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     if valid and book.consistency_pf > 0 and n >= 2:
-        h = n // 2
-        def _pf(v):
-            g = sum(x - cf for x in v if x - cf > 0)
-            l_ = -sum(x - cf for x in v if x - cf < 0)
-            return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
-        valid = min(_pf(w[:h]), _pf(w[h:])) + 1e-9 >= book.consistency_pf
+        valid = min(old, new) + 1e-9 >= book.consistency_pf
     if valid and getattr(book, "real_on", False):       # the Real gate: the same minimum PF over the Set's last realGateN orders
         rw = [x - cf for x in w[-book.real_n:]]
         g_ = sum(x for x in rw if x > 0)
         l_ = -sum(x for x in rw if x < 0)
-        valid = len(rw) >= book.real_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= book.pack_min_pf.get(st.pack, book.min_pf)
-    return valid, (pf, r25, -max_s, len(pp)), n, pf
+        valid = len(rw) >= book.real_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= floor
+    halves = min(old, new) if (old or new) else pf
+    shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * n_all / (n_all + se.RANK_SHRINK_N)
+    rank = (halves + 1e-9 >= floor, round(shrunk, 4), n_all, r25, -max_s)      # SetBook.rank_key
+    return valid, rank, n, pf
+
+
+def gate_until(book, tapes: Tapes, st, now: float) -> float:
+    """The last moment gate_metrics(st, now) is known to keep its verdict: the Set's next close (it joins the last N), its
+    oldest order in the lookback leaving it, and an open drawdown reaching the maximum drawdown time. A walk-forward that
+    re-reads a Set only after this validates every order on the Set's last N orders at that order's own minute."""
+    lb = book.lookback * 60.0
+    tx = tapes.by_set[st.idx][0]
+    end = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - lb)
+    until = float(tx[end]) if end < len(tx) else float("inf")
+    if lo < end:
+        until = min(until, float(tx[lo]) + lb)
+    _, _, pp = tapes.window(st.idx, now, lb, book.gate_window)
+    wt = tx[max(lo, end - book.gate_window):end]
+    eq = peak = 0.0
+    peak_t = wt[0] if len(wt) else now
+    in_dd = False
+    for t, x in zip(wt, pp):
+        eq += x - tapes.cf
+        if eq >= peak - 1e-12:
+            peak, peak_t, in_dd = max(peak, eq), t, False
+        else:
+            in_dd = True
+    if in_dd and now - peak_t < book.max_dd_s:
+        until = min(until, peak_t + book.max_dd_s)
+    return until
 
 
 def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) -> Tuple[int, int]:
@@ -186,9 +222,12 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
                    for a, b, x in zip(tx, te, pp)]
         st.live = []
         book._score_one(st, now=now)
+        st.n = len(st.hist)
         eng_valid = book.gate_reason(st) == ""
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
-        if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6:
+        ek = book.rank_key(st)
+        if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6 or key[:3] != ek[:3] or abs(key[3] - ek[3]) > 1e-9 \
+                or abs(key[4] - ek[4]) > 1e-6:
             bad += 1
         st.hist = []
     return samples, bad
@@ -196,9 +235,11 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
 
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
-def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None) -> List[Dict[str, Any]]:
+def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
+            refresh_s: int = 3600) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
-    the gate or not (a control: does validation carry information out of sample?)."""
+    the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
+    this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -207,22 +248,42 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
     cf = cost_as_frac(book.cost_pct)
     lb = book.lookback * 60.0
-    for h in hours:
-        ranked: Dict[Tuple[str, str], List[Any]] = {}
-        valid_n = 0
+    every = max(1, int(refresh_s) // 60) if refresh_s else 1
+    cache: Dict[int, Tuple[float, bool, Any]] = {}       # refresh_s 0: per order, each Set re-read only when its verdict can change
+
+    def verdict(st, now: float):
+        if not refresh_s:
+            c = cache.get(st.idx)
+            if c is None or now > c[0]:
+                ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
+                c = cache[st.idx] = (gate_until(book, tapes, st, now), ok_, key_)
+            return c[1], c[2]
+        ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
+        return ok_, key_
+
+    def rank_at(now: float):
+        ranked_: Dict[Tuple[str, str], List[Any]] = {}
+        valid_ = 0
         for st in book.by_idx:
-            if only_steps is not None and (st.kind != "base" or st.step not in only_steps):
+            if only_steps is not None and (st.kind == "trail" or st.step not in only_steps):
                 continue                      # an evaluation of one step's Sets alone
-            ok, key, _, _ = gate_metrics(book, tapes, st, h)
+            ok, key = verdict(st, now)
             if ok:
-                valid_n += 1
+                valid_ += 1
             if ok or control == "all":
-                ranked.setdefault((st.pack, st.kind), []).append((key, st))
-        for k in ranked:
-            ranked[k].sort(key=lambda r: r[0], reverse=True)
+                ranked_.setdefault((st.pack, st.kind), []).append((key, st))
+        for k in ranked_:
+            ranked_[k].sort(key=lambda r: r[0], reverse=True)
+        return ranked_, valid_
+
+    for h in hours:
+        ranked, valid_n = rank_at(h)
         executed.append({"hour": h, "valid": valid_n, "total": len(book.by_idx)})
+        ranked_t = float(h)
         for minute in range(60):
             t = int(h) + minute * 60
+            if refresh_s and minute and minute % every == 0:
+                ranked, _ = rank_at(float(t))
             for s in names:
                 i = idx_of[s].get(t)
                 if i is None or i <= busy[s]:
@@ -238,7 +299,11 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if best is None:
                     continue
                 pack, conf, d = best
-                pool = [st for _, st in ranked.get((pack, "base"), [])] or [st for _, st in ranked.get((pack, "trail"), [])]
+                if not refresh_s and ranked_t != float(t):
+                    ranked, ranked_t = rank_at(float(t))[0], float(t)      # per order: every Set's last N at this minute
+                # SetBook.pick_any: base and Exit Sets ranked together, else the trailing Sets
+                pool = sorted(ranked.get((pack, "base"), []) + ranked.get((pack, "exit"), []), key=lambda r: r[0], reverse=True)
+                pool = [st for _, st in pool] or [st for _, st in ranked.get((pack, "trail"), [])]
                 if set_axis:
                     n_, min_pf = set_axis
                     keep = []

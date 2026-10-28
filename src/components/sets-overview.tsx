@@ -110,10 +110,11 @@ function Panel({ title, hint, children }: { title: string; hint?: string; childr
 
 function setLabel(r: SetIndexRow): string {
   const pack = PACK_LABEL[r.pack] ?? r.pack;
-  return r.kind === "trail" ? `${pack} trail ${r.tr}` : `${pack} sl${num(r.sl)} st${r.st}`;
+  if (r.kind === "trail") return `${pack} trail ${r.tr}`;
+  return `${pack} sl${num(r.sl)} st${r.st}${r.kind === "exit" ? " exit" : ""}`;
 }
 
-function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" | "trailing"; rangeId: string }) {
+function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" | "exit" | "trailing"; rangeId: string }) {
   const cost = stats.pfCost?.costPct ?? POSITION_COST_PCT_DEFAULT;
   const minPf = stats.sets?.minPf ?? 1.1;
   const index = stats.sets?.index;
@@ -130,7 +131,7 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
   return (
     <div className="space-y-3" data-testid="sets-overview-body">
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-        <Kpi k="Sets shown" v={String(sum.total)} s={`${type === "normal" ? "base" : "trailing"} · step ${rangeById(rangeId).label}`} />
+        <Kpi k="Sets shown" v={String(sum.total)} s={`${type === "normal" ? "base" : type === "exit" ? "exit (no TP)" : "trailing"} · step ${rangeById(rangeId).label}`} />
         <Kpi k="Validated" v={`${num(sum.validatedPct, 1)}%`} s={`${sum.valid} of ${sum.total} pass Base`} good={sum.validatedPct >= 25} />
         <Kpi
           k="Effective PF"
@@ -416,7 +417,7 @@ function DcaBody({ stats }: { stats: LiveStats }) {
 
 /**
  * The Sets overview. Two selections sit at the top: the step range (first and default: All) and the strategy type
- * (Normal, Trailing, Axis, Block, DCA). The range filters Sets, so it applies to Normal and Trailing; Axis, Block and
+ * (Normal, Exit, Trailing, Axis, Block, DCA). The range filters Sets, so it applies to Normal, Exit and Trailing; Axis, Block and
  * DCA show their own panels.
  */
 export function SetsOverview({ stats, title = "Sets overview" }: { stats: LiveStats | null; title?: string }) {
@@ -434,7 +435,7 @@ export function SetsOverview({ stats, title = "Sets overview" }: { stats: LiveSt
       /* storage unavailable: the selection lasts for this view only */
     }
   };
-  const isSets = type === "normal" || type === "trailing";
+  const isSets = type === "normal" || type === "exit" || type === "trailing";
   return (
     <section className="rounded-xl border border-border bg-surface p-4" data-testid="sets-overview">
       <h2 className="font-mono text-[11px] tracking-wide text-muted uppercase">{title}</h2>
@@ -445,7 +446,7 @@ export function SetsOverview({ stats, title = "Sets overview" }: { stats: LiveSt
           value={rangeId}
           options={STEP_RANGES.map((r) => ({ id: r.id, label: r.label, hint: r.id === "2-6" ? "Short Range band" : undefined }))}
           disabled={!isSets}
-          note={isSets ? "TP steps of one PositionCost each" : "the range filters Sets (Normal, Trailing)"}
+          note={isSets ? "TP steps of one PositionCost each" : "the range filters Sets (Normal, Exit, Trailing)"}
           onChange={(v) => {
             setRangeId(v);
             save(type, v);

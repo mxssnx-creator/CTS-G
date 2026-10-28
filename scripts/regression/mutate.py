@@ -1,13 +1,23 @@
 """Fault injection: the regression suite must catch each planted fault.
 
-Each mutation edits a temporary copy of server/pulse (the repo is never touched), runs the full suite
+Each mutation edits a temporary copy of server/pulse (the repo is never touched), runs the suite
 against that copy, and reports the checks that failed. A mutation that leaves the suite green is a gap.
-  python3 scripts/regression/mutate.py
+  python3 scripts/regression/mutate.py                  every mutant
+  python3 scripts/regression/mutate.py --only "trader:"  the mutants whose name starts with the prefix
+  python3 scripts/regression/mutate.py --full           ignore the catcher map (every mutant runs the whole suite)
+
+Speed: mutant_catchers.json remembers the check that caught each mutant last time. That check runs first, alone (a
+few seconds); when it fails the mutant is caught, exactly as the full run would report it. Only a mutant it does not
+catch (or a new one) runs the whole suite, and the check that catches it is recorded. A survivor is therefore always
+decided by the whole suite, so the verdicts are those of a full run.
 """
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
+import json
 import os
+import threading
 import shutil
 import subprocess
 import sys
@@ -16,8 +26,33 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 PULSE = os.path.join(ROOT, "server", "pulse")
+CATCHERS_PATH = os.path.join(HERE, "mutant_catchers.json")
+_catchers: dict = {}
+_catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("trader: lanes: a Set close escalates the symbol backoff like the Exit lane",
+     "pulse_trader.py", "        if set_lane:\n            return float(getattr(self.sets, \"cooldown_bars\", 2)) * 60.0\n", ""),
+    ("trader: lanes: Set losses pause the whole book",
+     "pulse_trader.py", "        if not pos.set_id:\n            # the cold-streak pause belongs to the Exit lane", "        if True:\n            # the cold-streak pause belongs to the Exit lane"),
+    ("trader: live entry: the forming minute counts as a bar",
+     "pulse_trader.py", "if 0 < self._kline_time(r) / 1000.0 + 60.0 <= minute]", "if 0 < self._kline_time(r) / 1000.0 <= minute]"),
+    ("trader: live entry: a late fill on an old signal minute",
+     "pulse_trader.py", "        if now - minute > ENTRY_FRESH_S:\n            return {}", "        if False:\n            return {}"),
+    ("trader: live entry: the minute is decided before it reached the history",
+     "pulse_trader.py", "                if getattr(self.sets, \"bar_t\", {}).get(s) != bar_t:\n                    continue", "                if False:\n                    continue"),
+    ("trader: live entry: the live scores decide again under the Base gate",
+     "pulse_trader.py", "            best = self.set_entry_candidates()\n", "            best = {}\n"),
+    ("live entry: the lower confidence pack wins",
+     "set_engine.py", "            if d != 0 and c >= self.entry_conf and (best is None or c > best[2]):", "            if d != 0 and c >= self.entry_conf and (best is None or c < best[2]):"),
+    ("exit Sets take their TP",
+     "set_engine.py", "    if kind == \"exit\":\n        return False", "    if kind == \"exit\":\n        return True"),
+    ("base Sets follow exitIgnoreTp again",
+     "set_engine.py", "    if kind == \"base\":\n        return True", "    if kind == \"base\":\n        return None"),
+    ("exit Sets not built",
+     "set_engine.py", "            if self.exit_sets:\n                seen_stop", "            if False:\n                seen_stop"),
+    ("trader: client id: an Exit Set decodes to its base twin",
+     "pulse_trader.py", "                if (st_obj.kind == \"exit\") != is_exit:\n                    return False", "                if False:\n                    return False"),
     ("scan: TP wins a same-bar tie against the stop",
      "set_engine.py", "if low <= stop:", "if low <= stop and not (honor_tp and high >= tp):"),
     ("scan: time exit one bar late",
@@ -66,8 +101,8 @@ MUTATIONS = [
      "bingx_fast.py", "                    wait = self.gate.reserve_public(path)",
      "                    wait = self.gate.buckets[\"public\"].reserve()"),
     ("bars: a live refresh replaces the stored history",
-     "set_engine.py", "self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned, keep_on_gap=tail)[-self.lookback :]",
-     "self.bars[symbol] = cleaned[-self.lookback :]"),
+     "set_engine.py", "joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.lookback :]",
+     "joined = cleaned[-self.lookback :]"),
     ("indications: reason matched by kind only, mode ignored",
      "indication_engine.py", "            bool(kind and mode) and (lambda i: i.kind == kind and i.mode == mode),",
      "            bool(kind) and (lambda i: i.kind == kind),"),
@@ -161,7 +196,7 @@ MUTATIONS = [
     ("trader: lanes: the Set lane drops its time exit",
      "pulse_trader.py", "        if age >= float(hold_bars) * 60.0:", "        if False:"),
     ("trader: lanes: the Set lane exits on TP whatever the lane's setting",
-     "pulse_trader.py", "        if self.lane_honors_tp() and tp_f > 0:", "        if tp_f > 0:"),
+     "pulse_trader.py", "        if self.lane_honors_tp(pos) and tp_f > 0:", "        if tp_f > 0:"),
     ("trader: lanes: the Exit lanes score the Set closes",
      "pulse_trader.py", "            if not rec.set_id:                 # the Exit lanes score only the closes they made themselves", "            if True:                 # the Exit lanes score only the closes they made themselves"),
     ("trader: lanes: the exit lane tightens a Set position's order stop",
@@ -221,8 +256,8 @@ MUTATIONS = [
      "set_engine.py", "    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)",
      "    return sl_base, max(2 * cost_as_frac(cost_pct), st.tp_pct)"),
     ("lanes: the live Set levels use the base ratio for a trailing Set",
-     "set_engine.py", "    sl_base = st.tp_pct * (st.sl_ratio if st.kind == \"base\" else TRAIL_SL_RATIO)",
-     "    sl_base = st.tp_pct * 1.0"),
+     "set_engine.py", "    sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == \"trail\" else st.sl_ratio)\n    return max(",
+     "    sl_base = st.tp_pct * 1.0\n    return max("),
     ("sets: the effective PF pools every Set",
      "set_engine.py", "        return {\"base\": pool(valid), \"unfiltered\": pool(allsets)", "        return {\"base\": pool(allsets), \"unfiltered\": pool(allsets)"),
     ("trader: lanes: a recovered Set position keeps the default variants' trailing",
@@ -360,8 +395,8 @@ MUTATIONS = [
      "set_engine.py", "    def snapshot(self) -> Dict[str, Any]:\n        with self._lock:\n            return self._snapshot()",
      "    def snapshot(self) -> Dict[str, Any]:\n        return self._snapshot()"),
     ("pick: the base and trail lookups take the lock separately",
-     "set_engine.py", "        with self._lock:\n            return self._pick(pack, \"base\") or self._pick(pack, \"trail\")",
-     "        return self.pick(pack, \"base\") or self.pick(pack, \"trail\")"),
+     "set_engine.py", "        with self._lock:\n            fixed = [x for x in (self._pick(pack, \"base\"), self._pick(pack, \"exit\")) if x is not None]",
+     "        if True:\n            fixed = [x for x in (self.pick(pack, \"base\"), self.pick(pack, \"exit\")) if x is not None]"),
     ("cache: a departed symbol keeps its signal memo",
      "set_engine.py", "                for s in [s for s in self._sig_cache if s not in live]:\n                    del self._sig_cache[s]          # and so do their signal memo entries\n",
      ""),
@@ -383,7 +418,7 @@ MUTATIONS = [
     ("trader: the live Set lane ignores the Set's own hold",
      "pulse_trader.py", '        hold_bars = int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)', '        hold_bars = int(self.sets.hist_time_bars)'),
     ("hold: a trailing Set reads the base step",
-     "set_engine.py", "return int(st.step) if st.kind == \"base\" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))", "return int(st.step)"),
+     "set_engine.py", "return int(st.step) if st.kind != \"trail\" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))", "return int(st.step)"),
     ("hold: auto candidates of steps 6 and up come from the low list",
      "set_engine.py", "return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH", "return HOLD_AUTO_LOW"),
     ("hold: auto candidates cut one step early (step 5 reads the high list)",
@@ -563,9 +598,10 @@ def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subproce
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=1500)
 
 
-def _mutant(item):
+def _mutant(item, use_cache: bool = True):
     """Apply one fault to a private copy of server/pulse and run the suite against it. Returns (name, verdict, info).
-    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass."""
+    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass.
+    The check that caught this mutant last time runs first, alone; the whole suite runs only when it does not catch it."""
     name, fname, old, new = item
     with tempfile.TemporaryDirectory() as td:
         copy = os.path.join(td, "pulse")
@@ -580,23 +616,41 @@ def _mutant(item):
                 return name, "anchor", f"anchor found {count} times, mutation not applied"
             text = text.replace(old, new)
         open(path, "w", encoding="utf-8").write(text)
+        known = _catchers.get(name) if use_cache else None
+        if known:
+            out = run_once(copy, fail_fast=True, only=known)
+            fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
+            if out.returncode != 0 and fails:
+                return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]} (known catcher)"
         out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "bybit." if name.startswith("bybit:") else "")
     fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
     if out.returncode == 0:
         return name, "survived", ""
+    if fails:
+        with _catchers_lock:
+            _catchers[name] = fails[0]
     return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]}"
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="", help="run the mutants whose name starts with this prefix")
+    ap.add_argument("--full", action="store_true", help="ignore the catcher map: every mutant runs the whole suite")
+    args = ap.parse_args()
     base = run_once(PULSE, fail_fast=False)
     if base.returncode != 0:
         print("baseline suite is not green; fix it before injecting faults", flush=True)
         print("\n".join(l for l in base.stdout.splitlines() if l.startswith("FAIL")), flush=True)
         return 1
+    try:
+        _catchers.update(json.load(open(CATCHERS_PATH, encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    todo = [m for m in MUTATIONS if m[0].startswith(args.only)]
     jobs = int(os.environ.get("CTSG_MUT_JOBS") or 4)
     survivors, anchors = [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        for name, verdict, info in pool.map(_mutant, MUTATIONS):
+        for name, verdict, info in pool.map(lambda m: _mutant(m, not args.full), todo):
             if verdict == "survived":
                 survivors.append(name)
                 print(f"SURVIVED  {name}", flush=True)
@@ -605,7 +659,11 @@ def main() -> int:
                 print(f"ANCHOR    {name}: {info}", flush=True)
             else:
                 print(f"caught    {name}: {info}", flush=True)
-    print(f"\nmutations: {len(MUTATIONS)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
+    names = {m[0] for m in MUTATIONS}
+    with open(CATCHERS_PATH, "w", encoding="utf-8") as fh:        # only mutants that still exist, in a stable order
+        json.dump({k: v for k, v in sorted(_catchers.items()) if k in names}, fh, indent=1)
+        fh.write("\n")
+    print(f"\nmutations: {len(todo)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
           f"workers: {jobs}", flush=True)
     return 1 if (survivors or anchors) else 0
 

@@ -41,13 +41,43 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
   PositionCost + `trailMinSteps` steps (default 2, so 3 x cost).
 - Short Range strategy (pack `shortrange`, overlay `stratShortRange`): the Low-Range signals, TP steps 2-6.
 
+## Live entries = replay entries (standard)
+
+- Under the Base gate every live entry is the replay's: `SetBook.entry_signal` reads the signal of the minute that just
+  completed on the Set history (`bar_signal`, the per-bar rule `pack_signals` uses; the pack with the highest confidence at or
+  above `setEntryConf`), once per symbol and minute, within `ENTRY_FRESH_S` (30 s) of that minute's close
+  (`Pulse.set_entry_candidates`). Only completed minutes reach the Set history (`Pulse._closed_klines`; the venue's last row
+  is the minute still forming). The live 60-bar indication and general scores (outbreak, regime, forming bar) never open a
+  Set position: they traded entries no Set was validated on. Checks `trader.live-entry-is-the-replays-signal`,
+  `trader.only-completed-minutes-reach-set-history`, with mutants.
+
+## Exit Sets (exitIgnoreTp as its own strategy type)
+
+- With `exitIgnoreTp` on (the default) every base stop (SL ratio x TP step, one Set per distinct stop distance: 182 per
+  pack) also runs as an Exit Set (`kind` exit, id `<pack>:1m:sl<r>:st<n>:xt`): no TP exit, leaves by its stop, the time
+  exit or the scratch exit, with its own lanes, tape and Base validation. Base Sets always take their TP. `pick_any` ranks
+  the valid base and Exit Sets of a pack together (`rank_key`), then the trailing Sets. Default grid: 754 base + 364 Exit +
+  420 trailing = 1538 Sets. Client ids mark an Exit Set in the trail field (`CID_EXIT_TR`), so it never decodes to its twin.
+  Desk: Sets overview type "Exit".
+
+## Measured edge (30 days, 20 symbols, development window, `scripts/trade_sim.py`)
+
+- Every Set group's average gross result per order is at most +0.034 % (indications trail +0.025 %, Exit +0.014 %, base
+  +0.008 %, general about 0) against a PositionCost of 0.12 %. Effective PF after Base 2.33 (in-sample, 15 % validated);
+  the validated Sets' next 8 orders PF 0.46, next 50 orders 0.50 (below the ungated average of about 0.58: a Set passes
+  at the end of a lucky stretch); executed (validated per order) 0.61 on 9,993 orders, 61 of 199 blocks of 50 orders at PF
+  1 or more; the last 12 h on 12 symbols 0.43 on 130 orders (`reports/trade_sim_12h_12sym.txt`); no type,
+  step or SL ratio above 1 on its next orders. No gate or ranking can carry a PF above 1 out of sample while the signals'
+  gross move per order is under the cost: an edge has to come from the signals or the exits. `trade_sim.py` reports per
+  type and range, in orders (never hours); `reports/trade_sim_dev.txt` holds the full listing.
+
 ## Independent lanes (standard)
 
 Every strategy type runs its own lane; none may close, tighten or score another's positions.
 
 - **Set lane.** A position opened under a Set (`pos.set_id`) is closed only by its Set's own rules, the ones the replay
-  validated: stop (kept on the exchange), TP when the lane honours it (`setHonorTp` / `exitIgnoreTp` decide, in the replay
-  and live alike), trailing only from an independent trailing Set (`trail_set_id`; a base Set does not trail), the time
+  validated: stop (kept on the exchange), TP by the Set's kind (a base Set always takes its TP, an Exit Set never does, a
+  trailing Set follows `setHonorTp` / `exitIgnoreTp`; `set_engine.lane_honors_tp`, replay and live alike), trailing only from an independent trailing Set (`trail_set_id`; a base Set does not trail), the time
   exit after `hist_time_bars`, the scratch exit. Live code: `Pulse.manage_set_lane`. The Exit strategies, the
   coordinator and the default variants never read or move these positions (`security_prices` skips the exit-lane stop
   tightening for them).
@@ -168,5 +198,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 ## Checks
 
-`python3 -B scripts/regression/run.py` (all green), `python3 -B scripts/regression/mutate.py` (no survivors),
+`python3 -B scripts/regression/run.py` (all green, about 6 min), `python3 -B scripts/regression/mutate.py` (no survivors; each
+mutant first runs the check that caught it last time, `scripts/regression/mutant_catchers.json`, and the whole suite only
+when that one passes, so a run takes minutes, not hours; `--only PREFIX`, `--full`),
 `npm run typecheck`, `npm test`. A new check must fail on the previous code.

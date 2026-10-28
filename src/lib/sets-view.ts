@@ -12,7 +12,7 @@
 export type SetIndexRow = {
   i: number;
   id: string;
-  kind: "base" | "trail";
+  kind: "base" | "exit" | "trail";
   pack: string;
   /** SL ratio. */
   sl: number;
@@ -44,10 +44,14 @@ export type SetIndexRow = {
   rk?: number;
 };
 
-export type StrategyType = "normal" | "trailing" | "axis" | "block" | "dca";
+export type StrategyType = "normal" | "exit" | "trailing" | "axis" | "block" | "dca";
+
+/** The Set kinds a view shows: Normal = base Sets (take their TP), Exit = no-TP Sets (exitIgnoreTp), Trailing = trailing Sets. */
+export const SET_VIEW_KIND: Partial<Record<StrategyType, string>> = { normal: "base", exit: "exit", trailing: "trail" };
 
 export const STRATEGY_TYPES: Array<{ id: StrategyType; label: string; hint: string }> = [
-  { id: "normal", label: "Normal", hint: "base Sets: pack x SL ratio x TP step" },
+  { id: "normal", label: "Normal", hint: "base Sets: pack x SL ratio x TP step, leave at their TP" },
+  { id: "exit", label: "Exit", hint: "Exit Sets (exitIgnoreTp): the base stop with no TP, own lanes and validation" },
   { id: "trailing", label: "Trailing", hint: "independent trailing Sets: pack x arm x give" },
   { id: "axis", label: "Axis", hint: "the coordinator's axes and stage PFs" },
   { id: "block", label: "Block", hint: "Block counts and lanes" },
@@ -106,8 +110,8 @@ export function filterSets(
   rangeId: string,
   costPct: number,
 ): SetIndexRow[] {
-  if (!index || (type !== "normal" && type !== "trailing")) return [];
-  const kind = type === "normal" ? "base" : "trail";
+  const kind = SET_VIEW_KIND[type];
+  if (!index || !kind) return [];
   const range = rangeById(rangeId);
   return index.filter((r) => r.kind === kind && inRange(stepOf(r, costPct), range));
 }

@@ -37,7 +37,7 @@ def every_set_processed_full_grid():
     b.replay_all(now=T0)
     p = b.progress
     unscored = [st.id for st in b.by_idx if st.last_error or st.gate_n < 0]
-    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1174 and not unscored and p.errors == 0
+    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1538 and not unscored and p.errors == 0
     return ok, f"phase={p.phase} sets={len(b.by_idx)} sets_done={p.sets_done} unscored={len(unscored)} errors={p.errors}"
 
 

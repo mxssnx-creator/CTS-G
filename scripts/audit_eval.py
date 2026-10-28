@@ -20,7 +20,7 @@ RANGES = [(2, 5, "steps 2-5"), (6, 10, "steps 6-10"), (11, 20, "steps 11-20"), (
 
 
 def rng_of(book, st):
-    step = int(st.step) if st.kind == "base" else int(round(float(st.trail_arm) / max(1e-9, float(book.cost_pct))))
+    step = int(st.step) if st.kind != "trail" else int(round(float(st.trail_arm) / max(1e-9, float(book.cost_pct))))
     for lo, hi, name in RANGES:
         if lo <= step <= hi:
             return name
