@@ -335,6 +335,8 @@ MUTATIONS = [
      "modules.py", 'flags["strategy.dca"] = bool(overlay.get("dcaEnabled", False)) and not DCA_HARD_OFF', 'flags["strategy.dca"] = False'),
     ("dca: the auto plan ignores the exposure ceiling",
      "dca_engine.py", "        if self.auto:      # the calculated plan keeps", "        if False:      # the calculated plan keeps"),
+    ("sets: the overlay can switch the Base gate off",
+     "set_engine.py", "        self.use_historic_gate = True      # the Base gate is always on", "        self.use_historic_gate = bool(ov.get(\"setUseHistoricGate\", True))      # the Base gate is always on"),
     ("trader: a wildcard overlay ignores the symbol cap",
      "pulse_trader.py", "        elif cap <= 0:\n            # every ranked name", "        elif wild or cap <= 0:\n            # every ranked name"),
     ("trader: the overlay's max-leverage toggle is ignored",

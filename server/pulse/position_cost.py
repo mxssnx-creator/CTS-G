@@ -95,7 +95,7 @@ def snap_sl_ratio(value: Any) -> float:
     return round(SL_RATIO_MIN + n * SL_RATIO_STEP, 2)
 
 
-GATE_MIN_PF_DEFAULT = 1.10   # base gate: net PF must stay above this (every module reads this one constant)
+GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
 
 
 def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:

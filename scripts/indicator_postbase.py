@@ -54,7 +54,7 @@ def evaluate(data, symbols, jobs, patch, sealed):
     return {"hours_evaluated": len(pools), "effective_pf_median": round(statistics.median(eff), 3) if eff else None,
             "effective_pf_min": round(min(eff), 3) if eff else None, "validated_pct_mean": round(sum(pcts) / len(pcts), 2),
             "orders_valid_mean": round(sum(p["orders_post"] for p in pools) / len(pools)), "valid_sets_mean": round(sum(p["valid"] for p in pools) / len(pools), 1),
-            "sets_total": pools[0]["total"], "pf_unfiltered_median": round(statistics.median([p["pf_pre"] for p in pools if p["pf_pre"] is not None]), 3),
+            "sets_total": pools[0]["total"], "pf_unfiltered_median": (round(statistics.median([p["pf_pre"] for p in pools if p["pf_pre"] is not None]), 3) if any(p["pf_pre"] is not None for p in pools) else None),
             "exec_orders": len(trades), "exec_pf": round(gp / gl, 3) if gl > 0 else None, "by_pack": by_pack}
 
 
@@ -68,8 +68,10 @@ def main():
     ap.add_argument("--sealed", action="store_true")
     a = ap.parse_args()
     variants = json.load(open(a.variants))
-    out = {}
+    out = json.load(open(a.out)) if a.out and os.path.exists(a.out) else {}
     for name, patch in variants.items():
+        if name in out:
+            continue            # resumed run: already evaluated
         t0 = time.time()
         r = evaluate(a.data, a.symbols, a.jobs, patch, a.sealed)
         out[name] = r

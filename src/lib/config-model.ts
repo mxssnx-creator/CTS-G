@@ -81,7 +81,7 @@ export function capSymbols(list: string[]): string[] {
   return list.slice(0, MAX_SYMBOLS);
 }
 // Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.10).
-export const GATE_MIN_PF_DEFAULT = 1.1;
+export const GATE_MIN_PF_DEFAULT = 1.25;
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
@@ -260,7 +260,7 @@ export type PulseOverlay = {
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
-  volumeFactor: 1,
+  volumeFactor: 0.05,
   sizePctOfBalance: 0,
   sizeMaxNotional: 25,
   maxEntrySlipPct: 0.75,
@@ -291,7 +291,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockPauseCountRatio: 1,
   blockActiveLive: true,
   blockActiveReal: true,
-  dcaEnabled: false,
+  dcaEnabled: true,
   dcaMaxSteps: 0,
   dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
@@ -320,15 +320,15 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   "1000PEPE-USDT",
   "KAS-USDT",
   ],
-  axisPrevEnabled: true,
+  axisPrevEnabled: false,
   axisPrevMaxWindow: 12,
-  axisLastEnabled: true,
+  axisLastEnabled: false,
   axisLastMaxWindow: 4,
-  axisContEnabled: true,
+  axisContEnabled: false,
   axisContMaxWindow: 8,
-  axisPauseEnabled: true,
+  axisPauseEnabled: false,
   axisPauseMaxWindow: 8,
-  minPf: 1.2,
+  minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.12,
   pfWindow: 6,
   slMinPct: 0.2,
@@ -364,7 +364,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   shortRangeMinPf: 1.1,
   slMinSteps: 1,
   trailMinSteps: 2,
-  stratDca: false,
+  stratDca: true,
   indTypeState: true,
   indTypeDirection: true,
   indTypeMove: true,
@@ -649,14 +649,14 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
+    volumeFactor: num(cts.volumeFactor, 0.05),
+    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
-    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),
+    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
     axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
-    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), true),
+    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
-    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
+    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),

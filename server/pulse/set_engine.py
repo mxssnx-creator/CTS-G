@@ -57,7 +57,7 @@ from risk_variants import parse_trail, trail_grid
 PACKS = ("indications", "general")
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
-SHORT_MIN_PF_DEFAULT = 1.1
+SHORT_MIN_PF_DEFAULT = 1.25
 SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
 TREND_PACK = "trend"                  # additional strategy: the Trend family (indication_extra), judged by Base on its own Sets
 BREAK_PACK = "breakout"               # additional strategy: the Breakout family
@@ -965,7 +965,7 @@ class SetBook:
         hrs = max(2.0, min(36.0, round(hrs / 2.0) * 2.0))
         self.max_ddt_h = hrs
         self.max_dd_s = hrs * 3600.0
-        self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
+        self.use_historic_gate = True      # the Base gate is always on: entries open only under a Base-validated Set (the overlay key is ignored)
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
         self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))
         if ov.get("timeStopS") is not None:

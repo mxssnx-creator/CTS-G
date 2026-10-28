@@ -492,7 +492,7 @@ def short_range_has_its_own_pf_floor():
     other = next(s for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "base")
     for st in (sr, other):
         st.gate_n = b.gate_min
-        st.gate_pf = 1.2          # above Short Range's 1.1, below the global 2.0
+        st.gate_pf = 1.3          # above Short Range's 1.25, below the global 2.0
         st.max_dd_s = 0.0
         st.active = True
         st.last_error = ""
@@ -501,7 +501,7 @@ def short_range_has_its_own_pf_floor():
     reason_default = None
     b2 = SetBook()
     b2.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
-    ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.1
+    ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.25
           and b2.gate_reason(sr) == "" and b2.gate_reason(other) == "pf<min")
     return ok, f"short range floor default={b2.pack_min_pf[SHORT_PACK]} set={b.pack_min_pf[SHORT_PACK]}; PF 1.2: short range='{b2.gate_reason(sr)}' other='{b2.gate_reason(other)}'"
 
@@ -533,6 +533,14 @@ def legacy_pick_prefers_judged_sets_over_a_single_lucky_order():
         st.gate_n, st.gate_pf = 0, 0.0
     got = b.pick(b.packs[0])
     return got is solid, f"picked {got and got.id} (n={got and got.gate_n}, pf={got and got.gate_pf}) over the one-order Set"
+
+
+def the_base_gate_cannot_be_switched_off():
+    """Base evaluation gates are always enabled: an overlay that says otherwise is ignored."""
+    b = SetBook()
+    b.load(overlay(setUseHistoricGate=False, **SMALL))
+    on = b.use_historic_gate is True and b.snapshot()["useHistoricGate"] is True
+    return on, f"overlay setUseHistoricGate=false -> engine gate on={on}"
 
 
 def step_adapt_waits_for_the_pass_in_flight():
@@ -667,6 +675,7 @@ CHECKS = [
     ("processing.short-range-trailing-inside-its-steps", short_range_trailing_stays_inside_its_steps),
     ("processing.effective-pf-rolling-window", effective_pf_uses_the_rolling_window_not_the_whole_tape),
     ("processing.short-range-own-pf-floor", short_range_has_its_own_pf_floor),
+    ("processing.base-gate-always-on", the_base_gate_cannot_be_switched_off),
     ("processing.pf-progress-history", pf_progress_history_is_continuous_and_bounded),
     ("processing.pack-change-keeps-memo-sound", pack_change_does_not_poison_the_signal_memo),
     ("processing.effective-pf-pooled-over-valid-sets", effective_pf_is_pooled_over_valid_sets_only),

@@ -23,7 +23,7 @@ def overlays_share_grid_contract():
     for path in (X01, X02):
         ov = json.load(open(path))
         want = {"setMinStep": 2, "setStepMax": 30, "trailMinStep": 3, "histLookbackBars": 1920,
-                "setMinPf": 1.1, "setGateWindow": 50, "setGateMinTrades": 30}
+                "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 30}
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")
@@ -76,7 +76,7 @@ def _ts_default(raw):
     if raw in ("true", "false"):
         return raw == "true"
     if raw == "GATE_MIN_PF_DEFAULT":
-        return 1.1
+        return 1.25
     if raw.startswith("["):
         inner = raw.strip("[]").strip()
         try:
@@ -99,7 +99,6 @@ DESK_DEFAULT_EXCEPTIONS = {
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
     "ddHaltPct": "x01 drawdown halt switched off by the owner; desk default 18 %",
-    "volumeFactor": "x01 volume factor lowered to 0.5 by the owner (2026-10-28); desk default 1",
 }
 
 
@@ -207,14 +206,18 @@ def engine_absent_defaults_agree():
     return not problems, f"problems={problems}" if problems else "absent defaults agree: scratchMin 0.16%, minStep 6"
 
 
-def dca_is_off_by_default_everywhere():
+def dca_is_on_with_set_and_axis_options_off_everywhere():
     dca_src = open(os.path.join(PULSE, "dca_engine.py"), encoding="utf-8").read()
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
     hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
-    flag = re.search(r'"strategy\.dca"\s*:\s*False', mod_src) is not None
-    x01 = overlay()
-    ok = hard and flag and not x01.get("dcaEnabled", False)
-    return ok, f"hard_off={hard} module_flag_off={flag} overlay_dcaEnabled={x01.get('dcaEnabled', False)}"
+    ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
+    for path in (X01, X02):
+        ov = json.load(open(path))
+        good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
+                and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
+        ok_all = ok_all and good
+        detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
+    return ok_all, " ".join(detail)
 
 
 def deploy_pin_matches_engine():
@@ -384,7 +387,7 @@ CHECKS = [
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),
-    ("logistics.dca-off-by-default-everywhere", dca_is_off_by_default_everywhere),
+    ("logistics.dca-on-with-set-and-axis-options-off", dca_is_on_with_set_and_axis_options_off_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),
     ("logistics.no-leftover-zest-names", no_leftover_zest_names),

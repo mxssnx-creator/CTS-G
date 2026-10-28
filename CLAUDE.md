@@ -17,6 +17,15 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
 - Choose on the development windows only; read the sealed window once, for the finalists. Report the numbers as they
   come out, positive or not. Do not tune on the sealed window.
 
+## Defaults decided by the owner (2026-10-28)
+
+- The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
+  (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`, Short Range floor). The volume factor default is the minimum, **0.05**.
+- Block and DCA are enabled (DCA auto plan; its Set and Axis options `dcaOnSets` / `dcaOnAxis` stay off, so under the Base
+  gate, where every position is a Set position, both add-ons are idle until a position without a Set exists or an option is
+  turned on).
+- The Axis gates (prev, last, cont, pause) are disabled until a configuration is shown to improve the post-Base result.
+
 ## Units and defaults
 
 - PositionCost is in percent, default 0.12 (`position_cost.POSITION_COST_PCT_DEFAULT`, both overlays, desk default).

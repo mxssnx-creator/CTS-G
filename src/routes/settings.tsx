@@ -431,7 +431,7 @@ function SettingsPage() {
             >
               <Grid>
                 <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
-                <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
+                <Toggle label="Base gate (always on: entries open only under a Base-validated Set)" on={true} onChange={() => patch("setUseHistoricGate", true)} />
                 <Slider
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
