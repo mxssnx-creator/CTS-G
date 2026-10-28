@@ -114,6 +114,27 @@ def parse_exchange_rows(rows: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def bars_from_records(records: Sequence[Dict[str, Any]], max_fill: Optional[int] = 5) -> List[List[float]]:
+    """Apply the replay's gap rule to one immutable snapshot of closed records."""
+    if max_fill is None:
+        return [list(record["bar"]) for record in records]
+    out: List[List[float]] = []
+    prev_minute: Optional[int] = None
+    prev_close = 0.0
+    for record in records:
+        minute = int(record["minute"])
+        bar = list(record["bar"])
+        if prev_minute is not None:
+            hole = minute - prev_minute - 1
+            if hole > max_fill:
+                out = []
+            elif hole > 0:
+                out.extend([[prev_close, prev_close, prev_close, prev_close, 0.0] for _ in range(hole)])
+        out.append(bar)
+        prev_minute, prev_close = minute, float(bar[3])
+    return out
+
+
 def _safe_connection(connection: str) -> str:
     value = "".join(ch for ch in str(connection or "default") if ch.isalnum() or ch in "._-")
     return value or "default"
@@ -373,7 +394,25 @@ class HistoryStore:
     ) -> List[Dict[str, Any]]:
         last = int(end or (int(time.time()) // BAR_S - 1))
         first = last - max(1, int(bars)) + 1
-        return self.records(symbol, start=first, end=last, source=source, closed_only=closed_only)
+        name = str(symbol or "").strip().upper()
+        # A live 60-minute signal must not sort an entire multi-day symbol history on every scan. For short
+        # windows use direct minute-key lookups; sparse/very large requests still scan the bounded stored keys.
+        with self._lock:
+            rows = self._rows.get(name, {})
+            if not rows:
+                return []
+            minutes = range(first, last + 1) if last - first + 1 <= len(rows) * 2 else sorted(
+                minute for minute in rows if first <= minute <= last
+            )
+            out: List[Dict[str, Any]] = []
+            for minute in minutes:
+                record = rows.get(minute)
+                if record is None or (closed_only and not bool(record.get("closed", True))):
+                    continue
+                if source is not None and str(record.get("source")) != source:
+                    continue
+                out.append({"minute": minute, **record, "bar": list(record.get("bar") or [])})
+            return out
 
     def window(
         self,
@@ -393,23 +432,7 @@ class HistoryStore:
         ``max_fill=None`` returns the stored bars as they are.
         """
         records = self.window_records(symbol, bars=bars, end=end, source=source, closed_only=closed_only)
-        if max_fill is None:
-            return [list(record["bar"]) for record in records]
-        out: List[List[float]] = []
-        prev_minute: Optional[int] = None
-        prev_close = 0.0
-        for record in records:
-            minute = int(record["minute"])
-            bar = list(record["bar"])
-            if prev_minute is not None:
-                hole = minute - prev_minute - 1
-                if hole > max_fill:
-                    out = []
-                elif hole > 0:
-                    out.extend([[prev_close, prev_close, prev_close, prev_close, 0.0] for _ in range(hole)])
-            out.append(bar)
-            prev_minute, prev_close = minute, float(bar[3])
-        return out
+        return bars_from_records(records, max_fill)
 
     def missing_ranges(
         self,

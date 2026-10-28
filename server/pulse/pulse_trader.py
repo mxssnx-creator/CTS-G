@@ -65,14 +65,14 @@ from position_cost import (
 )
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES, exit_tactic_hit, tactic_should_close, KIND_FLAGS
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import MAIN_EVAL_DEFAULT, PF_N_DEFAULT, REAL_EVAL_DEFAULT, SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
+from set_engine import MAIN_EVAL_DEFAULT, PF_N_DEFAULT, REAL_EVAL_DEFAULT, SetBook, self_test as sets_self_test, general_signal, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
 from exit_engine import ExitBook, self_test as exit_self_test
 import htf_engine
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, SMALL_BOOK_ENTRY_BATCH, trim_map, cap_map, prune_ttl, cap_list
 from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
-from history_store import BAR_S, HistoryStore, parse_exchange_rows
+from history_store import BAR_S, HistoryStore, bars_from_records, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
 from hist_calc import read_stop_at as read_hist_stop_at
 from hist_calc import run_forced_calc, forced_path, request_lookback, job_is_running
@@ -4383,6 +4383,19 @@ class Pulse:
             bars = self._parse_klines(body.get("data") if isinstance(body, dict) else None)
             if not s or len(bars) < 5:
                 return
+            if tf == "1m":
+                store = getattr(self, "history_store", None)
+                if store is not None:
+                    # Only completed, timestamped exchange rows become replay/entry evidence. The mutable final
+                    # candle and price-seeded placeholders in klines_tf have no confirmed close identity.
+                    records = [dict(row, source="exchange") for row in parse_exchange_rows(body.get("data"))
+                               if row.get("closed") and int(row["minute"]) < int(now // BAR_S)]
+                    if records:
+                        try:
+                            store.merge(s, records, source="exchange", quality="exchange-confirmed", persist=False)
+                        except Exception as exc:
+                            self.errors = int(getattr(self, "errors", 0) or 0) + 1
+                            self.last_error = f"closed candle history {s}: {type(exc).__name__}: {str(exc)[:100]}"
             self.klines_tf.setdefault(tf, {})[s] = bars[-KLINE_LIMIT:]
             self.kline_ts_tf.setdefault(tf, {})[s] = now
             stored += 1
@@ -4447,6 +4460,26 @@ class Pulse:
         if isinstance(cache, dict):
             cache[sym] = (fp, result)
         return result
+
+    def general_entry_score(self, sym: str) -> Tuple[int, str, float]:
+        """Use the same latest 60 closed bars and signal function as general Set validation."""
+        store = getattr(self, "history_store", None)
+        if store is None:
+            return 0, "no-closed-history", 0.0
+        end = int(time.time() // BAR_S) - 1
+        try:
+            records = store.window_records(sym, bars=60, end=end, source=None, closed_only=True)
+            if not records or int(records[-1]["minute"]) != end:
+                return 0, "stale-closed-history", 0.0
+            bars = bars_from_records(records)
+            if len(bars) != 60:
+                return 0, "incomplete-closed-history", 0.0
+            direction, confidence, reason = general_signal(bars)
+            return direction, reason, confidence
+        except Exception as exc:
+            self.errors = int(getattr(self, "errors", 0) or 0) + 1
+            self.last_error = f"general closed-bar signal {sym}: {type(exc).__name__}: {str(exc)[:100]}"
+            return 0, "invalid-closed-history", 0.0
 
     def _score_compute(self, sym: str, bars: List[Any], px: float) -> Tuple[int, str, float]:
         if len(bars) < 16 or px <= 0:
@@ -7770,20 +7803,50 @@ class Pulse:
         to every body, so each run resolves its own client id before anything is re-sent.
         """
         path = "/openApi/swap/v2/trade/order"
+        # Validate each input before dispatch so one malformed quantity cannot cause valid siblings to be dropped,
+        # and a locally refused batch is never retried as an invalid single order.
+        valid: List[Dict[str, Any]] = []
+        indexes: List[int] = []
+        results: List[Optional[Dict[str, Any]]] = [None] * len(bodies)
+        for index, body in enumerate(bodies):
+            invalid = ""
+            for key in ("quantity", "price", "stopPrice"):
+                if key == "quantity" or key in body:
+                    try:
+                        value = float(body[key])
+                        if not math.isfinite(value) or value <= 0:
+                            invalid = key
+                            break
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        invalid = key
+                        break
+            if invalid:
+                results[index] = {"code": 100400, "msg": f"invalid {invalid}; request not sent", "notSent": True}
+            else:
+                indexes.append(index)
+                valid.append(body)
+        if len(valid) != len(bodies):
+            for index, response in zip(indexes, self._submit_entry_chunk(valid) if valid else []):
+                results[index] = response
+            return [row if row is not None else {"code": -1, "error": True, "msg": "missing local batch result"} for row in results]
         if len(bodies) == 1 or not hasattr(self.api, "batch_place"):
             return [self.api.post(path, body) for body in bodies]
         try:
             batch = self.api.batch_place(bodies)
         except ValueError as exc:  # invalid quantity: nothing was sent
-            batch = {"code": 100400, "msg": f"batch entry rejected before sending: {exc}"}
+            return [{"code": 100400, "msg": f"batch entry rejected before sending: {exc}", "notSent": True} for _ in bodies]
         except Exception as exc:  # unknown: the venue may have accepted the orders
             batch = {"code": -1, "error": True, "msg": f"batch entry failed: {type(exc).__name__}"}
         self.did_io = True
         if not isinstance(batch, dict):
             batch = {"code": -1, "error": True, "msg": "bad batch response"}
-        if not self.ok(batch) and not self.order_response_ambiguous(batch) and not batch.get("cooled"):
-            # The venue refused the batch as a whole, so nothing was accepted: send the orders one by
-            # one (each keeps its client id and its own retries) and stop batching if it keeps refusing.
+        message = str(batch.get("msg") or "").lower()
+        unsupported = str(batch.get("code")) == "100400" and "batch" in message and (
+            "not support" in message or "unsupported" in message
+        )
+        if not self.ok(batch) and not self.order_response_ambiguous(batch) and not batch.get("cooled") and unsupported:
+            # Only an explicit unsupported batch form permits single-order fallback. A rate limit or risk refusal
+            # must not be circumvented by switching endpoints.
             self._batch_reject_streak = int(getattr(self, "_batch_reject_streak", 0) or 0) + 1
             if self._batch_reject_streak >= 3 and getattr(self, "entry_batch_orders", False):
                 self.entry_batch_orders = False
@@ -7799,7 +7862,8 @@ class Pulse:
                 out: List[Dict[str, Any]] = []
                 for body, row in zip(bodies, rows):
                     echoed = self.order_cid(row)
-                    if echoed and echoed.lower() != str(body.get("clientOrderID") or "").lower():
+                    success = row.get("code") in (0, None, "0", "")
+                    if (success and not echoed) or (echoed and echoed.lower() != str(body.get("clientOrderID") or "").lower()):
                         out = []
                         break
                     if row.get("code") not in (0, None, "0", ""):
@@ -11948,30 +12012,10 @@ class Pulse:
             for s in intern_scan:
                 if not _intern_placeable(s):
                     continue
-                d, why, conf = self.score(s)
+                d, why, conf = self.general_entry_score(s)
                 if d == 0:
                     continue
                 candidates[(s, d, "general")] = (conf, s, d, f"gen:{why}")
-            # High-value: Real-qualified general Sets are idle when score() is
-            # flat. Reuse same-side indication timing so hist winners actually
-            # reach EntryMatrix instead of stalling behind an empty general lane.
-            if self.sets.enabled and callable(getattr(self.sets, "entry_sets", None)):
-                for pack_side, want in (("LONG", 1), ("SHORT", -1)):
-                    try:
-                        gens = self.sets.entry_sets("general", side=pack_side)
-                    except Exception:
-                        gens = []
-                    if not gens:
-                        continue
-                    for (s, d, why), row in list(candidates.items()):
-                        if d != want or (s, d, "general") in candidates:
-                            continue
-                        if not str(why).startswith("ind:"):
-                            continue
-                        conf = float(row[0] or 0.0)
-                        if conf < 0.50:
-                            continue
-                        candidates[(s, d, "general")] = (conf, s, d, "gen:high-value")
         ranked = sorted(candidates.values(), reverse=True)
         ranked = [row for row in ranked if not self._hedge_entry_blocked(row[1], row[2])]
         anchors = getattr(self, "_block_reference_anchors", {})
