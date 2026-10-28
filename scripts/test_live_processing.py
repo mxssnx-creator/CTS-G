@@ -48,6 +48,17 @@ def _long(sl_pct=0.0015, sl=99.85, tp=100.60, key="X-USDT:LONG"):
 
 
 class LiveProcessingTests(unittest.TestCase):
+    def test_order_acknowledgements_and_invalid_quantities_never_create_fills(self):
+        requested = .05
+        for reply in ({}, {'orderId': '1'}, {'quantity': '0.05'},
+                      {'status': 'NEW', 'origQty': '0.05'},
+                      {'status': 'FILLED', 'executedQty': 'NaN'},
+                      {'status': 'FILLED', 'quantity': 'invalid'}):
+            self.assertEqual(pt.order_fill_qty(reply, requested), 0.0, str(reply))
+        self.assertEqual(pt.order_fill_qty({'status': 'FILLED'}, requested), requested)
+        self.assertEqual(pt.order_fill_qty({'status': 'PARTIALLY_FILLED', 'executedQty': '.02'}, requested), .02)
+        self.assertTrue(_pulse().ok({'code': '0'}))
+
     def test_sized_notional_applies_set_ratio_once(self):
         p = _pulse()
         with patch.object(pt, "TARGET_NOTIONAL", 10.0):

@@ -59,6 +59,21 @@ class AllValidEntries(unittest.TestCase):
         state.by_side[side] = blob
         return state
 
+    def test_acknowledged_but_unfilled_order_remains_pending_and_creates_no_position(self):
+        for ack in ({}, {'orderId': 'ack'}, {'orderId': 'ack', 'quantity': '.05'},
+                    {'orderId': 'ack', 'status': 'NEW', 'origQty': '.05'},
+                    {'orderId': 'ack', 'status': 'FILLED', 'executedQty': 'NaN'}):
+            p = self.pulse(self.book(1))
+            p.api.post = lambda _path, _body: {'code': '0', 'data': {'order': dict(ack)}}
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+            self.assertEqual(p.open, {}, str(ack))
+            self.assertEqual(len(p.pending_orders), 1, str(ack))
+            pending = next(iter(p.pending_orders.values()))
+            self.assertEqual(pending['filled_qty'], 0, str(ack))
+            self.assertEqual(p._next_fill_poll, 0.0)
+            if not ack.get('orderId'):
+                self.assertTrue(pending['metadata']['ambiguous_since'])
+
     def test_250_sets_open_500_independent_normal_and_block_orders_with_exact_volume(self):
         from block_engine import BlockBook
         p=self.pulse(self.book(250))
