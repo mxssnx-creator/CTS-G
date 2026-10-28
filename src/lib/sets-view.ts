@@ -200,3 +200,9 @@ export function pfByStep(
     .sort((a, b) => a[0] - b[0])
     .map(([step, rs]) => ({ step, pf: pooledPf(rs), valid: rs.length, orders: rs.reduce((a, r) => a + Number(r.gn ?? 0), 0) }));
 }
+
+/** A PF for display: a window without a loss has no finite PF (the engine reports 99), so it reads "no loss" rather than 99.00. */
+export function formatPf(v: number | null | undefined, digits = 2): string {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return "—";
+  return Number(v) >= 99 ? "no loss" : Number(v).toFixed(digits);
+}

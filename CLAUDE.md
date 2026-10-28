@@ -51,7 +51,16 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **Block stacks on its own lane.** Only positions without a Set; its evidence is the net PF of those positions' closes
   (`Pulse.exit_lane_pf`, at least Block's minimum samples); it adds only to a parent at least one step in profit, within
   the book cap; Set closes never reach Block's or DCA's scores. DCA is hard-off (`dca_engine.DCA_HARD_OFF`) until it is
-  re-approved.
+  re-approved. With the Base gate on (the standard) every entry is a Set position, so Block has nothing to stack on and
+  is idle; it only acts when a position has no Set.
+- **Block volume (`block_engine`).** Additive from the group's original base volume V0: each VALID group (its PF decision
+  passes, not paused) adds one partial ratio (`blockVolumeRatio` x V0), so the stack is V0 x (1 + ratio x valid groups),
+  at most `blockMaxStack` (8) groups, never a cumulative jump in one order and never computed on the grown volume. The
+  k-th valid group must pass the PF threshold of the stack it creates. A stack that was increased stays increased: a
+  parent that closes at a net loss keeps the level (`carried`, `top`) and V0, the next parent opens at V0 x (1 + carried
+  x ratio) (`Pulse.place`, `BlockBook.parent_scale`), and the group's net accumulates over its parents; once that net is
+  back to equal (>= 0) the next parent opens at the base volume. The lane's observed PF, pauses and parent ring persist
+  across parents. Checks: `block.*` and `trader.block-*`.
 
 ## Live safety
 

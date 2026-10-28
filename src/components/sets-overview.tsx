@@ -9,6 +9,7 @@ import {
   STEP_RANGES,
   STRATEGY_TYPES,
   filterSets,
+  formatPf,
   pfByStep,
   rangeById,
   rankRows,
@@ -133,19 +134,19 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
         <Kpi k="Validated" v={`${num(sum.validatedPct, 1)}%`} s={`${sum.valid} of ${sum.total} pass Base`} good={sum.validatedPct >= 25} />
         <Kpi
           k="Effective PF"
-          v={sum.effectivePf === null ? "—" : num(sum.effectivePf)}
+          v={formatPf(sum.effectivePf)}
           s={`after Base · min ${minPf}`}
           good={(sum.effectivePf ?? 0) >= minPf}
           bad={sum.effectivePf !== null && sum.effectivePf < 1}
         />
         <Kpi k="Orders" v={String(sum.orders)} s="valid Sets, gate windows" />
-        <Kpi k="Before Base" v={sum.unfilteredPf === null ? "—" : num(sum.unfilteredPf)} s="under 1 is normal" />
+        <Kpi k="Before Base" v={formatPf(sum.unfilteredPf)} s="under 1 is normal" />
       </div>
       {packs.length > 1 ? (
         <div className="flex flex-wrap gap-3 font-mono text-xs text-muted" data-testid="sets-overview-packs">
           {packs.map(([p, s]) => (
             <span key={p}>
-              {PACK_LABEL[p] ?? p}: {s.valid}/{s.total} ({num(s.validatedPct, 1)}%) · PF {s.effectivePf === null ? "—" : num(s.effectivePf)}
+              {PACK_LABEL[p] ?? p}: {s.valid}/{s.total} ({num(s.validatedPct, 1)}%) · PF {formatPf(s.effectivePf)}
             </span>
           ))}
         </div>
@@ -210,8 +211,8 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
                   <td className={r.on === 1 ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.on === 1 ? "valid" : "off"}</td>
                   <td className="py-1.5 text-right">{num(stepOf(r, cost), 0)}</td>
                   <td className="py-1.5 text-right">{r.n ?? "—"}</td>
-                  <td className={`py-1.5 text-right ${r.pf >= minPf ? "text-primary" : "text-danger"}`}>{num(r.pf)}</td>
-                  <td className="py-1.5 text-right">{num(r.p15)}</td>
+                  <td className={`py-1.5 text-right ${r.pf >= minPf ? "text-primary" : "text-danger"}`}>{formatPf(r.pf)}</td>
+                  <td className="py-1.5 text-right">{formatPf(r.p15)}</td>
                   <td className={`py-1.5 text-right ${Number(r.r25 ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{num(r.r25)}</td>
                   <td className="py-1.5 text-right">{r.wr === undefined ? "—" : `${num(r.wr, 0)}%`}</td>
                   <td className={`py-1.5 text-right ${Number(r.e ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{num(r.e, 4)}</td>

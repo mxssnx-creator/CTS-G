@@ -6,6 +6,7 @@ import {
   STEP_RANGES,
   STRATEGY_TYPES,
   filterSets,
+  formatPf,
   inRange,
   pfByStep,
   rangeById,
@@ -131,4 +132,14 @@ test("effective PF per step pools the valid Sets of that step only", () => {
     { step: 4, pf: 2, valid: 2, orders: 100 },
     { step: 6, pf: 0.5, valid: 1, orders: 50 },
   ]);
+});
+
+test("a PF for display: a window without a loss reads no loss, not 99.00; missing values read a dash", () => {
+  assert.equal(formatPf(99), "no loss");
+  assert.equal(formatPf(1.2345), "1.23");
+  assert.equal(formatPf(0), "0.00");
+  assert.equal(formatPf(null), "—");
+  assert.equal(formatPf(undefined), "—");
+  assert.equal(formatPf(Number.NaN), "—");
+  assert.equal(formatPf(98.99), "98.99");
 });

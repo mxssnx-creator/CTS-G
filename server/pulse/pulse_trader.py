@@ -2783,6 +2783,17 @@ class Pulse:
                 trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
                 trail_set_id = trail_st.id
                 trail_idx = int(getattr(trail_st, "idx", -1))
+        if not chosen and self.block.enabled and self.strat_block:
+            # a Block stack that was increased stays increased: the parent opens at V0 x (1 + carried x ratio) until the
+            # group's net is back to equal, within the book and what the balance can carry
+            scale = self.block.parent_scale(sym, side)
+            if scale > 1.0:
+                scaled = self.cap_order_qty(c, px, qty * scale, min(self.max_book_notional(), self.avail_notional(c)))
+                if scaled > qty:
+                    log(f"BLOCK carry {sym} {side} x{scale:.2f} qty {qty} -> {scaled}", every=30.0, key=f"bcarry:{sym}")
+                    qty = scaled
+                    notional = qty * px
+                    margin = notional / max(1, lev)
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -3866,13 +3877,13 @@ class Pulse:
             if not c or px <= 0:
                 continue
             raw = row["requestedAddQty"]
-            parent = self.size_qty(c, px)
-            inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
+            # one valid group adds one partial ratio of the group's ORIGINAL base volume, never more in one order
+            partial = float(lane.base_qty) * float(self.block.volume_ratio)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
-            add_cap = min(self.notional_cap() * max(1.0, inc), room)
+            add_cap = min(self.notional_cap() * max(1.0, float(self.block.volume_ratio)), room)
             qty = self.cap_order_qty(c, px, raw, add_cap)
-            if parent > 0 and qty > parent * inc * 1.05:
-                qty = self.cap_order_qty(c, px, parent * inc, add_cap)
+            if partial > 0 and qty > partial * 1.05:
+                qty = self.cap_order_qty(c, px, partial, add_cap)
             if qty < c.min_qty or qty <= 0:
                 bumped = self.min_order_qty(c, px)
                 if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:

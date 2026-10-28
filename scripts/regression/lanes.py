@@ -461,8 +461,9 @@ class _Env:
     """A Pulse on the venue stub with private state files, for the Block checks. slip: the venue fills market orders this
     far (a fraction) from the price the engine saw."""
 
-    def __init__(self, slip: float = 0.0) -> None:
+    def __init__(self, slip: float = 0.0, carry: int = 0) -> None:
         self.slip = slip
+        self.carry = carry              # partials Block carries into the parent that opens in __enter__
 
     def __enter__(self):
         self.saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
@@ -496,6 +497,12 @@ class _Env:
         p.missing_controls = lambda q: False
         p.max_book_notional = lambda: 10_000.0
         p.notional_cap = lambda: 1_000.0
+        if self.carry:
+            import block_engine as be
+            lane = be.BlockLane(symbol=SYM, side="LONG", base_qty=0.0, base_entry=100.0, active=False,
+                                carried=self.carry, top=self.carry, v0=1.0, net=-1.0)
+            p.block.lanes[p.block.key(SYM, "LONG")] = lane
+            p.block.volume_ratio = 1.0
         p.place(SYM, 1, "gen:x", CONF)
         self.p = p
         self.pos = p.open.get(SYM)
@@ -876,6 +883,160 @@ def the_desk_index_reproduces_the_engines_pooled_pf():
     return ok, f"effective {got_base} vs engine {want_base}; unfiltered {got_all} vs {want_all}; validated {pct}% vs {pb['validatedPct']}; packs ok={packs_ok}; ranks ok={ranks_ok}"
 
 
+def _block(**cfg):
+    import block_engine as be
+    base = {"blockMaxStack": 8, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 5}
+    base.update(cfg)
+    return be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-block-"), "block.json"), base)
+
+
+def _stack(b, lane, groups_ok, max_orders=20):
+    """Fill the lane the way the trader does, one order per evaluation, until Block stops asking. groups_ok: the groups
+    whose PF decision passes (the others carry a losing observed PF). Returns the size of each order."""
+    sizes = []
+    for n in range(1, int(b.max_stack) + 1):
+        lane.pf_ring[n] = [3.0] * 6 if n in groups_ok else [-1.0] * 6
+    for _ in range(max_orders):
+        row = b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.5))
+        if not row:
+            break
+        sizes.append(round(row["requestedAddQty"], 9))
+        b.record_fill(lane, row, row["requestedAddQty"], f"c{len(sizes)}", f"o{len(sizes)}")
+    return sizes
+
+
+def block_adds_one_partial_ratio_per_valid_group():
+    """Additive from the original volume: every valid group adds ratio x V0 (here 0.5 x 10 = 5), never a cumulative jump,
+    whichever groups before it were not valid. All 8 valid: 8 orders of 5, V0 x (1 + 8 x 0.5) = 50 in total."""
+    out = {}
+    for name, ok in (("all 8 valid", range(1, 9)), ("1 and 3 valid", {1, 3}), ("only 5 valid", {5}), ("none valid", set())):
+        b = _block()
+        lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
+        sizes = _stack(b, lane, set(ok))
+        out[name] = (sizes, round(lane.base_qty + lane.confirmed_add, 6))
+    want = {"all 8 valid": ([5.0] * 8, 50.0), "1 and 3 valid": ([5.0, 5.0], 20.0), "only 5 valid": ([5.0], 15.0),
+            "none valid": ([], 10.0)}
+    return out == want, f"orders and final volume by valid groups: {out}"
+
+
+def block_stack_is_capped_at_eight_groups():
+    """The stack never goes past maxStack groups: with every group valid the 9th partial is never asked for."""
+    b = _block(blockMaxStack=8, blockVolumeRatio=1.0)
+    lane = b.register_parent("X-USDT", "LONG", 4.0, 100.0)
+    sizes = _stack(b, lane, set(range(1, 40)), max_orders=40)
+    rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.5)
+    groups = max(r["blockCount"] for r in rows if r["kind"] == "regular")
+    # groups 2, 4, 6, 8 valid: four partials of ratio x V0, not the cumulative 2, 4, 6, 8 x V0 each in one order
+    b2 = _block(blockMaxStack=8, blockVolumeRatio=1.0)
+    lane2 = b2.register_parent("Y-USDT", "LONG", 4.0, 100.0)
+    sizes2 = _stack(b2, lane2, {2, 4, 6, 8})
+    ok = len(sizes) == 8 and groups == 8 and abs(lane.base_qty + lane.confirmed_add - 4.0 * 9) < 1e-9 \
+        and sizes2 == [4.0] * 4 and abs(lane2.base_qty + lane2.confirmed_add - 20.0) < 1e-9
+    return ok, (f"orders={len(sizes)} groups evaluated={groups} final volume={lane.base_qty + lane.confirmed_add} (V0 x 9 = 36); "
+                f"groups 2,4,6,8 valid -> orders {sizes2}")
+
+
+def block_threshold_rises_with_the_valid_group_count():
+    """The k-th valid group must clear the PF threshold of the stack it creates, so each valid group asks for more."""
+    b = _block()
+    lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
+    rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=9.0) if r["kind"] == "regular"]
+    mins = [round(r["blockMinPF"], 4) for r in rows]
+    inc = [round(r["cumulativeRatio"], 4) for r in rows]
+    ok = mins == sorted(mins) and len(set(mins)) == 8 and inc == [round(0.5 * k, 4) for k in range(1, 9)]
+    return ok, f"min PF by valid rank={mins}; cumulative ratio={inc}"
+
+
+def block_stack_stays_increased_until_the_groups_net_is_back_to_equal():
+    """The stack the last group reached stays for the next parents: a losing parent keeps the level and the original V0,
+    the group's net accumulates over its parents, and only when that net is back to equal (>= 0) the next parent opens at
+    the base volume again. The level never shrinks while the net is negative."""
+    b = _block(blockVolumeRatio=0.5)
+    steps = {}
+    lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
+    _stack(b, lane, {1, 2, 3})                                          # three partials: 10 + 3 x 5 = 25
+    steps["parent 1 stacked"] = (round(lane.base_qty + lane.confirmed_add, 6), len(lane.legs))
+    b.on_parent_close("X-USDT", "LONG", -10.0)                          # loss
+    steps["after loss -10"] = (b.lanes["X-USDT:LONG"].carried, round(b.lanes["X-USDT:LONG"].net, 6), b.parent_scale("X-USDT", "LONG"))
+    lane = b.register_parent("X-USDT", "LONG", 25.0, 100.0)             # the parent opens at V0 x 2.5
+    steps["parent 2 opens"] = (lane.base_qty, round(lane.confirmed_add, 6))
+    b.on_parent_close("X-USDT", "LONG", +4.0)                           # net -6: still not equal
+    steps["after win +4"] = (b.lanes["X-USDT:LONG"].carried, round(b.lanes["X-USDT:LONG"].net, 6), b.parent_scale("X-USDT", "LONG"))
+    lane = b.register_parent("X-USDT", "LONG", 25.0, 100.0)
+    sizes = _stack(b, lane, {1, 2, 3, 4})                               # the 4th valid group adds one more partial
+    steps["parent 3 adds"] = (sizes, b.lanes["X-USDT:LONG"].carried)
+    b.on_parent_close("X-USDT", "LONG", -1.0)                           # net -7, level 4 now
+    steps["after loss -1"] = (b.lanes["X-USDT:LONG"].carried, round(b.lanes["X-USDT:LONG"].net, 6), b.parent_scale("X-USDT", "LONG"))
+    lane = b.register_parent("X-USDT", "LONG", 30.0, 100.0)
+    b.on_parent_close("X-USDT", "LONG", +7.0)                           # net 0: back to equal
+    steps["after win +7 (net 0)"] = (b.lanes["X-USDT:LONG"].carried, b.lanes["X-USDT:LONG"].v0, b.lanes["X-USDT:LONG"].net, b.parent_scale("X-USDT", "LONG"))
+    lane = b.register_parent("X-USDT", "LONG", 12.0, 100.0)             # a fresh base volume
+    steps["parent 5 opens"] = (lane.base_qty, lane.confirmed_add)
+    want = {
+        "parent 1 stacked": (25.0, 3),
+        "after loss -10": (3, -10.0, 2.5),
+        "parent 2 opens": (10.0, 15.0),
+        "after win +4": (3, -6.0, 2.5),
+        "parent 3 adds": ([5.0], 3),                      # one more partial; the level (4) is carried when the parent closes
+        "after loss -1": (4, -7.0, 3.0),
+        "after win +7 (net 0)": (0, 0.0, 0.0, 1.0),
+        "parent 5 opens": (12.0, 0.0),
+    }
+    bad = {k: (steps[k], want[k]) for k in want if steps[k] != want[k]}
+    return not bad, f"{steps}" + (f" MISMATCH {bad}" if bad else "")
+
+
+def block_winning_group_never_carries_and_the_memory_survives_parents():
+    """A stacked parent that closes in profit starts the next one at the base volume (nothing to recover). The observed PF
+    and parent ring of the lane survive from one parent to the next: they were thrown away with every new parent."""
+    b = _block()
+    lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
+    _stack(b, lane, {1, 2})
+    b.on_parent_close("X-USDT", "LONG", +3.0)
+    carried_after_win = b.lanes["X-USDT:LONG"].carried
+    ring_before = {n: list(v) for n, v in b.lanes["X-USDT:LONG"].pf_ring.items()}
+    parent_ring = list(b.lanes["X-USDT:LONG"].parent_pf_ring)
+    same_object = b.register_parent("X-USDT", "LONG", 10.0, 100.0) is b.lanes["X-USDT:LONG"]
+    kept = b.lanes["X-USDT:LONG"].pf_ring == ring_before and b.lanes["X-USDT:LONG"].parent_pf_ring == parent_ring
+    ok = carried_after_win == 0 and b.parent_scale("X-USDT", "LONG") == 1.0 and same_object and kept and len(parent_ring) == 1
+    return ok, f"carried after a win={carried_after_win}; lane reused={same_object}; observed PF and parent ring kept={kept} ({parent_ring})"
+
+
+def block_carried_stack_survives_a_restart():
+    """The carried level, the original volume and the group's net are saved with the lane and loaded again."""
+    b = _block()
+    lane = b.register_parent("X-USDT", "SHORT", 8.0, 100.0)
+    _stack(b, lane, {1, 2})
+    b.on_parent_close("X-USDT", "SHORT", -2.5)
+    b2 = _block()
+    b2.path = b.path
+    b2.load()
+    l2 = b2.lanes.get("X-USDT:SHORT")
+    ok = l2 is not None and l2.carried == 2 and abs(l2.v0 - 8.0) < 1e-9 and abs(l2.net + 2.5) < 1e-9 and b2.parent_scale("X-USDT", "SHORT") == 2.0
+    return ok, f"loaded carried={l2 and l2.carried} v0={l2 and l2.v0} net={l2 and l2.net} scale={b2.parent_scale('X-USDT', 'SHORT')}"
+
+
+def a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial():
+    """With a stack carried (3 partials of ratio 1), the next parent without a Set opens at 4 x the base volume and the lane
+    keeps the group's original V0; a Block add is one partial of that V0, not the cumulative increment."""
+    sizes = {}
+    for carry in (0, 3):
+        with _Env(carry=carry) as e:
+            lane = e.p.block.lanes.get(e.p.block.key(SYM, "LONG"))
+            sizes[carry] = (round(e.pos.qty, 6), lane and round(lane.base_qty, 6), lane and round(lane.confirmed_add, 6))
+    base_qty = sizes[0][0]
+    with _Env() as e:
+        e.exit_closes(10, 0.01)
+        e.p.block.volume_ratio = 1.0
+        e.p.px[SYM] = 100.5
+        e.p.maybe_block_adds()
+        add1 = round(e.pos.qty - base_qty, 6)
+        lane = e.p.block.lanes[e.p.block.key(SYM, "LONG")]
+        partial = round(lane.base_qty * 1.0, 6)
+    ok = abs(sizes[3][0] - 4.0 * base_qty) <= 0.002 and sizes[3][1] > 0 and add1 <= partial * 1.06 and add1 > 0
+    return ok, f"parent qty with no carry={sizes[0]}, with 3 carried={sizes[3]}; first add={add1} (one partial = {partial})"
+
+
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
@@ -891,6 +1052,13 @@ CHECKS = [
     ("trader.badfill-closed-and-symbol-rests", a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests),
     ("trader.symbol-backoff-grows-with-losses", a_symbol_that_keeps_losing_rests_longer_each_time),
     ("trader.size-has-a-hard-ceiling", position_size_has_a_hard_ceiling),
+    ("trader.block-carried-parent-and-partial-add", a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial),
+    ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
+    ("block.stack-capped-at-eight-groups", block_stack_is_capped_at_eight_groups),
+    ("block.threshold-rises-with-valid-groups", block_threshold_rises_with_the_valid_group_count),
+    ("block.stack-stays-until-net-is-back-to-equal", block_stack_stays_increased_until_the_groups_net_is_back_to_equal),
+    ("block.win-never-carries-memory-survives", block_winning_group_never_carries_and_the_memory_survives_parents),
+    ("block.carried-stack-survives-a-restart", block_carried_stack_survives_a_restart),
     ("trader.block-stacks-only-on-its-own-proven-lane", block_stacks_only_on_its_own_proven_lane),
     ("trader.block-adds-only-into-strength", block_adds_only_into_strength),
     ("trader.block-fill-updates-position-and-stop", block_fill_updates_the_position_and_its_stop),
