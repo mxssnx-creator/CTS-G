@@ -24,6 +24,11 @@ being assigned by position. Existing pending intents remain authoritative.
 Recent-window lookups visit the requested minutes rather than sorting the
 entire retained symbol history; both paths return identical records.
 
+The broader offline suite also found a pre-existing indentation error that
+prevented the account-simulation module from importing. Its sizing helper now
+binds both the existing sizing methods and the stop/margin methods; all 21
+synthetic account-simulation tests pass after the repair.
+
 This is a code-level correction, not proof of sustained profitability or of
 actual exchange fills. The full transport, restart, pending-fill, and live
 account behavior must be verified on the intended environment before enabling
