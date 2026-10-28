@@ -268,7 +268,7 @@ MUTATIONS = [
     ("trader: block: the Exit-lane PF counts Set closes",
      "pulse_trader.py", "        rows = [c for c in self.closed if not getattr(c, \"set_id\", \"\")]", "        rows = list(self.closed)"),
     ("trader: block: the Exit-lane PF passes without the minimum samples",
-     "pulse_trader.py", "        if int(res.get(\"count\") or 0) < int(getattr(self.block, \"min_samples\", MIN_VALIDATION_N) or MIN_VALIDATION_N):\n            return 0.0\n", ""),
+     "pulse_trader.py", "        if int(res.get(\"count\") or 0) < int(getattr(self.block, \"min_samples\", 5) or 5):\n            return 0.0\n", ""),
     ("trader: block: Block stacks into a losing parent",
      "pulse_trader.py", "                if u < cost_as_frac(self.position_cost_pct):", "                if u < -0.0015:"),
     ("trader: block: a Set close is scored by Block",
