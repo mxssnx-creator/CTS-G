@@ -203,7 +203,9 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
 
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
-def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None) -> List[Dict[str, Any]]:
+def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None) -> List[Dict[str, Any]]:
+    """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
+    the gate or not (a control: does validation carry information out of sample?)."""
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -221,6 +223,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             ok, key, _, _ = gate_metrics(book, tapes, st, h)
             if ok:
                 valid_n += 1
+            if ok or control == "all":
                 ranked.setdefault((st.pack, st.kind), []).append((key, st))
         for k in ranked:
             ranked[k].sort(key=lambda r: r[0], reverse=True)
@@ -259,7 +262,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     continue
                 if axis and not axis_allows(closes if axis_evidence is None else axis_evidence, float(t), axis, cf):
                     continue
-                st = pool[0]
+                st = pick(pool, (s, t)) if pick else pool[0]
                 lane = se.SetLane(st, s)
                 dd = [0] * len(bars[s])
                 cc = [0.0] * len(bars[s])

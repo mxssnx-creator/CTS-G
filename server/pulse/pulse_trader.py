@@ -26,7 +26,7 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
+from position_cost import MIN_VALIDATION_N, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import EXIT_TAG, SetBook, lane_honors_tp, self_test as sets_self_test
@@ -195,9 +195,11 @@ ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and
 DD_HALT = 0.18
 EQ_MIN = 0.20
 RECV = 5000
+_CONN_SUFFIX = CONN_SHORT.split("-")[-1]
+IS_BYBIT = CONN_SHORT.startswith("bybit-")
 TAG = "G" + (
-    CONN_SHORT.split("-")[-1]
-    if CONN_SHORT.split("-")[-1].startswith("x")
+    ("b" + _CONN_SUFFIX[1:] if IS_BYBIT and _CONN_SUFFIX.startswith("x") else _CONN_SUFFIX)    # Bybit: Gb01 / Gb02, never a BingX tag
+    if _CONN_SUFFIX.startswith("x")
     else "x01"
 )
 SL_TYPES = {"STOP_MARKET", "STOP", "TRIGGER_MARKET"}
@@ -3559,7 +3561,7 @@ class Pulse:
         if ov.get("staggerS"):
             STAGGER_S = float(ov["staggerS"])
         self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
-        self.pf_window = int(ov.get("pfWindow") or 15)
+        self.pf_window = window_n(ov, "pfWindow", fallback=15)
         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
         self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
         self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
@@ -3908,7 +3910,7 @@ class Pulse:
         rows = [c for c in self.closed if not getattr(c, "set_id", "")]
         n = int(getattr(self.block, "window", 25) or 25)
         res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
-        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", MIN_VALIDATION_N) or MIN_VALIDATION_N):
             return 0.0
         return float(res.get("pf") or 0.0)
 
@@ -4990,7 +4992,7 @@ class Pulse:
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
         pc["minPf"] = self.coord.min_pf
-        pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= self.coord.min_pf)
+        pc["pass"] = bool(pc["count"] < MIN_VALIDATION_N or pc["pf"] + 1e-9 >= self.coord.min_pf)
         pc["neutral"] = 1.0
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
@@ -4998,9 +5000,9 @@ class Pulse:
             "running": not self.halted,
             "mode": _mode_label(),
             "connection": CONN_SHORT,
-            "connType": "vst" if "x02" in CONN_SHORT else "live",
-            "unit": "VST" if "x02" in CONN_SHORT else "USDT",
-            "exchange": "BingX VST" if "x02" in CONN_SHORT else "BingX",
+            "connType": ("bybit-demo" if "x02" in CONN_SHORT else "bybit") if IS_BYBIT else ("vst" if "x02" in CONN_SHORT else "live"),
+            "unit": "USDT" if IS_BYBIT else ("VST" if "x02" in CONN_SHORT else "USDT"),
+            "exchange": ("Bybit demo" if "x02" in CONN_SHORT else "Bybit") if IS_BYBIT else ("BingX VST" if "x02" in CONN_SHORT else "BingX"),
             "startedAt": self.started,
             "now": time.time(),
             "uptimeS": age,
@@ -5844,7 +5846,19 @@ class Pulse:
                 self._stats_force = True
 
 
+def make_api(conn: str, key: str, secret: str, base: str):
+    """The venue client of a connection: bybit-* talks to Bybit V5 (bybit_fast), everything else to BingX."""
+    if str(conn).startswith("bybit-"):
+        from bybit_fast import FastBybit
+        return FastBybit(key, secret, ErrorLog(ERR_PATH), base=base)
+    return FastBingX(key, secret, ErrorLog(ERR_PATH), base=base)
+
+
 def load_contracts(want: Optional[set] = None) -> Dict[str, Contract]:
+    if IS_BYBIT:
+        from bybit_fast import fetch_contract_rows
+        return {c["symbol"]: Contract(c["symbol"], c["min_qty"], c["step"], c["qprec"], c["pprec"], c["min_usdt"], c["max_lev"])
+                for c in fetch_contract_rows(BASE, want)}
     url = BASE + "/openApi/swap/v2/quote/contracts"
     with urllib.request.urlopen(url, timeout=15) as r:
         data = json.loads(r.read().decode()).get("data") or []
@@ -5911,7 +5925,7 @@ def main() -> None:
                                    os.environ.get("PULSE_BASE", ""))
     except ConnGuardError as exc:
         raise SystemExit(f"refusing to start: {exc}")
-    api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
+    api = make_api(CONN_SHORT, key, secret, BASE)
     Pulse(api, load_contracts()).run()
 
 

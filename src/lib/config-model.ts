@@ -160,6 +160,7 @@ export type PulseOverlay = {
   axisPauseMaxWindow: number;
   minPf: number;
   positionCostPct: number;
+  windowsLinked: boolean;
   pfWindow: number;
   slMinPct: number;
   slMaxPct: number;
@@ -334,14 +335,15 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPrevEnabled: false,
   axisPrevMaxWindow: 12,
   axisLastEnabled: false,
-  axisLastMaxWindow: 4,
+  axisLastMaxWindow: 8,
   axisContEnabled: false,
   axisContMaxWindow: 8,
   axisPauseEnabled: false,
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.12,
-  pfWindow: 6,
+  windowsLinked: true,
+  pfWindow: 8,
   slMinPct: 0.2,
   slMaxPct: 15.75,
   tpMinPct: 0.35,
@@ -349,10 +351,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   tpCostRatio: 5,
   slToTpRatio: 0.6,
   slToTpAuto: true,
-  slToTpRecalcN: 6,
+  slToTpRecalcN: 8,
   slToTpRecalcEvery: 8,
   trailAuto: true,
-  trailRecalcN: 6,
+  trailRecalcN: 8,
   trailRecalcEvery: 8,
   trailArmMin: 0.3,
   trailArmMax: 1.5,
@@ -410,7 +412,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 120,
-  setPfWindow: 6,
+  setPfWindow: 8,
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
@@ -439,7 +441,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
-  exitPfWindow: 6,
+  exitPfWindow: 8,
   exitDeactN: 25,
   exitMinPf: 1.2,
   exitAutoDeact: true,
@@ -506,6 +508,7 @@ export type CtsSettings = {
   realProfitFactor?: number;
   exchangePositionCost?: number;
   positionCost?: number;
+  windowsLinked?: boolean;
   pfWindow?: number;
   slMinPct?: number;
   slMaxPct?: number;
@@ -686,14 +689,15 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
-    axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
+    axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 8),
     axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),
-    pfWindow: num(cts.pfWindow, 15),
+    windowsLinked: bool(cts.windowsLinked, true),
+    pfWindow: Math.max(8, num(cts.pfWindow, 15)),
     slMinPct: num(cts.slMinPct, 0.2),
     slMaxPct: num(cts.slMaxPct, 15.75),
     tpMinPct: num(cts.tpMinPct, 0.35),
@@ -701,10 +705,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     tpCostRatio: num(cts.tpCostRatio, 5),
     slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
     slToTpAuto: bool(cts.slToTpAuto, true),
-    slToTpRecalcN: num(cts.slToTpRecalcN, 6),
+    slToTpRecalcN: Math.max(8, num(cts.slToTpRecalcN, 8)),
     slToTpRecalcEvery: num(cts.slToTpRecalcEvery, 8),
     trailAuto: bool(cts.trailAuto, true),
-    trailRecalcN: num(cts.trailRecalcN, 6),
+    trailRecalcN: Math.max(8, num(cts.trailRecalcN, 8)),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
     trailArmMin: num(cts.trailArmMin, 0.3),
     trailArmMax: num(cts.trailArmMax, 1.5),

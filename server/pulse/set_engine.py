@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from config_num import num
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
+    MIN_VALIDATION_N,
+    window_n,
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
     normalize_cost_pct,
@@ -924,7 +926,7 @@ STEP_HOLD_STEPS = 12
 HOLD_AUTO_LOW = (10, 15, 20, 30, 40, 50)              # Auto Mode candidates in minutes, steps 1..5 (the desk range 1-50)
 HOLD_AUTO_HIGH = (30, 60, 90, 120, 180, 240, 350)      # steps 6..12 (the desk range 30-350)
 HOLD_AUTO_MAX_ORDERS = 50                              # a Set is judged on its existing orders, never more than this many
-HOLD_AUTO_MIN_ORDERS = 10
+HOLD_AUTO_MIN_ORDERS = 10                              # never below MIN_VALIDATION_N (8)
 HOLD_AUTO_MARGIN = 1.02                                # a candidate must beat the global time stop's PF by 2% to replace it
 STEP_HOLD_LOW = (1, 50)        # allowed minutes for steps 1..5 (the desk slider); the engine itself accepts 1..720
 STEP_HOLD_HIGH = (30, 350)     # steps 6..12
@@ -1024,10 +1026,10 @@ class SetBook:
         self.max_jump = max(0.01, num(ov, "histMaxJumpPct", 50.0) / 100.0)
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
-        self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
+        self.pf_n = max(MIN_VALIDATION_N, min(200, window_n(ov, "setPfWindow", "pfWindow", fallback=PF_N_DEFAULT)))   # follows the overall validation N unless unlinked
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
-        self.gate_min = max(5, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
+        self.gate_min = max(MIN_VALIDATION_N, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
         self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
         # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
         cons = ov.get("setGateConsistencyPf")
@@ -1069,7 +1071,7 @@ class SetBook:
         self.hold_on = bool(ov.get("holdEnabled", True))
         self.hold_auto = self.hold_on and bool(ov.get("holdAuto", True))
         self.hold_auto_max = int(max(HOLD_AUTO_MIN_ORDERS, min(HOLD_AUTO_MAX_ORDERS, num(ov, "holdAutoMax", HOLD_AUTO_MAX_ORDERS))))
-        self.hold_auto_min = int(max(3, min(self.hold_auto_max, num(ov, "holdAutoMin", HOLD_AUTO_MIN_ORDERS))))
+        self.hold_auto_min = int(max(MIN_VALIDATION_N, min(self.hold_auto_max, num(ov, "holdAutoMin", HOLD_AUTO_MIN_ORDERS))))
         self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin")) if self.hold_on else {}
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
@@ -2246,7 +2248,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         {
             "histEnabled": True,
             "setDeactN": 25,
-            "setPfWindow": 15,
+            "windowsLinked": False, "setPfWindow": 15,
             "setMinPf": 1.10,
             "setMaxDdtHours": 36,
             "setMinSamples": 8,
@@ -2312,7 +2314,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "histMinBars": 80,
             "histWarmup": 20,
             "setDeactN": 25,
-            "setPfWindow": 15,
+            "windowsLinked": False, "setPfWindow": 15,
             "setMinPf": 1.0,
             "setMaxDdtHours": 36,
             "setMinSamples": 5,
@@ -2360,7 +2362,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "histMinBars": 80,
             "histWarmup": 20,
             "setDeactN": 25,
-            "setPfWindow": 15,
+            "windowsLinked": False, "setPfWindow": 15,
             "setMinPf": 0.5,
             "setMaxDdtHours": 36,
             "setMinSamples": 3,
@@ -2480,7 +2482,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     w = SetBook()
     w.load(
         {
-            "positionCostPct": 0.15, "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
+            "positionCostPct": 0.15, "histEnabled": True, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
             "setMinSamples": 5, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5],
             "trailVariants": ["0.3:0.1"],
@@ -2507,7 +2509,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g2 = SetBook()
     g2.load(
         {
-            "positionCostPct": 0.15, "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
+            "positionCostPct": 0.15, "histEnabled": True, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
             "setMinSamples": 8, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
             "trailVariants": ["0.3:0.1"],

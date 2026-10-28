@@ -18,6 +18,8 @@ RATIO_MIN = 1.02
 RATIO_MAX = 2.30
 RATIO_STEP = 0.02
 LAST_N_DEFAULT = 15
+MIN_VALIDATION_N = 8         # no last-N validation reads fewer orders than this
+OVERALL_N_DEFAULT = 50       # the overall validation's last N (setGateWindow, the Base gate window)
 SL_TP_MIN = 0.3
 SL_TP_MAX = 1.5
 SL_TP_STEP = 0.3
@@ -274,3 +276,30 @@ if __name__ == "__main__":
     assert abs(sl15 - 0.0075 * 1.5) < 1e-9 and sl15 > tp15
     assert abs(snap_ratio(0.64) - 0.6) < 1e-9
     print("position_cost ok", got, src, src15)
+
+
+def overall_validation_n(ov: Any) -> int:
+    """The overall validation's last N: the Base gate window every Set is judged on (setGateWindow, 10..200, default 50)."""
+    try:
+        n = int((ov or {}).get("setGateWindow") or OVERALL_N_DEFAULT)
+    except (TypeError, ValueError):
+        n = OVERALL_N_DEFAULT
+    return max(10, min(200, n))
+
+
+def window_n(ov: Any, *keys: str, fallback: Optional[int] = None) -> int:
+    """The last N a secondary validation reads (pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN, trailRecalcN).
+    windowsLinked (default on): it is the overall validation's last N, so every validation judges the same stretch of orders.
+    Off: the first of the keys that is set is its own N, never below MIN_VALIDATION_N; none set takes the fallback, then the overall N."""
+    ov = ov or {}
+    overall = overall_validation_n(ov)
+    if ov.get("windowsLinked", True):
+        return overall
+    for k in keys:
+        try:
+            v = int(ov.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            return max(MIN_VALIDATION_N, v)
+    return max(MIN_VALIDATION_N, int(fallback)) if fallback else overall
