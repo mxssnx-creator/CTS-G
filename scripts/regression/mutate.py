@@ -579,6 +579,8 @@ MUTATIONS = [
      "set_engine.py", "self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)", "self.lookback = self.lookback + LOOKBACK_GROW_STEP"),
     ("pre-history: a reload forgets what was grown",
      "set_engine.py", "int(getattr(self, \"_lookback_grown\", 0) or 0)", "0"),
+    ("trader: the coordinator's advice blocks a Set entry (a last-N validation between the Set and the exchange)",
+     "pulse_trader.py", "        if not allow:\n            if ranked and (time.time() - self.skip_log.get(\"gate\", 0) > 45):\n                log(\"COORD soft \"", "        if not allow:\n            return\n        if not allow:\n            if ranked and (time.time() - self.skip_log.get(\"gate\", 0) > 45):\n                log(\"COORD soft \""),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]

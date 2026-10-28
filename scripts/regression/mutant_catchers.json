@@ -239,6 +239,7 @@
  "trader: the Set index in a client order id has three digits": "trader.cids-round-trip-to-their-own-set",
  "trader: the Set lane measures its stop from the averaged entry": "trader.dca-optin-lane-leaves-the-set-lane-alone",
  "trader: the close order ids are not marked as seen": "trader.manager-close-not-counted-twice",
+ "trader: the coordinator's advice blocks a Set entry (a last-N validation between the Set and the exchange)": "trader.entry-mirrors-set-signal-without-last-n-validation",
  "trader: the flatten runs during a venue ban": "trader.venue-ban-pauses-flatten-and-refusal-logged",
  "trader: the history fetch asks for the whole lookback in one request": "trader.history-thread-fetches-at-start",
  "trader: the history fetch does not page past one request": "trader.history-thread-fetches-at-start",

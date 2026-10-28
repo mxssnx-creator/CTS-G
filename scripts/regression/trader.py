@@ -1329,6 +1329,60 @@ def the_entry_loop_places_the_set_signal_and_not_the_live_score():
     return ok, f"placed={placed} set signal={sig[:3]}"
 
 
+def the_entry_loop_mirrors_the_set_signal_without_any_last_n_validation():
+    """Once a Set passes its gates the entry is mirrored to the exchange as the replay's signal: no last-N validation sits between them. Thirty
+    straight losing closes, every Axis (last, previous, continuation, pause) switched on, the coordinator's last-N PF far under its minimum:
+    the signal is still placed, in the same direction and pack, and the coordinator only advises (it records the failing evidence, it never
+    blocks)."""
+    from coord_engine import Coordinator
+    b, se = _signal_book()
+    sym = "A-USDT"
+    t_open = float(int(time.time() // 60) * 60 - 60)
+    full = se.synth_trend(600, step=0.09, noise=0.05)
+    sig = None
+    for n in range(320, 600, 7):
+        b.bars.clear()
+        b.bar_t.clear()
+        b.ingest_bars(sym, full[:n], last_t=t_open)
+        sig = b.entry_signal(sym, t_open)
+        if sig:
+            break
+    if not sig:
+        return False, "no signal bar in the fixture"
+    losses = [pt.Closed(t=time.time() - 60 * (40 - k), symbol="X-USDT", side="LONG", qty=1.0, entry=100.0, exit=99.0, pnl=-0.01, pnl_pct=-0.01,
+                        reason="sl", hold_s=60.0, set_id="s", pack="indications") for k in range(30)]
+    p = _bare_pulse()
+    p.sets = b
+    p.open = {}
+    p.halted = False
+    p.closed = losses
+    p.strategy_closes = lambda: list(losses)
+    p.coord = Coordinator()
+    p.coord.load({}, {"axisPrevEnabled": True, "axisLastEnabled": True, "axisContEnabled": True, "axisPauseEnabled": True, "windowsLinked": False, "pfWindow": 8})
+    p.strat_ind = p.strat_general = True
+    p.indications = types.SimpleNamespace(settings={"enabled": True}, pick_entry=lambda *a, **k: None, best=lambda s: None, primary=lambda s: None)
+    p.score = lambda s: (0, "live", 0.0)
+    p.entries_blocked = lambda: False
+    p.rearrange_opens = lambda: []
+    p.maybe_block_adds = p.maybe_dca_adds = lambda: None
+    p.available = 100.0
+    p.cooldown, p.skip_log, p.contracts, p.px = {}, {}, {}, {}
+    p.avail_notional = lambda *a: 100.0
+    placed = []
+    p.place = lambda s_, d, why, conf: placed.append((s_, d, why))
+    old_syms, old_fresh, old_max = pt.SYMBOLS, pt.ENTRY_FRESH_S, pt.MAX_OPEN
+    try:
+        pt.SYMBOLS = [sym]
+        pt.ENTRY_FRESH_S = 61.0
+        pt.MAX_OPEN = 5
+        p.maybe_entries()
+    finally:
+        pt.SYMBOLS, pt.ENTRY_FRESH_S, pt.MAX_OPEN = old_syms, old_fresh, old_max
+    advice = dict(p.coord.last or {})
+    ok = len(placed) == 1 and placed[0][1] == sig[1] and placed[0][2].startswith(f"set:{sig[0]}:") and advice.get("allow") is False
+    return ok, f"placed={placed}; the coordinator advised allow={advice.get('allow')} reasons={(advice.get('reasons') or [])[:2]}"
+
+
 def a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes():
     """No cross-lane wait on a Set: after a Set close the symbol waits the Set lane's own cooldown (setCooldownBars, as the
     replay), however many losses came before, and a run of Set losses never pauses the book. The Exit lane keeps its
@@ -1359,6 +1413,7 @@ CHECKS = [
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
     ("trader.lanes-set-close-waits-only-its-own-cooldown", a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes),
     ("trader.entry-loop-places-the-set-signal", the_entry_loop_places_the_set_signal_and_not_the_live_score),
+    ("trader.entry-mirrors-set-signal-without-last-n-validation", the_entry_loop_mirrors_the_set_signal_without_any_last_n_validation),
     ("trader.only-completed-minutes-reach-set-history", completed_minutes_only_reach_the_set_history),
     ("trader.exit-set-never-takes-tp-base-always", an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does),
     ("trader.drawdown-halt-follows-its-setting", drawdown_halt_follows_its_setting),
