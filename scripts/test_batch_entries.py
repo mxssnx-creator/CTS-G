@@ -177,7 +177,7 @@ class BatchEntries(unittest.TestCase):
 
     def test_a_working_batch_resets_the_refusal_streak(self):
         p = self.desk(10)
-        p.api.refuse_batches = (100400, 'nope')
+        p.api.refuse_batches = (100400, 'batch form not supported')
         rows = self.rows(p)
         p.place_batch(rows[0:5])
         p.place_batch(rows[5:10])
@@ -188,6 +188,37 @@ class BatchEntries(unittest.TestCase):
         q.place_batch(self.rows(q))
         self.assertEqual(q._batch_reject_streak, 0)
         self.assertTrue(q.entry_batch_orders)
+
+    def test_invalid_input_is_not_sent_and_valid_siblings_keep_their_results(self):
+        p = self.desk(3)
+        bodies = [{'type': 'MARKET', 'clientOrderID': str(i), 'quantity': q}
+                  for i, q in enumerate(['1', 'NaN', '2'])]
+        results = p._submit_entry_chunk(bodies)
+        self.assertEqual([row['code'] for row in results], [0, 100400, 0])
+        self.assertTrue(results[1]['notSent'])
+        self.assertEqual(set(p.api.filled), {'0', '2'})
+        self.assertEqual(p.api.entry_batches, [2])
+        self.assertEqual(self.entries(p), [])
+
+    def test_rate_and_risk_refusals_do_not_fall_back_to_another_endpoint(self):
+        for code, message in [(429, 'rate limited'), (429, 'batch unsupported due to rate limit'),
+                              (100400, 'Order rejected by risk control')]:
+            p = self.desk(2)
+            p.api.refuse_batches = (code, message)
+            bodies = [{'type': 'MARKET', 'clientOrderID': str(i), 'quantity': '1'} for i in range(2)]
+            results = p._submit_entry_chunk(bodies)
+            self.assertEqual([row['code'] for row in results], [code, code])
+            self.assertEqual(self.entries(p), [])
+            self.assertEqual(p.api.entry_batches, [2])
+
+    def test_successful_batch_rows_without_client_identity_require_reconciliation(self):
+        p = self.desk(2)
+        p.api.batch_place = lambda _bodies: {'code': 0, 'complete': True, 'data': {'orders': [
+            {'code': 0, 'orderId': '1'}, {'code': 0, 'orderId': '2'}]}}
+        bodies = [{'type': 'MARKET', 'clientOrderID': str(i), 'quantity': '1'} for i in range(2)]
+        results = p._submit_entry_chunk(bodies)
+        self.assertTrue(all(p.order_response_ambiguous(row) for row in results))
+        self.assertEqual(self.entries(p), [])
 
     def test_lost_batch_response_resolves_every_order_by_client_id_without_resending(self):
         p = self.desk(5)

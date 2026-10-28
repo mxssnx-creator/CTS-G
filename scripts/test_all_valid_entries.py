@@ -323,6 +323,8 @@ class AllValidEntries(unittest.TestCase):
         p.coord = NS(gate=lambda *a, **k: (True, [], {}), slot_cap=lambda *a: 10**9,
                      pick_rearrange=lambda *a: None)
         p.score = lambda s: (1, 'trend', .9)
+        # These scheduler fixtures supply a proven synthetic signal directly; signal/bar parity has its own tests.
+        p.general_entry_score = lambda s: p.score(s)
         p.maybe_forced_entries = Mock(); p.avail_notional = lambda *a, **k: 1000
         return p
 
@@ -607,9 +609,9 @@ class AllValidEntries(unittest.TestCase):
             for _ in range(5):
                 p.maybe_entries()
         self.assertEqual(p.errors, 0, p.last_error)
-        self.assertEqual(len(p.open), 5)
-        self.assertEqual(sum(pos.pack == 'general' for pos in p.open.values()), 2)
-        self.assertEqual(sum(pos.side == 'SHORT' for pos in p.open.values()), 2)
+        self.assertEqual(len(p.open), 4)
+        self.assertEqual(sum(pos.pack == 'general' for pos in p.open.values()), 1)
+        self.assertEqual(sum(pos.side == 'SHORT' for pos in p.open.values()), 1)
         self.assertEqual(len({pos.execution_lane for pos in p.open.values()}), 4)
         from stats_report import occupancy
         positions=list(p.open.values())
@@ -622,6 +624,22 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual(occupancy(separate_connections)['duplicateSlots'],0)
         # An actual duplicate of the same execution must still fail QA.
         self.assertEqual(occupancy([*positions,positions[1]])['duplicateSlots'],1)
+
+    def test_indication_entry_never_invents_a_flat_general_signal(self):
+        book = self.book(2)
+        original = book.by_idx[1]
+        del book.sets[original.id]
+        ind_state = replace(original, id='indications:1m:sl0.6:st3', pack='indications')
+        book.by_idx[1] = ind_state
+        book.sets[ind_state.id] = ind_state
+        p = self.pulse(book)
+        p.general_entry_score = lambda _s: (0, 'flat', .2)
+        p.indications.last['X-USDT'] = [self.indication()]
+        with patch.object(pt, 'SYMBOLS', ['X-USDT']):
+            for _ in range(3):
+                p.maybe_entries()
+        self.assertTrue(p.open, 'the separately validated indication still executes')
+        self.assertTrue(all(pos.pack == 'indications' for pos in p.open.values()))
 
     def test_one_failed_candidate_cannot_starve_the_others(self):
         p = self.pulse(); examined = []

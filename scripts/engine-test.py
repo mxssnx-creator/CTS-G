@@ -3124,7 +3124,7 @@ def process_guard_test() -> None:
         'st.pack != "indications" else "signals"' not in open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read(),
     )
     rec("hist-partial-publish-wired", "self._hist_can_publish_partial(valid, completed_syms, pending_symbols)" in trader)
-    rec("high-value-general-from-ind", "gen:high-value" in trader)
+    rec("general-entry-uses-validated-signal", "self.general_entry_score(s)" in trader and "gen:high-value" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
     rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
     rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
