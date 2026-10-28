@@ -108,6 +108,7 @@ export type PulseOverlay = {
   maxEntrySlipPct: number;
   /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
   ddHaltPct: number;
+  ddHaltBasis: "session" | "start";
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -290,7 +291,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   sizePctOfBalance: 0,
   sizeMaxNotional: 25,
   maxEntrySlipPct: 0.75,
-  ddHaltPct: 18,
+  ddHaltPct: 80,
+  ddHaltBasis: "session",
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,

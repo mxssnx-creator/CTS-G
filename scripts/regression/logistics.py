@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "589b3df15b60191c775e7e1d9b59353ac88f3bb1"
+PIN_WANT = "b2a4f187566897cc46f04557335fa831e1add91c"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -98,7 +98,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
-    "ddHaltPct": "x01 drawdown halt switched off by the owner; desk default 18 %",
+    "ddHaltPct": "owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (x01 and x02); the Bybit overlays keep 18",
 }
 
 

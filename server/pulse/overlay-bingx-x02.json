@@ -4,7 +4,7 @@
   "sizePctOfBalance": 0,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
-  "ddHaltPct": 18,
+  "ddHaltPct": 80,
   "leverage": 150,
   "maxOpen": 0,
   "maxPerGroup": 0,
@@ -187,5 +187,6 @@
   "mainGateN": 8,
   "minPfLinked": true,
   "histLookbackAuto": true,
-  "histLookbackMax": 2880
+  "histLookbackMax": 2880,
+  "ddHaltBasis": "session"
 }

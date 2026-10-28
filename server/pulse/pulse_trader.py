@@ -192,7 +192,7 @@ def pack_of_reason(reason: Any) -> str:
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
 ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
-DD_HALT = 0.18
+DD_HALT = 0.80                  # owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (ddHaltPct)
 EQ_MIN = 0.20
 RECV = 5000
 _CONN_SUFFIX = CONN_SHORT.split("-")[-1]
@@ -697,7 +697,9 @@ class Pulse:
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
         self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
-        self.dd_halt = DD_HALT        # drawdown from the start equity that halts entries (fraction); 0 = off (ddHaltPct)
+        self.dd_halt = DD_HALT        # drawdown from the session's start equity that halts entries (fraction); 0 = off (ddHaltPct)
+        self.dd_basis = "session"      # ddHaltBasis: "session" = the equity when this session started, "start" = the stored start equity
+        self.session_eq = 0.0         # equity at the start of the active session (engine start or explicit Start)
         self.size_max = 25.0          # ceiling for one position's notional in USDT (sizeMaxNotional)
         self.max_entry_slip = 0.0075  # fill vs reference price beyond this (fraction, maxEntrySlipPct) closes the entry
         self.regime = "neutral"
@@ -1341,8 +1343,11 @@ class Pulse:
                 if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
                     self._pre_pause_halt = None
                 self.start_eq = 0.0
+                self.session_eq = 0.0              # an explicit Start is a new session
         except Exception:
             pass
+        if self.session_eq <= 0 and self.equity > 0:
+            self.session_eq = self.equity           # the active session starts at the first balance this process reads
         if self.start_eq <= 0 and self.equity > 0:
             self.start_eq = self.equity
             try:
@@ -1364,6 +1369,7 @@ class Pulse:
         if rescued:
             log(f"EQ re-baseline on deposit start_eq {self.start_eq:.4f} -> {self.equity:.4f}")
             self.start_eq = self.equity
+            self.session_eq = self.equity
             try:
                 tmp = START_EQ_PATH + ".tmp"
                 with open(tmp, "w") as f:
@@ -1385,7 +1391,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
+        elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
             if not self.halted:
                 self._halt_eq = self.equity
             self.halted = True
@@ -1397,12 +1403,25 @@ class Pulse:
             self.halted = True
             self.halt_reason = f"equity {self.equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.equity >= EQ_MIN and self.start_eq > 0 and (
-            self.dd_halt <= 0 or (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < self.dd_halt * 0.6
+        elif self.equity >= EQ_MIN and self.dd_base() > 0 and (
+            self.dd_halt <= 0 or self.dd_now() < self.dd_halt * 0.6
         ):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
+
+    def dd_base(self) -> float:
+        """The equity the drawdown halt measures from: the active session's start (default) or the stored start equity."""
+        if getattr(self, "dd_basis", "session") == "session" and getattr(self, "session_eq", 0.0) > 0:
+            return float(self.session_eq)
+        return float(self.start_eq or 0.0)
+
+    def dd_now(self) -> float:
+        """Drawdown of the equity from the halt's basis, as a fraction (0 when there is no basis or no equity)."""
+        base = self.dd_base()
+        if base <= 0 or not (self.equity and self.equity > 0):
+            return 0.0
+        return (base - self.equity) / base
 
     def bump(self, kind: str = "tick") -> None:
         self.last_event = kind
@@ -3605,6 +3624,7 @@ class Pulse:
         except Exception:
             self.max_entry_slip = 0.0075
         try:   # the drawdown halt in percent of the start equity; 0 switches it off (an explicit owner setting)
+            self.dd_basis = "start" if str(ov.get("ddHaltBasis") or "session").lower() == "start" else "session"
             raw_dd = ov.get("ddHaltPct")
             self.dd_halt = max(0.0, min(90.0, float(raw_dd if raw_dd is not None else DD_HALT * 100.0))) / 100.0
         except Exception:
@@ -5063,7 +5083,7 @@ class Pulse:
     def stats(self) -> Dict[str, Any]:
         realized = sum(c.pnl for c in self.closed)
         wr = (self.wins / (self.wins + self.losses) * 100) if (self.wins + self.losses) else 0
-        dd = ((self.start_eq - self.equity) / self.start_eq * 100) if self.start_eq else 0
+        dd = self.dd_now() * 100.0
         age = time.time() - self.started
         per_min = (self.wins + self.losses) / (age / 60) if age > 1 else 0
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
@@ -5085,6 +5105,8 @@ class Pulse:
             "uptimeS": age,
             "equity": round(self.equity, 4),
             "startEquity": round(self.start_eq, 4),
+            "sessionStartEquity": round(float(getattr(self, "session_eq", 0.0) or 0.0), 4),
+            "ddBasis": getattr(self, "dd_basis", "session"),
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
             "unrealized": round(self.upnl, 4),
@@ -5806,7 +5828,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
+            elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:

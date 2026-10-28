@@ -1335,12 +1335,17 @@ function SettingsPage() {
                 />
                 <Num
                   label="Drawdown halt %"
-                  value={overlay.ddHaltPct ?? 18}
+                  value={overlay.ddHaltPct ?? 80}
                   min={0}
                   max={90}
                   step={1}
-                  hint="Entries halt when equity falls this far below the start equity. 0 = off (no drawdown protection)."
+                  hint="Entries halt when equity falls this far below the start equity of the active session (owner default 80). 0 = off (no drawdown protection)."
                   onChange={(v) => patch("ddHaltPct", v)}
+                />
+                <Toggle
+                  label="Drawdown halt measures from the active session's start (off: the stored start equity)"
+                  on={(overlay.ddHaltBasis ?? "session") === "session"}
+                  onChange={(v) => patch("ddHaltBasis", v ? "session" : "start")}
                 />
                 <Num
                   label="Size % of balance"

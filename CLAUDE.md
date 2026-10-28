@@ -236,7 +236,9 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 ## Live safety
 
 - x01 runs real money. The drawdown halt is a protection: never clear it or reset the start equity without an explicit
-  instruction. It is the overlay setting `ddHaltPct` (percent of the start equity, default 18, 0 = off). On 2026-10-28
+  instruction. **Owner decision (2026-10-28, later): the drawdown halt is 80 % (`ddHaltPct` 80, x01 and x02; the Bybit overlays keep 18) of the equity the
+  active session started with (`ddHaltBasis` "session": the first balance this engine process reads, or the one after an explicit Start;
+  "start" = the stored start equity), replacing the 18 % / off settings below.** Checks `trader.drawdown-halt-*`. It is the overlay setting `ddHaltPct` (percent of the start equity, default 18, 0 = off). On 2026-10-28
   the owner reset x01's start equity and switched its halt off (`ddHaltPct` 0) and set x01 to the minimum order size
   (`sizePctOfBalance` 0, `targetNotional` 0.2); the volume factor is the minimum, 0.05 (owner, later the same day)); the minimum-equity guard (`EQ_MIN`) stays on. The same day x01 took
   x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). The Base gate
