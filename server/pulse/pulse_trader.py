@@ -167,6 +167,7 @@ SYMBOL_SORTS = ("vol1h", "vol24h", "quoteVolume", "changeAbs", "changePct", "lev
 BALANCE_EVERY = 6.0
 QA_EVERY = 5
 COOLDOWN_S = 9.0
+SYM_BAN_S = 1800.0       # a symbol that stops out within 30 s, or fills far from its reference price, rests this long
 STAGGER_S = 0.12
 DD_HALT = 0.18
 EQ_MIN = 0.20
@@ -670,6 +671,8 @@ class Pulse:
         self.volume_factor = 1.0
         self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
         self.dd_halt = DD_HALT        # drawdown from the start equity that halts entries (fraction); 0 = off (ddHaltPct)
+        self.size_max = 25.0          # ceiling for one position's notional in USDT (sizeMaxNotional)
+        self.max_entry_slip = 0.0075  # fill vs reference price beyond this (fraction, maxEntrySlipPct) closes the entry
         self.regime = "neutral"
         self.consec_loss = 0
         self.wins = 0
@@ -979,8 +982,12 @@ class Pulse:
         pct = float(getattr(self, "size_pct", 0.0) or 0.0)
         bal = float(getattr(self, "equity", 0.0) or 0.0)
         if pct > 0 and bal > 0:
-            return max(0.2, bal * pct / 100.0 * vf)
-        return max(0.2, float(TARGET_NOTIONAL) * vf)
+            n = bal * pct / 100.0 * vf
+        else:
+            n = float(TARGET_NOTIONAL) * vf
+        # a hard ceiling whatever the balance (sizeMaxNotional): a large or demo balance must never scale one entry into
+        # an exposure the strategy was not validated at
+        return max(0.2, min(n, float(getattr(self, "size_max", 25.0) or 25.0)))
 
     def notional_cap(self) -> float:
         return max(self.sized_notional(), 2.0)
@@ -2929,6 +2936,14 @@ class Pulse:
         self.save_open_book()
         if cid:
             self.seen_fill_cids.add(cid)
+        slip = abs(avg - px) / px if px > 0 else 0.0
+        slip_limit = max(2.0 * cost_as_frac(self.position_cost_pct), min(self.max_entry_slip, 0.5 * float(sl_pct or 0.0)))
+        if slip > slip_limit:
+            # the fill is far from the price the decision was made at (a broken or empty book): the stop and target would
+            # be measured from a price the market never gave. Leave at once, do not score the Set, and keep off the symbol.
+            log(f"BADFILL {sym} {side} fill={avg} ref={px} slip={slip * 100:.2f}% limit={slip_limit * 100:.2f}%")
+            self.close_pos(pos, avg, "bad-fill")      # a skip-eval close bans the symbol, closed or not
+            return
         self.last_entry_ts = time.time()
         self.fees_est += filled * avg * 0.0005
         self.available = max(0.0, self.available - margin)
@@ -3025,7 +3040,7 @@ class Pulse:
         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
-        skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+        skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
         for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", "")):
             if real_oid(oid):                 # an exchange-side stop fill of this position is the close recorded below
                 self.seen_fill_oids.add(str(oid))
@@ -3103,7 +3118,7 @@ class Pulse:
                 self.cooldown["__book__"] = time.time() + 120
                 self.consec_loss = 4
                 log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
+        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason)
         if not pos.set_id:
             # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
             self.block.on_parent_close(pos.symbol, pos.side, pnl)
@@ -3116,6 +3131,23 @@ class Pulse:
             pass
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
+
+    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str) -> float:
+        """Seconds before this symbol may be entered again. A win resets it to COOLDOWN_S. Each loss in a row on the symbol
+        multiplies it by four (9 s, 36 s, 2.4 min, 9.6 min, capped at 30 min), and a stop-out within 30 s of the entry
+        (a book that moves faster than the strategy can act on) bans the symbol for SYM_BAN_S."""
+        net = float(pnl_pct) - cost_as_frac(self.position_cost_pct)
+        fails = getattr(self, "sym_fails", None)
+        if fails is None:
+            fails = self.sym_fails = {}
+        if net >= 0:
+            fails.pop(sym, None)
+            return COOLDOWN_S
+        n = fails[sym] = int(fails.get(sym, 0)) + 1
+        if str(reason) == "sl" and float(hold_s) < 30.0:
+            self.ignore_syms[sym] = max(self.ignore_syms.get(sym, 0.0), time.time() + SYM_BAN_S)
+            log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s ({n} losses in a row)")
+        return min(1800.0, COOLDOWN_S * (4 ** (n - 1)))
 
     def lane_honors_tp(self) -> bool:
         """Whether the Set lane exits on its TP: the setting the replay used, so live and validation agree."""
@@ -3346,6 +3378,14 @@ class Pulse:
             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
         except Exception:
             self.volume_factor = 1.0
+        try:
+            self.size_max = max(0.2, float(ov.get("sizeMaxNotional") if ov.get("sizeMaxNotional") is not None else 25.0))
+        except Exception:
+            self.size_max = 25.0
+        try:
+            self.max_entry_slip = max(0.0005, min(0.05, float(ov.get("maxEntrySlipPct") if ov.get("maxEntrySlipPct") is not None else 0.75) / 100.0))
+        except Exception:
+            self.max_entry_slip = 0.0075
         try:   # the drawdown halt in percent of the start equity; 0 switches it off (an explicit owner setting)
             raw_dd = ov.get("ddHaltPct")
             self.dd_halt = max(0.0, min(90.0, float(raw_dd if raw_dd is not None else DD_HALT * 100.0))) / 100.0
@@ -4801,6 +4841,8 @@ class Pulse:
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
+            "sizeMaxNotional": float(getattr(self, "size_max", 25.0) or 25.0),
+            "maxEntrySlipPct": round(float(getattr(self, "max_entry_slip", 0.0075)) * 100.0, 4),
             "sizedNotional": round(self.sized_notional(), 6),
             "ddHaltPct": round(float(getattr(self, "dd_halt", DD_HALT)) * 100.0, 4),
             "paused": os.path.exists(PAUSE_PATH),

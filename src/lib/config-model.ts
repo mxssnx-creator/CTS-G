@@ -102,6 +102,10 @@ export type PulseOverlay = {
   volumeFactor: number;
   /** Percent of the balance per position before the volume factor; 0 = the fixed targetNotional. */
   sizePctOfBalance: number;
+  /** Hard ceiling for one position's notional in USDT, whatever the balance. */
+  sizeMaxNotional: number;
+  /** A fill farther than this (percent) from the price the entry was decided at is closed at once and the symbol rests. */
+  maxEntrySlipPct: number;
   /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
   ddHaltPct: number;
   leverage: number;
@@ -253,7 +257,9 @@ export type PulseOverlay = {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
   volumeFactor: 1,
-  sizePctOfBalance: 1,
+  sizePctOfBalance: 0,
+  sizeMaxNotional: 25,
+  maxEntrySlipPct: 0.75,
   ddHaltPct: 18,
   leverage: 150,
   useMaxLeverage: true,
@@ -384,7 +390,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
-  setUseHistoricGate: false,
+  setUseHistoricGate: true,
   setMinSamples: 12,
   setMinStep: 2,
   setStepMax: 30,

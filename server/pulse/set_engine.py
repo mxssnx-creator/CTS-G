@@ -76,6 +76,8 @@ STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
+RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
+RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
 
 
 def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]]) -> List[List[float]]:
@@ -1370,6 +1372,9 @@ class SetBook:
                 names = [s for s in self.bars if self.usable(s)]
             else:
                 names = [s for s in symbols if self.usable(s)]
+            # the symbols that already hold the most orders go first: a pass that is cut short (load) still refreshed the
+            # tapes the Sets are judged on most; the sort is stable, so a first pass keeps the given order
+            names.sort(key=lambda s: -sum(len(v) for v in (self._hist_rows.get(s) or {}).values()))
             was_ready = self.progress.ready
             self.progress = Progress(
                 phase="replay",
@@ -1423,10 +1428,11 @@ class SetBook:
                 if stale:
                     aborted = True                  # keep each Set's last complete scores; the next pass redoes them
                     self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
+                tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
                 for st in ([] if stale else self.by_idx):
                     try:
                         full = sorted(
-                            (r for per_set in self._hist_rows.values() for r in per_set.get(st.id, ()) if r[0] >= cutoff),
+                            (r for sym_ in tape_order for r in self._hist_rows[sym_].get(st.id, ()) if r[0] >= cutoff),
                             key=_row_t,
                         )
                         st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
@@ -1697,9 +1703,23 @@ class SetBook:
         with self._lock:
             return self._valid_for(pack, kind)
 
+    def rank_key(self, st: SetState) -> Tuple[Any, ...]:
+        """Order of choice among the eligible Sets, best first (sort descending):
+        1. stable: the PF of both halves of the gate window is at or above the pack's PF floor, so the Set did not pass
+           on one lucky stretch;
+        2. the gate PF shrunk toward 1 by the orders behind it (n / (n + RANK_SHRINK_N)): a PF on 35 orders weighs less
+           than the same PF on 350;
+        3. more orders;
+        4. the better recent R, then the shorter drawdown time."""
+        floor = self.pack_min_pf.get(st.pack, self.min_pf)
+        halves = min(st.gate_pf_old, st.gate_pf_new) if (st.gate_pf_old or st.gate_pf_new) else st.gate_pf
+        n = max(0, int(st.n))
+        shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
+        return (halves + 1e-9 >= floor, round(shrunk, 4), n, st.last25_avg_r, -st.max_dd_s)
+
     def _valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and self.is_eligible(s)]
-        rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        rows.sort(key=self.rank_key, reverse=True)
         return rows
 
     def _pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
@@ -1713,7 +1733,7 @@ class SetBook:
         rows = [s for s in rows if s.active] or rows
         # a Set with fewer orders than the gate floor is not judged: its PF (99 after one winning order) must not outrank a
         # Set that has the orders
-        rows.sort(key=lambda s: (s.gate_n >= self.gate_min, s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        rows.sort(key=lambda s: (s.gate_n >= self.gate_min,) + self.rank_key(s), reverse=True)
         return rows[0]
 
     @property
@@ -1872,6 +1892,7 @@ class SetBook:
         rows = rows[:24]
         p = self.progress
         cover = self.coverage()
+        rank = {id(st): k for k, st in enumerate(sorted((s for s in self.by_idx if self.is_eligible(s)), key=self.rank_key, reverse=True))}
         index = [
             {
                 "i": st.idx,
@@ -1884,6 +1905,19 @@ class SetBook:
                 "on": int(self.is_eligible(st)),
                 "pf": round(st.gate_pf, 4),
                 "dd": st.max_dd_s,
+                # what the desk needs to pool the PF of any selection like _pf_split: orders, gate-window orders and
+                # gross profit / loss, plus the table columns and the engine's own rank among the valid Sets
+                "n": st.n,
+                "gn": st.gate_n,
+                "gp": st.gate_gp,
+                "gl": st.gate_gl,
+                "p15": round(st.last15_pf, 4),
+                "r25": round(st.last25_avg_r, 3),
+                "wr": round(st.wr, 1),
+                "e": round(st.expectancy, 5),
+                "h": round(st.avg_hold_s),
+                "da": round(st.avg_dd_s),
+                "rk": rank.get(id(st), -1),
             }
             for st in self.by_idx
         ]

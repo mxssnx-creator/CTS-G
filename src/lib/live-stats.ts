@@ -1,3 +1,4 @@
+import type { SetIndexRow } from "./sets-view.ts";
 export type LiveOpen = {
   symbol: string;
   side: string;
@@ -477,6 +478,8 @@ export type LiveStats = {
     maxDdS?: number;
     useHistoricGate?: boolean;
     setCount?: number;
+    /** Every configured Set in compact form, with the gate-window fields that pool the PF of any selection. */
+    index?: SetIndexRow[];
     /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
     pfBase?: PfBase;
     counts?: { valid: number; invalid: number; locked: number; error: number; configured: number; retired?: number;

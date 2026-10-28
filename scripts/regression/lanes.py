@@ -458,7 +458,11 @@ def explicit_trail_variants_keep_their_own_arm():
     return ok, f"trailing Sets={trails}"
 
 class _Env:
-    """A Pulse on the venue stub with private state files, for the Block checks."""
+    """A Pulse on the venue stub with private state files, for the Block checks. slip: the venue fills market orders this
+    far (a fraction) from the price the engine saw."""
+
+    def __init__(self, slip: float = 0.0) -> None:
+        self.slip = slip
 
     def __enter__(self):
         self.saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
@@ -472,7 +476,7 @@ class _Env:
         contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=1.0, max_lev=50)}
         self.venue = _Venue()
         p = pt.Pulse(self.venue, contracts)
-        self.venue.price = lambda: p.px.get(SYM) or 100.0
+        self.venue.price = lambda: (p.px.get(SYM) or 100.0) * (1.0 + self.slip)
         p.sets = _book()
         p.sets.pick_any = lambda pack: None            # no Set: the position belongs to the Exit lane
         p.sets.pick_trail = lambda pack: None
@@ -732,6 +736,146 @@ def a_venue_close_is_recorded_as_its_lanes_close():
     return ok, f"(still open, recorded closes, Set live closes): {out}"
 
 
+def a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests():
+    """A fill far from the price the decision was made at (a broken or empty book: AMEMECOIN on x02 filled 11 % away and
+    stopped out in 3 s, 18 times in an hour) is closed at once, not scored against any Set, and the symbol is kept off
+    for 30 minutes. An ordinary fill stays open."""
+    out = {}
+    for slip in (0.0004, 0.11):
+        with _Env(slip=slip) as e:
+            seen = []
+            e.p.sets.on_live_close = lambda rec: seen.append(rec)
+            out[slip] = (SYM in e.p.open, len(e.p.closed), len(seen),
+                         round(e.p.ignore_syms.get(SYM, 0.0) - _real_time.time()) if SYM in e.p.ignore_syms else 0)
+    ok = out[0.0004][0] is True and out[0.0004][3] == 0 \
+        and out[0.11][0] is False and out[0.11][1] == 0 and out[0.11][2] == 0 and out[0.11][3] > 1700
+    return ok, f"slip -> (still open, scored closes, Set closes, ban seconds): {out}"
+
+
+def a_symbol_that_keeps_losing_rests_longer_each_time():
+    """The wait before a symbol may be entered again: COOLDOWN_S after a win; four times longer after each loss in a row
+    (9, 36, 144, 576 s, capped at 30 min); a stop-out within 30 s of the entry bans it for 30 minutes."""
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.position_cost_pct = 0.12
+    p.ignore_syms = {}
+    waits = [p.symbol_backoff("A-USDT", -0.01, 300.0, "sl") for _ in range(6)]
+    after_win = p.symbol_backoff("A-USDT", 0.01, 300.0, "tp")
+    loss_after_win = p.symbol_backoff("A-USDT", -0.01, 300.0, "sl")       # the count starts over after a win
+    p.symbol_backoff("B-USDT", -0.0005, 300.0, "scratch+")             # a gross gain under the cost is a loss
+    small = p.symbol_backoff("B-USDT", -0.0005, 300.0, "scratch+")
+    p.symbol_backoff("C-USDT", -0.1, 3.0, "sl")                         # fast stop-out
+    banned = p.ignore_syms.get("C-USDT", 0.0) - _real_time.time()
+    ok = waits == [9.0, 36.0, 144.0, 576.0, 1800.0, 1800.0] and after_win == 9.0 and loss_after_win == 9.0 \
+        and small == 36.0 and banned > 1700 and "A-USDT" not in p.ignore_syms
+    return ok, f"waits after 6 losses={waits}; after a win={after_win}, next loss={loss_after_win}; cost-eaten gain twice={small}; fast stop-out ban={round(banned)}s"
+
+
+def position_size_has_a_hard_ceiling():
+    """sizeMaxNotional caps one position's notional whatever the balance or the factor. x02's demo balance (474,849 USDT)
+    at 1 % once sized a position at 4,748 USDT, 2,000 times the 2.15 USDT it was validated at."""
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.volume_factor, p.size_pct, p.equity = 1.0, 1.0, 474849.0
+    p.size_max = 25.0
+    capped = round(p.sized_notional(), 6)
+    p.size_pct, p.volume_factor = 0.0, 20.0
+    capped_fixed = round(p.sized_notional(), 6)
+    p.size_max = 1e9
+    p.size_pct, p.volume_factor = 1.0, 1.0
+    free = round(p.sized_notional(), 6)
+    ok = capped == 25.0 and capped_fixed == 25.0 and abs(free - 4748.49) < 1e-6
+    return ok, f"capped={capped}; fixed target x20 capped={capped_fixed}; without the cap={free}"
+
+
+def _eligible_set(b, idx, **fields):
+    st = b.by_idx[idx]
+    st.active, st.locked, st.last_error = True, False, ""
+    st.gate_n, st.max_dd_s, st.evaluated_at = 50, 0.0, _real_time.time()
+    for k, v in fields.items():
+        setattr(st, k, v)
+    return st
+
+
+def stable_sets_with_many_orders_are_chosen_first():
+    """Among the eligible Sets the first choice is one that passed on both halves of its gate window and has many orders
+    behind its PF; a higher PF on few orders, or on one lucky half, ranks below it."""
+    b = _book(setMinPf=1.1)
+    base = [i for i, st in enumerate(b.by_idx) if st.pack == "indications" and st.kind == "base"]
+    solid = _eligible_set(b, base[0], gate_pf=2.0, gate_pf_old=2.2, gate_pf_new=1.8, n=400)
+    thin = _eligible_set(b, base[1], gate_pf=2.0, gate_pf_old=2.2, gate_pf_new=1.8, n=35)
+    lucky = _eligible_set(b, base[2], gate_pf=6.0, gate_pf_old=11.0, gate_pf_new=1.0, n=400)     # one half under the floor
+    fewer = _eligible_set(b, base[3], gate_pf=1.6, gate_pf_old=1.5, gate_pf_new=1.7, n=120)
+    for st in (solid, thin, lucky, fewer):
+        assert b.gate_reason(st) == "", (st.id, b.gate_reason(st))
+    order = [st.id for st in b.valid_for("indications", "base")]
+    want = [solid.id, fewer.id, thin.id, lucky.id][:4]
+    ok_rank = order[:4] == want
+    # the same ranking picks the Set for a new entry
+    picked = b.pick("indications", kind="base")
+    ok_pick = picked is not None and picked.id == solid.id
+    return ok_rank and ok_pick, f"order={[o.split(':')[-1] for o in order[:4]]} want={[o.split(':')[-1] for o in want]} pick={picked and picked.id.split(':')[-1]}"
+
+
+def replay_starts_with_the_symbols_that_hold_the_most_orders():
+    """A pass that is cut short refreshed the tapes the Sets are judged on most: symbols are replayed by the number of
+    orders they already hold, most first. A first pass (no orders yet) keeps the given order."""
+    names = [f"S{k}-USDT" for k in range(4)]
+    b = _book()
+    b.bars = {s: _scaled(synth_bars(10 + k, 700, start=100.0, vol=0.002 + 0.001 * k), 0) for k, s in enumerate(names)}
+    first_pass = []
+    b.replay_all(now=T_BASE, on_step=lambda: first_pass.append(b.progress.symbol))
+    counts = {s: sum(len(v) for v in b._hist_rows[s].values()) for s in names}
+    want_first = max(names, key=lambda s: counts[s])
+    seen = []
+    b.last_run = 0.0
+    b.replay_all(now=T_BASE, on_step=lambda: seen.append(b.progress.symbol), abort=lambda: len(seen) >= 1)
+    ok = bool(seen) and seen[0] == want_first and first_pass[0] == names[0]
+    return ok, f"orders={counts}; first replayed in a cut-short pass={seen[:1]} want={want_first}; first pass started with {first_pass[:1]}"
+
+
+def scoring_does_not_depend_on_the_replay_order():
+    """Equal exit times from different symbols are ordered by symbol, so the gate PF, drawdown time and rank of every Set
+    are the same however the symbols were replayed."""
+    names = [f"S{k}-USDT" for k in range(4)]
+    bars = {s: _scaled(synth_bars(20 + k, 800, start=100.0, vol=0.002), 0) for k, s in enumerate(names)}
+    out = []
+    for order in (names, list(reversed(names))):
+        b = _book(setMinPf=0.2, setGateMinTrades=10)
+        b.bars = {s: bars[s] for s in order}
+        b.replay_all(now=T_BASE, symbols=order)
+        out.append([(st.id, round(st.gate_pf, 6), st.max_dd_s, st.gate_n, st.n) for st in b.by_idx])
+    same = out[0] == out[1]
+    return same, f"Sets compared={len(out[0])}; identical={same}"
+
+
+def the_desk_index_reproduces_the_engines_pooled_pf():
+    """The compact Set index carries the gate-window gross profit and loss and the orders, so a desk selection pools the PF
+    exactly as SetBook._pf_split does: over every Set, per pack, with the validated share."""
+    b = _book(setMinPf=0.25, setGateMinTrades=10, setGateWindow=40, setMaxDdtHours=36)
+    b.bars = {f"S{k}-USDT": _scaled(synth_bars(40 + k, 1500, start=100.0, vol=0.0015, drift=0.0003 * (k - 1)), 0) for k in range(4)}
+    b.replay_all(now=T_BASE)
+    snap = b.snapshot()
+    index, pb = snap["index"], snap["pfBase"]
+
+    def pool(rows):
+        gp, gl = sum(r["gp"] for r in rows), sum(r["gl"] for r in rows)
+        pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+        return round(pf, 4), sum(r["gn"] for r in rows), len(rows)
+    valid = [r for r in index if r["on"] == 1]
+    got_base, want_base = pool(valid), (pb["base"]["pf"], pb["base"]["n"], pb["base"]["sets"])
+    got_all, want_all = pool(index), (pb["unfiltered"]["pf"], pb["unfiltered"]["n"], pb["unfiltered"]["sets"])
+    pct = round(100.0 * len(valid) / len(index), 2)
+    packs_ok = True
+    for pack, row in pb["byPack"].items():
+        rows = [r for r in index if r["pack"] == pack]
+        vs = [r for r in rows if r["on"] == 1]
+        packs_ok &= pool(vs) == (row["base"]["pf"], row["base"]["n"], row["base"]["sets"]) and pool(rows)[0] == row["unfiltered"]["pf"]
+        packs_ok &= abs(row["validatedPct"] - round(100.0 * len(vs) / len(rows), 2)) < 1e-9
+    ranked = sorted((r for r in index if r["on"] == 1), key=lambda r: r["rk"])
+    ranks_ok = [r["rk"] for r in ranked] == list(range(len(ranked))) and all(r["rk"] == -1 for r in index if r["on"] != 1)
+    ok = got_base == want_base and got_all == want_all and abs(pb["validatedPct"] - pct) < 1e-9 and packs_ok and ranks_ok and len(valid) > 0
+    return ok, f"effective {got_base} vs engine {want_base}; unfiltered {got_all} vs {want_all}; validated {pct}% vs {pb['validatedPct']}; packs ok={packs_ok}; ranks ok={ranks_ok}"
+
+
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
@@ -740,6 +884,13 @@ CHECKS = [
     ("trader.lanes-venue-close-recorded", a_venue_close_is_recorded_as_its_lanes_close),
     ("trader.lanes-recovered-set-keeps-its-lane", a_recovered_set_position_keeps_its_own_lane),
     ("processing.explicit-trail-variants-keep-their-arm", explicit_trail_variants_keep_their_own_arm),
+    ("processing.stable-sets-with-many-orders-first", stable_sets_with_many_orders_are_chosen_first),
+    ("processing.replay-starts-with-the-most-orders", replay_starts_with_the_symbols_that_hold_the_most_orders),
+    ("processing.scoring-independent-of-replay-order", scoring_does_not_depend_on_the_replay_order),
+    ("processing.desk-index-reproduces-pooled-pf", the_desk_index_reproduces_the_engines_pooled_pf),
+    ("trader.badfill-closed-and-symbol-rests", a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests),
+    ("trader.symbol-backoff-grows-with-losses", a_symbol_that_keeps_losing_rests_longer_each_time),
+    ("trader.size-has-a-hard-ceiling", position_size_has_a_hard_ceiling),
     ("trader.block-stacks-only-on-its-own-proven-lane", block_stacks_only_on_its_own_proven_lane),
     ("trader.block-adds-only-into-strength", block_adds_only_into_strength),
     ("trader.block-fill-updates-position-and-stop", block_fill_updates_the_position_and_its_stop),

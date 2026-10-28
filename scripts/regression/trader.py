@@ -1069,6 +1069,7 @@ def position_size_follows_the_balance_and_the_volume_factor():
     it to the venue's minimum order on a small account."""
     p = _bare_pulse()
     p.volume_factor, p.size_pct = 1.5, 1.0
+    p.size_max = 1e9                              # the ceiling has its own check
     out = {}
     for bal in (0.0, 8.92, 1000.0, 2000.0):
         p.equity = bal

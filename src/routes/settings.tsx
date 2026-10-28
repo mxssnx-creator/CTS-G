@@ -1,3 +1,4 @@
+import { SetsOverview } from "@/components/sets-overview";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -422,6 +423,7 @@ function SettingsPage() {
             </Card>
           )}
 
+          {section === "sets" && <SetsOverview stats={stats} />}
           {section === "sets" && (
             <Card
               title="Independent Sets · 1m historic"
@@ -1146,6 +1148,24 @@ function SettingsPage() {
                   onChange={(v) => patch("targetNotional", v)}
                 />
                 <Num
+                  label="Max position USDT"
+                  value={overlay.sizeMaxNotional ?? 25}
+                  min={0.2}
+                  max={5000}
+                  step={0.5}
+                  hint="Hard ceiling for one position's notional, whatever the balance or the factor."
+                  onChange={(v) => patch("sizeMaxNotional", v)}
+                />
+                <Num
+                  label="Max entry slippage %"
+                  value={overlay.maxEntrySlipPct ?? 0.75}
+                  min={0.05}
+                  max={5}
+                  step={0.05}
+                  hint="A fill farther than this from the price the entry was decided at is closed at once and the symbol rests 30 min."
+                  onChange={(v) => patch("maxEntrySlipPct", v)}
+                />
+                <Num
                   label="Drawdown halt %"
                   value={overlay.ddHaltPct ?? 18}
                   min={0}
@@ -1166,9 +1186,12 @@ function SettingsPage() {
                 <KV
                   k="Effective notional"
                   v={
-                    (overlay.sizePctOfBalance ?? 1) > 0 && Number(stats?.equity) > 0
-                      ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 1)) / 100 * (overlay.volumeFactor || 1)).toFixed(2)
-                      : (overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)
+                    Math.min(
+                      (overlay.sizePctOfBalance ?? 0) > 0 && Number(stats?.equity) > 0
+                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor || 1)
+                        : overlay.targetNotional * (overlay.volumeFactor || 1),
+                      overlay.sizeMaxNotional ?? 25,
+                    ).toFixed(2)
                   }
                 />
                 <Toggle

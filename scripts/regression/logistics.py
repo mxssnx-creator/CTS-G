@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "f37dc4d3db6db55ef3b970f9aa860b8c628a1441"
+PIN_WANT = "2a69455079b8c1b92b7f9d6672004897bd7c426a"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -100,6 +100,20 @@ DESK_DEFAULT_EXCEPTIONS = {
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
     "ddHaltPct": "x01 drawdown halt switched off by the owner; desk default 18 %",
 }
+
+
+def shipped_overlays_run_the_base_gate():
+    """The Base gate is the standard: both shipped overlays and the desk default open entries only under a Base-validated
+    Set (setUseHistoricGate true). x02 ran without it from 01e842b until the owner switched it back on."""
+    out = {}
+    for conn in ("x01", "x02"):
+        ov = json.load(open(os.path.join(PULSE, f"overlay-bingx-{conn}.json"), encoding="utf-8"))
+        out[conn] = ov.get("setUseHistoricGate", True)
+    src = open(CONFIG_MODEL, encoding="utf-8").read()
+    start = src.index("export const DEFAULT_OVERLAY")
+    desk = re.search(r"^  setUseHistoricGate: (true|false)", src[start:src.index("\n};", start)], re.M)
+    out["desk"] = desk.group(1) == "true" if desk else None
+    return all(v is True for v in out.values()), f"setUseHistoricGate: {out}"
 
 
 def desk_default_overlay_equals_shipped_x01():
@@ -362,6 +376,7 @@ CHECKS = [
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
     ("logistics.desk-defaults-equal-shipped-overlay", desk_defaults_equal_shipped_overlay),
     ("logistics.desk-default-overlay-equals-shipped-x01", desk_default_overlay_equals_shipped_x01),
+    ("logistics.shipped-overlays-run-the-base-gate", shipped_overlays_run_the_base_gate),
     ("logistics.desk-symbols-equal-engine-fixed-list", desk_symbols_equal_engine_fixed_list),
     ("logistics.desk-cards-read-effective-overlay", desk_cards_read_effective_overlay),
     ("logistics.engine-absent-defaults-agree", engine_absent_defaults_agree),

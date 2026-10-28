@@ -59,9 +59,9 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   instruction. It is the overlay setting `ddHaltPct` (percent of the start equity, default 18, 0 = off). On 2026-10-28
   the owner reset x01's start equity and switched its halt off (`ddHaltPct` 0) and set x01 to the minimum order size
   (`sizePctOfBalance` 0, `targetNotional` 0.2); the minimum-equity guard (`EQ_MIN`) stays on. The same day x01 took
-  x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). Both run `setUseHistoricGate` false:
-  entries do not wait for a Base-validated Set (the legacy pick ranks every active Set), so their live PF is not the PF
-  after Base. Credentials are never printed or stored in the repo; rotate any that appeared in a session.
+  x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). The Base gate
+  (`setUseHistoricGate` true) is the default on every connection: entries open only under a Base-validated Set. (x02 ran
+  with it off from 01e842b, 2026-10-21, until 2026-10-28; switched back on by the owner.) Credentials are never printed or stored in the repo; rotate any that appeared in a session.
 - State files of the live engine live in the pulse directory; tests must use private temp paths.
 
 ## Checks
