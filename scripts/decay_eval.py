@@ -50,7 +50,7 @@ def main():
             import bisect
             lo, hi = bisect.bisect_left(tx2, h), bisect.bisect_left(tx2, h + 3600)
             fw = pp2[lo:hi]
-            for tag in ("all", f"step{st.step:02d}" if st.kind == "base" else "trail"):
+            for tag in ("all", f"step{st.step:02d}" if st.kind == "base" else (f"exit{st.step:02d}" if st.kind == "exit" else "trail")):
                 d = acc[tag]
                 d["sets"] += 1
                 d["in_gp"] += gi; d["in_gl"] += li; d["in_n"] += len(pp)

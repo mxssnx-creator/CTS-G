@@ -29,7 +29,7 @@ from modules import resolve as resolve_modules
 from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test
+from set_engine import EXIT_TAG, SetBook, lane_honors_tp, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -169,6 +169,29 @@ QA_EVERY = 5
 COOLDOWN_S = 9.0
 SYM_BAN_S = 1800.0       # a symbol that stops out within 30 s, or fills far from its reference price, rests this long
 STAGGER_S = 0.12
+
+
+def set_kind_of(set_id: str) -> str:
+    """The kind of a Set from its id: "<pack>:1m:tr<arm>:<give>" trail, "...:st<n>:xt" exit, "...:st<n>" base."""
+    sid = str(set_id or "")
+    if sid.endswith(":" + EXIT_TAG):
+        return "exit"
+    if re.search(r":tr[0-9.]+:[0-9.]+$", sid):
+        return "trail"
+    return "base"
+
+
+def pack_of_reason(reason: Any) -> str:
+    """The pack an entry reason belongs to: "set:<pack>:..." (a Set entry), "ind:..." (indications), else general."""
+    r = str(reason or "")
+    if r.startswith("set:"):
+        return r.split(":", 2)[1] or "general"
+    return "indications" if r.startswith("ind:") else "general"
+
+
+CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
+ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
+ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
 DD_HALT = 0.18
 EQ_MIN = 0.20
 RECV = 5000
@@ -1171,6 +1194,8 @@ class Pulse:
             st = f"{int(m.group(1)):02d}"
         elif re.search(r"tr[0-9.]+:[0-9.]+", set_id or ""):
             st = "00"                      # a trailing Set has no TP step
+        if set_kind_of(set_id) == "exit":
+            tr = CID_EXIT_TR               # an Exit Set: same pack, SL ratio and step as its base Set, told apart here
         if idx < 0:
             try:
                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
@@ -1209,6 +1234,7 @@ class Pulse:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
         pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
+        is_exit = rest[4:6] == CID_EXIT_TR
         try:
             sl = int(rest[2:4]) / 10.0
             arm = int(rest[4:6]) / 10.0
@@ -1237,7 +1263,9 @@ class Pulse:
                 if str(getattr(st_obj, "pack", "")) != pack:
                     return False
                 if st_obj.kind == "trail":
-                    return step == 0 and abs(float(st_obj.trail_arm) - arm) < 0.06
+                    return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06
+                if (st_obj.kind == "exit") != is_exit:
+                    return False
                 return step == int(st_obj.step) and abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
             except Exception:
                 return False
@@ -1628,10 +1656,24 @@ class Pulse:
                 pass
             log(f"UNIVERSE rank={self.symbol_sort} n={len(SYMBOLS)} dyn={int(self.symbols_dynamic)} cap={cap} wild={int(wild)} lead={(SYMBOLS[0] if SYMBOLS else '-')}", every=20.0, key="uni-rank")
 
+    def _closed_klines(self, data: Any, now: Optional[float] = None) -> Tuple[List[List[float]], Optional[float]]:
+        """The completed minutes of a 1m klines answer, oldest first, and the open time (s) of the last one. The venue's last
+        row is the minute still forming; the replay only ever reads completed bars, so live entries read the same ones."""
+        if not isinstance(data, list):
+            return [], None
+        minute = float(int((now or time.time()) // 60) * 60)
+        rows = [r for r in sorted(data, key=self._kline_time) if 0 < self._kline_time(r) / 1000.0 + 60.0 <= minute]
+        bars = self._parse_klines(rows)
+        if len(bars) != len(rows) or not rows:
+            return bars, None
+        return bars, self._kline_time(rows[-1]) / 1000.0
+
     def _parse_klines(self, data: Any) -> List[List[float]]:
         bars: List[List[float]] = []
         if not isinstance(data, list):
             return bars
+        if data and all(self._kline_time(b) > 0 for b in data):
+            data = sorted(data, key=self._kline_time)      # the v3 endpoint answers newest first
         for b in data:
             try:
                 if isinstance(b, dict):
@@ -1772,6 +1814,13 @@ class Pulse:
             self.klines_tf.setdefault(tf, {})[s] = bars[-KLINE_LIMIT:]
             if tf == "1m":
                 self.real_1m[s] = len(bars[-KLINE_LIMIT:])
+                sets = getattr(self, "sets", None)
+                if sets is not None and sets.enabled and isinstance(body, dict):
+                    # the newest completed minutes join the Set history (where they line up with it), so the entry signal
+                    # reads the bar that just closed, on the replay's own series
+                    closed, last_t = self._closed_klines(body.get("data"), now)
+                    if closed and last_t is not None:
+                        sets.ingest_bars(s, closed, tail=bool(sets.bars.get(s)), last_t=last_t)
             self.kline_ts_tf.setdefault(tf, {})[s] = now
             stored += 1
 
@@ -2033,7 +2082,7 @@ class Pulse:
         """Qty-matched order SL/TP from the Set's own range."""
         sl_f, tp_f, _, _ = self.opt_fracs(pos)
         set_lane = bool(pos.set_id)
-        if set_lane and not self.lane_honors_tp():
+        if set_lane and not self.lane_honors_tp(pos):
             tp_f = max(tp_f, float(self.tp_max))      # the lane that validated this Set has no TP exit: the order is only a safety
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
@@ -2679,7 +2728,8 @@ class Pulse:
         side = "LONG" if direction > 0 else "SHORT"
         if self.occupying(sym, side, pack):
             return "slot-taken"
-        if pack == "indications":
+        if pack == "indications" and str(reason).startswith("ind:"):
+            # a live indication row must still stand; a Set entry ("set:") is the replay's own signal and needs no other row
             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
                 return "ind-off"
             ind = None
@@ -2728,7 +2778,7 @@ class Pulse:
             return
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
-        pack = "indications" if str(reason).startswith("ind:") else "general"
+        pack = pack_of_reason(reason)
         skip = self.entry_sense(sym, direction, reason, conf, pack)
         if skip:
             if time.time() - self.skip_log.get("sense", 0) > 40:
@@ -3226,9 +3276,12 @@ class Pulse:
             log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s ({n} losses in a row)")
         return min(1800.0, COOLDOWN_S * (4 ** (n - 1)))
 
-    def lane_honors_tp(self) -> bool:
-        """Whether the Set lane exits on its TP: the setting the replay used, so live and validation agree."""
-        return bool(getattr(self.sets, "hist_honor_tp", True))
+    def lane_honors_tp(self, pos: Optional[Position] = None) -> bool:
+        """Whether this Set position's lane exits on its TP, by its Set's kind as the replay decided it (set_engine.SetLane):
+        a base Set takes its TP, an Exit Set never does, a trailing Set follows the book's setting."""
+        kind = set_kind_of(getattr(pos, "set_id", "") or "") if pos is not None else "trail"
+        honor = lane_honors_tp(kind)
+        return bool(getattr(self.sets, "hist_honor_tp", True)) if honor is None else honor
 
     def manage_set_lane(self, pos: Position, px: float, now: float, age: float, pnl_pct: float) -> None:
         """The close rules of a Set position, one for one with set_engine.SetLane: the stop at the Set's own level (raised by
@@ -3247,7 +3300,7 @@ class Pulse:
             self.close_pos(pos, px, "sl")
             return
         tp_f = float(pos.tp_pct or 0)
-        if self.lane_honors_tp() and tp_f > 0:
+        if self.lane_honors_tp(pos) and tp_f > 0:
             tp = e * (1 + side * tp_f)
             if self.software_exit(pos, "tp", tp, px):
                 self.close_pos(pos, px, "tp")
@@ -4321,6 +4374,41 @@ class Pulse:
         tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
         return tagged if tagged else []
 
+    def set_entry_candidates(self, now: Optional[float] = None) -> Dict[str, Tuple[float, str, int, str]]:
+        """{symbol: (conf, symbol, dir, "set:<pack>:<why>")} for the symbols whose newest completed minute signals, decided once
+        per symbol and minute (the replay decides once per bar) and offered only within ENTRY_FRESH_S of that minute's close
+        (the replay enters at its close: a later fill is a different trade)."""
+        now = float(now if now is not None else time.time())
+        minute = float(int(now // 60) * 60)
+        if now - minute > ENTRY_FRESH_S:
+            return {}
+        memo = getattr(self, "_entry_sig", None)
+        if memo is None:
+            memo = self._entry_sig = {}
+        out: Dict[str, Tuple[float, str, int, str]] = {}
+        budget = ENTRY_SIG_BUDGET
+        for s in SYMBOLS:
+            if s in self.open:
+                continue
+            bar_t = minute - 60.0
+            hit = memo.get(s)
+            if hit is None or hit[0] != bar_t:
+                if getattr(self.sets, "bar_t", {}).get(s) != bar_t:
+                    continue                          # that minute is not in the Set history yet
+                if budget <= 0:
+                    continue                          # the next cycle reads it (still inside the fresh window)
+                budget -= 1
+                try:
+                    sig = self.sets.entry_signal(s, bar_t)
+                except Exception:
+                    sig = None
+                hit = memo[s] = (bar_t, sig)
+            sig = hit[1]
+            if sig:
+                pack, d, conf, why = sig
+                out[s] = (float(conf), s, int(d), f"set:{pack}:{why}")
+        return out
+
     def maybe_entries(self) -> None:
         if self.halted:
             return
@@ -4353,7 +4441,13 @@ class Pulse:
         slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Pf", metrics.get("lastPf", 1.0)))
         ranked: List[Tuple[float, str, int, str]] = []
         best: Dict[str, Tuple[float, str, int, str]] = {}
-        if self.strat_ind and bool(self.indications.settings.get("enabled")):
+        if self.sets.enabled:
+            # Under the Base gate every entry is a Set position, so the entry is the replay's: the signal of the minute that
+            # just completed, on the Set history, by the rule that built every Set's tape (SetBook.entry_signal). The live
+            # indication and general scores (60-bar windows, a forming minute, regime and outbreak terms) never saw those
+            # tapes; entering on them traded positions no Set was validated on.
+            best = self.set_entry_candidates()
+        elif self.strat_ind and bool(self.indications.settings.get("enabled")):
             for s in SYMBOLS:
                 if s in self.open:
                     continue
@@ -4377,7 +4471,7 @@ class Pulse:
                 d = 1 if pick.direction == "long" else -1
                 why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
                 best[s] = (float(conf), s, d, why)
-        if self.strat_general:
+        if self.strat_general and not self.sets.enabled:
             for s in SYMBOLS:
                 if s in self.open:
                     continue
@@ -4445,7 +4539,7 @@ class Pulse:
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
-            pack = "indications" if str(why).startswith("ind:") else "general"
+            pack = pack_of_reason(why)
             if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
                 if not intern.get(pack):
                     alt = "general" if pack == "indications" else "indications"
@@ -5445,7 +5539,7 @@ class Pulse:
         if not self.sets.enabled:
             return
         self.sets.progress.phase = "fetch"
-        lookback = int(self.sets.lookback)
+        lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
         page = HIST_PAGE
         stored = 0
         chunk = 4
@@ -5487,9 +5581,9 @@ class Pulse:
                     if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
                         pending.append(sym)
             for s in names:
-                bars = self._parse_klines(rows_by.get(s) or [])
+                bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
                 if s and bars:
-                    self.sets.ingest_bars(s, bars)
+                    self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
             time.sleep(0.12)
         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"

@@ -89,6 +89,8 @@ STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
+EXIT_TAG = "xt"                 # id suffix of an Exit Set (no TP: stop, time and scratch exits only)
+SET_KINDS = ("base", "exit", "trail")
 RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
 RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
 
@@ -340,6 +342,31 @@ def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tu
     return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
 
 
+def bar_signal(
+    bars: Sequence[Sequence[float]],
+    i: int,
+    packs: Sequence[str],
+    ind_settings: Dict[str, Any],
+    ts: float,
+) -> Dict[str, Tuple[int, float, str]]:
+    """The signal of every pack on bar i, read from the closed bars up to and including i (each pack its own window).
+    The one per-bar rule: the replay (pack_signals) and the live entries (SetBook.entry_signal) both call it, so a live
+    entry is taken on exactly the bar and direction the Sets were validated on."""
+    row: Dict[str, Tuple[int, float, str]] = {}
+    if "general" in packs:
+        lo = i + 1 - GENERAL_WINDOW_BARS
+        row["general"] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
+    if "indications" in packs:
+        lo = i + 1 - IND_WINDOW_BARS
+        row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+    if SHORT_PACK in packs:
+        row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)    # each name reads its own window
+    for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
+        if pk in packs:
+            row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(vkey) or list(default))
+    return row
+
+
 def pack_signals(
     bars: Sequence[Sequence[float]],
     packs: Sequence[str],
@@ -376,19 +403,7 @@ def pack_signals(
                 if on_step and i % 50 == 0:
                     on_step()
                 continue
-        ts = base_ts + i * BAR_S
-        row: Dict[str, Tuple[int, float, str]] = {}
-        if "general" in packs:
-            lo = i + 1 - GENERAL_WINDOW_BARS
-            row["general"] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
-        if "indications" in packs:
-            lo = i + 1 - IND_WINDOW_BARS
-            row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
-        if SHORT_PACK in packs:
-            row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)    # each name reads its own window
-        for pk, (_sw, vkey, default) in EXTRA_PACKS.items():          # (not `key`: that is this bar's memo key)
-            if pk in packs:
-                row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(vkey) or list(default))
+        row = bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:
@@ -438,6 +453,11 @@ def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> s
     if trail:
         return f"{pack}:1m:tr{trail}"
     return f"{pack}:1m:sl{sl_ratio:.2f}"
+
+
+def make_exit_id(pack: str, sl_ratio: float, step: int) -> str:
+    """An Exit Set: the base Set's stop (SL ratio x TP step) with no TP exit (exitIgnoreTp), its own lane and its own tape."""
+    return f"{pack}:1m:sl{sl_ratio:.2f}:st{int(step)}:{EXIT_TAG}"
 
 
 def make_trail_id(pack: str, trail: str) -> str:
@@ -592,18 +612,27 @@ class BarIndex:
         return b
 
 
+def lane_honors_tp(kind: str) -> Optional[bool]:
+    """Whether a lane of this Set kind exits on its TP: base always, exit never, trail per the book (None)."""
+    if kind == "base":
+        return True
+    if kind == "exit":
+        return False
+    return None
+
+
 def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None) -> Tuple[float, float]:
     """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
     ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under 2 x PositionCost.
     The live trader takes a Set position's levels from here, so live and replay share one formula."""
-    sl_base = st.tp_pct * (st.sl_ratio if st.kind == "base" else TRAIL_SL_RATIO)
+    sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == "trail" else st.sl_ratio)
     return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)
 
 
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
-    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold")
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold", "honor")
 
     def __init__(self, st: "SetState", symbol: str) -> None:
         self.st = st
@@ -615,8 +644,11 @@ class SetLane:
         # trail values are percent of price on every path (trail_grid, parse_trail): no magnitude guessing
         self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
         self.give = st.trail_give / 100.0 if self.use_trail else 0.0
-        self.sl_base = st.tp_pct * (st.sl_ratio if st.kind == "base" else TRAIL_SL_RATIO)
+        self.sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == "trail" else st.sl_ratio)
         self.tp_frac = st.tp_pct
+        # TP by kind: a base Set takes its TP (the step is its target), an Exit Set never does (exitIgnoreTp is its own
+        # strategy type), a trailing Set follows cfg["honor_tp"] (not exitIgnoreTp)
+        self.honor = lane_honors_tp(st.kind)
         self.hold = int(getattr(st, "hold_bars", 0) or 0)      # the Set's own time exit (bars); 0 = the global one
 
     def step(self, i: int, bar: Sequence[float], d: int, conf: float, allowed: bool, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -642,7 +674,8 @@ class SetLane:
                 o["peak"] = max(o["peak"], float(bar[1]))
             else:
                 o["peak"] = min(o["peak"], float(bar[2]))
-            why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not cfg["honor_tp"])
+            honor = cfg["honor_tp"] if self.honor is None else self.honor
+            why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not honor)
             if why is None and held >= (self.hold or cfg["time_bars"]):
                 why, px = "time", float(bar[3])
             if why is None and held >= cfg["scratch_bars"]:
@@ -703,7 +736,7 @@ class SetLane:
         cost_pct = cfg["cost_pct"]
         cost_frac = cost_as_frac(cost_pct)
         sl_floor = sl_floor_frac(cost_pct, cfg.get("sl_floor_steps"))
-        honor_tp = bool(cfg["honor_tp"])
+        honor_tp = bool(cfg["honor_tp"] if self.honor is None else self.honor)
         use_trail = self.use_trail
         arm = self.arm
         give = self.give
@@ -953,6 +986,7 @@ class SetBook:
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
         self.hist_honor_tp = True
+        self.exit_sets = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
@@ -968,6 +1002,9 @@ class SetBook:
         # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
         self._hist_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
+        # open time (s) of the newest row of self.bars[symbol] when that row is a completed exchange minute; absent when the
+        # series ends in rows of unknown time (live ticks). Live entries read a signal only on the bar this names.
+        self.bar_t: Dict[str, float] = {}
         self.progress = Progress()
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
@@ -1021,6 +1058,10 @@ class SetBook:
             self.hist_honor_tp = not bool(ov["exitIgnoreTp"])
         else:
             self.hist_honor_tp = bool(ov.get("setHonorTp", True))
+        # hist_honor_tp decides the trailing Sets only. A base Set always takes its TP (its step is its target); ignoring TP
+        # is its own strategy type: with exitIgnoreTp on, every base stop (SL ratio x step, one Set per distinct distance)
+        # also runs as an Exit Set, its own lane with no TP exit, its own tape and its own Base validation.
+        self.exit_sets = bool(ov.get("exitIgnoreTp", True))
         # per-step hold times: stepHoldOn[i] / stepHoldMin[i] belong to step i + 1 (steps 1..12); an "on" step leaves on its own
         # time exit after that many minutes, an "off" step keeps the global time stop. Replay and live read the same table.
         # holdEnabled is the master switch (off: no per-step and no auto hold, only the global time stop); holdAuto lets every Set
@@ -1188,6 +1229,31 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
+            if self.exit_sets:
+                seen_stop: Dict[float, None] = {}
+                for sl_i, sl in enumerate(self.sl_ratios):
+                    for step_i, step in enumerate(pack_steps):
+                        dist = round(sl * step, 6)          # without a TP only the stop distance tells two Exit Sets apart
+                        if dist in seen_stop:
+                            continue
+                        seen_stop[dist] = None
+                        sid = make_exit_id(pack, sl, step)
+                        tp = step_tp_pct(step, self.cost_pct)
+                        prev = keep.get(sid)
+                        if prev:
+                            st = prev
+                            st.sl_ratio, st.step, st.tp_pct = sl, step, tp
+                            st.trail_key, st.trail_arm, st.trail_give = "", 0.0, 0.0
+                            st.kind = "exit"
+                            st.locked = bool(self.locks.get(sid))
+                        else:
+                            st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, trail_key="", trail_arm=0.0, trail_give=0.0,
+                                          step=step, tp_pct=tp, kind="exit", locked=bool(self.locks.get(sid)))
+                        st.pack_i = pack_i
+                        st.sl_i = sl_i
+                        st.tr_i = -1
+                        st.step_i = step_i
+                        _put(st)
             for tr_i, (tkey, arm, give) in enumerate(pack_trails):
                 sid = make_trail_id(pack, tkey)
                 prev = keep.get(sid)
@@ -1319,9 +1385,11 @@ class SetBook:
         """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
         return symbol not in self.quality
 
-    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False) -> None:
-        """Join bars onto the symbol's history. tail=True: rows built from live ticks, joined only where they line up with
-        the stored series; they never replace a history they do not overlap."""
+    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
+        """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only
+        where they line up with the stored series; they never replace a history they do not overlap. last_t: the open time
+        of the last given row, a completed minute (the caller drops the still-forming one); kept in bar_t when the joined
+        series ends on that row."""
         if not bars:
             return
         cleaned: List[List[float]] = []
@@ -1333,7 +1401,35 @@ class SetBook:
                 continue
             cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
-            self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned, keep_on_gap=tail)[-self.lookback :]
+            old = self.bars.get(symbol) or []
+            joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.lookback :]
+            self.bars[symbol] = joined
+            bar_t = self.__dict__.setdefault("bar_t", {})
+            if last_t is not None and joined and joined[-1] == cleaned[-1]:
+                bar_t[symbol] = float(last_t)
+            elif not old or not joined or joined[-1] != old[-1]:
+                bar_t.pop(symbol, None)           # the series now ends on a row of unknown time
+
+    def entry_signal(self, symbol: str, bar_open_t: float) -> Optional[Tuple[str, int, float, str]]:
+        """The live entry decision on the completed minute that opened at bar_open_t: (pack, direction, confidence, why) of the
+        pack with the highest confidence at or above setEntryConf, else None. The replay's own rule on the replay's own bars
+        (bar_signal on the Set history), so a live position opens only where its Set's tape would have opened one. None when
+        the history does not end on that minute (it is not in yet, or the series ends on rows of unknown time)."""
+        with self._lock:
+            if self.__dict__.get("bar_t", {}).get(symbol) != float(bar_open_t) or not self.symbol_ok(symbol):
+                return None
+            bars = list(self.bars.get(symbol) or [])
+            packs = list(self.packs)
+            settings = dict(self.ind_settings)
+        if len(bars) < max(self.min_bars, self.warmup + 1):
+            return None
+        row = bar_signal(bars, len(bars) - 1, packs, settings, float(bar_open_t) + BAR_S)
+        best: Optional[Tuple[str, int, float, str]] = None
+        for p in packs:
+            d, c, why = row.get(p, (0, 0.0, ""))
+            if d != 0 and c >= self.entry_conf and (best is None or c > best[2]):
+                best = (p, int(d), float(c), str(why))
+        return best
 
     def trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)
@@ -1341,6 +1437,7 @@ class SetBook:
         for s in list(self.bars):
             if s not in want:
                 self.bars.pop(s, None)
+                self.__dict__.setdefault("bar_t", {}).pop(s, None)
                 n += 1
         return n
 
@@ -1766,6 +1863,7 @@ class SetBook:
         trails = [t[0] for t in (self.trails_built or self.trails or [])]
         trail_sets = [st for st in self.by_idx if st.kind == "trail"]
         base_sets = [st for st in self.by_idx if st.kind == "base"]
+        exit_sets = [st for st in self.by_idx if st.kind == "exit"]
         by_tr: Dict[str, Dict[str, Any]] = {}
         by_sl: Dict[str, Dict[str, Any]] = {}
         for st in trail_sets:
@@ -1794,7 +1892,7 @@ class SetBook:
                 "trail": len(trails) or 1,
                 "step": len(self.steps),
             },
-            "families": {"base": len(base_sets), "trail": len(trail_sets)},
+            "families": {"base": len(base_sets), "exit": len(exit_sets), "trail": len(trail_sets)},
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
@@ -1858,7 +1956,7 @@ class SetBook:
 
     def step_of(self, st: "SetState") -> int:
         """The TP step of a Set; a trailing Set takes the step of its arm (arm % over PositionCost)."""
-        return int(st.step) if st.kind == "base" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
+        return int(st.step) if st.kind != "trail" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
 
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
@@ -1885,15 +1983,20 @@ class SetBook:
         return self.pick(pack, kind="trail")
 
     def pick_any(self, pack: str) -> Optional[SetState]:
-        # one lock acquisition: a Set cannot change between the base and the trail lookup
+        """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
+        rank_key: the same entries, each judged on its own exits), else the best valid trailing Set."""
+        # one lock acquisition: a Set cannot change between the lookups
         with self._lock:
-            return self._pick(pack, "base") or self._pick(pack, "trail")
+            fixed = [x for x in (self._pick(pack, "base"), self._pick(pack, "exit")) if x is not None]
+            if fixed:
+                return max(fixed, key=self.rank_key)
+            return self._pick(pack, "trail")
 
     def pack_open(self, pack: str) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
         with self._lock:
-            return bool(self._valid_for(pack, "base") or self._valid_for(pack, "trail"))
+            return any(self._valid_for(pack, k) for k in SET_KINDS)
 
     def counts(self) -> Dict[str, Any]:
         """Every configured Set is in exactly one of valid, invalid, locked, error. The retired Sets are counted apart."""
@@ -2306,11 +2409,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     want_base = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps)
     built_keys = sorted({s.trail_key for s in book4.by_idx if s.kind == "trail"})
     want_tr = len(book4.packs) * max(1, len(built_keys))
-    want = want_base + want_tr
+    # Exit Sets (exitIgnoreTp): one per distinct stop distance (SL ratio x step) per pack, no TP
+    want_exit = len(book4.packs) * len({round(sl * st_, 6) for sl in book4.sl_ratios for st_ in book4.steps}) if book4.exit_sets else 0
+    want = want_base + want_tr + want_exit
     idxs = [s.idx for s in book4.by_idx]
     trails_in = {s.trail_key for s in book4.by_idx if s.kind == "trail"}
     kinds = {s.kind for s in book4.by_idx}
-    out.append(("set-grid-product", len(book4.by_idx) == want and want_base >= 50 and want_tr >= 10, f"n={len(book4.by_idx)} base={want_base} trail={want_tr} dims={cov.get('dims')} fam={cov.get('families')}"))
+    out.append(("set-grid-product", len(book4.by_idx) == want and want_base >= 50 and want_tr >= 10, f"n={len(book4.by_idx)} base={want_base} exit={want_exit} trail={want_tr} dims={cov.get('dims')} fam={cov.get('families')}"))
     out.append(("set-idx-unique", idxs == list(range(len(idxs))), f"n={len(idxs)} last={idxs[-1] if idxs else None}"))
     out.append(("set-trail-cover", cov.get("trailCover") and len(trails_in) >= 5 and "trail" in kinds, f"trails={sorted(trails_in)} cover={cov.get('trailCover')}"))
     mid_tp = (book4.steps[len(book4.steps) // 2]) * book4.cost_pct
@@ -2654,6 +2759,62 @@ def self_test() -> List[Tuple[str, bool, str]]:
         and _iso.progress.errors >= 1
     )
     out.append(("set-isolation", _set_ok, f"victim={_victim} err={_iso.sets[_victim].last_error[:40]} errors={_iso.progress.errors}"))
+    # Exit Sets: exitIgnoreTp is its own strategy type. A base Set takes its TP; its Exit twin (same stop, no TP) does not,
+    # each has its own id and tape, and the pick ranks the two kinds together.
+    xb = SetBook()
+    xb.load({"exitIgnoreTp": True, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
+    kinds_x = {k: [x for x in xb.by_idx if x.kind == k] for k in SET_KINDS}
+    dists = {round(x.sl_ratio * x.step, 6) for x in kinds_x["exit"] if x.pack == "general"}
+    out.append(("set-exit-kind-built", len(kinds_x["exit"]) == len(xb.packs) * 5 and len(dists) == 5
+                and all(x.id.endswith(":" + EXIT_TAG) for x in kinds_x["exit"]),
+                f"exit={len(kinds_x['exit'])} distinct stops={sorted(dists)}"))
+    xoff = SetBook()
+    xoff.load({"exitIgnoreTp": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
+    out.append(("set-exit-kind-off", not any(x.kind == "exit" for x in xoff.by_idx), "exitIgnoreTp off builds no Exit Set"))
+    up = [[100.0, 100.0, 100.0, 100.0, 1.0]] + [[100.0 + 0.05 * k, 100.06 + 0.05 * k, 99.99 + 0.05 * k, 100.05 + 0.05 * k, 1.0] for k in range(30)]
+    cfg_x = {"entry_conf": 0.5, "time_bars": 200, "scratch_bars": 999, "scratch_min": 0.5, "cooldown": 0, "cost_pct": 0.12,
+             "honor_tp": False, "sl_floor_steps": 1}
+    bst = next(x for x in xb.by_idx if x.kind == "base" and x.pack == "general" and x.step == 2 and x.sl_ratio == 1.0)
+    xst = next(x for x in xb.by_idx if x.kind == "exit" and x.pack == "general" and x.step == 2 and x.sl_ratio == 1.0)
+    dirs_x = [1] + [0] * 30
+    confs_x = [0.9] + [0.0] * 30
+    tb = SetLane(bst, "T").scan(0, len(up), up, dirs_x, confs_x, True, cfg_x, [0], BarIndex(up))
+    tx = SetLane(xst, "T").scan(0, len(up), up, dirs_x, confs_x, True, cfg_x, [0], BarIndex(up))
+    out.append(("set-base-takes-tp-exit-never", bool(tb) and tb[0]["reason"] == "tp" and not tx,
+                f"base={[t['reason'] for t in tb]} exit={[t['reason'] for t in tx]} (honor_tp off applies to trailing Sets only)"))
+    bst.gate_n = xst.gate_n = 50
+    bst.gate_pf, xst.gate_pf = 1.3, 2.0
+    bst.gate_pf_old = bst.gate_pf_new = 1.3
+    xst.gate_pf_old = xst.gate_pf_new = 2.0
+    bst.n = xst.n = 200
+    for x in xb.by_idx:
+        x.active = x in (bst, xst)
+        x.max_dd_s = 0.0
+    out.append(("set-pick-ranks-base-and-exit", xb.pick_any("general") is xst and xb.pack_open("general"),
+                f"pick={getattr(xb.pick_any('general'), 'id', None)}"))
+    # last N: every "last N" judgement reads at least MIN_VALIDATION_N orders, whatever the overlay asks for
+    ln = SetBook()
+    ln.load({"setPfWindow": 3, "pfWindow": 3, "setGateMinTrades": 3, "setGateWindow": 20, "holdAutoMin": 3})
+    out.append(("set-last-n-at-least-8", ln.pf_n >= MIN_VALIDATION_N and ln.gate_min >= MIN_VALIDATION_N and ln.hold_auto_min >= MIN_VALIDATION_N
+                and MIN_VALIDATION_N == 8, f"pf_n={ln.pf_n} gate_min={ln.gate_min} hold_auto_min={ln.hold_auto_min}"))
+    try:
+        from dca_engine import DcaBook
+        from exit_engine import ExitBook
+        from risk_variants import VariantBook
+        from block_engine import BlockBook
+        d_, e_, v_ = DcaBook(), ExitBook(), VariantBook()
+        d_.load({"dcaPfWindow": 3})
+        e_.load({"exitPfWindow": 3, "exitMinSamples": 3})
+        v_.load({"slToTpRecalcN": 3, "trailRecalcN": 3}, {})
+        import os as _os
+        import tempfile as _tf
+        bb = BlockBook(_os.path.join(_tf.mkdtemp(prefix="ctsg-block-"), "block.json"), {"prevPosMinCount": 3})
+        floors = {"block_min": bb.min_samples, "dca": d_.pf_n, "exit_pf": e_.pf_n, "exit_min": e_.min_samples, "sl_recalc": v_.sl_recalc_n,
+                  "trail_recalc": v_.trail_recalc_n}
+        ok_floor = all(v >= MIN_VALIDATION_N for v in floors.values())
+    except Exception as exc:          # a module that no longer loads is a failure here
+        floors, ok_floor = {"error": repr(exc)[:80]}, False
+    out.append(("set-last-n-floor-everywhere", ok_floor, str(floors)))
     return out
 
 

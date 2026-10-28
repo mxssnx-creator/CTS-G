@@ -1,6 +1,6 @@
 """Lifecycle suite: every configured Set is an independent unit, evaluated on an interval, valid or invalid on its own tape.
 
-Covers: one state per configured Set and counts that sum to the grid (1174 with TP ignored, 936 with TP honoured);
+Covers: one state per configured Set and counts that sum to the grid (1538 with exitIgnoreTp on: base, Exit and trail Sets; 936 with it off);
 interval-driven refresh, never back to back; every Set evaluated on a full pass; a failing Set isolated while the
 others are scored; an invalid Set stays in processing and becomes valid again with no reset; a lock blocks at once
 and is undone only by unlocking; entries per Set through valid_for (no global gate); freshness in live; the one rule
@@ -48,9 +48,10 @@ def coverage_counts_sum_to_grid():
     ig = _book(exitIgnoreTp=True)
     hn = _book(exitIgnoreTp=False)
     ci, ch = ig.counts(), hn.counts()
-    ok = (len(ig.by_idx) == 1174 and len(hn.by_idx) == 936
-          and ci["sum"] == ci["configured"] == 1174 and ch["sum"] == ch["configured"] == 936
-          and ci["total"] == 1174 + len(ig.retired) and ch["total"] == 936 + len(hn.retired))
+    # exitIgnoreTp on: base 754 + Exit 364 + trail 420; off: base 754 + the 182 trails under the mid TP, no Exit Set
+    ok = (len(ig.by_idx) == 1538 and len(hn.by_idx) == 936
+          and ci["sum"] == ci["configured"] == 1538 and ch["sum"] == ch["configured"] == 936
+          and ci["total"] == 1538 + len(ig.retired) and ch["total"] == 936 + len(hn.retired))
     return ok, f"ignore configured={ci['configured']} sum={ci['sum']} | honour configured={ch['configured']} sum={ch['sum']}"
 
 

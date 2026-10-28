@@ -128,9 +128,12 @@ class Tapes:
 
 
 def gate_metrics(book, tapes: Tapes, st, now: float):
-    """gate_n, gate_pf, max drawdown time and the ranking terms, as SetBook._score_one computes them."""
+    """(valid, rank, gate_n, gate_pf): the gate and the ranking key exactly as SetBook._score_one / gate_reason /
+    rank_key compute them (self_check compares both with the engine)."""
     lb = book.lookback * 60.0
     tx, te, pp = tapes.window(st.idx, now, lb, max(book.gate_window, book.deact_n))
+    txa = tapes.by_set[st.idx][0]
+    n_all = bisect.bisect_left(txa, now) - bisect.bisect_left(txa, now - lb)     # SetState.n: every order in the lookback
     cf = tapes.cf
     w = pp[-book.gate_window:]
     wt = tx[-book.gate_window:]
@@ -157,15 +160,21 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
         max_s = max(max_s, now - peak_t)
     last25 = pp[-book.deact_n:]
     r25 = sum(signed_result_r(x, book.cost_pct) for x in last25) / len(last25) if len(last25) else 0.0
-    valid = n >= book.gate_min and pf + 1e-9 >= book.pack_min_pf.get(st.pack, book.min_pf) and max_s < book.max_dd_s
+    floor = book.pack_min_pf.get(st.pack, book.min_pf)
+    valid = n >= book.gate_min and pf + 1e-9 >= floor and max_s < book.max_dd_s
+
+    def _pf(v):
+        g = sum(x - cf for x in v if x - cf > 0)
+        l_ = -sum(x - cf for x in v if x - cf < 0)
+        return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
+    h = n // 2
+    old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     if valid and book.consistency_pf > 0 and n >= 2:
-        h = n // 2
-        def _pf(v):
-            g = sum(x - cf for x in v if x - cf > 0)
-            l_ = -sum(x - cf for x in v if x - cf < 0)
-            return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
-        valid = min(_pf(w[:h]), _pf(w[h:])) + 1e-9 >= book.consistency_pf
-    return valid, (pf, r25, -max_s, len(pp)), n, pf
+        valid = min(old, new) + 1e-9 >= book.consistency_pf
+    halves = min(old, new) if (old or new) else pf
+    shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * n_all / (n_all + se.RANK_SHRINK_N)
+    rank = (halves + 1e-9 >= floor, round(shrunk, 4), n_all, r25, -max_s)      # SetBook.rank_key
+    return valid, rank, n, pf
 
 
 def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) -> Tuple[int, int]:
@@ -181,9 +190,12 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
                    for a, b, x in zip(tx, te, pp)]
         st.live = []
         book._score_one(st, now=now)
+        st.n = len(st.hist)
         eng_valid = book.gate_reason(st) == ""
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
-        if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6:
+        ek = book.rank_key(st)
+        if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6 or key[:3] != ek[:3] or abs(key[3] - ek[3]) > 1e-9 \
+                or abs(key[4] - ek[4]) > 1e-6:
             bad += 1
         st.hist = []
     return samples, bad
@@ -204,7 +216,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         ranked: Dict[Tuple[str, str], List[Any]] = {}
         valid_n = 0
         for st in book.by_idx:
-            if only_steps is not None and (st.kind != "base" or st.step not in only_steps):
+            if only_steps is not None and (st.kind == "trail" or st.step not in only_steps):
                 continue                      # an evaluation of one step's Sets alone
             ok, key, _, _ = gate_metrics(book, tapes, st, h)
             if ok:
@@ -230,7 +242,9 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if best is None:
                     continue
                 pack, conf, d = best
-                pool = [st for _, st in ranked.get((pack, "base"), [])] or [st for _, st in ranked.get((pack, "trail"), [])]
+                # SetBook.pick_any: base and Exit Sets ranked together, else the trailing Sets
+                pool = sorted(ranked.get((pack, "base"), []) + ranked.get((pack, "exit"), []), key=lambda r: r[0], reverse=True)
+                pool = [st for _, st in pool] or [st for _, st in ranked.get((pack, "trail"), [])]
                 if set_axis:
                     n_, min_pf = set_axis
                     keep = []

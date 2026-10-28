@@ -29,11 +29,11 @@ function trail(arm: string, on: number, gp: number, gl: number, extra: Partial<S
   return { i: seq++, id: `general:1m:tr${arm}`, kind: "trail", pack: "general", sl: 0.6, tr: arm, st: 0, on, pf: gl > 0 ? gp / gl : 0, dd: 0, n: 100, gn: 50, gp, gl, ...extra };
 }
 
-test("the defaults are All and Normal, and the five types are Normal, Trailing, Axis, Block, DCA in that order", () => {
+test("the defaults are All and Normal, and the six types are Normal, Exit, Trailing, Axis, Block, DCA in that order", () => {
   assert.equal(DEFAULT_RANGE_ID, "all");
   assert.equal(STEP_RANGES[0].id, "all");
   assert.equal(DEFAULT_TYPE, "normal");
-  assert.deepEqual(STRATEGY_TYPES.map((t) => t.label), ["Normal", "Trailing", "Axis", "Block", "DCA"]);
+  assert.deepEqual(STRATEGY_TYPES.map((t) => t.label), ["Normal", "Exit", "Trailing", "Axis", "Block", "DCA"]);
   assert.equal(rangeById("nonsense").id, "all", "an unknown range falls back to All");
   assert.equal(typeById("nonsense"), "normal", "an unknown type falls back to Normal");
 });
@@ -60,9 +60,12 @@ test("a trailing Set is filtered by its arm in PositionCost steps, not by the st
   assert.deepEqual(filterSets(rows, "trailing", "21-30", COST).map((r) => r.tr), ["3.60:1.20"]);
 });
 
-test("Normal shows base Sets only, Trailing trailing only, Axis, Block and DCA select no Set", () => {
-  const rows = [base(3, 1, 1, 1), base(9, 0, 1, 2), trail("0.60:0.36", 1, 1, 1)];
+test("Normal shows base Sets only, Exit the no-TP Sets only, Trailing trailing only, Axis, Block and DCA select no Set", () => {
+  const ex = base(5, 1, 1, 1, { kind: "exit", id: "general:1m:sl1.00:st5:xt" });
+  const rows = [base(3, 1, 1, 1), base(9, 0, 1, 2), trail("0.60:0.36", 1, 1, 1), ex];
   assert.equal(filterSets(rows, "normal", "all", COST).length, 2);
+  assert.deepEqual(filterSets(rows, "exit", "all", COST).map((r) => r.id), [ex.id]);
+  assert.deepEqual(filterSets(rows, "exit", "7-12", COST), [], "an Exit Set is filtered by its step like a base Set");
   assert.equal(filterSets(rows, "trailing", "all", COST).length, 1);
   for (const t of ["axis", "block", "dca"] as const) assert.equal(filterSets(rows, t, "all", COST).length, 0);
   assert.deepEqual(filterSets(rows, "normal", "7-12", COST).map((r) => r.st), [9]);

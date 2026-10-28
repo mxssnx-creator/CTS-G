@@ -71,7 +71,7 @@ def pool(book, tapes, hour):
             gp_v += gp
             gl_v += gl
             n_v += len(w)
-            ddts.append(-key[2] / 3600.0)
+            ddts.append(-key[4] / 3600.0)
     return {"total": tot, "valid": val, "validated_pct": round(100.0 * val / tot, 2) if tot else 0.0,
             "pf_pre": round(gp_a / gl_a, 3) if gl_a > 0 else None, "orders_pre": n_a,
             "pf_post": (round(gp_v / gl_v, 3) if gl_v > 0 else (99.0 if gp_v > 0 else None)) if val else None, "orders_post": n_v,

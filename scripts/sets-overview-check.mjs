@@ -74,7 +74,7 @@ try {
   expect((await page.getByTestId("sets-range-all").getAttribute("aria-pressed")) === "true", "Step range defaults to All");
   expect((await page.getByTestId("sets-type-normal").getAttribute("aria-pressed")) === "true", "Type defaults to Normal");
   const typeLabels = await page.locator('[data-testid="sets-type"] button').allInnerTexts();
-  expect(JSON.stringify(typeLabels) === JSON.stringify(["Normal", "Trailing", "Axis", "Block", "DCA"]), "types are Normal, Trailing, Axis, Block, DCA", JSON.stringify(typeLabels));
+  expect(JSON.stringify(typeLabels) === JSON.stringify(["Normal", "Exit", "Trailing", "Axis", "Block", "DCA"]), "types are Normal, Exit, Trailing, Axis, Block, DCA", JSON.stringify(typeLabels));
   const rangeLabels = await page.locator('[data-testid="sets-range"] button').allInnerTexts();
   expect(rangeLabels[0] === "All", "the first range is All", JSON.stringify(rangeLabels));
   await shot("results-default");
