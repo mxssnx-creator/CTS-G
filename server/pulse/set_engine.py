@@ -59,6 +59,10 @@ SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signa
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
 SHORT_MIN_PF_DEFAULT = 1.1
 SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
+TREND_PACK = "trend"                  # additional strategy: the Trend family (indication_extra), judged by Base on its own Sets
+BREAK_PACK = "breakout"               # additional strategy: the Breakout family
+TREND_VARIANTS_DEFAULT = ("trend_c6", "trend_c10", "trend_c20")      # combined across 1m / 5m / 15m, by range
+BREAK_VARIANTS_DEFAULT = ("brk_c6", "brk_c10", "brk_c20")
 GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
@@ -302,7 +306,20 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
 def short_range_signal(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
     """The Short Range pack: the Low-Range variants named in settings["shortRangeVariants"]. One variant firing is a
     signal; several firing the same way take the strongest confidence; opposite directions cancel (no signal)."""
-    names = settings.get("shortRangeVariants") or list(SHORT_VARIANTS_DEFAULT)
+    return _variant_signal(rows, settings.get("shortRangeVariants") or list(SHORT_VARIANTS_DEFAULT))
+
+
+def trend_signal_pack(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Trend pack: the trend variants named in settings["trendVariants"], combined as the Short Range pack does."""
+    return _variant_signal(rows, settings.get("trendVariants") or list(TREND_VARIANTS_DEFAULT))
+
+
+def breakout_signal_pack(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Breakout pack: the breakout variants named in settings["breakoutVariants"]."""
+    return _variant_signal(rows, settings.get("breakoutVariants") or list(BREAK_VARIANTS_DEFAULT))
+
+
+def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tuple[int, float, str]:
     votes = extra_votes(rows, names)
     if not votes:
         return 0, 0.0, "flat"
@@ -360,6 +377,10 @@ def pack_signals(
             row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
         if SHORT_PACK in packs:
             row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_LOOKBACK) : i + 1], ind_settings)
+        if TREND_PACK in packs:
+            row[TREND_PACK] = trend_signal_pack(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)
+        if BREAK_PACK in packs:
+            row[BREAK_PACK] = breakout_signal_pack(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:
@@ -975,6 +996,10 @@ class SetBook:
             packs.append("general")
         if bool(ov.get("stratShortRange", False)):
             packs.append(SHORT_PACK)
+        if bool(ov.get("stratTrend", False)):
+            packs.append(TREND_PACK)
+        if bool(ov.get("stratBreakout", False)):
+            packs.append(BREAK_PACK)
         self.packs = packs or ["indications"]
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
@@ -1046,6 +1071,8 @@ class SetBook:
             "typeSignals": bool(ov.get("indTypeSignals", True)),
             # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
             "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
+            "trendVariants": [str(x) for x in (ov.get("trendVariants") or TREND_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
+            "breakoutVariants": [str(x) for x in (ov.get("breakoutVariants") or BREAK_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
             "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if str(x) in EXTRA_INDICATORS}),
         }
         with self._lock:

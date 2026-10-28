@@ -934,10 +934,13 @@ def history_thread_keeps_real_history_and_tops_up_a_partial_one():
         kept, kept_flat = run(_Offline(), 1920)
         topped, topped_flat = run(_PagedKlines(), 500)
         livetail, _ = run(_Offline(), 1920, live=True)
+        boot_live, boot_flat = run(_Offline(), 0, live=True)      # no history yet: the live-built real rows bootstrap it, never the padding
+        boot_none, _ = run(_Offline(), 0)                          # no history and no real rows: nothing is ingested
     finally:
         pt.SYMBOLS[:] = saved
-    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0 and all(n == 1920 for n in livetail)
-    return ok, f"live-built tail on a full history -> {livetail}; offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
+    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0 and all(n == 1920 for n in livetail) \
+         and all(n == 40 for n in boot_live) and boot_flat == 0 and all(n == 0 for n in boot_none)
+    return ok, f"bootstrap from live-built rows {boot_live} (no real rows {boot_none}); live-built tail on a full history -> {livetail}; offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
 
 
 def no_other_lane_touches_a_set_position():

@@ -183,7 +183,7 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None):
                             on_cycle(p)
                     q = p.open.get(SYM)
                     if q is not None:
-                        trace.append((bi, k, round(q.qty, 9), round(q.entry, 9), round(q.sl_pct, 12), round(q.tp_pct, 12),
+                        trace.append((bi, k, round(q.qty, 9), round(q.entry, 9), round(q.sl_pct, 12), round(q.tp_pct, 12), round(q.sl, 9), round(q.tp, 9),
                                       None if q.trail is None else round(q.trail, 9)))
                     else:
                         c = p.closed[-1]
@@ -298,7 +298,8 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
         return [c, c + 0.01, c - 0.01, c, 1.0]
     rung = 100 * (1 - 0.5 * sl_f)                           # past the auto rung (0.4 x the stop distance), above the stop
     stop = 100 * (1 - sl_f)
-    path = [100 - (100 - rung) * k / 6 for k in range(1, 7)] + [rung] * 3 + [stop - 0.5] + [stop - 0.5] * 40
+    # the final fall ends between the stop of the entry (99.76) and the stop of the averaged entry: only the Set's own level exits
+    path = [100 - (100 - rung) * k / 6 for k in range(1, 7)] + [rung] * 3 + [stop - 0.02] + [stop - 0.02] * 40
     bars = flat + [bar(c) for c in path]
     (rsl, rtp), rep = replay(b0, st, bars, 5, 1)
     out = {}
@@ -308,7 +309,17 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
         qtys = sorted({t[2] for t in trace})
         out[name] = {"exit": liv and liv[:2], "qty": qtys, "dca closes": len(p.dca.closes), "set n": st.n if False else None,
                      "dca pnl": [round(r.get("pnl_pct"), 5) for r in p.dca.closes]}
-    same_exit = all(v["exit"] == (rep["reason"], rep["exit_i"]) for v in out.values())
+    # on: the stop and TP on the position never move, and the DCA lane is scored on its add alone
+    lv2, liv2, trace2 = live(_book(), st, bars, 5, 1, dca={"dcaOnSets": True})
+    p2 = live.pulse
+    levels_fixed = len({(t[6], t[7]) for t in trace2}) == 1
+    c = p2.closed[-1]
+    q0 = min(t[2] for t in trace2)
+    qa = c.qty - q0
+    fill = (c.entry * c.qty - 100.0 * q0) / qa if qa > 0 else 0.0
+    expect = (c.exit - fill) / fill if fill else None
+    scored = bool(p2.dca.closes) and expect is not None and abs(p2.dca.closes[-1]["pnl_pct"] - expect) < 1e-9 and abs(expect - c.pnl_pct) > 1e-5
+    same_exit = levels_fixed and scored and all(v["exit"] == (rep["reason"], rep["exit_i"]) for v in out.values())
     untouched = len(out["off"]["qty"]) == 1 and len(out["on, Sets not allowed"]["qty"]) == 1 and out["on, Sets not allowed"]["dca closes"] == 0
     added = len(out["on, onSets"]["qty"]) == 2 and out["on, onSets"]["dca closes"] == 1 and out["on, onSets"]["dca pnl"][0] < 0
     return same_exit and untouched and added, f"replay exit={rep and (rep['reason'], rep['exit_i'])}; {out}"

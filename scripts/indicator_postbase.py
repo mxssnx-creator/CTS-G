@@ -39,13 +39,23 @@ def evaluate(data, symbols, jobs, patch, sealed):
     trades = [r["net"] for r in rows if "net" in r]
     eff = [p["pf_post"] for p in pools if p["pf_post"] is not None]
     pcts = [p["validated_pct"] for p in pools]
+    packs = {}
+    for p in pools:
+        for k, v in p["by_pack"].items():
+            d = packs.setdefault(k, {"pf": [], "pct": [], "orders": []})
+            if v["pf_post"] is not None:
+                d["pf"].append(v["pf_post"])
+            d["pct"].append(v["pct"])
+            d["orders"].append(v["orders"])
+    by_pack = {k: {"eff_pf_median": round(statistics.median(d["pf"]), 3) if d["pf"] else None, "validated_pct_mean": round(sum(d["pct"]) / len(d["pct"]), 2),
+                   "orders_mean": round(sum(d["orders"]) / len(d["orders"]))} for k, d in packs.items()}
     gp = sum(x for x in trades if x > 0)
     gl = -sum(x for x in trades if x < 0)
     return {"hours_evaluated": len(pools), "effective_pf_median": round(statistics.median(eff), 3) if eff else None,
             "effective_pf_min": round(min(eff), 3) if eff else None, "validated_pct_mean": round(sum(pcts) / len(pcts), 2),
             "orders_valid_mean": round(sum(p["orders_post"] for p in pools) / len(pools)), "valid_sets_mean": round(sum(p["valid"] for p in pools) / len(pools), 1),
             "sets_total": pools[0]["total"], "pf_unfiltered_median": round(statistics.median([p["pf_pre"] for p in pools if p["pf_pre"] is not None]), 3),
-            "exec_orders": len(trades), "exec_pf": round(gp / gl, 3) if gl > 0 else None}
+            "exec_orders": len(trades), "exec_pf": round(gp / gl, 3) if gl > 0 else None, "by_pack": by_pack}
 
 
 def main():
@@ -65,6 +75,8 @@ def main():
         out[name] = r
         print(f"{name:34s} eff PF median {r['effective_pf_median']} (min {r['effective_pf_min']})  valid {r['validated_pct_mean']}% ({r['valid_sets_mean']}/{r['sets_total']})  "
               f"orders {r['orders_valid_mean']}  unfiltered {r['pf_unfiltered_median']}  exec PF {r['exec_pf']} on {r['exec_orders']}  [{time.time() - t0:.0f}s]", flush=True)
+        for k, v in r["by_pack"].items():
+            print(f"    pack {k:12s} eff PF median {v['eff_pf_median']}  valid {v['validated_pct_mean']}%  orders {v['orders_mean']}", flush=True)
         if a.out:
             json.dump(out, open(a.out, "w"), indent=1)
 

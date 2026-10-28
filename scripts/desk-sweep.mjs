@@ -105,15 +105,16 @@ try {
           return ident.includes(`${o} open`) && ident.includes(`${(c.closed ?? []).length} closed`);
         });
         expect(headerOk, `${view.label} results: open and closed counts in the header match the stats the page received`, ident);
-        // Last 15 PF tile against an independent computation from the raw closes
-        const m = text.match(/Last 15 PF\s*\n\s*([^\n]+)/i);
-        const got = m ? m[1].trim() : null;
+        // Last N PF tile (N is the engine's PF window, shown in the label) against an independent computation from the raw closes
+        const m = text.match(/Last (\d+) PF\s*\n\s*([^\n]+)/i);
+        const win = m ? Number(m[1]) : 15;
+        const got = m ? m[2].trim() : null;
         const shown = got === "—" ? null : got === "no loss" ? 99 : got !== null ? parseFloat(got) : undefined;
         const pfOk = cands.some((c) => {
-          const w = lastN(c.closed ?? [], 15);
+          const w = lastN(c.closed ?? [], win);
           return w.count === 0 ? got === "—" : shown !== undefined && shown !== null && Math.abs(shown - Math.min(w.pf, 99)) < 0.006;
         });
-        expect(pfOk, `${view.label} results: Last 15 PF matches an independent computation from the closes`, `tile ${got}; candidates ${cands.map((c) => lastN(c.closed ?? [], 15).pf).join(",")}`);
+        expect(pfOk, `${view.label} results: Last N PF matches an independent computation from the closes`, `tile ${got}; candidates ${cands.map((c) => lastN(c.closed ?? [], win).pf).join(",")}`);
         if (stats.sets?.pfBase?.base) {
           const m2 = text.match(/Effective PF . after Base\s*\n\s*([^\n]+)/i);
           const g2 = m2 ? m2[1].trim() : null;

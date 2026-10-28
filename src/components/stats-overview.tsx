@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
+import { formatPf } from "@/lib/sets-view";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -36,8 +37,8 @@ export function StatsOverview({
   const heroes = (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
-          k="Last 15 PF"
-          v={cost.count ? cost.pf.toFixed(2) : "—"}
+          k={`Last ${cost.n || 15} PF`}
+          v={cost.count ? formatPf(cost.pf) : "—"}
           s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />

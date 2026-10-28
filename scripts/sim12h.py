@@ -60,11 +60,14 @@ def pool(book, tapes, hour):
         gp_a += gp
         gl_a += gl
         n_a += len(w)
-        p = by_pack.setdefault(st.pack, [0, 0])
+        p = by_pack.setdefault(st.pack, [0, 0, 0.0, 0.0, 0])
         p[0] += 1
         if ok:
             val += 1
             p[1] += 1
+            p[2] += gp
+            p[3] += gl
+            p[4] += len(w)
             gp_v += gp
             gl_v += gl
             n_v += len(w)
@@ -73,7 +76,8 @@ def pool(book, tapes, hour):
             "pf_pre": round(gp_a / gl_a, 3) if gl_a > 0 else None, "orders_pre": n_a,
             "pf_post": (round(gp_v / gl_v, 3) if gl_v > 0 else (99.0 if gp_v > 0 else None)) if val else None, "orders_post": n_v,
             "ddt_mean_h": round(sum(ddts) / len(ddts), 3) if ddts else None, "ddt_max_h": round(max(ddts), 3) if ddts else None,
-            "by_pack": {k: {"total": v[0], "valid": v[1], "pct": round(100.0 * v[1] / v[0], 2) if v[0] else 0.0} for k, v in by_pack.items()}}
+            "by_pack": {k: {"total": v[0], "valid": v[1], "pct": round(100.0 * v[1] / v[0], 2) if v[0] else 0.0,
+                            "pf_post": round(v[2] / v[3], 3) if v[3] > 0 else None, "orders": v[4]} for k, v in by_pack.items()}}
 
 
 def run(a):
