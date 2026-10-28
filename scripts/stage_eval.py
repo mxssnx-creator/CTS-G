@@ -203,9 +203,11 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
 
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
-def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None) -> List[Dict[str, Any]]:
+def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
+            refresh_s: int = 3600) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
-    the gate or not (a control: does validation carry information out of sample?)."""
+    the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
+    this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
@@ -214,22 +216,30 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
     cf = cost_as_frac(book.cost_pct)
     lb = book.lookback * 60.0
-    for h in hours:
-        ranked: Dict[Tuple[str, str], List[Any]] = {}
-        valid_n = 0
+    every = max(1, int(refresh_s) // 60)
+
+    def rank_at(now: float):
+        ranked_: Dict[Tuple[str, str], List[Any]] = {}
+        valid_ = 0
         for st in book.by_idx:
             if only_steps is not None and (st.kind == "trail" or st.step not in only_steps):
                 continue                      # an evaluation of one step's Sets alone
-            ok, key, _, _ = gate_metrics(book, tapes, st, h)
+            ok, key, _, _ = gate_metrics(book, tapes, st, now)
             if ok:
-                valid_n += 1
+                valid_ += 1
             if ok or control == "all":
-                ranked.setdefault((st.pack, st.kind), []).append((key, st))
-        for k in ranked:
-            ranked[k].sort(key=lambda r: r[0], reverse=True)
+                ranked_.setdefault((st.pack, st.kind), []).append((key, st))
+        for k in ranked_:
+            ranked_[k].sort(key=lambda r: r[0], reverse=True)
+        return ranked_, valid_
+
+    for h in hours:
+        ranked, valid_n = rank_at(h)
         executed.append({"hour": h, "valid": valid_n, "total": len(book.by_idx)})
         for minute in range(60):
             t = int(h) + minute * 60
+            if minute and minute % every == 0:
+                ranked, _ = rank_at(float(t))
             for s in names:
                 i = idx_of[s].get(t)
                 if i is None or i <= busy[s]:

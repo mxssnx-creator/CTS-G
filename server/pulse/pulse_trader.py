@@ -4541,16 +4541,7 @@ class Pulse:
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
-            pack = pack_of_reason(why)
-            if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
-                if not intern.get(pack):
-                    alt = "general" if pack == "indications" else "indications"
-                    if intern.get(alt):
-                        pack = alt
-                    elif intern_any:
-                        pack = "general" if intern.get("general") else "indications"
-                    else:
-                        pack = "general"
+            # the pack is the signal's own (place() reads it from the reason): a signal never borrows another pack's Sets
             before = len(self.open)
             self.place(s, d, why, conf)
             if len(self.open) > before:

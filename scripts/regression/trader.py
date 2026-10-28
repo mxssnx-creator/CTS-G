@@ -1272,8 +1272,59 @@ def an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does():
     return ok, f"honours TP {honor} cid round trip={round_trip} twin by content={no_idx}"
 
 
+def the_entry_loop_places_the_set_signal_and_not_the_live_score():
+    """maybe_entries under the Base gate: the order placed is the Set history's signal of the completed minute (its pack,
+    direction and confidence), whatever the live general score says (here the opposite direction at a higher confidence)."""
+    from coord_engine import Coordinator
+    b, se = _signal_book()
+    sym = "A-USDT"
+    t_open = float(int(time.time() // 60) * 60 - 60)
+    full = se.synth_trend(600, step=0.09, noise=0.05)
+    bars = sig = None
+    for n in range(320, 600, 7):
+        b.bars.clear()
+        b.bar_t.clear()
+        b.ingest_bars(sym, full[:n], last_t=t_open)
+        sig = b.entry_signal(sym, t_open)
+        if sig:
+            bars = full[:n]
+            break
+    if not bars:
+        return False, "no signal bar in the fixture"
+    p = _bare_pulse()
+    p.sets = b
+    p.open = {}
+    p.halted = False
+    p.closed = []
+    p.strategy_closes = lambda: []
+    p.coord = Coordinator()
+    p.coord.load({}, {})
+    p.strat_ind = p.strat_general = True
+    p.indications = types.SimpleNamespace(settings={"enabled": True}, pick_entry=lambda *a, **k: None, best=lambda s: None, primary=lambda s: None)
+    p.score = lambda s: (-sig[1], "live", 0.99)            # the live score: opposite direction, higher confidence
+    p.entries_blocked = lambda: False
+    p.rearrange_opens = lambda: []
+    p.maybe_block_adds = p.maybe_dca_adds = lambda: None
+    p.available = 100.0
+    p.cooldown, p.skip_log, p.contracts, p.px = {}, {}, {}, {}
+    p.avail_notional = lambda *a: 100.0
+    placed = []
+    p.place = lambda s_, d, why, conf: placed.append((s_, d, why, round(conf, 6)))
+    old_syms, old_fresh = pt.SYMBOLS, pt.ENTRY_FRESH_S
+    try:
+        pt.SYMBOLS = [sym]
+        pt.ENTRY_FRESH_S = 61.0                              # the check must not depend on the second of the minute it runs in
+        p.maybe_entries()
+    finally:
+        pt.SYMBOLS, pt.ENTRY_FRESH_S = old_syms, old_fresh
+    want = [(sym, sig[1], None, round(sig[2], 6))]
+    ok = len(placed) == 1 and placed[0][1] == sig[1] and placed[0][3] == want[0][3] and placed[0][2].startswith(f"set:{sig[0]}:")
+    return ok, f"placed={placed} set signal={sig[:3]}"
+
+
 CHECKS = [
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
+    ("trader.entry-loop-places-the-set-signal", the_entry_loop_places_the_set_signal_and_not_the_live_score),
     ("trader.only-completed-minutes-reach-set-history", completed_minutes_only_reach_the_set_history),
     ("trader.exit-set-never-takes-tp-base-always", an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does),
     ("trader.drawdown-halt-follows-its-setting", drawdown_halt_follows_its_setting),
