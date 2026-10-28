@@ -611,7 +611,7 @@ function SettingsPage() {
                 <Slider
                   label="Min samples"
                   value={overlay.setMinSamples}
-                  min={8}
+                  min={5}
                   max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
@@ -1080,7 +1080,7 @@ function SettingsPage() {
                 <Num
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
-                  min={8}
+                  min={5}
                   max={40}
                   step={1}
                   onChange={(v) => patch("dcaPfWindow", v)}
@@ -1154,10 +1154,10 @@ function SettingsPage() {
               <div className="space-y-2">
                 <LiveAxis
                   name="Previous"
-                  range="8–12 step 2"
+                  range="4–12 step 2"
                   enabled={overlay.axisPrevEnabled}
                   window={overlay.axisPrevMaxWindow}
-                  min={8}
+                  min={4}
                   max={12}
                   step={2}
                   onEn={(v) => patch("axisPrevEnabled", v)}
@@ -1165,12 +1165,12 @@ function SettingsPage() {
                 />
                 <LiveAxis
                   name="Last"
-                  range="8–16 step 2"
+                  range="1–4"
                   enabled={overlay.axisLastEnabled}
                   window={overlay.axisLastMaxWindow}
-                  min={8}
-                  max={16}
-                  step={2}
+                  min={1}
+                  max={4}
+                  step={1}
                   onEn={(v) => patch("axisLastEnabled", v)}
                   onWin={(v) => patch("axisLastMaxWindow", v)}
                 />

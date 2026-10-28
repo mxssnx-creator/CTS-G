@@ -1055,7 +1055,7 @@ def the_desk_index_reproduces_the_engines_pooled_pf():
 
 def _block(**cfg):
     import block_engine as be
-    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 8}
+    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 5}
     base.update(cfg)
     return be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-block-"), "block.json"), base)
 
@@ -1065,7 +1065,7 @@ def _stack(b, lane, groups_ok, max_orders=20):
     whose PF decision passes (the others carry a losing observed PF). Returns the size of each order."""
     sizes = []
     for n in range(1, int(b.max_stack) + 1):
-        lane.pf_ring[n] = [3.0] * 8 if n in groups_ok else [-1.0] * 8
+        lane.pf_ring[n] = [3.0] * 6 if n in groups_ok else [-1.0] * 6
     for _ in range(max_orders):
         row = b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.5))
         if not row:

@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..001bc94 100644
+index b3a9ff3..bd037fd 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -4,6 +4,7 @@ from __future__ import annotations
@@ -22,7 +22,7 @@ index b3a9ff3..001bc94 100644
  from bingx_fast import FastBingX, ErrorLog
  from modules import resolve as resolve_modules
 -from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
-+from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
++from position_cost import MIN_VALIDATION_N, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
  from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
  from risk_variants import VariantBook, self_test as variants_self_test
  from set_engine import SetBook, self_test as sets_self_test
@@ -1390,8 +1390,9 @@ index b3a9ff3..001bc94 100644
          if ov.get("staggerS"):
              STAGGER_S = float(ov["staggerS"])
 -        self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
+-        self.pf_window = int(ov.get("pfWindow") or 15)
 +        self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
-         self.pf_window = int(ov.get("pfWindow") or 15)
++        self.pf_window = window_n(ov, "pfWindow", fallback=15)
          self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
 -        self.sl_max = float(ov.get("slMaxPct") or 1.20) / 100.0
 +        self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
@@ -1524,7 +1525,7 @@ index b3a9ff3..001bc94 100644
 +        rows = [c for c in self.closed if not getattr(c, "set_id", "")]
 +        n = int(getattr(self.block, "window", 25) or 25)
 +        res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
-+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
++        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", MIN_VALIDATION_N) or MIN_VALIDATION_N):
 +            return 0.0
 +        return float(res.get("pf") or 0.0)
 +
@@ -1960,7 +1961,7 @@ index b3a9ff3..001bc94 100644
          pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
          pc["minPf"] = self.coord.min_pf
 -        pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
-+        pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= self.coord.min_pf)
++        pc["pass"] = bool(pc["count"] < MIN_VALIDATION_N or pc["pf"] + 1e-9 >= self.coord.min_pf)
          pc["neutral"] = 1.0
          pc["plus1x"] = 1.1
          pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"

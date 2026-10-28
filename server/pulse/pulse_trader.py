@@ -3857,7 +3857,7 @@ class Pulse:
         rows = [c for c in self.closed if not getattr(c, "set_id", "")]
         n = int(getattr(self.block, "window", 25) or 25)
         res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
-        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", MIN_VALIDATION_N) or MIN_VALIDATION_N):
+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
             return 0.0
         return float(res.get("pf") or 0.0)
 

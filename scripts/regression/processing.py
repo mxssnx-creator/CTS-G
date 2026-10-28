@@ -763,7 +763,7 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
     return not bad and chosen > 0 and same, f"sets={len(first)} with an own hold={chosen} bad={bad[:3]} same_on_second_pass={same}"
 
 
-def validation_windows_follow_the_overall_n_and_never_read_fewer_than_8():
+def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     """pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN and trailRecalcN follow the overall validation's last N
     (setGateWindow) while windowsLinked is on (the default); unlinked each takes its own N, and no last-N validation reads fewer than
     8 orders (the gate minimum, the samples of Exit, Block and the coordinator, the Axis windows) whatever the setting."""
@@ -779,11 +779,10 @@ def validation_windows_follow_the_overall_n_and_never_read_fewer_than_8():
         sb = SetBook(); sb.load(overlay(**ov))
         co = Coordinator(); co.load({}, ov)
         ex = ExitBook(); ex.load(ov)
-        dc = DcaBook(); dc.load(ov)
         vb = VariantBook(); vb.load(ov)
-        return {"set": sb.pf_n, "coord": co.pf_window, "exit": ex.pf_n, "dca": dc.pf_n, "sl": vb.sl_recalc_n, "trail": vb.trail_recalc_n}
+        return {"set": sb.pf_n, "coord": co.pf_window, "exit": ex.pf_n, "sl": vb.sl_recalc_n, "trail": vb.trail_recalc_n}
 
-    own = {"pfWindow": 12, "setPfWindow": 12, "exitPfWindow": 12, "dcaPfWindow": 12, "slToTpRecalcN": 12, "trailRecalcN": 12}
+    own = {"pfWindow": 12, "setPfWindow": 12, "exitPfWindow": 12, "slToTpRecalcN": 12, "trailRecalcN": 12}
     tiny = {k: 3 for k in own}
     got = {
         "linked 50": windows({}),
@@ -802,14 +801,18 @@ def validation_windows_follow_the_overall_n_and_never_read_fewer_than_8():
         "unlinked 3 -> floor": {k: 8 for k in got["linked 50"]},
     }
     sb = SetBook(); sb.load(overlay(setGateMinTrades=3, holdAutoMin=2))
+    # only the validation gates and the five windows have the floor; the other counts stay as they were
     ex = ExitBook(); ex.load({"exitMinSamples": 2})
-    co = Coordinator(); co.load({}, {"setMinSamples": 2, "prevPosMinCount": 1, "axisLastMaxWindow": 1, "windowsLinked": False})
+    co = Coordinator(); co.load({}, {"setMinSamples": 7, "prevPosMinCount": 1, "axisLastMaxWindow": 1})
     bb = BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-win-"), "b.json"), {"prevPosMinCount": 2})
-    floors = {"gate_min": sb.gate_min, "hold_auto_min": sb.hold_auto_min, "exit_samples": ex.min_samples, "coord_samples": co.min_samples,
-              "coord_prev_min": co.prev_min_count, "axis_last_window": co.axes["last"].max_window, "block_samples": bb.min_samples}
+    floors = {"gate_min": sb.gate_min, "hold_auto_min": sb.hold_auto_min}
     floors_ok = all(v >= MIN_VALIDATION_N for v in floors.values())
-    ok = got == want and floors_ok and window_n({}, "pfWindow") == 50
-    return ok, f"windows {got}; floors {floors}"
+    dc = DcaBook(); dc.load({"dcaPfWindow": 3, "windowsLinked": True})
+    kept = {"dca_window": dc.pf_n, "exit_samples": ex.min_samples, "coord_samples": co.min_samples, "coord_prev_min": co.prev_min_count, "axis_last_window": co.axes["last"].max_window,
+            "block_samples": bb.min_samples, "main_eval": co.main_eval, "real_eval": co.real_eval}
+    kept_ok = kept == {"dca_window": 5, "exit_samples": 5, "coord_samples": 7, "coord_prev_min": 1, "axis_last_window": 1, "block_samples": 2, "main_eval": 5, "real_eval": 3}
+    ok = got == want and floors_ok and kept_ok and window_n({}, "pfWindow") == 50
+    return ok, f"windows {got}; floors {floors}; unchanged {kept}"
 
 
 CHECKS = [
@@ -845,7 +848,7 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
-    ("processing.validation-windows-follow-overall-n-floor-8", validation_windows_follow_the_overall_n_and_never_read_fewer_than_8),
+    ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
     ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized
