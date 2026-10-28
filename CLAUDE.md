@@ -118,6 +118,25 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   effective PF after Base reads 1.3 to 1.7 in-sample and the executed PF of the walk-forward stays under 1 (best 0.87 on 459
   orders). Choose on development windows; do not read these as an edge until an executed PF above 1 holds on the sealed window.
 
+## Venues
+
+- BingX is the default venue (`bingx-x01` live, `bingx-x02` VST demo). **Bybit V5 linear USDT perpetuals** run through the same
+  trader: `PULSE_CONN=bybit-x01` (mainnet, `https://api.bybit.com`) or `bybit-x02` (demo trading, `https://api-demo.bybit.com`,
+  public data from mainnet). `server/pulse/bybit_fast.py` (`FastBybit`, selected by `pulse_trader.make_api`) takes the trader's
+  BingX calls and returns BingX-shaped answers; nothing in the order logic differs by venue. Order tags are `Gb01` / `Gb02`.
+  Hedge mode (positionIdx 1 / 2), conditional reduce-only SL/TP (`triggerDirection` from side and kind), stops move by amend,
+  every create is idempotent through `orderLinkId` (a lost reply or a timeout is looked up before it is ever resent).
+- Bybit limits (`bybit_limits.py`): 80 requests/s IP pace (venue 600 per 5 s; HTTP 403 holds an IP for ten minutes, so nothing is
+  sent for 600 s after one), per-endpoint gates driven by `X-Bapi-Limit*` headers, a batch counts once per item, batches of 10,
+  failed items are resent alone, retCode 10002 resyncs the clock from `/v5/market/time`, a breaker holds new entries (never closes
+  or cancels) after repeated transient failures. Error classes: `bybit_limits.classify`; the words the trader reads are kept
+  in `msg`. Checks: `bybit.*` (stub venue, `scripts/regression/bybit.py`) and the `bybit:` mutants.
+- **Not verified against the live venue**: Bybit is geo-blocked from the build host, so the adapter is proven on a stub of the V5
+  documentation, not on Bybit. Run `bybit-x02` (demo) first. Credentials: `deploy/bybit-up.sh x01|x02` writes
+  `/opt/grok-x01-pulse/cred-bybit-xNN.json` (mode 600: `api_key`, `api_secret`, `is_testnet` "0" live / "1" demo); keys need Unified
+  Trading, Orders + Positions (trade) and Wallet (read), no withdrawal, bound to the host IP. The Bybit lanes are separate from
+  Overall in the desk and are not started by Overall Start or the watchdog. The drawdown halt ships on (18) in the Bybit overlays.
+
 ## Live safety
 
 - x01 runs real money. The drawdown halt is a protection: never clear it or reset the start equity without an explicit
