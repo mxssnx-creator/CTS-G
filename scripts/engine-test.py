@@ -1782,7 +1782,7 @@ def block_calc_test() -> None:
             return {"code": 0, "data": {"order": {
                 "orderId": f"oid{len(self.posts)}",
                 "avgPrice": "100",
-                "quantity": str(body.get("quantity"))}}}
+                "quantity": str(body.get("quantity")), "executedQty": str(body.get("quantity"))}}}
 
         def get(self, path, params=None):
             return {"code": 0, "data": []}
@@ -2205,7 +2205,10 @@ def set_orders_test() -> None:
                     row["orderId"] = oid
                     self.orders[oid] = row
                 px = self.fill.get(str(body.get("symbol")), PXS.get(str(body.get("symbol")), 100.0))
-                return {"code": 0, "data": {"order": {"orderId": oid, "avgPrice": str(px), "quantity": str(body.get("quantity") or "0")}}}
+                row = {"orderId": oid, "avgPrice": str(px), "quantity": str(body.get("quantity") or "0")}
+                if body.get("type") == "MARKET":
+                    row["executedQty"] = str(body.get("quantity") or "0")
+                return {"code": 0, "data": {"order": row}}
             return {"code": 0, "data": {}}
 
         def batch_place(self, orders):
@@ -2502,6 +2505,7 @@ def grouped_control_test() -> None:
                     "orderId": f"close-{len(self.posts)}",
                     "avgPrice": "100",
                     "quantity": str(body.get("quantity") or ""),
+                    "executedQty": str(body.get("quantity") or ""),
                 }}}
             return {"code": 0, "data": {"order": {
                 "orderId": f"single-{len(self.posts)}",
@@ -2813,7 +2817,8 @@ def strict_gate_test() -> None:
         def post(self, path, body):
             self.posts.append((path, dict(body)))
             return {"code": 0, "data": {"order": {"orderId": f"o{len(self.posts)}",
-                    "avgPrice": "100", "quantity": str(body.get("quantity"))}}}
+                    "avgPrice": "100", "quantity": str(body.get("quantity")),
+                    "executedQty": str(body.get("quantity"))}}}
 
     def mk_place_trader(book):
         p = mk_trader(book)

@@ -28,7 +28,7 @@ class FakeApi:
         self.posts.append((path, dict(body)))
         return {"code": 0, "data": {"order": {
             "orderId": f"oid{len(self.posts)}", "avgPrice": "100.5",
-            "quantity": str(body.get("quantity"))}}}
+            "quantity": str(body.get("quantity")), "executedQty": str(body.get("quantity"))}}}
 
     def get(self, path, params=None):
         return {"code": 0, "data": []}
@@ -221,6 +221,24 @@ class OverallLaneTests(unittest.TestCase):
         self.assertTrue(p._pending_add_open(b, "block"))
         p.block_overall = False
         self.assertFalse(p._pending_add_open(b, "block"))
+
+    def test_unfilled_add_keeps_the_block_level_pending_without_stacking(self):
+        p = trader(self.tmp.name, [position("general:sl0.6:st3")])
+        p.cid = lambda kind="o", pos=None, **kw: f"{pt.TAG}{kind}pending"
+        posts = []
+        def acknowledgement(path, body):
+            posts.append((path, dict(body)))
+            return {"code": 0, "data": {"order": {"orderId": "pending", "quantity": body["quantity"]}}}
+        p.api.post = acknowledgement
+        p.maybe_block_adds()
+        lane = p.block.lanes[f"{SYM}:LONG"]
+        self.assertEqual(lane.confirmed_add, 0)
+        self.assertEqual(len(lane.legs), 0)
+        self.assertEqual(len(p.pending_orders), 1)
+        self.assertEqual(p._next_fill_poll, 0.0)
+        p.block_last_emit = 0
+        p.maybe_block_adds()
+        self.assertEqual(len(posts), 1, "the pending group cannot submit the same add twice")
 
 
 class CloseLifecycleTests(unittest.TestCase):

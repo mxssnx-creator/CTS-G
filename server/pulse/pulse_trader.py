@@ -8530,6 +8530,10 @@ class Pulse:
                 "control_group_key": getattr(pos, "control_group_key", ""),
                 "control_range_key": getattr(pos, "control_range_key", "") or "aggregate",
             }
+            if filled_qty <= 1e-12 and not close_oid:
+                pending_meta["ambiguous_since"] = time.time()
+                self.recon_pending = True
+                self._reconcile_retry_at = 0.0
             self._remember_pending(
                 kind="close",
                 cid=close_cid,
@@ -8545,6 +8549,7 @@ class Pulse:
             )
             pos.pending_close_qty = max(0.0, requested_qty - filled_qty)
             if filled_qty <= 1e-12:
+                self._next_fill_poll = 0.0
                 if getattr(self, "control_orders", True):
                     try:
                         self.ensure_controls(pos)
@@ -10919,8 +10924,13 @@ class Pulse:
                 order_id=oid,
                 avg_price=avg,
                 group_key=block_group_key,
+                metadata={"ambiguous_since": time.time()} if filled <= 0 and not oid else None,
             )
             if filled <= 0:
+                self._next_fill_poll = 0.0
+                if not oid:
+                    self.recon_pending = True
+                    self._reconcile_retry_at = 0.0
                 self.block_last_emit = time.time()
                 log(f"BLOCK NO FILL {pos.symbol} #{row['blockCount']}", every=20.0, key=f"block-nofill:{pos.symbol}")
                 continue
@@ -11206,8 +11216,13 @@ class Pulse:
                 order_id=oid,
                 avg_price=avg,
                 group_key=group_key,
+                metadata={"ambiguous_since": time.time()} if filled <= 0 and not oid else None,
             )
             if filled <= 0:
+                self._next_fill_poll = 0.0
+                if not oid:
+                    self.recon_pending = True
+                    self._reconcile_retry_at = 0.0
                 self.dca_last_emit = time.time()
                 log(f"DCA NO FILL {pos.symbol} #{row['n']}", every=20.0, key=f"dca-nofill:{pos.symbol}")
                 continue
