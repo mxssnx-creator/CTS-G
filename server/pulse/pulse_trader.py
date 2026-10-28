@@ -3266,7 +3266,9 @@ class Pulse:
                     pos.trail = trail      # committed only when the exchange stop moved
                     if not self.replace_sl(pos, trail):
                         pos.trail = prev
-        if age >= float(self.sets.hist_time_bars) * 60.0:
+        own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
+        hold_bars = int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
+        if age >= float(hold_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return
         # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m

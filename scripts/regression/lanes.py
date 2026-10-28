@@ -376,6 +376,35 @@ def dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average():
     return ok, f"(sizes seen, distinct (stop, TP) pairs) auto={out['auto']} manual={out['manual']}"
 
 
+def per_step_hold_time_is_the_same_in_replay_and_live():
+    """A step with its hold on leaves on its own time exit (minutes after the entry), replay and live on the same bar; the steps
+    with the hold off keep the global time stop. The desk table: stepHoldOn / stepHoldMin, indexed by step - 1."""
+    b0 = _book()
+    st0 = _pick(b0, "time")
+    step = int(st0.step)
+    out, bad = {}, []
+    for hold in (3, 12, 30):
+        on = [False] * 12
+        mins = [10] * 12
+        on[step - 1], mins[step - 1] = True, hold
+        for d in (1, -1):
+            kw = {"stepHoldOn": on, "stepHoldMin": mins}
+            b = _book(**kw)
+            st = b.sets[st0.id]
+            bars = _scenario_bars("time", d)
+            (rsl, rtp), rep = replay(b, st, bars, 5, d)
+            lv, liv, _ = live(_book(**kw), st, bars, 5, d, others=False)
+            ok = rep is not None and liv is not None and rep["reason"] == "time" and liv[0] == "time" and liv[1] == rep["exit_i"] \
+                and rep["exit_i"] - 5 == hold and st.hold_bars == hold
+            out[f"{hold}{'+' if d > 0 else '-'}"] = (rep and rep["exit_i"] - 5, liv and liv[1] - 5)
+            if not ok:
+                bad.append((hold, d, rep and (rep["reason"], rep["exit_i"]), liv and liv[:2], st.hold_bars))
+    # a step with the hold off keeps the global stop
+    off_book = _book(stepHoldOn=[False] * 12, stepHoldMin=[5] * 12)
+    off_ok = all(x.hold_bars == 0 for x in off_book.by_idx)
+    return not bad and off_ok, f"step {step}: bars held (replay, live) by hold and side {out}; hold off keeps global={off_ok}" + (f" MISMATCH {bad}" if bad else "")
+
+
 def other_strategies_never_change_a_set_position():
     """Differential: the same Set position on the same random series, once alone and once with the Exit lanes, Block, DCA
     and rearrange all active around it. Exit, every tick's size, entry, levels and trailing stop are identical."""
@@ -1184,6 +1213,7 @@ CHECKS = [
     ("trader.block-carried-parent-and-partial-add", a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial),
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
+    ("trader.per-step-hold-same-in-replay-and-live", per_step_hold_time_is_the_same_in_replay_and_live),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
     ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),

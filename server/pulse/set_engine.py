@@ -471,6 +471,7 @@ class SetState:
     trail_give: float
     step: int = 3
     tp_pct: float = 0.0045
+    hold_bars: int = 0              # this Set's own time exit in bars (minutes); 0 = the global time stop (stepHoldOn / stepHoldMin)
     idx: int = 0
     pack_i: int = 0
     sl_i: int = 0
@@ -599,7 +600,7 @@ def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = Non
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
-    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac")
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold")
 
     def __init__(self, st: "SetState", symbol: str) -> None:
         self.st = st
@@ -613,6 +614,7 @@ class SetLane:
         self.give = st.trail_give / 100.0 if self.use_trail else 0.0
         self.sl_base = st.tp_pct * (st.sl_ratio if st.kind == "base" else TRAIL_SL_RATIO)
         self.tp_frac = st.tp_pct
+        self.hold = int(getattr(st, "hold_bars", 0) or 0)      # the Set's own time exit (bars); 0 = the global one
 
     def step(self, i: int, bar: Sequence[float], d: int, conf: float, allowed: bool, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Advance one bar. Returns the closed trade (a dict) or None.
@@ -638,7 +640,7 @@ class SetLane:
             else:
                 o["peak"] = min(o["peak"], float(bar[2]))
             why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not cfg["honor_tp"])
-            if why is None and held >= cfg["time_bars"]:
+            if why is None and held >= (self.hold or cfg["time_bars"]):
                 why, px = "time", float(bar[3])
             if why is None and held >= cfg["scratch_bars"]:
                 if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
@@ -691,7 +693,7 @@ class SetLane:
         thr = cfg["entry_conf"]
         if cand is None:
             cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
-        time_bars = cfg["time_bars"]
+        time_bars = self.hold or cfg["time_bars"]
         scratch_bars = cfg["scratch_bars"]
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
@@ -881,6 +883,26 @@ class SetLane:
         self.cool = cool
         return out
 
+STEP_HOLD_STEPS = 12
+STEP_HOLD_LOW = (1, 50)        # allowed minutes for steps 1..5 (the desk slider); the engine itself accepts 1..720
+STEP_HOLD_HIGH = (30, 350)     # steps 6..12
+
+
+def parse_step_hold(on: Any, minutes: Any) -> Dict[int, int]:
+    """{step: minutes} for the steps whose hold is on. Both lists are indexed by step - 1; a missing or invalid entry is off."""
+    out: Dict[int, int] = {}
+    if not isinstance(on, (list, tuple)) or not isinstance(minutes, (list, tuple)):
+        return out
+    for i in range(min(STEP_HOLD_STEPS, len(on), len(minutes))):
+        try:
+            m = int(round(float(minutes[i])))
+        except (TypeError, ValueError):
+            continue
+        if bool(on[i]) and 1 <= m <= 720:
+            out[i + 1] = m
+    return out
+
+
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
@@ -990,6 +1012,9 @@ class SetBook:
             self.hist_honor_tp = not bool(ov["exitIgnoreTp"])
         else:
             self.hist_honor_tp = bool(ov.get("setHonorTp", True))
+        # per-step hold times: stepHoldOn[i] / stepHoldMin[i] belong to step i + 1 (steps 1..12); an "on" step leaves on its own
+        # time exit after that many minutes, an "off" step keeps the global time stop. Replay and live read the same table.
+        self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin"))
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
@@ -1182,6 +1207,8 @@ class SetBook:
         self.retired = gone
         self.sets = next_sets
         self.by_idx = by_idx
+        for st_ in by_idx:
+            st_.hold_bars = self.hold_bars_for(st_)
         self.progress.sets_total = len(self.sets)
         self._topo_gen += 1
 
@@ -1774,6 +1801,15 @@ class SetBook:
         # Set that has the orders
         rows.sort(key=lambda s: (s.gate_n >= self.gate_min,) + self.rank_key(s), reverse=True)
         return rows[0]
+
+    def hold_bars_for(self, st: "SetState") -> int:
+        """The Set's own time exit in bars (one bar = one minute), 0 when its step has no hold of its own. A trailing Set takes the
+        step of its arm (arm % over PositionCost)."""
+        table = getattr(self, "step_hold", None) or {}
+        if not table:
+            return 0
+        step = int(st.step) if st.kind == "base" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
+        return int(table.get(step, 0))
 
     @property
     def scratch_bars(self) -> int:
