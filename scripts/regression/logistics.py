@@ -99,6 +99,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
     "ddHaltPct": "x01 drawdown halt switched off by the owner; desk default 18 %",
+    "volumeFactor": "x01 volume factor lowered to 0.5 by the owner (2026-10-28); desk default 1",
 }
 
 

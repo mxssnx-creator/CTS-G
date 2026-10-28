@@ -58,7 +58,11 @@ def load_bars(data_dir: str, n_symbols: int) -> Tuple[List[str], Dict[str, List[
 
 def make_book() -> se.SetBook:
     b = se.SetBook()
-    b.load(json.load(open(OVERLAY)))
+    ov = json.load(open(OVERLAY))
+    patch = os.environ.get("STAGE_OVERLAY_PATCH")      # e.g. {"extraIndicators": ["trend_c10"]}: a variant under test
+    if patch:
+        ov.update(json.loads(patch))
+    b.load(ov)
     return b
 
 
