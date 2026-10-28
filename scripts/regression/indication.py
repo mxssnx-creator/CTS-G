@@ -106,8 +106,14 @@ def snapshot_survives_concurrent_writes():
 
     w = threading.Thread(target=writer)
     r = threading.Thread(target=reader)
-    w.start(); r.start()
-    r.join(60); w.join(60)
+    import sys
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)          # switch threads constantly: a reader that iterates the live dict is then caught every run
+    try:
+        w.start(); r.start()
+        r.join(60); w.join(60)
+    finally:
+        sys.setswitchinterval(old)
     ok = not errors and not r.is_alive() and len(reads) > 0
     return ok, f"reads={len(reads)} errors={errors[:1]}"
 
