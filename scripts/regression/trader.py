@@ -46,6 +46,45 @@ def _bare_pulse():
     return p
 
 
+def restored_book_drops_a_position_only_when_two_reads_agree():
+    """A position in the saved book that the venue does not list at start is dropped only when a second read agrees (a lagging
+    positions list must not unprotect a live position); one the venue still lists, in either mode, stays."""
+    def pos(sym, side):
+        return pt.Position(symbol=sym, side=side, qty=1.0, entry=10.0, opened_at=1.0, sl=9.0, tp=11.0, peak=10.0)
+
+    def run(first, second, saved):
+        p = _bare_pulse()
+        p.open = {s_: pos(s_, sd) for s_, sd in saved}
+        reads = [first, second]
+
+        class Api:
+            def get(self, path, extra=None):
+                rows = reads.pop(0) if reads else second
+                return {"code": 0, "data": rows}
+        p.api = Api()
+        p.cooldown = {}
+        p.close_from_venue = lambda pos_, why: False
+        p.cancel_controls = lambda sym: None
+        p.save_open_book = lambda: None
+        real_sleep = pt.time.sleep
+        pt.time.sleep = lambda s_: None
+        try:
+            p.reconcile_restored_book()
+        finally:
+            pt.time.sleep = real_sleep
+        return sorted(p.open)
+    other = {"symbol": "OTHER-USDT", "positionSide": "LONG", "positionAmt": "1"}
+    mine = {"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "1"}
+    oneway = {"symbol": "A-USDT", "positionSide": "BOTH", "positionAmt": "-2"}
+    lag = run([other], [other, mine], [("A-USDT", "LONG")])                  # the second read lists it: kept
+    gone = run([other], [other], [("A-USDT", "LONG")])                       # two reads agree: dropped
+    held = run([other, mine], [other, mine], [("A-USDT", "LONG")])           # listed: kept
+    both = run([oneway], [oneway], [("A-USDT", "SHORT")])                    # one-way mode: the sign of the amount is the side
+    empty = run([], [], [("A-USDT", "LONG")])                                # an empty list can be lag: nothing is dropped
+    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == ["A-USDT"]
+    return ok, f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, empty list kept={empty}"
+
+
 def cycles_start_at_least_scan_apart():
     """Ticks are not an input to the pacing: cycles of 10 ms each, scan 0.2 s. Every start is 0.2 s after the last."""
     scan, cost = 0.2, 0.01
@@ -1138,6 +1177,7 @@ CHECKS = [
     ("trader.lanes-set-position-gets-no-add-on-lane", a_set_position_gets_no_add_on_lane),
     ("trader.no-entry-on-a-failed-data-check", no_entry_on_a_symbol_that_failed_the_data_check),
     ("trader.history-thread-fetches-at-start", history_thread_fetches_at_start_and_never_replays_padding),
+    ("trader.restored-book-drop-needs-two-reads", restored_book_drops_a_position_only_when_two_reads_agree),
     ("trader.history-kept-offline-and-topped-up", history_thread_keeps_real_history_and_tops_up_a_partial_one),
     ("trader.departed-symbol-leaves-set-history", a_symbol_that_left_the_universe_leaves_the_set_history),
     ("trader.credentials-from-private-file", credentials_come_from_a_private_file_without_redis),

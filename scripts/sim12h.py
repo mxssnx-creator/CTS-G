@@ -96,16 +96,17 @@ def run(a):
     print(f"symbols={len(names)} sets={len(book.by_idx)} sim {time.strftime('%F %H:%M', time.gmtime(hours[0]))} -> "
           f"{time.strftime('%F %H:%M', time.gmtime(t_end))} UTC, pre-history {a.pre} h, gate check {n_chk - bad}/{n_chk}, build {time.time() - t0:.0f}s", flush=True)
     cfg = sg.lane_cfg(book)
-    axis_cfg = (4, 1.2, 8)                                       # the coordinator's gate, as stage_eval's "axis current"
-    runs = {"axis": sg.execute(book, names, bars, times, shadow, tapes, hours, axis=axis_cfg),
-            "no axis": sg.execute(book, names, bars, times, shadow, tapes, hours)}
+    axis_cfg = (6, 1.0, 0)          # the best Axis found on the 30-day development window (axis_eval): last 6 closes at or above PF 1.0
+    free = sg.execute(book, names, bars, times, shadow, tapes, hours)
+    evidence = sorted((r["t"], r["net"]) for r in free if "net" in r)           # the Axis reads a paper stream, see axis_eval
+    runs = {"axis": sg.execute(book, names, bars, times, shadow, tapes, hours, axis=axis_cfg, axis_evidence=evidence), "no axis": free}
     cf = cost_as_frac(book.cost_pct)
 
     def trades_of(rows):
         return sorted((r for r in rows if "net" in r), key=lambda r: r["t"])
 
-    primary = trades_of(runs["axis"])
-    plain = trades_of(runs["no axis"])
+    primary = trades_of(runs["no axis"])          # the shipped config: the Axis gates are off
+    plain = trades_of(runs["axis"])               # the alternative shown next to it
     # add-on lanes on the executed positions (own results only)
     block = []
     dca = []
@@ -162,7 +163,7 @@ def run(a):
             "last15_pf": pf_of(last15[-15:]),
             "equity": round(eq["main"], 4), "equity_alt": round(eq["alt"], 4), "dd_usd": round(dd_usd, 4),
             "dd_pct": round(100.0 * dd_usd / peak["main"], 3),
-            "axis_pf": pf_of(cum), "noaxis_pf_cum": pf_of([r["net"] for r in plain if r["t"] < h + 3600]),
+            "axis_pf": pf_of([r["net"] for r in plain if r["t"] < h + 3600]), "noaxis_pf_cum": pf_of(cum),
             "block_pf_hour": pf_of(bh), "block_pf_cum": pf_of(block_cum), "block_legs": len(block_cum),
             "dca_pf_hour": pf_of(dh), "dca_pf_cum": pf_of(dca_cum), "dca_adds": len(dca_cum),
         })
@@ -179,8 +180,8 @@ def run(a):
     if cur_start is not None:
         longest = max(longest, t_end - cur_start)
     total = {
-        "trades": len(primary), "pf_exec": pf_of([r["net"] for r in primary]), "pf_exec_no_axis": pf_of([r["net"] for r in plain]),
-        "trades_no_axis": len(plain), "win_rate": round(100.0 * sum(1 for r in primary if r["net"] > 0) / len(primary), 1) if primary else None,
+        "trades": len(primary), "pf_exec": pf_of([r["net"] for r in primary]), "pf_exec_axis": pf_of([r["net"] for r in plain]),
+        "trades_axis": len(plain), "win_rate": round(100.0 * sum(1 for r in primary if r["net"] > 0) / len(primary), 1) if primary else None,
         "equity_end": round(eq["main"], 4), "equity_alt_end": round(eq["alt"], 4),
         "max_dd_usd": round(max([s[3] for s in series] or [0.0]), 4), "max_dd_pct": round(max([s[4] for s in series] or [0.0]), 3),
         "equity_ddt_h": round(longest / 3600.0, 2),

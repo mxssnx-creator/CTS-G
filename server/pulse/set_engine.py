@@ -386,9 +386,9 @@ def pack_signals(
             row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
         if SHORT_PACK in packs:
             row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)    # each name reads its own window
-        for pk, (_sw, key, default) in EXTRA_PACKS.items():
+        for pk, (_sw, vkey, default) in EXTRA_PACKS.items():          # (not `key`: that is this bar's memo key)
             if pk in packs:
-                row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(key) or list(default))
+                row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(vkey) or list(default))
         for p in packs:
             signals[p][i] = row.get(p, (0, 0.0, ""))
         if key is not None:

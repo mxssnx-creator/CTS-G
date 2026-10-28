@@ -453,6 +453,22 @@ def effective_pf_is_pooled_over_valid_sets_only():
                 f"over {snap['unfiltered']['sets']}; validated {snap['validatedPct']}% ({snap['valid']}/{snap['total']}) packs={list(packs)}")
 
 
+def the_signal_memo_holds_one_entry_per_bar_for_every_pack():
+    """pack_signals memoises each bar's signals under that bar's window key. An extra pack's loop once reused the memo key name
+    and stored every bar under one entry: no hit was ever possible. One entry per scored bar, and a second pass reads them."""
+    import set_engine as se
+    b = SetBook()
+    b.load(overlay(stratMulti=True, stratTrend=True, **SMALL))
+    bars = synth_bars(9, 420)
+    cache = {}
+    first = se.pack_signals(bars, b.packs, b.ind_settings, 0.0, 100, cache=cache, salt=7)
+    n = len(cache)
+    keys = set(cache)
+    second = se.pack_signals(bars, b.packs, b.ind_settings, 0.0, 100, cache=cache, salt=7)
+    ok = n == len(bars) - 100 and set(cache) == keys and first == second and {"multi", "trend", "indications"} <= set(b.packs)
+    return ok, f"memo entries={n} (scored bars {len(bars) - 100}); same keys on the second pass={set(cache) == keys}; identical signals={first == second}"
+
+
 def pack_change_does_not_poison_the_signal_memo():
     """The signal memo is kept across a reload. A reload that switches a pack on must not find memo entries written
     without that pack: the replay has to complete, not fail with a missing pack on every symbol."""
@@ -678,6 +694,7 @@ CHECKS = [
     ("processing.base-gate-always-on", the_base_gate_cannot_be_switched_off),
     ("processing.pf-progress-history", pf_progress_history_is_continuous_and_bounded),
     ("processing.pack-change-keeps-memo-sound", pack_change_does_not_poison_the_signal_memo),
+    ("processing.signal-memo-one-entry-per-bar", the_signal_memo_holds_one_entry_per_bar_for_every_pack),
     ("processing.effective-pf-pooled-over-valid-sets", effective_pf_is_pooled_over_valid_sets_only),
     ("processing.pick-any-no-gap-between-lookups", pick_any_has_no_gap_between_lookups),
     ("processing.departed-symbols-leave-caches", departed_symbols_leave_every_cache),

@@ -147,7 +147,7 @@ def build(d, out):
         k("Equity", f'{tot["equity_end"]:.3f}', f'from {st["balance"]:g} · {tot["equity_end"] - st["balance"]:+.3f} at {st["notional"]:g} per order'),
         k("Max drawdown", f'{tot["max_dd_pct"]:.2f}%', f'{tot["max_dd_usd"]:.3f} from peak · longest {tot["equity_ddt_h"]:g} h under water'),
         k("PF executed", fmt_pf(tot["pf_exec"]), f'{tot["trades"]} positions · win rate {tot["win_rate"]}%'),
-        k("PF without Axis", fmt_pf(tot["pf_exec_no_axis"]), f'{tot["trades_no_axis"]} positions'),
+        k("PF with Axis", fmt_pf(tot["pf_exec_axis"]), f'{tot["trades_axis"]} positions · gate off in the shipped config'),
         k("PF after Base", fmt_pf(last["pf_post"]), f'{last["sets_valid"]} of {last["sets_total"]} Sets valid ({last["validated_pct"]}%) · {last["orders_post"]} orders · last hour'),
         k("PF before Base", fmt_pf(last["pf_pre"]), f'{last["orders_pre"]} orders (every Set) · by design under 1'),
         k("Block legs PF", fmt_pf(tot["block_pf"]), f'{tot["block_legs"]} legs · idle in the shipped config'),
@@ -173,7 +173,7 @@ def build(d, out):
     ch.append(chart("Drawdown time of valid Sets", "hours, mean and longest (the limit is %g h)" % st["max_ddt_h"], [
         ("mean", "--s1", [(e["t"], e["ddt_mean_h"]) for e in ev], "line"), ("longest", "--s2", [(e["t"], e["ddt_max_h"]) for e in ev], "line")], t0, t1, ymin=0))
     ch.append(chart("Add-on lanes and Axis", "cumulative PF per lane (capped at 6); each is scored on its own results", [
-        ("with Axis (executed)", "--s1", hp("cum_pf"), "line"), ("without Axis", "--s2", hp("noaxis_pf_cum"), "line"),
+        ("executed (Axis off)", "--s1", hp("cum_pf"), "line"), ("with Axis (last 6 >= 1.0)", "--s2", hp("axis_pf"), "line"),
         ("Block legs", "--s3", hp("block_pf_cum"), "line"), ("DCA adds", "--s4", hp("dca_pf_cum"), "line")], t0, t1, ref=1.0))
     cols = [("hour", "Hour (UTC)"), ("sets", "Sets valid / all"), ("validated_pct", "Valid %"), ("pf_pre", "PF before Base"), ("pf_post", "PF after Base"),
             ("orders_post", "Orders (valid)"), ("ddt", "DDT mean / max h"), ("opened", "Opened"), ("closed", "Closed"), ("open_at_end", "Open at end"),
@@ -195,7 +195,7 @@ def build(d, out):
     note = (f'Walk-forward on stored 1-minute history of {len(st["symbols"])} symbols: {st["pre_hours"]} h of pre-history, then {st["hours"]} simulated hours, '
             f'{st["sets"]} Sets from the {html.escape(st["overlay"])} settings, PositionCost {st["cost_pct"]}%. Each hour every Set is scored from its own tape (the gate: '
             f'at least {st["gate_min_orders"]} orders, PF over the last {st["gate_window"]} at or above {st["min_pf"]}, drawdown time under {st["max_ddt_h"]:g} h; checked against the engine on {st["gate_check"]} samples), '
-            f'valid Sets are ranked and positions open under the best one and leave by its own lane. Axis is the coordinator gate on the executed closes (last 4 PF at least 1.2, pause after 8 losses in a row). '
+            f'valid Sets are ranked and positions open under the best one and leave by its own lane. The Axis gates are off in the shipped config; the alternative run applies the best gate from the 30-day development window (last 6 closes of the unfiltered stream at PF 1.0 or more). '
             f'Block and DCA are shown as add-on lanes on those positions (Block: up to 6 legs, ratio 1; DCA: the auto plan), each scored on its own legs or adds; both are off or idle in the shipped config. '
             f'Twelve hours and a few dozen positions are a small sample: read the shape, not the decimals.')
     body = f"""<title>12 Hour Simulation</title>

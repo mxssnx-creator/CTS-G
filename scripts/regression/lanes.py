@@ -316,9 +316,11 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
     seen = []
     orig = b2.on_live_close
     b2.on_live_close = lambda r: (seen.append(r), orig(r))[1]
-    lv2, liv2, trace2 = live(b2, st, bars, 5, 1, dca={"dcaOnSets": True})
+    def far_venue_stop(p_, pos_):               # the venue stop sits far out: only the lane's own level can close the position
+        pos_.sl = pos_.entry * 0.98
+    lv2, liv2, trace2 = live(b2, st, bars, 5, 1, dca={"dcaOnSets": True}, after_open=far_venue_stop)
     p2 = live.pulse
-    levels_fixed = len({(t[6], t[7]) for t in trace2}) == 1
+    levels_fixed = len({(t[6], t[7]) for t in trace2}) == 1 and abs(trace2[0][6] - 98.0) < 1e-6
     c = p2.closed[-1]
     q0 = min(t[2] for t in trace2)
     qa = c.qty - q0
