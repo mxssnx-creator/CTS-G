@@ -23,7 +23,7 @@ AUTO_RUNG_FRACS = [0.4]
 AUTO_RUNG_MULT = 0.5
 AUTO_MAX_EXPOSURE_X = 2.0       # base size + all adds never above this multiple of the base size
 
-from position_cost import GATE_MIN_PF_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_cost_pct, signed_result_r, window_n
+from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_cost_pct, signed_result_r
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
@@ -159,7 +159,7 @@ class DcaBook:
         self.be_pct = be / 100.0   # dcaBreakevenProfitPct is percent
         cd_raw = ov.get("dcaCooldownSeconds", coord.get("dcaCooldownSeconds", cts.get("dcaCooldownSeconds", 30)))
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
-        self.pf_n = max(MIN_VALIDATION_N, window_n(ov, "dcaPfWindow", "setPfWindow", fallback=15))
+        self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or GATE_MIN_PF_DEFAULT)
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
@@ -228,7 +228,7 @@ class DcaBook:
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
             self.active = False
             self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
-        elif pc["count"] >= min(MIN_VALIDATION_N, self.pf_n) and pc["pf"] + 1e-9 < self.min_pf:
+        elif pc["count"] >= min(8, self.pf_n) and pc["pf"] + 1e-9 < self.min_pf:
             self.active = False
             self.deact_reason = f"last15 PF {pc['pf']:.2f}<{self.min_pf:.2f}"
         else:

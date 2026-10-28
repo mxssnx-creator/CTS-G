@@ -611,7 +611,7 @@ function SettingsPage() {
                 <Slider
                   label="Min samples"
                   value={overlay.setMinSamples}
-                  min={8}
+                  min={5}
                   max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
@@ -715,6 +715,7 @@ function SettingsPage() {
                 <Slider label="Opt SL min" value={overlay.exitOptSlMin} min={0.05} max={0.5} step={0.01} unit="%" onChange={(v) => patch("exitOptSlMin", v)} />
                 <Slider label="Opt SL max" value={overlay.exitOptSlMax} min={0.2} max={1.5} step={0.05} unit="%" onChange={(v) => patch("exitOptSlMax", v)} />
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
+                <Slider label="Exit min samples" value={overlay.exitMinSamples} min={5} max={40} step={1} hint="default 8 · closes of a lane before it is judged" onChange={(v) => patch("exitMinSamples", v)} />
                 <Slider label="Exit PF window" value={overlay.exitPfWindow} min={8} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
                 <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
                 <Slider
@@ -766,10 +767,10 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
-                <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
-                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
-                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
+                <Slider label="Prev window" value={overlay.prevPosWindow} min={5} max={100} step={1} hint="closes the coordinator's previous-positions axis reads" onChange={(v) => patch("prevPosWindow", v)} />
+                <Slider label="Prev min count" value={overlay.prevPosMinCount} min={1} max={50} step={1} hint="default 8" onChange={(v) => patch("prevPosMinCount", v)} />
+                <Slider label="Main eval pos count" value={overlay.mainEvalPosCount} min={3} max={50} step={1} hint="default 8" onChange={(v) => patch("mainEvalPosCount", v)} />
+                <Slider label="Real eval pos count" value={overlay.realEvalPosCount} min={3} max={50} step={1} hint="default 8" onChange={(v) => patch("realEvalPosCount", v)} />
                 <KV k="Min step" v={String(overlay.minStep)} />
                 <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>
@@ -794,6 +795,24 @@ function SettingsPage() {
                   label="Active Real overlay"
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
+                />
+                <Num
+                  label="Block min samples"
+                  value={overlay.blockMinSamples}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="Block's own count (default 8) — independent of the PF windows and the coordinator's prev counts"
+                  onChange={(v) => patch("blockMinSamples", v)}
+                />
+                <Num
+                  label="Block window"
+                  value={overlay.blockWindow}
+                  min={8}
+                  max={100}
+                  step={1}
+                  hint="closes the Block evidence reads (default 25)"
+                  onChange={(v) => patch("blockWindow", v)}
                 />
                 <Num
                   label="Max stack"
@@ -1080,7 +1099,7 @@ function SettingsPage() {
                 <Num
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
-                  min={8}
+                  min={5}
                   max={40}
                   step={1}
                   onChange={(v) => patch("dcaPfWindow", v)}
@@ -1154,10 +1173,10 @@ function SettingsPage() {
               <div className="space-y-2">
                 <LiveAxis
                   name="Previous"
-                  range="8–12 step 2"
+                  range="4–12 step 2"
                   enabled={overlay.axisPrevEnabled}
                   window={overlay.axisPrevMaxWindow}
-                  min={8}
+                  min={4}
                   max={12}
                   step={2}
                   onEn={(v) => patch("axisPrevEnabled", v)}
@@ -1165,12 +1184,12 @@ function SettingsPage() {
                 />
                 <LiveAxis
                   name="Last"
-                  range="8–16 step 2"
+                  range="1–4"
                   enabled={overlay.axisLastEnabled}
                   window={overlay.axisLastMaxWindow}
-                  min={8}
-                  max={16}
-                  step={2}
+                  min={1}
+                  max={4}
+                  step={1}
                   onEn={(v) => patch("axisLastEnabled", v)}
                   onWin={(v) => patch("axisLastMaxWindow", v)}
                 />

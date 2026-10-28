@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, window_n
 
 AXIS_SPECS = {
-    "prev": {"min": 8, "max": 12, "step": 2, "default": 12},
-    "last": {"min": 8, "max": 16, "step": 2, "default": 8},
+    "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
+    "last": {"min": 1, "max": 4, "step": 1, "default": 4},
     "cont": {"min": 1, "max": 8, "step": 1, "default": 8},
     "pause": {"min": 1, "max": 8, "step": 1, "default": 8},
 }
@@ -62,11 +62,11 @@ class Coordinator:
         self.noise = 0.05
         self.vol_weight = 0.3
         self.outbreak = [3, 5, 10]
-        self.prev_min_count = MIN_VALIDATION_N
+        self.prev_min_count = 8
         self.prev_window = 25
-        self.main_eval = MIN_VALIDATION_N
+        self.main_eval = 8
         self.min_samples = 12
-        self.real_eval = MIN_VALIDATION_N
+        self.real_eval = 8
         self.min_step = 6
         self.max_sl_ratio = 2.5
         self.trailing_min_step = 6
@@ -100,7 +100,7 @@ class Coordinator:
         except Exception:
             self.min_pf = float(ov.get("minPf") or GATE_MIN_PF_DEFAULT)
         self.pf_window = window_n(ov, "pfWindow", fallback=LAST_N_DEFAULT)
-        self.min_samples = max(MIN_VALIDATION_N, int(ov.get("setMinSamples") or 12))
+        self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
         # percent everywhere (0.12 = 0.12%), the same unit as position_cost.cost_as_frac; no magnitude guessing
         if not self.position_cost_pct > 0:  # zero, negative or NaN is a config error: default, nothing else is guessed
@@ -111,10 +111,10 @@ class Coordinator:
         if isinstance(raw_ob, str):
             raw_ob = [int(x) for x in raw_ob.replace("[", "").replace("]", "").split(",") if x.strip().isdigit()]
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
-        self.prev_min_count = max(MIN_VALIDATION_N, int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or MIN_VALIDATION_N))
+        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 8)
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
-        self.main_eval = max(MIN_VALIDATION_N, int(coord.get("mainEvalPosCount") or MIN_VALIDATION_N))
-        self.real_eval = max(MIN_VALIDATION_N, int(coord.get("realEvalPosCount") or MIN_VALIDATION_N))
+        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 8)
+        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 8)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or 6)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 6)
@@ -168,8 +168,8 @@ class Coordinator:
         cost = last_n_cost_pf(closed_rows, self.pf_window, self.position_cost_pct)
         last_cost = last_n_cost_pf(closed_rows, last_w, self.position_cost_pct)
         prev_cost = last_n_cost_pf(closed_rows, prev_w, self.position_cost_pct)
-        main_cost = last_n_cost_pf(closed_rows, max(MIN_VALIDATION_N, self.main_eval), self.position_cost_pct)
-        real_cost = last_n_cost_pf(closed_rows, max(MIN_VALIDATION_N, self.real_eval), self.position_cost_pct)
+        main_cost = last_n_cost_pf(closed_rows, max(3, self.main_eval), self.position_cost_pct)
+        real_cost = last_n_cost_pf(closed_rows, max(3, self.real_eval), self.position_cost_pct)
         intern = intern or {}
         # first key PRESENT wins: a real PF of 0.0 must not fall through to the next key
         intern_pf = next((float(intern[k]) for k in ("pf", "indications", "general") if intern.get(k) is not None), 0.0)
@@ -195,10 +195,10 @@ class Coordinator:
         }
         allow = True
         sample_ok = cost["count"] >= min(MIN_VALIDATION_N, self.pf_window)
-        intern_ok = intern_n >= max(MIN_VALIDATION_N, self.min_samples) and intern_pf + 1e-9 >= 1.0
+        intern_ok = intern_n >= max(5, self.min_samples) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
-        last_n_ok = int(last_cost["count"]) >= min(MIN_VALIDATION_N, last_w)
+        last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
             if last_cost["pf"] + 1e-9 < self.min_pf:
                 allow = False
@@ -216,9 +216,9 @@ class Coordinator:
                 allow = False
                 reasons.append(f"pause {consec}/{pause_n}")
         # Main / real stages are advisory intern: they do not freeze the book.
-        if sample_ok and float(main_cost["count"]) >= max(MIN_VALIDATION_N, self.main_eval) and float(main_cost["pf"]) + 1e-9 < 1.0:
+        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["pf"]) + 1e-9 < 1.0:
             reasons.append(f"main {int(main_cost['count'])} PF {main_cost['pf']:.2f}<1.00")
-        if sample_ok and float(real_cost["count"]) >= max(MIN_VALIDATION_N, self.real_eval) and float(real_cost["pf"]) + 1e-9 < 1.0:
+        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["pf"]) + 1e-9 < 1.0:
             reasons.append(f"real {int(real_cost['count'])} PF {real_cost['pf']:.2f}<1.00")
         stages = {
             "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},
@@ -302,11 +302,11 @@ class Coordinator:
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     c = Coordinator()
-    c.load({}, {"setMinSamples": 9})
-    out.append(("coord-min-samples", c.min_samples == 9, f"min_samples={c.min_samples}"))
+    c.load({}, {"setMinSamples": 7})
+    out.append(("coord-min-samples", c.min_samples == 7, f"min_samples={c.min_samples}"))
     lo = Coordinator()
-    lo.load({}, {"setMinSamples": 3, "prevPosMinCount": 2, "pfWindow": 4, "windowsLinked": False})
-    out.append(("coord-counts-floor-8", lo.min_samples == 8 and lo.prev_min_count == 8 and lo.pf_window == 8, f"min={lo.min_samples} prev={lo.prev_min_count} pf={lo.pf_window}"))
+    lo.load({}, {"pfWindow": 4, "windowsLinked": False})
+    out.append(("coord-pf-window-floor-8", lo.pf_window == 8, f"pf_window={lo.pf_window}"))
     d = Coordinator()
     d.load({}, {})
     out.append(("coord-min-default", d.min_samples == 12, f"min_samples={d.min_samples}"))

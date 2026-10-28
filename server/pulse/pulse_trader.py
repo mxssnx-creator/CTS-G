@@ -774,8 +774,8 @@ class Pulse:
             "blockActiveRealEnabled": True,
             "blockActiveLiveEnabled": True,
             "defaultMinPF": 1.2,
-            "prevPosMinCount": 5,
-            "prevPosWindow": 25,
+            "blockMinSamples": 8,
+            "blockWindow": 25,
         })
         self.coord = Coordinator()
         self.indications = IndicationBook()
@@ -3661,6 +3661,8 @@ class Pulse:
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
+        self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
+        self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
         self.coord.load(cts, ov)
         self.indications.load(ov)
@@ -3919,7 +3921,7 @@ class Pulse:
         rows = [c for c in self.closed if not getattr(c, "set_id", "")]
         n = int(getattr(self.block, "window", 25) or 25)
         res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
-        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", MIN_VALIDATION_N) or MIN_VALIDATION_N):
+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
             return 0.0
         return float(res.get("pf") or 0.0)
 

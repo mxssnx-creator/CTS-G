@@ -129,6 +129,13 @@ export type PulseOverlay = {
   controlOrders: boolean;
   blockEnabled: boolean;
   blockMaxStack: number;
+  blockMinSamples: number;
+  blockWindow: number;
+  mainEvalPosCount: number;
+  realEvalPosCount: number;
+  prevPosMinCount: number;
+  prevPosWindow: number;
+  exitMinSamples: number;
   blockVolumeRatio: number;
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
@@ -298,6 +305,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   controlOrders: true,
   blockEnabled: true,
   blockMaxStack: 6,
+  blockMinSamples: 8,
+  blockWindow: 25,
+  mainEvalPosCount: 8,
+  realEvalPosCount: 8,
+  prevPosMinCount: 8,
+  prevPosWindow: 25,
+  exitMinSamples: 8,
   blockVolumeRatio: 1,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
@@ -335,7 +349,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPrevEnabled: false,
   axisPrevMaxWindow: 12,
   axisLastEnabled: false,
-  axisLastMaxWindow: 8,
+  axisLastMaxWindow: 4,
   axisContEnabled: false,
   axisContMaxWindow: 8,
   axisPauseEnabled: false,
@@ -473,6 +487,9 @@ export type CtsSettings = {
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
   blockMaxStack?: number;
+  blockMinSamples?: number;
+  blockWindow?: number;
+  exitMinSamples?: number;
   blockVolumeRatio?: number;
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
@@ -665,6 +682,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     controlOrders: bool(cts.control_orders, true),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
+    blockMinSamples: Math.max(1, Math.round(num(cts.blockMinSamples, 8))),
+    blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
+    mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 8))),
+    realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 8))),
+    prevPosMinCount: Math.max(1, Math.round(num(cts.prevPosMinCount ?? cts.prev_pos_min_count, 8))),
+    prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
+    exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
@@ -689,7 +713,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
-    axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 8),
+    axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
     axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),

@@ -130,6 +130,19 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - The choice is made on the orders the Set is then judged on, so the effective PF after Base is in-sample (higher than the executed PF).
   Measured results: `scripts/hold_eval.py` (fixed hold per step), `scripts/hold_auto_eval.py` (Auto Mode against the global stop, both
   PFs, development window; `--sealed` once). Do not read a better effective PF as an edge without the executed PF.
+- Validation windows (`position_cost.window_n`, `MIN_VALIDATION_N` = 8): with `windowsLinked` (default on) `pfWindow`, `setPfWindow`,
+  `exitPfWindow`, `slToTpRecalcN` and `trailRecalcN` follow the overall validation's last N (`setGateWindow`, 50); unlinked each is its
+  own value, at least 8 (shipped 8). The floor of 8 applies to these windows, the Base gate minimum (`setGateMinTrades`) and the hold Auto
+  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount`, `realEvalPosCount`, `prevPosMinCount`,
+  `exitMinSamples` and Block's `blockMinSamples` are 8 (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
+  `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
+- Measured (2 days, 20 symbols, development window = first 2/3; `scripts/window_eval.py`, extra last-N PF check on top of the Base gate; "none" =
+  the Base gate alone, all windows at the overall N): majors executed PF none 0.40, N = 6/8/12/15/20/25: 0.42/0.43/0.41/0.42/0.41/0.43;
+  recent small caps none 1.20, N = 6/8/12/15/20/25: 1.19/1.15/1.07/1.12/1.08/1.10 (sealed third, read once: none vs 8, majors 1.54 vs 1.62,
+  small caps 0.98 vs 1.01). `scripts/sim12h.py --counts N` (12 h, 20 symbols, windows + Axis last-N + Block evidence at N): executed PF
+  as before / 8 / 12 / 15 / 20 / 25: majors 1.08/1.14/1.04/1.04/1.44/1.13, small caps 0.99/1.03/1.03/1.09/1.01/0.92. No N wins in both
+  universes and the differences are inside the noise of one 12-hour window, so the shipped default is the minimum, 8 (windows linked to
+  the overall N). Do not tune these on a 12-hour window.
 
 ## Indication library and extra packs
 
@@ -146,6 +159,25 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Measured so far (8 and 30 day walk-forward, 20 symbols): every single indicator has an unfiltered PF of 0.4 to 0.65; the
   effective PF after Base reads 1.3 to 1.7 in-sample and the executed PF of the walk-forward stays under 1 (best 0.87 on 459
   orders). Choose on development windows; do not read these as an edge until an executed PF above 1 holds on the sealed window.
+
+## Venues
+
+- BingX is the default venue (`bingx-x01` live, `bingx-x02` VST demo). **Bybit V5 linear USDT perpetuals** run through the same
+  trader: `PULSE_CONN=bybit-x01` (mainnet, `https://api.bybit.com`) or `bybit-x02` (demo trading, `https://api-demo.bybit.com`,
+  public data from mainnet). `server/pulse/bybit_fast.py` (`FastBybit`, selected by `pulse_trader.make_api`) takes the trader's
+  BingX calls and returns BingX-shaped answers; nothing in the order logic differs by venue. Order tags are `Gb01` / `Gb02`.
+  Hedge mode (positionIdx 1 / 2), conditional reduce-only SL/TP (`triggerDirection` from side and kind), stops move by amend,
+  every create is idempotent through `orderLinkId` (a lost reply or a timeout is looked up before it is ever resent).
+- Bybit limits (`bybit_limits.py`): 80 requests/s IP pace (venue 600 per 5 s; HTTP 403 holds an IP for ten minutes, so nothing is
+  sent for 600 s after one), per-endpoint gates driven by `X-Bapi-Limit*` headers, a batch counts once per item, batches of 10,
+  failed items are resent alone, retCode 10002 resyncs the clock from `/v5/market/time`, a breaker holds new entries (never closes
+  or cancels) after repeated transient failures. Error classes: `bybit_limits.classify`; the words the trader reads are kept
+  in `msg`. Checks: `bybit.*` (stub venue, `scripts/regression/bybit.py`) and the `bybit:` mutants.
+- **Not verified against the live venue**: Bybit is geo-blocked from the build host, so the adapter is proven on a stub of the V5
+  documentation, not on Bybit. Run `bybit-x02` (demo) first. Credentials: `deploy/bybit-up.sh x01|x02` writes
+  `/opt/grok-x01-pulse/cred-bybit-xNN.json` (mode 600: `api_key`, `api_secret`, `is_testnet` "0" live / "1" demo); keys need Unified
+  Trading, Orders + Positions (trade) and Wallet (read), no withdrawal, bound to the host IP. The Bybit lanes are separate from
+  Overall in the desk and are not started by Overall Start or the watchdog. The drawdown halt ships on (18) in the Bybit overlays.
 
 ## Live safety
 

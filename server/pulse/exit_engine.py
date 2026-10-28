@@ -139,7 +139,7 @@ class ExitBook:
         self.pf_n = max(MIN_VALIDATION_N, window_n(ov, "exitPfWindow", "setPfWindow", fallback=15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or GATE_MIN_PF_DEFAULT)
-        self.min_samples = max(MIN_VALIDATION_N, int(ov.get("exitMinSamples") or 8))
+        self.min_samples = max(5, int(ov.get("exitMinSamples") or 8))
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 

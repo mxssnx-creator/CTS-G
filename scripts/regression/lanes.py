@@ -405,6 +405,40 @@ def per_step_hold_time_is_the_same_in_replay_and_live():
     return not bad and off_ok, f"step {step}: bars held (replay, live) by hold and side {out}; hold off keeps global={off_ok}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def block_samples_are_its_own_and_independent_of_the_window_calcs():
+    """Block counts its own samples: blockMinSamples (default 8) and blockWindow (default 25), set through the overlay of the live trader.
+    The coordinator's prevPosMinCount / prevPosWindow and the last-N validation windows (pfWindow, windowsLinked, the overall N) never
+    move them; the coordinator and Exit defaults are 8."""
+    import json as _json
+    import block_engine as be
+    from coord_engine import Coordinator
+    from exit_engine import ExitBook
+    own = be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-bs-"), "b.json"), {"blockMinSamples": 9, "blockWindow": 31, "prevPosMinCount": 20, "prevPosWindow": 60})
+    dflt = be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-bs-"), "b.json"), {"prevPosMinCount": 20, "prevPosWindow": 60, "pfWindow": 12})
+    saved = (pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    live_vals = {}
+    with tempfile.TemporaryDirectory() as td:
+        pt.TRADES_PATH, pt.BLOCK_PATH = os.path.join(td, "t.jsonl"), os.path.join(td, "block.json")
+        pt.LEV_PATH, pt.OPEN_PATH = os.path.join(td, "lev.json"), os.path.join(td, "open.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for name, ov in (("own", {"blockMinSamples": 11, "blockWindow": 30, "prevPosMinCount": 20, "pfWindow": 12, "windowsLinked": False}),
+                             ("linked", {"prevPosMinCount": 20, "prevPosWindow": 70, "setGateWindow": 40}), ("empty", {})):
+                pt.OVERLAY_PATH = os.path.join(td, f"overlay-{name}.json")
+                _json.dump(ov, open(pt.OVERLAY_PATH, "w"))
+                contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
+                p = pt.Pulse(_Venue(), contracts)
+                live_vals[name] = (p.block.min_samples, p.block.window)
+        finally:
+            pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    co = Coordinator(); co.load({}, {})
+    ex = ExitBook(); ex.load({})
+    defaults = (co.main_eval, co.real_eval, co.prev_min_count, ex.min_samples)
+    ok = ((own.min_samples, own.window) == (9, 31) and (dflt.min_samples, dflt.window) == (8, 25)
+          and live_vals == {"own": (11, 30), "linked": (8, 25), "empty": (8, 25)} and defaults == (8, 8, 8, 8))
+    return ok, f"BlockBook own {(own.min_samples, own.window)} default {(dflt.min_samples, dflt.window)}; live trader {live_vals}; (main, real, prev, exit) defaults {defaults}"
+
+
 def lane_step_leaves_on_the_sets_own_hold():
     """SetLane.step (the streaming simulator's path) leaves on the Set's own hold, the same bar the scan does; a Set without one keeps the
     global time stop."""
@@ -1055,7 +1089,7 @@ def the_desk_index_reproduces_the_engines_pooled_pf():
 
 def _block(**cfg):
     import block_engine as be
-    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 8}
+    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 5}
     base.update(cfg)
     return be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-block-"), "block.json"), base)
 
@@ -1258,6 +1292,7 @@ CHECKS = [
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
     ("trader.per-step-hold-same-in-replay-and-live", per_step_hold_time_is_the_same_in_replay_and_live),
+    ("trader.block-samples-own-and-independent-of-windows", block_samples_are_its_own_and_independent_of_the_window_calcs),
     ("trader.lane-step-leaves-on-the-sets-own-hold", lane_step_leaves_on_the_sets_own_hold),
     ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
