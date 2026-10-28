@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "738e06e9fd7c564fdb1034380894158a8547690c"
+PIN_WANT = "f37dc4d3db6db55ef3b970f9aa860b8c628a1441"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -94,6 +94,11 @@ def _ts_default(raw):
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
+    # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
+    # balance-based size and the 18 % halt for every other connection
+    "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
+    "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
+    "ddHaltPct": "x01 drawdown halt switched off by the owner; desk default 18 %",
 }
 
 

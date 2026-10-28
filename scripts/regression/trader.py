@@ -1089,6 +1089,26 @@ def position_size_follows_the_balance_and_the_volume_factor():
                 f"9 USDT account order={round(q * 100.0, 4)} USDT (venue minimum 5)")
 
 
+def drawdown_halt_follows_its_setting():
+    """ddHaltPct (percent of the start equity, default 18) halts entries on a drawdown; 0 switches the halt off, and a
+    drawdown halt already latched clears on the next balance read. The minimum-equity guard stays on either way."""
+    def run():
+        out = {}
+        for pct, eq in ((None, 30.0), (0.0, 30.0), (0.0, 0.1)):
+            p, sym = _enter(_StubExchange(executed="1", requested="1"))
+            p.start_eq = 100.0
+            p.dd_halt = pt.DD_HALT if pct is None else pct / 100.0
+            p.halted, p.halt_reason = (True, "drawdown halt") if pct == 0.0 else (False, None)   # latched from before
+            p.api.get = lambda path, extra=None, _e=eq: {"code": 0, "data": {"balance": {"equity": str(_e), "availableMargin": str(_e)}}}
+            p.refresh_balance()
+            out[f"{pct}:{eq}"] = (p.halted, p.halt_reason)
+        return out
+    out = _isolated(run)
+    ok = out["None:30.0"] == (True, "drawdown halt") and out["0.0:30.0"] == (False, None) and out["0.0:0.1"][0] is True \
+        and "below min" in str(out["0.0:0.1"][1])
+    return ok, f"(halted, reason) by (ddHaltPct, equity from start 100): {out}"
+
+
 def no_entry_on_a_symbol_that_failed_the_data_check():
     import types
     p = _bare_pulse()
@@ -1103,6 +1123,7 @@ def no_entry_on_a_symbol_that_failed_the_data_check():
 
 
 CHECKS = [
+    ("trader.drawdown-halt-follows-its-setting", drawdown_halt_follows_its_setting),
     ("trader.size-follows-balance-and-volume-factor", position_size_follows_the_balance_and_the_volume_factor),
     ("trader.venue-ban-pauses-flatten-and-refusal-logged", a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged),
     ("trader.lanes-no-other-lane-touches-a-set-position", no_other_lane_touches_a_set_position),

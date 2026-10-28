@@ -1146,6 +1146,15 @@ function SettingsPage() {
                   onChange={(v) => patch("targetNotional", v)}
                 />
                 <Num
+                  label="Drawdown halt %"
+                  value={overlay.ddHaltPct ?? 18}
+                  min={0}
+                  max={90}
+                  step={1}
+                  hint="Entries halt when equity falls this far below the start equity. 0 = off (no drawdown protection)."
+                  onChange={(v) => patch("ddHaltPct", v)}
+                />
+                <Num
                   label="Size % of balance"
                   value={overlay.sizePctOfBalance ?? 1}
                   min={0}

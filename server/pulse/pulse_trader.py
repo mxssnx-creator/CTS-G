@@ -669,6 +669,7 @@ class Pulse:
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
         self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
+        self.dd_halt = DD_HALT        # drawdown from the start equity that halts entries (fraction); 0 = off (ddHaltPct)
         self.regime = "neutral"
         self.consec_loss = 0
         self.wins = 0
@@ -1344,7 +1345,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+        elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
             if not self.halted:
                 self._halt_eq = self.equity
             self.halted = True
@@ -1356,7 +1357,9 @@ class Pulse:
             self.halted = True
             self.halt_reason = f"equity {self.equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.equity >= EQ_MIN and self.start_eq > 0 and (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6:
+        elif self.equity >= EQ_MIN and self.start_eq > 0 and (
+            self.dd_halt <= 0 or (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < self.dd_halt * 0.6
+        ):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
@@ -3343,6 +3346,11 @@ class Pulse:
             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
         except Exception:
             self.volume_factor = 1.0
+        try:   # the drawdown halt in percent of the start equity; 0 switches it off (an explicit owner setting)
+            raw_dd = ov.get("ddHaltPct")
+            self.dd_halt = max(0.0, min(90.0, float(raw_dd if raw_dd is not None else DD_HALT * 100.0))) / 100.0
+        except Exception:
+            self.dd_halt = DD_HALT
         try:   # percent of the balance per position before the volume factor; 0 = the fixed targetNotional
             raw_pct = ov.get("sizePctOfBalance")
             self.size_pct = max(0.0, min(25.0, float(raw_pct if raw_pct is not None else 1.0)))
@@ -4794,6 +4802,7 @@ class Pulse:
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
             "sizedNotional": round(self.sized_notional(), 6),
+            "ddHaltPct": round(float(getattr(self, "dd_halt", DD_HALT)) * 100.0, 4),
             "paused": os.path.exists(PAUSE_PATH),
             "activityPerMin": round(per_min, 2),
             "consecLoss": self.consec_loss,
@@ -5481,7 +5490,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+            elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:

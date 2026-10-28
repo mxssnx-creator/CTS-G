@@ -102,6 +102,8 @@ export type PulseOverlay = {
   volumeFactor: number;
   /** Percent of the balance per position before the volume factor; 0 = the fixed targetNotional. */
   sizePctOfBalance: number;
+  /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
+  ddHaltPct: number;
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -250,8 +252,9 @@ export type PulseOverlay = {
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
-  volumeFactor: 1.5,
+  volumeFactor: 1,
   sizePctOfBalance: 1,
+  ddHaltPct: 18,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,
@@ -259,7 +262,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsAll: false,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: 0,
+  symbolCap: 50,
   slPct: 0.48,
   tpPct: 0.75,
   trailArmPct: 0.3,
@@ -280,11 +283,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockActiveReal: true,
   dcaEnabled: false,
   dcaMaxSteps: 0,
-  dcaCooldownSeconds: 45,
+  dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
   dcaTakeProfitMode: "average",
-  dcaStepDistancesPct: [0.5, 0.9],
-  dcaStepVolumeMultipliers: [1.5, 2],
+  dcaStepDistancesPct: [0.5, 1, 1.5, 2],
+  dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
   dcaMinPf: 1.2,
   dcaPfWindow: 15,
@@ -313,7 +316,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseMaxWindow: 8,
   minPf: 1.2,
   positionCostPct: 0.12,
-  pfWindow: 15,
+  pfWindow: 6,
   slMinPct: 0.2,
   slMaxPct: 15.75,
   tpMinPct: 0.35,
@@ -330,7 +333,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmMax: 1.5,
   trailGiveMin: 0.1,
   trailGiveMax: 0.5,
-  trailGiveFactor: 0.333,
+  trailGiveFactor: 0.3333333333333333,
   trailRecalcGive: true,
   tf1m: true,
   tf5m: true,
@@ -356,7 +359,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeSignals: true,
   noise: 0.05,
   volWeight: 0.3,
-  minStep: 8,
+  minStep: 10,
   maxStopLossRatio: 2.5,
   trailingMinStep: 6,
   posCountsVolumeRatio: 0.05,
@@ -377,11 +380,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 120,
-  setPfWindow: 15,
+  setPfWindow: 6,
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
-  setUseHistoricGate: true,
+  setUseHistoricGate: false,
   setMinSamples: 12,
   setMinStep: 2,
   setStepMax: 30,
@@ -400,7 +403,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
-  exitPfWindow: 15,
+  exitPfWindow: 6,
   exitDeactN: 25,
   exitMinPf: 1.2,
   exitAutoDeact: true,
