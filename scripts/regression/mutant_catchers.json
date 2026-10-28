@@ -135,6 +135,8 @@
  "pre-history: a reload forgets what was grown": "processing.pre-history-grows-when-sets-lack-orders",
  "pre-history: grows without the cap": "processing.pre-history-grows-when-sets-lack-orders",
  "pre-history: never grows": "processing.pre-history-grows-when-sets-lack-orders",
+ "processed lane: every order counts as processed": "selftest.set_engine",
+ "processed lane: the Real gate reads the raw tape again": "selftest.set_engine",
  "real gate: N below the floor of 8": "processing.real-gate-per-set-at-the-base-minimum-pf",
  "real gate: fewer orders than N still pass": "processing.real-gate-per-set-at-the-base-minimum-pf",
  "real gate: ignored by the gate reason": "trader.invalid-set-keeps-open-position-handled-and-counted",

@@ -150,13 +150,29 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   1.08/0.99/1.01/0.94, small caps 0.99/1.19/1.06/1.02. The development ranking flips on the sealed window and between universes, so the
   default stays 50 (shorter windows validate more Sets and read higher in-sample, not a better executed result).
 
+## Processed lanes (core logic, owner 2026-10-28)
+
+- Base judges a Set on its own tape (every order its lane would take). The validations after Base never read that tape: they read
+  the Set's **processed lane**, its own Set related to the Base Set (`<base id>:pv`), whose orders are the ones the Base Set opened
+  while it passed Base, judged on its own closes before each entry (`set_engine.processed_flag`: last N, minimum orders, PF,
+  consistency, drawdown time to the entry). `SetBook.set_processed` builds it in every replay pass, `processed_stream` adds the
+  Set's live closes (opened under the Set while valid, so processed by definition); the Real gate reads the newest `realGateN` of
+  them. Snapshot: `pv`, `procN`, `realPf` per Set and the `pfBase.processed` pool. The simulator mirrors it
+  (`stage_eval.processed_tail`, compared with the engine by the self-check). Checks `selftest.set_engine`
+  (`set-real-gate-reads-processed-orders`: the raw last 12 all wins, the processed lane fails) and two `processed lane:` mutants.
+- Measured (30 days, 20 symbols, development window, per-order validation, Base last 30, Real 12): Real on the raw tape next 8 / next 50
+  orders PF 0.50 / 0.51 at 10.4 % validated; on the processed lane 0.40 / 0.47 at 8.0 %; executed with the processed Real gate 0.59 on
+  10,010 orders (effective PF 3.55, 11 % validated). The processed lane is the owner's rule for what the later gates judge; it does not
+  by itself make the executed PF higher.
+
 ## Validation gates: Base last N, Real gate, shared minimum PF, pre-history, execution tracking
 
 - Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
   another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
 - **Base last N** (`setGateWindow`) default **30** and minimum orders `setGateMinTrades` 25 (owner, 2026-10-28, for the small-cap universe the
-  live engines trade; the code fallback without an overlay stays 50). **Real gate** (`realGateEnabled`, `realGateN` default 12, at least 8,
-  at most the Base window): besides Base a Set must hold the Base minimum PF over its own last N orders (reason `real`); execution picks only
+  live engines trade; the code fallback without an overlay stays 50). **Real gate** (`realGateEnabled`, `realGateN` default **8** (owner,
+  2026-10-28), at least 8, at most the Base window): besides Base a Set must hold the Base minimum PF over the last N orders of its
+  **processed lane** (reason `real`, see below); execution picks only
   Sets that pass both (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
   over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
   (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.

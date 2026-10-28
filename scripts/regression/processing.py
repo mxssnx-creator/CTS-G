@@ -829,10 +829,12 @@ def _real_rows(sid, head_w, tail):
 
 
 def real_gate_is_per_set_at_the_base_minimum_pf():
-    """The Real gate: besides Base, a Set must hold the Base minimum PF over its own last realGateN orders (default 12). Per Set (another
+    """The Real gate: besides Base, a Set must hold the Base minimum PF over its own last realGateN processed orders (default 8; the
+    fixtures below read N 12). Per Set (another
     Set's tape never moves it), the same minimum PF as Base (setMinPf, the Short Range floor), reason "real", and the execution pool
     (valid_for / pick) holds only Sets that pass both. Switched off it is the Base gate alone."""
     def judged(real_on, tail, min_pf=1.25, **extra):
+        extra.setdefault("realGateN", 12)
         b = _book(n_syms=1, bars=300, setMinPf=min_pf, realGateEnabled=real_on, **extra)
         st = next(x for x in b.by_idx if x.kind == "base" and x.pack == b.packs[0])
         st.hist = [dict(zip(("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id"), r)) for r in _real_rows(st.id, 38, tail)]
@@ -874,7 +876,8 @@ def real_gate_is_per_set_at_the_base_minimum_pf():
     snap = judged(True, good)[0].snapshot()["pfBase"]
     ok = (out["boundary 1.25"] == "" and out["just under"] == "real" and out["bad last 12"] == "real" and out["bad, Real off"] == ""
           and out["min PF 1.5 moves Real too"] in ("pf<min", "real") and out["N=8"][0] == 8 and before == after
-          and out["20 orders, Real N 30"] == (20, 20, "real") and out["Real N 3"] == 8
+          and out["20 orders, Real N 30"][0] == 20 and out["20 orders, Real N 30"][1] < 30 and out["20 orders, Real N 30"][2] == "real"
+          and out["Real N 3"] == 8
           and st2.id in pool_off and st2.id not in pool_on and "real" in snap and "baseOnly" in snap)
     return ok, f"reasons {out}; other Set left it alone={before == after}; pool off/on holds the Set={st2.id in pool_off}/{st2.id in pool_on}; pfBase keys {sorted(snap)[:6]}"
 

@@ -980,7 +980,8 @@ class SetLane:
         self.cool = cool
         return out
 
-REAL_GATE_N_DEFAULT = 12
+REAL_GATE_N_DEFAULT = 8         # owner, 2026-10-28: the Real gate reads the last 8 processed orders
+PROC_SUFFIX = ":pv"                # id of a Base Set's processed lane: "<base Set id>:pv"
 PROC_KEEP = 200                   # processed orders kept per Set (the Real gate reads the newest realGateN of them)
 LOOKBACK_GROW_STEP = 240          # bars added to the pre-history per growth step
 LOOKBACK_SHORT_SHARE = 0.25       # grow when this share of the Sets that traded has fewer orders than the gate minimum
@@ -1103,7 +1104,7 @@ class SetBook:
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
         self.gate_min = max(MIN_VALIDATION_N, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
-        # the Real gate: every Set, besides the Base gate, must hold the minimum PF over its own last realGateN orders (default 12);
+        # the Real gate: every Set, besides the Base gate, must hold the minimum PF over its own last realGateN processed orders (default 8);
         # execution picks only Sets that pass both, and the minimum PF is the Set's Base minimum PF (one value for every validation gate)
         self.real_on = bool(ov.get("realGateEnabled", True))
         self.real_n = max(MIN_VALIDATION_N, min(self.gate_window, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))
@@ -2182,9 +2183,14 @@ class SetBook:
         rgp, rgl = sum(x.real_gp for x in valid), sum(x.real_gl for x in valid)
         real = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.real_n for x in valid), "sets": len(valid),
                 "on": self.real_on, "lastN": self.real_n}
+        pgp, pgl = sum(x.real_gp for x in base_only), sum(x.real_gl for x in base_only)
+        processed = {"pf": round(pgp / pgl, 4) if pgl > 0 else (99.0 if pgp > 0 else 0.0), "n": sum(x.real_n for x in base_only),
+                     "sets": len(base_only), "orders": sum(int(x.proc_total) + len(x.live) for x in base_only), "lastN": self.real_n}
         # `base` is the end figure: the pooled PF of the Sets that pass every gate (Base and Real) over their Base windows; `baseOnly` is the
-        # pool of the Sets that pass the Base gate alone; `real` is the PF of the same end Sets over their last realGateN orders
-        return {"base": pool(valid), "baseOnly": pool(base_only), "real": real, "unfiltered": pool(allsets), "total": total, "valid": len(valid),
+        # pool of the Sets that pass the Base gate alone; `real` is the PF of the same end Sets over their last realGateN processed orders;
+        # `processed` pools the processed lanes (the Sets of the orders opened while their Base Set passed) of every Base-passing Set
+        return {"base": pool(valid), "baseOnly": pool(base_only), "real": real, "processed": processed, "unfiltered": pool(allsets),
+                "total": total, "valid": len(valid),
                 "validatedBasePct": round(100.0 * len(base_only) / total, 2) if total else 0.0,
                 "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack,
                 "basis": "gate-window", "history": list(self.pf_history[-240:])}
@@ -2235,6 +2241,7 @@ class SetBook:
                     "gateN": st.gate_n,
                     "pf15": round(st.last15_pf, 4),
                     "realPf": round(st.real_pf, 4),
+                    "pv": st.id + PROC_SUFFIX,                         # the Set's processed lane: its own Set, related to this Base Set
                     "procN": int(st.proc_total) + len(st.live),       # processed orders (opened while the Set passed Base)
                     "realN": st.real_n,
                     "ratio": round(st.last15_ratio, 4),
