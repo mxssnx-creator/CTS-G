@@ -769,8 +769,8 @@ function SettingsPage() {
               <Grid>
                 <Slider label="Prev window" value={overlay.prevPosWindow} min={5} max={100} step={1} hint="closes the coordinator's previous-positions axis reads" onChange={(v) => patch("prevPosWindow", v)} />
                 <Slider label="Prev min count" value={overlay.prevPosMinCount} min={1} max={50} step={1} hint="default 8" onChange={(v) => patch("prevPosMinCount", v)} />
-                <Slider label="Main eval pos count" value={overlay.mainEvalPosCount} min={3} max={50} step={1} hint="default 8" onChange={(v) => patch("mainEvalPosCount", v)} />
-                <Slider label="Real eval pos count" value={overlay.realEvalPosCount} min={3} max={50} step={1} hint="default 8" onChange={(v) => patch("realEvalPosCount", v)} />
+                <Slider label="Main eval pos count" value={overlay.mainEvalPosCount} min={3} max={50} step={1} hint="default 20" onChange={(v) => patch("mainEvalPosCount", v)} />
+                <Slider label="Real eval pos count" value={overlay.realEvalPosCount} min={3} max={50} step={1} hint="default 15" onChange={(v) => patch("realEvalPosCount", v)} />
                 <KV k="Min step" v={String(overlay.minStep)} />
                 <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>

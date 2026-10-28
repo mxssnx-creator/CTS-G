@@ -104,8 +104,8 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Validation windows (`position_cost.window_n`, `MIN_VALIDATION_N` = 8): with `windowsLinked` (default on) `pfWindow`, `setPfWindow`,
   `exitPfWindow`, `slToTpRecalcN` and `trailRecalcN` follow the overall validation's last N (`setGateWindow`, 50); unlinked each is its
   own value, at least 8 (shipped 8). The floor of 8 applies to these windows, the Base gate minimum (`setGateMinTrades`) and the hold Auto
-  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount`, `realEvalPosCount`, `prevPosMinCount`,
-  `exitMinSamples` and Block's `blockMinSamples` are 8 (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
+  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount` (20) and `realEvalPosCount` (15, owner, 2026-10-28), and of `prevPosMinCount`,
+  `exitMinSamples` and Block's `blockMinSamples` (8) (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
   `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
 - Measured (2 days, 20 symbols, development window = first 2/3; `scripts/window_eval.py`, extra last-N PF check on top of the Base gate; "none" =
   the Base gate alone, all windows at the overall N): majors executed PF none 0.40, N = 6/8/12/15/20/25: 0.42/0.43/0.41/0.42/0.41/0.43;
