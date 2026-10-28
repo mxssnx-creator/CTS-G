@@ -11,7 +11,7 @@ from set_engine import SetBook, SetLane
 def _book_one(**extra):
     b = SetBook()
     b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
-            "setStepMax": 5, "setSlRatios": [1.0], "trailVariants": ["0.3:0.1"], **extra})
+            "setStepMax": 5, "setSlRatios": [1.0], "trailVariants": ["0.3:0.1"], "realGateEnabled": False, **extra})
     return b
 
 

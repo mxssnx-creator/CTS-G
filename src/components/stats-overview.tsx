@@ -46,8 +46,16 @@ export function StatsOverview({
           <Hero
             k="Effective PF · after Base"
             v={live.sets.pfBase.base.sets ? live.sets.pfBase.base.pf.toFixed(2) : "—"}
-            s={`${live.sets.pfBase.base.sets} valid Sets · n ${live.sets.pfBase.base.n} · before Base ${live.sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)`}
+            s={`${live.sets.pfBase.base.sets} valid Sets${live.sets.pfBase.validatedPct != null ? ` (${live.sets.pfBase.validatedPct.toFixed(1)}%${live.sets.pfBase.validatedBasePct != null && live.sets.pfBase.real?.on ? `, Base alone ${live.sets.pfBase.validatedBasePct.toFixed(1)}%` : ""})` : ""} · n ${live.sets.pfBase.base.n}${live.sets.pfBase.real?.on ? ` · Real last ${live.sets.pfBase.real.lastN}: PF ${live.sets.pfBase.real.pf.toFixed(2)}` : ""} · before Base ${live.sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)`}
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
+          />
+        ) : null}
+        {live?.execution ? (
+          <Hero
+            k="Executed · after all gates"
+            v={`${live.execution.open.positions} open`}
+            s={`${live.execution.sets.valid}/${live.execution.sets.configured} Sets valid · ${live.execution.open.sets} Sets running${live.execution.open.underInvalidSet ? ` (${live.execution.open.underInvalidSet} under a Set that no longer passes, handled to close)` : ""} · ${live.execution.closed.orders} orders closed (Set ${live.execution.closed.setLane} · Exit ${live.execution.closed.exitLane}) · ${live.execution.closed.setsThatTraded} Sets traded${live.execution.closed.droppedNoRecord ? ` · ${live.execution.closed.droppedNoRecord} dropped without a record` : ""}`}
+            tone="ok"
           />
         ) : null}
         <Hero

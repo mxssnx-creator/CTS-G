@@ -165,6 +165,11 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
             l_ = -sum(x - cf for x in v if x - cf < 0)
             return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
         valid = min(_pf(w[:h]), _pf(w[h:])) + 1e-9 >= book.consistency_pf
+    if valid and getattr(book, "real_on", False):       # the Real gate: the same minimum PF over the Set's last realGateN orders
+        rw = [x - cf for x in w[-book.real_n:]]
+        g_ = sum(x for x in rw if x > 0)
+        l_ = -sum(x for x in rw if x < 0)
+        valid = len(rw) >= book.real_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= book.pack_min_pf.get(st.pack, book.min_pf)
     return valid, (pf, r25, -max_s, len(pp)), n, pf
 
 

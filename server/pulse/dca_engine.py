@@ -23,7 +23,7 @@ AUTO_RUNG_FRACS = [0.4]
 AUTO_RUNG_MULT = 0.5
 AUTO_MAX_EXPOSURE_X = 2.0       # base size + all adds never above this multiple of the base size
 
-from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_cost_pct, signed_result_r
+from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, gate_min_pf, last_n_cost_pf, normalize_cost_pct, signed_result_r
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
@@ -161,7 +161,7 @@ class DcaBook:
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or GATE_MIN_PF_DEFAULT)
+        self.min_pf = gate_min_pf(ov, "dcaMinPf", "minPf")
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 
@@ -461,7 +461,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("dca-auto-exposure-ceiling", bool(capped_add) and abs(capped_add["qty"] - 0.2) < 1e-9, f"qty under a 1.2x ceiling={capped_add and capped_add['qty']} (partial 0.5)"))
     # the lane is scored on its own add-on results and switches off when they lose
     c = DcaBook()
-    c.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaPfWindow": 8, "dcaMinPf": 1.2})
+    c.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaPfWindow": 8, "dcaMinPf": 1.2, "minPfLinked": False})
     for i in range(10):
         c.on_close({"symbol": "S%d-USDT" % i, "side": "LONG", "reason": "sl", "client_id": "", "dca_n": 1, "pnl_pct": -0.004})
     out.append(("dca-add-on-lane-switches-off-on-losses", (not c.active) and c.due("S-USDT", "LONG", 1.0, 100.0, 99.0, now=3.0, sl_frac=0.01) is None, f"active={c.active} {c.deact_reason}"))

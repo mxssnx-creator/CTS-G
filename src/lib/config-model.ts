@@ -245,6 +245,13 @@ export type PulseOverlay = {
   setDeactN: number;
   setMinPf: number;
   setMaxDdtHours: number;
+  setGateWindow: number;
+  setGateMinTrades: number;
+  realGateEnabled: boolean;
+  realGateN: number;
+  minPfLinked: boolean;
+  histLookbackAuto: boolean;
+  histLookbackMax: number;
   setUseHistoricGate: boolean;
   holdEnabled: boolean;
   holdAuto: boolean;
@@ -329,7 +336,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaOnSets: false,
   dcaOnAxis: false,
   dcaMaxExposureX: 2,
-  dcaMinPf: 1.2,
+  dcaMinPf: 1.25,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: [
@@ -430,6 +437,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
+  setGateWindow: 30,
+  setGateMinTrades: 25,
+  realGateEnabled: true,
+  realGateN: 12,
+  minPfLinked: true,
+  histLookbackAuto: true,
+  histLookbackMax: 2880,
   setUseHistoricGate: true,
   holdEnabled: true,
   holdAuto: true,
@@ -457,7 +471,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   exitPfWindow: 8,
   exitDeactN: 25,
-  exitMinPf: 1.2,
+  exitMinPf: 1.25,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -586,6 +600,13 @@ export type CtsSettings = {
   setDeactN?: number;
   setMinPf?: number;
   setMaxDdtHours?: number;
+  setGateWindow?: number;
+  setGateMinTrades?: number;
+  realGateEnabled?: boolean;
+  realGateN?: number;
+  minPfLinked?: boolean;
+  histLookbackAuto?: boolean;
+  histLookbackMax?: number;
   setUseHistoricGate?: boolean;
   holdEnabled?: boolean;
   holdAuto?: boolean;
@@ -784,6 +805,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setDeactN: num(cts.setDeactN, 25),
     setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     setMaxDdtHours: num(cts.setMaxDdtHours, 12),
+    setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 30)))),
+    setGateMinTrades: Math.max(8, Math.min(200, Math.round(num(cts.setGateMinTrades, 25)))),
+    realGateEnabled: bool(cts.realGateEnabled, true),
+    realGateN: Math.max(8, Math.min(200, Math.round(num(cts.realGateN, 12)))),
+    minPfLinked: bool(cts.minPfLinked, true),
+    histLookbackAuto: bool(cts.histLookbackAuto, true),
+    histLookbackMax: Math.max(120, Math.min(2880, Math.round(num(cts.histLookbackMax, 2880)))),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     holdEnabled: bool(cts.holdEnabled, true),
     holdAuto: bool(cts.holdAuto, true),

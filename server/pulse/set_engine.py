@@ -492,6 +492,10 @@ class SetState:
     gate_pf_new: float = 0.0
     gate_gp: float = 0.0            # gross profit / loss (net fractions) inside that same window: the rolling pool inputs
     gate_gl: float = 0.0
+    real_pf: float = 0.0            # net PF over the last realGateN orders: the Real gate (a second, shorter last-N validation, per Set)
+    real_n: int = 0
+    real_gp: float = 0.0
+    real_gl: float = 0.0
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
     last15_r: float = 0.0
@@ -888,6 +892,9 @@ class SetLane:
         self.cool = cool
         return out
 
+REAL_GATE_N_DEFAULT = 12
+LOOKBACK_GROW_STEP = 240          # bars added to the pre-history per growth step
+LOOKBACK_SHORT_SHARE = 0.25       # grow when this share of the Sets that traded has fewer orders than the gate minimum
 HOLD_KEY = "@h"                                       # _hist_rows key of an Auto Mode candidate tape: "<set id>@h<minutes>"
 STEP_HOLD_STEPS = 12
 HOLD_AUTO_LOW = (10, 15, 20, 30, 40, 50)              # Auto Mode candidates in minutes, steps 1..5 (the desk range 1-50)
@@ -918,6 +925,12 @@ class SetBook:
     def __init__(self) -> None:
         self.enabled = True
         self.lookback = LOOKBACK_DEFAULT
+        self.lookback_cfg = LOOKBACK_DEFAULT
+        self.lookback_max = 2880
+        self.lookback_auto = True
+        self._lookback_grown = 0
+        self.real_on = True
+        self.real_n = REAL_GATE_N_DEFAULT
         self.min_bars = 120
         self.warmup = WARMUP_DEFAULT
         self.refresh_s = 90.0
@@ -983,7 +996,11 @@ class SetBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
-        self.lookback = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
+        self.lookback_cfg = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
+        # pre-history grows when too many Sets have fewer orders than the gate needs (histLookbackAuto), up to histLookbackMax bars
+        self.lookback_auto = bool(ov.get("histLookbackAuto", True))
+        self.lookback_max = max(self.lookback_cfg, min(2880, int(ov.get("histLookbackMax") or 2880)))
+        self.lookback = max(self.lookback_cfg, min(self.lookback_max, int(getattr(self, "_lookback_grown", 0) or 0))) if self.lookback_auto else self.lookback_cfg
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.max_flat_share = min(1.0, max(0.0, num(ov, "histMaxFlatShare", 0.35)))
         self.max_jump = max(0.01, num(ov, "histMaxJumpPct", 50.0) / 100.0)
@@ -993,6 +1010,10 @@ class SetBook:
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
         self.gate_min = max(MIN_VALIDATION_N, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
+        # the Real gate: every Set, besides the Base gate, must hold the minimum PF over its own last realGateN orders (default 12);
+        # execution picks only Sets that pass both, and the minimum PF is the Set's Base minimum PF (one value for every validation gate)
+        self.real_on = bool(ov.get("realGateEnabled", True))
+        self.real_n = max(MIN_VALIDATION_N, min(self.gate_window, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))
         self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
         # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
         cons = ov.get("setGateConsistencyPf")
@@ -1547,6 +1568,7 @@ class SetBook:
                 self.progress.ready = True
                 with self._lock:
                     self._record_pf_progress()
+                    self._adapt_lookback()
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
@@ -1610,6 +1632,20 @@ class SetBook:
                 if h:
                     del out[:-HOLD_AUTO_MAX_ORDERS]  # only the newest orders of a candidate can be among the last 50 overall
             self.progress.set_id = st.id
+
+    def _adapt_lookback(self) -> None:
+        """Pre-history for the calcs: when too many of the Sets that traded have fewer orders than the gate needs (gate_min), the
+        lookback grows by LOOKBACK_GROW_STEP bars (up to histLookbackMax), so the next fetch loads older minutes and the Sets get
+        their orders. It only grows; a reload keeps the grown value. Called with the lock held after a complete pass."""
+        if not self.lookback_auto or self.lookback >= self.lookback_max:
+            return
+        traded = [st for st in self.by_idx if st.source_n > 0]
+        if len(traded) < 20:
+            return
+        short = sum(1 for st in traded if st.gate_n < self.gate_min)
+        if short / len(traded) >= LOOKBACK_SHORT_SHARE:
+            self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)
+            self._lookback_grown = self.lookback
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff), key=_row_t)
@@ -1676,6 +1712,11 @@ class SetBook:
             st.gate_pf_old = st.gate_pf_new = 0.0
         st.gate_gp = round(sum(x for x in win if x > 0), 8)
         st.gate_gl = round(-sum(x for x in win if x < 0), 8)
+        rw = win[-self.real_n:]
+        st.real_n = len(rw)
+        st.real_gp = round(sum(x for x in rw if x > 0), 8)
+        st.real_gl = round(-sum(x for x in rw if x < 0), 8)
+        st.real_pf = round(st.real_gp / st.real_gl, 4) if st.real_gl > 0 else (99.0 if st.real_gp > 0 else 0.0)
         last25 = tape[-self.deact_n :]
         st.last25_n = len(last25)
         if last25:
@@ -1715,6 +1756,8 @@ class SetBook:
             return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
+        if self.real_on and (st.real_n < self.real_n or st.real_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf)):
+            return "real"            # passed Base but not the Real gate: its last realGateN orders are below the minimum PF
         if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
             return "stale"
         return ""
@@ -1932,16 +1975,24 @@ class SetBook:
             pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
             return {"pf": pf, "n": sum(x.gate_n for x in sts), "sets": len(sts)}
         allsets = list(self.by_idx)
-        valid = [x for x in allsets if not self.gate_reason(x)]
+        reasons = {x.id: self.gate_reason(x) for x in allsets}
+        valid = [x for x in allsets if not reasons[x.id]]
+        base_only = [x for x in allsets if reasons[x.id] in ("", "real")]          # passed the Base gate (the Real gate not applied)
         total = len(allsets)
         by_pack: Dict[str, Any] = {}
         for pack in self.packs:
             ps = [x for x in allsets if x.pack == pack]
-            pv = [x for x in ps if not self.gate_reason(x)]
+            pv = [x for x in ps if not reasons[x.id]]
             by_pack[pack] = {"base": pool(pv), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv),
                              "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
                              "minPf": self.pack_min_pf.get(pack, self.min_pf)}
-        return {"base": pool(valid), "unfiltered": pool(allsets), "total": total, "valid": len(valid),
+        rgp, rgl = sum(x.real_gp for x in valid), sum(x.real_gl for x in valid)
+        real = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.real_n for x in valid), "sets": len(valid),
+                "on": self.real_on, "lastN": self.real_n}
+        # `base` is the end figure: the pooled PF of the Sets that pass every gate (Base and Real) over their Base windows; `baseOnly` is the
+        # pool of the Sets that pass the Base gate alone; `real` is the PF of the same end Sets over their last realGateN orders
+        return {"base": pool(valid), "baseOnly": pool(base_only), "real": real, "unfiltered": pool(allsets), "total": total, "valid": len(valid),
+                "validatedBasePct": round(100.0 * len(base_only) / total, 2) if total else 0.0,
                 "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack,
                 "basis": "gate-window", "history": list(self.pf_history[-240:])}
 
@@ -1990,6 +2041,8 @@ class SetBook:
                     "pf": round(st.gate_pf, 4),
                     "gateN": st.gate_n,
                     "pf15": round(st.last15_pf, 4),
+                    "realPf": round(st.real_pf, 4),
+                    "realN": st.real_n,
                     "ratio": round(st.last15_ratio, 4),
                     "last15N": st.last15_n,
                     "last15R": round(st.last15_r, 4),
@@ -2480,7 +2533,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
         return rows
     gb = SetBook()
-    gb.load({"positionCostPct": 0.15, "setMinPf": 1.10, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    gb.load({"positionCostPct": 0.15, "setMinPf": 1.10, "realGateEnabled": False, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sg = next(iter(gb.by_idx))
     sg.active = True
     def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:

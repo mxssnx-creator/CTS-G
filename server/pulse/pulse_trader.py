@@ -26,7 +26,7 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import MIN_VALIDATION_N, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
+from position_cost import MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test
@@ -741,6 +741,7 @@ class Pulse:
         self.recon_ok = True
         self.recon_detail = "pending"
         self._load_trade_history()
+        self._exec_boot()
         self._load_open_book()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
@@ -750,7 +751,7 @@ class Pulse:
             "blockPauseCountRatio": 1,
             "blockActiveRealEnabled": True,
             "blockActiveLiveEnabled": True,
-            "defaultMinPF": 1.2,
+            "defaultMinPF": GATE_MIN_PF_DEFAULT,
             "blockMinSamples": 8,
             "blockWindow": 25,
         })
@@ -3080,6 +3081,7 @@ class Pulse:
             if (pos.symbol, pos.side) in confirmed:
                 continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
+            self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(pos.symbol)
             self.open.pop(pos.symbol, None)
             self.cooldown[pos.symbol] = time.time() + 90.0
@@ -3157,6 +3159,7 @@ class Pulse:
         if pos.client_id:
             self.seen_fill_cids.add(pos.client_id)
         if skip_eval:
+            self._exec_inc("skipped")       # closed, not scored: counted apart so no order goes missing
             self.open.pop(pos.symbol, None)
             self.ban_sym(pos.symbol)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
@@ -3164,6 +3167,7 @@ class Pulse:
             self._stats_force = True
             return
         self.closed.append(rec)
+        self._exec_note(rec)
         try:
             if not rec.set_id:                 # the default variants learn from default-variant positions only
                 self.variants.on_close(rec)
@@ -3389,6 +3393,75 @@ class Pulse:
 
 
 
+    def _exec_boot(self) -> None:
+        """Execution counters from the whole trades file (streamed): orders closed by a Set lane and by the Exit lane, wins, the Sets that closed
+        orders. The in-memory closed list keeps only the last 80; these totals do not."""
+        self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
+        self.exec_sets: Dict[str, int] = {}
+        if not os.path.exists(TRADES_PATH):
+            return
+        try:
+            with open(TRADES_PATH) as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not (1.6e9 < float(rec.get("t") or 0) <= time.time() + 300.0) or rec.get("ours", True) is False:
+                        continue
+                    self._exec_count(str(rec.get("set_id") or rec.get("setId") or ""), float(rec.get("pnl") or 0))
+        except Exception:
+            pass
+
+    def _exec_inc(self, key: str, by: int = 1) -> None:
+        n = self.__dict__.setdefault("exec_n", {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0})
+        n[key] = n.get(key, 0) + by
+
+    def _exec_count(self, set_id: str, pnl: float) -> None:
+        self._exec_inc("set" if set_id else "exit")
+        if pnl > 0:
+            self._exec_inc("wins")
+        elif pnl < 0:
+            self._exec_inc("losses")
+        self.__dict__.setdefault("exec_sets", {})
+        if set_id and (set_id in self.exec_sets or len(self.exec_sets) < 20000):
+            self.exec_sets[set_id] = self.exec_sets.get(set_id, 0) + 1
+
+    def _exec_note(self, rec: "Closed") -> None:
+        if getattr(rec, "ours", True) is not False:
+            self._exec_count(rec.set_id, rec.pnl)
+
+    def execution_snapshot(self) -> Dict[str, Any]:
+        """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
+        Set (a Set that stopped passing keeps its open positions until its own lane closes them), and the orders closed so far by lane."""
+        counts = self.sets.counts()
+        reasons = counts.get("reasons", {})
+        by_pack: Dict[str, Dict[str, int]] = {}
+        open_sets, under_invalid, retired, no_set = set(), 0, 0, 0
+        for p in self.open.values():
+            row = by_pack.setdefault(p.pack or "-", {"open": 0, "underInvalidSet": 0})
+            row["open"] += 1
+            if not p.set_id:
+                no_set += 1
+                continue
+            open_sets.add(p.set_id)
+            st = self.sets.sets.get(p.set_id)
+            if st is None:
+                retired += 1                      # the Set left the grid: its position still runs on the Set rules it opened with
+            elif self.sets.gate_reason(st):
+                under_invalid += 1
+                row["underInvalidSet"] += 1
+        n = self.__dict__.setdefault("exec_n", {})
+        return {
+            "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0), "baseValid": counts.get("valid", 0) + int(reasons.get("real", 0)),
+                     "invalid": counts.get("invalid", 0), "reasons": dict(reasons)},
+            "open": {"positions": len(self.open), "setPositions": len(self.open) - no_set, "noSet": no_set, "sets": len(open_sets),
+                     "underInvalidSet": under_invalid, "setRetired": retired, "byPack": by_pack},
+            "closed": {"orders": int(n.get("set", 0) + n.get("exit", 0)), "setLane": int(n.get("set", 0)), "exitLane": int(n.get("exit", 0)),
+                       "wins": int(n.get("wins", 0)), "losses": int(n.get("losses", 0)), "skippedNotScored": int(n.get("skipped", 0)), "droppedNoRecord": int(n.get("dropped", 0)),
+                       "setsThatTraded": len(self.__dict__.get("exec_sets", {}))},
+        }
+
     def _load_trade_history(self) -> None:
         if not os.path.exists(TRADES_PATH):
             return
@@ -3598,7 +3671,7 @@ class Pulse:
         self.block.pause_ratio = max(0, b_pause)
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
-        self.block.default_min_pf = float(real_pf)
+        self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else float(real_pf)     # the Base gate's PF unless unlinked
         self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
         self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
@@ -4512,6 +4585,7 @@ class Pulse:
                         self.cooldown[sym] = time.time() + 90.0
                         continue
                     log(f"DROP stale local {sym} (exchange flat)")
+                    self._exec_inc("dropped")       # left the book with no close record: counted, never lost
                     self.cancel_controls(sym)
                     self.open.pop(sym, None)
                     self.cooldown[sym] = time.time() + 90.0
@@ -4646,6 +4720,7 @@ class Pulse:
                 self.cooldown[sym] = time.time() + 90.0
                 continue
             log(f"DROP stale local {sym} age={age:.0f}s")
+            self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(sym)
             self.open.pop(sym, None)
             self.cooldown[sym] = time.time() + 90.0
@@ -4966,6 +5041,7 @@ class Pulse:
             "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
             "variants": self.variants.snapshot(),
             "sets": self.sets.snapshot(),
+            "execution": self.execution_snapshot(),
             "exits": self.exits.snapshot(),
             "indications": self.indications.snapshot(),
             "dca": self.dca.snapshot(),

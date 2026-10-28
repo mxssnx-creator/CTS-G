@@ -22,6 +22,8 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from position_cost import GATE_MIN_PF_DEFAULT
+
 BLOCK_MIN_SAMPLES_DEFAULT = 8      # closes a Block lane needs before its observed PF counts
 BLOCK_WINDOW_DEFAULT = 25          # closes the Block evidence (exit_lane_pf) reads
 
@@ -132,7 +134,7 @@ class BlockBook:
         self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
-        self.default_min_pf = float(cfg.get("defaultMinPF", 1.2) or 1.2)
+        self.default_min_pf = float(cfg.get("defaultMinPF", GATE_MIN_PF_DEFAULT) or GATE_MIN_PF_DEFAULT)
         # Block counts its own samples (blockMinSamples, blockWindow): independent of the coordinator's prevPos* counts and of the
         # last-N validation windows (pfWindow and friends, windowsLinked)
         self.min_samples = max(1, int(cfg.get("blockMinSamples", BLOCK_MIN_SAMPLES_DEFAULT) or BLOCK_MIN_SAMPLES_DEFAULT))

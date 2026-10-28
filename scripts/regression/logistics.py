@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "5866c36dd5127288cc63686e70b0ff319a88ea24"
+PIN_WANT = "d8ebe5f743b4509d459f761e6eeb6ade42b00151"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -23,7 +23,7 @@ def overlays_share_grid_contract():
     for path in (X01, X02):
         ov = json.load(open(path))
         want = {"setMinStep": 2, "setStepMax": 30, "trailMinStep": 3, "histLookbackBars": 1920,
-                "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 30}
+                "setMinPf": 1.25, "setGateWindow": 30, "setGateMinTrades": 25}   # owner 2026-10-28: Base last N 30 for the small-cap universe
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")

@@ -150,7 +150,7 @@
     2.5
   ],
   "dcaAutoDeact": true,
-  "dcaMinPf": 1.2,
+  "dcaMinPf": 1.25,
   "stratDca": true,
   "indTypeState": true,
   "indTypeDirection": true,
@@ -161,10 +161,10 @@
   "setUseHistoricGate": true,
   "setMinPf": 1.25,
   "setEntryConf": 0.58,
-  "setGateWindow": 50,
-  "setGateMinTrades": 30,
+  "setGateWindow": 30,
+  "setGateMinTrades": 25,
   "loadPartial": true,
-  "exitMinPf": 1.2,
+  "exitMinPf": 1.25,
   "stratShortRange": false,
   "shortRangeStepMin": 2,
   "shortRangeStepMax": 6,
@@ -181,5 +181,10 @@
   "prevPosWindow": 25,
   "exitMinSamples": 8,
   "blockMinSamples": 8,
-  "blockWindow": 25
+  "blockWindow": 25,
+  "realGateEnabled": true,
+  "realGateN": 12,
+  "minPfLinked": true,
+  "histLookbackAuto": true,
+  "histLookbackMax": 2880
 }

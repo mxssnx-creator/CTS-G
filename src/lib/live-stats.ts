@@ -69,7 +69,12 @@ export type LiveClosed = {
  * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
 export type PfPool = { pf: number; n: number; sets: number };
 export type PfBase = {
+  /** The end figure: the pool of the Sets that pass every gate (Base and Real). */
   base: PfPool;
+  /** The pool of the Sets that pass the Base gate alone, and the end Sets over their Real gate window. */
+  baseOnly?: PfPool;
+  real?: PfPool & { on: boolean; lastN: number };
+  validatedBasePct?: number;
   unfiltered: PfPool;
   total?: number;
   valid?: number;
@@ -81,7 +86,16 @@ export type PfBase = {
   history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number }>;
 };
 
+/** Sets and orders as executed, after every validation gate (Pulse.execution_snapshot). */
+export type Execution = {
+  sets: { configured: number; valid: number; baseValid: number; invalid: number; reasons: Record<string, number> };
+  open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
+  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number };
+};
+
 export type LiveStats = {
+  /** Sets and orders after every validation gate, as executed (open positions stay handled until closed). */
+  execution?: Execution;
   running: boolean;
   mode: string;
   connection: string;

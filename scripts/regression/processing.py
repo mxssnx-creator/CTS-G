@@ -503,7 +503,7 @@ def effective_pf_uses_the_rolling_window_not_the_whole_tape():
 def short_range_has_its_own_pf_floor():
     from set_engine import SHORT_PACK
     b = SetBook()
-    b.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
+    b.load(overlay(stratShortRange=True, setMinPf=2.0, realGateEnabled=False, **SMALL))
     sr = next(s for s in b.by_idx if s.pack == SHORT_PACK and s.kind == "base")
     other = next(s for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "base")
     for st in (sr, other):
@@ -513,10 +513,10 @@ def short_range_has_its_own_pf_floor():
         st.active = True
         st.last_error = ""
         st.locked = False
-    b.load(overlay(stratShortRange=True, setMinPf=2.0, shortRangeMinPf=1.5, **SMALL))
+    b.load(overlay(stratShortRange=True, setMinPf=2.0, shortRangeMinPf=1.5, realGateEnabled=False, **SMALL))
     reason_default = None
     b2 = SetBook()
-    b2.load(overlay(stratShortRange=True, setMinPf=2.0, **SMALL))
+    b2.load(overlay(stratShortRange=True, setMinPf=2.0, realGateEnabled=False, **SMALL))
     ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.25
           and b2.gate_reason(sr) == "" and b2.gate_reason(other) == "pf<min")
     return ok, f"short range floor default={b2.pack_min_pf[SHORT_PACK]} set={b.pack_min_pf[SHORT_PACK]}; PF 1.2: short range='{b2.gate_reason(sr)}' other='{b2.gate_reason(other)}'"
@@ -540,7 +540,7 @@ def pf_progress_history_is_continuous_and_bounded():
 
 def legacy_pick_prefers_judged_sets_over_a_single_lucky_order():
     b = SetBook()
-    b.load(overlay(setUseHistoricGate=False, **SMALL))
+    b.load(overlay(setUseHistoricGate=False, realGateEnabled=False, **SMALL))
     base = [s for s in b.by_idx if s.kind == "base" and s.pack == b.packs[0]]
     lucky, solid = base[0], base[1]
     for st, n, pf in ((lucky, 1, 99.0), (solid, 40, 4.0)):
@@ -554,7 +554,7 @@ def legacy_pick_prefers_judged_sets_over_a_single_lucky_order():
 def the_base_gate_cannot_be_switched_off():
     """Base evaluation gates are always enabled: an overlay that says otherwise is ignored."""
     b = SetBook()
-    b.load(overlay(setUseHistoricGate=False, **SMALL))
+    b.load(overlay(setUseHistoricGate=False, realGateEnabled=False, **SMALL))
     on = b.use_historic_gate is True and b.snapshot()["useHistoricGate"] is True
     return on, f"overlay setUseHistoricGate=false -> engine gate on={on}"
 
@@ -776,7 +776,8 @@ def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     import os, tempfile
 
     def windows(ov):
-        sb = SetBook(); sb.load(overlay(**ov))
+        ov = overlay(**ov)                      # the shipped overlay plus the case: every engine reads the same keys
+        sb = SetBook(); sb.load(ov)
         co = Coordinator(); co.load({}, ov)
         ex = ExitBook(); ex.load(ov)
         vb = VariantBook(); vb.load(ov)
@@ -785,7 +786,7 @@ def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     own = {"pfWindow": 12, "setPfWindow": 12, "exitPfWindow": 12, "slToTpRecalcN": 12, "trailRecalcN": 12}
     tiny = {k: 3 for k in own}
     got = {
-        "linked 50": windows({}),
+        "linked (shipped 30)": windows({}),
         "linked 30": windows({"setGateWindow": 30}),
         "linked ignores own values": windows({**own, "setGateWindow": 40}),
         "unlinked 12": windows({**own, "windowsLinked": False}),
@@ -793,12 +794,12 @@ def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
         "unlinked 3 -> floor": windows({**tiny, "windowsLinked": False}),
     }
     want = {
-        "linked 50": {k: 50 for k in got["linked 50"]},
-        "linked 30": {k: 30 for k in got["linked 50"]},
-        "linked ignores own values": {k: 40 for k in got["linked 50"]},
-        "unlinked 12": {k: 12 for k in got["linked 50"]},
-        "unlinked 8": {k: 8 for k in got["linked 50"]},
-        "unlinked 3 -> floor": {k: 8 for k in got["linked 50"]},
+        "linked (shipped 30)": {k: 30 for k in got["linked (shipped 30)"]},
+        "linked 30": {k: 30 for k in got["linked (shipped 30)"]},
+        "linked ignores own values": {k: 40 for k in got["linked (shipped 30)"]},
+        "unlinked 12": {k: 12 for k in got["linked (shipped 30)"]},
+        "unlinked 8": {k: 8 for k in got["linked (shipped 30)"]},
+        "unlinked 3 -> floor": {k: 8 for k in got["linked (shipped 30)"]},
     }
     sb = SetBook(); sb.load(overlay(setGateMinTrades=3, holdAutoMin=2))
     # only the validation gates and the five windows have the floor; the other counts stay as they were
@@ -813,6 +814,102 @@ def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     kept_ok = kept == {"dca_window": 5, "exit_samples": 5, "coord_samples": 7, "coord_prev_min": 1, "axis_last_window": 1, "block_samples": 8, "main_eval": 20, "real_eval": 15}
     ok = got == want and floors_ok and kept_ok and window_n({}, "pfWindow") == 50
     return ok, f"windows {got}; floors {floors}; unchanged {kept}"
+
+
+def _real_rows(sid, head_w, tail):
+    """50 orders for the gate window: head_w winners first (+0.4%), then `tail` = [(pnl_pct, ...)] as the newest orders. Net of the 0.12% cost."""
+    rows, t = [], 1000.0
+    for _ in range(50 - len(tail)):
+        t += 60
+        rows.append((t, "S0-USDT", "LONG", 0.0028, 0.004, 600.0, "tp", sid))
+    for x in tail:
+        t += 60
+        rows.append((t, "S0-USDT", "LONG", x - 0.0012, x, 600.0, "tp" if x > 0 else "sl", sid))
+    return rows
+
+
+def real_gate_is_per_set_at_the_base_minimum_pf():
+    """The Real gate: besides Base, a Set must hold the Base minimum PF over its own last realGateN orders (default 12). Per Set (another
+    Set's tape never moves it), the same minimum PF as Base (setMinPf, the Short Range floor), reason "real", and the execution pool
+    (valid_for / pick) holds only Sets that pass both. Switched off it is the Base gate alone."""
+    def judged(real_on, tail, min_pf=1.25, **extra):
+        b = _book(n_syms=1, bars=300, setMinPf=min_pf, realGateEnabled=real_on, **extra)
+        st = next(x for x in b.by_idx if x.kind == "base" and x.pack == b.packs[0])
+        st.hist = [dict(zip(("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id"), r)) for r in _real_rows(st.id, 38, tail)]
+        st.live = []
+        b._score_one(st)
+        return b, st, b.gate_reason(st)
+    good = [0.0062] * 6 + [-0.0028] * 6          # last 12: PF = 1.25 net of cost: exactly the minimum
+    weak = [0.0061] * 6 + [-0.0028] * 6          # a hair under
+    bad = [0.004] * 5 + [-0.002] * 7             # clearly under
+    out = {}
+    out["boundary 1.25"] = judged(True, good)[2]
+    out["just under"] = judged(True, weak)[2]
+    out["bad last 12"] = judged(True, bad)[2]
+    out["bad, Real off"] = judged(False, bad)[2]
+    out["min PF 1.5 moves Real too"] = judged(True, good, min_pf=1.5)[2]
+    b8, st8, r8 = judged(True, bad, realGateN=8)       # the last 8 orders of `bad`: 5 winners... a different N reads a different stretch
+    out["N=8"] = (st8.real_n, r8)
+    b_, st_, _ = judged(True, bad)
+    # another Set never moves it: score a second Set with a wildly different tape, the first Set's Real numbers stay
+    other = next(x for x in b_.by_idx if x is not st_ and x.kind == "base")
+    before = (st_.real_pf, st_.real_n, b_.gate_reason(st_))
+    other.hist = [dict(zip(("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id"), r)) for r in _real_rows(other.id, 38, [0.01] * 12)]
+    other.live = []
+    b_._score_one(other)
+    after = (st_.real_pf, st_.real_n, b_.gate_reason(st_))
+    # the execution pool holds only Sets that pass both
+    b2, st2, _ = judged(True, bad)
+    pool_off = [x.id for x in judged(False, bad)[0].valid_for(st2.pack, "base")]
+    pool_on = [x.id for x in b2.valid_for(st2.pack, "base")]
+    snap = judged(True, good)[0].snapshot()["pfBase"]
+    ok = (out["boundary 1.25"] == "" and out["just under"] == "real" and out["bad last 12"] == "real" and out["bad, Real off"] == ""
+          and out["min PF 1.5 moves Real too"] in ("pf<min", "real") and out["N=8"][0] == 8 and before == after
+          and st2.id in pool_off and st2.id not in pool_on and "real" in snap and "baseOnly" in snap)
+    return ok, f"reasons {out}; other Set left it alone={before == after}; pool off/on holds the Set={st2.id in pool_off}/{st2.id in pool_on}; pfBase keys {sorted(snap)[:6]}"
+
+
+def every_validation_gate_asks_the_base_minimum_pf():
+    """Real, Exit, DCA, Block and the coordinator use the Base gate's minimum PF (setMinPf) while minPfLinked is on (the default); unlinked, Exit,
+    DCA and the coordinator take their own value."""
+    import os, tempfile
+    from block_engine import BlockBook
+    from coord_engine import Coordinator
+    from dca_engine import DcaBook
+    from exit_engine import ExitBook
+
+    def gates(ov):
+        sb = SetBook(); sb.load(overlay(**ov))
+        co = Coordinator(); co.load({}, ov)
+        ex = ExitBook(); ex.load(ov)
+        dc = DcaBook(); dc.load(ov)
+        pk = sb.packs[0]
+        return {"real": sb.pack_min_pf.get(pk, sb.min_pf), "coord": co.min_pf, "exit": ex.min_pf, "dca": dc.min_pf}
+    own = {"minPf": 1.1, "exitMinPf": 1.05, "dcaMinPf": 1.15}
+    got = {"default": gates({}), "base 1.4": gates({"setMinPf": 1.4, **own}), "unlinked": gates({"setMinPf": 1.4, "minPfLinked": False, **own})}
+    want = {"default": {k: 1.25 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
+            "unlinked": {"real": 1.4, "coord": 1.1, "exit": 1.05, "dca": 1.15}}
+    return got == want, f"{got}"
+
+
+def pre_history_grows_when_too_many_sets_lack_orders():
+    """When a quarter of the Sets that traded have fewer orders than the gate minimum, the lookback (the pre-history the calcs read) grows by
+    240 bars up to histLookbackMax; it never shrinks, survives a reload, and histLookbackAuto off keeps the configured value."""
+    from set_engine import LOOKBACK_GROW_STEP
+    def after(passes=1, **ov):
+        b = _book(n_syms=2, bars=500, setGateMinTrades=400, histLookbackBars=500, **ov)     # nobody can reach 400 orders: every Set that traded is short
+        l0 = b.lookback
+        for _ in range(passes):
+            b.replay_all(now=T0)
+        return b, l0
+    b, l0 = after(1)
+    grown1 = b.lookback
+    b2, _ = after(1, histLookbackAuto=False)
+    b3, _ = after(30, histLookbackMax=1000)
+    b.load(overlay(setGateMinTrades=400, histLookbackBars=500))         # a live-config reload keeps what was grown
+    kept = b.lookback
+    ok = l0 == 500 and grown1 == l0 + LOOKBACK_GROW_STEP and b2.lookback == 500 and b3.lookback == 1000 and kept == grown1
+    return ok, f"start {l0} -> {grown1} after one pass; auto off {b2.lookback}; capped at histLookbackMax {b3.lookback}; after a reload {kept}"
 
 
 CHECKS = [
@@ -849,6 +946,9 @@ CHECKS = [
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
+    ("processing.real-gate-per-set-at-the-base-minimum-pf", real_gate_is_per_set_at_the_base_minimum_pf),
+    ("processing.every-validation-gate-asks-the-base-minimum-pf", every_validation_gate_asks_the_base_minimum_pf),
+    ("processing.pre-history-grows-when-sets-lack-orders", pre_history_grows_when_too_many_sets_lack_orders),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
     ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, window_n
+from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, window_n
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -99,6 +99,8 @@ class Coordinator:
             self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or GATE_MIN_PF_DEFAULT)
         except Exception:
             self.min_pf = float(ov.get("minPf") or GATE_MIN_PF_DEFAULT)
+        if ov.get("minPfLinked", True):
+            self.min_pf = base_min_pf(ov)        # every validation gate asks the Base gate's PF
         self.pf_window = window_n(ov, "pfWindow", fallback=LAST_N_DEFAULT)
         self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)

@@ -303,3 +303,28 @@ def window_n(ov: Any, *keys: str, fallback: Optional[int] = None) -> int:
         if v > 0:
             return max(MIN_VALIDATION_N, v)
     return max(MIN_VALIDATION_N, int(fallback)) if fallback else overall
+
+
+def base_min_pf(ov: Any) -> float:
+    """The Base gate's minimum PF (setMinPf, default GATE_MIN_PF_DEFAULT): the one value every validation gate uses."""
+    v = (ov or {}).get("setMinPf")
+    try:
+        return float(v) if v is not None else GATE_MIN_PF_DEFAULT
+    except (TypeError, ValueError):
+        return GATE_MIN_PF_DEFAULT
+
+
+def gate_min_pf(ov: Any, *own_keys: str) -> float:
+    """The minimum PF of a validation gate (Real, Exit, DCA, Block, the coordinator). minPfLinked (default on): the Base gate's value, so
+    every gate asks the same PF. Off: the first of own_keys that is set, else the Base value."""
+    ov = ov or {}
+    if ov.get("minPfLinked", True):
+        return base_min_pf(ov)
+    for k in own_keys:
+        try:
+            v = float(ov.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    return base_min_pf(ov)

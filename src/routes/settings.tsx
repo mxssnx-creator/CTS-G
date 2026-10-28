@@ -609,6 +609,45 @@ function SettingsPage() {
                   onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
                 />
                 <Slider
+                  label="Base gate · last N orders"
+                  value={overlay.setGateWindow}
+                  min={10}
+                  max={100}
+                  step={1}
+                  hint="each Set is judged on its own last N orders (default 30 for the small-cap universe)"
+                  onChange={(v) => patch("setGateWindow", v)}
+                />
+                <Slider
+                  label="Base gate · min orders"
+                  value={overlay.setGateMinTrades}
+                  min={8}
+                  max={100}
+                  step={1}
+                  hint="fewer orders than this: not judged (at most the last N)"
+                  onChange={(v) => patch("setGateMinTrades", v)}
+                />
+                <Toggle label="Real gate (second last-N validation per Set; execution uses Sets that pass both)" on={overlay.realGateEnabled !== false} onChange={(v) => patch("realGateEnabled", v)} />
+                <Slider
+                  label="Real gate · last N orders"
+                  value={overlay.realGateN}
+                  min={8}
+                  max={50}
+                  step={1}
+                  hint="default 12 · same minimum PF as Base · tested 8, 12, 15, 20, 25"
+                  onChange={(v) => patch("realGateN", v)}
+                />
+                <Toggle label="All validation gates use the Base minimum PF (Real, Exit, DCA, Block, coordinator)" on={overlay.minPfLinked !== false} onChange={(v) => patch("minPfLinked", v)} />
+                <Toggle label="Pre-history grows when too many Sets lack orders" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />
+                <Slider
+                  label="Pre-history · max bars"
+                  value={overlay.histLookbackMax}
+                  min={480}
+                  max={2880}
+                  step={240}
+                  hint="the lookback may grow up to this many 1m bars"
+                  onChange={(v) => patch("histLookbackMax", v)}
+                />
+                <Slider
                   label="Min samples"
                   value={overlay.setMinSamples}
                   min={5}
