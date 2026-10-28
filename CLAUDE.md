@@ -150,6 +150,31 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   1.08/0.99/1.01/0.94, small caps 0.99/1.19/1.06/1.02. The development ranking flips on the sealed window and between universes, so the
   default stays 50 (shorter windows validate more Sets and read higher in-sample, not a better executed result).
 
+## Validation gates: Base last N, Real gate, shared minimum PF, pre-history, execution tracking
+
+- Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
+  another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
+- **Base last N** (`setGateWindow`) default **30** and minimum orders `setGateMinTrades` 25 (owner, 2026-10-28, for the small-cap universe the
+  live engines trade; the code fallback without an overlay stays 50). **Real gate** (`realGateEnabled`, `realGateN` default 12, at least 8,
+  at most the Base window): besides Base a Set must hold the Base minimum PF over its own last N orders (reason `real`); execution picks only
+  Sets that pass both (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
+  over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
+  (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.
+- **Pre-history grows** (`histLookbackAuto`, `histLookbackMax` 2880): when a quarter of the Sets that traded have fewer orders than the gate
+  minimum, the lookback grows by 240 bars after a complete pass (the next fetch pages older minutes); it only grows and survives a reload.
+- **Execution tracking** (`Pulse.execution_snapshot`, stats `execution`, desk "Executed · after all gates"): Sets valid after all gates, open
+  positions and the Sets they run under (a Set that stopped passing keeps its open positions handled by its own lane until they close; counted
+  as `underInvalidSet`), orders closed by lane (Set / Exit, wins, losses, Sets that traded) from the whole trades file plus live closes, closes not
+  scored (`skippedNotScored`) and positions that left the book without a record (`droppedNoRecord`). Checks `trader.invalid-set-keeps-open-position-...`,
+  `processing.real-gate-per-set-...`, `processing.every-validation-gate-asks-the-base-minimum-pf`, `processing.pre-history-grows-...`.
+- Measured (2 days, 20 symbols, `scripts/window_eval.py --base-list ... --arms ...`, development window; 7 Base N x 7 Real N): validated Sets
+  fall with a longer Base window (small caps 36.7 % at 10 to 29.1 % at 35, majors 31.9 % to 12.7 %) and again with the Real gate (Base 30: 31.4 %
+  alone, 20.2-26.8 % after Real 8-25; majors 14.5 % alone, 10.1-12.8 %). The in-sample effective PF rises as the windows shorten and with the Real
+  gate (small caps Base 30: 1.79 alone, 1.90-2.01 with Real); the executed PF does not follow: small caps 1.07-1.22 (best Base 30 / Real 8-10 1.22, Base 25
+  / Real 10 1.06), majors 0.35-0.57, no cell above 1 on majors and no consistent winner across universes. Merged engine (Exit Sets), Base 30 Real
+  off / 12: small caps dev 0.94 / 0.91, sealed 1.07 / 0.97; majors dev 0.55 / 0.42, sealed 0.80 / 0.82. The Real gate removes a third of the validated
+  Sets and carries no measurable out-of-sample gain; it is on by default at N = 12 by owner decision.
+
 ## Indication library and extra packs
 
 - `server/pulse/indication_lib.py`: 37 causal indicator families (trend, breakout, reversion, volume and flow; relations and

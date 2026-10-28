@@ -859,12 +859,22 @@ def real_gate_is_per_set_at_the_base_minimum_pf():
     b_._score_one(other)
     after = (st_.real_pf, st_.real_n, b_.gate_reason(st_))
     # the execution pool holds only Sets that pass both
+    # fewer orders than N: Base is satisfied (window 40, minimum 8) but the Set has only 20 orders for a Real N of 30
+    b20 = _book(n_syms=1, bars=300, realGateEnabled=True, realGateN=30, setGateWindow=40, setGateMinTrades=8)
+    s20 = next(x for x in b20.by_idx if x.kind == "base" and x.pack == b20.packs[0])
+    s20.hist = [dict(zip(("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id"), (1000.0 + 60 * k, "S0-USDT", "LONG", 0.0028, 0.004, 600.0, "tp", s20.id))) for k in range(20)]
+    s20.live = []
+    b20._score_one(s20)
+    out["20 orders, Real N 30"] = (s20.gate_n, s20.real_n, b20.gate_reason(s20))
+    floor3 = _book(n_syms=1, bars=300, realGateN=3)                        # an N under the floor is read as 8
+    out["Real N 3"] = floor3.real_n
     b2, st2, _ = judged(True, bad)
     pool_off = [x.id for x in judged(False, bad)[0].valid_for(st2.pack, "base")]
     pool_on = [x.id for x in b2.valid_for(st2.pack, "base")]
     snap = judged(True, good)[0].snapshot()["pfBase"]
     ok = (out["boundary 1.25"] == "" and out["just under"] == "real" and out["bad last 12"] == "real" and out["bad, Real off"] == ""
           and out["min PF 1.5 moves Real too"] in ("pf<min", "real") and out["N=8"][0] == 8 and before == after
+          and out["20 orders, Real N 30"] == (20, 20, "real") and out["Real N 3"] == 8
           and st2.id in pool_off and st2.id not in pool_on and "real" in snap and "baseOnly" in snap)
     return ok, f"reasons {out}; other Set left it alone={before == after}; pool off/on holds the Set={st2.id in pool_off}/{st2.id in pool_on}; pfBase keys {sorted(snap)[:6]}"
 
