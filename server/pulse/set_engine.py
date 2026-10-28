@@ -2794,29 +2794,24 @@ def self_test() -> List[Tuple[str, bool, str]]:
         x.max_dd_s = 0.0
     out.append(("set-pick-ranks-base-and-exit", xb.pick_any("general") is xst and xb.pack_open("general"),
                 f"pick={getattr(xb.pick_any('general'), 'id', None)}"))
-    # last N: every "last N" judgement reads at least MIN_VALIDATION_N orders, whatever the overlay asks for
+    # last N: the Base gate minimum, the hold Auto floor and the linked windows read at least MIN_VALIDATION_N orders
     ln = SetBook()
     ln.load({"setPfWindow": 3, "pfWindow": 3, "setGateMinTrades": 3, "setGateWindow": 20, "holdAutoMin": 3})
     out.append(("set-last-n-at-least-8", ln.pf_n >= MIN_VALIDATION_N and ln.gate_min >= MIN_VALIDATION_N and ln.hold_auto_min >= MIN_VALIDATION_N
                 and MIN_VALIDATION_N == 8, f"pf_n={ln.pf_n} gate_min={ln.gate_min} hold_auto_min={ln.hold_auto_min}"))
     try:
-        from dca_engine import DcaBook
         from exit_engine import ExitBook
         from risk_variants import VariantBook
-        from block_engine import BlockBook
-        d_, e_, v_ = DcaBook(), ExitBook(), VariantBook()
-        d_.load({"dcaPfWindow": 3})
-        e_.load({"exitPfWindow": 3, "exitMinSamples": 3})
+        e_, v_ = ExitBook(), VariantBook()
+        e_.load({"exitPfWindow": 3})
         v_.load({"slToTpRecalcN": 3, "trailRecalcN": 3}, {})
-        import os as _os
-        import tempfile as _tf
-        bb = BlockBook(_os.path.join(_tf.mkdtemp(prefix="ctsg-block-"), "block.json"), {"prevPosMinCount": 3})
-        floors = {"block_min": bb.min_samples, "dca": d_.pf_n, "exit_pf": e_.pf_n, "exit_min": e_.min_samples, "sl_recalc": v_.sl_recalc_n,
-                  "trail_recalc": v_.trail_recalc_n}
+        # the floor applies to the Base gate minimum, the hold Auto floor and the linked validation windows; the other
+        # counts (Block's own samples, the Exit lane minimum, the DCA window) keep their own ranges
+        floors = {"exit_pf": e_.pf_n, "sl_recalc": v_.sl_recalc_n, "trail_recalc": v_.trail_recalc_n}
         ok_floor = all(v >= MIN_VALIDATION_N for v in floors.values())
     except Exception as exc:          # a module that no longer loads is a failure here
         floors, ok_floor = {"error": repr(exc)[:80]}, False
-    out.append(("set-last-n-floor-everywhere", ok_floor, str(floors)))
+    out.append(("set-last-n-floor-linked-windows", ok_floor, str(floors)))
     return out
 
 

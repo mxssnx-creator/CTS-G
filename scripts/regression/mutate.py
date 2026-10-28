@@ -1,13 +1,23 @@
 """Fault injection: the regression suite must catch each planted fault.
 
-Each mutation edits a temporary copy of server/pulse (the repo is never touched), runs the full suite
+Each mutation edits a temporary copy of server/pulse (the repo is never touched), runs the suite
 against that copy, and reports the checks that failed. A mutation that leaves the suite green is a gap.
-  python3 scripts/regression/mutate.py
+  python3 scripts/regression/mutate.py                  every mutant
+  python3 scripts/regression/mutate.py --only "trader:"  the mutants whose name starts with the prefix
+  python3 scripts/regression/mutate.py --full           ignore the catcher map (every mutant runs the whole suite)
+
+Speed: mutant_catchers.json remembers the check that caught each mutant last time. That check runs first, alone (a
+few seconds); when it fails the mutant is caught, exactly as the full run would report it. Only a mutant it does not
+catch (or a new one) runs the whole suite, and the check that catches it is recorded. A survivor is therefore always
+decided by the whole suite, so the verdicts are those of a full run.
 """
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
+import json
 import os
+import threading
 import shutil
 import subprocess
 import sys
@@ -16,6 +26,9 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 PULSE = os.path.join(ROOT, "server", "pulse")
+CATCHERS_PATH = os.path.join(HERE, "mutant_catchers.json")
+_catchers: dict = {}
+_catchers_lock = threading.Lock()
 
 MUTATIONS = [
     ("trader: lanes: a Set close escalates the symbol backoff like the Exit lane",
@@ -563,9 +576,10 @@ def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subproce
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=1500)
 
 
-def _mutant(item):
+def _mutant(item, use_cache: bool = True):
     """Apply one fault to a private copy of server/pulse and run the suite against it. Returns (name, verdict, info).
-    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass."""
+    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass.
+    The check that caught this mutant last time runs first, alone; the whole suite runs only when it does not catch it."""
     name, fname, old, new = item
     with tempfile.TemporaryDirectory() as td:
         copy = os.path.join(td, "pulse")
@@ -580,23 +594,41 @@ def _mutant(item):
                 return name, "anchor", f"anchor found {count} times, mutation not applied"
             text = text.replace(old, new)
         open(path, "w", encoding="utf-8").write(text)
+        known = _catchers.get(name) if use_cache else None
+        if known:
+            out = run_once(copy, fail_fast=True, only=known)
+            fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
+            if out.returncode != 0 and fails:
+                return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]} (known catcher)"
         out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "bybit." if name.startswith("bybit:") else "")
     fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
     if out.returncode == 0:
         return name, "survived", ""
+    if fails:
+        with _catchers_lock:
+            _catchers[name] = fails[0]
     return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]}"
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="", help="run the mutants whose name starts with this prefix")
+    ap.add_argument("--full", action="store_true", help="ignore the catcher map: every mutant runs the whole suite")
+    args = ap.parse_args()
     base = run_once(PULSE, fail_fast=False)
     if base.returncode != 0:
         print("baseline suite is not green; fix it before injecting faults", flush=True)
         print("\n".join(l for l in base.stdout.splitlines() if l.startswith("FAIL")), flush=True)
         return 1
+    try:
+        _catchers.update(json.load(open(CATCHERS_PATH, encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    todo = [m for m in MUTATIONS if m[0].startswith(args.only)]
     jobs = int(os.environ.get("CTSG_MUT_JOBS") or 4)
     survivors, anchors = [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        for name, verdict, info in pool.map(_mutant, MUTATIONS):
+        for name, verdict, info in pool.map(lambda m: _mutant(m, not args.full), todo):
             if verdict == "survived":
                 survivors.append(name)
                 print(f"SURVIVED  {name}", flush=True)
@@ -605,7 +637,11 @@ def main() -> int:
                 print(f"ANCHOR    {name}: {info}", flush=True)
             else:
                 print(f"caught    {name}: {info}", flush=True)
-    print(f"\nmutations: {len(MUTATIONS)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
+    names = {m[0] for m in MUTATIONS}
+    with open(CATCHERS_PATH, "w", encoding="utf-8") as fh:        # only mutants that still exist, in a stable order
+        json.dump({k: v for k, v in sorted(_catchers.items()) if k in names}, fh, indent=1)
+        fh.write("\n")
+    print(f"\nmutations: {len(todo)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
           f"workers: {jobs}", flush=True)
     return 1 if (survivors or anchors) else 0
 

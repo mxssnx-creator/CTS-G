@@ -65,7 +65,8 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
 - Every Set group's average gross result per order is at most +0.034 % (indications trail +0.025 %, Exit +0.014 %, base
   +0.008 %, general about 0) against a PositionCost of 0.12 %. Effective PF after Base 2.33 (in-sample, 15 % validated);
   the validated Sets' next 8 orders PF 0.46, next 50 orders 0.50 (below the ungated average of about 0.58: a Set passes
-  at the end of a lucky stretch); executed 0.64 on 9,822 orders, 53 of 196 blocks of 50 orders at PF 1 or more; no type,
+  at the end of a lucky stretch); executed (validated per order) 0.61 on 9,993 orders, 61 of 199 blocks of 50 orders at PF
+  1 or more; the last 12 h on 12 symbols 0.43 on 130 orders (`reports/trade_sim_12h_12sym.txt`); no type,
   step or SL ratio above 1 on its next orders. No gate or ranking can carry a PF above 1 out of sample while the signals'
   gross move per order is under the cost: an edge has to come from the signals or the exits. `trade_sim.py` reports per
   type and range, in orders (never hours); `reports/trade_sim_dev.txt` holds the full listing.
@@ -192,5 +193,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 ## Checks
 
-`python3 -B scripts/regression/run.py` (all green), `python3 -B scripts/regression/mutate.py` (no survivors),
+`python3 -B scripts/regression/run.py` (all green, about 6 min), `python3 -B scripts/regression/mutate.py` (no survivors; each
+mutant first runs the check that caught it last time, `scripts/regression/mutant_catchers.json`, and the whole suite only
+when that one passes, so a run takes minutes, not hours; `--only PREFIX`, `--full`),
 `npm run typecheck`, `npm test`. A new check must fail on the previous code.
