@@ -432,7 +432,7 @@ def pick_any_has_no_gap_between_lookups():
 def effective_pf_is_pooled_over_valid_sets_only():
     """The snapshot reports the effective PF (Sets that pass Base validation) apart from the unfiltered PF of every Set.
     The base figure is rebuilt here from the valid Sets' own gross profit and loss, so a mix-up of the two pools fails."""
-    b = _book(n_syms=3, bars=900, **SMALL)
+    b = _book(n_syms=3, bars=900, realGateEnabled=False, **SMALL)     # the pools of the Base gate (the floor is moved below)
     b.replay_all(now=T0)
     pfs = sorted(st.gate_pf for st in b.by_idx if st.gate_n >= b.gate_min)
     b.min_pf = pfs[len(pfs) // 2] if pfs else 0.0   # the median: some Sets pass Base, some do not
@@ -598,7 +598,7 @@ def a_set_must_pass_on_both_halves_of_its_window_when_asked():
     out = {}
     for cons in (0.0, 1.0):
         b = SetBook()
-        b.load(overlay(setGateWindow=50, setGateMinTrades=30, setMinPf=1.1, setGateConsistencyPf=cons, **SMALL))
+        b.load(overlay(setGateWindow=50, setGateMinTrades=30, setMinPf=1.1, setGateConsistencyPf=cons, realGateEnabled=False, **SMALL))
         st = next(x for x in b.by_idx if x.kind == "base")
         st.hist = tape(first, second)
         st.live = []

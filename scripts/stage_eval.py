@@ -119,6 +119,14 @@ class Tapes:
             self.by_set[st.idx] = (array("d", (r[0] for r in rows)), array("d", (r[1] for r in rows)),
                                    array("d", (r[2] for r in rows)))
 
+    def prefix(self, idx: int):
+        """(net results, gain prefix sums, loss prefix sums) of a Set's tape, computed once."""
+        cache = self.__dict__.setdefault("_prefix", {})
+        if idx not in cache:
+            nets = [x - self.cf for x in self.by_set[idx][2]]
+            cache[idx] = (nets,) + se.prefix_sums(nets)
+        return cache[idx]
+
     def window(self, idx: int, now: float, lookback_s: float, n: int):
         tx, te, pp = self.by_set[idx]
         end = bisect.bisect_left(tx, now)
@@ -171,8 +179,8 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     if valid and book.consistency_pf > 0 and n >= 2:
         valid = min(old, new) + 1e-9 >= book.consistency_pf
-    if valid and getattr(book, "real_on", False):       # the Real gate: the same minimum PF over the Set's last realGateN orders
-        rw = [x - cf for x in w[-book.real_n:]]
+    if valid and getattr(book, "real_on", False):       # the Real gate: the same minimum PF over the Set's last realGateN processed orders
+        rw = processed_tail(book, tapes, st, now, book.real_n)
         g_ = sum(x for x in rw if x > 0)
         l_ = -sum(x for x in rw if x < 0)
         valid = len(rw) >= book.real_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= floor
@@ -180,6 +188,26 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * n_all / (n_all + se.RANK_SHRINK_N)
     rank = (halves + 1e-9 >= floor, round(shrunk, 4), n_all, r25, -max_s)      # SetBook.rank_key
     return valid, rank, n, pf
+
+
+def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
+    """The net results of the Set's newest n processed orders closed before now: orders it opened while it passed its Base gate,
+    judged on its own closes before each entry within the lookback (set_engine.processed_flag, SetBook.set_processed's rule)."""
+    lb = book.lookback * 60.0
+    tx, te, pp = tapes.by_set[st.idx]
+    nets, gpre, lpre = tapes.prefix(st.idx)
+    e = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - lb)
+    floor = book.pack_min_pf.get(st.pack, book.min_pf)
+    out: List[float] = []
+    for k in range(e - 1, lo - 1, -1):
+        if se.processed_flag(tx, nets, gpre, lpre, te[k], book.gate_window, book.gate_min, floor, book.max_dd_s, lb, lo,
+                             book.consistency_pf):
+            out.append(nets[k])
+            if len(out) >= n:
+                break
+    out.reverse()
+    return out
 
 
 def gate_until(book, tapes: Tapes, st, now: float) -> float:
@@ -210,13 +238,25 @@ def gate_until(book, tapes: Tapes, st, now: float) -> float:
 
 
 def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) -> Tuple[int, int]:
-    """The direct gate against the engine's own scoring on sampled (Set, hour) pairs."""
+    """The direct gate against the engine's own scoring on sampled (Set, hour) pairs; half of them are pairs that pass the Base
+    gate, so the Real gate on the processed orders is compared too."""
     import random
     rnd = random.Random(5)
     bad = 0
-    for _ in range(samples):
-        st = rnd.choice(book.by_idx)
-        now = rnd.choice(list(hours))
+    picks, tries = [], 0
+    hours = list(hours)
+    while len(picks) < samples and tries < samples * 400:
+        tries += 1
+        st, now = rnd.choice(book.by_idx), rnd.choice(hours)
+        want_base = len(picks) % 2 == 0
+        if want_base and tries < samples * 300:
+            tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.gate_window)
+            g_ = sum(x - tapes.cf for x in pp if x - tapes.cf > 0)
+            l_ = -sum(x - tapes.cf for x in pp if x - tapes.cf < 0)
+            if len(pp) < book.gate_min or (g_ / l_ if l_ > 0 else 99.0) < book.min_pf:
+                continue
+        picks.append((st, now))
+    for st, now in picks:
         tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, 10 ** 9)
         st.hist = [{"t": float(a), "pnl": float(x) - tapes.cf, "pnl_pct": float(x), "hold_s": float(a - b), "reason": "x"}
                    for a, b, x in zip(tx, te, pp)]
@@ -230,7 +270,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
                 or abs(key[4] - ek[4]) > 1e-6:
             bad += 1
         st.hist = []
-    return samples, bad
+    return len(picks), bad
 
 
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------

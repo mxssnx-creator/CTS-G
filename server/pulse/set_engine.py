@@ -192,6 +192,58 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -
     }
 
 
+def processed_flag(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[float], lpre: Sequence[float], entry_t: float,
+                   gate_window: int, gate_min: int, floor: float, max_dd_s: float, lookback_s: float, lo_floor: int = 0,
+                   consistency: float = 0.0) -> bool:
+    """Whether a Set passed its Base gate at entry_t, judged on its own closes before that moment (exit time < entry_t, within the
+    lookback, from index lo_floor on): at least gate_min of its last gate_window closes, their net PF at or above floor, the
+    consistency floor on both halves when set, and a drawdown time under max_dd_s measured to entry_t. ts: exit times
+    ascending; nets: net results (after PositionCost); gpre / lpre: prefix sums of the gains and of the losses of nets."""
+    e = bisect.bisect_left(ts, entry_t)
+    lo = max(lo_floor, bisect.bisect_left(ts, entry_t - lookback_s))
+    s0 = max(lo, e - gate_window)
+    if e - s0 < gate_min:
+        return False
+    g, l_ = gpre[e] - gpre[s0], lpre[e] - lpre[s0]
+    pf = round(g / l_, 4) if l_ > 0 else (99.0 if g > 0 else 0.0)
+    if pf + 1e-9 < floor:
+        return False
+    if consistency > 0:
+        h = s0 + (e - s0) // 2
+
+        def _pf(a: int, b: int) -> float:
+            g_, l2 = gpre[b] - gpre[a], lpre[b] - lpre[a]
+            return g_ / l2 if l2 > 0 else (99.0 if g_ > 0 else 0.0)
+        if min(_pf(s0, h), _pf(h, e)) + 1e-9 < consistency:
+            return False
+    eq = peak = 0.0
+    peak_t = ts[s0]
+    in_dd = False
+    max_s = 0.0
+    for k in range(s0, e):                      # drawdown_time over that window, the open drawdown measured to entry_t
+        eq += nets[k]
+        if eq >= peak - 1e-12:
+            if in_dd:
+                max_s = max(max_s, ts[k] - peak_t)
+                in_dd = False
+            peak = max(peak, eq)
+            peak_t = ts[k]
+        else:
+            in_dd = True
+    if in_dd:
+        max_s = max(max_s, entry_t - peak_t)
+    return max_s < max_dd_s
+
+
+def prefix_sums(nets: Sequence[float]) -> Tuple[List[float], List[float]]:
+    """Prefix sums of the gains and of the losses (as positive numbers) of net results, for processed_flag."""
+    gpre, lpre = [0.0], [0.0]
+    for x in nets:
+        gpre.append(gpre[-1] + (x if x > 0 else 0.0))
+        lpre.append(lpre[-1] + (-x if x < 0 else 0.0))
+    return gpre, lpre
+
+
 def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     """Pulse general pack, 1m bars [o,h,l,c,v]. Pure — no Pulse instance."""
     if len(bars) < 16:
@@ -512,10 +564,13 @@ class SetState:
     gate_pf_new: float = 0.0
     gate_gp: float = 0.0            # gross profit / loss (net fractions) inside that same window: the rolling pool inputs
     gate_gl: float = 0.0
-    real_pf: float = 0.0            # net PF over the last realGateN orders: the Real gate (a second, shorter last-N validation, per Set)
+    real_pf: float = 0.0            # net PF over the last realGateN processed orders: the Real gate (a second, shorter last-N validation, per Set)
     real_n: int = 0
     real_gp: float = 0.0
     real_gl: float = 0.0
+    proc: List[Tuple[float, float]] = field(default_factory=list)   # processed orders (exit t, net): opened while the Set passed Base
+    proc_total: int = 0             # processed orders in the lookback (before the PROC_KEEP cap)
+    proc_replayed: bool = False     # proc comes from a replay pass (else processed_stream derives it from the held tape)
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
     last15_r: float = 0.0
@@ -926,6 +981,7 @@ class SetLane:
         return out
 
 REAL_GATE_N_DEFAULT = 12
+PROC_KEEP = 200                   # processed orders kept per Set (the Real gate reads the newest realGateN of them)
 LOOKBACK_GROW_STEP = 240          # bars added to the pre-history per growth step
 LOOKBACK_SHORT_SHARE = 0.25       # grow when this share of the Sets that traded has fewer orders than the gate minimum
 HOLD_KEY = "@h"                                       # _hist_rows key of an Auto Mode candidate tape: "<set id>@h<minutes>"
@@ -1638,6 +1694,7 @@ class SetBook:
                     try:
                         full = self._tape_rows(st.id, tape_order, cutoff)
                         full = self._choose_hold(st, full, tape_order, cutoff)
+                        self.set_processed(st, full)
                         st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=now)
@@ -1772,6 +1829,39 @@ class SetBook:
         st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
         return best[2]
 
+    def _processed_of(self, st: SetState, full: Sequence[tuple]) -> List[Tuple[float, float]]:
+        cf = cost_as_frac(self.cost_pct)
+        ts = [finite(r[0]) for r in full]
+        nets = [finite(r[4]) - cf for r in full]
+        gpre, lpre = prefix_sums(nets)
+        floor = self.pack_min_pf.get(st.pack, self.min_pf)
+        lb = self.lookback * BAR_S
+        return [(ts[k], nets[k]) for k in range(len(full))
+                if processed_flag(ts, nets, gpre, lpre, ts[k] - finite(full[k][5]), self.gate_window, self.gate_min, floor,
+                                  self.max_dd_s, lb, 0, self.consistency_pf)]
+
+    def set_processed(self, st: SetState, full: Sequence[tuple]) -> None:
+        """The Set's processed orders: the orders of its tape (rows as replayed, exit time ascending) that it opened while it
+        passed its Base gate, judged on its own closes before each entry (processed_flag). The continuous validations after
+        Base (the Real gate) read this stream, never the raw tape: they judge what the Set did while it was tradeable."""
+        proc = self._processed_of(st, full)
+        st.proc = proc[-PROC_KEEP:]
+        st.proc_total = len(proc)
+        st.proc_replayed = True
+
+    def processed_stream(self, st: SetState) -> List[float]:
+        """Net results of the Set's processed orders in exit order: the replayed ones (set_processed) and its live closes, which
+        were opened under the Set while it was valid, so every one of them is processed."""
+        cf = cost_as_frac(self.cost_pct)
+        if getattr(st, "proc_replayed", False):
+            rows = list(st.proc or [])
+        else:                                   # not replayed (a Set scored on the tape it holds): the same rule over that tape
+            held = sorted((tuple(r.get(k) for k in _ROW_KEYS) for r in st.hist if r.get("pnl_pct") is not None), key=lambda r: finite(r[0]))
+            rows = self._processed_of(st, held)
+        rows += [(finite(r.get("t")), finite(r.get("pnl_pct")) - cf) for r in st.live if r.get("pnl_pct") is not None]
+        rows.sort(key=lambda r: r[0])
+        return [x for _, x in rows]
+
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
         tape = sorted(st.tape(), key=lambda r: finite(r.get("t")))   # last-N and drawdown read one time order
         pnls = [finite(r.get("pnl")) for r in tape]
@@ -1809,7 +1899,7 @@ class SetBook:
             st.gate_pf_old = st.gate_pf_new = 0.0
         st.gate_gp = round(sum(x for x in win if x > 0), 8)
         st.gate_gl = round(-sum(x for x in win if x < 0), 8)
-        rw = win[-self.real_n:]
+        rw = self.processed_stream(st)[-self.real_n:]     # the Real gate reads the processed orders, not the raw tape
         st.real_n = len(rw)
         st.real_gp = round(sum(x for x in rw if x > 0), 8)
         st.real_gl = round(-sum(x for x in rw if x < 0), 8)
@@ -2145,6 +2235,7 @@ class SetBook:
                     "gateN": st.gate_n,
                     "pf15": round(st.last15_pf, 4),
                     "realPf": round(st.real_pf, 4),
+                    "procN": int(st.proc_total) + len(st.live),       # processed orders (opened while the Set passed Base)
                     "realN": st.real_n,
                     "ratio": round(st.last15_ratio, 4),
                     "last15N": st.last15_n,
@@ -2451,7 +2542,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book4 = SetBook()
     book4.load(
         {
-            "histEnabled": True,
+            "histEnabled": True, "realGateEnabled": False,      # these checks are about the Base gate on short fixture tapes
             "setMinStep": 8,
             "setStepMax": 12,
             "stratIndications": True,
@@ -2562,7 +2653,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g2 = SetBook()
     g2.load(
         {
-            "positionCostPct": 0.15, "histEnabled": True, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
+            "positionCostPct": 0.15, "histEnabled": True, "realGateEnabled": False, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
             "setMinSamples": 8, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
             "trailVariants": ["0.3:0.1"],
@@ -2867,6 +2958,32 @@ def self_test() -> List[Tuple[str, bool, str]]:
     except Exception as exc:          # a module that no longer loads is a failure here
         floors, ok_floor = {"error": repr(exc)[:80]}, False
     out.append(("set-last-n-floor-linked-windows", ok_floor, str(floors)))
+    # the Real gate reads the processed orders (opened while the Set passed Base), not the raw tape: 20 wins, 6 losses of three
+    # times the size, then 12 wins opened while the Set was not valid. Base passes at the end (PF 1.33 over the last 30) and the
+    # raw last 12 are all wins; the processed last 12 hold the losses (PF 1.0), so the Set fails the Real gate.
+    pr = SetBook()
+    pr.load({"setGateWindow": 30, "setGateMinTrades": 20, "realGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+             "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
+    pst = next(x for x in pr.by_idx if x.kind == "base")
+    cfp = cost_as_frac(pr.cost_pct)
+    seq = [0.004] * 20 + [-0.012] * 6 + [0.004] * 12
+    rows_p = [(1_700_000_000.0 + 600.0 * k, "T", "LONG", x, x + cfp, 300.0, "x", pst.id) for k, x in enumerate(seq)]
+    pst.active = True
+    pr.set_processed(pst, rows_p)
+    pst.hist = [dict(zip(_ROW_KEYS, r)) for r in rows_p]
+    pr._score_one(pst, now=rows_p[-1][0] + 60.0)
+    raw12 = [r[3] for r in rows_p[-12:]]
+    held = SetBook()
+    held.load({"setGateWindow": 30, "setGateMinTrades": 20, "realGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+               "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
+    hst = next(x for x in held.by_idx if x.kind == "base")
+    hst.active = True
+    hst.hist = [dict(zip(_ROW_KEYS, r)) for r in rows_p]
+    held._score_one(hst, now=rows_p[-1][0] + 60.0)          # not replayed: the same rule over the tape it holds
+    out.append(("set-real-gate-reads-processed-orders", min(raw12) > 0 and pr.gate_reason(pst) == "real" and pst.gate_pf >= 1.25
+                and held.gate_reason(hst) == "real" and abs(hst.real_pf - pst.real_pf) < 1e-9 and pst.proc_total < len(rows_p),
+                f"raw last 12 all wins={min(raw12) > 0}; Base PF {pst.gate_pf}; processed {pst.proc_total}/{len(rows_p)}; "
+                f"Real PF {pst.real_pf} -> {pr.gate_reason(pst) or 'valid'} (held tape: {held.gate_reason(hst) or 'valid'})"))
     return out
 
 

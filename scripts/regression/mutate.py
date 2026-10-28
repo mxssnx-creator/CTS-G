@@ -31,6 +31,10 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("processed lane: the Real gate reads the raw tape again",
+     "set_engine.py", "        rw = self.processed_stream(st)[-self.real_n:]", "        rw = win[-self.real_n:]"),
+    ("processed lane: every order counts as processed",
+     "set_engine.py", "        e = bisect.bisect_left(ts, entry_t)\n    lo = max(lo_floor,", "        return True\n    e = bisect.bisect_left(ts, entry_t)\n    lo = max(lo_floor,"),
     ("trader: lanes: a Set close escalates the symbol backoff like the Exit lane",
      "pulse_trader.py", "        if set_lane:\n            return float(getattr(self.sets, \"cooldown_bars\", 2)) * 60.0\n", ""),
     ("trader: lanes: Set losses pause the whole book",
