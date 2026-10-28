@@ -608,17 +608,20 @@ export function statsMatchesConn(s: LiveStats, conn: string): boolean {
   const got = String(s.connType || "").toLowerCase();
   const cid = String(s.connection || "").toLowerCase();
   const unit = String(s.unit || "").toLowerCase();
+  const bybit = cid.startsWith("bybit") || got.startsWith("bybit");
   if (conn === "live") {
-    if (got === "overall" || cid === "overall") return false;
+    if (got === "overall" || cid === "overall" || bybit) return false;
     if (got === "vst" || cid.includes("x02") || unit === "vst") return false;
     return got === "live" || cid.includes("x01") || unit === "usdt";
   }
   if (conn === "vst") {
-    if (got === "overall" || cid === "overall") return false;
+    if (got === "overall" || cid === "overall" || bybit) return false;
     if (got === "live" || cid.includes("x01") || unit === "usdt") return false;
     return got === "vst" || cid.includes("x02") || unit === "vst";
   }
   if (conn === "overall") return got === "overall" || cid === "overall";
+  // another venue's lane (Bybit): its own connection type, matched by the type or the connection id
+  if (conn.startsWith("bybit")) return got === conn || cid === (conn === "bybit" ? "bybit-x01" : "bybit-x02");
   return false;
 }
 
@@ -630,6 +633,8 @@ export function pickView(stats: LiveStats | null, conn: string): LiveStats | nul
 function cidPrefix(conn: string): string {
   if (conn === "live") return "Gx01";
   if (conn === "vst") return "Gx02";
+  if (conn === "bybit") return "Gb01";
+  if (conn === "bybit-demo") return "Gb02";
   return "";
 }
 

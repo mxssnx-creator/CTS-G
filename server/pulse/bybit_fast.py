@@ -45,7 +45,8 @@ import urllib.parse
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from bingx_fast import ErrorLog, TokenBucket, dumps, loads
+from bingx_fast import ErrorLog, dumps, loads
+from bybit_limits import AUTH_WORDS, IP_BAN_S, WORDS, Limiter, Verdict, classify
 
 try:
     import websocket as _ws
@@ -63,17 +64,11 @@ SETTLE = "USDT"
 WS_ARGS_PER_CONN = 90          # Bybit limits a futures connection to 100 topics
 WS_PING_S = 20.0
 
-LIMITS = {
-    "public": (40.0, 80.0),
-    "private": (15.0, 30.0),
-    "order": (8.0, 16.0),
-}
-
-# retCodes
-RATE_CODES = {10006, 10018}
-IP_BAN_HTTP = 403
-OK_ALREADY = {110043, 110025, 110026, 34036, 3400045}      # leverage / position mode / margin mode already as asked
-TIME_CODE = 10002
+BATCH_MAX = 10                  # orders per batch call (the rate-limit page allows 10, the endpoint pages up to 20 for linear)
+BREAKER_FAILS = 6               # consecutive transient failures that open the circuit breaker
+BREAKER_S = 15.0                # how long it stays open for new entries (closing orders and cancels always go)
+RETRY_PAUSE_S = 0.25
+OK_ALREADY = {110043, 110025, 110026, 34040}      # leverage / position mode / margin mode already as asked
 
 # the BingX paths the trader uses (also the keys of path_cd)
 P_BAL3 = "/openApi/swap/v3/user/balance"
@@ -160,8 +155,6 @@ def parse_instrument(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """One instruments-info row as the trader's contract fields, or None for a symbol the trader does not trade."""
     sym = str(row.get("symbol") or "")
     if not is_usdt_perp(sym):
-        return None
-    if str(row.get("quoteCoin") or SETTLE) != SETTLE or str(row.get("settleCoin") or SETTLE) != SETTLE:
         return None
     if str(row.get("contractType") or "LinearPerpetual") != "LinearPerpetual":
         return None
@@ -338,19 +331,27 @@ def _urllib_transport(method: str, url: str, headers: Dict[str, str], body: Opti
         return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, e.read()
 
 
+ORDER_PATHS = ("/v5/order/create", "/v5/order/create-batch", "/v5/order/cancel", "/v5/order/amend", "/v5/order/amend-batch", "/v5/order/cancel-batch")
+
+
 class FastBybit:
     def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: str = WS_URL,
                  public_base: str = "", transport: Optional[Transport] = None, hedge: bool = True,
-                 trigger_by: str = "MarkPrice") -> None:
+                 trigger_by: str = "MarkPrice", sleep: Optional[Callable[[float], None]] = None,
+                 clock: Optional[Callable[[], float]] = None) -> None:
         self.key = key
         self.secret = secret
         self.err = err
         self.base = (base or BASE).rstrip("/")
-        self.public_base = (public_base or self.base).rstrip("/")     # market data is the same on every host
+        # market data is the same on every host; the demo host is for signed trading, so its public reads go to mainnet
+        self.public_base = (public_base or (BASE if "demo" in self.base else self.base)).rstrip("/")
         self.transport: Transport = transport or _urllib_transport
+        self.sleep = sleep or time.sleep
+        self.clock = clock or time.time
         self.hedge = hedge
         self.trigger_by = trigger_by
-        self.buckets = {k: TokenBucket(*v) for k, v in LIMITS.items()}
+        self.limiter = Limiter()
+        self.buckets = self.limiter.eps                    # what the trader's self-test looks for: gates exist
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.px: Dict[str, float] = {}
@@ -358,7 +359,7 @@ class FastBybit:
         self.hub = BybitPriceHub(self._on_px, err, ws_url=ws_url)
         self.on_event = None
         self.bridge = None
-        self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0}
+        self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0, "retry": 0, "resync": 0, "breaker": 0}
         self.inst: Dict[str, Dict[str, Any]] = {}          # bingx symbol -> parse_instrument
         self._inst_ts = 0.0
         self._time_offset = 0
@@ -366,13 +367,16 @@ class FastBybit:
         self._last_ts = 0
         self._mode_done = False
         self._margin_done = False
+        self.fail_streak = 0
+        self.fail_ts = 0.0
+        self.breaker_until = 0.0
         self._pub_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
     # -- plumbing ------------------------------------------------------------------------------------------------------
 
     def _next_ts(self) -> int:
         with self._ts_lock:
-            t = int(time.time() * 1000) + self._time_offset
+            t = int(self.clock() * 1000) + self._time_offset
             if t <= self._last_ts:
                 t = self._last_ts + 1
             self._last_ts = t
@@ -400,40 +404,48 @@ class FastBybit:
     def _lane(self, v5: str) -> str:
         if v5.startswith("/v5/market"):
             return "public"
-        if v5 in ("/v5/order/create", "/v5/order/create-batch", "/v5/order/cancel", "/v5/order/amend"):
-            return "order"
-        return "private"
+        return "order" if v5 in ORDER_PATHS else "private"
 
-    def _take(self, lane: str, key: str) -> bool:
-        now = time.time()
-        gate = self.path_cd.get(key, 0.0)
-        if lane == "order":
-            gate = max(self.cooldown_until, gate)
-        if now < gate:
+    def _cooled(self, why: str) -> Dict[str, Any]:
+        return {"retCode": 101209, "retMsg": "cooling " + why, "_cooled": True, "_why": why, "_status": 0, "_headers": {}}
+
+    def _breaker_open(self, v5: str, params: Dict[str, Any]) -> bool:
+        """While the breaker is open a call that would add risk (a create that is not reduce-only) is refused; closing orders,
+        cancels and reads always go."""
+        if self.clock() >= self.breaker_until or v5 not in ("/v5/order/create", "/v5/order/create-batch"):
             return False
-        w = self.buckets[lane].take()
-        self.stats["wait"] += w
-        return True
+        reqs = params.get("request") if v5.endswith("batch") else [params]
+        return any(not r.get("reduceOnly") for r in (reqs or []))
 
-    def _trip(self, key: str, status: int, headers: Dict[str, str], code: Any, msg: str) -> bool:
-        """A rate-limit reply starts the cooldown of the BingX path the trader called (the keys it watches)."""
-        limited = code in RATE_CODES or status in (429, IP_BAN_HTTP) or "rate limit" in msg.lower() or "too many" in msg.lower()
-        if not limited:
-            return False
-        self.stats["rl"] += 1
-        wait = 1.2
-        reset = fnum(headers.get("x-bapi-limit-reset-timestamp"))
-        if reset > 1e12:
-            wait = max(0.8, min(900.0, reset / 1000.0 - time.time() + 0.4))
-        if status == IP_BAN_HTTP:
-            wait = 600.0                      # Bybit: a breached IP limit (HTTP 403) holds for ten minutes
-        self.path_cd[key] = time.time() + (wait if status == IP_BAN_HTTP else max(wait, 1.2))
-        self.cooldown_until = max(self.cooldown_until, time.time() + min(wait, 12.0))
-        self.err.write("rate-limit", path=key, code=code, msg=msg[:180], wait=round(wait, 2))
-        return True
+    def _note_result(self, v: Verdict, v5: str, write: bool) -> None:
+        """The breaker counts transient failures (a timeout, a server error) in a row. Only a write that succeeded clears the
+        count: a read that works says nothing about the order path, and old failures age out after 30 s."""
+        now = self.clock()
+        if v.cls == "transient":
+            if now - self.fail_ts > 30.0:
+                self.fail_streak = 0
+            self.fail_ts = now
+            self.fail_streak += 1
+            if self.fail_streak >= BREAKER_FAILS and now >= self.breaker_until:
+                self.breaker_until = now + BREAKER_S
+                self.stats["breaker"] += 1
+                self.err.write("breaker", msg=f"{self.fail_streak} transient failures in a row; new entries held {BREAKER_S:.0f}s", path=v5)
+        elif write and v.cls == "ok":
+            self.fail_streak = 0
+            self.breaker_until = 0.0
 
-    def _send(self, method: str, v5: str, params: Dict[str, Any], key: str, signed: bool, retry_time: bool = True) -> Dict[str, Any]:
-        """One Bybit call. Returns the decoded envelope with "_status" and "_headers" added, or a transport error."""
+    def _send(self, method: str, v5: str, params: Dict[str, Any], key: str, signed: bool, cost: int = 1,
+              retry_time: bool = True) -> Dict[str, Any]:
+        """One Bybit call through the gates. Returns the decoded envelope with "_status" and "_headers" added, a transport
+        error, or a cooled marker when a gate (IP ban, endpoint reset, breaker) says the request must not go."""
+        if self._breaker_open(v5, params):
+            return self._cooled("circuit-breaker")
+        wait, why = self.limiter.acquire(v5, cost, now=self.clock())
+        if wait is None:
+            return self._cooled(why)
+        if wait > 0:
+            self.stats["wait"] += wait
+            self.sleep(wait)
         base = self.base if signed else self.public_base
         headers = {"User-Agent": UA, "Accept": "application/json"}
         body: Optional[bytes] = None
@@ -457,7 +469,9 @@ class FastBybit:
         except Exception as e:
             self.stats["err"] += 1
             self.err.write("http", method=method, path=v5, msg=str(e)[:220])
-            return {"retCode": -1, "retMsg": str(e)[:400], "_transport": True, "_status": 0, "_headers": {}}
+            self._note_result(Verdict("transient", True), v5, method != "GET")
+            return {"retCode": -1, "retMsg": str(e)[:400], "_transport": True, "_class": "transient", "_status": 0, "_headers": {}}
+        rh = {str(k).lower(): v for k, v in (rh or {}).items()}
         try:
             env = loads(raw) if raw else {}
         except Exception:
@@ -465,86 +479,103 @@ class FastBybit:
         if not isinstance(env, dict):
             env = {}
         env["_status"], env["_headers"] = status, rh
-        if "retCode" not in env:
+        if "retCode" not in env:                       # not a V5 envelope: an HTTP error page, a gateway reply, a bad body
             env["retCode"] = status if status != 200 else -1
             env.setdefault("retMsg", (raw[:200].decode("utf-8", "ignore") if raw else "empty response"))
+            env["_badbody"] = True
         code, msg = env.get("retCode"), str(env.get("retMsg") or "")
-        if code == TIME_CODE and retry_time:
+        self.limiter.observe(v5, rh, now=self.clock())
+        v = classify(code, status, msg)
+        env["_class"] = v.cls
+        if v.cls == "time" and retry_time:
             self._sync_time()
-            return self._send(method, v5, params, key, signed, retry_time=False)
-        if code not in (0, None):
-            self._trip(key, status, rh, code, msg)
-            if code not in RATE_CODES and code not in OK_ALREADY and code not in (110001, 110008, 110010, 110092, 110093):
-                self.err.write("api", method=method, path=v5, code=code, msg=msg[:220])
-        elif status in (429, IP_BAN_HTTP):
-            self._trip(key, status, rh, status, msg)
+            return self._send(method, v5, params, key, signed, cost, retry_time=False)
+        if v.cls == "ip-ban":
+            pause = self.limiter.ban_ip(self.clock())
+            self.path_cd[key] = self.clock() + pause
+            self.cooldown_until = max(self.cooldown_until, self.clock() + min(pause, 12.0))
+            self.stats["rl"] += 1
+            self.err.write("rate-limit", path=key, code=code, msg=f"IP rate limit: no requests for {pause:.0f}s", wait=round(pause, 1))
+        elif v.cls == "rate":
+            pause = self.limiter.trip(v5, rh, now=self.clock())
+            self.path_cd[key] = max(self.path_cd.get(key, 0.0), self.clock() + pause)
+            self.cooldown_until = max(self.cooldown_until, self.clock() + min(pause, 12.0))
+            self.stats["rl"] += 1
+            self.err.write("rate-limit", path=key, code=code, msg=msg[:160], wait=round(pause, 2))
+        elif v.cls not in ("ok", "not-found", "unchanged", "duplicate", "trigger"):
+            self.err.write("api", method=method, path=v5, code=code, msg=msg[:220], cls=v.cls)
+        self._note_result(v, v5, method != "GET")
         return env
 
     def _sync_time(self) -> None:
+        """retCode 10002: the local clock is outside the receive window. The offset to the venue's clock is applied to every
+        later timestamp (checked against Bybit's own server time, never guessed)."""
         env = self._send("GET", "/v5/market/time", {}, "time", False, retry_time=False)
-        t = fnum((env.get("result") or {}).get("timeNano")) / 1e6 or fnum(env.get("time"))
+        t = fnum(env.get("time")) or fnum((env.get("result") or {}).get("timeNano")) / 1e6
         if t > 0:
-            self._time_offset = int(t - time.time() * 1000)
+            self._time_offset = int(t - self.clock() * 1000)
+            self.stats["resync"] += 1
+            self.err.write("time-sync", msg=f"clock offset {self._time_offset} ms")
 
-    def call(self, key: str, method: str, v5: str, params: Dict[str, Any], signed: bool = True) -> Dict[str, Any]:
-        """A gated call: cooldown and token bucket first. A cooled call is returned as FastBingX returns it."""
-        if not self._take(self._lane(v5), key):
-            return {"retCode": 101209, "retMsg": "cooling", "_cooled": True, "_status": 0, "_headers": {}}
-        return self._send(method, v5, params, key, signed)
+    def call(self, key: str, method: str, v5: str, params: Dict[str, Any], signed: bool = True, cost: int = 1,
+             retries: int = 0) -> Dict[str, Any]:
+        """A gated call. `key` is the BingX path the trader watches in path_cd (its cooldown gates the call first). A transient
+        failure is repeated `retries` times after a pause: only reads and idempotent writes pass retries > 0."""
+        if self.clock() < self.path_cd.get(key, 0.0) or (v5 in ORDER_PATHS and self.clock() < self.cooldown_until):
+            return self._cooled("path-cooling")
+        env = self._send(method, v5, params, key, signed, cost)
+        n = 0
+        while n < retries and env.get("_class") == "transient" and not env.get("_cooled"):
+            n += 1
+            self.stats["retry"] += 1
+            self.sleep(RETRY_PAUSE_S * n)
+            env = self._send(method, v5, params, key, signed, cost)
+        return env
 
     # -- error words ---------------------------------------------------------------------------------------------------
 
     def fail(self, env: Dict[str, Any]) -> Dict[str, Any]:
         """A failed Bybit envelope as the BingX-shaped error the trader reads."""
         if env.get("_cooled"):
-            return {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
+            return {"code": 101209, "msg": "cooling" + (" (" + str(env.get("_why")) + ")" if env.get("_why") else ""), "error": True, "cooled": True}
         if env.get("_transport"):
             return {"code": -1, "msg": str(env.get("retMsg") or "")[:400], "error": True}
         code = env.get("retCode")
         msg = str(env.get("retMsg") or "")
-        low = msg.lower()
         status = int(env.get("_status") or 0)
-        word = ""
-        if code in RATE_CODES or status in (429, IP_BAN_HTTP) or "rate limit" in low or "too many" in low:
-            return {"code": 100410, "msg": f"rate limit (bybit {code}) {msg}"[:260]}
-        if code in (110007, 110012, 110044, 110045) or "insufficient" in low and ("balance" in low or "margin" in low):
-            word = "insufficient margin"
-        elif code in (110001,) or "order not exists" in low or "order does not exist" in low:
-            word = "order not exist"
-        elif code in (110008, 110010):
-            word = "order not exist (already completed or cancelled)"
-        elif code in (110034,) or "position is zero" in low or "no position" in low or ("reduce-only" in low and "position" in low):
-            word = "position not exist"
-        elif code in (110092, 110093) or "triggerprice" in low.replace(" ", "") or "trigger price" in low:
-            word = "trigger price is on the wrong side of the current price"
-        elif code == 110020 or "more than 500" in low:
-            word = "exceeded the limit of active orders"
-        elif code in (110017, 110094) or "notional" in low or "too small" in low:
-            word = "order size below the minimum"
-        elif code in (110072,) or "duplicate" in low and "link" in low:
-            word = "order already exists"
-        elif code in (110013,) or "leverage" in low and "risk limit" in low:
-            word = "maximum leverage exceeded"
-        elif code == 10004 or "signature" in low:
-            word = "signature error"
-        elif code == 10003:
-            word = "api key invalid"
-        elif code == 10005:
-            word = "api key permission denied"
-        elif code == 10010:
-            word = "ip not allowed"
-        elif code == 10001:
-            word = "parameter error"
-        return {"code": int(code) if isinstance(code, (int, float)) else -1, "msg": f"{word} (bybit {code}) {msg}".strip()[:260] if word else f"{msg} (bybit {code})"[:260]}
+        v = classify(code, status, msg)
+        icode = int(code) if isinstance(code, (int, float)) else -1
+        if v.cls in ("rate", "ip-ban"):
+            tail = " the IP is held for ten minutes" if v.cls == "ip-ban" else ""
+            return {"code": 100410, "msg": f"rate limit (bybit {code}){tail} {msg}"[:260]}
+        if v.cls == "auth":
+            word = AUTH_WORDS.get(icode, WORDS["auth"])
+        elif v.cls == "leverage":
+            sym = str(env.get("_symbol") or "")
+            mx = int((self.inst.get(sym) or {}).get("max_lev") or 0)
+            word = WORDS["param"] if not mx else f"maximum leverage {mx}"
+        elif v.cls == "permanent":
+            word = ""
+        else:
+            word = WORDS.get(v.cls, "")
+        text = f"{word} (bybit {code}) {msg}".strip() if word else f"{msg} (bybit {code})"
+        out: Dict[str, Any] = {"code": icode, "msg": text[:260]}
+        if v.cls == "transient":
+            out["transient"] = True
+        return out
 
     @staticmethod
     def ok(env: Dict[str, Any]) -> bool:
-        return env.get("retCode") == 0 and not env.get("_transport")
+        return env.get("retCode") == 0 and not env.get("_transport") and not env.get("_cooled")
+
+    @staticmethod
+    def verdict(env: Dict[str, Any]) -> Verdict:
+        return classify(env.get("retCode"), int(env.get("_status") or 0), str(env.get("retMsg") or ""))
 
     # -- instruments ---------------------------------------------------------------------------------------------------
 
     def load_instruments(self, force: bool = False) -> Dict[str, Dict[str, Any]]:
-        if self.inst and not force and time.time() - self._inst_ts < 3600:
+        if self.inst and not force and self.clock() - self._inst_ts < 3600:
             return self.inst
         rows: List[Dict[str, Any]] = []
         cursor = ""
@@ -552,7 +583,7 @@ class FastBybit:
             params = {"category": CATEGORY, "limit": 1000}
             if cursor:
                 params["cursor"] = cursor
-            env = self.call("contracts", "GET", "/v5/market/instruments-info", params, signed=False)
+            env = self.call("contracts", "GET", "/v5/market/instruments-info", params, signed=False, retries=1)
             if not self.ok(env):
                 break
             res = env.get("result") or {}
@@ -562,7 +593,7 @@ class FastBybit:
                 break
         found = {c["symbol"]: c for c in contract_rows(rows)}
         if found:
-            self.inst, self._inst_ts = found, time.time()
+            self.inst, self._inst_ts = found, self.clock()
         return self.inst
 
     def _qty(self, symbol: str, q: Any) -> str:
@@ -580,15 +611,17 @@ class FastBybit:
     # -- account setup -------------------------------------------------------------------------------------------------
 
     def _setup_account(self) -> None:
-        """Once per process: hedge position mode for every USDT perpetual and cross margin. Both are 'already set' no-ops on
-        an account that has them (retCodes 110025 / 110026 / 110043)."""
-        if self._mode_done:
+        """Hedge position mode for every USDT perpetual, once the venue has answered (an 'already set' reply, retCode 110025,
+        counts). A rate limit, a transport error or a cooling gate does not mark it done: the next order asks again."""
+        if self._mode_done or not self.hedge:
             return
-        self._mode_done = True
-        if self.hedge:
-            env = self.call("setup", "POST", "/v5/position/switch-mode", {"category": CATEGORY, "coin": SETTLE, "mode": 3})
-            if not self.ok(env) and env.get("retCode") not in OK_ALREADY:
-                self.err.write("setup", msg=f"hedge mode: {env.get('retCode')} {str(env.get('retMsg'))[:120]}")
+        env = self.call("setup", "POST", "/v5/position/switch-mode", {"category": CATEGORY, "coin": SETTLE, "mode": 3})
+        cls = env.get("_class")
+        if self.ok(env) or cls in ("unchanged",):
+            self._mode_done = True
+        elif not env.get("_cooled") and cls not in ("rate", "ip-ban", "transient", "time"):
+            self._mode_done = True                       # a definite refusal (open positions, unsupported account): do not nag
+            self.err.write("setup", msg=f"hedge mode: {env.get('retCode')} {str(env.get('retMsg'))[:120]}")
 
     def _pos_idx(self, position_side: str) -> int:
         if not self.hedge:
@@ -696,9 +729,9 @@ class FastBybit:
     # -- BingX-shaped reads --------------------------------------------------------------------------------------------
 
     def _balance(self, path: str) -> Dict[str, Any]:
-        env = self.call(path, "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": SETTLE})
-        if not self.ok(env) and not env.get("_cooled") and not env.get("_transport"):
-            env2 = self.call(path, "GET", "/v5/account/wallet-balance", {"accountType": "CONTRACT", "coin": SETTLE})
+        env = self.call(path, "GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": SETTLE}, retries=1)
+        if not self.ok(env) and env.get("_class") in ("param", "permanent"):
+            env2 = self.call(path, "GET", "/v5/account/wallet-balance", {"accountType": "CONTRACT", "coin": SETTLE}, retries=1)
             if self.ok(env2):
                 env = env2
         if not self.ok(env):
@@ -727,7 +760,7 @@ class FastBybit:
                 params["settleCoin"] = SETTLE
             if cursor:
                 params["cursor"] = cursor
-            env = self.call(path, "GET", "/v5/position/list", params)
+            env = self.call(path, "GET", "/v5/position/list", params, retries=1)
             if not self.ok(env):
                 return self.fail(env)
             res = env.get("result") or {}
@@ -762,10 +795,10 @@ class FastBybit:
         return {"code": 0, "data": out}
 
     def _tickers(self, extra: Dict[str, Any]) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"category": CATEGORY}
+        params: Dict[str, Any] = {"category": CATEGORY}            # no symbol: one call answers every symbol
         if extra.get("symbol"):
             params["symbol"] = to_by(extra["symbol"])
-        env = self.call(P_TICK, "GET", "/v5/market/tickers", params, signed=False)
+        env = self.call(P_TICK, "GET", "/v5/market/tickers", params, signed=False, retries=1)
         if not self.ok(env):
             return self.fail(env)
         out = []
@@ -795,7 +828,7 @@ class FastBybit:
             params["end"] = int(fnum(extra["endTime"]))
         if extra.get("startTime"):
             params["start"] = int(fnum(extra["startTime"]))
-        env = self.call(path, "GET", "/v5/market/kline", params, signed=False)
+        env = self.call(path, "GET", "/v5/market/kline", params, signed=False, retries=1)
         if not self.ok(env):
             return self.fail(env)
         rows = []
@@ -812,7 +845,7 @@ class FastBybit:
             params = dict(base_params)
             if cursor:
                 params["cursor"] = cursor
-            env = self.call(path, "GET", v5, params)
+            env = self.call(path, "GET", v5, params, retries=1)
             if not self.ok(env):
                 return rows, env
             res = env.get("result") or {}
@@ -849,7 +882,7 @@ class FastBybit:
         elif link_id:
             base["orderLinkId"] = link_id
         for v5, extra in (("/v5/order/realtime", {"openOnly": 0}), ("/v5/order/history", {})):
-            env = self.call(path, "GET", v5, {**base, **extra})
+            env = self.call(path, "GET", v5, {**base, **extra}, retries=1)
             if self.ok(env):
                 lst = (env.get("result") or {}).get("list") or []
                 if lst:
@@ -857,16 +890,16 @@ class FastBybit:
         return None
 
     def _executions(self, path: str, symbol: str, order_id: str) -> List[Dict[str, Any]]:
-        env = self.call(path, "GET", "/v5/execution/list", {"category": CATEGORY, "symbol": to_by(symbol), "orderId": order_id, "limit": 100})
+        env = self.call(path, "GET", "/v5/execution/list", {"category": CATEGORY, "symbol": to_by(symbol), "orderId": order_id, "limit": 100}, retries=1)
         return ((env.get("result") or {}).get("list") or []) if self.ok(env) else []
 
     def _all_orders(self, extra: Dict[str, Any]) -> Dict[str, Any]:
         limit = min(50, max(1, int(fnum(extra.get("limit"), 50))))
-        env = self.call(P_ALL, "GET", "/v5/order/history", {"category": CATEGORY, "limit": limit})
+        env = self.call(P_ALL, "GET", "/v5/order/history", {"category": CATEGORY, "limit": limit}, retries=1)
         if not self.ok(env):
             return self.fail(env)
         pnl: Dict[str, float] = {}
-        cp = self.call(P_ALL, "GET", "/v5/position/closed-pnl", {"category": CATEGORY, "limit": 100})
+        cp = self.call(P_ALL, "GET", "/v5/position/closed-pnl", {"category": CATEGORY, "limit": 100}, retries=1)
         if self.ok(cp):
             for r in (cp.get("result") or {}).get("list") or []:
                 pnl[str(r.get("orderId") or "")] = pnl.get(str(r.get("orderId") or ""), 0.0) + fnum(r.get("closedPnl"))
@@ -879,7 +912,7 @@ class FastBybit:
         return {"code": 0, "data": {"orders": out}}
 
     def _fills(self, extra: Dict[str, Any]) -> Dict[str, Any]:
-        env = self.call(P_FILLS, "GET", "/v5/execution/list", {"category": CATEGORY, "limit": min(100, max(1, int(fnum(extra.get("pageSize"), 50))))})
+        env = self.call(P_FILLS, "GET", "/v5/execution/list", {"category": CATEGORY, "limit": min(100, max(1, int(fnum(extra.get("pageSize"), 50))))}, retries=1)
         if not self.ok(env):
             return self.fail(env)
         out = []
@@ -893,7 +926,7 @@ class FastBybit:
 
     def _leverage_get(self, extra: Dict[str, Any]) -> Dict[str, Any]:
         sym = str(extra.get("symbol") or "")
-        env = self.call(P_LEV, "GET", "/v5/position/list", {"category": CATEGORY, "symbol": to_by(sym)})
+        env = self.call(P_LEV, "GET", "/v5/position/list", {"category": CATEGORY, "symbol": to_by(sym)}, retries=1)
         if not self.ok(env):
             return self.fail(env)
         long_l = short_l = 0
@@ -913,18 +946,21 @@ class FastBybit:
         self._setup_account()
         lev = str(int(fnum(extra.get("leverage"), 1)))
         env = self.call(P_LEV, "POST", "/v5/position/set-leverage",
-                        {"category": CATEGORY, "symbol": to_by(extra.get("symbol")), "buyLeverage": lev, "sellLeverage": lev})
-        if self.ok(env) or env.get("retCode") in OK_ALREADY:
+                        {"category": CATEGORY, "symbol": to_by(extra.get("symbol")), "buyLeverage": lev, "sellLeverage": lev}, retries=1)
+        if self.ok(env) or env.get("_class") == "unchanged":
             return {"code": 0, "data": {"leverage": int(lev)}}
+        env["_symbol"] = str(extra.get("symbol") or "")
         return self.fail(env)
 
     def _margin_type(self, extra: Dict[str, Any]) -> Dict[str, Any]:
         if self._margin_done:
             return {"code": 0, "data": {}}
-        self._margin_done = True
         env = self.call("setup", "POST", "/v5/account/set-margin-mode", {"setMarginMode": "REGULAR_MARGIN"})
-        if not self.ok(env) and env.get("retCode") not in OK_ALREADY:
-            self.err.write("setup", msg=f"margin mode: {env.get('retCode')} {str(env.get('retMsg'))[:120]}")
+        cls = env.get("_class")
+        if self.ok(env) or cls == "unchanged" or (not env.get("_cooled") and cls not in ("rate", "ip-ban", "transient", "time")):
+            self._margin_done = True
+            if not self.ok(env) and cls != "unchanged":
+                self.err.write("setup", msg=f"margin mode: {env.get('retCode')} {str(env.get('retMsg'))[:120]}")
         return {"code": 0, "data": {}}
 
     # -- BingX-shaped writes -------------------------------------------------------------------------------------------
@@ -933,7 +969,7 @@ class FastBybit:
         """Average price and executed quantity of a market order (the create reply carries only its ids)."""
         for wait in (0.0, 0.08, 0.2):
             if wait:
-                time.sleep(wait)
+                self.sleep(wait)
             fills = self._executions(path, symbol, order_id)
             qty = sum(fnum(f.get("execQty")) for f in fills)
             if qty > 0:
@@ -944,11 +980,49 @@ class FastBybit:
                 return {"avgPrice": str(row.get("avgPrice")), "executedQty": str(row.get("cumExecQty")), "status": STATUS.get(str(row.get("orderStatus")), "")}
         return {}
 
+    def _landed(self, req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Did this create reach the venue? Looked up by its orderLinkId, which is what makes a retry safe."""
+        link = str(req.get("orderLinkId") or "")
+        if not link:
+            return None
+        return self._find_order("landed", to_bx(req.get("symbol")), "", link)       # its own cooldown key: a create's rate limit must not block the lookup
+
+    def _create(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /v5/order/create, idempotent: a transport error, a timeout or a server error may hide a placed order, so the
+        order is looked up by its orderLinkId before it is sent again, and a duplicate-link refusal on the resend resolves to
+        the order that exists. A retry never opens a second position."""
+        env = self.call(P_ORDER, "POST", "/v5/order/create", req)
+        for attempt in range(2):
+            cls = env.get("_class")
+            if self.ok(env) or env.get("_cooled") or cls not in ("transient", "duplicate", "rate"):
+                break
+            row = self._landed(req)
+            if row is not None:
+                return env_ok({"orderId": row.get("orderId"), "orderLinkId": row.get("orderLinkId") or req.get("orderLinkId")})
+            if cls == "duplicate":
+                break
+            self.stats["retry"] += 1
+            self.sleep(self._pause(env))
+            env = self.call(P_ORDER, "POST", "/v5/order/create", req)
+        if env.get("_class") == "duplicate":
+            row = self._landed(req)
+            if row is not None:
+                return env_ok({"orderId": row.get("orderId"), "orderLinkId": row.get("orderLinkId") or req.get("orderLinkId")})
+        return env
+
+    def _pause(self, env: Dict[str, Any]) -> float:
+        """How long to wait before sending again: to the endpoint's reset time after a rate limit, else a short step."""
+        rst = fnum((env.get("_headers") or {}).get("x-bapi-limit-reset-timestamp")) / 1000.0
+        if env.get("_class") == "rate" and rst > self.clock():
+            return min(3.0, max(RETRY_PAUSE_S, rst - self.clock() + 0.2))
+        return RETRY_PAUSE_S
+
     def _order_post(self, body: Dict[str, Any]) -> Dict[str, Any]:
         self._setup_account()
         req = self.order_request(body)
-        env = self.call(P_ORDER, "POST", "/v5/order/create", req)
+        env = self._create(req)
         if not self.ok(env):
+            env["_symbol"] = str(body.get("symbol") or "")
             return self.fail(env)
         res = env.get("result") or {}
         oid = str(res.get("orderId") or "")
@@ -968,42 +1042,132 @@ class FastBybit:
             req["orderId"] = str(extra["orderId"])
         elif extra.get("clientOrderID"):
             req["orderLinkId"] = str(extra["clientOrderID"])
-        env = self.call(P_ORDER, "POST", "/v5/order/cancel", req)
+        env = self.call(P_ORDER, "POST", "/v5/order/cancel", req, retries=1)       # a cancel is idempotent: the order is gone or it is not
         if not self.ok(env):
             return self.fail(env)
         res = env.get("result") or {}
         return {"code": 0, "data": {"order": {"orderId": str(res.get("orderId") or req.get("orderId") or "")}}}
 
+    # -- batches -------------------------------------------------------------------------------------------------------
+
+    def _run_batch(self, v5: str, items: List[Dict[str, Any]], key: str, landed: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+                   max_rounds: int = 3) -> List[Dict[str, Any]]:
+        """One batch endpoint over any number of items, BATCH_MAX per call. Each item ends as {"ok", "orderId", "orderLinkId",
+        "code", "msg", "cls"}. An item that failed for a transient reason or a rate limit is sent again on its own (only the
+        failed items, not the batch); a duplicate or a transport error is resolved by looking the item up by its
+        orderLinkId first (`landed`), so nothing is placed twice. The rest of the batch is never resent."""
+        results: List[Optional[Dict[str, Any]]] = [None] * len(items)
+        pending = list(range(len(items)))
+        rounds = 0
+        while pending and rounds < max_rounds:
+            rounds += 1
+            retry: List[int] = []
+            pause = RETRY_PAUSE_S
+            for lo in range(0, len(pending), BATCH_MAX):
+                idxs = pending[lo:lo + BATCH_MAX]
+                sub = [items[i] for i in idxs]
+                env = self.call(key, "POST", v5, {"category": CATEGORY, "request": sub}, cost=len(sub))
+                if env.get("_cooled"):
+                    for i in idxs:
+                        results[i] = {"ok": False, "orderId": "", "orderLinkId": str(items[i].get("orderLinkId") or ""), "code": 101209, "msg": "cooling", "cls": "cooled", "cooled": True}
+                    continue
+                if not self.ok(env):                      # the whole call failed: every item is unknown, not necessarily failed
+                    cls = env.get("_class")
+                    for i in idxs:
+                        row = landed(items[i]) if (landed is not None and cls in ("transient", "rate")) else None
+                        if row is not None:
+                            results[i] = {"ok": True, "orderId": str(row.get("orderId") or ""), "orderLinkId": str(row.get("orderLinkId") or items[i].get("orderLinkId") or ""), "code": 0, "msg": "", "cls": "ok"}
+                        elif cls in ("transient", "rate"):
+                            retry.append(i)
+                            results[i] = self._item_fail(env.get("retCode"), env.get("retMsg"), cls, items[i])
+                            pause = max(pause, self._pause(env))
+                        else:
+                            results[i] = self._item_fail(env.get("retCode"), env.get("retMsg"), cls, items[i], int(env.get("_status") or 0))
+                    continue
+                made = (env.get("result") or {}).get("list") or []
+                info = (env.get("retExtInfo") or {}).get("list") or []
+                for j, i in enumerate(idxs):
+                    m = made[j] if j < len(made) and isinstance(made[j], dict) else {}
+                    inf = info[j] if j < len(info) and isinstance(info[j], dict) else {}
+                    code = inf.get("code", 0 if m.get("orderId") else -1)
+                    if code in (0, None, "0") and (m.get("orderId") or v5.endswith("amend-batch") or v5.endswith("cancel-batch")):
+                        results[i] = {"ok": True, "orderId": str(m.get("orderId") or items[i].get("orderId") or ""), "orderLinkId": str(m.get("orderLinkId") or items[i].get("orderLinkId") or ""), "code": 0, "msg": "", "cls": "ok"}
+                        continue
+                    v = classify(code, 200, str(inf.get("msg") or ""))
+                    if v.cls == "duplicate" and landed is not None:
+                        row = landed(items[i])
+                        if row is not None:
+                            results[i] = {"ok": True, "orderId": str(row.get("orderId") or ""), "orderLinkId": str(row.get("orderLinkId") or ""), "code": 0, "msg": "", "cls": "ok"}
+                            continue
+                    results[i] = self._item_fail(code, inf.get("msg"), v.cls, items[i])
+                    if v.retry and v.cls in ("transient", "rate"):
+                        retry.append(i)
+            pending = retry
+            if pending and rounds < max_rounds:
+                self.stats["retry"] += len(pending)
+                self.sleep(pause)
+        return [r if r is not None else {"ok": False, "orderId": "", "orderLinkId": "", "code": -1, "msg": "no result", "cls": "transient"} for r in results]
+
+    def _item_fail(self, code: Any, msg: Any, cls: Any, item: Dict[str, Any], status: int = 200) -> Dict[str, Any]:
+        bad = self.fail({"retCode": code, "retMsg": msg, "_status": status, "_symbol": to_bx(item.get("symbol"))})
+        return {"ok": False, "orderId": "", "orderLinkId": str(item.get("orderLinkId") or ""), "code": bad["code"], "msg": bad["msg"], "cls": str(cls or "permanent")}
+
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Any number of BingX order bodies (several symbols, SL and TP together) as create-batch calls of BATCH_MAX. The reply
+        has one row per order, in order, whether or not others in the same call failed."""
         if not orders:
             return {"code": 0, "data": {"orders": []}}
         self._setup_account()
-        chunk = orders[:20]
         reqs = []
-        for o in chunk:
+        for o in orders:
             r = self.order_request(o)
             r.pop("category", None)
             reqs.append(r)
-        env = self.call(P_ORDER, "POST", "/v5/order/create-batch", {"category": CATEGORY, "request": reqs})
-        if not self.ok(env):
-            return self.fail(env)
-        made = (env.get("result") or {}).get("list") or []
-        info = (env.get("retExtInfo") or {}).get("list") or []
+        results = self._run_batch("/v5/order/create-batch", reqs, P_BATCH, landed=self._landed)
         rows = []
-        for i, o in enumerate(chunk):
-            m = made[i] if i < len(made) and isinstance(made[i], dict) else {}
-            inf = info[i] if i < len(info) and isinstance(info[i], dict) else {}
-            code = inf.get("code", 0 if m.get("orderId") else -1)
+        for o, r in zip(orders, results):
             row: Dict[str, Any] = {"symbol": str(o.get("symbol") or ""), "type": str(o.get("type") or "").upper(),
                                    "positionSide": str(o.get("positionSide") or ""), "side": str(o.get("side") or ""),
-                                   "clientOrderID": str(m.get("orderLinkId") or reqs[i].get("orderLinkId") or "")}
-            if code in (0, None, "0") and m.get("orderId"):
-                row.update({"code": 0, "orderId": str(m["orderId"]), "msg": ""})
+                                   "clientOrderID": r["orderLinkId"] or str(o.get("clientOrderID") or "")}
+            if r["ok"]:
+                row.update({"code": 0, "orderId": r["orderId"], "msg": ""})
             else:
-                bad = self.fail({"retCode": code, "retMsg": inf.get("msg") or "batch item failed", "_status": 200})
-                row.update({"code": bad["code"], "msg": bad["msg"], "orderId": ""})
+                row.update({"code": r["code"], "msg": r["msg"], "orderId": ""})
+                if r.get("cooled"):
+                    row["cooled"] = True
             rows.append(row)
+        if rows and all(r.get("cooled") for r in rows):
+            return {"code": 101209, "msg": "cooling", "error": True, "cooled": True, "data": {"orders": rows}}
         return {"code": 0, "data": {"orders": rows}}
+
+    def batch_cancel(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """orders: [{"symbol": "BTC-USDT", "orderId": "..."}]. One row each: an order that is already gone counts as cancelled."""
+        if not orders:
+            return {"code": 0, "data": {"orders": []}}
+        items = [{"symbol": to_by(o.get("symbol")), **({"orderId": str(o["orderId"])} if o.get("orderId") else {"orderLinkId": str(o.get("clientOrderID") or "")})} for o in orders]
+        results = self._run_batch("/v5/order/cancel-batch", items, P_ORDER)
+        rows = []
+        for o, r in zip(orders, results):
+            gone = r["cls"] in ("not-found",)
+            rows.append({"symbol": str(o.get("symbol") or ""), "orderId": r["orderId"] or str(o.get("orderId") or ""), "code": 0 if (r["ok"] or gone) else r["code"],
+                         "msg": "" if (r["ok"] or gone) else r["msg"]})
+        return {"code": 0, "data": {"orders": rows}}
+
+    def batch_amend(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """items: [{"symbol", "orderId", "stopPrice"?, "quantity"?}]: trigger prices (and quantities) of existing orders."""
+        if not items:
+            return {"code": 0, "data": {"orders": []}}
+        reqs = []
+        for it in items:
+            sym = str(it.get("symbol") or "")
+            r: Dict[str, Any] = {"symbol": to_by(sym), "orderId": str(it.get("orderId") or "")}
+            if it.get("stopPrice") not in (None, ""):
+                r["triggerPrice"] = self._px(sym, it["stopPrice"])
+            if it.get("quantity") not in (None, ""):
+                r["qty"] = self._qty(sym, it["quantity"])
+            reqs.append(r)
+        results = self._run_batch("/v5/order/amend-batch", reqs, P_REPLACE)
+        return {"code": 0, "data": {"orders": [{"symbol": str(i.get("symbol") or ""), "orderId": r["orderId"], "code": 0 if r["ok"] else r["code"], "msg": r["msg"]} for i, r in zip(items, results)]}}
 
     def cancel_replace(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Move a stop: amend the conditional order's trigger price. BingX cancels the old order and places a new one; Bybit
@@ -1017,7 +1181,7 @@ class FastBybit:
                                "triggerPrice": self._px(sym, body.get("stopPrice"))}
         if str(body.get("quantity") or "") and str(body.get("closePosition") or "").lower() not in ("true", "1"):
             req["qty"] = self._qty(sym, body.get("quantity"))
-        env = self.call(P_REPLACE, "POST", "/v5/order/amend", req)
+        env = self.call(P_REPLACE, "POST", "/v5/order/amend", req, retries=1)      # setting the same trigger twice is harmless
         if not self.ok(env):
             return self.fail(env)
         oid = str((env.get("result") or {}).get("orderId") or old)
@@ -1066,17 +1230,14 @@ class FastBybit:
         return self._route("DELETE", path, dict(extra or {}))
 
     def reserve_public(self, path: str) -> Optional[float]:
-        if time.time() < self.path_cd.get(path, 0.0):
+        if self.clock() < self.path_cd.get(path, 0.0):
             return None
-        return self.buckets["public"].reserve()
+        wait, _why = self.limiter.acquire("/v5/market/tickers" if path == P_TICK else "/v5/market/kline", 1, now=self.clock())
+        return wait
 
     def public(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        wait = self.reserve_public(path)
-        if wait is None:
+        if self.clock() < self.path_cd.get(path, 0.0) or self.clock() < self.limiter.ip_ban_until:
             return {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
-        if wait > 0:
-            self.stats["wait"] += wait
-            time.sleep(wait)
         extra = dict(extra or {})
         if path == P_TICK:
             return self._tickers(extra)
@@ -1087,6 +1248,8 @@ class FastBybit:
         return {"code": -1, "msg": f"bybit: unsupported public call {path}", "error": True}
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        """Public GETs (klines of several symbols) in parallel on a small pool; every request still passes the IP and the
+        endpoint gate, so the parallelism never exceeds the limits."""
         if not reqs:
             return []
         pool = self._pub_pool
@@ -1113,9 +1276,17 @@ class FastBybit:
             "httpErr": self.stats["err"],
             "asyncN": 0,
             "asyncP50": 0.0,
+            "retries": self.stats["retry"],
+            "breakerOpen": self.clock() < self.breaker_until,
+            "ipBanSeconds": max(0, round(self.limiter.ip_ban_until - self.clock())),
             "errors": self.err.recent(8),
             "errorN": self.err.n,
         }
+
+
+def env_ok(result: Dict[str, Any]) -> Dict[str, Any]:
+    """A success envelope built locally (an order found by its link id after an unclear create)."""
+    return {"retCode": 0, "retMsg": "OK", "result": result, "retExtInfo": {}, "_status": 200, "_headers": {}, "_class": "ok", "_resolved": True}
 
 
 def fetch_contract_rows(base: str = BASE, want: Optional[set] = None, transport: Optional[Transport] = None) -> List[Dict[str, Any]]:

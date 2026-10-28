@@ -38,7 +38,7 @@ export const MODULES: SysModule[] = [
   { id: "feed.tfCombined", layer: "feed", name: "TF combined", summary: "Comprehensive consensus across 1/5/15", status: "live", toggle: "tfCombined", defaultOn: true },
   { id: "exchange.bingx", layer: "exchange", name: "BingX USDT-M", summary: "X01 live adapter · hedge · crossed", status: "live", defaultOn: true },
   { id: "exchange.binance", layer: "exchange", name: "Binance USD-M", summary: "Adapter slot — same order/risk contract", status: "slot", defaultOn: false },
-  { id: "exchange.bybit", layer: "exchange", name: "Bybit linear", summary: "Adapter slot — same order/risk contract", status: "slot", defaultOn: false },
+  { id: "exchange.bybit", layer: "exchange", name: "Bybit V5 linear", summary: "Connection bybit-x01 live, bybit-x02 demo · hedge · conditional SL/TP · batch orders · header-driven rate limits", status: "live", defaultOn: false },
   { id: "exchange.okx", layer: "exchange", name: "OKX swap", summary: "Adapter slot — same order/risk contract", status: "slot", defaultOn: false },
   { id: "strategy.indications", layer: "strategy", name: "Indications", summary: "Signals coordinated: min 3 sources, 0.6 agreement, low-stop consensus", status: "live", toggle: "indEnabled", defaultOn: true },
   { id: "strategy.block", layer: "strategy", name: "Block strategy", summary: "Counts 1–12 on a live parent · independent PF per stack", status: "live", toggle: "blockEnabled", defaultOn: true },

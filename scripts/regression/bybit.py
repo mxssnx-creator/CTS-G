@@ -30,6 +30,7 @@ for _name in ("STATS_PATH", "TRADES_PATH", "STOP_PATH", "PAUSE_PATH", "LOG_PATH"
         setattr(pt, _name, os.path.join(_STATE_DIR, "by-" + os.path.basename(getattr(pt, _name))))
 
 KEY, SECRET = "TESTKEY", "TESTSECRET"
+_REAL_LOAD_CONTRACTS = pt.load_contracts     # the trader suite replaces it with an offline one when it is imported; this suite is imported first
 
 INSTRUMENTS = [
     {"symbol": "BTCUSDT", "status": "Trading", "contractType": "LinearPerpetual", "baseCoin": "BTC", "quoteCoin": "USDT", "settleCoin": "USDT",
@@ -45,6 +46,9 @@ INSTRUMENTS = [
      "leverageFilter": {"maxLeverage": "100"}},
     {"symbol": "BTC-26DEC26", "status": "Trading", "contractType": "LinearFutures", "baseCoin": "BTC", "quoteCoin": "USDT", "settleCoin": "USDT",
      "lotSizeFilter": {"minOrderQty": "0.001", "qtyStep": "0.001", "minNotionalValue": "5"}, "priceFilter": {"tickSize": "0.5"},
+     "leverageFilter": {"maxLeverage": "50"}},
+    {"symbol": "ETHUSDT", "status": "Trading", "contractType": "LinearFutures", "baseCoin": "ETH", "quoteCoin": "USDT", "settleCoin": "USDT",
+     "lotSizeFilter": {"minOrderQty": "0.01", "qtyStep": "0.01", "minNotionalValue": "5"}, "priceFilter": {"tickSize": "0.01"},
      "leverageFilter": {"maxLeverage": "50"}},
     {"symbol": "NEWUSDT", "status": "PreLaunch", "contractType": "LinearPerpetual", "baseCoin": "NEW", "quoteCoin": "USDT", "settleCoin": "USDT",
      "lotSizeFilter": {"minOrderQty": "1", "qtyStep": "1", "minNotionalValue": "5"}, "priceFilter": {"tickSize": "0.01"},
@@ -76,6 +80,13 @@ class StubBybit:
         self.exec_lag = 0               # executions that answer empty before the fill shows (tests the retry)
         self.margin_calls = 0
         self.mode_calls = 0
+        self.headers = {}               # response headers added to every private reply (rate-limit headers)
+        self.lose = {}                  # path -> n: process the next n requests of that path, then lose the response (timeout)
+        self.script = {}                # path -> [envelope, ...]: answered before any processing, one per request
+        self.item_script = {}           # path -> [{index: (code, msg)}, ...]: per-item failures of the next batch calls (not processed)
+        self.skew_ms = 0                # the venue's clock runs this far ahead of the caller's
+        self.raw = {}                   # path -> [(status, bytes), ...]: raw answers before any processing
+        self.clock = time.time          # the venue's clock (a test with a fake client clock points it at that clock)
 
     # -- transport -------------------------------------------------------------------------------------------------------
     def __call__(self, method, url, headers, body):
@@ -85,12 +96,22 @@ class StubBybit:
         text = body.decode() if body else ""
         data = json.loads(text) if text else {}
         self.calls.append((method, path, data if method == "POST" else params))
+        if path in self.raw and self.raw[path]:
+            st, bts = self.raw[path].pop(0)
+            return st, {}, bts
+        if path == "/v5/market/time":
+            now_ms = int(self.clock() * 1000) + self.skew_ms
+            return 200, {}, json.dumps({"retCode": 0, "retMsg": "OK", "result": {"timeSecond": str(now_ms // 1000), "timeNano": str(now_ms * 1_000_000)}, "time": now_ms}).encode()
         if not path.startswith("/v5/market"):
             ts, rw, sg = headers.get("X-BAPI-TIMESTAMP", ""), headers.get("X-BAPI-RECV-WINDOW", ""), headers.get("X-BAPI-SIGN", "")
             want = hmac.new(self.secret.encode(), f"{ts}{headers.get('X-BAPI-API-KEY', '')}{rw}{query if method == 'GET' else text}".encode(), hashlib.sha256).hexdigest()
             if headers.get("X-BAPI-API-KEY") != self.key or sg != want:
                 self.sig_failures += 1
                 return 200, {}, json.dumps(env(10004, "error sign! origin_string[" + ts + "...]")).encode()
+            if abs(int(ts or 0) - (int(self.clock() * 1000) + self.skew_ms)) > int(rw or 5000):
+                return 200, {}, json.dumps(env(10002, "invalid request, please check your server timestamp or recv_window param")).encode()
+            if self.script.get(path):
+                return 200, dict(self.headers), json.dumps(self.script[path].pop(0)).encode()
             if self.rate_limit_next is not None:
                 st, hd, ev = self.rate_limit_next
                 self.rate_limit_next = None
@@ -100,8 +121,27 @@ class StubBybit:
         h = getattr(self, "h_" + path.strip("/").replace("v5/", "").replace("/", "_").replace("-", "_"), None)
         if h is None:
             return 404, {}, json.dumps(env(10001, "unknown path " + path)).encode()
-        out = h(method, params if method == "GET" else data)
-        return 200, {}, json.dumps(out).encode()
+        if path in self.item_script and self.item_script[path]:
+            fails = self.item_script[path].pop(0)
+            reqs = data.get("request", [])
+            ok_reqs = [r for i, r in enumerate(reqs) if i not in fails]
+            sub = h(method, {**data, "request": ok_reqs})
+            made, info, k = [], [], 0
+            for i, r in enumerate(reqs):
+                if i in fails:
+                    made.append({"category": "linear", "symbol": r["symbol"], "orderId": "", "orderLinkId": r.get("orderLinkId", ""), "createAt": ""})
+                    info.append({"code": fails[i][0], "msg": fails[i][1]})
+                else:
+                    made.append(sub["result"]["list"][k])
+                    info.append(sub["retExtInfo"]["list"][k])
+                    k += 1
+            out = env(result={"list": made}, ext={"list": info})
+        else:
+            out = h(method, params if method == "GET" else data)
+        if self.lose.get(path):
+            self.lose[path] -= 1
+            raise OSError("timed out")
+        return 200, dict(self.headers) if not path.startswith("/v5/market") else {}, json.dumps(out).encode()
 
     def paged(self, rows, p):
         start = int(p.get("cursor") or 0)
@@ -202,7 +242,7 @@ class StubBybit:
             step = Decimal("0.001") if sym == "BTCUSDT" else Decimal("10")
             if Decimal(str(o["qty"])) % step != 0 or Decimal(str(o["qty"])) <= 0:
                 return env(110017, "Order quantity does not meet the qty step")
-        if any(x.get("orderLinkId") == o.get("orderLinkId") and o.get("orderLinkId") and x["orderStatus"] in ("New", "Untriggered") for x in self.orders.values()):
+        if o.get("orderLinkId") and any(x.get("orderLinkId") == o.get("orderLinkId") for x in self.orders.values()):
             return env(110072, "OrderLinkedID is duplicate")
         trig = o.get("triggerPrice")
         if trig:
@@ -289,6 +329,27 @@ class StubBybit:
         o["triggerPrice"] = p["triggerPrice"]
         return env(result={"orderId": o["orderId"], "orderLinkId": o.get("orderLinkId", "")})
 
+    def h_order_amend_batch(self, m, p):
+        made, info = [], []
+        for r in p["request"]:
+            out = self.h_order_amend("POST", {"category": p["category"], **r})
+            if out["retCode"] == 0:
+                made.append({"category": "linear", "symbol": r["symbol"], "orderId": r["orderId"], "orderLinkId": ""})
+                info.append({"code": 0, "msg": "OK"})
+            else:
+                made.append({"category": "linear", "symbol": r["symbol"], "orderId": "", "orderLinkId": ""})
+                info.append({"code": out["retCode"], "msg": out["retMsg"]})
+        return env(result={"list": made}, ext={"list": info})
+
+    def h_order_cancel_batch(self, m, p):
+        made, info = [], []
+        for r in p["request"]:
+            out = self.h_order_cancel("POST", {"category": p["category"], **r})
+            ok_ = out["retCode"] == 0
+            made.append({"category": "linear", "symbol": r["symbol"], "orderId": r.get("orderId", "") if ok_ else "", "orderLinkId": ""})
+            info.append({"code": out["retCode"], "msg": out["retMsg"]})
+        return env(result={"list": made}, ext={"list": info})
+
     def _rows(self, statuses, p):
         rows = []
         for o in self.orders.values():
@@ -297,6 +358,8 @@ class StubBybit:
             if p.get("symbol") and p["symbol"] != o["symbol"]:
                 continue
             if p.get("orderId") and p["orderId"] != o["orderId"]:
+                continue
+            if p.get("orderLinkId") and p["orderLinkId"] != o.get("orderLinkId"):
                 continue
             rows.append(o)
         return rows
@@ -342,8 +405,33 @@ def _contracts():
             for c in bf.contract_rows(INSTRUMENTS)}
 
 
+_CID = [0]
+
+
 def _cid(kind="u"):
-    return f"Gx01{kind}g060308000{int(time.time() * 1000) % 100000:05d}"[:32]
+    _CID[0] += 1
+    return f"Gx01{kind}g060308000{_CID[0]:05d}"[:32]
+
+
+class Clock:
+    """A fake clock: sleeping advances it, nothing really waits."""
+
+    def __init__(self, t=1_800_000_000.0):
+        self.t, self.slept = t, []
+
+    def now(self):
+        return self.t
+
+    def sleep(self, s):
+        self.slept.append(round(s, 3))
+        self.t += s
+
+
+def _api_clock(stub=None, **kw):
+    c = Clock(time.time())
+    stub = stub or StubBybit()
+    stub.clock = c.now
+    return bf.FastBybit(KEY, SECRET, ErrorLog(os.path.join(_STATE_DIR, "by-err.jsonl")), transport=stub, clock=c.now, sleep=c.sleep, **kw), stub, c
 
 
 # ---- checks ----------------------------------------------------------------------------------------------------------------
@@ -428,7 +516,7 @@ def entry_order_body_and_fill_report():
     req2 = stub.sent("/v5/order/create")[-1]
     real_sleep = bf.time.sleep
     ok = (r["code"] == 0 and req["positionIdx"] == 1 and req["orderType"] == "Market" and req["side"] == "Buy" and req["qty"] == "0.3" and req["symbol"] == "BTCUSDT"
-          and "reduceOnly" not in req and req["orderLinkId"] == cid and o["avgPrice"] == "100.0" and o["executedQty"] == "0.3" and o["orderId"].startswith("oid")
+          and "reduceOnly" not in req and req["orderLinkId"] == cid and float(o["avgPrice"]) == 100.0 and o["executedQty"] == "0.3" and o["orderId"].startswith("oid")
           and pt.filled_qty(o, 1.0) == 0.3 and r2["code"] == 0 and req2["positionIdx"] == 2 and req2["side"] == "Sell" and req2["qty"] == "40"
           and r2["data"]["order"]["executedQty"] == "40" and stub.hedge and stub.mode_calls == 1)
     return ok, f"entry qty {req['qty']} (float noise removed) idx={req['positionIdx']} avg={o['avgPrice']} executed={o['executedQty']}; PEPE qty 37 -> {req2['qty']} on step 10; late executions retried; hedge mode set once"
@@ -556,22 +644,6 @@ def bybit_errors_carry_the_words_the_trader_reads():
     return ok, f"{len(cases)} codes mapped to trader words, mismatches={bad}; rate limit -> {rl['code']}; transport -> error"
 
 
-def rate_limits_start_the_path_cooldown_without_more_requests():
-    api, stub = _api()
-    stub.rate_limit_next = (200, {"x-bapi-limit-reset-timestamp": str(int((time.time() + 3) * 1000))}, env(10006, "Too many visits. Exceeded the API Rate Limit."))
-    r = api.post(bf.P_ORDER, {"symbol": "BTC-USDT", "type": "MARKET", "side": "BUY", "positionSide": "LONG", "quantity": "0.1", "clientOrderID": _cid("o")})
-    n = len(stub.calls)
-    r2 = api.post(bf.P_ORDER, {"symbol": "BTC-USDT", "type": "MARKET", "side": "BUY", "positionSide": "LONG", "quantity": "0.1", "clientOrderID": _cid("o")})
-    cd = api.path_cd.get(bf.P_ORDER, 0) - time.time()
-    other = api.get(bf.P_POS)
-    ip_api, ip_stub = _api()
-    ip_stub.rate_limit_next = (403, {}, {})
-    ip_api.get(bf.P_POS)
-    ip_cd = ip_api.path_cd.get(bf.P_POS, 0) - time.time()
-    ok = (r["code"] == 100410 and 1.5 < cd < 4.0 and r2.get("cooled") is True and len(stub.calls) == n and other["code"] == 0 and ip_cd > 500 and api.cooldown_until > time.time())
-    return ok, f"first order -> {r['code']}, path cooldown {cd:.1f}s from the reset header, next order cooled without a request ({len(stub.calls) == n}); HTTP 403 -> {ip_cd:.0f}s"
-
-
 def leverage_and_account_modes_are_set_once():
     api, stub = _api()
     api.load_instruments()
@@ -598,7 +670,7 @@ def price_stream_merges_snapshots_and_deltas():
     markonly = {"topic": "tickers.ETHUSDT", "type": "snapshot", "data": {"symbol": "ETHUSDT", "markPrice": "3000"}, "ts": 4}
     a, b, c, d = (bf.apply_ticker_message(st, m) for m in (snap, delta, delta2, markonly))
     junk = [bf.apply_ticker_message(st, x) for x in ({"op": "pong"}, {"topic": "tickers.BTCPERP", "type": "snapshot", "data": {"symbol": "BTCPERP", "lastPrice": "1"}}, {"success": True}, None)]
-    ok = (a == ("BTC-USDT", 66666.6, -15.8315) and b[1] == 66666.6 and c[1] == 66670.0 and abs(c[2] + 15.8315) < 1e-9 and d == ("ETH-USDT", 3000.0, 0.0) and junk == [None] * 4)
+    ok = (a[:2] == ("BTC-USDT", 66666.6) and abs(a[2] + 15.8315) < 1e-9 and b[1] == 66666.6 and c[1] == 66670.0 and abs(c[2] + 15.8315) < 1e-9 and d == ("ETH-USDT", 3000.0, 0.0) and junk == [None] * 4)
     return ok, f"snapshot={a} delta without lastPrice keeps {b[1]}; delta with it -> {c[1]}; mark-only ticker -> {d[1]}; control frames and USDC perps ignored"
 
 
@@ -702,6 +774,348 @@ def own_closing_fills_are_synced_with_their_pnl():
           and abs(float(closed[0]["profit"]) - 1.2) < 1e-6 and float(closed[0]["executedQty"]) == 0.4 and float(closed[0]["avgPrice"]) == 103.0 and fills and fills[0]["status"] == "FILLED")
     return ok, f"closePosition market -> qty {req['qty']} reduceOnly; allOrders row profit={closed[0]['profit'] if closed else None} executed={closed[0]['executedQty'] if closed else None}; fills={len(fills)}"
 
+def _order(sym="BTC-USDT", side="BUY", ps="LONG", qty="0.1", cid=None, **kw):
+    return {"symbol": sym, "type": "MARKET", "side": side, "positionSide": ps, "quantity": qty, "clientOrderID": cid or _cid("o"), **kw}
+
+
+def _ctrl(kind, price, ps="LONG", sym="BTC-USDT"):
+    return pt.ctrl_payload(sym, ps, "sl" if kind == "sl" else "tp", price, "0.4", _cid("u" if kind == "sl" else "v"), close_pos=True)
+
+
+def _held(stub, size="0.4"):
+    stub.hedge = True
+    stub.pos[("BTCUSDT", 1)] = {"size": Decimal(size), "avg": 100.0}
+    stub.pos[("BTCUSDT", 2)] = {"size": Decimal(size), "avg": 100.0}
+    stub.pos[("1000PEPEUSDT", 1)] = {"size": Decimal("100"), "avg": 0.001}
+
+
+def rate_limit_headers_drive_the_endpoint_gate():
+    api, stub, clk = _api_clock()
+    api.get(bf.P_POS)                                                    # warm: nothing limited yet
+    n0 = len(clk.slept)
+    reset = clk.now() + 0.8
+    stub.headers = {"x-bapi-limit": "10", "x-bapi-limit-status": "0", "x-bapi-limit-reset-timestamp": str(int(reset * 1000))}
+    api.get(bf.P_POS)                                                    # this reply says: nothing left in the window
+    stub.headers = {}
+    ep = api.limiter.endpoint("/v5/position/list")
+    api.get(bf.P_POS)                                                    # must wait for the reset before it goes
+    waited = clk.slept[n0:]
+    other = len(clk.slept)
+    api.get(bf.P_BAL3)                                                   # another endpoint is not held back
+    free = len(clk.slept) == other
+    stub.headers = {"x-bapi-limit": "20", "x-bapi-limit-status": "19", "x-bapi-limit-reset-timestamp": str(int(clk.now() * 1000))}
+    api.get(bf.P_POS)
+    ok = bool(waited) and 0.75 <= max(waited) <= 1.6 and free and ep.limit == 20.0 and ep.bucket.rate == 20.0
+    return ok, f"after X-Bapi-Limit-Status 0 the next call on that endpoint waited {max(waited) if waited else 0}s (reset in 0.8s); another endpoint waited: {not free}; the venue's limit 20 replaced the local guess ({ep.bucket.rate})"
+
+
+def rate_limit_error_backs_off_to_the_reset_and_retries_once():
+    api, stub, clk = _api_clock()
+    api.post(bf.P_ORDER, _order())                                       # account set up
+    reset = clk.now() + 2.0
+    stub.script["/v5/order/create"] = [env(10006, "Too many visits. Exceeded the API Rate Limit.")]
+    stub.headers = {}
+    stub.rate_limit_next = (200, {"x-bapi-limit-reset-timestamp": str(int(reset * 1000))}, env(10006, "Too many visits. Exceeded the API Rate Limit."))
+    stub.script.clear()
+    n_pos = len(stub.sent("/v5/order/create"))
+    t0 = clk.now()
+    r = api.post(bf.P_ORDER, _order())                                   # 10006, then the pause to the reset, then the resend
+    paused = clk.now() - t0
+    # a second consecutive refusal is returned as the BingX rate-limit code and the path rests
+    stub.rate_limit_next = (200, {"x-bapi-limit-reset-timestamp": str(int((clk.now() + 5) * 1000))}, env(10006, "Too many visits."))
+    r2 = api.post(bf.P_ORDER, _order())
+    calls = len(stub.calls)
+    r3 = api.post(bf.P_ORDER, _order())                                  # during the cooldown nothing is sent
+    sent_during = len(stub.calls) - calls
+    cd = api.path_cd.get(bf.P_ORDER, 0) - clk.now()
+    clk.t += 6.0
+    r4 = api.post(bf.P_ORDER, _order())
+    ok = (r["code"] == 0 and 2.0 <= paused <= 2.6 and r2["code"] in (100410, 101209) and r3.get("cooled") is True and sent_during == 0 and cd > 1.0 and r4["code"] == 0)
+    return ok, f"10006 -> paused {paused:.2f}s to the reset timestamp and the order went through ({r['code']}); a second refusal -> {r2['code']}, path rests {cd:.1f}s with {sent_during} requests sent; after the reset -> {r4['code']}"
+
+
+def ip_ban_stops_every_request_for_ten_minutes():
+    api, stub, clk = _api_clock()
+    api.get(bf.P_POS)
+    stub.raw["/v5/position/list"] = [(403, b"<html>access too frequent</html>")]
+    r = api.get(bf.P_POS)
+    n = len(stub.calls)
+    outs = [api.get(bf.P_BAL3), api.public(bf.P_TICK), api.post(bf.P_ORDER, _order()), api.public(bf.P_KL2, {"symbol": "BTC-USDT", "interval": "1m", "limit": "5"})]
+    held = len(stub.calls) - n
+    clk.t += 599
+    still = api.get(bf.P_POS).get("cooled") is True
+    clk.t += 3
+    back = api.get(bf.P_POS)
+    ok = (r["code"] == 100410 and "ten minutes" in r["msg"] and all(o.get("cooled") for o in outs) and held == 0 and still and back["code"] == 0 and 599 < api.limiter.ip_ban_until - (clk.now() - 602) <= 601)
+    return ok, f"HTTP 403 -> {r['code']} ({'ten minutes' in r['msg']}); {held} requests sent during the ban (reads, public and orders all cooled); at 599 s still cooled={still}; after 602 s -> {back['code']}; pace {bf.__dict__.get('IP_RATE', None) or 'bybit_limits.IP_RATE'}"
+
+
+def local_pace_stays_far_below_the_ip_limit():
+    import bybit_limits as bl
+    ok = bl.IP_RATE[0] * 5 <= 600 * 0.7 and bl.ENDPOINTS["/v5/order/create"][0] <= 10 and bl.ENDPOINTS["/v5/order/create-batch"][0] <= 10 and bl.ENDPOINTS["/v5/position/set-leverage"][0] <= 10 and bl.ENDPOINTS["/v5/position/list"][0] <= 50 and bl.IP_BAN_S == 600.0
+    return ok, f"IP pace {bl.IP_RATE[0]:.0f}/s = {bl.IP_RATE[0] * 5:.0f} per 5 s (venue 600); order endpoints {bl.ENDPOINTS['/v5/order/create'][0]:.0f}/s, reads {bl.ENDPOINTS['/v5/position/list'][0]:.0f}/s"
+
+
+def batches_are_chunked_and_retry_only_the_failed_items():
+    api, stub, clk = _api_clock()
+    _held(stub)
+    api.post(bf.P_ORDER, _order())                                       # account set up
+    orders = [_ctrl("sl", "98.5"), _ctrl("tp", "103"), _ctrl("sl", "98.0", sym="1000PEPE-USDT"), _ctrl("tp", "103", ps="SHORT"), ]
+    orders[2] = pt.ctrl_payload("1000PEPE-USDT", "LONG", "sl", "0.0009", "10", _cid("u"), close_pos=True)
+    orders[3] = pt.ctrl_payload("BTC-USDT", "SHORT", "tp", "97", "0.4", _cid("v"), close_pos=True)
+    # item 1: a rate limit inside the batch, item 2: a refusal that must not be retried, item 3: a transient server error
+    stub.item_script["/v5/order/create-batch"] = [{1: (10006, "Too many visits"), 2: (110092, "expect Rising, but trigger_price[1] <= current[2]"), 3: (10016, "Server error")}]
+    n = len(stub.sent("/v5/order/create-batch"))
+    r = api.batch_place(orders)
+    calls = stub.sent("/v5/order/create-batch")[n:]
+    rows = r["data"]["orders"]
+    sizes = [len(c["request"]) for c in calls]
+    retried = [x["symbol"] + ":" + x.get("triggerDirection", "").__str__() for x in calls[1]["request"]] if len(calls) > 1 else []
+    # 25 orders go out in calls of 10, 10 and 5
+    stub.mid["BTCUSDT"] = 100.0
+    many = [pt.ctrl_payload("BTC-USDT", "LONG", "sl", "98.5", "0.4", _cid("u"), close_pos=True) for _ in range(25)]
+    stub.hedge = True
+    n2 = len(stub.sent("/v5/order/create-batch"))
+    r2 = api.batch_place(many)
+    sizes2 = [len(c["request"]) for c in stub.sent("/v5/order/create-batch")[n2:]]
+    ok = (sizes == [4, 2] and [x["code"] for x in rows] == [0, 0, 110092, 0] and rows[2]["orderId"] == "" and pt.ctrl_err_kind(rows[2]["msg"]) == "px"
+          and all(x["orderId"] for i, x in enumerate(rows) if i != 2) and len(retried) == 2 and sizes2 == [10, 10, 5] and len(r2["data"]["orders"]) == 25)
+    return ok, f"4 orders -> calls of {sizes}: only the rate-limited and the server-error items were sent again; the refused item stays refused ({rows[2]['code']}); codes {[x['code'] for x in rows]}; 25 orders -> calls of {sizes2}"
+
+
+def batch_whole_call_failure_resolves_items_by_link_id():
+    api, stub, clk = _api_clock()
+    _held(stub)
+    api.post(bf.P_ORDER, _order())
+    orders = [_ctrl("sl", "98.5"), _ctrl("tp", "103")]
+    stub.lose["/v5/order/create-batch"] = 1                              # the venue places both, the reply is lost
+    n = len(stub.sent("/v5/order/create-batch"))
+    r = api.batch_place(orders)
+    calls = len(stub.sent("/v5/order/create-batch")) - n
+    conds = [o for o in stub.orders.values() if o.get("triggerPrice") and o["orderStatus"] == "Untriggered"]
+    rows = r["data"]["orders"]
+    ok = calls == 1 and len(conds) == 2 and all(x["code"] == 0 and x["orderId"] for x in rows) and sorted(x["orderId"] for x in rows) == sorted(o["orderId"] for o in conds)
+    return ok, f"reply lost after both orders were placed: {calls} create-batch call, venue holds {len(conds)} orders (no second pair), both items resolved to their order ids by orderLinkId"
+
+
+def retry_after_a_lost_reply_never_opens_a_second_position():
+    api, stub, clk = _api_clock()
+    api.post(bf.P_ORDER, _order(qty="0.1"))                              # account set up, position 0.1
+    base = stub.pos[("BTCUSDT", 1)]["size"]
+    cid = _cid("o")
+    stub.lose["/v5/order/create"] = 1                                    # placed and filled on the venue, the answer never arrives
+    r = api.post(bf.P_ORDER, _order(qty="0.2", cid=cid))
+    after_lost = stub.pos[("BTCUSDT", 1)]["size"]
+    creates = [d for d in stub.sent("/v5/order/create") if d.get("orderLinkId") == cid]
+    # a server error that did not place anything: the retry places it once
+    cid2 = _cid("o")
+    stub.script["/v5/order/create"] = [env(10016, "Server error")]
+    r2 = api.post(bf.P_ORDER, _order(qty="0.3", cid=cid2))
+    after_retry = stub.pos[("BTCUSDT", 1)]["size"]
+    # a duplicate-link refusal on a resend resolves to the order that exists
+    cid3 = _cid("o")
+    r3 = api.post(bf.P_ORDER, _order(qty="0.1", cid=cid3))
+    stub.script["/v5/order/create"] = []
+    dup = api._create({"category": "linear", "symbol": "BTCUSDT", "side": "Buy", "orderType": "Market", "qty": "0.1", "positionIdx": 1, "orderLinkId": cid3})
+    after_dup = stub.pos[("BTCUSDT", 1)]["size"]
+    ok = (r["code"] == 0 and after_lost - base == Decimal("0.2") and len(creates) == 1 and float(r["data"]["order"]["executedQty"]) == 0.2
+          and r2["code"] == 0 and after_retry - after_lost == Decimal("0.3") and dup.get("retCode") == 0 and after_dup - after_retry == Decimal("0.1"))
+    return ok, f"lost reply: position +{after_lost - base} (one order, {len(creates)} create request, reported executed {r['data']['order']['executedQty']}); server error then retry: +{after_retry - after_lost}; duplicate orderLinkId resolved to the existing order, position +{after_dup - after_retry}"
+
+
+def timestamp_outside_the_window_is_resynced_with_the_server_time():
+    stub = StubBybit()
+    stub.skew_ms = 60_000                                                # the venue's clock is a minute ahead
+    api = bf.FastBybit(KEY, SECRET, ErrorLog(os.path.join(_STATE_DIR, "by-err.jsonl")), transport=stub)
+    r = api.get(bf.P_POS)
+    first = len(stub.calls)
+    r2 = api.get(bf.P_POS)
+    second = len(stub.calls) - first
+    ok = r["code"] == 0 and r2["code"] == 0 and 59_000 <= api._time_offset <= 61_000 and api.stats["resync"] == 1 and second == 1 and any(p == "/v5/market/time" for m, p, d in stub.calls)
+    return ok, f"retCode 10002 -> clock offset {api._time_offset} ms from /v5/market/time, request repeated ({first} calls), the next request needs {second} call"
+
+
+def circuit_breaker_holds_entries_but_never_closes_or_cancels():
+    api, stub, clk = _api_clock()
+    _held(stub)
+    api.post(bf.P_ORDER, _order())
+    oid = api.batch_place([_ctrl("sl", "98.5")])["data"]["orders"][0]["orderId"]
+    stub.script["/v5/order/create"] = [env(10016, "Server error")] * 40
+    for _ in range(4):
+        api.post(bf.P_ORDER, _order())
+    opened = clk.now() < api.breaker_until
+    n = len(stub.calls)
+    entry = api.post(bf.P_ORDER, _order())
+    held = len(stub.calls) == n and entry.get("cooled") is True
+    stub.script["/v5/order/create"] = []
+    close = api.post(bf.P_ORDER, {"symbol": "BTC-USDT", "type": "MARKET", "side": "SELL", "positionSide": "LONG", "quantity": "0.1", "clientOrderID": _cid("c")})
+    cancel = api.delete(bf.P_ORDER, {"symbol": "BTC-USDT", "orderId": oid})
+    clk.t += 16
+    back = api.post(bf.P_ORDER, _order())
+    ok = opened and held and close["code"] == 0 and cancel["code"] == 0 and back["code"] == 0 and api.stats["breaker"] >= 1 and api.breaker_until == 0.0
+    return ok, f"{api.stats['breaker']} breaker trip(s) after repeated server errors; entry held without a request={held}; reduce-only close -> {close['code']}, cancel -> {cancel['code']}; entry after 15 s -> {back['code']}"
+
+
+def error_classes_cover_rate_auth_time_balance_and_filters():
+    import bybit_limits as bl
+    table = [
+        ((10006, 200, "Too many visits"), "rate"), ((0, 429, ""), "rate"), ((10018, 200, ""), "ip-ban"), ((-1, 403, "access too frequent"), "ip-ban"),
+        ((10002, 200, "invalid request, please check your server timestamp or recv_window param"), "time"),
+        ((10002, 200, ""), "time"), ((10003, 200, ""), "auth"), ((10004, 200, ""), "auth"), ((10005, 200, ""), "auth"), ((10010, 200, ""), "auth"), ((-1, 401, ""), "auth"),
+        ((10009, 200, ""), "restricted"), ((10029, 200, ""), "restricted"),
+        ((10000, 200, ""), "transient"), ((10016, 200, ""), "transient"), ((-1, 0, "timed out"), "transient"), ((502, 502, "<html>bad gateway"), "transient"), ((110079, 200, ""), "transient"),
+        ((10001, 200, "params error"), "param"),
+        ((110007, 200, ""), "insufficient"), ((110012, 200, ""), "insufficient"), ((110045, 200, ""), "insufficient"), ((110044, 200, ""), "insufficient"),
+        ((110017, 200, "current position is zero, cannot fix reduce-only order qty"), "flat"), ((110034, 200, ""), "flat"), ((110023, 200, ""), "flat"),
+        ((110017, 200, "Order quantity truncates to zero"), "qty-filter"), ((110094, 200, "notional"), "price-filter"), ((110003, 200, ""), "price-filter"),
+        ((110001, 200, ""), "not-found"), ((110008, 200, ""), "not-found"), ((110010, 200, ""), "not-found"),
+        ((110072, 200, ""), "duplicate"), ((110092, 200, ""), "trigger"), ((110093, 200, ""), "trigger"), ((110020, 200, ""), "cap"),
+        ((110043, 200, ""), "unchanged"), ((110025, 200, ""), "unchanged"), ((110013, 200, ""), "leverage"), ((110040, 200, ""), "liquidation"),
+        ((110016, 200, ""), "limit"), ((110999, 200, ""), "permanent"),
+    ]
+    bad = [(a, want, bl.classify(*a).cls) for a, want in table if bl.classify(*a).cls != want]
+    retry_ok = all(bl.classify(*a).retry == (want in ("rate", "transient", "time")) for a, want in table if want not in ("ip-ban",))
+    api, stub = _api()
+    stub.raw["/v5/position/list"] = [(200, b"not json at all")]
+    r = api.get(bf.P_POS)                                                # a bad body is a transient read error, retried once
+    stub.raw["/v5/position/list"] = [(502, b"<html>502 Bad Gateway</html>"), (200, json.dumps(env(result={"list": [], "nextPageCursor": ""})).encode())]
+    r2 = api.get(bf.P_POS)
+    ok = not bad and retry_ok and r["code"] == 0 and r2["code"] == 0
+    return ok, f"{len(table)} (code, status, text) cases classified, mismatches={bad[:3]}; retry flag only for rate/transient/time={retry_ok}; bad JSON and HTTP 502 on a read are retried once -> {r['code']}/{r2['code']}"
+
+
+def reads_retry_once_on_a_server_error_and_writes_do_not_repeat_blindly():
+    api, stub, clk = _api_clock()
+    stub.script["/v5/position/list"] = [env(10016, "Server error")]
+    r = api.get(bf.P_POS)
+    reads = len(stub.sent("/v5/position/list", "GET"))
+    stub.script["/v5/position/set-leverage"] = [env(10016, "Server error")] * 3
+    lv = api.post(bf.P_LEV, {"symbol": "BTC-USDT", "side": "LONG", "leverage": 10})
+    ok = r["code"] == 0 and reads == 2 and lv["code"] == 10016 and lv.get("transient") is True and "retry" in lv["msg"]
+    return ok, f"position read: server error then ok after {reads} requests; leverage write gave up after its retry -> {lv['code']} marked transient"
+
+
+def hedge_mode_is_asked_again_after_a_rate_limit():
+    api, stub, clk = _api_clock()
+    stub.script["/v5/position/switch-mode"] = [env(10006, "Too many visits")]
+    api.post(bf.P_ORDER, _order())
+    first = api._mode_done
+    clk.t += 2.0
+    api.post(bf.P_ORDER, _order())
+    ok = (not first or stub.hedge) and api._mode_done and stub.hedge
+    return ok, f"switch-mode refused by a rate limit did not mark the account set up (done={first} after the first order); the next order asked again -> hedge={stub.hedge}"
+
+
+def batch_cancel_and_amend_work_item_by_item():
+    api, stub, clk = _api_clock()
+    _held(stub)
+    api.post(bf.P_ORDER, _order())
+    ids = [x["orderId"] for x in api.batch_place([_ctrl("sl", "98.5"), _ctrl("tp", "103"), _ctrl("sl", "98.0")])["data"]["orders"]]
+    am = api.batch_amend([{"symbol": "BTC-USDT", "orderId": ids[0], "stopPrice": "99.5"}, {"symbol": "BTC-USDT", "orderId": ids[1], "stopPrice": "99"}, {"symbol": "BTC-USDT", "orderId": "ghost", "stopPrice": "99.5"}])
+    cc = api.batch_cancel([{"symbol": "BTC-USDT", "orderId": ids[0]}, {"symbol": "BTC-USDT", "orderId": ids[0]}, {"symbol": "BTC-USDT", "orderId": "ghost"}])
+    amended = stub.sent("/v5/order/amend-batch")
+    ok = ([x["code"] for x in am["data"]["orders"]] == [0, 110092, 110001] and stub.orders[ids[0]]["orderStatus"] == "Cancelled"
+          and [x["code"] for x in cc["data"]["orders"]] == [0, 0, 0] and len(amended) == 1 and len(amended[0]["request"]) == 3)
+    return ok, f"amend-batch item codes {[x['code'] for x in am['data']['orders']]} (one call of 3); cancel-batch {[x['code'] for x in cc['data']['orders']]} (an order already gone counts as cancelled)"
+
+
+def demo_trading_reads_market_data_from_mainnet():
+    seen = []
+
+    def tr(method, url, headers, body):
+        seen.append(url)
+        return 200, {}, json.dumps(env(result={"list": [], "category": "linear"})).encode()
+    demo = bf.FastBybit(KEY, SECRET, ErrorLog(os.path.join(_STATE_DIR, "by-err.jsonl")), base=bf.BASE_DEMO, transport=tr)
+    demo.public(bf.P_TICK)
+    demo.get(bf.P_POS)
+    live = bf.FastBybit(KEY, SECRET, ErrorLog(os.path.join(_STATE_DIR, "by-err.jsonl")), base=bf.BASE, transport=tr)
+    live.public(bf.P_TICK)
+    ok = seen[0].startswith("https://api.bybit.com/v5/market/tickers") and seen[1].startswith("https://api-demo.bybit.com/v5/position/list") and seen[2].startswith("https://api.bybit.com/v5/market")
+    return ok, f"demo: public -> {seen[0].split('/v5')[0]}, signed -> {seen[1].split('/v5')[0]}; live: public -> {seen[2].split('/v5')[0]}"
+
+
+def bybit_connections_get_their_own_tag_contracts_and_pins():
+    import subprocess
+    import sys
+    out = {}
+    for conn in ("bybit-x01", "bybit-x02", "bingx-x02", "bingx-x01"):
+        r = subprocess.run([sys.executable, "-B", "-c", "import pulse_trader as p; print(p.TAG, p.IS_BYBIT, p.make_api.__name__)"], cwd=PULSE, capture_output=True, text=True,
+                           env={**os.environ, "PULSE_CONN": conn}, timeout=120)
+        out[conn] = (r.stdout.strip().split("\n") or [""])[-1]
+    stub = StubBybit()
+    saved = (bf._urllib_transport, pt.IS_BYBIT, pt.BASE)
+    bf._urllib_transport = stub
+    pt.IS_BYBIT, pt.BASE = True, "https://api.bybit.com"
+    try:
+        rows = _REAL_LOAD_CONTRACTS(None)
+        only = _REAL_LOAD_CONTRACTS({"BTC-USDT"})
+    finally:
+        bf._urllib_transport, pt.IS_BYBIT, pt.BASE = saved
+    c = rows.get("BTC-USDT")
+    pep = rows.get("1000PEPE-USDT")
+    import conn_guard
+    mb, mm = conn_guard.resolve_base("bybit-x02")
+    lb, lm = conn_guard.resolve_base("bybit-x01")
+    hosts = (conn_guard.mode_of("https://api.bybit.com"), conn_guard.mode_of("https://api-demo.bybit.com/"))
+    ok = (out["bybit-x01"] == "Gb01 True make_api" and out["bybit-x02"] == "Gb02 True make_api" and out["bingx-x02"] == "Gx02 False make_api" and out["bingx-x01"] == "Gx01 False make_api"
+          and sorted(rows) == ["1000PEPE-USDT", "BTC-USDT"] and isinstance(c, pt.Contract) and c.step == 0.001 and c.qprec == 3 and c.min_usdt == 5.0 and c.max_lev == 100
+          and pep.step == 10.0 and sorted(only) == ["BTC-USDT"] and mb == "https://api-demo.bybit.com"
+          and lb == "https://api.bybit.com" and lm == conn_guard.LIVE_MAINNET and hosts == (conn_guard.LIVE_MAINNET, conn_guard.VST_DEMO))
+    return ok, f"tags {out}; contracts {sorted(rows)} BTC step={getattr(c, 'step', None)} PEPE step={getattr(pep, 'step', None)}; want filter {sorted(only)}; bybit-x02 pinned to {mb}"
+
+
+def the_sidecar_lists_bybit_lanes_apart_from_overall():
+    import tempfile as tf
+    import importlib
+    saved_dir = os.environ.get("PULSE_DIR_TEST")
+    import pulse_http as ph
+    with tf.TemporaryDirectory() as td:
+        open(os.path.join(td, "cred-bybit-x01.json"), "w").write("{}")
+        old_dir = ph.DIR
+        ph.DIR = td
+        try:
+            extra = ph._extra_lanes()
+        finally:
+            ph.DIR = old_dir
+    none = ph._extra_lanes()                    # the real pulse directory has no Bybit file in the build host
+    base_ids = [l["id"] for l in ph.LANES]
+    ok = [l["id"] for l in extra] == ["bybit-x01"] and extra[0]["type"] == "bybit" and extra[0]["unit"] == "USDT" and base_ids == ["bingx-x01", "bingx-x02"] and all(l["id"].startswith("bybit") is False for l in ph.LANES) and isinstance(none, list)
+    return ok, f"a credential file adds lane {[l['id'] for l in extra]}; Overall keeps {base_ids}"
+
+
+def batch_item_with_a_used_link_id_resolves_to_the_existing_order():
+    api, stub, clk = _api_clock()
+    _held(stub)
+    api.post(bf.P_ORDER, _order())
+    first = _ctrl("sl", "98.5")
+    oid = api.batch_place([first])["data"]["orders"][0]["orderId"]
+    again = api.batch_place([dict(first), _ctrl("tp", "103")])           # the first item's link id exists: 110072 for that item only
+    rows = again["data"]["orders"]
+    conds = [o for o in stub.orders.values() if o.get("triggerPrice") and o["orderStatus"] == "Untriggered"]
+    ok = rows[0]["code"] == 0 and rows[0]["orderId"] == oid and rows[1]["code"] == 0 and rows[1]["orderId"] and rows[1]["orderId"] != oid and len(conds) == 2
+    return ok, f"a batch item whose orderLinkId exists -> the existing order {rows[0]['orderId']} (no second stop); the other item placed; venue holds {len(conds)} conditional orders"
+
+
+def bring_up_script_writes_a_private_credential_file_and_never_prints_it():
+    import subprocess
+    sh = os.path.join(os.path.dirname(PULSE), "..", "deploy", "bybit-up.sh")
+    sh = os.path.abspath(sh)
+    syntax = subprocess.run(["bash", "-n", sh], capture_output=True, text=True)
+    with tempfile.TemporaryDirectory() as td:
+        pdir = os.path.join(td, "pulse")
+        env_ = {**os.environ, "BYBIT_API_KEY": "KEY-NEVER-PRINT", "BYBIT_API_SECRET": "SECRET-NEVER-PRINT", "PULSE_DIR": pdir, "LOG_DIR": os.path.join(td, "log"),
+                "REPO": os.path.abspath(os.path.join(PULSE, "..", ".."))}
+        out = subprocess.run(["bash", sh, "x02"], capture_output=True, text=True, env=env_, timeout=120)
+        cred = os.path.join(pdir, "cred-bybit-x02.json")
+        data = json.load(open(cred)) if os.path.exists(cred) else {}
+        mode = (os.stat(cred).st_mode & 0o777) if os.path.exists(cred) else 0
+        said = out.stdout + out.stderr
+        bad_arg = subprocess.run(["bash", sh, "x09"], capture_output=True, text=True, env=env_, timeout=30)
+        started = any(f.endswith(".log") for f in os.listdir(os.path.join(td, "log"))) if os.path.isdir(os.path.join(td, "log")) else False
+    ok = (syntax.returncode == 0 and out.returncode == 0 and data == {"api_key": "KEY-NEVER-PRINT", "api_secret": "SECRET-NEVER-PRINT", "is_testnet": "1"} and mode == 0o600
+          and "KEY-NEVER-PRINT" not in said and "SECRET-NEVER-PRINT" not in said and bad_arg.returncode == 2 and not started)
+    return ok, f"syntax ok={syntax.returncode == 0}; x02 file mode {oct(mode)} fields {sorted(data)} is_testnet={data.get('is_testnet')}; secrets in output: {'KEY-NEVER-PRINT' in said or 'SECRET-NEVER-PRINT' in said}; bad slot exit {bad_arg.returncode}; no engine started without START=1"
+
 
 def connection_names_pick_the_venue():
     ok_by = ok_bx = False
@@ -728,11 +1142,28 @@ CHECKS = [
     ("bybit.open-orders-typed-by-direction-and-paged", open_orders_are_typed_by_trigger_direction_and_paged),
     ("bybit.cancel-and-status-lookup", cancel_and_status_lookup_report_like_bingx),
     ("bybit.errors-carry-trader-words", bybit_errors_carry_the_words_the_trader_reads),
-    ("bybit.rate-limit-cooldown", rate_limits_start_the_path_cooldown_without_more_requests),
     ("bybit.leverage-and-modes-set-once", leverage_and_account_modes_are_set_once),
+    ("bybit.rate-headers-drive-the-endpoint-gate", rate_limit_headers_drive_the_endpoint_gate),
+    ("bybit.rate-limit-error-backs-off-to-the-reset", rate_limit_error_backs_off_to_the_reset_and_retries_once),
+    ("bybit.ip-ban-stops-every-request-ten-minutes", ip_ban_stops_every_request_for_ten_minutes),
+    ("bybit.local-pace-far-below-the-ip-limit", local_pace_stays_far_below_the_ip_limit),
+    ("bybit.batches-chunked-and-only-failed-items-retried", batches_are_chunked_and_retry_only_the_failed_items),
+    ("bybit.batch-lost-reply-resolved-by-link-id", batch_whole_call_failure_resolves_items_by_link_id),
+    ("bybit.retry-never-opens-a-second-position", retry_after_a_lost_reply_never_opens_a_second_position),
+    ("bybit.batch-item-with-a-used-link-id-resolves-to-the-existing-order", batch_item_with_a_used_link_id_resolves_to_the_existing_order),
+    ("bybit.timestamp-resync", timestamp_outside_the_window_is_resynced_with_the_server_time),
+    ("bybit.circuit-breaker-holds-entries-only", circuit_breaker_holds_entries_but_never_closes_or_cancels),
+    ("bybit.error-classes", error_classes_cover_rate_auth_time_balance_and_filters),
+    ("bybit.reads-retry-writes-do-not", reads_retry_once_on_a_server_error_and_writes_do_not_repeat_blindly),
+    ("bybit.hedge-mode-asked-again-after-rate-limit", hedge_mode_is_asked_again_after_a_rate_limit),
+    ("bybit.batch-cancel-and-amend-per-item", batch_cancel_and_amend_work_item_by_item),
     ("bybit.price-stream-merges-snapshot-and-delta", price_stream_merges_snapshots_and_deltas),
     ("bybit.price-hub-shards-subscribes-pings", price_hub_subscribes_in_shards_and_pings),
     ("bybit.trader-lifecycle-entry-controls-venue-tp-close", positions_and_orders_lifecycle_through_the_live_trader),
     ("bybit.own-closing-fills-synced-with-pnl", own_closing_fills_are_synced_with_their_pnl),
+    ("bybit.demo-reads-market-data-from-mainnet", demo_trading_reads_market_data_from_mainnet),
+    ("bybit.bring-up-script-private-credentials-no-secret-output", bring_up_script_writes_a_private_credential_file_and_never_prints_it),
     ("bybit.connection-name-picks-the-venue", connection_names_pick_the_venue),
+    ("bybit.tag-contracts-and-pins-per-connection", bybit_connections_get_their_own_tag_contracts_and_pins),
+    ("bybit.sidecar-lists-bybit-lanes-apart-from-overall", the_sidecar_lists_bybit_lanes_apart_from_overall),
 ]

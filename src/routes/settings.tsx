@@ -277,10 +277,15 @@ function SettingsPage() {
                   hint={pfHint(overlay.minPf, overlay.positionCostPct)}
                   onChange={(v) => patch("minPf", v)}
                 />
+                <Toggle
+                  label="Windows follow the overall validation N (PF, Set PF, Exit PF, SL:TP and trail recalc)"
+                  on={overlay.windowsLinked !== false}
+                  onChange={(v) => patch("windowsLinked", v)}
+                />
                 <Slider
-                  label="PF window"
+                  label="PF window (own N when windows are unlinked)"
                   value={overlay.pfWindow}
-                  min={5}
+                  min={8}
                   max={50}
                   step={1}
                   hint="Last N closed trades for the average Result-R."
@@ -346,7 +351,7 @@ function SettingsPage() {
                 <Slider
                   label="Recalc min samples"
                   value={overlay.slToTpRecalcN}
-                  min={3}
+                  min={8}
                   max={20}
                   step={1}
                   hint="Last-N closes tagged with that ratio"
@@ -546,7 +551,7 @@ function SettingsPage() {
                 <Slider
                   label="PF window"
                   value={overlay.setPfWindow}
-                  min={5}
+                  min={8}
                   max={40}
                   step={1}
                   hint="Last N historic+live fills for PositionCost PF"
@@ -606,7 +611,7 @@ function SettingsPage() {
                 <Slider
                   label="Min samples"
                   value={overlay.setMinSamples}
-                  min={5}
+                  min={8}
                   max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
@@ -710,7 +715,7 @@ function SettingsPage() {
                 <Slider label="Opt SL min" value={overlay.exitOptSlMin} min={0.05} max={0.5} step={0.01} unit="%" onChange={(v) => patch("exitOptSlMin", v)} />
                 <Slider label="Opt SL max" value={overlay.exitOptSlMax} min={0.2} max={1.5} step={0.05} unit="%" onChange={(v) => patch("exitOptSlMax", v)} />
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
-                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
+                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={8} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
                 <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
                 <Slider
                   label="Exit min PF"
@@ -949,7 +954,7 @@ function SettingsPage() {
                   }
                 }} />
                 <Slider label="Giveback %" value={overlay.trailGivePct} min={0.05} max={0.8} step={0.05} unit="%" onChange={(v) => patch("trailGivePct", v)} />
-                <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={3} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
+                <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={8} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
                 <Slider label="Recalc every N closes" value={overlay.trailRecalcEvery} min={3} max={30} step={1} onChange={(v) => patch("trailRecalcEvery", v)} />
               </Grid>
               <p className="text-sm text-muted">
@@ -1075,7 +1080,7 @@ function SettingsPage() {
                 <Num
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
-                  min={5}
+                  min={8}
                   max={40}
                   step={1}
                   onChange={(v) => patch("dcaPfWindow", v)}
@@ -1149,10 +1154,10 @@ function SettingsPage() {
               <div className="space-y-2">
                 <LiveAxis
                   name="Previous"
-                  range="4–12 step 2"
+                  range="8–12 step 2"
                   enabled={overlay.axisPrevEnabled}
                   window={overlay.axisPrevMaxWindow}
-                  min={4}
+                  min={8}
                   max={12}
                   step={2}
                   onEn={(v) => patch("axisPrevEnabled", v)}
@@ -1160,12 +1165,12 @@ function SettingsPage() {
                 />
                 <LiveAxis
                   name="Last"
-                  range="1–4"
+                  range="8–16 step 2"
                   enabled={overlay.axisLastEnabled}
                   window={overlay.axisLastMaxWindow}
-                  min={1}
-                  max={4}
-                  step={1}
+                  min={8}
+                  max={16}
+                  step={2}
                   onEn={(v) => patch("axisLastEnabled", v)}
                   onWin={(v) => patch("axisLastMaxWindow", v)}
                 />

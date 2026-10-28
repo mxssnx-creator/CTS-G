@@ -716,6 +716,11 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     got["few"] = run(lo, ref, {15: _rows(lo.id, 5, 0)})                 # 5 orders, all wins: below holdAutoMin
     got["tie"] = run(lo, _rows(lo.id, 30, 20), {15: _rows(lo.id, 30, 20)})      # an equal PF keeps the global stop
     got["better"] = run(lo, _rows(lo.id, 30, 20), {15: _rows(lo.id, 31, 19)})   # +9%: replaces it
+    # a PF only 1% above the global stop's is inside the margin and keeps the global stop; 5% above replaces it
+    def with_loss(wins, losses, loss_pct):
+        return [(1000.0 + 60 * k, "S0-USDT", "LONG", 0.0, (0.004 if k >= losses else loss_pct), 600.0, "x", lo.id) for k in range(wins + losses)]
+    got["inside margin"] = run(lo, with_loss(30, 20, -0.002), {15: with_loss(30, 20, -0.00197)})
+    got["outside margin"] = run(lo, with_loss(30, 20, -0.002), {15: with_loss(30, 20, -0.0018)})
     got["high"] = run(hi, _rows(hi.id, 10, 30), {120: _rows(hi.id, 40, 10), 10: _rows(hi.id, 50, 0)})   # 10 min is not a step-8 candidate
     man = _book(n_syms=1, bars=300, stepHoldOn=[False, False, True] + [False] * 9, stepHoldMin=[10, 10, 17] + [10] * 9)
     off = _book(n_syms=1, bars=300, holdEnabled=False, stepHoldOn=[True] * 12, stepHoldMin=[30] * 12)
@@ -729,7 +734,7 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH
     ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50 and got["best"][2] == 50
           and got["cap"][0] == 0 and got["cap_good"][0] == 30 and got["cap_good"][1] == 50
-          and got["few"][0] == 0 and got["tie"][0] == 0 and got["better"][0] == 15 and got["high"][0] == 120
+          and got["few"][0] == 0 and got["tie"][0] == 0 and got["inside margin"][0] == 0 and got["outside margin"][0] == 15 and got["better"][0] == 15 and got["high"][0] == 120
           and lo.hold_auto and man.auto_holds(m3) == () and m3.hold_bars == 17 and not m3.hold_auto and man.auto_holds(m4) != ()
           and not off.auto_holds(off.by_idx[0]) and all(x.hold_bars == 0 for x in off.by_idx)
           and not auto_off.auto_holds(auto_off.by_idx[0]) and all(x.hold_bars == 0 for x in auto_off.by_idx))
@@ -756,6 +761,55 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
     b.replay_all(now=T0)
     same = first == {st.id: st.hold_bars for st in b.by_idx}
     return not bad and chosen > 0 and same, f"sets={len(first)} with an own hold={chosen} bad={bad[:3]} same_on_second_pass={same}"
+
+
+def validation_windows_follow_the_overall_n_and_never_read_fewer_than_8():
+    """pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN and trailRecalcN follow the overall validation's last N
+    (setGateWindow) while windowsLinked is on (the default); unlinked each takes its own N, and no last-N validation reads fewer than
+    8 orders (the gate minimum, the samples of Exit, Block and the coordinator, the Axis windows) whatever the setting."""
+    from block_engine import BlockBook
+    from coord_engine import Coordinator
+    from dca_engine import DcaBook
+    from exit_engine import ExitBook
+    from position_cost import MIN_VALIDATION_N, window_n
+    from risk_variants import VariantBook
+    import os, tempfile
+
+    def windows(ov):
+        sb = SetBook(); sb.load(overlay(**ov))
+        co = Coordinator(); co.load({}, ov)
+        ex = ExitBook(); ex.load(ov)
+        dc = DcaBook(); dc.load(ov)
+        vb = VariantBook(); vb.load(ov)
+        return {"set": sb.pf_n, "coord": co.pf_window, "exit": ex.pf_n, "dca": dc.pf_n, "sl": vb.sl_recalc_n, "trail": vb.trail_recalc_n}
+
+    own = {"pfWindow": 12, "setPfWindow": 12, "exitPfWindow": 12, "dcaPfWindow": 12, "slToTpRecalcN": 12, "trailRecalcN": 12}
+    tiny = {k: 3 for k in own}
+    got = {
+        "linked 50": windows({}),
+        "linked 30": windows({"setGateWindow": 30}),
+        "linked ignores own values": windows({**own, "setGateWindow": 40}),
+        "unlinked 12": windows({**own, "windowsLinked": False}),
+        "unlinked 8": windows({**{k: 8 for k in own}, "windowsLinked": False}),
+        "unlinked 3 -> floor": windows({**tiny, "windowsLinked": False}),
+    }
+    want = {
+        "linked 50": {k: 50 for k in got["linked 50"]},
+        "linked 30": {k: 30 for k in got["linked 50"]},
+        "linked ignores own values": {k: 40 for k in got["linked 50"]},
+        "unlinked 12": {k: 12 for k in got["linked 50"]},
+        "unlinked 8": {k: 8 for k in got["linked 50"]},
+        "unlinked 3 -> floor": {k: 8 for k in got["linked 50"]},
+    }
+    sb = SetBook(); sb.load(overlay(setGateMinTrades=3, holdAutoMin=2))
+    ex = ExitBook(); ex.load({"exitMinSamples": 2})
+    co = Coordinator(); co.load({}, {"setMinSamples": 2, "prevPosMinCount": 1, "axisLastMaxWindow": 1, "windowsLinked": False})
+    bb = BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-win-"), "b.json"), {"prevPosMinCount": 2})
+    floors = {"gate_min": sb.gate_min, "hold_auto_min": sb.hold_auto_min, "exit_samples": ex.min_samples, "coord_samples": co.min_samples,
+              "coord_prev_min": co.prev_min_count, "axis_last_window": co.axes["last"].max_window, "block_samples": bb.min_samples}
+    floors_ok = all(v >= MIN_VALIDATION_N for v in floors.values())
+    ok = got == want and floors_ok and window_n({}, "pfWindow") == 50
+    return ok, f"windows {got}; floors {floors}"
 
 
 CHECKS = [
@@ -791,6 +845,7 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
+    ("processing.validation-windows-follow-overall-n-floor-8", validation_windows_follow_the_overall_n_and_never_read_fewer_than_8),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
     ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized

@@ -405,6 +405,27 @@ def per_step_hold_time_is_the_same_in_replay_and_live():
     return not bad and off_ok, f"step {step}: bars held (replay, live) by hold and side {out}; hold off keeps global={off_ok}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def lane_step_leaves_on_the_sets_own_hold():
+    """SetLane.step (the streaming simulator's path) leaves on the Set's own hold, the same bar the scan does; a Set without one keeps the
+    global time stop."""
+    b = _book()
+    st = _pick(b, "time")
+    cfg = _replay_cfg(b)
+    flat = [[100.0, 100.001, 99.999, 100.0, 1.0] for _ in range(cfg["time_bars"] + 40)]
+    out = {}
+    for hold in (0, 7, 19):
+        lane = se.SetLane(st, "X-USDT")
+        lane.hold = hold
+        done = None
+        for i, bar in enumerate(flat):
+            done = lane.step(i, bar, 1, 1.0, i == 0, cfg)
+            if done:
+                break
+        out[hold] = (done and done["reason"], done and done["exit_i"])
+    ok = out[7] == ("time", 7) and out[19] == ("time", 19) and out[0][0] == "time" and out[0][1] == cfg["time_bars"]
+    return ok, f"(reason, exit bar) by hold {out}; global time stop {cfg['time_bars']}"
+
+
 def auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live():
     """The hold the Auto Mode chose for one Set (st.hold_bars, hold_auto) is the time exit of the live position and of the replay on
     the same bar; another Set of the same step keeps the global time stop."""
@@ -1034,7 +1055,7 @@ def the_desk_index_reproduces_the_engines_pooled_pf():
 
 def _block(**cfg):
     import block_engine as be
-    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 5}
+    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 8}
     base.update(cfg)
     return be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-block-"), "block.json"), base)
 
@@ -1044,7 +1065,7 @@ def _stack(b, lane, groups_ok, max_orders=20):
     whose PF decision passes (the others carry a losing observed PF). Returns the size of each order."""
     sizes = []
     for n in range(1, int(b.max_stack) + 1):
-        lane.pf_ring[n] = [3.0] * 6 if n in groups_ok else [-1.0] * 6
+        lane.pf_ring[n] = [3.0] * 8 if n in groups_ok else [-1.0] * 8
     for _ in range(max_orders):
         row = b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.5))
         if not row:
@@ -1237,6 +1258,7 @@ CHECKS = [
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
     ("trader.per-step-hold-same-in-replay-and-live", per_step_hold_time_is_the_same_in_replay_and_live),
+    ("trader.lane-step-leaves-on-the-sets-own-hold", lane_step_leaves_on_the_sets_own_hold),
     ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),

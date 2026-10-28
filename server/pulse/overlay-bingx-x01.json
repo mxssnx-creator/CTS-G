@@ -41,7 +41,7 @@
   "axisPrevEnabled": false,
   "axisPrevMaxWindow": 12,
   "axisLastEnabled": false,
-  "axisLastMaxWindow": 4,
+  "axisLastMaxWindow": 8,
   "axisContEnabled": false,
   "axisContMaxWindow": 8,
   "axisPauseEnabled": false,
@@ -56,9 +56,9 @@
   "rearrange": true,
   "rearrangeGap": 0.22,
   "positionCostPct": 0.12,
-  "pfWindow": 6,
-  "setPfWindow": 6,
-  "exitPfWindow": 6,
+  "pfWindow": 8,
+  "setPfWindow": 8,
+  "exitPfWindow": 8,
   "slMinPct": 0.2,
   "slMaxPct": 15.75,
   "tpMinPct": 0.35,
@@ -70,10 +70,10 @@
     0.9
   ],
   "slToTpAuto": true,
-  "slToTpRecalcN": 6,
+  "slToTpRecalcN": 8,
   "slToTpRecalcEvery": 8,
   "trailAuto": true,
-  "trailRecalcN": 6,
+  "trailRecalcN": 8,
   "trailRecalcEvery": 8,
   "trailArmMin": 0.3,
   "trailArmMax": 1.5,
@@ -173,5 +173,6 @@
   "holdEnabled": true,
   "holdAuto": true,
   "holdAutoMax": 50,
-  "holdAutoMin": 10
+  "holdAutoMin": 10,
+  "windowsLinked": true
 }

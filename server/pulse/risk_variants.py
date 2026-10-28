@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
+    MIN_VALIDATION_N,
     POSITION_COST_PCT_DEFAULT,
+    window_n,
     TRAIL_STEP_MAX,
     TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN,
@@ -139,14 +141,14 @@ class VariantBook:
     skipped: int = 0            # closes without pnl_pct: cannot be normalised, not counted in any tape
     sl_ratio: float = 0.6
     sl_auto: bool = True
-    sl_recalc_n: int = 6
+    sl_recalc_n: int = 8
     sl_recalc_every: int = 8
     sl_ratios: List[float] = field(default_factory=lambda: list(SL_TP_RATIOS))
     trail_key: str = "0.3:0.1"
     trail_arm: float = 0.3
     trail_give: float = 0.1
     trail_auto: bool = True
-    trail_recalc_n: int = 6
+    trail_recalc_n: int = 8
     trail_recalc_every: int = 8
     trail_arm_min: float = TRAIL_ARM_MIN
     trail_arm_max: float = TRAIL_ARM_MAX
@@ -187,7 +189,7 @@ class VariantBook:
         if self.sl_ratio not in self.sl_ratios:
             self.sl_ratio = min(self.sl_ratios, key=lambda r: abs(r - self.sl_ratio))
         self.sl_auto = bool(ov.get("slToTpAuto", True))
-        self.sl_recalc_n = max(3, int(ov.get("slToTpRecalcN") or 6))
+        self.sl_recalc_n = max(MIN_VALIDATION_N, window_n(ov, "slToTpRecalcN", fallback=MIN_VALIDATION_N))
         self.sl_recalc_every = max(3, int(ov.get("slToTpRecalcEvery") or 8))
 
         raw_trails = ov.get("trailVariants") or coord.get("trailingVariants") or cts.get("strategyBaseTrailingVariants") or list(TRAIL_VARIANTS)
@@ -201,7 +203,7 @@ class VariantBook:
         self.trail_give_factor = float(ov.get("trailGiveFactor") or TRAIL_GIVE_FACTOR)
         self.trail_recalc_give = bool(ov.get("trailRecalcGive", True))
         self.trail_auto = bool(ov.get("trailAuto", True))
-        self.trail_recalc_n = max(3, int(ov.get("trailRecalcN") or 6))
+        self.trail_recalc_n = max(MIN_VALIDATION_N, window_n(ov, "trailRecalcN", fallback=MIN_VALIDATION_N))
         self.trail_recalc_every = max(3, int(ov.get("trailRecalcEvery") or 8))
         arm = ov.get("trailArmPct")
         give = ov.get("trailGivePct")
@@ -434,7 +436,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     step = [round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(5)]
     out.append(("var-sl-grid", step == list(SL_TP_RATIOS), f"{step}"))
     b = VariantBook()
-    b.load({"slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333})
+    b.load({"windowsLinked": False, "slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333})
     out.append(("var-sl-default", abs(b.sl_ratio - 0.6) < 1e-9, f"sl={b.sl_ratio}"))
     out.append(("var-trail-give", abs(b.trail_give - 0.1) < 0.02, f"arm={b.trail_arm} give={b.trail_give}"))
     # independent recals: SL book does not move trail

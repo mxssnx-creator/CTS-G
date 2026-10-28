@@ -43,6 +43,25 @@ TYPE_TO_ID = {l["type"]: l["id"] for l in LANES}
 ID_TO_LANE = {l["id"]: l for l in LANES}
 
 
+def _extra_lanes() -> list:
+    """Bybit connections the operator has set up (credential file or an engine stats file in the pulse directory). They are
+    their own lanes: selectable and controllable one by one, but never summed into Overall, never started by an Overall
+    Start and never revived by the watchdog (a second venue with its own money is started on purpose)."""
+    out = []
+    for conn, typ, label, ex in (("bybit-x01", "bybit", "Bybit", "Bybit"), ("bybit-x02", "bybit-demo", "Bybit demo", "Bybit demo")):
+        if any(os.path.exists(os.path.join(DIR, f)) for f in (f"cred-{conn}.json", f"stats-{conn}.json")):
+            out.append({"type": typ, "id": conn, "label": label, "unit": "USDT", "exchange": ex})
+    return out
+
+
+EXTRA_LANES = _extra_lanes()
+TYPE_TO_ID.update({l["type"]: l["id"] for l in EXTRA_LANES})
+ID_TO_LANE.update({l["id"]: l for l in EXTRA_LANES})
+for _slot in SLOTS:
+    if _slot["type"] == "bybit":
+        _slot["ready"] = bool(EXTRA_LANES)
+
+
 def _short_err(msg) -> str:
     s = " ".join(str(msg or "").split())
     s = re.sub(r"https?://\S+", "", s)
@@ -602,7 +621,8 @@ def merge_overall() -> dict:
 
 
 def connections_blob() -> dict:
-    lanes = [lane_summary(l) for l in LANES]
+    base_lanes = [lane_summary(l) for l in LANES]
+    lanes = base_lanes + [lane_summary(l) for l in EXTRA_LANES]
     return {
         "selectedDefault": "overall",
         "types": [
@@ -610,10 +630,10 @@ def connections_blob() -> dict:
                 "type": "overall",
                 "label": "Overall",
                 "blurb": "All desks in parallel",
-                "running": any(l["running"] and not l["halted"] for l in lanes),
-                "openCount": sum(l["openCount"] for l in lanes),
-                "halted": all(l["halted"] or not l["running"] for l in lanes),
-                "progressReady": all(bool(l.get("progressReady")) for l in lanes) if lanes else False,
+                "running": any(l["running"] and not l["halted"] for l in base_lanes),
+                "openCount": sum(l["openCount"] for l in base_lanes),
+                "halted": all(l["halted"] or not l["running"] for l in base_lanes),
+                "progressReady": all(bool(l.get("progressReady")) for l in base_lanes) if base_lanes else False,
             },
             *[
                 {
