@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""What the secondary last-N windows (pfWindow and friends) do as a validation on top of the Base gate. Arms: 'none' = the Base gate alone
-(every window follows the overall validation N, nothing extra), and N = 6 (the old shipped value, below the floor of 8), 8, 12: a Base-valid
+"""What the secondary last-N windows (pfWindow and friends) do as a validation on top of the Base gate. Arms (--arms): 'none' = the Base gate alone
+(every window follows the overall validation N, nothing extra), and N = 6 (the old shipped value, below the floor of 8), 8, 12, 15, 20, 25: a Base-valid
 Set must in addition have its last N orders at or above the minimum PF. Same hours, tapes and execution as stage_eval; development window
 only (--sealed reads the last third once). Per arm: validated share, post-Base effective PF with its orders, executed PF with orders,
 net, drawdown, hours positive.
@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--symbols", type=int, default=20)
     ap.add_argument("--sealed", action="store_true")
+    ap.add_argument("--arms", default="none,6,8,12,15,20,25")
     a = ap.parse_args()
     os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"holdEnabled": False})
     names, bars, times = sg.load_bars(a.data, a.symbols)
@@ -42,7 +43,7 @@ def main():
     lb = book.lookback * 60.0
     res = {}
     print(f"{'arm':26s} {'valid %':>8s} {'eff PF':>7s} {'eff orders/h':>12s} {'exec PF':>8s} {'orders':>7s} {'net %':>9s} {'maxDD %':>9s} {'hours+':>9s}")
-    for arm in ("none", 6, 8, 12):
+    for arm in [x if x == "none" else int(x) for x in a.arms.split(",")]:
         def gate(book_, tapes_, st, now, _arm=arm):
             ok, key, n, pf = base_gate(book_, tapes_, st, now)
             if ok and _arm != "none":
