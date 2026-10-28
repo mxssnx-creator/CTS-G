@@ -534,12 +534,10 @@ def extract_oid(r: Any) -> str:
 def order_fill_qty(data: Any, requested: float = 0.0) -> float:
     """Read executed quantity without turning an unfilled order into a fill.
 
-    BingX responses vary by endpoint: market responses may expose quantity or
-    origQty, while fill/order responses expose executedQty. An explicit zero
-    must remain zero, and a malformed or oversized response is never allowed
-    to inflate the local position, Block lane, DCA lane, or balance estimate.
-    Partial fills are valid progress even while an order remains open; only a
-    response with no execution fields may use the legacy requested-size fallback.
+    An explicit execution quantity proves partial or full progress. Requested
+    quantity alone is not a fill; a terminal filled status can prove a full
+    order when the execution quantity is omitted. Unknown or malformed execution
+    data stays pending instead of inflating local positions or results.
     """
     try:
         want = max(0.0, float(requested or 0.0))
@@ -564,21 +562,20 @@ def order_fill_qty(data: Any, requested: float = 0.0) -> float:
                 parsed = number(data.get(key))
                 if parsed is not None:
                     return min(parsed, want) if want > 0 else parsed
+                return 0.0
         status = str(data.get("status") or data.get("orderStatus") or data.get("state") or "").strip().upper()
-        if status and status not in terminal:
-            # quantity/origQty is the requested size on NEW and PARTIALLY_FILLED
-            # responses, not an executed fill. Keep it pending for polling.
+        if status not in terminal:
+            # quantity/origQty on an acknowledgement is the requested size, not a measured execution.
             return 0.0
         for key in ("quantity", "origQty"):
             if key in data and data.get(key) not in (None, ""):
                 parsed = number(data.get(key))
                 if parsed is not None:
                     return min(parsed, want) if want > 0 else parsed
+                return 0.0
         if status in terminal:
             return want
-    # Existing market-order responses without a status/execution field have
-    # historically meant "the requested market size was filled".
-    return want
+    return 0.0
 
 
 def ctrl_payload(
@@ -3437,7 +3434,7 @@ class Pulse:
 
 
     def ok(self, r: Dict[str, Any]) -> bool:
-        return (not r.get("error")) and r.get("code") in (0, None)
+        return (not r.get("error")) and r.get("code") in (0, "0", None)
 
     @staticmethod
     def order_response_ambiguous(r: Dict[str, Any]) -> bool:
@@ -7580,6 +7577,12 @@ class Pulse:
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
         filled = order_fill_qty(data, qty)
         order_id = extract_oid(data)
+        if filled <= 0 and not order_id:
+            # A response without an order identity may still have reached the venue. Keep the same client id
+            # fenced and explicitly reconcile it before releasing or retrying the intent.
+            pending_meta["ambiguous_since"] = time.time()
+            self.recon_pending = True
+            self._reconcile_retry_at = 0.0
         entry_fee = row_fee_usdt(data) if isinstance(data, dict) else 0.0
         if entry_fee > 0:
             pending_meta["entry_fee"] = entry_fee
@@ -7597,6 +7600,7 @@ class Pulse:
             metadata=pending_meta,
         )
         if filled <= 0:
+            self._next_fill_poll = 0.0
             self.cooldown[f"{sym}:{side}"] = time.time() + 12.0
             log(f"ENTRY no fill {sym} {side}", every=20.0, key=f"nofill:{sym}")
             return

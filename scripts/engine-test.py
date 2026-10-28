@@ -284,8 +284,8 @@ def fill_accounting_test() -> None:
     rec("fill-executed-priority", abs(order_fill_qty({"executedQty": "0.02", "quantity": "0.05"}, 0.05) - 0.02) < 1e-12)
     rec("fill-explicit-zero-stays-zero", order_fill_qty({"executedQty": "0", "quantity": "0.05"}, 0.05) == 0.0)
     rec("fill-capped-to-request", order_fill_qty({"executedQty": "0.08"}, 0.05) == 0.05)
-    rec("fill-fallback-requested", order_fill_qty({"orderId": "x"}, 0.05) == 0.05)
-    rec("fill-malformed-fallback", order_fill_qty({"executedQty": "nan"}, 0.05) == 0.05)
+    rec("fill-ack-is-not-a-fill", order_fill_qty({"orderId": "x"}, 0.05) == 0.0)
+    rec("fill-malformed-is-not-a-fill", order_fill_qty({"executedQty": "nan"}, 0.05) == 0.0)
     rec("fill-control-half-up", normalize_control_pct(0.00495) == 50,
         str(normalize_control_pct(0.00495)))
 
