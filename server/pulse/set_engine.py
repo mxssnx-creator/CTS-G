@@ -80,11 +80,13 @@ RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward 
 RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
 
 
-def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]]) -> List[List[float]]:
+def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]], keep_on_gap: bool = False) -> List[List[float]]:
     """Join a newer 1-minute window onto a stored series. Rows carry no timestamps, so the join finds where the new
     window's first row sits in the stored series and checks the overlap row by row. The stored history before that
     point is kept, and the new rows (including a still-forming last bar) replace the overlapped tail. With no overlap
-    the new window stands, because a gap cannot be filled from rows that do not line up."""
+    the new window stands, because a gap cannot be filled from rows that do not line up. keep_on_gap: a window that does not
+    line up is dropped and the stored series kept (rows built from live ticks never equal the exchange's rows, and a short
+    window of them must not replace a long history)."""
     if not old:
         return [list(r) for r in new]
     head = list(new[0])
@@ -94,6 +96,8 @@ def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]]) -
             if all(list(old[p + i]) == list(new[i]) for i in range(span - 1)):
                 return [list(r) for r in old[:p]] + [list(r) for r in new]
             break
+    if keep_on_gap and old:
+        return [list(r) for r in old]
     return [list(r) for r in new]
 
 
@@ -1236,7 +1240,9 @@ class SetBook:
         """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
         return symbol not in self.quality
 
-    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
+    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False) -> None:
+        """Join bars onto the symbol's history. tail=True: rows built from live ticks, joined only where they line up with
+        the stored series; they never replace a history they do not overlap."""
         if not bars:
             return
         cleaned: List[List[float]] = []
@@ -1248,7 +1254,7 @@ class SetBook:
                 continue
             cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
-            self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned)[-self.lookback :]
+            self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned, keep_on_gap=tail)[-self.lookback :]
 
     def trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)

@@ -919,6 +919,35 @@ def block_adds_one_partial_ratio_per_valid_group():
     return out == want, f"orders and final volume by valid groups: {out}"
 
 
+def block_no_row_asks_for_more_than_one_partial():
+    """Whichever group is picked, one order is one partial ratio of V0: no row of the evaluation (a later group's target is
+    cumulative) may request more, even when nothing was added yet."""
+    b = _block()
+    lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
+    for n in range(1, 9):
+        lane.pf_ring[n] = [3.0] * 6
+    rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=1.5) if r["kind"] == "regular"]
+    asks = [round(r["requestedAddQty"], 9) for r in rows]
+    return bool(rows) and max(asks) <= 5.0 + 1e-9, f"requested per group={asks} (a partial is 0.5 x 10 = 5)"
+
+
+def history_survives_live_built_tail():
+    """Rows built from live ticks (zero volume, sampled highs and lows) never equal the exchange's rows. Ingested as a tail
+    after a full history they used to replace it with the last few minutes (1,920 bars -> 40), and every Set's tape with it."""
+    import set_engine as se
+    sb = se.SetBook.__new__(se.SetBook)
+    sb.bars, sb.lookback, sb._lock = {}, 3000, __import__("threading").RLock()
+    full = [[10.0 + 0.001 * (i % 97), 10.5, 9.5, 10.1 + 0.001 * (i % 89), 5.0] for i in range(1920)]
+    sb.ingest_bars("X-USDT", full)
+    tail = [[10.0 + 0.0003 * i, 10.2, 9.9, 10.05, 0.0] for i in range(40)]
+    sb.ingest_bars("X-USDT", tail, tail=True)
+    n = len(sb.bars["X-USDT"])
+    sb.bars = {}
+    sb.ingest_bars("Y-USDT", tail, tail=True)
+    boot = len(sb.bars["Y-USDT"])
+    return n == 1920 and boot == 40, f"history after a live-built tail: {n} (want 1920); bootstrap with no history: {boot} (want 40)"
+
+
 def block_stack_is_capped_at_eight_groups():
     """The stack never goes past maxStack groups: with every group valid the 9th partial is never asked for."""
     b = _block(blockMaxStack=8, blockVolumeRatio=1.0)
@@ -1054,7 +1083,9 @@ CHECKS = [
     ("trader.size-has-a-hard-ceiling", position_size_has_a_hard_ceiling),
     ("trader.block-carried-parent-and-partial-add", a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial),
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
+    ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
     ("block.stack-capped-at-eight-groups", block_stack_is_capped_at_eight_groups),
+    ("processing.history-not-truncated-by-live-rows", history_survives_live_built_tail),
     ("block.threshold-rises-with-valid-groups", block_threshold_rises_with_the_valid_group_count),
     ("block.stack-stays-until-net-is-back-to-equal", block_stack_stays_increased_until_the_groups_net_is_back_to_equal),
     ("block.win-never-carries-memory-survives", block_winning_group_never_carries_and_the_memory_survives_parents),

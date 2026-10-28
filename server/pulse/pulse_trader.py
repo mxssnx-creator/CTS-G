@@ -3027,6 +3027,44 @@ class Pulse:
                     return kind, px
         return None
 
+    def reconcile_restored_book(self) -> None:
+        """Positions in the saved book that the venue no longer holds were closed there (by their own stop or TP) while the
+        engine was down. Settle them from one positions read before the first cycle, sending no order: a close or a stop for
+        a position that does not exist draws "position not exist", and 20 of those in 8 minutes ban the whole order API
+        (x02 lost its order path for minutes after every restart this way). A venue fill is recorded as that lane's close;
+        a position with no fill found is dropped only when the venue lists other positions (an empty list can be lag)."""
+        if not self.open:
+            return
+        try:
+            r = self.api.get("/openApi/swap/v2/user/positions")
+        except Exception:
+            return
+        rows = r.get("data") if self.ok(r) else None
+        if not isinstance(rows, list):
+            return
+        held = set()
+        for p in rows:
+            try:
+                amt = abs(float(p.get("positionAmt") or p.get("availableAmt") or 0))
+            except Exception:
+                continue
+            if amt > 1e-12:
+                side = (p.get("positionSide") or "").upper() or ("LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT")
+                held.add((str(p.get("symbol") or ""), side))
+        for pos in list(self.open.values()):
+            if (pos.symbol, pos.side) in held:
+                continue
+            if self.close_from_venue(pos, "restart"):
+                self.cooldown[pos.symbol] = time.time() + 90.0
+                continue
+            if not held:
+                continue
+            log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it")
+            self.cancel_controls(pos.symbol)
+            self.open.pop(pos.symbol, None)
+            self.cooldown[pos.symbol] = time.time() + 90.0
+        self.save_open_book()
+
     def close_from_venue(self, pos: Position, why: str) -> bool:
         """Record a position the venue closed by its own stop or TP as a normal close of its lane (reason sl or tp, the
         fill price). False when no such fill is found."""
@@ -3327,6 +3365,8 @@ class Pulse:
                 lines = collections.deque(f, maxlen=80)   # streams the file: memory stays at 80 lines however long it grows
             for line in lines:
                 rec = json.loads(line)
+                if not (1.6e9 < float(rec.get("t") or 0) <= time.time() + 300.0):
+                    continue          # a record from the future (or from before the engine existed) is not a trade
                 c = Closed(
                     t=float(rec.get("t") or 0),
                     symbol=str(rec.get("symbol") or ""),
@@ -3877,13 +3917,10 @@ class Pulse:
             if not c or px <= 0:
                 continue
             raw = row["requestedAddQty"]
-            # one valid group adds one partial ratio of the group's ORIGINAL base volume, never more in one order
-            partial = float(lane.base_qty) * float(self.block.volume_ratio)
+            # (Block's evaluation already limits one order to one partial: ratio x V0)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
             add_cap = min(self.notional_cap() * max(1.0, float(self.block.volume_ratio)), room)
             qty = self.cap_order_qty(c, px, raw, add_cap)
-            if partial > 0 and qty > partial * 1.05:
-                qty = self.cap_order_qty(c, px, partial, add_cap)
             if qty < c.min_qty or qty <= 0:
                 bumped = self.min_order_qty(c, px)
                 if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:
@@ -5420,10 +5457,14 @@ class Pulse:
         # universe keeps no bars, so its old trades leave every Set's tape and its memory is freed
         self.sets.trim_bars(list(SYMBOLS) + [p.symbol for p in self.open.values()])
         for s in SYMBOLS:
-            # only real minutes join the Set history: the seed padding (flat rows) would be replayed as bars
-            bars = self.real_bars_1m(s)
+            # The exchange history (REST) is the Set history and the fetch below keeps it current. The 1m rows built from
+            # live ticks (zero volume, sampled highs and lows) are only a bootstrap for a symbol that has no history yet,
+            # and never replace one: ingesting them every tick cut a 1,920-bar history to the minutes since start.
+            if len(self.sets.bars.get(s) or []) >= self.sets.min_bars:
+                continue
+            bars = self.real_bars_1m(s)      # real minutes only: the seed padding (flat rows) would be replayed as bars
             if bars:
-                self.sets.ingest_bars(s, bars)
+                self.sets.ingest_bars(s, bars, tail=True)
         if not self.sets.due():
             return
         full = int(self.sets.lookback * 0.9)
@@ -5600,6 +5641,10 @@ class Pulse:
         except Exception:
             pass
         sd_notify("WATCHDOG=1")
+        try:
+            self.reconcile_restored_book()
+        except Exception:
+            log("reconcile_restored_book failed: " + traceback.format_exc()[-160:])
         self.adopt_exchange_positions()
         sd_notify("WATCHDOG=1")
         try:

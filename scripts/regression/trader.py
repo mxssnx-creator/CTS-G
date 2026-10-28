@@ -903,7 +903,7 @@ def history_thread_keeps_real_history_and_tops_up_a_partial_one():
         def gather_public(self, reqs, timeout=4.2):
             return [(path, extra, {"code": 0, "data": []}) for path, extra in reqs]
 
-    def run(api, real_n):
+    def run(api, real_n, live=False):
         p = _bare_pulse()
         p.api = api
         p.sets = se.SetBook()
@@ -916,6 +916,9 @@ def history_thread_keeps_real_history_and_tops_up_a_partial_one():
                                for i in range(real_n)]
             p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 60       # the seed padding
             p.real_1m[s_] = 0
+            if live:      # rows built from live ticks since start: zero volume, never equal to the exchange's rows
+                p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 20 + [[70.0 + i * 0.003, 70.2, 69.9, 70.1, 0.0] for i in range(40)]
+                p.real_1m[s_] = 40
         p.open = {}
         p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=False)
         p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
@@ -930,10 +933,11 @@ def history_thread_keeps_real_history_and_tops_up_a_partial_one():
         pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
         kept, kept_flat = run(_Offline(), 1920)
         topped, topped_flat = run(_PagedKlines(), 500)
+        livetail, _ = run(_Offline(), 1920, live=True)
     finally:
         pt.SYMBOLS[:] = saved
-    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0
-    return ok, f"offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
+    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0 and all(n == 1920 for n in livetail)
+    return ok, f"live-built tail on a full history -> {livetail}; offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
 
 
 def no_other_lane_touches_a_set_position():
