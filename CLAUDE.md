@@ -107,10 +107,13 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount`, `realEvalPosCount`, `prevPosMinCount`,
   `exitMinSamples` and Block's `blockMinSamples` are 8 (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
   `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
-- Measured (`scripts/window_eval.py`, 8 days, 20-24 symbols, development window): an extra last-N PF check on top of the Base gate (N = 6, 8,
-  12) moves the executed PF by a few hundredths and not in one direction (majors 0.525 -> 0.54/0.56/0.59, small caps 0.89 -> 0.91/0.93/0.87);
-  `scripts/sim12h.py --counts 0|8|12` (12 h, 20 symbols): executed PF 1.08/1.14/1.04 (majors) and 0.99/1.03/1.03 (small caps). Differences
-  of this size are inside the noise of a 12-hour window; 8 is the default.
+- Measured (2 days, 20 symbols, development window = first 2/3; `scripts/window_eval.py`, extra last-N PF check on top of the Base gate; "none" =
+  the Base gate alone, all windows at the overall N): majors executed PF none 0.40, N = 6/8/12/15/20/25: 0.42/0.43/0.41/0.42/0.41/0.43;
+  recent small caps none 1.20, N = 6/8/12/15/20/25: 1.19/1.15/1.07/1.12/1.08/1.10 (sealed third, read once: none vs 8, majors 1.54 vs 1.62,
+  small caps 0.98 vs 1.01). `scripts/sim12h.py --counts N` (12 h, 20 symbols, windows + Axis last-N + Block evidence at N): executed PF
+  as before / 8 / 12 / 15 / 20 / 25: majors 1.08/1.14/1.04/1.04/1.44/1.13, small caps 0.99/1.03/1.03/1.09/1.01/0.92. No N wins in both
+  universes and the differences are inside the noise of one 12-hour window, so the shipped default is the minimum, 8 (windows linked to
+  the overall N). Do not tune these on a 12-hour window.
 
 ## Indication library and extra packs
 
