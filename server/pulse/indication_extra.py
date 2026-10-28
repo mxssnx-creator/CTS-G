@@ -958,6 +958,9 @@ INDICATORS.update(FAMILY)
 from indication_lib import LIB as _LIB, WINDOW as _LIB_WINDOW  # noqa: E402  (the library imports nothing from this module)
 INDICATORS.update(_LIB)
 WINDOWS.update({name: _LIB_WINDOW for name in _LIB})
+from indication_ao import AO as _AO  # noqa: E402  (ported from CTS-A-O; imports indication_lib only)
+INDICATORS.update(_AO)
+WINDOWS.update({name: _LIB_WINDOW for name in _AO})
 
 
 def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, float, str]]:
