@@ -16,7 +16,7 @@ DEFAULT_FLAGS = {
     "exchange.bingx": True,
     "strategy.block": True,
     "strategy.trailing": True,
-    "strategy.dca": False,  # DCA off by default — overlay dcaEnabled=true re-enables
+    "strategy.dca": False,  # DCA off by default — overlay dcaEnabled=true turns it on
     "strategy.indications": True,
     "strategy.coord": True,
     "feed.signals": True,
@@ -41,8 +41,9 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags[str(k)] = bool(v)
     if "blockEnabled" in overlay:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
-    # DCA is disabled for now (dca_engine.DCA_HARD_OFF); the overlay cannot re-enable it.
-    flags["strategy.dca"] = False
+    # DCA is an opt-in lane: off unless the overlay switches it on (and the build-time kill switch is not set)
+    from dca_engine import DCA_HARD_OFF
+    flags["strategy.dca"] = bool(overlay.get("dcaEnabled", False)) and not DCA_HARD_OFF
     if "controlOrders" in overlay:
         flags["exec.controls"] = bool(overlay["controlOrders"])
     if "rearrange" in overlay:

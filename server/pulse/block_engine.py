@@ -116,12 +116,12 @@ class BlockBook:
         self.path = path
         cfg = cfg or {}
         self.enabled = bool(cfg.get("variantBlockEnabled", True))
-        raw_stack = cfg.get("blockMaxStack", 0)
+        raw_stack = cfg.get("blockMaxStack", 6)
         try:
             stack_n = int(raw_stack if raw_stack is not None else 0)
         except Exception:
             stack_n = 0
-        # 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
+        # default 6 groups, 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
         self.max_stack = 0 if stack_n <= 0 else max(1, stack_n)
         self.volume_ratio = clamp(float(cfg.get("blockVolumeRatio", 1) or 1), 0.25, 3.0)
         self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 0.8) or 0.8), 0.2, 5.0)

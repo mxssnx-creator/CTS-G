@@ -719,7 +719,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="0 = unlimited"
+                  hint="default 6 groups; 0 = unlimited"
                   onChange={(v) => patch("blockMaxStack", v)}
                 />
                 <Num
@@ -923,17 +923,44 @@ function SettingsPage() {
           )}
 
           {section === "dca" && (
-            <Card title="DCA" hint="Independent of Block · fires on adverse % from average entry · own last-15 PF / last-25 deact">
+            <Card title="DCA" hint="Independent of Block · adds against a position · scored on its own adds (last-15 PF / last-25 deact) · off by default">
               <Toggle
                 label="DCA enabled"
                 on={overlay.dcaEnabled === true}
-                onChange={(v) => patch("dcaEnabled", v)}
+                onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }}
               />
+              <Toggle
+                label="Auto calculation (rungs from each position's own stop, one small rung, exposure ceiling)"
+                on={overlay.dcaAuto !== false}
+                onChange={(v) => patch("dcaAuto", v)}
+              />
+              <Toggle
+                label="Also on Set positions (the Set keeps its own stop and TP; the Set is scored on its base result)"
+                on={overlay.dcaOnSets === true}
+                onChange={(v) => patch("dcaOnSets", v)}
+              />
+              <Toggle
+                label="Also on Axis-admitted positions (only while an Axis is on and the coordinator allows)"
+                on={overlay.dcaOnAxis === true}
+                onChange={(v) => patch("dcaOnAxis", v)}
+              />
+              <Grid>
+                <Num
+                  label="Max exposure × base size (auto)"
+                  value={overlay.dcaMaxExposureX}
+                  min={1}
+                  max={8}
+                  step={0.5}
+                  onChange={(v) => patch("dcaMaxExposureX", v)}
+                />
+              </Grid>
               <Toggle
                 label="Auto-deact on last-25 avg loss"
                 on={overlay.dcaAutoDeact !== false}
                 onChange={(v) => patch("dcaAutoDeact", v)}
               />
+              <details className="mt-3" open={overlay.dcaAuto === false} data-testid="dca-manual">
+              <summary className="cursor-pointer font-mono text-xs text-muted">Manual static settings (used when Auto calculation is off)</summary>
               <Grid>
                 <Num
                   label="Max steps"
@@ -1036,6 +1063,7 @@ function SettingsPage() {
                   />
                 ))}
               </Grid>
+              </details>
             </Card>
           )}
 

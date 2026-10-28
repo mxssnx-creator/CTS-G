@@ -39,7 +39,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   their own closes (`exits.on_close` and `variants.on_close` get closes without a set_id).
 - **Why.** A Set is validated on its own lane; an Exit strategy closing the same position early makes the live result
   something the Base validation never measured (the PF after Base then does not carry over to live).
-- **No cross-lane actions on a Set position.** The Block and DCA add-ons never add to it (no parent or DCA lane is
+- **No cross-lane actions on a Set position.** The Block add-on never adds to it, and DCA only through its opt-in switches (no parent lane is
   attached at open), the coordinator's rearrange never swaps it out (`Pulse.rearrange_opens`), and the global 6 h hold
   cap leaves it to its own time exit. Each rule has a `trader.lanes-*` check and a mutant.
 - **Live = replay for a Set position.** Its SL and TP come from `set_engine.lane_fracs` (the replay's formula, no overlay
@@ -50,12 +50,21 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   price), and the same outcome with every other strategy switched on (differential check).
 - **Block stacks on its own lane.** Only positions without a Set; its evidence is the net PF of those positions' closes
   (`Pulse.exit_lane_pf`, at least Block's minimum samples); it adds only to a parent at least one step in profit, within
-  the book cap; Set closes never reach Block's or DCA's scores. DCA is hard-off (`dca_engine.DCA_HARD_OFF`) until it is
-  re-approved. With the Base gate on (the standard) every entry is a Set position, so Block has nothing to stack on and
-  is idle; it only acts when a position has no Set.
+  the book cap; Set closes never reach Block's or DCA's scores. With the Base gate on (the standard) every entry is a
+  Set position, so Block has nothing to stack on and is idle; it only acts when a position has no Set. Block defaults:
+  max stack 6 groups, volume ratio 1 of the original volume (`blockMaxStack`, `blockVolumeRatio`).
+- **DCA is an opt-in lane** (off by default: `dcaEnabled`; `dca_engine.DCA_HARD_OFF` is only a build-time kill switch).
+  Independent of Block. `dcaAuto` (on by default) calculates the plan from each position's own stop distance (rungs as
+  fractions of it, one small rung, exposure ceiling `dcaMaxExposureX`, stop kept at the original level; the measured
+  least-harmful shape, `scripts/dca_eval.py`); off = the static lists (`dcaMaxSteps`, distances, multipliers).
+  Set positions are added to only with `dcaOnSets`, or `dcaOnAxis` (an Axis is on and the coordinator allows); the Set
+  then keeps its own stop and TP at the entry it opened at (`pos.dca_ref`), is scored on its base result, and the DCA
+  lane is scored on its own adds (`dca_pct`) and switches itself off when they lose. Measured walk-forward on Base-executed
+  positions (8 and 30 days, 20 symbols): every DCA shape lowered or left the PF unchanged and scaled the losses, so it
+  stays off until a window shows otherwise.
 - **Block volume (`block_engine`).** Additive from the group's original base volume V0: each VALID group (its PF decision
   passes, not paused) adds one partial ratio (`blockVolumeRatio` x V0), so the stack is V0 x (1 + ratio x valid groups),
-  at most `blockMaxStack` (8) groups, never a cumulative jump in one order and never computed on the grown volume. The
+  at most `blockMaxStack` (6) groups, never a cumulative jump in one order and never computed on the grown volume. The
   k-th valid group must pass the PF threshold of the stack it creates. A stack that was increased stays increased: a
   parent that closes at a net loss keeps the level (`carried`, `top`) and V0, the next parent opens at V0 x (1 + carried
   x ratio) (`Pulse.place`, `BlockBook.parent_scale`), and the group's net accumulates over its parents; once that net is

@@ -24,13 +24,17 @@
   "staggerS": 0.12,
   "controlOrders": true,
   "blockEnabled": true,
-  "blockMaxStack": 8,
+  "blockMaxStack": 6,
   "blockVolumeRatio": 1,
   "blockProfitFactorRatio": 0.8,
   "blockPauseCountRatio": 1,
   "blockActiveLive": true,
   "blockActiveReal": true,
   "dcaEnabled": false,
+  "dcaAuto": true,
+  "dcaOnSets": false,
+  "dcaOnAxis": false,
+  "dcaMaxExposureX": 2,
   "symbols": [
     "*"
   ],

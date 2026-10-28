@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field, replace as dc_replace
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
 from coord_engine import Coordinator
@@ -614,6 +614,8 @@ class Position:
     liq: float = 0.0
     position_id: str = ""
     ctrl_verified: bool = False
+    dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
+    dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
 
 
 @dataclass
@@ -740,7 +742,7 @@ class Pulse:
         self._load_open_book()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
-            "blockMaxStack": 0,
+            "blockMaxStack": 6,
             "blockVolumeRatio": 1.0,
             "blockProfitFactorRatio": 0.8,
             "blockPauseCountRatio": 1,
@@ -3118,6 +3120,16 @@ class Pulse:
             pnl_pct = (pos.entry - exit_px) / pos.entry
         pnl = net_pnl_usdt(pnl_pct, pos.qty, pos.entry, self.position_cost_pct)
         hold = time.time() - pos.opened_at
+        dca_pct = None          # the DCA add-on's own return (on the notional it added)
+        base_pct = None         # what the Set lane alone made: exit against the entry the Set opened at
+        if pos.dca_fills:
+            sd = 1 if pos.side == "LONG" else -1
+            add_q = sum(float(q) for _, q in pos.dca_fills)
+            if add_q > 0:
+                dca_pct = sum(float(q) * ((exit_px - float(p)) / float(p) * sd) for p, q in pos.dca_fills) / add_q
+            ref = float(pos.dca_ref or 0.0)
+            if ref > 0:
+                base_pct = (exit_px - ref) / ref * sd
         rec = Closed(
             time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
@@ -3139,7 +3151,8 @@ class Pulse:
         except Exception:
             pass
         try:
-            self.sets.on_live_close(rec)
+            # a Set is judged on its own lane: with DCA adds the Set sees the base result, the add-on its own
+            self.sets.on_live_close(dc_replace(rec, entry=float(pos.dca_ref), pnl_pct=base_pct) if (pos.dca_fills and base_pct is not None) else rec)
             self.sets.adapt_from_live(self.strategy_closes())
         except Exception:
             pass
@@ -3149,12 +3162,10 @@ class Pulse:
         except Exception:
             pass
         try:
-            if not rec.set_id:                 # DCA scores and drops only the positions it may add to
-                self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
-                    "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
-                    "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
-                })
-                self.dca.drop(pos.symbol, pos.side)
+            if dca_pct is not None:            # the DCA lane scores its own adds only, whatever lane the parent was
+                self.dca.on_close({"symbol": rec.symbol, "side": rec.side, "reason": rec.reason, "client_id": rec.client_id,
+                                   "dca_n": len(pos.dca_fills), "pnl": rec.pnl, "pnl_pct": dca_pct})
+            self.dca.drop(pos.symbol, pos.side)
         except Exception:
             pass
         if pnl >= 0:
@@ -3208,7 +3219,7 @@ class Pulse:
         scratch exit on a completed 1m close. The venue stop and TP stay in place as a safety; they may sit farther out
         (clamp_ctrl_price), so the lane checks its own levels. Nothing here reads the Exit strategies."""
         side = 1 if pos.side == "LONG" else -1
-        e = float(pos.entry or 0)
+        e = float(pos.dca_ref or pos.entry or 0)      # the Set's levels stay where it opened, whatever a DCA add did to the average
         if e <= 0:
             return
         sl_f = float(pos.sl_pct or 0)
@@ -3541,9 +3552,9 @@ class Pulse:
         # CTS Block defaults, overlay wins
         b_en = ov.get("blockEnabled", cts.get("variantBlockEnabled", True))
         try:
-            b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") or 0))
+            b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") if cts.get("blockMaxStack") is not None else 6))
         except Exception:
-            b_stack = 0
+            b_stack = 6                      # default stack: 6 groups (0 in the overlay = unlimited)
         b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
         b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 0.8)
         b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
@@ -4020,6 +4031,17 @@ class Pulse:
                 f"minPF={row['blockMinPF']:.3f} {row['setKey']}"
             )
 
+    def dca_eligible(self, pos: Position) -> bool:
+        """A position without a Set is the DCA lane's own. A Set position only when dcaOnSets is on, or when dcaOnAxis is on
+        and an Axis is enabled and the coordinator is allowing entries right now."""
+        if not pos.set_id:
+            return True
+        if getattr(self.dca, "on_sets", False):
+            return True
+        if getattr(self.dca, "on_axis", False) and any(ax.enabled for ax in self.coord.axes.values()):
+            return bool((self.coord.last or {}).get("allow", True))
+        return False
+
     def maybe_dca_adds(self) -> None:
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
         if not getattr(self.dca, "enabled", False) or self.halted:
@@ -4033,8 +4055,8 @@ class Pulse:
         for pos in list(self.open.values()):
             if emitted >= add_budget:
                 break
-            if pos.set_id:
-                continue           # no add-on to a Set position (its own lane, as validated)
+            if not self.dca_eligible(pos):
+                continue           # a Set position is added to only when dcaOnSets / dcaOnAxis say so (both off by default)
             if time.time() < self.dca_fail_cd.get(pos.symbol, 0):
                 continue
             if self.missing_controls(pos):
@@ -4055,7 +4077,7 @@ class Pulse:
                 continue
             parent = float(getattr(self.dca.lanes.get(self.dca.key(pos.symbol, pos.side), None), "parent_qty", 0) or 0)
             seed = parent if parent > 0 else pos.qty
-            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px)
+            row = self.dca.due(pos.symbol, pos.side, seed, float(pos.dca_ref or pos.entry), px, sl_frac=sl_pct)
             if not row:
                 continue
             c = self.contracts.get(pos.symbol)
@@ -4066,7 +4088,10 @@ class Pulse:
             qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
             floor = self.min_order_qty(c, px)
             if qty < floor:
-                if floor * px > add_cap * 1.08:
+                # the exchange minimum is larger than the partial: the auto plan rounds up to it while the whole position
+                # stays under its exposure ceiling; the static plan keeps its notional cap
+                within_ceiling = bool(getattr(self.dca, "auto", False)) and (pos.qty + floor) <= float(self.dca.max_expo) * seed * 1.05
+                if floor * px > add_cap * 1.08 and not within_ceiling:
                     self.dca.skips += 1
                     continue
                 qty = floor
@@ -4107,19 +4132,23 @@ class Pulse:
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
             filled = filled_qty(data, qty)
             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
+            if not pos.dca_ref:
+                pos.dca_ref = pos.entry
+            pos.dca_fills.append([avg, filled])
             pos.qty += filled
             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
             pos.notional = pos.qty * pos.entry
             try:
-                mode = str(getattr(self.dca, "tp_mode", "average") or "average").lower()
-                if mode in ("breakeven", "be"):
-                    be = max(float(getattr(self.dca, "be_pct", 0.002) or 0.002), 0.0004)
-                    pos.tp = pos.entry * (1 + be) if pos.side == "LONG" else pos.entry * (1 - be)
-                else:
-                    tp_pct = pos.tp_pct or TP_PCT
-                    pos.tp = pos.entry * (1 + tp_pct) if pos.side == "LONG" else pos.entry * (1 - tp_pct)
-                sl_pct = pos.sl_pct or SL_PCT
-                pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
+                if not pos.set_id:            # a Set position keeps its own stop and TP (set at the entry it opened at)
+                    mode = str(getattr(self.dca, "tp_mode", "average") or "average").lower()
+                    if mode in ("breakeven", "be"):
+                        be = max(float(getattr(self.dca, "be_pct", 0.002) or 0.002), 0.0004)
+                        pos.tp = pos.entry * (1 + be) if pos.side == "LONG" else pos.entry * (1 - be)
+                    else:
+                        tp_pct = pos.tp_pct or TP_PCT
+                        pos.tp = pos.entry * (1 + tp_pct) if pos.side == "LONG" else pos.entry * (1 - tp_pct)
+                    sl_pct = pos.sl_pct or SL_PCT
+                    pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
             except Exception:
                 pass
             self.available = max(0.0, self.available - margin)

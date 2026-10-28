@@ -109,7 +109,7 @@ def replay(b, st, bars, i, d):
     return (o.get("sl"), o.get("tp")), (trades[0] if trades else None)
 
 
-def live(b, st, bars, i, d, others=False, on_cycle=None):
+def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None):
     """The live trader on the same bars. others=True switches every other strategy on around the Set position: the Exit
     lanes (with a reversal signal against it), Block and DCA add-ons with a lane on the same symbol and side, and the
     coordinator's rearrange with a stronger signal waiting. Returns (levels at entry, (reason, bar, px) or None, trace)."""
@@ -127,6 +127,7 @@ def live(b, st, bars, i, d, others=False, on_cycle=None):
             venue = _Venue()
             p = pt.Pulse(venue, contracts)
             venue.price = lambda: p.px.get(SYM) or 100.0      # market orders fill at the tick
+            live.pulse = p
             p.sets = b
             b.pick_any = lambda pack, _st=st: _st
             b.pick_trail = lambda pack: None
@@ -156,6 +157,9 @@ def live(b, st, bars, i, d, others=False, on_cycle=None):
                 p.dca.enabled = True
                 p.coord.rearrange = True
                 p.score = lambda s_: (side, "x", 0.99)
+            if dca is not None:                    # the DCA lane on, with these overlay keys (cooldown 0)
+                p.dca.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, **dca})
+                p.dca.enabled = True
             trace = []
             for bi in range(i + 1, len(bars)):
                 o_, h_, l_, c_ = (float(x) for x in bars[bi][:4])
@@ -166,6 +170,8 @@ def live(b, st, bars, i, d, others=False, on_cycle=None):
                         p.last_closed_1m = {SYM: (int((T_BASE + bi * 60.0) // 60), c_)}
                     p.px[SYM] = px
                     p.manage()
+                    if dca is not None and SYM in p.open:
+                        p.maybe_dca_adds()
                     if others and SYM in p.open:
                         p.maybe_block_adds()
                         p.maybe_dca_adds()
@@ -277,6 +283,50 @@ def set_lane_matches_the_replay_on_random_series():
                 if not ok:
                     bad.append((st.id, seed, honor, rep and (rep["reason"], rep["exit_i"]), liv and liv[:2]))
     return compared > 0 and not bad, f"compared={compared} exits by reason={reasons} mismatches={bad[:4]}"
+
+
+def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
+    """DCA is off by default and, even on, never adds to a Set position unless dcaOnSets says so. With it on, the add
+    comes at a rung of the position's own stop distance, the Set keeps its replay stop and exit bar, the Set is scored on
+    its base result (exit against the entry it opened at) and the DCA lane on its own add."""
+    b0 = _book()
+    st = _pick(b0, "sl")
+    sl_f, _ = se.lane_fracs(st, b0.cost_pct, b0.sl_min_steps)
+    flat = [[100.0, 100.01, 99.99, 100.0, 1.0] for _ in range(6)]
+
+    def bar(c):
+        return [c, c + 0.01, c - 0.01, c, 1.0]
+    rung = 100 * (1 - 0.5 * sl_f)                           # past the auto rung (0.4 x the stop distance), above the stop
+    stop = 100 * (1 - sl_f)
+    path = [100 - (100 - rung) * k / 6 for k in range(1, 7)] + [rung] * 3 + [stop - 0.5] + [stop - 0.5] * 40
+    bars = flat + [bar(c) for c in path]
+    (rsl, rtp), rep = replay(b0, st, bars, 5, 1)
+    out = {}
+    for name, cfg in (("off", None), ("on, Sets not allowed", {}), ("on, onSets", {"dcaOnSets": True})):
+        lv, liv, trace = live(_book(), st, bars, 5, 1, dca=cfg)
+        p = live.pulse
+        qtys = sorted({t[2] for t in trace})
+        out[name] = {"exit": liv and liv[:2], "qty": qtys, "dca closes": len(p.dca.closes), "set n": st.n if False else None,
+                     "dca pnl": [round(r.get("pnl_pct"), 5) for r in p.dca.closes]}
+    same_exit = all(v["exit"] == (rep["reason"], rep["exit_i"]) for v in out.values())
+    untouched = len(out["off"]["qty"]) == 1 and len(out["on, Sets not allowed"]["qty"]) == 1 and out["on, Sets not allowed"]["dca closes"] == 0
+    added = len(out["on, onSets"]["qty"]) == 2 and out["on, onSets"]["dca closes"] == 1 and out["on, onSets"]["dca pnl"][0] < 0
+    return same_exit and untouched and added, f"replay exit={rep and (rep['reason'], rep['exit_i'])}; {out}"
+
+
+def dca_switch_reaches_the_module_flag():
+    """The overlay switch is what turns the DCA module on (off by default, off under the build-time kill switch)."""
+    import modules
+    import dca_engine
+    on = modules.resolve({"dcaEnabled": True}).get("strategy.dca")
+    off = modules.resolve({}).get("strategy.dca")
+    saved = dca_engine.DCA_HARD_OFF
+    dca_engine.DCA_HARD_OFF = True
+    try:
+        killed = modules.resolve({"dcaEnabled": True}).get("strategy.dca")
+    finally:
+        dca_engine.DCA_HARD_OFF = saved
+    return on is True and off is False and killed is False, f"overlay on={on} default={off} kill switch={killed}"
 
 
 def other_strategies_never_change_a_set_position():
@@ -885,7 +935,7 @@ def the_desk_index_reproduces_the_engines_pooled_pf():
 
 def _block(**cfg):
     import block_engine as be
-    base = {"blockMaxStack": 8, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 5}
+    base = {"blockMaxStack": 6, "blockVolumeRatio": 0.5, "defaultMinPF": 1.1, "blockProfitFactorRatio": 0.8, "prevPosMinCount": 5}
     base.update(cfg)
     return be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-block-"), "block.json"), base)
 
@@ -907,14 +957,14 @@ def _stack(b, lane, groups_ok, max_orders=20):
 
 def block_adds_one_partial_ratio_per_valid_group():
     """Additive from the original volume: every valid group adds ratio x V0 (here 0.5 x 10 = 5), never a cumulative jump,
-    whichever groups before it were not valid. All 8 valid: 8 orders of 5, V0 x (1 + 8 x 0.5) = 50 in total."""
+    whichever groups before it were not valid. All 6 valid: 6 orders of 5, V0 x (1 + 6 x 0.5) = 40 in total."""
     out = {}
-    for name, ok in (("all 8 valid", range(1, 9)), ("1 and 3 valid", {1, 3}), ("only 5 valid", {5}), ("none valid", set())):
+    for name, ok in (("all 6 valid", range(1, 7)), ("1 and 3 valid", {1, 3}), ("only 5 valid", {5}), ("none valid", set())):
         b = _block()
         lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
         sizes = _stack(b, lane, set(ok))
         out[name] = (sizes, round(lane.base_qty + lane.confirmed_add, 6))
-    want = {"all 8 valid": ([5.0] * 8, 50.0), "1 and 3 valid": ([5.0, 5.0], 20.0), "only 5 valid": ([5.0], 15.0),
+    want = {"all 6 valid": ([5.0] * 6, 40.0), "1 and 3 valid": ([5.0, 5.0], 20.0), "only 5 valid": ([5.0], 15.0),
             "none valid": ([], 10.0)}
     return out == want, f"orders and final volume by valid groups: {out}"
 
@@ -924,7 +974,7 @@ def block_no_row_asks_for_more_than_one_partial():
     cumulative) may request more, even when nothing was added yet."""
     b = _block()
     lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
-    for n in range(1, 9):
+    for n in range(1, 7):
         lane.pf_ring[n] = [3.0] * 6
     rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=1.5) if r["kind"] == "regular"]
     asks = [round(r["requestedAddQty"], 9) for r in rows]
@@ -948,21 +998,24 @@ def history_survives_live_built_tail():
     return n == 1920 and boot == 40, f"history after a live-built tail: {n} (want 1920); bootstrap with no history: {boot} (want 40)"
 
 
-def block_stack_is_capped_at_eight_groups():
-    """The stack never goes past maxStack groups: with every group valid the 9th partial is never asked for."""
-    b = _block(blockMaxStack=8, blockVolumeRatio=1.0)
+def block_stack_is_capped_at_six_groups():
+    """The default stack is 6 groups at ratio 1 of the original volume, and it never goes past maxStack: with every group
+    valid the 7th partial is never asked for. Groups 2, 4, 6 valid add three partials of ratio x V0, not cumulative orders."""
+    import block_engine as be
+    d = be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-block-"), "b.json"), {})
+    b = _block(blockMaxStack=6, blockVolumeRatio=1.0)
     lane = b.register_parent("X-USDT", "LONG", 4.0, 100.0)
     sizes = _stack(b, lane, set(range(1, 40)), max_orders=40)
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.5)
     groups = max(r["blockCount"] for r in rows if r["kind"] == "regular")
-    # groups 2, 4, 6, 8 valid: four partials of ratio x V0, not the cumulative 2, 4, 6, 8 x V0 each in one order
-    b2 = _block(blockMaxStack=8, blockVolumeRatio=1.0)
+    b2 = _block(blockMaxStack=6, blockVolumeRatio=1.0)
     lane2 = b2.register_parent("Y-USDT", "LONG", 4.0, 100.0)
-    sizes2 = _stack(b2, lane2, {2, 4, 6, 8})
-    ok = len(sizes) == 8 and groups == 8 and abs(lane.base_qty + lane.confirmed_add - 4.0 * 9) < 1e-9 \
-        and sizes2 == [4.0] * 4 and abs(lane2.base_qty + lane2.confirmed_add - 20.0) < 1e-9
-    return ok, (f"orders={len(sizes)} groups evaluated={groups} final volume={lane.base_qty + lane.confirmed_add} (V0 x 9 = 36); "
-                f"groups 2,4,6,8 valid -> orders {sizes2}")
+    sizes2 = _stack(b2, lane2, {2, 4, 6})
+    ok = d.max_stack == 6 and d.volume_ratio == 1.0 and len(sizes) == 6 and groups == 6 \
+        and abs(lane.base_qty + lane.confirmed_add - 4.0 * 7) < 1e-9 \
+        and sizes2 == [4.0] * 3 and abs(lane2.base_qty + lane2.confirmed_add - 16.0) < 1e-9
+    return ok, (f"defaults stack={d.max_stack} ratio={d.volume_ratio}; orders={len(sizes)} groups evaluated={groups} final volume="
+                f"{lane.base_qty + lane.confirmed_add} (V0 x 7 = 28); groups 2,4,6 valid -> orders {sizes2}")
 
 
 def block_threshold_rises_with_the_valid_group_count():
@@ -972,7 +1025,7 @@ def block_threshold_rises_with_the_valid_group_count():
     rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=9.0) if r["kind"] == "regular"]
     mins = [round(r["blockMinPF"], 4) for r in rows]
     inc = [round(r["cumulativeRatio"], 4) for r in rows]
-    ok = mins == sorted(mins) and len(set(mins)) == 8 and inc == [round(0.5 * k, 4) for k in range(1, 9)]
+    ok = mins == sorted(mins) and len(set(mins)) == 6 and inc == [round(0.5 * k, 4) for k in range(1, 7)]
     return ok, f"min PF by valid rank={mins}; cumulative ratio={inc}"
 
 
@@ -1084,7 +1137,9 @@ CHECKS = [
     ("trader.block-carried-parent-and-partial-add", a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial),
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
-    ("block.stack-capped-at-eight-groups", block_stack_is_capped_at_eight_groups),
+    ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
+    ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),
+    ("block.stack-capped-at-six-groups", block_stack_is_capped_at_six_groups),
     ("processing.history-not-truncated-by-live-rows", history_survives_live_built_tail),
     ("block.threshold-rises-with-valid-groups", block_threshold_rises_with_the_valid_group_count),
     ("block.stack-stays-until-net-is-back-to-equal", block_stack_stays_increased_until_the_groups_net_is_back_to_equal),

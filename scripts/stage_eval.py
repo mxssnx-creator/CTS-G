@@ -251,7 +251,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 busy[s] = tr["exit_i"]
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
-                       "pack": pack, "kind": st.kind, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs}
+                       "pack": pack, "kind": st.kind, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
+                       "tr": tr, "fracs": se.lane_fracs(st, book.cost_pct, book.sl_min_steps)}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
     return executed

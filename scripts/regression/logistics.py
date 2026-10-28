@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "4b9962592cd421a08186270a16ca88630ec85d40"
+PIN_WANT = "2f46df107ea4e1827cd8c27a0c97b6810aeb741c"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -206,10 +206,10 @@ def engine_absent_defaults_agree():
     return not problems, f"problems={problems}" if problems else "absent defaults agree: scratchMin 0.16%, minStep 6"
 
 
-def dca_is_off_everywhere():
+def dca_is_off_by_default_everywhere():
     dca_src = open(os.path.join(PULSE, "dca_engine.py"), encoding="utf-8").read()
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
-    hard = re.search(r"DCA_HARD_OFF\s*=\s*True", dca_src) is not None
+    hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
     flag = re.search(r'"strategy\.dca"\s*:\s*False', mod_src) is not None
     x01 = overlay()
     ok = hard and flag and not x01.get("dcaEnabled", False)
@@ -383,7 +383,7 @@ CHECKS = [
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),
-    ("logistics.dca-off-everywhere", dca_is_off_everywhere),
+    ("logistics.dca-off-by-default-everywhere", dca_is_off_by_default_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),
     ("logistics.no-leftover-zest-names", no_leftover_zest_names),

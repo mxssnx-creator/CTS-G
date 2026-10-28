@@ -142,6 +142,10 @@ export type PulseOverlay = {
   dcaStepDistancesPct: number[];
   dcaStepVolumeMultipliers: number[];
   dcaAutoDeact: boolean;
+  dcaAuto: boolean;
+  dcaOnSets: boolean;
+  dcaOnAxis: boolean;
+  dcaMaxExposureX: number;
   dcaMinPf: number;
   dcaPfWindow: number;
   dcaDeactN: number;
@@ -281,7 +285,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   staggerS: 0.12,
   controlOrders: true,
   blockEnabled: true,
-  blockMaxStack: 8,
+  blockMaxStack: 6,
   blockVolumeRatio: 1,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
@@ -295,6 +299,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
+  dcaAuto: true,
+  dcaOnSets: false,
+  dcaOnAxis: false,
+  dcaMaxExposureX: 2,
   dcaMinPf: 1.2,
   dcaPfWindow: 15,
   dcaDeactN: 25,
@@ -456,6 +464,10 @@ export type CtsSettings = {
   dcaStepDistancesPct?: number[];
   dcaStepVolumeMultipliers?: number[];
   dcaAutoDeact?: boolean;
+  dcaAuto?: boolean;
+  dcaOnSets?: boolean;
+  dcaOnAxis?: boolean;
+  dcaMaxExposureX?: number;
   dcaMinPf?: number;
   dcaPfWindow?: number;
   dcaDeactN?: number;
@@ -616,7 +628,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
-    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 8),
+    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
@@ -630,6 +642,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
+    dcaAuto: bool(cts.dcaAuto, true),
+    dcaOnSets: bool(cts.dcaOnSets, false),
+    dcaOnAxis: bool(cts.dcaOnAxis, false),
+    dcaMaxExposureX: num(cts.dcaMaxExposureX, 2),
     dcaMinPf: num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
