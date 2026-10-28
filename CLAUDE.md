@@ -101,6 +101,16 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - The choice is made on the orders the Set is then judged on, so the effective PF after Base is in-sample (higher than the executed PF).
   Measured results: `scripts/hold_eval.py` (fixed hold per step), `scripts/hold_auto_eval.py` (Auto Mode against the global stop, both
   PFs, development window; `--sealed` once). Do not read a better effective PF as an edge without the executed PF.
+- Validation windows (`position_cost.window_n`, `MIN_VALIDATION_N` = 8): with `windowsLinked` (default on) `pfWindow`, `setPfWindow`,
+  `exitPfWindow`, `slToTpRecalcN` and `trailRecalcN` follow the overall validation's last N (`setGateWindow`, 50); unlinked each is its
+  own value, at least 8 (shipped 8). The floor of 8 applies to these windows, the Base gate minimum (`setGateMinTrades`) and the hold Auto
+  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount`, `realEvalPosCount`, `prevPosMinCount`,
+  `exitMinSamples` and Block's `blockMinSamples` are 8 (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
+  `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
+- Measured (`scripts/window_eval.py`, 8 days, 20-24 symbols, development window): an extra last-N PF check on top of the Base gate (N = 6, 8,
+  12) moves the executed PF by a few hundredths and not in one direction (majors 0.525 -> 0.54/0.56/0.59, small caps 0.89 -> 0.91/0.93/0.87);
+  `scripts/sim12h.py --counts 0|8|12` (12 h, 20 symbols): executed PF 1.08/1.14/1.04 (majors) and 0.99/1.03/1.03 (small caps). Differences
+  of this size are inside the noise of a 12-hour window; 8 is the default.
 
 ## Indication library and extra packs
 

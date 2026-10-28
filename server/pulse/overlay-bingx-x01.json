@@ -174,5 +174,12 @@
   "holdAuto": true,
   "holdAutoMax": 50,
   "holdAutoMin": 10,
-  "windowsLinked": true
+  "windowsLinked": true,
+  "mainEvalPosCount": 8,
+  "realEvalPosCount": 8,
+  "prevPosMinCount": 8,
+  "prevPosWindow": 25,
+  "exitMinSamples": 8,
+  "blockMinSamples": 8,
+  "blockWindow": 25
 }

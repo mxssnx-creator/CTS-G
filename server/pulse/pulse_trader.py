@@ -751,8 +751,8 @@ class Pulse:
             "blockActiveRealEnabled": True,
             "blockActiveLiveEnabled": True,
             "defaultMinPF": 1.2,
-            "prevPosMinCount": 5,
-            "prevPosWindow": 25,
+            "blockMinSamples": 8,
+            "blockWindow": 25,
         })
         self.coord = Coordinator()
         self.indications = IndicationBook()
@@ -3599,6 +3599,8 @@ class Pulse:
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
+        self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
+        self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
         self.coord.load(cts, ov)
         self.indications.load(ov)

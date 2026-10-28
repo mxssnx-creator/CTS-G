@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..bd037fd 100644
+index b3a9ff3..5866c36 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -4,6 +4,7 @@ from __future__ import annotations
@@ -238,7 +238,7 @@ index b3a9ff3..bd037fd 100644
          self.owned_syms = BoundedSet(800)
          self.load = LoadGovernor()
          self._scan_keep: List[str] = []
-@@ -636,7 +744,7 @@ class Pulse:
+@@ -636,15 +744,15 @@ class Pulse:
          self._load_open_book()
          self.block = BlockBook(BLOCK_PATH, {
              "variantBlockEnabled": True,
@@ -247,6 +247,16 @@ index b3a9ff3..bd037fd 100644
              "blockVolumeRatio": 1.0,
              "blockProfitFactorRatio": 0.8,
              "blockPauseCountRatio": 1,
+             "blockActiveRealEnabled": True,
+             "blockActiveLiveEnabled": True,
+             "defaultMinPF": 1.2,
+-            "prevPosMinCount": 5,
+-            "prevPosWindow": 25,
++            "blockMinSamples": 8,
++            "blockWindow": 25,
+         })
+         self.coord = Coordinator()
+         self.indications = IndicationBook()
 @@ -705,12 +813,19 @@ class Pulse:
          need = max(float(c.min_qty or 0), (float(c.min_usdt or 0) / px) if c.min_usdt else 0.0)
          return self.round_qty_up(c, need)
@@ -1439,7 +1449,13 @@ index b3a9ff3..bd037fd 100644
          try:
              self.load.configure(ov)
          except Exception:
-@@ -3088,6 +3603,8 @@ class Pulse:
+@@ -3084,10 +3599,14 @@ class Pulse:
+         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
+         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
+         self.block.default_min_pf = float(real_pf)
++        self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
++        self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
+         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
          self.coord.load(cts, ov)
          self.indications.load(ov)
          self.sets.load(ov, cts)
@@ -1448,7 +1464,7 @@ index b3a9ff3..bd037fd 100644
          self.exits.load(ov, cts)
          self.dca.load(ov, cts)
          if initial:
-@@ -3116,7 +3633,7 @@ class Pulse:
+@@ -3116,7 +3635,7 @@ class Pulse:
          else:
              self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
              self.strat_ind = True
@@ -1457,7 +1473,7 @@ index b3a9ff3..bd037fd 100644
          if not self.mods.get("strategy.coord", True):
              for ax in self.coord.axes.values():
                  ax.enabled = False
-@@ -3172,8 +3689,9 @@ class Pulse:
+@@ -3172,8 +3691,9 @@ class Pulse:
          return {
              "targetNotional": TARGET_NOTIONAL,
              "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -1468,7 +1484,7 @@ index b3a9ff3..bd037fd 100644
              "leverageMap": dict(getattr(self, "lev_map", {})),
              "leverageMax": dict(getattr(self, "lev_max", {})),
              "maxOpen": MAX_OPEN,
-@@ -3249,12 +3767,9 @@ class Pulse:
+@@ -3249,12 +3769,9 @@ class Pulse:
              "setPfWindow": self.sets.pf_n,
              "setDeactN": self.sets.deact_n,
              "setMinPf": self.sets.min_pf,
@@ -1483,7 +1499,7 @@ index b3a9ff3..bd037fd 100644
              "exitEnabled": self.exits.enabled,
              "exitIgnoreTp": self.exits.ignore_tp,
              "exitBestOf": self.exits.best_of,
-@@ -3304,6 +3819,60 @@ class Pulse:
+@@ -3304,6 +3821,60 @@ class Pulse:
              "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
          }
  
@@ -1525,7 +1541,7 @@ index b3a9ff3..bd037fd 100644
 +        rows = [c for c in self.closed if not getattr(c, "set_id", "")]
 +        n = int(getattr(self.block, "window", 25) or 25)
 +        res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
-+        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", MIN_VALIDATION_N) or MIN_VALIDATION_N):
++        if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
 +            return 0.0
 +        return float(res.get("pf") or 0.0)
 +
@@ -1544,7 +1560,7 @@ index b3a9ff3..bd037fd 100644
      def maybe_block_adds(self) -> None:
          """CTS Block Live: add-on only against an existing same-side parent."""
          if self.halted or not self.block.enabled or not self.strat_block:
-@@ -3340,6 +3909,8 @@ class Pulse:
+@@ -3340,6 +3911,8 @@ class Pulse:
          for pos in list(self.open.values()):
              if emitted >= add_budget:
                  break
@@ -1553,7 +1569,7 @@ index b3a9ff3..bd037fd 100644
              if self.missing_controls(pos):
                  self.ensure_controls(pos)
                  if self.missing_controls(pos):
-@@ -3348,18 +3919,9 @@ class Pulse:
+@@ -3348,18 +3921,9 @@ class Pulse:
              lane = self.block.lanes.get(k)
              if not lane or lane.base_qty <= 0:
                  continue
@@ -1575,7 +1591,7 @@ index b3a9ff3..bd037fd 100644
              d, why, conf = self.score(pos.symbol)
              same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
              if not same:
-@@ -3371,11 +3933,12 @@ class Pulse:
+@@ -3371,11 +3935,12 @@ class Pulse:
                      same = True
              if not same:
                  continue
@@ -1590,7 +1606,7 @@ index b3a9ff3..bd037fd 100644
                      continue
              rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
              row = self.block.pick_emit(rows)
-@@ -3386,13 +3949,10 @@ class Pulse:
+@@ -3386,13 +3951,10 @@ class Pulse:
              if not c or px <= 0:
                  continue
              raw = row["requestedAddQty"]
@@ -1606,7 +1622,7 @@ index b3a9ff3..bd037fd 100644
              if qty < c.min_qty or qty <= 0:
                  bumped = self.min_order_qty(c, px)
                  if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:
-@@ -3467,7 +4027,7 @@ class Pulse:
+@@ -3467,7 +4029,7 @@ class Pulse:
                      continue
              data = (r.get("data") or {}).get("order") or r.get("data") or {}
              avg = float(data.get("avgPrice") or data.get("price") or px) or px
@@ -1615,7 +1631,7 @@ index b3a9ff3..bd037fd 100644
              oid = str(data.get("orderId") or "")
              row["emitted"] = 1
              self.block.record_fill(lane, row, filled, cid, oid)
-@@ -3477,6 +4037,7 @@ class Pulse:
+@@ -3477,6 +4039,7 @@ class Pulse:
              pos.notional = pos.qty * pos.entry
              self.available = max(0.0, self.available - margin)
              if getattr(self, "control_orders", True):
@@ -1623,7 +1639,7 @@ index b3a9ff3..bd037fd 100644
                  pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                  pos.ctrl_verified = False
                  self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
-@@ -3491,6 +4052,17 @@ class Pulse:
+@@ -3491,6 +4054,17 @@ class Pulse:
                  f"minPF={row['blockMinPF']:.3f} {row['setKey']}"
              )
  
@@ -1641,7 +1657,7 @@ index b3a9ff3..bd037fd 100644
      def maybe_dca_adds(self) -> None:
          """Independent CTS DCA adds — own distances/mults/PF, not Block."""
          if not getattr(self.dca, "enabled", False) or self.halted:
-@@ -3504,6 +4076,8 @@ class Pulse:
+@@ -3504,6 +4078,8 @@ class Pulse:
          for pos in list(self.open.values()):
              if emitted >= add_budget:
                  break
@@ -1650,7 +1666,7 @@ index b3a9ff3..bd037fd 100644
              if time.time() < self.dca_fail_cd.get(pos.symbol, 0):
                  continue
              if self.missing_controls(pos):
-@@ -3524,7 +4098,7 @@ class Pulse:
+@@ -3524,7 +4100,7 @@ class Pulse:
                  continue
              parent = float(getattr(self.dca.lanes.get(self.dca.key(pos.symbol, pos.side), None), "parent_qty", 0) or 0)
              seed = parent if parent > 0 else pos.qty
@@ -1659,7 +1675,7 @@ index b3a9ff3..bd037fd 100644
              if not row:
                  continue
              c = self.contracts.get(pos.symbol)
-@@ -3535,7 +4109,10 @@ class Pulse:
+@@ -3535,7 +4111,10 @@ class Pulse:
              qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
              floor = self.min_order_qty(c, px)
              if qty < floor:
@@ -1671,7 +1687,7 @@ index b3a9ff3..bd037fd 100644
                      self.dca.skips += 1
                      continue
                  qty = floor
-@@ -3574,25 +4151,30 @@ class Pulse:
+@@ -3574,25 +4153,30 @@ class Pulse:
                  continue
              data = (r.get("data") or {}).get("order") or r.get("data") or {}
              avg = float(data.get("avgPrice") or data.get("price") or px) or px
@@ -1712,7 +1728,7 @@ index b3a9ff3..bd037fd 100644
                  pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                  pos.ctrl_verified = False
                  self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
-@@ -3688,8 +4270,8 @@ class Pulse:
+@@ -3688,8 +4272,8 @@ class Pulse:
              fp_map = {}
              self._ind_fp = fp_map
          for s in window:
@@ -1723,7 +1739,7 @@ index b3a9ff3..bd037fd 100644
                  continue
              last_c = float(bars[-1][3]) if bars else 0.0
              px = self.px.get(s) or 0
-@@ -3699,7 +4281,7 @@ class Pulse:
+@@ -3699,7 +4283,7 @@ class Pulse:
              fp_map[s] = fp
              d, _, conf = self.score(s)
              bars_by_tf = {
@@ -1732,7 +1748,7 @@ index b3a9ff3..bd037fd 100644
                  for tf in TIMEFRAMES
                  if self.tf_on.get(tf, True)
              }
-@@ -3760,7 +4342,7 @@ class Pulse:
+@@ -3760,7 +4344,7 @@ class Pulse:
                      best_st = st
              if best_st:
                  intern_metrics = {
@@ -1741,7 +1757,7 @@ index b3a9ff3..bd037fd 100644
                      "n": float(best_st.last15_n),
                      "pack": best_st.pack,
                  }
-@@ -3770,7 +4352,7 @@ class Pulse:
+@@ -3770,7 +4354,7 @@ class Pulse:
          if self.entries_blocked():
              self.priority_controls()
              return
@@ -1750,7 +1766,7 @@ index b3a9ff3..bd037fd 100644
          ranked: List[Tuple[float, str, int, str]] = []
          best: Dict[str, Tuple[float, str, int, str]] = {}
          if self.strat_ind and bool(self.indications.settings.get("enabled")):
-@@ -3778,14 +4360,16 @@ class Pulse:
+@@ -3778,14 +4362,16 @@ class Pulse:
                  if s in self.open:
                      continue
                  picked = None
@@ -1769,7 +1785,7 @@ index b3a9ff3..bd037fd 100644
                              picked = (one, float(one.confidence), 1)
                      except Exception:
                          picked = None
-@@ -3833,12 +4417,7 @@ class Pulse:
+@@ -3833,12 +4419,7 @@ class Pulse:
              if ranked and (time.time() - self.skip_log.get("gate", 0) > 45):
                  log("COORD soft " + "; ".join(reasons)[:160] + f" intern={intern}", every=45.0, key="coord-pause", quiet=True)
                  self.skip_log["gate"] = time.time()
@@ -1783,7 +1799,7 @@ index b3a9ff3..bd037fd 100644
          if swap and swap["from"] in self.open:
              pos = self.open[swap["from"]]
              self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
-@@ -3885,7 +4464,7 @@ class Pulse:
+@@ -3885,7 +4466,7 @@ class Pulse:
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -1792,7 +1808,7 @@ index b3a9ff3..bd037fd 100644
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -3919,8 +4498,25 @@ class Pulse:
+@@ -3919,8 +4500,25 @@ class Pulse:
              except Exception:
                  pass
          if live_n == 0 and self.open:
@@ -1818,7 +1834,7 @@ index b3a9ff3..bd037fd 100644
          live = set()
          foreign = set()
          for p in rows:
-@@ -3949,11 +4545,12 @@ class Pulse:
+@@ -3949,11 +4547,12 @@ class Pulse:
              except Exception:
                  tagged = []
              owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
@@ -1833,7 +1849,7 @@ index b3a9ff3..bd037fd 100644
                  self.ensure_max_leverage(sym, force=True)
              try:
                  liq = float(p.get("liquidationPrice") or p.get("liqPrice") or p.get("avgLiquidationPrice") or 0)
-@@ -3996,6 +4593,19 @@ class Pulse:
+@@ -3996,6 +4595,19 @@ class Pulse:
                  sl_to_tp=sl_ratio, bind_sl_to_tp=True,
                  cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
              )
@@ -1853,7 +1869,7 @@ index b3a9ff3..bd037fd 100644
              sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
              tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
              cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
-@@ -4009,6 +4619,7 @@ class Pulse:
+@@ -4009,6 +4621,7 @@ class Pulse:
                  sl_pct=sl_pct, tp_pct=tp_pct, client_id=cid, ours=True,
                  overall=True, close_position=True,
                  set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
@@ -1861,7 +1877,7 @@ index b3a9ff3..bd037fd 100644
                  liq=liq, position_id=pid,
              )
              rec_pos = self.open[sym]
-@@ -4029,7 +4640,11 @@ class Pulse:
+@@ -4029,7 +4642,11 @@ class Pulse:
              if pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""):
                  if not self._exchange_flat(pos):
                      continue
@@ -1873,7 +1889,7 @@ index b3a9ff3..bd037fd 100644
              self.open.pop(sym, None)
              self.cooldown[sym] = time.time() + 90.0
          self.ignored_foreign = len(foreign)
-@@ -4068,6 +4683,9 @@ class Pulse:
+@@ -4068,6 +4685,9 @@ class Pulse:
              cid = self.order_cid(o)
              if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
                  continue
@@ -1883,7 +1899,7 @@ index b3a9ff3..bd037fd 100644
              status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
              if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
                  continue
-@@ -4087,6 +4705,17 @@ class Pulse:
+@@ -4087,6 +4707,17 @@ class Pulse:
                  continue
              if qty <= 0 or px <= 0:
                  continue
@@ -1901,7 +1917,7 @@ index b3a9ff3..bd037fd 100644
              pnl_pct = pnl / (qty * px) if qty * px else 0.0
              rec = {
                  "t": time.time(),
-@@ -4117,16 +4746,12 @@ class Pulse:
+@@ -4117,16 +4748,12 @@ class Pulse:
              log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)
  
      def set_leverage(self) -> None:
@@ -1920,7 +1936,7 @@ index b3a9ff3..bd037fd 100644
              now = time.time()
              if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
                  self._lev_rot_ts = now
-@@ -4135,8 +4760,6 @@ class Pulse:
+@@ -4135,8 +4762,6 @@ class Pulse:
              return
          for s in need[:12]:
              self.ensure_max_leverage(s, force=s not in self.lev_max)
@@ -1929,7 +1945,7 @@ index b3a9ff3..bd037fd 100644
  
      def run_self_tests(self) -> None:
          r = self.api.get("/openApi/swap/v3/user/balance")
-@@ -4191,9 +4814,13 @@ class Pulse:
+@@ -4191,9 +4816,13 @@ class Pulse:
          other = "Gx02oig060308000aaaaa" if TAG.lower() == "gx01" else "Gx01oig060308000aaaaa"
          self.record_test("cid-conn-only", not self.cid_ours(other) and not self.cid_ours("ctsbingxx02secbtc") and not self.cid_ours("ctsbingxx01tp"), f"other={other}")
          self.record_test("cid-set-bits", "g06" in sample or "g0603" in sample[4:14], sample)
@@ -1946,7 +1962,7 @@ index b3a9ff3..bd037fd 100644
          dummy = Position("BTC-USDT", "LONG", 0.001, 80000.0, time.time(), 0, 0, 80000.0, sl_pct=0.006, tp_pct=0.01)
          dummy.peak = 80000.0
          slp, tpp = self.security_prices(dummy)
-@@ -4236,7 +4863,8 @@ class Pulse:
+@@ -4236,7 +4865,8 @@ class Pulse:
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
@@ -1956,7 +1972,7 @@ index b3a9ff3..bd037fd 100644
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4270,17 +4898,17 @@ class Pulse:
+@@ -4270,17 +4900,17 @@ class Pulse:
          snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
          pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
          pc["minPf"] = self.coord.min_pf
@@ -1979,7 +1995,7 @@ index b3a9ff3..bd037fd 100644
              "startedAt": self.started,
              "now": time.time(),
              "uptimeS": age,
-@@ -4303,13 +4931,18 @@ class Pulse:
+@@ -4303,13 +4933,18 @@ class Pulse:
              "halted": self.halted,
              "haltReason": self.halt_reason,
              "leverage": LEVERAGE,
@@ -1999,7 +2015,7 @@ index b3a9ff3..bd037fd 100644
              "paused": os.path.exists(PAUSE_PATH),
              "activityPerMin": round(per_min, 2),
              "consecLoss": self.consec_loss,
-@@ -4324,8 +4957,8 @@ class Pulse:
+@@ -4324,8 +4959,8 @@ class Pulse:
              "pulse": self.pulse_snapshot(),
              "coord": self.coord.snapshot(),
              "pfCost": pc,
@@ -2010,7 +2026,7 @@ index b3a9ff3..bd037fd 100644
              "pfNeutral": 1.0,
              "pfPlus1xCost": 1.1,
              "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
-@@ -4482,7 +5115,7 @@ class Pulse:
+@@ -4482,7 +5117,7 @@ class Pulse:
              "sets": {
                  "families": scov.get("families"),
                  "setCount": len(self.sets.sets),
@@ -2019,7 +2035,7 @@ index b3a9ff3..bd037fd 100644
                  "histFills": sum(s.n for s in self.sets.sets.values()),
                  "trailCover": scov.get("trailCover"),
                  "slCover": scov.get("slCover"),
-@@ -4529,6 +5162,9 @@ class Pulse:
+@@ -4529,6 +5164,9 @@ class Pulse:
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -2029,7 +2045,7 @@ index b3a9ff3..bd037fd 100644
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4560,8 +5196,8 @@ class Pulse:
+@@ -4560,8 +5198,8 @@ class Pulse:
                  "gp": round(gp, 6),
                  "gl": round(gl, 6),
                  "net": round(gp - gl, 6),
@@ -2040,7 +2056,7 @@ index b3a9ff3..bd037fd 100644
                  "avgR": cost["avgR"],
                  "wr": round(100.0 * wins / max(1, wins + losses), 1),
                  "scale": "1.00=neutral 1.10=+1×cost",
-@@ -4649,7 +5285,11 @@ class Pulse:
+@@ -4649,7 +5287,11 @@ class Pulse:
              hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
@@ -2053,7 +2069,7 @@ index b3a9ff3..bd037fd 100644
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4731,7 +5371,7 @@ class Pulse:
+@@ -4731,7 +5373,7 @@ class Pulse:
          snap_ind = self.indications.snapshot()
          self.record_test("qa-ind-on", bool(snap_ind.get("enabled")), f"syms={snap_ind.get('symbols')} lanes={len(snap_ind.get('primary') or [])}")
          have = set(s for s, rows in (getattr(self.indications, "last", {}) or {}).items() if rows)
@@ -2062,7 +2078,7 @@ index b3a9ff3..bd037fd 100644
          miss = [s for s in scored if s not in have][:4]
          warm_ind = self.cycle < max(80, len(SYMBOLS))
          need = max(8, min(len(scored), max(8, len(scored) // 8))) if scored else 8
-@@ -4753,7 +5393,8 @@ class Pulse:
+@@ -4753,7 +5395,8 @@ class Pulse:
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -2072,7 +2088,7 @@ index b3a9ff3..bd037fd 100644
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4769,7 +5410,7 @@ class Pulse:
+@@ -4769,7 +5412,7 @@ class Pulse:
              except Exception:
                  stg = None
              if stg:
@@ -2081,7 +2097,7 @@ index b3a9ff3..bd037fd 100644
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4786,81 +5427,122 @@ class Pulse:
+@@ -4786,81 +5429,122 @@ class Pulse:
              bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
              f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
          )
@@ -2262,7 +2278,7 @@ index b3a9ff3..bd037fd 100644
              except Exception:
                  self.hist_busy = False
                  self.sets.progress.phase = "error"
-@@ -4888,11 +5570,26 @@ class Pulse:
+@@ -4888,11 +5572,26 @@ class Pulse:
                  if hasattr(self.api, "err"):
                      self.api.err.write("warm", msg=self.last_error[:220])
              self.warm_ms = (time.time() - t0) * 1000
@@ -2290,7 +2306,7 @@ index b3a9ff3..bd037fd 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4902,9 +5599,13 @@ class Pulse:
+@@ -4902,9 +5601,13 @@ class Pulse:
                  self._pre_pause_halt = self.halt_reason
              self.halted = True
              self.halt_reason = "stopped"
@@ -2305,7 +2321,7 @@ index b3a9ff3..bd037fd 100644
              return
          if paused:
              self.halted = True
-@@ -4916,18 +5617,24 @@ class Pulse:
+@@ -4916,18 +5619,24 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -2332,7 +2348,7 @@ index b3a9ff3..bd037fd 100644
                  self.halted = True
                  self.halt_reason = "drawdown halt"
              else:
-@@ -4984,6 +5691,10 @@ class Pulse:
+@@ -4984,6 +5693,10 @@ class Pulse:
          except Exception:
              pass
          sd_notify("WATCHDOG=1")
@@ -2343,7 +2359,7 @@ index b3a9ff3..bd037fd 100644
          self.adopt_exchange_positions()
          sd_notify("WATCHDOG=1")
          try:
-@@ -5001,6 +5712,8 @@ class Pulse:
+@@ -5001,6 +5714,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -2352,7 +2368,7 @@ index b3a9ff3..bd037fd 100644
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5029,17 +5742,29 @@ class Pulse:
+@@ -5029,17 +5744,29 @@ class Pulse:
                  pass
              sd_notify("WATCHDOG=1")
              wall = time.perf_counter() - t0
@@ -2387,7 +2403,7 @@ index b3a9ff3..bd037fd 100644
      url = BASE + "/openApi/swap/v2/quote/contracts"
      with urllib.request.urlopen(url, timeout=15) as r:
          data = json.loads(r.read().decode()).get("data") or []
-@@ -5086,20 +5811,27 @@ def seed_overlay() -> None:
+@@ -5086,20 +5813,27 @@ def seed_overlay() -> None:
              pass
  
  

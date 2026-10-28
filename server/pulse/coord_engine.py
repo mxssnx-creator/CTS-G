@@ -62,11 +62,11 @@ class Coordinator:
         self.noise = 0.05
         self.vol_weight = 0.3
         self.outbreak = [3, 5, 10]
-        self.prev_min_count = 5
+        self.prev_min_count = 8
         self.prev_window = 25
-        self.main_eval = 5
+        self.main_eval = 8
         self.min_samples = 12
-        self.real_eval = 3
+        self.real_eval = 8
         self.min_step = 6
         self.max_sl_ratio = 2.5
         self.trailing_min_step = 6
@@ -111,10 +111,10 @@ class Coordinator:
         if isinstance(raw_ob, str):
             raw_ob = [int(x) for x in raw_ob.replace("[", "").replace("]", "").split(",") if x.strip().isdigit()]
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
-        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)
+        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 8)
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
-        self.main_eval = int(coord.get("mainEvalPosCount") or 5)
-        self.real_eval = int(coord.get("realEvalPosCount") or 3)
+        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 8)
+        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 8)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or 6)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 6)

@@ -22,6 +22,9 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+BLOCK_MIN_SAMPLES_DEFAULT = 8      # closes a Block lane needs before its observed PF counts
+BLOCK_WINDOW_DEFAULT = 25          # closes the Block evidence (exit_lane_pf) reads
+
 
 BLOCK_COUNT_MIN = 1
 BLOCK_COUNT_PREVIEW = 12
@@ -130,8 +133,10 @@ class BlockBook:
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
         self.default_min_pf = float(cfg.get("defaultMinPF", 1.2) or 1.2)
-        self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
-        self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25))
+        # Block counts its own samples (blockMinSamples, blockWindow): independent of the coordinator's prevPos* counts and of the
+        # last-N validation windows (pfWindow and friends, windowsLinked)
+        self.min_samples = max(1, int(cfg.get("blockMinSamples", BLOCK_MIN_SAMPLES_DEFAULT) or BLOCK_MIN_SAMPLES_DEFAULT))
+        self.window = max(self.min_samples, int(cfg.get("blockWindow", BLOCK_WINDOW_DEFAULT) or BLOCK_WINDOW_DEFAULT))
         self.lanes: Dict[str, BlockLane] = {}
         self.load()
 

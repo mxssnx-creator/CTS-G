@@ -810,7 +810,7 @@ def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     dc = DcaBook(); dc.load({"dcaPfWindow": 3, "windowsLinked": True})
     kept = {"dca_window": dc.pf_n, "exit_samples": ex.min_samples, "coord_samples": co.min_samples, "coord_prev_min": co.prev_min_count, "axis_last_window": co.axes["last"].max_window,
             "block_samples": bb.min_samples, "main_eval": co.main_eval, "real_eval": co.real_eval}
-    kept_ok = kept == {"dca_window": 5, "exit_samples": 5, "coord_samples": 7, "coord_prev_min": 1, "axis_last_window": 1, "block_samples": 2, "main_eval": 5, "real_eval": 3}
+    kept_ok = kept == {"dca_window": 5, "exit_samples": 5, "coord_samples": 7, "coord_prev_min": 1, "axis_last_window": 1, "block_samples": 8, "main_eval": 8, "real_eval": 8}
     ok = got == want and floors_ok and kept_ok and window_n({}, "pfWindow") == 50
     return ok, f"windows {got}; floors {floors}; unchanged {kept}"
 
