@@ -3367,6 +3367,45 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 and v_neg["neg"] and v_neg["negl"] and not v_neg["pos"] and v_real["main"] and not v_real["real"] and not v_real["pos"]
                 and v_real["negl"] is False,
                 f"auto={v_auto['auto']} pos={v_auto['pos']}; dip neg={v_neg['neg']} negl={v_neg['negl']}; Real Set fails pos={v_real['pos']}"))
+    # the chain against a brute-force reading of its rules on random tapes: the Base short window, the Auto choice (the best
+    # candidate with enough orders and the margin) and both Main windows for the Real Set
+    import random as _rnd
+    from dataclasses import replace as _dc_replace
+
+    def _ref_chain(ts_, en_, nt_, Q):
+        def ok(idx, t, n):                    # the newest n of the lane's orders closed before t, PF at or above the floor
+            w = [nt_[k] for k in idx if ts_[k] < t][-n:]
+            return len(w) >= n and pf_of(sum(x for x in w if x > 0), -sum(x for x in w if x < 0)) + 1e-9 >= Q.floor
+        g_, l_ = prefix_sums(nt_)
+        allk = list(range(len(ts_)))
+        main_ = [k for k in allk if processed_flag(ts_, nt_, g_, l_, en_[k], Q.base_long, Q.gate_min, Q.floor, Q.max_dd_s, Q.lookback_s, 0, Q.consistency)
+                 and (not Q.base_short or ok(allk, en_[k], Q.base_short))]
+
+        def pf_inc(w):
+            inc = [nt_[k] for k in main_ if ok(main_, en_[k], w)]
+            return len(inc), pf_of(sum(x for x in inc if x > 0), -sum(x for x in inc if x < 0))
+        ref = pf_inc(Q.main_n)[1]
+        cands = [(pf, w) for w in Q.auto_windows for c, pf in [pf_inc(w)] if c >= Q.auto_min and pf >= ref * Q.auto_margin and pf > ref]
+        an = max(cands, key=lambda x: (x[0], -Q.auto_windows.index(x[1])))[1] if cands else Q.main_n
+        real_ = [k for k in main_ if ok(main_, en_[k], Q.main_n) and ok(main_, en_[k], an)]
+        return main_, real_, an
+    Pr = StageParams(base_long=30, base_short=10, gate_min=20, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=True,
+                     main_n=8, auto_on=True, auto_windows=(5, 10, 15, 20, 25), auto_min=8, auto_margin=1.02, neg_on=False, neg_windows=(5, 10),
+                     real_on=True, real_n=15)
+    rng_ = _rnd.Random(11)
+    same, short_cut, auto_moved, auto_cut = True, 0, 0, 0
+    for _ in range(12):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(400)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        got = stage_chain(ts_, en_, nt_, Pr)
+        m_, r_, an_ = _ref_chain(ts_, en_, nt_, Pr)
+        same = same and (got["main"], got["real"], got["auto_n"]) == (m_, r_, an_)
+        short_cut += len(_ref_chain(ts_, en_, nt_, _dc_replace(Pr, base_short=0))[0]) - len(m_)
+        auto_moved += an_ != Pr.main_n
+        auto_cut += len([k for k in m_ if k not in r_]) > 0 and an_ != Pr.main_n
+    out.append(("set-stage-chain-equals-the-rules", same and short_cut > 0 and auto_moved > 0 and auto_cut > 0,
+                f"equal={same}; short window removed {short_cut} Main orders; Auto window moved on {auto_moved}/12 tapes"))
     sb = SetBook()
     sb.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "setMinPf": 1.25, "setMaxDdtHours": 36,
              "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
