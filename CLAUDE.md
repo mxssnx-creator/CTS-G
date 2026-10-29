@@ -351,6 +351,10 @@ Every strategy type runs its own lane; none may close, tighten or score another'
      `pfBase.baseEntry` / `baseOnlyEntry` count each entry once, with its best-ranked Set's result (what execution takes): 8 symbols x 2
      days, Base-passing pooled 2.17 against 1.29 per entry (361 entries, 50 Sets each); valid through every gate 2.17 against 1.62 (303
      entries). Desk: "per entry PF" next to the effective PF. Check `processing.effective-pf-per-entry-counts-each-entry-once`.
+  4. **The long window reacts slowly** (`scripts/main_overlap_check.py`, 8 symbols x 2 days): for the 361 Sets passing Base now, their
+     window orders read 2.17 (18,050), the Main orders inside those windows 1.82 (1,609), but their Main Sets' last 25 orders 0.60
+     (3,950): most Main orders were opened in an earlier stretch while the 50-order window still passed and lost, before the window
+     failed. Same orders, same costs, same chain: a validation property (survivorship of the Sets valid now), not a bookkeeping fault.
   Read the per-entry PF next to the Main / Real figures: that is the like-for-like comparison.
 - One chain function, `set_engine.stage_chain` (each stage reads only the lane the stage before it built; each lane a subset of the one
   before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
