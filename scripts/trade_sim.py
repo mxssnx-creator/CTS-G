@@ -68,6 +68,7 @@ def main() -> int:
     ap.add_argument("--eval-every", type=int, default=600, help="seconds between the listing's validation samples")
     ap.add_argument("--last-hours", type=int, default=0, help="simulate only the last N hours of the data (a report window)")
     ap.add_argument("--trades", action="store_true", help="print every executed position")
+    ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
     args_refresh = max(60, min(3600, int(a.eval_every)))
     if a.patch:
@@ -114,7 +115,8 @@ def main() -> int:
             g = groups.setdefault(k, collections.defaultdict(float))
             g["sets"] += 1
             g["min_n"] = 1e9
-    nxt_ns = (MIN_VALIDATION_N, book.gate_window)
+    extra_n = tuple(int(x) for x in a.next.split(",") if x.strip()) if a.next else ()
+    nxt_ns = (MIN_VALIDATION_N, book.gate_window) + tuple(m for m in extra_n if m not in (MIN_VALIDATION_N, book.gate_window))
     slots = [h + k * args_refresh for h in run_hours for k in range(max(1, 3600 // args_refresh))]
     evals = []
     for now in slots:
@@ -144,11 +146,15 @@ def main() -> int:
                     g[f"n{m}_n"] += len(v)
                 g["min_n"] = min(g["min_n"], n)
             hv["valid"] += 1
+            for m, v in nxt.items():
+                hv[f"n{m}_gp"] += sum(x for x in v if x > 0)
+                hv[f"n{m}_gl"] += -sum(x for x in v if x < 0)
             hv["in_gp"] += gp
             hv["in_gl"] += gl
             hv["min_n"] = n if not hv.get("min_n") else min(hv["min_n"], n)
         evals.append({"t": now, "valid": int(hv["valid"]), "valid_pct": round(100.0 * hv["valid"] / len(book.by_idx), 2),
-                      "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0)})
+                      "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0),
+                      "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
 
     rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)))
@@ -181,10 +187,24 @@ def main() -> int:
                 "win_pct": round(100.0 * g["ex_win"] / g["ex_n"], 1) if g["ex_n"] else None,
                 "blocks50_pf1": f"{sum(1 for x in bl if (x or 0) >= 1.0)}/{len(bl)}",
                 "blocks50_min_pf": min((x for x in bl if x is not None), default=None),
-                "min_n": int(g["min_n"]) if g["min_n"] < 1e9 else None}
+                "min_n": int(g["min_n"]) if g["min_n"] < 1e9 else None,
+                "next": {str(m): {"pf": pf(g[f"n{m}_gp"], g[f"n{m}_gl"]), "orders": int(g[f"n{m}_n"])} for m in nxt_ns}}
+
+    def hourly():
+        """Per simulated hour: the validation samples of that hour (valid share, effective PF, next-N PF) and the orders the
+        execution opened in it (count, net, PF, wins)."""
+        out_h = []
+        for h in run_hours:
+            ev = [e for e in evals if h <= e["t"] < h + 3600]
+            tr = [r["net"] for r in trades if h <= r["t_in"] < h + 3600]
+            out_h.append({"t": h, "valid_pct": round(sum(e["valid_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
+                          "eff_pf": ev[0]["eff_pf"] if ev else None, "next": ev[0]["next"] if ev else {},
+                          "orders": len(tr), "net_pct": round(100 * sum(tr), 3), "exec_pf": acc_pf(tr),
+                          "wins": sum(1 for x in tr if x > 0)})
+        return out_h
 
     out = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
-           "hours": len(run_hours), "gate": {"window": book.gate_window, "min": book.gate_min, "min_pf": book.min_pf,
+           "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
                       "scratch_bars": book.scratch_bars, "scratch_min_pct": round(book.scratch_min * 100, 3),
@@ -194,6 +214,7 @@ def main() -> int:
            "ranges": [summary(k) for k in sorted(groups) if k[0] == "range"],
            "sl": [summary(k) for k in sorted(groups) if k[0] == "sl"],
            "evaluations": evals,
+           "hourly": hourly(),
            "exits": dict(collections.Counter(r["reason"] for r in trades)),
            "trades": [{"t_in": r["t_in"], "t_out": r["t"], "symbol": r["symbol"], "set": r["set"], "pack": r["pack"],
                        "kind": r["kind"], "reason": r["reason"], "net_pct": round(100 * r["net"], 4)} for r in trades]}

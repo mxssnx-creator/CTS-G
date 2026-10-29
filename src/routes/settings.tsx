@@ -631,7 +631,7 @@ function SettingsPage() {
                   min={0}
                   max={25}
                   step={5}
-                  hint="the second Base window, 0 = off · tested 5-25 step 5, the best is the default"
+                  hint="the second Base window, 0 = off · default 25: best of the 24 h grid (long 20-50 x short 5-25, scripts/window_grid.py)"
                   onChange={(v) => patch("setGateShortN", v)}
                 />
                 <Slider
@@ -742,7 +742,7 @@ function SettingsPage() {
                   min={1.1}
                   max={2.3}
                   step={0.02}
-                  hint="Base PF floor of the Short Range strategy alone (default 1.25, at least 1.10); the other strategies use the Set min PF above."
+                  hint="Base PF floor of the Short Range strategy alone (default 1.10, the floor; the other Sets 1.25); the other strategies use the Set min PF above."
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider

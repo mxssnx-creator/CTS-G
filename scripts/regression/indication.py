@@ -5,7 +5,7 @@ indication sweep: tf5m / tf15m / tfCombined / tfMinAgree were not in the set eng
 """
 from __future__ import annotations
 
-from common import T0, overlay, synth_bars  # noqa: F401
+from common import SMALL, T0, overlay, synth_bars  # noqa: F401
 from indication_engine import DEFAULT_SETTINGS, aggregate_bars, combine_timeframes, timeframe_evals
 from set_engine import SetBook, indication_signal, pack_signals
 
@@ -326,6 +326,72 @@ def library_memo_never_serves_another_state_of_the_rows():
     return not bad and not wrong, f"{len(pick)} indicators x {len(steps)} in-place changes; stale {len(bad)} {bad[:3]}; malformed {wrong}"
 
 
+def _regime_bars(seed, n):
+    """1m bars with trends, quiet ranges, spikes and varying volume (a constant volume would silence the volume families)."""
+    import random as _r
+    rng = _r.Random(seed)
+    out, c = [], 100.0
+    for i in range(n):
+        phase = (i // 400) % 4
+        drift = (0.0008, 0.0, -0.0008, 0.0)[phase]
+        vol = (0.0015, 0.0004, 0.0015, 0.003)[phase]
+        o = c
+        c = max(1.0, c * (1 + drift + rng.gauss(0, vol)))
+        if rng.random() < 0.01:
+            c *= 1 + rng.choice((-1, 1)) * 0.01
+        out.append([o, max(o, c) * (1 + abs(rng.gauss(0, vol / 2))), min(o, c) * (1 - abs(rng.gauss(0, vol / 2))), c, rng.uniform(0.2, 5.0)])
+    return out
+
+
+def every_name_gets_the_history_its_timeframe_needs():
+    """A name on a higher timeframe reads TF_BARS bars of it (indication_lib.rows_for: 480 rows for 5m, 1440 for 15m; combined and
+    group votes the 15m history); 124 names could never fire on the 300-row window. The band families (bbb, bbrev, vwapz) use a
+    width a close can reach in its own n-bar window (2 sd is out of reach at n = 5); a flat stretch never raises. Names that were
+    dead fire on a long series with trends, ranges and spikes."""
+    from indication_extra import INDICATORS, window_of
+    from indication_lib import _band_k, rows_for
+    import math as _m
+    bad_w = [k for k in INDICATORS if (k.endswith("_t15") or k.startswith("g_")) and window_of(k) < rows_for(15)]
+    bad_w += [k for k in INDICATORS if k.endswith("_t5") and window_of(k) < rows_for(5)]
+    reach = all(_band_k(n) < _m.sqrt(n - 1) for n in (5, 8)) and _band_k(14) == 2.0
+    flat = [[100.0, 100.0, 100.0, 100.0, 1.0]] * 1500
+    raised = []
+    for k in ("bbb_n5_t1", "bbb_n8_t1", "bbrev_n5_t1", "vwapz_n5_t1"):
+        try:
+            INDICATORS[k](flat[-window_of(k):])
+        except Exception as e:      # noqa: BLE001
+            raised.append((k, repr(e)))
+    revived = ("bbb_n5_t1", "bbrev_n5_t1", "vwapz_n5_t1", "vwapz_n8_t1", "adx_n21_t15", "ichi_n14_t15", "trend_n40_t15", "ao_htfpb_n8_t5")
+    bars = _regime_bars(3, 6000)
+    fired = {k: 0 for k in revived}
+    for i in range(1500, len(bars), 7):
+        for k in revived:
+            if INDICATORS[k](bars[i + 1 - window_of(k):i + 1]):
+                fired[k] += 1
+    dead = [k for k, v in fired.items() if not v]
+    ok = not bad_w and reach and not raised and not dead
+    return ok, f"short windows {bad_w[:4]} ({len(bad_w)}); band width reachable={reach}; raised on flat {raised}; fired {fired}"
+
+
+def the_signal_memo_key_covers_every_bar_a_pack_reads():
+    """pack_signals keys its memo on signal_window(packs, settings) bars: a pack whose names read 1440 rows (15m) must not take the
+    memo of another bar whose newest 300 rows are equal but whose older history differs."""
+    import set_engine as se
+    b = SetBook()
+    b.load(overlay(stratTrend=True, trendVariants=["trend_n20_t15", "adx_n21_t15", "ichi_n14_t15"], **SMALL))
+    A = _regime_bars(11, 3200)
+    B = _regime_bars(12, 3200)
+    B[-400:] = [list(r) for r in A[-400:]]           # the newest 400 bars equal, the older history different
+    w = se.signal_window(b.packs, b.ind_settings)
+    cache = {}
+    se.pack_signals(A, b.packs, b.ind_settings, 0.0, 2800, cache=cache, salt=3)
+    got = se.pack_signals(B, b.packs, b.ind_settings, 0.0, 2800, cache=cache, salt=3)["trend"]
+    want = se.pack_signals(B, b.packs, b.ind_settings, 0.0, 2800)["trend"]
+    differ = sum(1 for x, y in zip(se.pack_signals(A, b.packs, b.ind_settings, 0.0, 2800)["trend"][2800:], want[2800:]) if x != y)
+    ok = w >= 1440 and got == want and differ > 0
+    return ok, f"signal window {w}; memo result equals a fresh pass={got == want}; bars where the older history changes the trend signal {differ}"
+
+
 CHECKS = [
     ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
     ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
@@ -333,6 +399,8 @@ CHECKS = [
     ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
     ("indication.library-memo-never-stale", library_memo_never_serves_another_state_of_the_rows),
+    ("indication.every-name-gets-its-timeframe-history", every_name_gets_the_history_its_timeframe_needs),
+    ("indication.signal-memo-key-covers-the-window", the_signal_memo_key_covers_every_bar_a_pack_reads),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

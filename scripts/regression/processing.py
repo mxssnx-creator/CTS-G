@@ -508,7 +508,7 @@ def short_range_has_its_own_pf_floor():
     other = next(s for s in b.by_idx if s.pack != SHORT_PACK and s.kind == "base")
     for st in (sr, other):
         st.gate_n = b.gate_min
-        st.gate_pf = 1.3          # above Short Range's 1.25, below the global 2.0
+        st.gate_pf = 1.2          # above Short Range's 1.1, below the global 2.0
         st.max_dd_s = 0.0
         st.active = True
         st.last_error = ""
@@ -517,7 +517,7 @@ def short_range_has_its_own_pf_floor():
     reason_default = None
     b2 = SetBook()
     b2.load(overlay(stratShortRange=True, setMinPf=2.0, mainGateEnabled=False, stagesEnabled=False, **SMALL))
-    ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.25
+    ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.1
           and b2.gate_reason(sr) == "" and b2.gate_reason(other) == "pf<min")
     return ok, f"short range floor default={b2.pack_min_pf[SHORT_PACK]} set={b.pack_min_pf[SHORT_PACK]}; PF 1.2: short range='{b2.gate_reason(sr)}' other='{b2.gate_reason(other)}'"
 

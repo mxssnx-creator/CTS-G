@@ -171,7 +171,7 @@
   "shortRangeStepMax": 6,
   "slMinSteps": 1,
   "trailMinSteps": 2,
-  "shortRangeMinPf": 1.25,
+  "shortRangeMinPf": 1.1,
   "holdEnabled": true,
   "holdAuto": true,
   "holdAutoMax": 50,
@@ -189,7 +189,7 @@
   "histLookbackAuto": true,
   "histLookbackMax": 2880,
   "stagesEnabled": true,
-  "setGateShortN": 15,
+  "setGateShortN": 25,
   "mainAutoEnabled": true,
   "mainAutoWindows": [
     5,

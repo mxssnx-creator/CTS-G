@@ -31,6 +31,14 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("indication: the signal memo keys on the 300-bar window again",
+     "set_engine.py", "            lo_w = max(0, i + 1 - sig_w)", "            lo_w = max(0, i + 1 - IND_WINDOW_BARS)"),
+    ("indication: a higher timeframe reads the 300-row window again",
+     "indication_lib.py", "    return max(WINDOW, TF_BARS * int(tf))", "    return WINDOW"),
+    ("indication: 2 sd bands at every n (out of reach at n = 5)",
+     "indication_lib.py", "    return min(2.0, 0.7 * math.sqrt(max(1, n - 1)))", "    return 2.0"),
+    ("indication: a 5m / 15m name keeps the 300-row slice",
+     "indication_extra.py", "WINDOWS.update({name: max(WINDOWS.get(name, LOOKBACK), _rows_for(_highest_tf(name))) for name in INDICATORS if _highest_tf(name) > 1})", "pass"),
     ("stage: the Base pool drops Sets that stopped at Main Auto or Real",
      "set_engine.py", "        base_only = [x for x in allsets if reasons[x.id] in (\"\",) + STAGE_REASONS]", "        base_only = [x for x in allsets if reasons[x.id] in (\"\", \"main\")]"),
     ("indication: the library memo ignores a list that changed in place",

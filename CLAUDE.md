@@ -38,7 +38,9 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
   "n<min", 152 on drawdown time at 12 h); read it there, next to the executed PF.
 
 - The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
-  (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`, Short Range floor). The volume factor default is the minimum, **0.05**.
+  (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`); the Short Range strategy keeps its own earlier floor **1.1** (`shortRangeMinPf`,
+  owner 2026-10-29). No gate asks less than **1.1** whatever is configured (`position_cost.MIN_PF_FLOOR`, `pf_floor`; desk the same).
+  The volume factor default is the minimum, **0.05**.
 - Block and DCA are enabled (DCA auto plan; its Set and Axis options `dcaOnSets` / `dcaOnAxis` stay off, so under the Base
   gate, where every position is a Set position, both add-ons are idle until a position without a Set exists or an option is
   turned on).
@@ -167,7 +169,15 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 - **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
   **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
-  15, 0 = off; tested 5-25 step 5, `scripts/trade_sim.py --patch`), plus minimum orders and drawdown time. Reason `short` for the short one.
+  25, 0 = off), plus minimum orders and drawdown time. Reason `short` for the short one.
+- **The standard window test** (owner, 2026-10-29): `scripts/window_grid.py` runs every Base long x short cell (long 20-50 step 10, short
+  off / 5-25 step 5) through `trade_sim.py` on 20 symbols, the last 24 h simulated after 24 h of pre-history (`histLookbackBars` 1440),
+  and writes an HTML report (heatmaps of executed PF, next 15 / next 25 orders PF, effective PF, validated share and orders; cumulative
+  net per hour per cell; the best cell hour by hour and by type). Ranking: the geometric mean of the executed PF and the next 15 / 25
+  orders PF (at least 100 executed orders). Run 2026-10-28 04:00 - 10-29 04:00 UTC (`reports/window_grid_24h.html`): best long 50 /
+  short 25 (executed PF 0.75 on 617 orders, next 15 orders 0.85, next 25 orders 1.09, validated 2.4 %, effective PF 2.86 in-sample);
+  every cell executed 0.58-0.82, next 25 orders 0.30-1.09. One 24 h window: the ranking is inside the noise; no cell carries a PF above 1
+  in execution.
 - **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
   (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
   windows on the Main Set, both must pass: static `mainGateN` (25, owner 2026-10-29, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
@@ -224,7 +234,14 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   5, 8 (minimal) and 14, 21 (medial) on the 1m, 5m and 15m series (`<family>_n<range>_t<minutes>`), the three timeframes
   combined (`<family>_c<range>`, at least two agree, none disagrees) and group votes (`g_<group>_<min|med>`). They are in
   `indication_extra.INDICATORS` next to the older ones, so any name works in `extraIndicators` (a vote of the
-  indications pack) or in a pack's variant list. The 15m series is limited by the 300-row window (ranges up to about 17).
+  indications pack) or in a pack's variant list. A name on a higher timeframe reads `indication_lib.TF_BARS` (96) bars of it
+  (`rows_for`: 480 one-minute rows for 5m, 1440 for 15m; combined and group votes the 15m history; `indication_extra.window_of`),
+  replay and live alike, and `pack_signals` keys its memo on `set_engine.signal_window` (every bar a pack reads). Audit on 30 days
+  (2026-10-29): 124 of 880 names could never fire on the old 300-row window, and `bbb` / `bbrev` / `vwapz` asked a 2 sd band a close
+  cannot reach in its own 5-bar window (`_band_k`); after the fix 4 rarely firing names remain (`ao_ultimate` at n21 on 5m / 15m).
+  The library's 5m / 15m memo is keyed by the rows object, its length and newest row (a list changed in place got its earlier bars).
+  Checks `indication.every-name-gets-its-timeframe-history`, `indication.signal-memo-key-covers-the-window`,
+  `indication.library-memo-never-stale`, with mutants. The live defaults (indications without `extraIndicators`, general) are unchanged.
 - Extra packs (`set_engine.EXTRA_PACKS`: trend, breakout, reversion, flow, multi): each its own Sets and its own Base
   validation, switched by `stratTrend` etc. (off by default), indicator names by `trendVariants` etc. They exist in the Set
   engine and the evaluation scripts (`scripts/indicator_postbase.py`: effective PF, validated share and orders per pack and

@@ -13,6 +13,7 @@ shipped votes stay as they are until a measurement says otherwise.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 LOOKBACK = 160
@@ -803,6 +804,12 @@ FAMILY_RANGES = (6, 10, 20, 40)  # bars of the timeframe series: from the lowest
 FAMILY_TFS = (1, 5, 15)          # minutes per bar
 
 
+def _rows_for_tf(tf: int) -> int:
+    """1m rows the family reads for a tf-minute series (indication_lib.rows_for, never under FAMILY_WINDOW)."""
+    from indication_lib import rows_for
+    return max(FAMILY_WINDOW, rows_for(tf))
+
+
 def _agg(rows: Sequence[Row], minutes: int) -> List[List[float]]:
     """Causal N-minute bars aligned to the newest row (the newest bar ends on the newest row), as indication_engine does."""
     m = max(1, int(minutes))
@@ -836,7 +843,7 @@ def trend_signal(rows: Sequence[Row], n: int, tf: int, r2_min: float = 0.55, er_
     """Quality trend over the last n bars of the tf-minute series: a straight, efficient move (R^2 of the closes against
     time and Kaufman's efficiency ratio both high), the close on the trend side of EMA(n) with EMA(n/2) leading it, and not
     stretched more than 3 ATR from EMA(n). Direction is the slope's; confidence grows with the straightness."""
-    b = _agg(rows[-FAMILY_WINDOW:], tf)
+    b = _agg(rows[-_rows_for_tf(tf):], tf)     # the window, or TF_BARS bars of the timeframe (a 40-bar range on 15m)
     if len(b) < n + 3:
         return None
     c = [float(x[3]) for x in b[-n:]]
@@ -863,7 +870,7 @@ def breakout_signal(rows: Sequence[Row], n: int, tf: int, vol_mult: float = 1.1)
     """Range breakout on the tf-minute series: the close beyond the prior n-bar extreme, on a bar at least as wide as the
     ATR that closes in the outer 30 % of its own range, out of a range that was not itself a wild swing (prior range under
     4 ATR x sqrt(n)), with volume at least vol_mult x the prior average when volume is reported."""
-    b = _agg(rows[-FAMILY_WINDOW:], tf)
+    b = _agg(rows[-_rows_for_tf(tf):], tf)     # the window, or TF_BARS bars of the timeframe (a 40-bar range on 15m)
     if len(b) < n + 3:
         return None
     prior = b[-n - 1 : -1]
@@ -958,9 +965,24 @@ INDICATORS.update(FAMILY)
 from indication_lib import LIB as _LIB, WINDOW as _LIB_WINDOW  # noqa: E402  (the library imports nothing from this module)
 INDICATORS.update(_LIB)
 WINDOWS.update({name: _LIB_WINDOW for name in _LIB})
+from indication_lib import rows_for as _rows_for  # noqa: E402
 from indication_ao import AO as _AO  # noqa: E402  (ported from CTS-A-O; imports indication_lib only)
 INDICATORS.update(_AO)
 WINDOWS.update({name: _LIB_WINDOW for name in _AO})
+
+
+def _highest_tf(name: str) -> int:
+    """The highest timeframe a name reads: its own lane (_t5, _t15), 15 for a combined vote over the three timeframes or a group
+    vote, else 1."""
+    m = re.search(r"_t(\d+)$", name)
+    if m:
+        return int(m.group(1))
+    return 15 if re.search(r"_c\d+$", name) or name.startswith("g_") else 1
+
+
+# a name on a higher timeframe reads TF_BARS of its bars (indication_lib.rows_for); the others keep their own window
+WINDOWS.update({name: max(WINDOWS.get(name, LOOKBACK), _rows_for(_highest_tf(name))) for name in INDICATORS if _highest_tf(name) > 1})
+HISTORY = max(WINDOWS.values())         # the most 1m rows any indicator reads
 
 
 def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, float, str]]:
