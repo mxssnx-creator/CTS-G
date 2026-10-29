@@ -189,6 +189,7 @@ def pack_of_reason(reason: Any) -> str:
     return "indications" if r.startswith("ind:") else "general"
 
 
+CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
 ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
@@ -641,6 +642,7 @@ class Position:
     ctrl_verified: bool = False
     dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
     dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
+    lane: str = ""                             # the Set's lane at entry: "pos" (Base -> Main -> Real) or "neg" (Real Negative)
 
 
 @dataclass
@@ -665,6 +667,7 @@ class Closed:
     client_id: str = ""
     ours: bool = True
     conn: str = ""
+    lane: str = ""
 
 
 class Pulse:
@@ -1169,11 +1172,12 @@ class Pulse:
             if pos.client_id:
                 self.seen_fill_cids.add(pos.client_id)
 
-    def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1) -> str:
+    def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1, lane: str = "") -> str:
         kind = (kind or "o")[:1]
         idx = set_idx
         if pos is not None:
             set_id = set_id or pos.set_id
+            lane = lane or str(getattr(pos, "lane", "") or "")
             pack = pack or pos.pack
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
@@ -1205,7 +1209,9 @@ class Pulse:
             except Exception:
                 idx = -1
         ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
-        nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+        # the nonce carries the Set's lane: CID_NEG_MARK first for the Real Negative lane, never otherwise
+        alphabet = [c for c in string.ascii_lowercase + string.digits if c != CID_NEG_MARK]
+        nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + "".join(random.choices(alphabet, k=4))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
     def cid_ours(self, cid: str) -> bool:
@@ -1257,9 +1263,11 @@ class Pulse:
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
 
+        lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and rest[8:12].isdigit() else "pos"
+
         def _row(st_obj: Any) -> Dict[str, Any]:
             return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
-                    "idx": st_obj.idx, "set_id": st_obj.id}
+                    "idx": st_obj.idx, "set_id": st_obj.id, "lane": lane}
 
         def _agrees(st_obj: Any) -> bool:
             try:
@@ -2813,7 +2821,12 @@ class Pulse:
         set_idx = -1
         trail_set_id = ""
         trail_idx = -1
+        lane = ""
         if chosen:
+            try:
+                lane = self.sets.lane_of(chosen) or "pos"     # the lane the Set passed Real on: positive, or Real Negative
+            except Exception:
+                lane = "pos"
             # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
             # own arm and give. The independent trailing pick never reaches a Set position.
             sl_ratio = chosen.sl_ratio
@@ -2849,7 +2862,7 @@ class Pulse:
                     qty = scaled
                     notional = qty * px
                     margin = notional / max(1, lev)
-        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
+        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
@@ -2879,7 +2892,7 @@ class Pulse:
             msg0 = str(r.get("msg") or "").lower()
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
-                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)))
+                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)))
                 self.did_io = True
         if not self.ok(r):
             msg = str(r.get("msg") or "")
@@ -2895,7 +2908,7 @@ class Pulse:
                 self._persist_lev()
                 r = self.api.post(
                     "/openApi/swap/v2/trade/order",
-                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)),
+                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
                 )
                 self.did_io = True
                 msg = str(r.get("msg") or "")
@@ -2907,7 +2920,7 @@ class Pulse:
                 if qty > 0:
                     r = self.api.post(
                         "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)),
+                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
                     )
                     self.did_io = True
                     msg = str(r.get("msg") or "")
@@ -2989,7 +3002,7 @@ class Pulse:
             sl_ratio=sl_ratio, trail_key=trail_key,
             trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
             sl_pct=sl_pct, tp_pct=tp_pct,
-            set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
+            set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True, lane=lane,
             overall=True, close_position=True, ind_kind=ind_kind,
         )
         pos.sl, pos.tp = self.security_prices(pos)
@@ -3205,6 +3218,7 @@ class Pulse:
             time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
+            lane=str(getattr(pos, "lane", "") or ""),
         )
         if pos.client_id:
             self.seen_fill_cids.add(pos.client_id)
@@ -3492,6 +3506,10 @@ class Pulse:
     def _exec_note(self, rec: "Closed") -> None:
         if getattr(rec, "ours", True) is not False:
             self._exec_count(rec.set_id, rec.pnl)
+            if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
+                key = "laneNeg" if str(getattr(rec, "lane", "") or "") == "neg" else "lanePos"
+                self._exec_inc(key)
+                self._exec_inc(key + "Win" if rec.pnl > 0 else key + "Loss")
 
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
@@ -3500,7 +3518,10 @@ class Pulse:
         reasons = counts.get("reasons", {})
         by_pack: Dict[str, Dict[str, int]] = {}
         open_sets, under_invalid, retired, no_set = set(), 0, 0, 0
+        open_lane = {"pos": 0, "neg": 0}
         for p in self.open.values():
+            if p.set_id:
+                open_lane["neg" if str(getattr(p, "lane", "") or "") == "neg" else "pos"] += 1
             row = by_pack.setdefault(p.pack or "-", {"open": 0, "underInvalidSet": 0})
             row["open"] += 1
             if not p.set_id:
@@ -3515,8 +3536,14 @@ class Pulse:
                 row["underInvalidSet"] += 1
         n = self.__dict__.setdefault("exec_n", {})
         return {
-            "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0), "baseValid": counts.get("valid", 0) + int(reasons.get("main", 0)),
-                     "invalid": counts.get("invalid", 0), "reasons": dict(reasons)},
+            "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0),
+                     "baseValid": counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in ("main", "mainauto", "real")),
+                     "invalid": counts.get("invalid", 0), "reasons": dict(reasons),
+                     "stages": self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}},
+            "lanes": {"openPos": open_lane["pos"], "openNeg": open_lane["neg"],
+                      "closedPos": int(n.get("lanePos", 0)), "closedNeg": int(n.get("laneNeg", 0)),
+                      "winsPos": int(n.get("lanePosWin", 0)), "lossesPos": int(n.get("lanePosLoss", 0)),
+                      "winsNeg": int(n.get("laneNegWin", 0)), "lossesNeg": int(n.get("laneNegLoss", 0))},
             "open": {"positions": len(self.open), "setPositions": len(self.open) - no_set, "noSet": no_set, "sets": len(open_sets),
                      "underInvalidSet": under_invalid, "setRetired": retired, "byPack": by_pack},
             "closed": {"orders": int(n.get("set", 0) + n.get("exit", 0)), "setLane": int(n.get("set", 0)), "exitLane": int(n.get("exit", 0)),
@@ -3554,6 +3581,7 @@ class Pulse:
                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
                     ours=bool(rec.get("ours", True)),
                     conn=str(rec.get("conn") or rec.get("connection") or ""),
+                    lane=str(rec.get("lane") or ""),
                 )
                 cid = c.client_id
                 if cid and not self.cid_ours(cid):
@@ -3644,6 +3672,7 @@ class Pulse:
             STAGGER_S = float(ov["staggerS"])
         self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
         self.pf_window = window_n(ov, "pfWindow", fallback=15)
+        self.real_stage_paper = bool(ov.get("realStagePaper", True))      # the overall strategies read the Real Sets' paper stream
         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
         self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
         self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
@@ -4520,7 +4549,15 @@ class Pulse:
                 }
         except Exception:
             intern_metrics = {"pf": 0.0, "n": 0}
-        allow, reasons, metrics = self.coord.gate(rows, consec, intern=intern_metrics)
+        # Real stage: the overall strategies read the Real Sets' paper stream (the orders opened after Base and Main), not only the few
+        # executed closes; a gate that reads only what it let through never reopens
+        paper = []
+        if self.sets.enabled and getattr(self, "real_stage_paper", True):
+            try:
+                paper = self.sets.real_paper(max(50, int(getattr(self.coord, "prev_window", 25) or 25) * 4))
+            except Exception:
+                paper = []
+        allow, reasons, metrics = self.coord.gate(paper or rows, consec, intern=intern_metrics)
         if self.entries_blocked():
             self.priority_controls()
             return
@@ -4742,6 +4779,7 @@ class Pulse:
                         trk = self.parse_track(self.order_cid(tagged[0])) or {}
                         if trk.get("set_id"):
                             ours.set_id = str(trk.get("set_id"))
+                            ours.lane = str(trk.get("lane") or "pos")
                             idxv = trk.get("idx")
                             ours.set_idx = int(idxv) if idxv is not None else -1
                             ours.pack = str(trk.get("pack") or ours.pack)
@@ -4790,7 +4828,7 @@ class Pulse:
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
                 trail_set_id=rec_trail_id,
-                liq=liq, position_id=pid,
+                liq=liq, position_id=pid, lane=str(track.get("lane") or ("pos" if set_id else "")),
             )
             rec_pos = self.open[sym]
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)

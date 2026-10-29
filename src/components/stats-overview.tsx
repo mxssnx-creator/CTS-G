@@ -50,6 +50,14 @@ export function StatsOverview({
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
           />
         ) : null}
+        {live?.execution?.sets.stages ? (
+          <Hero
+            k="Stages · Base → Main → Real"
+            v={`${live.execution.sets.stages.real + live.execution.sets.stages.realNeg} Sets on Real`}
+            s={`Base ${live.execution.sets.stages.base} · Main ${live.execution.sets.stages.main} · Main dip ${live.execution.sets.stages.negative} · Real ${live.execution.sets.stages.real} · Real Negative ${live.execution.sets.stages.realNeg}${live.sets?.pfBase?.real ? ` · Real Sets PF ${live.sets.pfBase.real.pf.toFixed(2)}` : ""}${live.sets?.pfBase?.realneg ? ` · Real Negative PF ${live.sets.pfBase.realneg.pf.toFixed(2)}` : ""}${live.execution.lanes ? ` · open ${live.execution.lanes.openPos} / ${live.execution.lanes.openNeg} · closed ${live.execution.lanes.closedPos} (${live.execution.lanes.winsPos} won) / ${live.execution.lanes.closedNeg} (${live.execution.lanes.winsNeg} won)` : ""}`}
+            tone="ok"
+          />
+        ) : null}
         {live?.execution ? (
           <Hero
             k="Executed · after all gates"

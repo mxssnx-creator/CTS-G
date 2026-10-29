@@ -179,15 +179,30 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     if valid and book.consistency_pf > 0 and n >= 2:
         valid = min(old, new) + 1e-9 >= book.consistency_pf
-    if valid and getattr(book, "main_on", False):       # the Main gate: the same minimum PF over the Set's last mainGateN processed orders
-        rw = processed_tail(book, tapes, st, now, book.main_n)
-        g_ = sum(x for x in rw if x > 0)
-        l_ = -sum(x for x in rw if x < 0)
-        valid = len(rw) >= book.main_n and (g_ / l_ if l_ > 0 else (99.0 if g_ > 0 else 0.0)) + 1e-9 >= floor
+    if valid and getattr(book, "base_short", 0):       # Base: the short window too (both must pass)
+        sw = [x - cf for x in w[-book.base_short:]]
+        valid = len(sw) >= book.base_short and se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)) + 1e-9 >= floor
+    if valid and (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
+        valid = stage_lane(book, tapes, st, now)          # "pos" / "neg": the lane the Set passes Real on; "" when none
     halves = min(old, new) if (old or new) else pf
     shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * n_all / (n_all + se.RANK_SHRINK_N)
     rank = (halves + 1e-9 >= floor, round(shrunk, 4), n_all, r25, -max_s)      # SetBook.rank_key
     return valid, rank, n, pf
+
+
+def stage_lane(book, tapes: Tapes, st, now: float) -> str:
+    """The Set's chain over its orders in the lookback before now (set_engine.stage_chain, the replay's rule) and its stage verdicts
+    (set_engine.stage_verdicts): "pos" when Main and Real pass, "neg" when the Negative lane and Real Negative pass, else ""."""
+    lb = book.lookback * 60.0
+    tx, te, pp = tapes.by_set[st.idx]
+    e = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - lb)
+    ts, ents = list(tx[lo:e]), list(te[lo:e])
+    nets = [x - tapes.cf for x in pp[lo:e]]
+    P = book.stage_params(st.pack)
+    ch = se.stage_chain(ts, ents, nets, P)
+    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["auto_n"], P)
+    return "pos" if v["pos"] else ("neg" if v["negl"] else "")
 
 
 def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
@@ -264,7 +279,11 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
         book._score_one(st, now=now)
         st.n = len(st.hist)
         eng_valid = book.gate_reason(st) == ""
+        eng_lane = book.lane_of(st)
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
+        if (valid or "") not in ("", True) and str(valid) != eng_lane:
+            bad += 1
+        valid = bool(valid)
         ek = book.rank_key(st)
         if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6 or key[:3] != ek[:3] or abs(key[3] - ek[3]) > 1e-9 \
                 or abs(key[4] - ek[4]) > 1e-6:
@@ -311,7 +330,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             if ok:
                 valid_ += 1
             if ok or control == "all":
-                ranked_.setdefault((st.pack, st.kind), []).append((key, st))
+                lane_ = ok if isinstance(ok, str) else "pos"
+                ranked_.setdefault((st.pack, st.kind, lane_), []).append((key, st))
         for k in ranked_:
             ranked_[k].sort(key=lambda r: r[0], reverse=True)
         return ranked_, valid_
@@ -341,9 +361,14 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 pack, conf, d = best
                 if not refresh_s and ranked_t != float(t):
                     ranked, ranked_t = rank_at(float(t))[0], float(t)      # per order: every Set's last N at this minute
-                # SetBook.pick_any: base and Exit Sets ranked together, else the trailing Sets
-                pool = sorted(ranked.get((pack, "base"), []) + ranked.get((pack, "exit"), []), key=lambda r: r[0], reverse=True)
-                pool = [st for _, st in pool] or [st for _, st in ranked.get((pack, "trail"), [])]
+                # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
+                pool, lane_pick = [], ""
+                for lane_ in ("pos", "neg"):
+                    fixed = sorted(ranked.get((pack, "base", lane_), []) + ranked.get((pack, "exit", lane_), []), key=lambda r: r[0], reverse=True)
+                    pool = [st for _, st in fixed] or [st for _, st in sorted(ranked.get((pack, "trail", lane_), []), key=lambda r: r[0], reverse=True)]
+                    if pool:
+                        lane_pick = lane_
+                        break
                 if set_axis:
                     n_, min_pf = set_axis
                     keep = []
@@ -370,7 +395,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 busy[s] = tr["exit_i"]
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
-                       "pack": pack, "kind": st.kind, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
+                       "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
                        "tr": tr, "fracs": se.lane_fracs(st, book.cost_pct, book.sl_min_steps)}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))

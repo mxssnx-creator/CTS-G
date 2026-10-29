@@ -77,8 +77,11 @@ export type PfBase = {
   main?: PfPool & { on: boolean; lastN: number };
   /** The Main Sets of every Base-passing Set. */
   processed?: PfPool & { orders: number; lastN: number };
-  /** Real stage: the Real Sets (orders opened while Base and Main passed) of the end Sets. */
-  real?: { pf: number; sets: number; orders: number; stages: string[] };
+  /** Real stage: the Real Sets (orders opened while Base and Main passed) of the Sets valid on the positive lane, over the Real last N. */
+  real?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
+  /** Real stage, Negative lane: the Real Negative Sets of the Sets valid on it. */
+  realneg?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
+  stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
   validatedBasePct?: number;
   unfiltered: PfPool;
   total?: number;
@@ -93,7 +96,17 @@ export type PfBase = {
 
 /** Sets and orders as executed, after every validation gate (Pulse.execution_snapshot). */
 export type Execution = {
-  sets: { configured: number; valid: number; baseValid: number; invalid: number; reasons: Record<string, number> };
+  sets: {
+    configured: number;
+    valid: number;
+    baseValid: number;
+    invalid: number;
+    reasons: Record<string, number>;
+    /** Sets at each stage now: passed Base, passed Main, in a Main dip, valid on Real, valid on Real Negative. */
+    stages?: { base: number; main: number; negative: number; real: number; realNeg: number };
+  };
+  /** Positions and closes per lane: Real (positive) and Real Negative. */
+  lanes?: { openPos: number; openNeg: number; closedPos: number; closedNeg: number; winsPos: number; lossesPos: number; winsNeg: number; lossesNeg: number };
   open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
   closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number };
 };

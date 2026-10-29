@@ -49,6 +49,14 @@ export type SetIndexRow = {
   realId?: string;
   realN?: number;
   realPf?: number;
+  realNegId?: string;
+  realNegN?: number;
+  realNegPf?: number;
+  /** Base short window PF, the Set's Main Auto window, the lane it is valid on ("pos" / "neg" / ""), the reason when not. */
+  shortPf?: number;
+  autoN?: number;
+  lane?: string;
+  why?: string;
 };
 
 export type StrategyType = "normal" | "exit" | "trailing" | "axis" | "block" | "dca";

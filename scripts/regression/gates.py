@@ -23,7 +23,7 @@ O = 1_700_000_000.0
 
 def _book(**extra):
     b = SetBook()
-    b.load(overlay(**{"mainGateEnabled": False, **extra}))     # these fixtures judge the Base gate alone
+    b.load(overlay(**{"mainGateEnabled": False, "stagesEnabled": False, **extra}))     # these fixtures judge the Base gate alone
     b.cost_pct = 0.15
     return b
 

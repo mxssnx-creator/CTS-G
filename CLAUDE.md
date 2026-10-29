@@ -152,35 +152,41 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 ## Stages: Base -> Main -> Real, each stage's orders a new Set (core logic, owner 2026-10-28)
 
-- **Base stage**: every coordination, range and type (pack x SL ratio x TP step, Exit Set, trailing pair) is a Base Set, judged on
-  its own tape (the base evals: last N, minimum orders, PF, drawdown time).
-- **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): each Base Set's Main Set
-  (`<id>:main`) holds the orders it opened while it passed Base, each judged on the Set's own closes before that entry
-  (`set_engine.processed_flag`). The Main gate (`mainGateEnabled`, `mainGateN` default 8; the legacy `realGate*` keys are read when
-  the Main keys are absent; reason `main`) reads the last N of the Main Set, never the Base Set's tape.
-- **Real stage** (evals and overall strategies): each Base Set's Real Set (`<id>:real`) holds the orders of its Main Set opened while
-  the Main gate also passed, the orders it executes. Execution picks only Sets that pass Base and Main; the overall Real stage
-  (the coordinator's real evaluation, `realEvalPosCount`) reads the executed closes, which are Real-Set orders.
-- One chain function, `set_engine.stage_lanes` (each stage reads only the lane the stage before it built; each lane a subset of the
-  one before); `SetBook.set_processed` builds it in every replay pass, live closes join every lane (opened after every gate).
-  Snapshot index per Set: `mainId`, `mainN`, `mainPf`, `realId`, `realN`, `realPf`; `pfBase`: `base` (end figure), `baseOnly`, `main`,
-  `processed` (Main Sets), `real` (Real Sets). Desk: Sets overview columns "Main Set n · PF" and "Real Set n · PF". The simulator
-  mirrors the Main gate (`stage_eval.processed_tail`, self-check against the engine). Checks: `set-real-gate-reads-processed-orders`,
-  `set-lane-chain-each-stage-reads-the-lane-before`, `set-main-stage-keys-and-legacy-names`, and the `processed lane:` mutants.
-- Measured (30 days, 20 symbols, development window, Base 30/25, Main 8; pooled over every Set): Base Sets PF 0.59 on 15.3 M orders
-  (0 of 20 days at PF 1), Main Sets 0.63 on 3.3 M (1/20), Real Sets 0.65 on 1.9 M (3/20); by type the Real Sets read base 0.62, Exit
-  0.63, trailing 0.72. Each stage lifts the PF a little; none makes it high or stable while the signals' gross move per order is
-  under the PositionCost. Walk-forward with the Main gate (Base 30, Main 12): executed 0.59 on 10,010 orders.
+- **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
+  **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
+  15, 0 = off; tested 5-25 step 5, `scripts/trade_sim.py --patch`), plus minimum orders and drawdown time. Reason `short` for the short one.
+- **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
+  (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
+  windows on the Main Set, both must pass: static `mainGateN` (8, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
+  `mainAutoWindows` 5/10/15/20/25 the window whose past verdicts were followed by the best PF on its own Main Set; a candidate needs
+  `mainAutoMin` (8) orders and `mainAutoMargin` (1.02) x the static result, like `_choose_hold`; `st.main_auto_n`, reason `mainauto`).
+- **Main Negative lane** (separate, `mainNegEnabled`): the average net of the last 5 or the last 10 Main-Set orders (`mainNegWindows`) is
+  negative. Its orders form the **Real Negative Set** (`<id>:realneg`), with its own Real validation, stats and rank.
+- **Real stage** (evals and overall strategies): the **Real Set** (`<id>:real`) holds the Main-Set orders opened while both Main windows
+  passed. One window, the last `realGateN` (15, `realGateEnabled`, reason `real`) of the lane's Real Set at the minimum PF; the Real
+  Negative Set is judged the same way on its own orders. The overall strategies (coordinator real stage) read the Real Sets' pooled
+  paper stream (`SetBook.real_paper`, `realStagePaper`).
+- **Active execution**: `pick_any` takes only Sets valid through Real on a lane (`SetBook.lane_of`), the positive lane first, then the
+  Real Negative lane; the position carries its lane (`pos.lane`, client id nonce marker `CID_NEG_MARK`), a live close joins only its own
+  lane's Real Set, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
+- One chain function, `set_engine.stage_chain` (each stage reads only the lane the stage before it built; each lane a subset of the one
+  before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
+  `realId/N/Pf`, `realNegId/N/Pf`, `shortPf`, `autoN`, `lane`; `pfBase`: `base`, `baseOnly`, `main`, `processed`, `real`, `realneg`,
+  `stageSets`; execution stats `sets.stages` (Sets per stage) and `lanes` (open, closed, wins, losses per lane). Desk: Settings "Stages ·
+  Base -> Main -> Real", Sets overview columns Main / Real / Real Neg / Short PF · Auto / Lane, stats "Stages". The simulator mirrors the
+  chain (`stage_eval.stage_lane`, self-check against the engine). Checks: `set-stage-chain-*`, `set-stage-rules-*`, `set-base-needs-both-windows`,
+  `trader.lanes-every-stage-on-its-own-lane`, and the `stage:` mutants.
+- Measured earlier (single windows; 30 days, 20 symbols, development window, Base 30/25, Main 8; pooled over every Set): Base Sets PF 0.59
+  on 15.3 M orders, Main Sets 0.63 on 3.3 M, Real Sets 0.65 on 1.9 M. Each stage lifts the PF a little; none makes it high or stable while
+  the signals' gross move per order is under the PositionCost.
 
 ## Validation gates: Base last N, Main gate, shared minimum PF, pre-history, execution tracking
 
 - Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
   another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
-- **Base last N** (`setGateWindow`) default **30** and minimum orders `setGateMinTrades` 25 (owner, 2026-10-28, for the small-cap universe the
-  live engines trade; the code fallback without an overlay stays 50). **Main gate** (`mainGateEnabled`, `mainGateN` default **8** (owner,
-  2026-10-28), at least 8, at most the Base window): besides Base a Set must hold the Base minimum PF over the last N orders of its
-  **Main Set** (reason `main`, see above); execution picks only
-  Sets that pass both (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
+- **Base last N** (`setGateWindow`) **50** plus the short window `setGateShortN`, minimum orders `setGateMinTrades` 30 (overlays). **Main gate**
+  (`mainGateN` 8 plus Auto, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
+  Sets that pass every stage on a lane (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
   over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
   (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.
 - **Pre-history grows** (`histLookbackAuto`, `histLookbackMax` 2880): when a quarter of the Sets that traded have fewer orders than the gate
@@ -196,7 +202,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   gate (small caps Base 30: 1.79 alone, 1.90-2.01 with Real); the executed PF does not follow: small caps 1.07-1.22 (best Base 30 / Real 8-10 1.22, Base 25
   / Real 10 1.06), majors 0.35-0.57, no cell above 1 on majors and no consistent winner across universes. Merged engine (Exit Sets), Base 30 Real
   off / 12: small caps dev 0.94 / 0.91, sealed 1.07 / 0.97; majors dev 0.55 / 0.42, sealed 0.80 / 0.82. The Main gate removes a third of the validated
-  Sets and carries no measurable out-of-sample gain; it is on by default at N = 12 by owner decision.
+  Sets and carries no measurable out-of-sample gain; it is on by default at N = 8 (owner, 2026-10-28).
 
 ## Indication library and extra packs
 
