@@ -199,7 +199,7 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
               <th className="pb-2 text-right font-medium" title="Main Set: orders opened while Base passed · the Main gate's PF on its last N">Main Set n · PF</th>
               <th className="pb-2 text-right font-medium" title="Real Set: orders opened while Base and Main passed · PF on its last N">Real Set n · PF</th>
               <th className="pb-2 text-right font-medium" title="Real Negative Set: Main orders opened in a dip · PF on its last N">Real Neg n · PF</th>
-              <th className="pb-2 text-right font-medium" title="Base short window PF · the Set's Main Auto window">Short PF · Auto</th>
+              <th className="pb-2 text-right font-medium" title="Base short window PF · the Set's own Main short window (N)">Short PF · Main short</th>
               <th className="pb-2 font-medium" title="the lane the Set is valid on, or the stage it fails">Lane</th>
             </tr>
           </thead>
@@ -228,7 +228,7 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
                   <td className="py-1.5 text-right">{r.mainN === undefined ? "—" : `${r.mainN} · ${formatPf(r.mainPf ?? 0)}`}</td>
                   <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} · ${formatPf(r.realPf ?? 0)}`}</td>
                   <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} · ${formatPf(r.realNegPf ?? 0)}`}</td>
-                  <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.autoN ?? "—"}`}</td>
+                  <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
                   <td className="py-1.5">{r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
                 </tr>
               ))

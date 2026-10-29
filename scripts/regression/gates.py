@@ -173,22 +173,89 @@ def short_window_is_at_most_half_of_the_long_window():
     return got == want, f"{got}"
 
 
-def main_auto_windows_are_at_most_half_of_the_static_window():
-    """The Main Auto windows are capped at mainAutoMaxRatio (default 0.5) of the Main static window (owner 2026-10-29): static 25 keeps Auto 5 and 10 and drops
-    15, static 40 keeps up to 20, static 8 (cap 4) falls back to the cap itself, a ratio of 1 keeps every candidate, the ratio is held to 0.1..1."""
-    def autos(**ov):
+def main_short_windows_are_at_most_half_of_the_long_window():
+    """The Main short windows (the former Auto window) are capped at mainShortMaxRatio (default 0.5) of the Main long window (owner 2026-10-29): long 25 keeps
+    short 5 and 10 and drops 15, long 40 keeps up to 20, long 8 (cap 4) falls back to the cap itself, a ratio of 1 keeps every candidate, the ratio is held
+    to 0.1..1. The earlier mainAuto* keys still load when their mainShort* twin is absent, and the new key wins when both are given."""
+    def shorts(**ov):
         b = SetBook()
         b.load(overlay(**{"stagesEnabled": True, "setGateWindow": 50, **ov}))
-        return b.auto_windows
-    got = {"25 default": autos(mainGateN=25, mainAutoWindows=[5, 10, 15]), "40": autos(mainGateN=40, mainAutoWindows=[5, 10, 15, 20, 25]),
-           "8": autos(mainGateN=8, mainAutoWindows=[5, 10, 15]), "25 ratio 1": autos(mainGateN=25, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=1.0),
-           "25 ratio .3": autos(mainGateN=25, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3), "shipped": autos()}
-    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (4,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10)}
+        return b.short_windows
+    got = {"25 default": shorts(mainGateN=25, mainShortWindows=[5, 10, 15]), "40": shorts(mainGateN=40, mainShortWindows=[5, 10, 15, 20, 25]),
+           "8": shorts(mainGateN=8, mainShortWindows=[5, 10, 15]), "25 ratio 1": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=1.0),
+           "25 ratio .3": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=0.3), "shipped": shorts(),
+           "legacy keys": shorts(mainGateN=25, mainShortWindows=None, mainShortMaxRatio=None, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
+           "new key wins": shorts(mainGateN=25, mainShortWindows=[5, 10], mainAutoWindows=[5]) }
+    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (4,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
+            "legacy keys": (5,), "new key wins": (5, 10)}
     bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
-    bare.load({"mainGateN": 25, "mainAutoWindows": [5, 10, 15]})
-    got["engine default"] = bare.auto_windows
+    bare.load({"mainGateN": 25, "mainShortWindows": [5, 10, 15]})
+    got["engine default"] = bare.short_windows
     want["engine default"] = (5, 10)
-    return got == want, f"{got}"
+    leg = SetBook()
+    leg.load(overlay(mainShortEnabled=None, mainShortMin=None, mainShortMargin=None, mainAutoEnabled=False, mainAutoMin=5, mainAutoMargin=1.1))    # the shipped overlay carries the new keys: a file written before the rename carries only the old ones
+    new = SetBook()
+    new.load(overlay(mainShortEnabled=True, mainShortMin=6, mainShortMargin=1.2, mainAutoEnabled=False, mainAutoMin=5))
+    got["legacy enabled/min/margin"] = (leg.short_on, leg.short_min, leg.short_margin)
+    want["legacy enabled/min/margin"] = (False, 5, 1.1)
+    got["new enabled/min/margin win"] = (new.short_on, new.short_min, new.short_margin)
+    want["new enabled/min/margin win"] = (True, 6, 1.2)
+    return got == want, f"{ {k: v for k, v in got.items() if v != want[k]} or 'every case as asked'}"
+
+
+def main_minimal_window_positive_and_negative():
+    """The Main minimal window (mainMinN 1-3, mainMinMode), a third last-N next to the Main long and short window: the newest results of the Set's Main Set
+    (the orders it opened while Base passed) must all be positive (or all negative) after PositionCost. Judged through _score_one and gate_reason on a tape
+    whose Base and Main long windows pass throughout, so the minimal window is the only stage that can stop it; off by default; the count is held to 0..3
+    and to the smallest short window; a Main Set with fewer results is judged on the ones it has and, with stageFullWindow, is not; reason "mainminimal"."""
+    from set_engine import StageParams, stage_verdicts
+    def reason(nets, **ov):
+        b = SetBook()
+        b.load(overlay(**{"stagesEnabled": True, "mainGateEnabled": True, "mainGateN": 8, "mainShortEnabled": False, "realGateEnabled": False, "mainNegEnabled": False,
+                          "setGateShortN": 0, "setGateWindow": 50, "setGateMinTrades": 1, "setMinPf": 0.01, "setMaxDdtHours": 36, **ov}))
+        st = _set(b)
+        cf = b.cost_pct / 100.0
+        st.hist = [{"t": 1000.0 + 60.0 * i, "pnl": x, "pnl_pct": x + cf, "hold_s": 30.0, "reason": "tp", "symbol": "X", "side": "LONG"} for i, x in enumerate(nets)]
+        st.live = []
+        b._score_one(st, now=1000.0 + 60.0 * len(nets))
+        return b.gate_reason(st)
+    W, L = 0.006, -0.004
+    base = [W, W, W, W, W, W, W, W, L, W, W, W]               # Base and the Main long window pass at the end of this
+    cases = {
+        "off by default": reason(base + [L]),
+        "+1 last win": reason(base + [W], mainMinN=1, mainMinMode="positive"),
+        "+1 last loss": reason(base + [L], mainMinN=1, mainMinMode="positive"),
+        "+2 last win, loss before": reason(base + [L, W], mainMinN=2, mainMinMode="positive"),
+        "+2 last two wins": reason(base + [L, W, W], mainMinN=2, mainMinMode="positive"),
+        "-1 last loss": reason(base + [W, L], mainMinN=1, mainMinMode="negative"),
+        "-1 last win": reason(base + [W], mainMinN=1, mainMinMode="negative"),
+        "-2 last two losses": reason(base + [W, L, L], mainMinN=2, mainMinMode="negative"),
+        "-3 loss loss win": reason(base + [W, L, L, W], mainMinN=3, mainMinMode="negative"),
+        "-3 three losses": reason(base + [W, W, L, L, L], mainMinN=3, mainMinMode="negative"),
+        "count held to 3 (9 -> 3)": reason(base + [W, W, W], mainMinN=9, mainMinMode="positive"),
+        "Main stage off": reason(base + [L], mainMinN=1, mainMinMode="positive", mainGateEnabled=False),
+        "stages off": reason(base + [L], mainMinN=1, mainMinMode="positive", stagesEnabled=False),
+    }
+    want = {"off by default": "", "+1 last win": "", "+1 last loss": "mainminimal", "+2 last win, loss before": "mainminimal", "+2 last two wins": "",
+            "-1 last loss": "", "-1 last win": "mainminimal", "-2 last two losses": "", "-3 loss loss win": "mainminimal", "-3 three losses": "",
+            "count held to 3 (9 -> 3)": "", "Main stage off": "", "stages off": ""}
+    b9, b0, bs = SetBook(), SetBook(), SetBook()
+    b9.load(overlay(stagesEnabled=True, mainMinN=9))
+    b0.load(overlay())
+    bs.load(overlay(stagesEnabled=True, mainGateN=25, mainShortWindows=[2], mainMinN=3))     # the smallest short window (2) caps the minimal window
+    bo = SetBook()
+    bo.load(overlay(stagesEnabled=True, mainGateEnabled=False, mainMinN=2))
+    # the verdict on its own: two Main results against a window of 3, the results it has or the strict rule
+    P = StageParams(base_long=50, base_short=0, gate_min=1, floor=1.1, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=True, main_n=8, short_on=False,
+                    short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5, 10), real_on=False, real_n=15, full_window=False,
+                    main_min_n=3, main_min_positive=True)
+    from dataclasses import replace
+    v_av = stage_verdicts([W, W], [], [], 8, P)
+    v_st = stage_verdicts([W, W], [], [], 8, replace(P, full_window=True))
+    ok = (cases == want and b9.main_min_n == 3 and b0.main_min_n == 0 and b0.main_min_positive and bs.main_min_n == 2 and bo.main_min_n == 0
+          and v_av["minimal"] and v_av["minimal_n"] == 2 and not v_st["minimal"])
+    return ok, (f"{ {k: v for k, v in cases.items() if v != want[k]} or 'every case as asked'}; count 9 -> {b9.main_min_n}; default {b0.main_min_n}; "
+                f"capped by short window 2 -> {bs.main_min_n}; Main off -> {bo.main_min_n}; 2 results against 3: available {v_av['minimal']}, strict {v_st['minimal']}")
 
 
 def base_minimal_window_positive_and_negative():
@@ -256,7 +323,8 @@ def default_max_drawdown_time_is_24_hours():
 
 CHECKS = [
     ("gates.base-minimal-window-positive-and-negative", base_minimal_window_positive_and_negative),
-    ("gates.main-auto-windows-are-at-most-half-of-the-static-window", main_auto_windows_are_at_most_half_of_the_static_window),
+    ("gates.main-short-windows-are-at-most-half-of-the-long-window", main_short_windows_are_at_most_half_of_the_long_window),
+    ("gates.main-minimal-window-positive-and-negative", main_minimal_window_positive_and_negative),
     ("gates.short-window-is-at-most-half-of-the-long-window", short_window_is_at_most_half_of_the_long_window),
     ("gates.stage-short-window-judges-the-orders-it-has", stage_short_window_judges_the_orders_it_has),
     ("gates.stage-windows-accept-one-and-two", stage_windows_accept_one_and_two),

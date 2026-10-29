@@ -271,13 +271,16 @@ export type PulseOverlay = {
   setGateMinMode: "positive" | "negative";
   mainGateEnabled: boolean;
   mainGateN: number;
-  /** Main Auto: each Set picks its own window from these on its Main Set. */
-  mainAutoEnabled: boolean;
-  mainAutoWindows: number[];
-  /** The Auto windows are at most this share of the Main static window (default 0.5: static 25, Auto at most 12). */
-  mainAutoMaxRatio: number;
-  mainAutoMin: number;
-  mainAutoMargin: number;
+  /** Main short window (earlier "Auto"): each Set picks its own window from these on its Main Set; the long window and the short one must both pass. */
+  mainShortEnabled: boolean;
+  mainShortWindows: number[];
+  /** The short windows are at most this share of the Main long window (default 0.5: long 25, short at most 12). */
+  mainShortMaxRatio: number;
+  mainShortMin: number;
+  mainShortMargin: number;
+  /** Main minimal window: the newest N (1-3) results of a Set's Main Set must all be positive / negative (0 = off). */
+  mainMinN: number;
+  mainMinMode: "positive" | "negative";
   /** Main Negative lane: the average of the last N Main orders below zero (for some N) opens the Real Negative lane. */
   mainNegEnabled: boolean;
   mainNegWindows: number[];
@@ -485,11 +488,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setGateMinMode: "positive",
   mainGateEnabled: true,
   mainGateN: 25,
-  mainAutoEnabled: true,
-  mainAutoWindows: [5, 10, 15],
-  mainAutoMaxRatio: 0.5,
-  mainAutoMin: 8,
-  mainAutoMargin: 1.02,
+  mainShortEnabled: true,
+  mainShortWindows: [5, 10, 15],
+  mainShortMaxRatio: 0.5,
+  mainShortMin: 8,
+  mainShortMargin: 1.02,
+  mainMinN: 0,
+  mainMinMode: "positive",
   mainNegEnabled: true,
   mainNegWindows: [5, 10],
   realGateEnabled: true,
@@ -664,6 +669,14 @@ export type CtsSettings = {
   setGateShortMaxRatio?: number;
   setGateMinN?: number;
   setGateMinMode?: string;
+  mainShortEnabled?: boolean;
+  mainShortWindows?: number[];
+  mainShortMaxRatio?: number;
+  mainShortMin?: number;
+  mainShortMargin?: number;
+  mainMinN?: number;
+  mainMinMode?: string;
+  /** Earlier names of the Main short window keys (overlays written before the rename still load). */
   mainAutoEnabled?: boolean;
   mainAutoWindows?: number[];
   mainAutoMaxRatio?: number;
@@ -885,11 +898,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateMinMode: String(cts.setGateMinMode ?? "positive").toLowerCase() === "negative" ? "negative" : "positive",
     mainGateEnabled: bool(cts.mainGateEnabled, true),
     mainGateN: Math.max(8, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
-    mainAutoEnabled: bool(cts.mainAutoEnabled, true),
-    mainAutoWindows: windows(cts.mainAutoWindows, [5, 10, 15]),
-    mainAutoMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainAutoMaxRatio, 0.5))),
-    mainAutoMin: Math.max(3, Math.min(200, Math.round(num(cts.mainAutoMin, 8)))),
-    mainAutoMargin: Math.max(1, Math.min(2, num(cts.mainAutoMargin, 1.02))),
+    mainShortEnabled: bool(cts.mainShortEnabled ?? cts.mainAutoEnabled, true),
+    mainShortWindows: windows(cts.mainShortWindows ?? cts.mainAutoWindows, [5, 10, 15]),
+    mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),
+    mainShortMin: Math.max(3, Math.min(200, Math.round(num(cts.mainShortMin ?? cts.mainAutoMin, 8)))),
+    mainShortMargin: Math.max(1, Math.min(2, num(cts.mainShortMargin ?? cts.mainAutoMargin, 1.02))),
+    mainMinN: Math.max(0, Math.min(3, Math.round(num(cts.mainMinN, 0)))),
+    mainMinMode: String(cts.mainMinMode ?? "positive").toLowerCase() === "negative" ? "negative" : "positive",
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
     realGateEnabled: bool(cts.realGateEnabled, true),

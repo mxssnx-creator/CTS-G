@@ -172,7 +172,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   25, 0 = off), plus minimum orders and drawdown time. Reason `short` for the short one. A third Base window, the
   **minimal** window (`setGateMinN` 0 = off, 1-3; `setGateMinMode` positive / negative; reason `minimal`): the newest N results of the Set's own tape (net after
   PositionCost) must all be positive (or all negative); judged on the results it has unless `stageFullWindow`; at most the short window; part of the chain
-  (`set_engine.minimal_ok`), the simulator (`stage_eval.gate_base`) and the desk Settings (`gates.base-minimal-window-...`, `set-base-minimal-window-equals-the-rules`,
+  (`set_engine.stage_chain`, the Base loop), the simulator (`stage_eval.gate_base`) and the desk Settings (`gates.base-minimal-window-...`, `set-base-minimal-window-equals-the-rules`,
   `processing.sim-gate-equals-the-engine-for-every-window-configuration`, `base minimal:` mutants). The short window
   is at most `setGateShortMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the long window: long 40 allows at most 20, long 20 at most 10 (`gates.short-window-is-at-most-half-of-the-long-window`, `short window:` mutants).
 - **The standard window test** (owner, 2026-10-29): `scripts/base_window_grid.py` runs every Base long x short cell (long 20-50 step 10, short
@@ -186,12 +186,23 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   short 15 / Main 15 / Real 15 executed 1.07 on 1,629 orders (halves 1.15 / 0.95); long 50 short 15 0.96, short 25 0.94. The two
   universes rank the cells differently; one 24 h window is inside the noise.
 - **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
-  (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
-  windows on the Main Set, both must pass: static `mainGateN` (25, owner 2026-10-29, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
-  `mainAutoWindows` 5/10/15 (owner 2026-10-29) the window whose past verdicts were followed by the best PF on its own Main Set; a candidate needs
-  `mainAutoMin` (8) orders and `mainAutoMargin` (1.02) x the static result, like `_choose_hold`; `st.main_auto_n`, reason `mainauto`). The Auto windows are at
-  most `mainAutoMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the static window, the same rule as the Base short window: static 25 keeps 5 and 10, drops 15
-  (`gates.main-auto-windows-are-at-most-half-of-the-static-window`, `main auto:` mutants).
+  (`<id>:main`) holds the orders it opened while Base passed (all Base windows, each judged on the Set's own closes before that entry). **Three
+  windows on the Main Set, like Base (long, short, minimal), every one judged on its own and all of them must pass** (owner 2026-10-29: the earlier
+  "Auto" window is the **short** window; the earlier `mainAuto*` overlay keys still load when their `mainShort*` twin is absent, the new key wins):
+  - **long** `mainGateN` (25, reason `main`);
+  - **short** (`mainShortEnabled`, reason `mainshort`): each Set picks its own window from `mainShortWindows` 5/10/15 - the window whose passed
+    validations were followed by the best PF on its own Main Set; a candidate needs `mainShortMin` (8) orders and `mainShortMargin` (1.02) x the long
+    window's PF, like `_choose_hold`; `st.main_short_win`, snapshot `mainShortN`. The windows are at most `mainShortMaxRatio` (0.5, owner 2026-10-29,
+    desk Settings) of the long window, the same rule as the Base short window: long 25 keeps 5 and 10, drops 15
+    (`gates.main-short-windows-are-at-most-half-of-the-long-window`, `main short:` mutants). **The pick is causal (2026-10-29)**: each Main order is judged
+    with the window its own entry could pick, from the Main orders that had CLOSED before it and whether each had passed the candidates at its entry
+    (`stage_chain` returns `short_by_order`); the pick for the verdict now reads every Main order. Before, one pick over the whole tape was applied to every
+    earlier order, so the Real Set's history held hindsight (the order's own result was in the pick that admitted it): 13 % of the Real orders differed and
+    the realised PF of the Real Set read 0.925 against 0.878 without it (20 symbols, 24 h, 61k orders) - the gain was the leak, not an edge;
+  - **minimal** (`mainMinN` 0 = off, 1-3; `mainMinMode` positive / negative; reason `mainminimal`): the newest N results of the Main Set (net after
+    PositionCost) must all be positive (or all negative), judged on the results it has unless `stageFullWindow`; at most the smallest short candidate; it
+    only removes Real Set orders and never changes the Main Set or the short pick (`gates.main-minimal-window-positive-and-negative`,
+    `set-main-minimal-window-equals-the-rules`, `main minimal:` mutants).
 - **Main Negative lane** (separate, `mainNegEnabled`): the average net of the last 5 or the last 10 Main-Set orders (`mainNegWindows`) is
   negative. Its orders form the **Real Negative Set** (`<id>:realneg`), with its own Real validation, stats and rank.
 - **Real stage** (evals and overall strategies): the **Real Set** (`<id>:real`) holds the Main-Set orders opened while both Main windows
@@ -211,17 +222,75 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   Real Negative lane; the position carries its lane (`pos.lane`, client id nonce marker `CID_NEG_MARK`), a live close joins only its own
   lane's Real Set, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
 - **Stage windows judge the orders their lane has** (2026-10-29, `stageFullWindow` false, the default; true = the strict rule): the Base short
-  window, the Main static and Auto windows, Real and Real Negative each judge the newest N orders of their lane, at least one, at the minimum PF.
+  window, the Main long / short / minimal windows, Real and Real Negative each judge the newest N orders of their lane, at least one, at the minimum PF.
   The strict rule (a window must hold its full N) was a hidden minimum order count: a Set needed 25 Main orders before its first Real order and
   15 Real orders after, so on a sparse live book nothing reached Real. Measured on x02 (28 Oct, 1,234 configured Sets): 725 passed Base, 558 stopped at
   Main, 449 of those for lack of orders (median 18 Main orders in the 32 h lookback, 172 of them at PF 1.25 or more on the orders they had); of the 109 with
   25 or more, none reached 1.25 (median Main PF 0.94). On dense tapes (20 symbols, 24 h) the two rules differ by under 0.02 executed PF. Real last N and
-  the Negative windows go down to 1 (`realGateN` 1..200, `mainNegWindows` such as 1,2; the Main static window keeps its floor of 8).
+  the Negative windows go down to 1 (`realGateN` 1..200, `mainNegWindows` such as 1,2; the Main long window keeps its floor of 8). A Negative window is
+  below zero when its sum is under -`NEG_EPS` (1e-12): results that cancel exactly are not negative whatever the float rounding of a prefix-sum difference
+  says (found by the plain-reading check; the chain and the verdict read it the same way).
   Checks `set-stage-windows-judge-the-orders-available`, `gates.stage-short-window-...`, `gates.stage-windows-accept-one-and-two`, `stage windows:` mutants.
 - **Stage figures** (`pfBase.stages`, desk "Stages" card, coverage strip): per stage (Base, Main, Real, Real Negative, valid on any lane) the Sets that
   pass it, their share of all configured Sets, the pooled PF of those Sets' window orders and the mean of their own PFs. Never an average over all Sets
   (`processing.stage-figures-average-the-valid-sets-...`, `stats stages:` mutants).
-- Measured, stage audit (`scripts/stage_audit.py`, 20 live-universe symbols, fresh 24 h test after 24 h pre-history, Base 50/15, Main 25 + Auto, Real 15;
+- **Last-N windows** (`pfBase.windows`, desk "Last-N windows" table, grid `windows`): nine rows, each window on its own - Base long / short / minimal, Main long /
+  short / minimal, Negative (dip), Real, Real Negative: the Sets of the stage's population (all Sets for Base, the Base-passing Sets for Main and Negative, the
+  Main-passing Sets for Real) that pass THIS window alone, their share of that population and of all Sets, and the PF of the orders this window reads (gains
+  over losses of all those orders together, `orders` behind it) next to the mean of the Sets' own PFs; `chosen` = how many Sets run each Main short candidate.
+  The stage passes when all of its windows do, so a stage never has more Sets than any one of its windows (`stages.the-statistics-relations-hold`,
+  `stages.window-figures-pool-exactly-the-orders-each-window-reads`, `stages.every-window-is-judged-on-its-own`, `windows:` mutants). The simulator keeps the same
+  figures (`stage_eval.window_figures`, compared with the engine's SetState fields in `self_check` for every sampled pair).
+- **Complete figures in the window grid** (`scripts/window_grid.py`, `window_grid_report.py`, 2026-10-29): every average is over ALL the orders it covers. The cell's
+  effective PF is the gains over the losses of all the valid Sets' long-window orders over all 24 test hours (`eff_gp`, `eff_gl`, `eff_orders`; the median of the
+  hourly PFs stays beside it as `eff_pf_median`, it was the headline before), the executed PF carries its exact sums (`exec_gp_pct`, `exec_gl_pct`, also per half and lane), and
+  the per-setting tables add the cells' gains and losses ("Exec PF (all orders)", "Eff PF (all orders)", orders next to them) instead of averaging cell PFs
+  (the plain mean stays as a second column). Every cell walks the same hours, so these are comparisons between settings, not independent samples. `--main-minimal`
+  adds the Main minimal window as a grid dimension; several grid files of one test window merge into one report.
+- **Performance** (2026-10-29): `stage_chain` computes each order's window position once and shares it between the windows, answers the long window's PF before anything
+  else, skips the drawdown time for a window shorter than the limit (no episode can be longer) and builds the prefix sums in C: 4.4 -> 1.7 ms per Set and hour on 6,152
+  real Set-hours with identical lists (2.6x); the scoring pass reads a long tape from its end and sorts only when it is out of order (`_score_one` of a replayed Set
+  2.2 -> 1.4 ms, `snapshot` of 1,538 Sets about 70 ms, the golden replay fingerprint unchanged). Each shortcut has a check against the plain rule
+  (`set-chain-shortcuts-keep-the-rules`, `set-finite-and-by-time-equal-their-plain-readings`, `calc.last-n-window-without-a-full-scan-equals-the-full-scan`) and mutants.
+- **Main-stage audit** (owner question 2026-10-29: the PF after Main reads far below the effective PF - a defect?). `scripts/main_stage_audit.py`, 26 consecutive 24 h
+  test windows (2-28 Oct, 20 live-universe symbols, 24 h pre-history each, 40.7 M orders, Base 50/25, Main 25 + short 5/10, Real 15, minimum PF 1.25;
+  `reports/main_stage_audit_26x24h.txt`, `.json`; every PF is the gains over the losses of the pooled orders). Answer: **no accounting defect; the drop is the
+  selection effect on signals without an edge**, and the audit found and fixed two real defects on the way (below).
+  - *Accounting.* The chain of 120 Sets (274k orders) recomputed by a plain reading of the rules (sums in loops, no prefix sums) equals the engine's, Real and Real
+    Negative lie inside Main for every Set, 1.11 M stop exits sit exactly at -SL and 0.88 M target exits at +TP of the lane distances (deviation 2e-16), and the net of
+    every order is the gross move minus one PositionCost, once. Live x02 (80 closes of the stats export): net = gross - 0.12 % once; stops fill 2.5 % beyond the level
+    (8 stops: -4.58 % against -4.47 %), targets at the level, a scratch exit fills at the price of the next order, not of the completed minute (one closed at 0.000 %).
+  - *Zero edge.* A random entry with the Set's stop and target and one cost per order has an exact expected PF (win rate = stop / (stop + target)): 0.57 / 0.82 / 0.89 /
+    0.93 for step ranges 2-6 / 7-12 / 13-20 / 21-30. The unfiltered tapes read 0.52 / 0.75 / 0.83 / 0.88, i.e. at the benchmark and a little under it: mean gross result per
+    order +0.003 % (base Sets), +0.078 % (Exit), +0.063 % (trailing) against 0.12 % cost. No selection can make a PF above 1 out of nothing.
+  - *The ladder.* The window that selected each order reads 1.75 at Main entry and 2.11 at Real entry (2.23 for the Main long window of the Real orders); what those
+    orders then delivered: Base tape 0.834, Main Set 0.914, Real Set 0.934, Real Negative Set 0.908. Placebo (the same chain on results shuffled inside each Set, no
+    persistence in time left): 0.881 / 0.891 / 0.881. The Main Set beats the Base tape by +0.071 per window (standard error 0.015, 20 of 26 windows; pooled +0.080), the Real Set by
+    +0.071 per window (0.025, 19 of 26); of the pooled +0.080, +0.056 is choosing better Sets (the placebo keeps it: shuffling inside a Set keeps each Set's mean) and
+    +0.033 is persistence in time inside a Set (real minus placebo for Main, standard error 0.017 per window, negative in 11 of 26 windows), less 0.009 that the Base tape
+    itself differs from its placebo. Per window the lanes sit at 0.83 (Base) / 0.90 (Main) / 0.90 (Real) / 0.89 (Real Negative) and reach 1.0 in 0 / 4 / 5 / 2 of 26.
+  - *Persistence.* The Base window PF at an hour start in deciles against the PF of the Set's next 25 orders rises 0.797 -> 0.888 (rank correlation +0.079, negative
+    in 2 of 26 windows): the window PF carries about +0.09 PF of information across its whole range, trailing and base Sets +0.10 / +0.11, Exit Sets none. Nothing near
+    the 1.7-2.1 it reads at selection.
+  - *Groups.* Mean of the 26 per-window Real-lane PFs: indications trailing 1.008 (standard error 0.059), indications Exit 0.91, general Exit 0.93, general base 0.84, general
+    trailing 0.77, indications base 0.77; a pooled PF of 1.14 for indications trailing is carried by a few windows with many orders. No group holds above 1 (one window
+    ranked general trailing first, the 26 windows do not).
+  - *Hold times and exits.* The same 24 h window with every step on a fixed hold of 30 or 120 minutes instead of the 6 h stop: Base tape 0.850 / 0.854 (0.855 without),
+    Main Set 0.906 / 0.902 (0.902), Real Set 0.880 / 0.880 (0.878), Real Negative Set 0.915 / 0.912 (0.912), the selection PFs identical: the hold does not move the drop. Exits
+    by reason (26 windows): scratch exits are 51 % of the Base orders and 58 % of the Main orders (all wins), stops 36 % / 35 % (PF 0.15 / 0.21), targets 13 % / 6 %, the
+    6 h time exit under 1 % and always a loss. The Exit strategies manage only positions without a Set (live x02: 511 closes, all on the Set lane, none by an Exit strategy).
+  - *Lag and crowding (a lead, not a result).* Main Set orders opened while 1-5 of the Set's own positions were still open read PF 1.10-1.21 (48k orders), those opened with
+    11 or more open (87 % of the Main orders) 0.899; the Base tape shows no such pattern. The Base verdict reads closed orders only, so a market-wide burst of signals
+    (many symbols at once) is judged on results that come after it.
+  - *Defects found.* (1) The Main short window (then "Auto") was picked once over the whole tape and applied to every earlier order, so the Real Set's history held hindsight
+    (the order's own result sat in the pick that admitted it): now per order from the Main orders closed before it; 13 % of the Real orders changed and the realised PF of the
+    Real Set fell 0.925 -> 0.878 on the 24 h window it was found on (`stages.the-chain-is-causal`, `main short: ... hindsight` mutants). (2) A Negative window whose results
+    cancel exactly could count as negative through the rounding of a prefix-sum difference (`NEG_EPS`). (3) The grid reported the effective PF as a median of hourly values
+    and the setting tables as unweighted means of cell PFs: now the pooled figures above.
+  - *Process debug.* `scripts/stage_debug.py --data DIR --set ID`: every order of a Set with the windows that stopped it (Base: orders / long / short / minimal /
+    drawdown; Main: long / short / minimal), the Main short window each order was judged with, the three Sets the chain builds and the verdict now; the trace must rebuild the
+    engine's lists (`stages.the-debug-trace-equals-the-engine`).
+- Measured, stage audit (`scripts/stage_audit.py`, 20 live-universe symbols, fresh 24 h test after 24 h pre-history, Base 50/15, Main 25 + short window, Real 15;
   `reports/stage_audit_24h.txt`): PF of the lanes in the test window, Base Sets (whole tape) 0.855 on 2.39 M orders, Main Sets 0.892 on 221,560, Real Sets
   1.000 on 56,627, Real Negative Sets 0.887 on 131,966. By type (Base / Main / Real): trailing 0.894 / 1.032 / 1.254, exit 0.927 / 0.921 / 0.969, base (TP)
   0.797 / 0.769 / 0.770; by category general 0.911 / 0.996 / 1.090, indications 0.816 / 0.787 / 0.853; by step range 2-6 0.615 / 0.889 / 0.997, 7-12 0.843 /
@@ -246,7 +315,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
   `realId/N/Pf`, `realNegId/N/Pf`, `shortPf`, `autoN`, `lane`; `pfBase`: `base`, `baseOnly`, `main`, `processed`, `real`, `realneg`,
   `stageSets`; execution stats `sets.stages` (Sets per stage) and `lanes` (open, closed, wins, losses per lane). Desk: Settings "Stages ·
-  Base -> Main -> Real", Sets overview columns Main / Real / Real Neg / Short PF · Auto / Lane, stats "Stages". The simulator mirrors the
+  Base -> Main -> Real", Sets overview columns Main / Real / Real Neg / Short PF · Main short / Lane, stats "Stages" and "Last-N windows". The simulator mirrors the
   chain (`stage_eval.stage_lane`, self-check against the engine). Checks: `set-stage-chain-*`, `set-stage-rules-*`, `set-base-needs-both-windows`,
   `trader.lanes-every-stage-on-its-own-lane`, and the `stage:` mutants.
 - Measured earlier (single windows; 30 days, 20 symbols, development window, Base 30/25, Main 8; pooled over every Set): Base Sets PF 0.59
@@ -258,7 +327,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
   another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
 - **Base last N** (`setGateWindow`) **50** plus the short window `setGateShortN`, its minimum order count `setGateMinTrades` is off (0) since 2026-10-29 (was 30). **Main gate**
-  (`mainGateN` 25 plus Auto 5/10/15, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
+  (`mainGateN` 25 plus the short window 5/10/15 and the minimal window, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
   Sets that pass every stage on a lane (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
   over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
   (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.
@@ -363,3 +432,11 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 mutant first runs the check that caught it last time, `scripts/regression/mutant_catchers.json`, and the whole suite only
 when that one passes, so a run takes minutes, not hours; `--only PREFIX`, `--full`),
 `npm run typecheck`, `npm test`. A new check must fail on the previous code.
+
+The stage chain has its own suite, `scripts/regression/stages.py` (`stages.*`): each last-N window judged on its own (a setting of one window never moves another's
+verdict), the per-window figures against the Sets' own streams, the chain against two independent plain readings (the selftest's `_ref_chain` and
+`scripts/main_stage_audit.naive_chain`, sums in loops, no prefix sums), the process debug (`scripts/stage_debug.py`: order by order which window stopped an order
+and why; the trace must rebuild the engine's lists), causality (a result that closes after an order's entry never moves its place in the Main / Real Sets),
+neutrality (no PF created or destroyed on results without persistence, a lift on results with it), a Set's verdict ignoring every other Set's tape, the stats'
+own relations, id collisions between Sets and the Sets their orders form, and the costs (net = gross - one PositionCost, stops and targets at the lane's
+distances, a live close and a replay row of the same move on the same net). Tools: `scripts/main_stage_audit.py` (the audit below), `scripts/stage_debug.py`.

@@ -467,7 +467,7 @@ def stage_figures_average_the_valid_sets_and_report_the_validated_share():
     from set_engine import STAGE_REASONS, RANK_PF_CAP, pf_of
     reasons = {x.id: b.gate_reason(x) for x in b.by_idx}
     base_only = [x for x in b.by_idx if reasons[x.id] in ("",) + STAGE_REASONS]
-    main_pass = [x for x in base_only if (x.stage or {}).get("main") and (x.stage or {}).get("auto")]
+    main_pass = [x for x in base_only if b._main_pass(x)]
     valid = [x for x in b.by_idx if not reasons[x.id]]
     pos = [x for x in valid if b.lane_of(x) == "pos"]
     neg = [x for x in valid if b.lane_of(x) == "neg"]
@@ -492,7 +492,7 @@ def stage_figures_average_the_valid_sets_and_report_the_validated_share():
 def sim_gate_equals_the_engine_for_every_window_configuration():
     """The walk-forward simulator's direct gate (stage_eval.gate_metrics) and the engine (SetBook._score_one / gate_reason / lane_of / rank_key) give the same
     verdict, lane, window figures and rank for sampled (Set, hour) pairs under every window configuration: the Base long / short / minimal windows (1-3 results,
-    positive and negative), Main static and Auto, Real (down to 1), the Negative windows (1,2 and 5,10), both window rules and the stages off. Each configuration
+    positive and negative), the Main long / short / minimal windows (1-3 results, positive and negative), Real (down to 1), the Negative windows (1,2 and 5,10), both window rules and the stages off. Each configuration
     is loaded into its own SetBook: no state is shared between them."""
     import json as _json
     import os as _os
@@ -504,7 +504,7 @@ def sim_gate_equals_the_engine_for_every_window_configuration():
     bars = {s_: synth_bars(21 + i, 1100, drift=0.0006 if i % 2 == 0 else -0.0006, vol=0.003) for i, s_ in enumerate(names)}
     times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
     base_patch = {**SMALL, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
-                  "setGateWindow": 20, "setGateShortN": 8, "mainGateN": 8, "mainAutoWindows": [4], "realGateN": 4, "setMaxDdtHours": 36, "setGateMinTrades": 0}
+                  "setGateWindow": 20, "setGateShortN": 8, "mainGateN": 8, "mainShortWindows": [4], "realGateN": 4, "setMaxDdtHours": 36, "setGateMinTrades": 0}
     saved = _os.environ.get("STAGE_OVERLAY_PATCH")
     try:
         _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps(base_patch)
@@ -520,7 +520,11 @@ def sim_gate_equals_the_engine_for_every_window_configuration():
             "minimal -2 full windows": {"setGateMinN": 2, "setGateMinMode": "negative", "stageFullWindow": True},
             "Real 1, Negative 1,2": {"realGateN": 1, "mainNegWindows": "1,2"}, "Real 5, Negative 1,2, minimal +1": {"realGateN": 5, "mainNegWindows": "1,2", "setGateMinN": 1},
             "full windows": {"stageFullWindow": True}, "no short window": {"setGateShortN": 0, "setGateMinN": 2},
-            "Main static 12, Auto 5": {"mainGateN": 12, "mainAutoWindows": [5, 6]}, "long 30, short 12": {"setGateWindow": 30, "setGateShortN": 12},
+            "Main long 12, short 5": {"mainGateN": 12, "mainShortWindows": [5, 6]}, "long 30, short 12": {"setGateWindow": 30, "setGateShortN": 12},
+            "Main minimal +1": {"mainMinN": 1}, "Main minimal -2": {"mainMinN": 2, "mainMinMode": "negative"}, "Main minimal +3 full windows": {"mainMinN": 3, "stageFullWindow": True},
+            "Main short off, minimal -1": {"mainShortEnabled": False, "mainMinN": 1, "mainMinMode": "negative"},
+            "Base minimal -1 and Main minimal +2": {"setGateMinN": 1, "setGateMinMode": "negative", "mainMinN": 2},
+            "legacy mainAuto keys": {"mainAutoWindows": [4, 6], "mainAutoMin": 4, "mainAutoMargin": 1.0},
             "stages off": {"stagesEnabled": False},
         }
         res = {}
@@ -920,7 +924,7 @@ def _real_rows(sid, head_w, tail):
     return rows
 
 
-MAIN_ONLY = {"setGateShortN": 0, "mainAutoEnabled": False, "mainNegEnabled": False, "realGateEnabled": False}   # the Main static gate alone
+MAIN_ONLY = {"setGateShortN": 0, "mainShortEnabled": False, "mainNegEnabled": False, "realGateEnabled": False}   # the Main static gate alone
 
 
 def real_gate_is_per_set_at_the_base_minimum_pf():
@@ -1052,15 +1056,15 @@ def no_gate_asks_less_than_pf_1_1():
 
 def stage_pools_count_every_set_that_passed_base():
     """With the stages on, pfBase.baseOnly (and validatedBasePct, processed, stageSets.base) holds every Set that passed Base, also one
-    that stopped at the Main Auto window or at Real (reasons main, mainauto, real), recomputed here with the later stages switched off;
+    that stopped at the Main short window or at Real (reasons main, mainshort, real), recomputed here with the later stages switched off;
     the Real pool is rebuilt from each executing Set's own Real-Set orders (its last realGateN)."""
     from set_engine import pf_of
     b = _book(n_syms=4, bars=1200, mainGateN=8, setGateShortN=0, realGateN=5, **SMALL)     # short windows: some Sets reach Real
     b.min_pf = 0.3                  # the synthetic tapes lose: a fixture floor (set past load, which floors at 1.1) so the chain fills
     b.replay_all(now=T0)
-    passed = [st for st in b.by_idx if b.gate_reason(st) in ("", "main", "mainauto", "real")]
-    for st, why in zip([x for x in passed if b.gate_reason(x)][:3], ("mainauto", "real", "main")):          # one Set stopped at each later stage
-        st.stage = {"pos": False, "negl": False, "main": why != "main", "auto": why == "real", "neg": False}
+    passed = [st for st in b.by_idx if b.gate_reason(st) in ("", "main", "mainshort", "real")]
+    for st, why in zip([x for x in passed if b.gate_reason(x)][:3], ("mainshort", "real", "main")):          # one Set stopped at each later stage
+        st.stage = {"pos": False, "negl": False, "main": why != "main", "short": why == "real", "neg": False}
     saved = (b.main_on, b.neg_on, b.realst_on)
     b.main_on = b.neg_on = b.realst_on = False
     base_ok = {st.id for st in b.by_idx if not b.gate_reason(st)}
@@ -1076,8 +1080,8 @@ def stage_pools_count_every_set_that_passed_base():
         return sts, round(pf_of(gp, gl), 4)
     pos, real_pf = rebuilt("pos", 1)
     neg, neg_pf = rebuilt("neg", 2)
-    stopped = sorted({reasons[st.id] for st in passed if reasons[st.id]} & {"main", "mainauto", "real"})
-    ok = (len(passed) >= 3 and stopped == ["main", "mainauto", "real"] and snap["baseOnly"]["sets"] == len(base_ok)
+    stopped = sorted({reasons[st.id] for st in passed if reasons[st.id]} & {"main", "mainshort", "real"})
+    ok = (len(passed) >= 3 and stopped == ["main", "mainshort", "real"] and snap["baseOnly"]["sets"] == len(base_ok)
           and snap["stageSets"]["base"] == len(base_ok) and snap["validatedBasePct"] == round(100.0 * len(base_ok) / len(b.by_idx), 2)
           and snap["processed"]["sets"] == len(base_ok) and snap["real"]["sets"] == len(pos) and abs(snap["real"]["pf"] - real_pf) < 1e-3 and len(pos) + len(neg) > 0
           and snap["realneg"]["sets"] == len(neg) and abs(snap["realneg"]["pf"] - neg_pf) < 1e-3)

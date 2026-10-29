@@ -3,7 +3,7 @@
 Main static last N. Self-contained (inline CSS and JS, no external request), light and dark, the heatmaps rendered server-side so the page reads
 without JS (the JS only switches tabs, sorts the table and shows the tooltip).
 
-usage: window_grid_report.py GRID.json OUT.html"""
+usage: window_grid_report.py GRID.json [GRID2.json ...] OUT.html   (several files of the same test window are merged into one report)"""
 from __future__ import annotations
 
 import html
@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional
 
 METRICS = [
     ("exec_pf", "Executed PF", "pf", "{:.2f}", "The number that counts: the walk-forward PF of the positions the engine would have opened and closed under the Set's own lane."),
-    ("eff_pf", "Effective PF (in-sample)", "pf", "{:.2f}", "PF of the last-N orders of the Sets that pass every gate, measured on the tapes they were selected on."),
+    ("eff_pf", "Effective PF (in-sample, pooled)", "pf", "{:.2f}", "Gains over losses of ALL the long-window orders of the Sets that pass every gate, over all test hours (not a median of hourly figures), measured on the tapes they were selected on (in-sample)."),
+    ("eff_orders", "Orders behind the effective PF", "seq", "{:.0f}", "The long-window orders of the valid Sets added over all test hours: the count the effective PF divides (an order that stays in a Set's window counts once per hour)."),
     ("valid_pct", "Validated Sets %", "seq", "{:.1f}", "Share of the 1,538 Sets that pass every gate, mean over the test hours."),
     ("exec_orders", "Executed orders", "seq", "{:.0f}", "Positions opened and closed in the test window."),
     ("net_mean", "Net % per position", "net", "{:+.3f}", "Mean net result of an executed position, percent of its notional, after PositionCost: the same net the PF divides (PF above 1 exactly when this is positive)."),
@@ -26,7 +27,7 @@ METRICS = [
     ("neg_pf", "Executed PF · Negative lane", "pf", "{:.2f}", "Executed PF of the positions opened on the Real Negative lane (Main dips: the last Negative-window results below zero)."),
     ("neg_orders", "Orders on the Negative lane", "seq", "{:.0f}", "Positions opened on the Real Negative lane."),
 ]
-THIRDS = [("real_third", "real", "Ongoing (Real) last N", "Main static as shipped"), ("main_third", "main", "Main static last N", "Real as shipped")]
+THIRDS = [("real_third", "real", "Ongoing (Real) last N", "Main long as shipped"), ("main_third", "main", "Main long last N", "Real as shipped")]
 STRONG = 0.78                      # a cell this far along its scale takes the inverted ink
 
 
@@ -75,13 +76,15 @@ def tip(c: Dict[str, Any], floor: int) -> str:
     wins = 100.0 * c["wins"] / c["exec_orders"] if c["exec_orders"] else 0.0
     parts = [f"Base long {c['long']}" + (f" / short {c['short_eff']}" if c["stages"] else " alone (stages off)")]
     if c["stages"]:
-        parts.append(f"Main static {c['main_eff']} / Real {c['real_eff']}" + (f" / Negative windows {','.join(str(w) for w in c['neg_windows'])}" if c.get("neg_windows") else ""))
+        parts.append(f"Main long {c['main_eff']} / Real {c['real_eff']}" + (f" / Negative windows {','.join(str(w) for w in c['neg_windows'])}" if c.get("neg_windows") else ""))
     parts += [f"executed PF {c['exec_pf']} on {c['exec_orders']} orders ({wins:.0f}% wins)",
               f"halves {c['half1']['pf']} ({c['half1']['orders']}) / {c['half2']['pf']} ({c['half2']['orders']})",
-              f"effective PF {c['eff_pf']} (in-sample), validated {c['valid_pct']}%",
+              f"effective PF {c['eff_pf']} on {c.get('eff_orders', '–')} orders (pooled over all hours, in-sample), validated {c['valid_pct']}%",
               f"net {val(c, 'net_mean'):+.3f}% per position ({c['net_pct']:+.1f}% summed), max drawdown {c['max_dd_pct']}%, hours positive {c['hours_pos']}"]
     if c.get("min_n"):
-        parts.append(f"minimal window {min_label(c)} (the newest {c['min_n']} result(s) all {'positive' if c.get('min_mode') == 'positive' else 'negative'})")
+        parts.append(f"Base minimal window {min_label(c)} (the newest {c['min_n']} result(s) all {'positive' if c.get('min_mode') == 'positive' else 'negative'})")
+    if c.get("main_min_n"):
+        parts.append(f"Main minimal window {main_min_label(c)} (the newest {c['main_min_n']} Main result(s) all {'positive' if c.get('main_min_mode') == 'positive' else 'negative'})")
     if c.get("neg_lane"):
         parts.append(f"positive lane PF {c['pos_lane']['pf']} on {c['pos_lane']['orders']} orders, Negative lane PF {c['neg_lane']['pf']} on {c['neg_lane']['orders']}")
     elif c.get("neg_lane_orders"):
@@ -102,7 +105,10 @@ def pearson(xs: List[float], ys: List[float]) -> Optional[float]:
 
 
 def fmt(v: Optional[float], f: str) -> str:
-    return "–" if v is None else f.format(v)
+    """A number for display; 99 is the engine's PF of a window without a loss, shown as such rather than as 99.00."""
+    if v is None:
+        return "–"
+    return "no loss" if f == "{:.2f}" and v >= 99.0 else f.format(v)
 
 
 def min_label(c: Dict[str, Any]) -> str:
@@ -111,10 +117,43 @@ def min_label(c: Dict[str, Any]) -> str:
     return "off" if not n else f"{'+' if c.get('min_mode') == 'positive' else '-'}{n}"
 
 
-def rank_cells(cells, third, floor, neg=None, neg_default="", mn=None):
+def main_min_label(c: Dict[str, Any]) -> str:
+    """The Main minimal window of a cell, the same way."""
+    n = c.get("main_min_n") or 0
+    return "off" if not n else f"{'+' if c.get('main_min_mode') == 'positive' else '-'}{n}"
+
+
+def rank_cells(cells, third, floor, neg=None, neg_default="", mn=None, km=None):
     pool = [c for c in cells if c["stages"] and c.get(third) and c["exec_pf"] is not None and c["exec_orders"] >= floor
-            and (neg is None or (c.get("neg") or neg_default) == neg) and (mn is None or min_label(c) == mn)]
+            and (neg is None or (c.get("neg") or neg_default) == neg) and (mn is None or min_label(c) == mn) and (km is None or main_min_label(c) == km)]
     return sorted(pool, key=lambda c: (c["exec_pf"], c["exec_orders"]), reverse=True)
+
+
+WINDOW_ROWS = [("baseLong", "Base · long window"), ("baseShort", "Base · short window"), ("baseMinimal", "Base · minimal window"), ("mainLong", "Main · long window"),
+               ("mainShort", "Main · short window"), ("mainMinimal", "Main · minimal window"), ("negative", "Main · Negative (dip) windows"), ("real", "Real · last N"),
+               ("realNeg", "Real · Negative lane last N")]
+
+
+def windows_table(c: Dict[str, Any], title: str) -> str:
+    """The cell's last-N windows each on its own, pooled over every test hour: the Sets judged and passing per hour, the PF of all the orders the window read and
+    how many they were. A window that is off reads off."""
+    w = c.get("windows")
+    if not w:
+        return ""
+    rows = []
+    for key, label in WINDOW_ROWS:
+        x = w.get(key)
+        if not x:
+            continue
+        setting = "off" if not x["on"] else (" · ".join(str(i) for i in x["n"]) if isinstance(x["n"], list) else str(x["n"]))
+        if not x["on"]:
+            rows.append(f'<tr class="low"><td>{esc(label)}</td><td>off</td><td colspan="5">–</td></tr>')
+            continue
+        pf = x["pf"]
+        rows.append(f'<tr><td>{esc(label)}</td><td>{esc(setting)}</td><td>{x["judged_per_hour"]:.0f}</td><td>{x["sets_per_hour"]:.1f}</td><td>{x["pct"]:.1f}%</td>'
+                    f'<td><b>{fmt(pf, "{:.2f}")}</b></td><td>{x["orders"]}</td></tr>')
+    return (f'<h4>{esc(title)}</h4><div class="wrap"><table class="t"><thead><tr><th>Window</th><th>Setting</th><th>Sets judged / h</th><th>Passing / h</th><th>% passing</th>'
+            f'<th>PF of its orders</th><th>Orders (all hours)</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
 
 
 def render(data: Dict[str, Any]) -> str:
@@ -130,9 +169,10 @@ def render(data: Dict[str, Any]) -> str:
     def cneg(c: Dict[str, Any]) -> str:
         return c.get("neg") or neg_default
     minimals = [m["label"] for m in (meta.get("minimals") or [{"label": "off"}])]
-    best = {(t[0], n, m): (rank_cells(cells, t[0], floor, n, neg_default, m) or [None])[0] for t in thirds for n in negs for m in minimals}
+    kmins = [m["label"] for m in (meta.get("main_minimals") or [{"label": "off"}])]
+    best = {(t[0], n, m, k): (rank_cells(cells, t[0], floor, n, neg_default, m, k) or [None])[0] for t in thirds for n in negs for m in minimals for k in kmins}
     best_ids = {c["id"] for c in best.values() if c}
-    shipped = next((c for c in staged if (c["long"], c["short"], c["main"], c["real"], cneg(c), min_label(c)) == (ship["long"], ship["short"], ship["main"], ship["real"], neg_default, "off")), None)
+    shipped = next((c for c in staged if (c["long"], c["short"], c["main"], c["real"], cneg(c), min_label(c), main_min_label(c)) == (ship["long"], ship["short"], ship["main"], ship["real"], neg_default, "off", "off")), None)
     scale_hi = {"exec_orders": max([c["exec_orders"] for c in cells] or [1]), "valid_pct": max([c["valid_pct"] for c in cells] or [1]),
                 "net_pct": max([abs(c["net_pct"]) for c in cells] or [1]), "net_mean": max([abs(val(c, "net_mean") or 0.0) for c in cells] or [1]) or 1.0,
                 "neg_orders": max([val(c, "neg_orders") or 0 for c in cells] or [1]) or 1.0}
@@ -170,9 +210,9 @@ def render(data: Dict[str, Any]) -> str:
     na_title = (f"short window over {100 * ratio:g}% of the long window (setGateShortMaxRatio): not allowed" if ratio is not None and ratio < 1
                 else "short window at or over the long window: the long window itself")
 
-    def matrix(third: str, vary: str, value: int, neg: str, mn: str) -> str:
+    def matrix(third: str, vary: str, value: int, neg: str, mn: str, km: str) -> str:
         """One heatmap: every cell carries the figures of all metrics (data-v, data-t) so that a tab only repaints it; the page shows the first metric without JS."""
-        sel = {(c["long"], c["short"]): c for c in staged if c.get(third) and c[vary] == value and cneg(c) == neg and min_label(c) == mn}
+        sel = {(c["long"], c["short"]): c for c in staged if c.get(third) and c[vary] == value and cneg(c) == neg and min_label(c) == mn and main_min_label(c) == km}
         mk0, _l0, kind0, f0, _d0 = METRICS[0]
         out = ['<table class="hm" role="grid"><thead><tr><th class="corner" scope="col">long \\ short</th>']
         out += [f'<th scope="col">{s}</th>' for s in shorts] + ["</tr></thead><tbody>"]
@@ -193,7 +233,7 @@ def render(data: Dict[str, Any]) -> str:
                 cls = ["cell"]
                 if low:
                     cls.append("low")
-                if best.get((third, neg, mn)) is not None and c["id"] == best[(third, neg, mn)]["id"]:
+                if best.get((third, neg, mn, km)) is not None and c["id"] == best[(third, neg, mn, km)]["id"]:
                     cls.append("best")
                 if shipped is not None and c["id"] == shipped["id"]:
                     cls.append("ship")
@@ -212,12 +252,13 @@ def render(data: Dict[str, Any]) -> str:
         values = meta["mains"] if vary == "main" else meta["reals"]
         for nn in negs:
           for mn in minimals:
+           for km in kmins:
             blocks = []
             for v in values:
-                fixed_txt = f"Real {meta['real_default']}" if vary == "main" else f"Main static {meta['main_default']}"
-                blocks.append(f'<figure class="mx"><figcaption><b>{esc(label)} {v}</b><span>{esc(fixed_txt)} · Negative windows {esc(nn)} · minimal window {esc(mn)} · Base long (rows) × short (columns)</span></figcaption>'
-                              f'{matrix(third, vary, v, nn, mn)}</figure>')
-            panels.append(f'<section class="panel" data-third="{vary}" data-neg="{esc(nn)}" data-min="{esc(mn)}" hidden><div class="mxs">{"".join(blocks)}</div></section>')
+                fixed_txt = f"Real {meta['real_default']}" if vary == "main" else f"Main long {meta['main_default']}"
+                blocks.append(f'<figure class="mx"><figcaption><b>{esc(label)} {v}</b><span>{esc(fixed_txt)} · Negative windows {esc(nn)} · Base minimal {esc(mn)} · Main minimal {esc(km)} · Base long (rows) × short (columns)</span></figcaption>'
+                              f'{matrix(third, vary, v, nn, mn, km)}</figure>')
+            panels.append(f'<section class="panel" data-third="{vary}" data-neg="{esc(nn)}" data-min="{esc(mn)}" data-kmin="{esc(km)}" hidden><div class="mxs">{"".join(blocks)}</div></section>')
     metrics_json = json.dumps([{"key": k, "label": l, "kind": kd, "desc": d_, "fmt": ff} for k, l, kd, ff, d_ in METRICS], separators=(",", ":"))
 
     # reference row: Base long window alone
@@ -234,15 +275,15 @@ def render(data: Dict[str, Any]) -> str:
         low = c["exec_orders"] < floor
         rows.append(f'<tr class="{"low" if low else ""}{" best" if c["id"] in best_ids and any(b and b["id"] == c["id"] for b in best.values()) else ""}">'
                     f'<td data-v="{c["long"]}">{c["long"]}</td><td data-v="{c["short_eff"]}">{c["short_eff"] if c["stages"] else "–"}</td>'
-                    f'<td data-v="{c["main_eff"] or 0}">{c["main_eff"] or "–"}</td><td data-v="{c["real_eff"] or 0}">{c["real_eff"] or "–"}</td><td>{esc(cneg(c)) if c["stages"] else "–"}</td><td>{esc(min_label(c)) if c["stages"] else "–"}</td>'
+                    f'<td data-v="{c["main_eff"] or 0}">{c["main_eff"] or "–"}</td><td data-v="{c["real_eff"] or 0}">{c["real_eff"] or "–"}</td><td>{esc(cneg(c)) if c["stages"] else "–"}</td><td>{esc(min_label(c)) if c["stages"] else "–"}</td><td>{esc(main_min_label(c)) if c["stages"] else "–"}</td>'
                     f'<td data-v="{c["exec_pf"] or 0}"><b>{fmt(c["exec_pf"], "{:.2f}")}</b></td><td data-v="{c["exec_orders"]}">{c["exec_orders"]}{"†" if low else ""}</td>'
                     f'<td data-v="{wins:.1f}">{wins:.0f}%</td><td data-v="{val(c, "net_mean")}">{val(c, "net_mean"):+.3f}</td><td data-v="{c["net_pct"]}">{c["net_pct"]:+.1f}</td><td data-v="{c["max_dd_pct"]}">{c["max_dd_pct"]}</td>'
-                    f'<td data-v="{c["hours_pos"].split("/")[0]}">{c["hours_pos"]}</td><td data-v="{c["eff_pf"] or 0}">{fmt(c["eff_pf"], "{:.2f}")}</td>'
+                    f'<td data-v="{c["hours_pos"].split("/")[0]}">{c["hours_pos"]}</td><td data-v="{c["eff_pf"] or 0}">{fmt(c["eff_pf"], "{:.2f}")} ({c.get("eff_orders", "–")})</td>'
                     f'<td data-v="{c["valid_pct"]}">{c["valid_pct"]}</td><td data-v="{c["half1"]["pf"] or 0}">{fmt(c["half1"]["pf"], "{:.2f}")}</td>'
                     f'<td data-v="{c["half2"]["pf"] or 0}">{fmt(c["half2"]["pf"], "{:.2f}")}</td><td data-v="{val(c, "pos_pf") or 0}">{fmt(val(c, "pos_pf"), "{:.2f}")}</td>'
                     f'<td data-v="{val(c, "neg_pf") or 0}">{fmt(val(c, "neg_pf"), "{:.2f}")}</td><td data-v="{val(c, "neg_orders") or 0}">{val(c, "neg_orders") or 0:.0f}</td>'
                     f'<td>{tag}</td></tr>')
-    heads = ["Long", "Short", "Main", "Real", "Neg win", "Min win", "Exec PF", "Orders", "Wins", "Net / pos %", "Net Σ %", "Max DD %", "Hours +", "Eff PF", "Valid %", "PF 1st 12 h", "PF 2nd 12 h",
+    heads = ["Long", "Short", "Main", "Real", "Neg win", "Min win", "Main min", "Exec PF", "Orders", "Wins", "Net / pos %", "Net Σ %", "Max DD %", "Hours +", "Eff PF (orders)", "Valid %", "PF 1st 12 h", "PF 2nd 12 h",
              "PF pos lane", "PF neg lane", "Neg orders", "Grid"]
     thead = "".join(f'<th scope="col" data-col="{i}" aria-sort="none"><button type="button">{esc(h)}</button></th>' for i, h in enumerate(heads))
 
@@ -282,7 +323,16 @@ def render(data: Dict[str, Any]) -> str:
     third_tabs = "".join(f'<button type="button" class="tab" data-third="{v}" aria-pressed="{"true" if i == 0 else "false"}">{esc(l)} {" / ".join(str(x) for x in (meta["mains"] if v == "main" else meta["reals"]))}</button>'
                          for i, (_, v, l, _f) in enumerate(thirds))
     neg_tabs = "".join(f'<button type="button" class="tab" data-neg="{esc(n)}" aria-pressed="{"true" if i == 0 else "false"}">Negative windows {esc(n)}</button>' for i, n in enumerate(negs)) if len(negs) > 1 else ""
-    # marginal means: the mean executed PF of every cell that has this value of one dimension (the other dimensions averaged)
+    # marginals: the PF of ALL the orders of every cell that has this value of one dimension (gains over losses added over the cells: the complete, order-weighted
+    # figure), next to the plain mean of the cells' PFs; the other settings are averaged out. A cell without the exact sums (an older grid file) falls back to its PF.
+    def pooled(cs: List[Dict[str, Any]], gp_key: str, gl_key: str, pf_key: str) -> Optional[float]:
+        gp = sum(c[gp_key] for c in cs if c.get(gp_key) is not None)
+        gl = sum(c[gl_key] for c in cs if c.get(gl_key) is not None)
+        if gl > 0 and all(c.get(gp_key) is not None for c in cs):
+            return gp / gl
+        vals = [c[pf_key] for c in cs if c.get(pf_key) is not None]
+        return sum(vals) / len(vals) if vals else None
+
     def marginal(dim: str, values: List[Any], label: str, get) -> str:
         rows_ = []
         for v in values:
@@ -290,33 +340,46 @@ def render(data: Dict[str, Any]) -> str:
             if not cs:
                 continue
             n_ = sum(c["exec_orders"] for c in cs)
-            rows_.append(f"<tr><td>{esc(label)} {esc(v)}</td><td>{len(cs)}</td><td><b>{sum(c['exec_pf'] for c in cs) / len(cs):.3f}</b></td>"
-                         f"<td>{sum(c['eff_pf'] or 0 for c in cs) / len(cs):.2f}</td><td>{sum(c['valid_pct'] for c in cs) / len(cs):.2f}</td><td>{n_ / len(cs):.0f}</td>"
-                         f"<td>{sum(val(c, 'neg_orders') or 0 for c in cs) / len(cs):.0f}</td></tr>")
+            e_n = sum(c.get("eff_orders") or 0 for c in cs)
+            rows_.append(f"<tr><td>{esc(label)} {esc(v)}</td><td>{len(cs)}</td><td><b>{fmt(pooled(cs, 'exec_gp_pct', 'exec_gl_pct', 'exec_pf'), '{:.3f}')}</b></td>"
+                         f"<td>{sum(c['exec_pf'] for c in cs) / len(cs):.3f}</td><td>{n_}</td>"
+                         f"<td>{fmt(pooled(cs, 'eff_gp', 'eff_gl', 'eff_pf'), '{:.2f}')}</td><td>{e_n}</td><td>{sum(c['valid_pct'] for c in cs) / len(cs):.2f}</td>"
+                         f"<td>{sum(val(c, 'neg_orders') or 0 for c in cs)}</td></tr>")
         return "".join(rows_)
     best_rows = []
     for nn in negs:
         for mn in minimals:
+          for km in kmins:
             for t in thirds:
-                b = (rank_cells(cells, t[0], floor, nn, neg_default, mn) or [None])[0]
+                b = (rank_cells(cells, t[0], floor, nn, neg_default, mn, km) or [None])[0]
                 if b:
-                    best_rows.append(f"<tr><td>{esc(nn)}</td><td>{esc(mn)}</td><td>{b['long']}</td><td>{b['short_eff']}</td><td>{b['real_eff']}</td><td><b>{b['exec_pf']}</b></td><td>{b['exec_orders']}</td>"
-                                     f"<td>{b['eff_pf']}</td><td>{b['valid_pct']}</td><td>{b['half1']['pf']} / {b['half2']['pf']}</td><td>{fmt(val(b, 'neg_pf'), '{:.2f}')} on {val(b, 'neg_orders') or 0:.0f}</td></tr>")
-    best_table = ("<h2>Best cell per Negative windows × Base minimal window</h2><p class=\"sub\">The cell with the highest executed PF (at least " + str(floor) + " orders) for each combination: "
-                  "the minimal window decides which of the newest 1-3 results must be positive or negative before a Set is valid.</p>"
-                  "<div class=\"wrap\"><table class=\"t\"><thead><tr><th>Negative windows</th><th>Minimal</th><th>Long</th><th>Short</th><th>Real</th><th>Exec PF</th><th>Orders</th><th>Eff PF</th><th>Valid %</th>"
-                  "<th>PF 1st / 2nd 12 h</th><th>Negative lane</th></tr></thead><tbody>" + "".join(best_rows) + "</tbody></table></div>") if best_rows and len(minimals) > 1 else ""
+                    best_rows.append(f"<tr><td>{esc(nn)}</td><td>{esc(mn)}</td><td>{esc(km)}</td><td>{b['long']}</td><td>{b['short_eff']}</td><td>{b['real_eff']}</td><td><b>{b['exec_pf']}</b></td><td>{b['exec_orders']}</td>"
+                                     f"<td>{b['eff_pf']} ({b.get('eff_orders', '–')})</td><td>{b['valid_pct']}</td><td>{b['half1']['pf']} / {b['half2']['pf']}</td><td>{fmt(val(b, 'neg_pf'), '{:.2f}')} on {val(b, 'neg_orders') or 0:.0f}</td></tr>")
+    best_table = ("<h2>Best cell per Negative windows × minimal windows</h2><p class=\"sub\">The cell with the highest executed PF (at least " + str(floor) + " orders) for each combination: "
+                  "a minimal window decides which of the newest 1-3 results must be positive or negative before a Set is valid (Base: the Set's own results; Main: its Main Set's).</p>"
+                  "<div class=\"wrap\"><table class=\"t\"><thead><tr><th>Negative windows</th><th>Base minimal</th><th>Main minimal</th><th>Long</th><th>Short</th><th>Real</th><th>Exec PF</th><th>Orders</th><th>Eff PF (orders)</th><th>Valid %</th>"
+                  "<th>PF 1st / 2nd 12 h</th><th>Negative lane</th></tr></thead><tbody>" + "".join(best_rows) + "</tbody></table></div>") if best_rows and (len(minimals) > 1 or len(kmins) > 1) else ""
     marg = ""
     if staged:
         body = (marginal("long", longs, "Base long", lambda c: c["long"]) + marginal("short", shorts, "Base short", lambda c: c["short_eff"])
                 + marginal("real", meta["reals"], "Real last N", lambda c: c["real_eff"] if c.get("real_third") else None)
-                + marginal("main", meta["mains"], "Main static", lambda c: c["main_eff"] if c.get("main_third") and not c.get("real_third") else None)
+                + marginal("main", meta["mains"], "Main long", lambda c: c["main_eff"] if c.get("main_third") and not c.get("real_third") else None)
                 + (marginal("neg", negs, "Negative windows", cneg) if len(negs) > 1 else "")
-                + (marginal("min", minimals, "Minimal window", min_label) if len(minimals) > 1 else ""))
-        marg = ('<h2>What each setting does on average</h2><p class="sub">Mean over every cell that carries the value (the other settings averaged out): executed PF, effective PF (in-sample), validated share, '
-                'executed orders and Negative-lane orders per cell. The order of the means is the clean read of a setting; single cells are noisy.</p>'
-                f'<div class="wrap"><table class="t"><thead><tr><th>Setting</th><th>Cells</th><th>Mean exec PF</th><th>Mean eff PF</th><th>Mean valid %</th><th>Mean orders</th><th>Mean neg-lane orders</th></tr></thead><tbody>{body}</tbody></table></div>')
-    min_tabs = "".join(f'<button type="button" class="tab" data-min="{esc(m)}" aria-pressed="{"true" if i == 0 else "false"}">Minimal window {esc(m)}</button>' for i, m in enumerate(minimals)) if len(minimals) > 1 else ""
+                + (marginal("min", minimals, "Base minimal window", min_label) if len(minimals) > 1 else "")
+                + (marginal("kmin", kmins, "Main minimal window", main_min_label) if len(kmins) > 1 else ""))
+        marg = ('<h2>What each setting does, over all its orders</h2><p class="sub">For every setting value, all the cells that carry it (the other settings averaged out) taken together: the executed PF of ALL their orders (gains over losses added over the cells, '
+                'so a cell with many orders weighs more), the plain mean of the cells\' PFs beside it, the executed orders behind them, the effective PF of all their effective orders (in-sample), '
+                'the mean validated share and the orders on the Negative lane. The same orders appear in many cells (every cell walks the same hours), so these are comparisons between settings, not independent samples; single cells are noisy.</p>'
+                f'<div class="wrap"><table class="t"><thead><tr><th>Setting</th><th>Cells</th><th>Exec PF (all orders)</th><th>Mean of cell PFs</th><th>Exec orders</th><th>Eff PF (all orders)</th><th>Eff orders</th><th>Mean valid %</th><th>Neg-lane orders</th></tr></thead><tbody>{body}</tbody></table></div>')
+    min_tabs = "".join(f'<button type="button" class="tab" data-min="{esc(m)}" aria-pressed="{"true" if i == 0 else "false"}">Base minimal {esc(m)}</button>' for i, m in enumerate(minimals)) if len(minimals) > 1 else ""
+    kmin_tabs = "".join(f'<button type="button" class="tab" data-kmin="{esc(m)}" aria-pressed="{"true" if i == 0 else "false"}">Main minimal {esc(m)}</button>' for i, m in enumerate(kmins)) if len(kmins) > 1 else ""
+    win_tables = ""
+    show_cells = ([("Shipped setting", shipped)] if shipped else []) + [(f"Best by executed PF, rank {i + 1}", c) for i, c in enumerate(ranked_all[:3])]
+    for ttl, c in show_cells:
+        win_tables += windows_table(c, f"{ttl}: long {c['long']} / short {c['short_eff']} / Main {c['main_eff']} / Real {c['real_eff']}" + (f" / Base minimal {min_label(c)}" if c.get("min_n") else "") + (f" / Main minimal {main_min_label(c)}" if c.get("main_min_n") else ""))
+    if win_tables:
+        win_tables = ("<h2>Every last-N window on its own</h2><p class=\"sub\">For a cell, each window judged by itself over all test hours: how many Sets of its stage's population pass it (per hour), the PF of all the orders it reads, "
+                      "and how many orders that is. A stage passes when all of its windows do; the Sets that pass a window alone are more than those that pass the stage.</p>" + win_tables)
     metric_tabs = "".join(f'<button type="button" class="tab" data-metric="{k}" aria-pressed="{"true" if i == 0 else "false"}">{esc(l)}</button>' for i, (k, l, *_r) in enumerate(METRICS))
     sc = meta.get("self_check") or []
     chk = (f"direct gate = engine on {sum(x['samples'] - x['bad'] for x in sc)}/{sum(x['samples'] for x in sc)} sampled (Set, hour) pairs" if sc else "self-check not run")
@@ -324,7 +387,7 @@ def render(data: Dict[str, Any]) -> str:
     data_json = json.dumps({"meta": {k: v for k, v in meta.items() if k != "symbols"}, "cells": [{k: v for k, v in c.items() if k != "hourly"} for c in cells]}, separators=(",", ":")).replace("</", "<\\/")
     return TEMPLATE.format(span=esc(span), n_sym=len(meta["symbols"]), pre=f"{meta['prehistory_h']:g}", n_hours=len(meta["hours"]), n_cells=len(cells),
                            floor=floor, min_orders=("off" if not meta["min_orders"] else meta["min_orders"]), ddt=f"{meta['max_ddt_h']:g}", min_pf=meta["min_pf"],
-                           cost=meta["cost_pct"], sets=meta["sets"], ratio_txt=(f"{100 * meta['short_max_ratio']:g}%" if meta.get("short_max_ratio") is not None else "100%"), reading="".join(reading), third_tabs=third_tabs, metrics=metrics_json, neg_tabs=neg_tabs, min_tabs=min_tabs, marginals=marg, best_table=best_table, metric_tabs=metric_tabs,
+                           cost=meta["cost_pct"], sets=meta["sets"], ratio_txt=(f"{100 * meta['short_max_ratio']:g}%" if meta.get("short_max_ratio") is not None else "100%"), reading="".join(reading), third_tabs=third_tabs, metrics=metrics_json, neg_tabs=neg_tabs, min_tabs=min_tabs, kmin_tabs=kmin_tabs, windows_tables=win_tables, marginals=marg, best_table=best_table, metric_tabs=metric_tabs,
                            panels="".join(panels), alone=alone_html, table_head=thead, table_rows="".join(rows), strips=strips, chk=esc(chk), created=esc(created),
                            data=data_json, symbols=esc(", ".join(meta["symbols"])), ship=f"long {ship['long']}, short {ship['short']}, Main {ship['main']}, Real {ship['real']}")
 
@@ -418,6 +481,7 @@ table.t tr.low td {{ color:var(--t3); }} table.t tr.best td {{ font-weight:600; 
 <div class="bar" role="group" aria-label="Third axis">{third_tabs}</div>
 <div class="bar" role="group" aria-label="Negative windows">{neg_tabs}</div>
 <div class="bar" role="group" aria-label="Base minimal window">{min_tabs}</div>
+<div class="bar" role="group" aria-label="Main minimal window">{kmin_tabs}</div>
 <div class="bar" role="group" aria-label="Metric">{metric_tabs}</div>
 <p class="mdesc" id="mdesc"></p>
 {panels}
@@ -430,6 +494,8 @@ table.t tr.low td {{ color:var(--t3); }} table.t tr.best td {{ font-weight:600; 
 
 {marginals}
 
+{windows_tables}
+
 <h2>Base long window alone (stages off)</h2>
 <div class="chips">{alone}</div>
 
@@ -440,8 +506,8 @@ table.t tr.low td {{ color:var(--t3); }} table.t tr.best td {{ font-weight:600; 
 <h2>All cells</h2>
 <div class="wrap"><table class="t" id="tbl"><thead><tr>{table_head}</tr></thead><tbody>{table_rows}</tbody></table></div>
 
-<p class="foot">Executed PF is net of PositionCost over positions opened under the best valid Set per signal, closed by that Set's own lane; effective PF is the pooled PF of the last-N orders of the Sets that pass every gate, measured on the tapes they were selected on (in-sample).
-Main static, the Main Auto window (5/10/15), the Negative lane and the Real stage are as shipped except where a column says otherwise; the engine clamps a window to the long window. {chk}. Symbols: {symbols}. Generated {created} by scripts/window_grid.py.</p>
+<p class="foot">Executed PF is net of PositionCost over positions opened under the best valid Set per signal, closed by that Set's own lane; effective PF is the gains over the losses of ALL the long-window orders of the Sets that pass every gate over all test hours, measured on the tapes they were selected on (in-sample); every average of cells is taken over all their orders, not as a mean of PFs.
+Main long, the Main short window (5/10), the Negative lane and the Real stage are as shipped except where a column says otherwise; the engine clamps a window to the long window. {chk}. Symbols: {symbols}. Generated {created} by scripts/window_grid.py.</p>
 </main>
 <div class="tip" id="tip" role="tooltip"></div>
 <script type="application/json" id="data">{data}</script>
@@ -449,7 +515,7 @@ Main static, the Main Auto window (5/10/15), the Negative lane and the Real stag
 <script>
 (function () {{
   var first = document.querySelector(".panel");
-  var state = {{ third: first ? first.dataset.third : "real", neg: first ? first.dataset.neg : "", min: first ? first.dataset.min : "", metric: "exec_pf" }};
+  var state = {{ third: first ? first.dataset.third : "real", neg: first ? first.dataset.neg : "", min: first ? first.dataset.min : "", kmin: first ? first.dataset.kmin : "", metric: "exec_pf" }};
   var D = JSON.parse(document.getElementById("data").textContent);
   var METRICS = JSON.parse(document.getElementById("metrics").textContent);
   var CELLS = {{}};
@@ -475,20 +541,21 @@ Main static, the Main Auto window (5/10/15), the Negative lane and the Real stag
   function tipText(c) {{
     var f = function (x, d) {{ return x === null || x === undefined ? "–" : Number(x).toFixed(d); }};
     var p = ["Base long " + c.long + (c.stages ? " / short " + c.short_eff : " alone (stages off)")];
-    if (c.stages) p.push("Main static " + c.main_eff + " / Real " + c.real_eff + (c.neg_windows ? " / Negative windows " + c.neg_windows.join(",") : ""));
-    if (c.min_n) p.push("minimal window " + (c.min_mode === "positive" ? "+" : "-") + c.min_n + " (the newest " + c.min_n + " result(s) all " + c.min_mode + ")");
+    if (c.stages) p.push("Main long " + c.main_eff + " / Real " + c.real_eff + (c.neg_windows ? " / Negative windows " + c.neg_windows.join(",") : ""));
+    if (c.min_n) p.push("Base minimal window " + (c.min_mode === "positive" ? "+" : "-") + c.min_n + " (the newest " + c.min_n + " result(s) all " + c.min_mode + ")");
+    if (c.main_min_n) p.push("Main minimal window " + (c.main_min_mode === "positive" ? "+" : "-") + c.main_min_n + " (the newest " + c.main_min_n + " Main result(s) all " + c.main_min_mode + ")");
     p.push("executed PF " + f(c.exec_pf, 3) + " on " + c.exec_orders + " orders (" + (c.exec_orders ? Math.round(100 * c.wins / c.exec_orders) : 0) + "% wins)");
     p.push("halves " + f(c.half1.pf, 2) + " (" + c.half1.orders + ") / " + f(c.half2.pf, 2) + " (" + c.half2.orders + ")");
-    p.push("effective PF " + f(c.eff_pf, 2) + " (in-sample), validated " + f(c.valid_pct, 2) + "%");
+    p.push("effective PF " + f(c.eff_pf, 2) + " on " + (c.eff_orders === undefined ? "–" : c.eff_orders) + " orders (pooled over all hours, in-sample), validated " + f(c.valid_pct, 2) + "%");
     p.push("net " + f(c.net_per_order_pct, 3) + "% per position (" + f(c.net_pct, 1) + "% summed), max drawdown " + f(c.max_dd_pct, 1) + "%, hours positive " + c.hours_pos);
     if (c.neg_lane) p.push("positive lane PF " + f(c.pos_lane.pf, 2) + " on " + c.pos_lane.orders + ", Negative lane PF " + f(c.neg_lane.pf, 2) + " on " + c.neg_lane.orders);
     return p.join(" · ");
   }}
   function tipOf(el) {{ return el.dataset.tip || (el.dataset.cell && CELLS[el.dataset.cell] ? tipText(CELLS[el.dataset.cell]) : ""); }}
   function show() {{
-    document.querySelectorAll(".panel").forEach(function (p) {{ p.hidden = !(p.dataset.third === state.third && p.dataset.neg === state.neg && p.dataset.min === state.min); }});
+    document.querySelectorAll(".panel").forEach(function (p) {{ p.hidden = !(p.dataset.third === state.third && p.dataset.neg === state.neg && p.dataset.min === state.min && p.dataset.kmin === state.kmin); }});
     document.querySelectorAll(".tab").forEach(function (b) {{
-      var on = (b.dataset.third && b.dataset.third === state.third) || (b.dataset.neg && b.dataset.neg === state.neg) || (b.dataset.min && b.dataset.min === state.min) || (b.dataset.metric && b.dataset.metric === state.metric);
+      var on = (b.dataset.third && b.dataset.third === state.third) || (b.dataset.neg && b.dataset.neg === state.neg) || (b.dataset.min && b.dataset.min === state.min) || (b.dataset.kmin && b.dataset.kmin === state.kmin) || (b.dataset.metric && b.dataset.metric === state.metric);
       b.setAttribute("aria-pressed", on ? "true" : "false");
     }});
     repaint();
@@ -498,6 +565,7 @@ Main static, the Main Auto window (5/10/15), the Negative lane and the Real stag
       if (b.dataset.third) state.third = b.dataset.third;
       if (b.dataset.neg) state.neg = b.dataset.neg;
       if (b.dataset.min) state.min = b.dataset.min;
+      if (b.dataset.kmin) state.kmin = b.dataset.kmin;
       if (b.dataset.metric) state.metric = b.dataset.metric;
       show();
     }});
@@ -537,13 +605,40 @@ Main static, the Main Auto window (5/10/15), the Negative lane and the Real stag
 """
 
 
+def merge(datas: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Several grid files of the same test window in one report: the cells are added (an id twice is an error), the lists of values in the meta are united in
+    first-seen order (a heatmap panel shows n/a where a file has no cell for its combination)."""
+    out = {"meta": dict(datas[0]["meta"]), "cells": []}
+    seen = set()
+    for d in datas:
+        for c in d["cells"]:
+            if c["id"] in seen:
+                raise SystemExit(f"cell {c['id']} is in two grid files")
+            seen.add(c["id"])
+            out["cells"].append(c)
+    m = out["meta"]
+    for key in ("longs", "shorts", "mains", "reals", "negs"):
+        m[key] = sorted({x for d in datas for x in d["meta"].get(key, [])}, key=lambda x: (str(x).count(","), x)) if key != "negs" else list(dict.fromkeys(x for d in datas for x in d["meta"].get("negs", [])))
+    for key in ("minimals", "main_minimals"):
+        by = {}
+        for d in datas:
+            for x in d["meta"].get(key) or [{"n": 0, "mode": "", "label": "off"}]:
+                by.setdefault(x["label"], x)
+        m[key] = sorted(by.values(), key=lambda x: (x["n"] != 0, x["mode"] != "positive", x["n"]))
+    m["self_check"] = [x for d in datas for x in (d["meta"].get("self_check") or [])]
+    m["groups"] = sum(d["meta"].get("groups") or 0 for d in datas)
+    m["inconsistent_cells"] = sum(d["meta"].get("inconsistent_cells") or 0 for d in datas)
+    return out
+
+
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    data = json.load(open(sys.argv[1]))
-    open(sys.argv[2], "w", encoding="utf-8").write(render(data))
-    print("wrote", sys.argv[2])
+    datas = [json.load(open(f)) for f in sys.argv[1:-1]]
+    data = datas[0] if len(datas) == 1 else merge(datas)
+    open(sys.argv[-1], "w", encoding="utf-8").write(render(data))
+    print("wrote", sys.argv[-1])
     return 0
 
 

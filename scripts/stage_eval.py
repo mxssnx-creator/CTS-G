@@ -144,8 +144,9 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     return valid, rank, n, pf
 
 
-def gate_base(book, tapes: Tapes, st, now: float):
-    """The Base part of gate_metrics: the long, short and minimal windows, the drawdown time and the rank (no stage after Base)."""
+def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
+    """The Base long window's numbers for (Set, now), as SetBook._score_one reads them: the newest gate_window orders closed in the lookback (gross values
+    pp, net values w), their count and PF (rounded as last_n_cost_pf does), the drawdown time over them, both halves, and the rank inputs."""
     lb = book.lookback * 60.0
     tx, te, pp = tapes.window(st.idx, now, lb, max(book.gate_window, book.deact_n))
     txa = tapes.by_set[st.idx][0]
@@ -176,8 +177,6 @@ def gate_base(book, tapes: Tapes, st, now: float):
         max_s = max(max_s, now - peak_t)
     last25 = pp[-book.deact_n:]
     r25 = sum(signed_result_r(x, book.cost_pct) for x in last25) / len(last25) if len(last25) else 0.0
-    floor = book.pack_min_pf.get(st.pack, book.min_pf)
-    valid = n >= book.gate_min and pf + 1e-9 >= floor and max_s < book.max_dd_s
 
     def _pf(v):
         g = sum(x - cf for x in v if x - cf > 0)
@@ -185,19 +184,88 @@ def gate_base(book, tapes: Tapes, st, now: float):
         return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
     h = n // 2
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
-    if valid and book.consistency_pf > 0 and n >= 2:
-        valid = min(old, new) + 1e-9 >= book.consistency_pf
+    return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
+            "floor": book.pack_min_pf.get(st.pack, book.min_pf), "cf": cf}
+
+
+def _long_ok(book, e: Dict[str, Any]) -> bool:
+    """The Base long window on its own: orders, PF, drawdown time and (when asked) the consistency of both halves."""
+    ok = e["n"] >= book.gate_min and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
+    if ok and book.consistency_pf > 0 and e["n"] >= 2:
+        ok = min(e["old"], e["new"]) + 1e-9 >= book.consistency_pf
+    return ok
+
+
+def _short_ok(book, e: Dict[str, Any]) -> bool:
+    sw = [x - e["cf"] for x in e["w"][-book.base_short:]]
+    return len(sw) >= (book.base_short if getattr(book, "stage_full", False) else 1) and se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)) + 1e-9 >= e["floor"]
+
+
+def _min_ok(book, e: Dict[str, Any]) -> bool:
+    mw = [x - e["cf"] for x in e["w"][-book.base_min_n:]]
+    return len(mw) >= (book.base_min_n if getattr(book, "stage_full", False) else 1) and (all(x > 0 for x in mw) if book.base_min_positive else all(x < 0 for x in mw))
+
+
+def gate_base(book, tapes: Tapes, st, now: float):
+    """The Base part of gate_metrics: the long, short and minimal windows, the drawdown time and the rank (no stage after Base)."""
+    e = base_eval(book, tapes, st, now)
+    valid = _long_ok(book, e)
     if valid and getattr(book, "base_short", 0):       # Base: the short window too (both must pass)
-        sw = [x - cf for x in w[-book.base_short:]]
-        valid = len(sw) >= (book.base_short if getattr(book, "stage_full", False) else 1) and se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)) + 1e-9 >= floor
+        valid = _short_ok(book, e)
     if valid and getattr(book, "base_min_n", 0):         # Base: the minimal window (the newest 1-3 results all positive / all negative)
-        mw = [x - cf for x in w[-book.base_min_n:]]
-        valid = len(mw) >= (book.base_min_n if getattr(book, "stage_full", False) else 1) and (
-            all(x > 0 for x in mw) if book.base_min_positive else all(x < 0 for x in mw))
+        valid = _min_ok(book, e)
+    old, new, pf, n, floor = e["old"], e["new"], e["pf"], e["n"], e["floor"]
     halves = min(old, new) if (old or new) else pf
-    shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * n_all / (n_all + se.RANK_SHRINK_N)
-    rank = (halves + 1e-9 >= floor, round(shrunk, 4), n_all, r25, -max_s)      # SetBook.rank_key
+    shrunk = 1.0 + (min(float(pf), se.RANK_PF_CAP) - 1.0) * e["n_all"] / (e["n_all"] + se.RANK_SHRINK_N)
+    rank = (halves + 1e-9 >= floor, round(shrunk, 4), e["n_all"], e["r25"], -e["max_s"])      # SetBook.rank_key
     return valid, rank, n, pf
+
+
+def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tuple[bool, float, float, int]]]:
+    """Every last-N window on its own for (Set, now), as pfBase.windows counts them: {window: (passes, gains, losses, orders)} of the orders the window reads
+    (net after PositionCost), None for a window the Set is not judged by (the Main windows, the Negative and the Real windows judge only the Sets that passed
+    Base; Real judges the ones that passed Main; Real Negative the ones in a dip). The engine's SetState fields are the check (self_check)."""
+    e = base_eval(book, tapes, st, now)
+    cf = e["cf"]
+
+    def sums(v):
+        return sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
+    out: Dict[str, Optional[Tuple[bool, float, float, int]]] = {k: None for k in ("baseLong", "baseShort", "baseMinimal", "mainLong", "mainShort", "mainMinimal", "negative", "real", "realNeg")}
+    nets_w = [x - cf for x in e["w"]]
+    out["baseLong"] = (_long_ok(book, e),) + sums(nets_w) + (len(nets_w),)
+    if getattr(book, "base_short", 0):
+        sw = nets_w[-book.base_short:]
+        out["baseShort"] = (_short_ok(book, e),) + sums(sw) + (len(sw),)
+    if getattr(book, "base_min_n", 0):
+        mw = nets_w[-book.base_min_n:]
+        out["baseMinimal"] = (_min_ok(book, e),) + sums(mw) + (len(mw),)
+    base_pass = out["baseLong"][0] and (out["baseShort"] is None or out["baseShort"][0]) and (out["baseMinimal"] is None or out["baseMinimal"][0])
+    if not base_pass or not (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
+        return out
+    ch, nets = chain_at(book, tapes, st, now)
+    P = book.stage_params(st.pack)
+    mn, rn, qn = [nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]]
+    v = se.stage_verdicts(mn, rn, qn, ch["short_n"], P)
+    if book.main_on:
+        w_ = mn[-book.main_n:]
+        out["mainLong"] = (bool(v["main"]),) + sums(w_) + (len(w_),)
+        if book.short_on:
+            w_ = mn[-ch["short_n"]:]
+            out["mainShort"] = (bool(v["short"]),) + sums(w_) + (len(w_),)
+        if book.main_min_n:
+            w_ = mn[-book.main_min_n:]
+            out["mainMinimal"] = (bool(v["minimal"]),) + sums(w_) + (len(w_),)
+    if book.neg_on:
+        nw = next((w for w in sorted(book.neg_windows) if len(mn) >= w and sum(mn[-w:]) < -se.NEG_EPS), 0)
+        out["negative"] = (bool(v["neg"]),) + (sums(mn[-nw:]) if nw else (0.0, 0.0)) + (nw,)
+    main_pass = (not book.main_on) or bool(v["main"] and (v["short"] or not book.short_on) and (v["minimal"] or not book.main_min_n))
+    if book.realst_on and main_pass:
+        w_ = rn[-book.realst_n:]
+        out["real"] = (bool(v["real"]),) + sums(w_) + (len(w_),)
+    if book.realst_on and book.neg_on and v["neg"]:
+        w_ = qn[-book.realst_n:]
+        out["realNeg"] = (bool(v["realneg"]),) + sums(w_) + (len(w_),)
+    return out
 
 
 def chain_at(book, tapes: Tapes, st, now: float):
@@ -216,7 +284,7 @@ def stage_lane(book, tapes: Tapes, st, now: float) -> str:
     """The Set's stage verdicts (set_engine.stage_verdicts) on its chain: "pos" when Main and Real pass, "neg" when the Negative lane and Real
     Negative pass, else ""."""
     ch, nets = chain_at(book, tapes, st, now)
-    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["auto_n"], book.stage_params(st.pack))
+    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack))
     return "pos" if v["pos"] else ("neg" if v["negl"] else "")
 
 
@@ -267,6 +335,25 @@ def gate_until(book, tapes: Tapes, st, now: float) -> float:
     return until
 
 
+def window_state_equals(book, tapes: Tapes, st, now: float) -> bool:
+    """window_figures (the simulator's per-window figures) against the SetState fields the engine's _score_one left on the same Set: the pass flag, the gains and
+    losses and the order count of every window the simulator judges."""
+    got = window_figures(book, tapes, st, now)
+    v = st.stage or {}
+    want = {"baseLong": (st.base_long_ok, st.gate_gp, st.gate_gl, st.gate_n), "baseShort": (st.base_short_ok, st.base_short_gp, st.base_short_gl, st.base_short_n),
+            "baseMinimal": (st.base_min_ok, st.base_min_gp, st.base_min_gl, st.base_min_n), "mainLong": (bool(v.get("main")), st.main_gp, st.main_gl, st.main_n),
+            "mainShort": (bool(v.get("short")), st.main_short_gp, st.main_short_gl, st.main_short_n), "mainMinimal": (bool(v.get("minimal")), st.main_min_gp, st.main_min_gl, st.main_min_have),
+            "negative": (bool(v.get("neg")), st.neg_win_gp, st.neg_win_gl, st.neg_win), "real": (bool(v.get("real")), st.exe_gp, st.exe_gl, st.exe_n),
+            "realNeg": (bool(v.get("realneg")), st.neg_gp, st.neg_gl, st.neg_n)}
+    for k, g in got.items():
+        if g is None:
+            continue
+        w_ = want[k]
+        if bool(g[0]) != bool(w_[0]) or abs(g[1] - w_[1]) > 1e-6 or abs(g[2] - w_[2]) > 1e-6 or int(g[3]) != int(w_[3]):
+            return False
+    return True
+
+
 def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) -> Tuple[int, int]:
     """The direct gate against the engine's own scoring on sampled (Set, hour) pairs; half of them are pairs that pass the Base
     gate, so the Main gate on the processed orders is compared too."""
@@ -302,6 +389,8 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
         ek = book.rank_key(st)
         if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6 or key[:3] != ek[:3] or abs(key[3] - ek[3]) > 1e-9 \
                 or abs(key[4] - ek[4]) > 1e-6:
+            bad += 1
+        elif not window_state_equals(book, tapes, st, now):
             bad += 1
         st.hist = []
     return len(picks), bad
@@ -486,6 +575,7 @@ def summarize(rows: List[Dict[str, Any]], lo: float, hi: float, with_legs: bool)
     pos_h = sum(1 for v in by_hour.values() if v > 0)
     vp = [100.0 * h["valid"] / h["total"] for h in hours]
     return {"pf": round(gp / gl, 3) if gl > 0 else None, "orders": len(trades), "legs": len(vals) - len(trades),
+            "gp_pct": round(100 * gp, 6), "gl_pct": round(100 * gl, 6),          # the exact sums the PF divides: pooling several cells or windows adds these, never PFs
             "net_pct": round(100 * (gp - gl), 2), "net_per_order_pct": round(100 * (gp - gl) / len(trades), 4) if trades else 0.0, "max_dd_pct": round(100 * mdd, 2),
             "hours_positive": f"{pos_h}/{len(by_hour)}", "validated_pct": round(sum(vp) / len(vp), 2) if vp else 0.0}
 

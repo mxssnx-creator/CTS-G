@@ -1442,11 +1442,11 @@ def every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats():
     for x in base:
         x.active, x.gate_n, x.gate_pf, x.gate_pf_old, x.gate_pf_new, x.n = True, 50, 2.0, 2.0, 2.0, 100
         x.base_short_n, x.base_short_pf = max(b.base_short, 1), 2.0     # the Base short window full (its default)
-    pos_st.stage = {"pos": True, "negl": False, "main": True, "auto": True, "neg": False}
-    neg_st.stage = {"pos": False, "negl": True, "main": False, "auto": True, "neg": True}
+    pos_st.stage = {"pos": True, "negl": False, "main": True, "short": True, "neg": False}
+    neg_st.stage = {"pos": False, "negl": True, "main": False, "short": True, "neg": True}
     lanes = (b.lane_of(pos_st), b.lane_of(neg_st))
     first = b.pick_any(pos_st.pack)
-    pos_st.stage = {"pos": False, "negl": False, "main": False, "auto": False, "neg": False}
+    pos_st.stage = {"pos": False, "negl": False, "main": False, "short": False, "neg": False}
     second = b.pick_any(pos_st.pack)
     cid_neg = p.cid("o", set_id=neg_st.id, pack=neg_st.pack, set_idx=neg_st.idx, lane="neg")
     cid_pos = p.cid("o", set_id=pos_st.id, pack=pos_st.pack, set_idx=pos_st.idx, lane="pos")

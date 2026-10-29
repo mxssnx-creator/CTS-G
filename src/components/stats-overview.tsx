@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
-import { formatPf, stageFigures } from "@/lib/sets-view";
+import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -192,8 +192,47 @@ function StagesCard({ live }: { live: LiveStats | null | undefined }) {
       </table>
       <p className="mt-2 text-xs text-muted">
         Each row averages only the Sets that pass that stage (never every Set); the share is against all configured Sets. Base is in-sample (the Sets were selected on those orders): read it next to Main and Real.
+        Every stage PF is measured on the window the stage judged, so it is at or above the minimum PF by construction; the PF of orders opened AFTER a decision is the executed figure below.
       </p>
+      <WindowsTable live={live} />
     </Card>
+  );
+}
+
+/** Every last-N window on its own: the Sets passing that window alone, and the pooled PF and order count of the orders it reads. */
+function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
+  const rows = windowFigures(live?.sets?.pfBase);
+  if (!rows.length) return null;
+  return (
+    <div className="mt-4">
+      <div className="mb-1 font-mono text-[11px] text-muted">Last-N windows, each judged on its own (a stage passes when all of its windows do)</div>
+      <table className="w-full text-sm" data-testid="window-figures">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 text-left font-medium">Window</th>
+            <th className="pb-2 text-right font-medium">Setting</th>
+            <th className="pb-2 text-right font-medium" title="Sets judged by this window's stage">Judged</th>
+            <th className="pb-2 text-right font-medium">Pass</th>
+            <th className="pb-2 text-right font-medium" title="Share of the Sets its stage judges">% of judged</th>
+            <th className="pb-2 text-right font-medium" title="Gross profit over gross loss of the orders this window reads, over the Sets that pass it">PF</th>
+            <th className="pb-2 text-right font-medium" title="Orders behind that PF">Orders</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} className={`border-t border-border font-mono text-xs ${r.on ? "" : "text-muted"}`}>
+              <td className="py-1.5">{r.stage} · {r.label}{r.chosen ? <span className="ml-2 text-muted">({r.chosen})</span> : null}</td>
+              <td className="py-1.5 text-right">{r.setting}</td>
+              <td className="py-1.5 text-right">{r.on ? r.pop : "—"}</td>
+              <td className="py-1.5 text-right">{r.on ? r.sets : "—"}</td>
+              <td className="py-1.5 text-right">{r.on ? `${r.pct.toFixed(1)}%` : "—"}</td>
+              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{formatPf(r.pf)}</td>
+              <td className="py-1.5 text-right">{r.on ? r.orders : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

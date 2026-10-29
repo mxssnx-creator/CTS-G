@@ -323,7 +323,38 @@ def stage_summary_orders_pf_net_and_hours_share_one_basis():
     return ok, f"orders {r['orders']} PF {r['pf']} net {r['net_pct']}% ({r['net_per_order_pct']}% per order) hours positive {r['hours_positive']} (want {pos}/{len(hours)})"
 
 
+def last_n_window_without_a_full_scan_equals_the_full_scan():
+    """The scoring pass reads a long tape from its end (last_n_cost_pf scan_all=False) instead of every row: the window, its PF, R, net sum and count are the same
+    as the full scan's for any n, with rows that cannot be measured (no pnl_pct, NaN, text) scattered through the tape, at the end of it and all through it."""
+    rng = random.Random(9)
+    bad, cases = [], 0
+    for trial in range(60):
+        n_rows = rng.randint(1, 160)
+        rows = []
+        for i in range(n_rows):
+            kind = rng.random()
+            if kind < 0.08:
+                rows.append({"t": float(i)})                                    # no pnl_pct
+            elif kind < 0.14:
+                rows.append({"t": float(i), "pnl_pct": float("nan")})
+            elif kind < 0.18:
+                rows.append({"t": float(i), "pnl_pct": "x"})
+            else:
+                rows.append({"t": float(i), "pnl_pct": rng.uniform(-0.01, 0.012)})
+        if trial % 5 == 0:
+            rows += [{"t": 1e6}, {"t": 1e6 + 1, "pnl_pct": None}]               # unmeasurable rows at the very end
+        n = rng.choice((1, 5, 15, 25, 50, 300))
+        full = last_n_cost_pf(rows, n, COST)
+        fast = last_n_cost_pf(rows, n, COST, scan_all=False)
+        cases += 1
+        keys = [k for k in full if k != "skipped"]
+        if any(full[k] != fast[k] for k in keys) or fast["skipped"] > full["skipped"]:
+            bad.append((trial, n))
+    return not bad, f"{cases} tapes: windows that differ from the full scan {bad[:4] or 0}"
+
+
 CHECKS = [
+    ("calc.last-n-window-without-a-full-scan-equals-the-full-scan", last_n_window_without_a_full_scan_equals_the_full_scan),
     ("calc.net-sum-mean-and-pf-share-one-basis", net_sum_mean_and_pf_share_one_basis),
     ("calc.stage-summary-orders-pf-net-and-hours-share-one-basis", stage_summary_orders_pf_net_and_hours_share_one_basis),
     ("calc.net-is-gross-minus-one-cost", net_is_gross_minus_one_cost),

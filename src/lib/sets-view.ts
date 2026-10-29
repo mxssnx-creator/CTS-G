@@ -8,7 +8,7 @@
  * "Trailing" together they equal `sets.pfBase`; a test pins that.
  */
 
-import type { PfBase } from "./live-stats.ts";
+import type { PfBase, WindowFigure, WindowKey } from "./live-stats.ts";
 
 /** One Set of `sets.index`. The gate-window fields are what the pooled PF needs; the others fill the table. */
 export type SetIndexRow = {
@@ -54,9 +54,9 @@ export type SetIndexRow = {
   realNegId?: string;
   realNegN?: number;
   realNegPf?: number;
-  /** Base short window PF, the Set's Main Auto window, the lane it is valid on ("pos" / "neg" / ""), the reason when not. */
+  /** Base short window PF, the Set's own Main short window (N), the lane it is valid on ("pos" / "neg" / ""), the reason when not. */
   shortPf?: number;
-  autoN?: number;
+  mainShortN?: number;
   lane?: string;
   why?: string;
 };
@@ -225,8 +225,8 @@ export function pfByStep(
 export type StageRow = { key: string; label: string; sets: number; pct: number; pf: number | null; meanPf: number | null; orders: number };
 
 const STAGE_LABELS: Array<[StageRow["key"], string]> = [
-  ["base", "Base · long + short window"],
-  ["main", "Main · static + Auto window"],
+  ["base", "Base · long, short, minimal window"],
+  ["main", "Main · long, short, minimal window"],
   ["real", "Real · positive lane"],
   ["realNeg", "Real Negative lane"],
   ["valid", "Valid on any lane"],
@@ -242,6 +242,54 @@ export function stageFigures(pb: Pick<PfBase, "stages"> | null | undefined): Sta
   return STAGE_LABELS.map(([key, label]) => {
     const r = st[key as "base" | "main" | "real" | "realNeg" | "valid"];
     return { key, label, sets: r.sets, pct: r.pct, pf: r.sets > 0 ? r.pf : null, meanPf: r.sets > 0 ? r.meanPf : null, orders: r.n };
+  });
+}
+
+export type WindowRow = {
+  key: WindowKey;
+  stage: "Base" | "Main" | "Negative" | "Real";
+  label: string;
+  /** The configured window ("50", "5 · 10", "off", "newest 2 positive"). */
+  setting: string;
+  on: boolean;
+  pop: number;
+  sets: number;
+  pct: number;
+  pf: number | null;
+  meanPf: number | null;
+  orders: number;
+  chosen?: string;
+};
+
+const WINDOW_LABELS: Array<[WindowKey, WindowRow["stage"], string]> = [
+  ["baseLong", "Base", "long window"],
+  ["baseShort", "Base", "short window"],
+  ["baseMinimal", "Base", "minimal window"],
+  ["mainLong", "Main", "long window"],
+  ["mainShort", "Main", "short window"],
+  ["mainMinimal", "Main", "minimal window"],
+  ["negative", "Negative", "dip windows"],
+  ["real", "Real", "last N"],
+  ["realNeg", "Real", "Negative lane last N"],
+];
+
+function windowSetting(key: WindowKey, w: WindowFigure): string {
+  if (!w.on) return "off";
+  if (key === "baseMinimal" || key === "mainMinimal") return `newest ${w.n} ${w.mode ?? "positive"}`;
+  return Array.isArray(w.n) ? w.n.join(" · ") : String(w.n);
+}
+
+/**
+ * Every last-N window on its own: the Sets that pass THAT window alone (among the Sets its stage judges), their share, and the pooled PF of the orders
+ * that window reads with the count behind it. A window nobody passes has no PF ("—"); an off window reads "off" and counts nothing.
+ */
+export function windowFigures(pb: Pick<PfBase, "windows"> | null | undefined): WindowRow[] {
+  const ws = pb?.windows;
+  if (!ws) return [];
+  return WINDOW_LABELS.map(([key, stage, label]) => {
+    const w = ws[key];
+    const chosen = key === "mainShort" && w.on && w.chosen ? Object.entries(w.chosen).sort((a, b) => Number(a[0]) - Number(b[0])).map(([n, c]) => `${n}: ${c}`).join(" · ") : undefined;
+    return { key, stage, label, setting: windowSetting(key, w), on: w.on, pop: w.pop, sets: w.sets, pct: w.pct, pf: w.on && w.sets > 0 ? w.pf : null, meanPf: w.on && w.sets > 0 ? w.meanPf : null, orders: w.orders, chosen };
   });
 }
 

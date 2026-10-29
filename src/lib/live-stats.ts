@@ -71,6 +71,26 @@ export type LiveClosed = {
 export type PfPool = { pf: number; n: number; sets: number };
 /** One stage's figures over the Sets that pass it (`pfBase.stages`): `n` is the window orders behind the PF, `orders` all orders of the stage's Set. */
 export type StageFigure = { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };
+/**
+ * One last-N window on its own (`pfBase.windows`): the Sets of the stage's population that pass THIS window alone (`pop` of them are judged: all Sets for Base,
+ * the Base-passing Sets for Main, the Main-passing Sets for Real), their share of that population (`pct`) and of every configured Set (`pctAll`), the pooled PF of
+ * the orders this window reads (`pf`, `orders` behind it) and the mean of the Sets' own PFs. `n` is the configured window (a list for the Main short and
+ * Negative candidates), `chosen` (Main short) how many Sets run each candidate, `mode` (minimal windows) positive / negative.
+ */
+export type WindowFigure = {
+  on: boolean;
+  n: number | number[] | null;
+  pop: number;
+  sets: number;
+  pct: number;
+  pctAll: number;
+  pf: number;
+  meanPf: number;
+  orders: number;
+  chosen?: Record<string, number>;
+  mode?: "positive" | "negative";
+};
+export type WindowKey = "baseLong" | "baseShort" | "baseMinimal" | "mainLong" | "mainShort" | "mainMinimal" | "negative" | "real" | "realNeg";
 export type PfBase = {
   /** The end figure: the pool of the Sets that pass every gate (Base and Main). */
   base: PfPool;
@@ -87,6 +107,8 @@ export type PfBase = {
   stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
   /** Per stage, over the Sets that pass it (never over all Sets): how many, their share of every configured Set, the pooled PF and the mean of their own PFs. */
   stages?: Record<"base" | "main" | "real" | "realNeg" | "valid", StageFigure> & { allSets: number };
+  /** Per last-N window (Base long / short / minimal, Main long / short / minimal, Negative, Real, Real Negative), each judged on its own. */
+  windows?: Record<WindowKey, WindowFigure>;
   validatedBasePct?: number;
   unfiltered: PfPool;
   total?: number;
