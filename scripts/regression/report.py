@@ -169,7 +169,7 @@ def window_grid_html_has_heatmap_and_best_cell():
 
 def window_grid_files_of_one_window_merge_into_one_report():
     """Several grid files of the same test window (one per set of dimensions) merge into one report: every cell once, the lists of values united, an id in two
-    files refused, and the merged page equals the page of the unsplit grid."""
+    files kept once when the figures agree and refused when they differ, and the merged page equals the page of the unsplit grid."""
     import copy
     import window_grid_report as WG
     whole = _grid_fixture()
@@ -181,16 +181,20 @@ def window_grid_files_of_one_window_merge_into_one_report():
     merged = WG.merge([a, b])
     ids_ok = sorted(c["id"] for c in merged["cells"]) == sorted(c["id"] for c in whole["cells"])
     labels = [m["label"] for m in merged["meta"]["main_minimals"]]
+    twice = WG.merge([a, copy.deepcopy(a)])
+    dup_once = [c["id"] for c in twice["cells"]] == [c["id"] for c in a["cells"]]
+    clash = copy.deepcopy(a)
+    clash["cells"][0]["exec_pf"] = (clash["cells"][0]["exec_pf"] or 0) + 0.5
     try:
-        WG.merge([a, a])
+        WG.merge([a, clash])
         dup_refused = False
     except SystemExit:
         dup_refused = True
     same_page = WG.render(merged) == WG.render({"meta": {**whole["meta"], "main_minimals": merged["meta"]["main_minimals"], "self_check": merged["meta"]["self_check"],
                                                          "groups": merged["meta"]["groups"], "inconsistent_cells": merged["meta"]["inconsistent_cells"]},
                                                "cells": merged["cells"]})
-    ok = ids_ok and labels == ["off", "+1"] and dup_refused and same_page and 'data-kmin="+1"' in WG.render(merged)
-    return ok, f"cells {len(merged['cells'])}/{len(whole['cells'])} ids equal={ids_ok}; Main minimal values {labels}; duplicate id refused={dup_refused}; page equals the unsplit one={same_page}"
+    ok = ids_ok and labels == ["off", "+1"] and dup_once and dup_refused and same_page and 'data-kmin="+1"' in WG.render(merged)
+    return ok, f"cells {len(merged['cells'])}/{len(whole['cells'])} ids equal={ids_ok}; Main minimal values {labels}; identical duplicate kept once={dup_once}; clashing duplicate refused={dup_refused}; page equals the unsplit one={same_page}"
 
 
 CHECKS = [

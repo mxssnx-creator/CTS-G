@@ -300,17 +300,30 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   1.19 after every gate); base (TP) 0.76 / 0.73 and exit 0.86 / 0.73 fall further after the stages; indications base and exit Sets in 13-30 and general exit 21-30
   are the groups that lose most (0.64-0.78 next hour). Live x02, 485 closes (27-29 Oct): all on the Set lane, none closed by an Exit strategy or the
   coordinator, PF net of cost 1.04.
-- Measured, window grid (`scripts/window_grid.py`, report `reports/window_grid_24h.html`, relations `scripts/grid_relations.py`; 20 live-universe symbols, fresh 24 h test after
-  24 h pre-history, hold Auto off, Main static 25 + Auto 5/10; 788 cells, each its own independent group of SetBooks; every cell's orders, net and PF agree however they are
-  cut): Base long 20/30/40/50 x short 5-25 (at most half the long window) x Base minimal window off / +1 / +2 / +3 / -1 / -2 / -3 x Real last N 1/5/15/25 x Negative
-  windows 5,10 / 1,2. Mean executed PF over the cells that carry the value (orders per cell, validated share): minimal off 0.937 (1,603, 4.45 %), +1 0.891, +2 0.908, +3 0.906,
-  -1 0.974 (1,620, 1.19 %), -2 0.950 (911), -3 0.855 (465, 0.10 %): requiring the newest result(s) to be negative lifts the mean, requiring them positive lowers it
-  (mean reversion, not momentum, on these tapes). Negative windows 1,2 0.916 against 5,10 0.920; Real N 1/5/15/25 0.923 / 0.919 / 0.917 / 0.912 (validated 3.14 / 2.06 /
-  1.71 / 1.57 %); Base long 20/30/40/50 0.868 / 0.915 / 0.926 / 0.934 (effective PF 2.02 / 1.80 / 1.66 / 1.60); Base short 5/10/15/20/25 0.918 / 0.913 / 0.927 / 0.923 / 0.897.
-  The shipped setting (50 / 15 / 25 / Real 15, Negative 5,10, minimal off) 0.968 on 1,365 orders. Best cells (chosen on the same 24 h, so in-sample for the choice):
-  long 50 short 5 Real 5 minimal -2 1.157 on 654 orders (halves 1.165 / 1.103), long 30 short 5 Real 25 minimal -1 1.121 on 1,740 (1.142 / 1.076), long 50 short 25 Real 5
-  Negative 1,2 1.099 on 1,629 (1.149 / 1.010); 104 of 755 cells with 150 or more orders reach 1.00. One window, a few hundred to a few thousand orders per cell: a gap of
-  0.05 between marginal means is noise, the order of -1 against +1 is the only stable shape; read it on a second window before shipping a minimal window.
+- Measured, window grid (`scripts/window_grid.py`, report `reports/window_grid_24h.html` + `.json`, relations `scripts/grid_relations.py`; rerun 2026-10-29 on the engine after
+  the causal Main short pick, the pooled figures and the Main minimal window; 20 live-universe symbols, fresh 24 h test after 24 h pre-history, hold Auto off, Main long 25 + short
+  5/10; 824 cells (820 staged + Base alone at long 20/30/40/50), each its own independent group of SetBooks; every cell's orders, net and PF agree however they are cut; two
+  runs merged into one report, a reference cell both runs carry kept once when its figures agree): Base long 20/30/40/50 x short 5-25 (at most half the long window) x Base minimal
+  window off / +1 / +2 / +3 / -1 / -2 / -3 x Real last N 1/5/15/25 x Negative windows 5,10 / 1,2, plus the Main minimal window off / +1..+3 / -1..-3 at long 30 / 50 x short 10 / 25 x
+  Real 15. **Every figure below is pooled over all the orders it covers** (gains over losses of the cells' orders added, the cell's orders beside it), the plain mean of cell PFs only
+  as a second column in the report. Executed PF by setting: Base minimal off 0.931 (237,229 orders), +1 0.900, +2 0.909, +3 0.917, -1 0.969 (181,050), -2 0.936, -3 0.908 (47,230);
+  against the same cells without a Base minimal window (twins, 0.937 on 178,430 orders): -1 +0.032, every other value at or below it. Main minimal: off 0.926 (949,729 orders), +1 0.923,
+  +2 0.884, +3 0.888, -1 0.949, -2 0.925, -3 0.920 (6 cells each); against their own twins (0.976 on 10,437 orders) every one is lower (-1 -0.027, -2 -0.051, -3 -0.056, +1 -0.053, +2
+  -0.092, +3 -0.088): a Main minimal window takes Real orders away and none of the six values lifts the executed PF, so it ships off. Negative windows 1,2 0.925 against 5,10 0.926;
+  Real N 1/5/15/25 0.922 / 0.930 / 0.925 / 0.924 (validated 3.12 / 2.02 / 1.76 / 1.48 %); Base long 20/30/40/50 0.895 / 0.933 / 0.932 / 0.927 (effective PF, all orders, 2.51 / 2.10 /
+  1.91 / 1.81, validated 2.77 / 2.26 / 1.96 / 1.81 %); Base short 5/10/15/20/25 0.940 / 0.925 / 0.927 / 0.914 / 0.896 (effective PF 2.01 / 2.00 / 1.92 / 1.89 / 1.82). Base alone (no
+  Main, no Real) executed 0.808 / 0.853 / 0.896 / 0.916 for long 20 / 30 / 40 / 50 on 1,232-1,417 orders (effective PF 2.09 / 1.84 / 1.73 / 1.64, validated 25.6 / 22.2 / 18.7 / 17.5 %):
+  the same long window with the stages on (Real 15, Negative 5,10, minimals off, pooled over the short windows) reads 0.866 / 0.980 / 0.952 / 0.968 on 3,470 / 4,674 / 6,420 / 8,308 orders, so
+  the stages lift the executed PF by +0.06 / +0.13 / +0.06 / +0.05 and cut the validated share from 17.5 % to 3.6 % at the shipped setting; still under 1. The shipped setting
+  (long 50, short 25, Main 25, Real 15, Negative 5,10, minimals off) executed 0.949 on 1,688 orders (halves 0.957 / 0.934), effective PF 1.85 on 65,600 orders, validated 3.55 %; the
+  Stages table of that cell reads Base long 17.5 % of the Sets (PF 1.64 on 323,700 orders), Base short 23.9 %, Main long 34.7 % of the Base-passing Sets (2.15), Main short 45.1 % (2.78),
+  Real 41.7 % of the Main-passing Sets (2.76 on 7,904 orders), Negative 54.8 % (0.39 on 14,805: the dip lane's own window reads below 1 by construction). Best cells (chosen on the same 24 h,
+  so in-sample for the choice): long 50 short 5 Real 5 Base minimal -2 1.157 on 654 orders (halves 1.165 / 1.103, validated 0.27 %), long 50 short 5 Real 25 minimal -2 1.149 on 653, long 30
+  short 5 Real 25 minimal -1 1.120 on 1,746 (1.141 / 1.076, effective PF 2.01 on 9,570 orders), long 50 short 25 Real 5 Negative 1,2 1.104 on 1,688 (1.149 / 1.025); 107 of 791 cells with
+  150 or more orders reach 1.00, 27 with 500 or more orders hold 1.0 in both halves (24 of them with a Base minimal window, 18 of those -1; 15 at Base short 5; validated 0.27-5.1 % of the Sets).
+  One window, a few hundred to a few thousand orders per cell, every cell walking the same hours (comparisons between settings, not independent samples): a gap of 0.03-0.05 between pooled
+  marginals is noise; the shape that repeats across both grid runs is -1 above +1 (requiring the newest result to be negative, mean reversion on these tapes) and a longer Base long window
+  raising the executed PF while lowering the effective one (in-sample gap). Read a second window before shipping any minimal window or a Real N other than 15.
 - One chain function, `set_engine.stage_chain` (each stage reads only the lane the stage before it built; each lane a subset of the one
   before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
   `realId/N/Pf`, `realNegId/N/Pf`, `shortPf`, `autoN`, `lane`; `pfBase`: `base`, `baseOnly`, `main`, `processed`, `real`, `realneg`,
