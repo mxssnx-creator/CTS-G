@@ -451,7 +451,7 @@ def a_set_that_stops_passing_keeps_its_open_position_handled_and_counted():
         st = p.sets.sets[pos.set_id]
         before = p.execution_snapshot()
         st.main_pf, st.main_n, st.main_on = 0.0, p.sets.main_n, True      # the Set now fails the Main gate
-        st.stage = {"pos": False, "negl": False, "main": False, "auto": True, "neg": False}
+        st.stage = {"pos": False, "negl": False, "main": False, "short": True, "neg": False}
         p.sets.main_on = True
         seen["before"] = before
         seen["during"] = p.execution_snapshot()
@@ -459,10 +459,10 @@ def a_set_that_stops_passing_keeps_its_open_position_handled_and_counted():
 
     b0 = _book()
     st0 = _pick(b0, "time")
-    b = _book(mainGateEnabled=True, stagesEnabled=True, setGateShortN=0, mainAutoEnabled=False, mainNegEnabled=False, realGateEnabled=False)
+    b = _book(mainGateEnabled=True, stagesEnabled=True, setGateShortN=0, mainShortEnabled=False, mainNegEnabled=False, realGateEnabled=False)
     st = b.sets[st0.id]
     st.gate_n, st.gate_pf, st.main_n, st.main_pf, st.active, st.max_dd_s = b.gate_min, 2.0, b.main_n, 2.0, True, 0.0
-    st.stage = {"pos": True, "negl": False, "main": True, "auto": True, "neg": False}
+    st.stage = {"pos": True, "negl": False, "main": True, "short": True, "neg": False}
     bars = _scenario_bars("time", 1)
     (rsl, rtp), rep = replay(b0, st0, bars, 5, 1)
     lv, liv, _ = live(b, st, bars, 5, 1, others=False, after_open=hook)

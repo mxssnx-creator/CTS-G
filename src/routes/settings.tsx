@@ -678,9 +678,9 @@ function SettingsPage() {
                   onChange={(v) => patch("setGateMinTrades", v)}
                 />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Main · additional strategies, coordinations, processings · the last-N validation, on the Main Set</div>
-                <Toggle label="Main · static window" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
+                <Toggle label="Main · stage (long, short and minimal window, each on the Main Set)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
                 <Slider
-                  label="Main · static window (last N Main orders)"
+                  label="Main · long window (last N Main orders)"
                   value={overlay.mainGateN}
                   min={8}
                   max={50}
@@ -688,41 +688,61 @@ function SettingsPage() {
                   hint="default 25 · the first Main window, at the Base minimum PF"
                   onChange={(v) => patch("mainGateN", v)}
                 />
-                <Toggle label="Main · Auto window (each Set picks its own; both Main windows must pass)" on={overlay.mainAutoEnabled !== false} onChange={(v) => patch("mainAutoEnabled", v)} />
+                <Toggle label="Main · short window (each Set picks its own; the long and the short window must both pass)" on={overlay.mainShortEnabled !== false} onChange={(v) => patch("mainShortEnabled", v)} />
                 <Slider
-                  label="Main · Auto window max share of the static window"
-                  value={overlay.mainAutoMaxRatio}
+                  label="Main · short window max share of the long window"
+                  value={overlay.mainShortMaxRatio}
                   min={0.1}
                   max={1}
                   step={0.05}
-                  hint="default 0.5 (50 %): static 25 allows Auto windows of at most 12; candidates above it are dropped by the engine"
-                  onChange={(v) => patch("mainAutoMaxRatio", v)}
+                  hint="default 0.5 (50 %): long 25 allows short windows of at most 12; candidates above it are dropped by the engine"
+                  onChange={(v) => patch("mainShortMaxRatio", v)}
                 />
                 <WindowChips
-                  label="Main · Auto candidates"
-                  value={overlay.mainAutoWindows}
+                  label="Main · short candidates"
+                  value={overlay.mainShortWindows}
                   options={[5, 10, 15, 20, 25]}
-                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainAutoMaxRatio + 1e-9)} with the static window ${overlay.mainGateN} and the share below`}
-                  onChange={(v) => patch("mainAutoWindows", v)}
+                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)} with the long window ${overlay.mainGateN}`}
+                  onChange={(v) => patch("mainShortWindows", v)}
                 />
                 <Slider
-                  label="Main · Auto min orders"
-                  value={overlay.mainAutoMin}
+                  label="Main · short window min orders"
+                  value={overlay.mainShortMin}
                   min={3}
                   max={50}
                   step={1}
                   hint="a candidate needs this many validated Main orders"
-                  onChange={(v) => patch("mainAutoMin", v)}
+                  onChange={(v) => patch("mainShortMin", v)}
                 />
                 <Slider
-                  label="Main · Auto margin"
-                  value={overlay.mainAutoMargin}
+                  label="Main · short window margin"
+                  value={overlay.mainShortMargin}
                   min={1}
                   max={1.5}
                   step={0.01}
-                  hint="a candidate must beat the static window's PF by this factor (default 1.02)"
-                  onChange={(v) => patch("mainAutoMargin", v)}
+                  hint="a candidate must beat the long window's PF by this factor (default 1.02)"
+                  onChange={(v) => patch("mainShortMargin", v)}
                 />
+                <Slider
+                  label="Main · minimal window (newest results)"
+                  value={overlay.mainMinN}
+                  min={0}
+                  max={3}
+                  step={1}
+                  hint="the third Main window, 0 = off · the newest 1-3 results of the Set's Main Set must all be positive (or all negative, below) · at most the smallest short candidate"
+                  onChange={(v) => patch("mainMinN", v)}
+                />
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Main · minimal window results</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.mainMinMode}
+                    onChange={(e) => patch("mainMinMode", e.target.value === "negative" ? "negative" : "positive")}
+                  >
+                    <option value="positive">positive (every one of the newest results above zero)</option>
+                    <option value="negative">negative (every one of the newest results below zero)</option>
+                  </select>
+                </label>
                 <Toggle label="Main · Negative lane (a dip opens Real Negative)" on={overlay.mainNegEnabled !== false} onChange={(v) => patch("mainNegEnabled", v)} />
                 <WindowChips
                   label="Main · Negative windows"

@@ -12,6 +12,7 @@ import {
   rangeById,
   rankRows,
   stageFigures,
+  windowFigures,
   stepHistogram,
   stepOf,
   summarize,
@@ -169,4 +170,33 @@ test("stage figures show the Sets that pass each stage, their share of all Sets 
   assert.equal(rows[3].orders, 75);
   assert.deepEqual(stageFigures(undefined), []);
   assert.deepEqual(stageFigures({}), []);
+});
+
+test("window figures: each last-N window on its own, an off window counts nothing, a window nobody passes has no PF", () => {
+  const w = (on: boolean, n: number | number[] | null, pop: number, sets: number, pf: number, orders: number, extra = {}) =>
+    ({ on, n, pop, sets, pct: pop ? Math.round((10000 * sets) / pop) / 100 : 0, pctAll: 0, pf, meanPf: pf, orders, ...extra });
+  const rows = windowFigures({
+    windows: {
+      baseLong: w(true, 50, 1538, 700, 1.7, 33000),
+      baseShort: w(true, 25, 1538, 410, 1.9, 9800),
+      baseMinimal: w(false, 0, 1538, 0, 0, 0),
+      mainLong: w(true, 25, 410, 120, 1.5, 2900),
+      mainShort: w(true, [5, 10], 410, 0, 0, 0, { chosen: { "10": 90, "5": 320 } }),
+      mainMinimal: w(true, 2, 410, 60, 2.4, 118, { mode: "negative" }),
+      negative: w(true, [5, 10], 410, 33, 0.8, 330),
+      real: w(true, 15, 120, 40, 1.4, 590),
+      realNeg: w(true, 15, 33, 0, 0, 0),
+    },
+  });
+  assert.deepEqual(rows.map((r) => r.key), ["baseLong", "baseShort", "baseMinimal", "mainLong", "mainShort", "mainMinimal", "negative", "real", "realNeg"]);
+  assert.equal(rows[2].setting, "off");
+  assert.equal(rows[2].pf, null, "an off window has no PF");
+  assert.equal(rows[4].setting, "5 · 10");
+  assert.equal(rows[4].pf, null, "a window nobody passes has no PF, not 0.00");
+  assert.equal(rows[4].chosen, "5: 320 · 10: 90", "the Sets per chosen short window, in window order");
+  assert.equal(rows[5].setting, "newest 2 negative");
+  assert.equal(rows[0].pct, 45.51);
+  assert.equal(rows[0].orders, 33000);
+  assert.deepEqual(windowFigures(undefined), []);
+  assert.deepEqual(windowFigures({}), []);
 });

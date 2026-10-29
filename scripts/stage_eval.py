@@ -216,7 +216,7 @@ def stage_lane(book, tapes: Tapes, st, now: float) -> str:
     """The Set's stage verdicts (set_engine.stage_verdicts) on its chain: "pos" when Main and Real pass, "neg" when the Negative lane and Real
     Negative pass, else ""."""
     ch, nets = chain_at(book, tapes, st, now)
-    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["auto_n"], book.stage_params(st.pack))
+    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack))
     return "pos" if v["pos"] else ("neg" if v["negl"] else "")
 
 
