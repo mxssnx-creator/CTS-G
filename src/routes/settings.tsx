@@ -605,7 +605,7 @@ function SettingsPage() {
                   max={36}
                   step={2}
                   unit="h"
-                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 12 h)."
+                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 24 h, owner 2026-10-29)."
                   onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
                 />
                 <Slider
@@ -620,10 +620,10 @@ function SettingsPage() {
                 <Slider
                   label="Base gate · min orders"
                   value={overlay.setGateMinTrades}
-                  min={8}
+                  min={0}
                   max={100}
                   step={1}
-                  hint="fewer orders than this: not judged (at most the last N)"
+                  hint="0 = off (default, owner 2026-10-29): a Set is judged on the orders it has. Above 0: fewer orders than this are not judged (at most the last N)."
                   onChange={(v) => patch("setGateMinTrades", v)}
                 />
                 <Toggle label="Main stage gate (last-N validation of each Set's Main Set: orders opened while Base passed; execution uses Sets that pass Base and Main)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />

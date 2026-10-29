@@ -23,7 +23,8 @@ def overlays_share_grid_contract():
     for path in (X01, X02):
         ov = json.load(open(path))
         want = {"setMinStep": 2, "setStepMax": 30, "trailMinStep": 3, "histLookbackBars": 1920,
-                "setMinPf": 1.25, "setGateWindow": 30, "setGateMinTrades": 25}   # owner 2026-10-28: Base last N 30 for the small-cap universe
+                "setMinPf": 1.25, "setGateWindow": 30, "setGateMinTrades": 0,   # owner 2026-10-28: Base last N 30 for the small-cap universe
+                "setMaxDdtHours": 24}   # owner 2026-10-29: minimum order count off, drawdown time 24 h
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
         detail.append(f"{os.path.basename(path)}:{'ok' if not bad else bad}")

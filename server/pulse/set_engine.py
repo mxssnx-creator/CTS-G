@@ -4,8 +4,8 @@
 A Set is one (pack × SL:TP ratio × trail) book. Historic walks 1-minute OHLC,
 simulates entries/exits, then scores each Set on its own tape. Live closes
 merge into the same book. One rule decides validity (gate_reason): PF over the
-last setGateWindow orders at or above setMinPf, at least setGateMinTrades orders,
-max drawdown time below setMaxDdtHours, and a fresh evaluation. An invalid Set
+last setGateWindow orders at or above setMinPf (at least setGateMinTrades orders when that minimum is
+on; 0 = off, the default), max drawdown time below setMaxDdtHours, and a fresh evaluation. An invalid Set
 keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
@@ -82,7 +82,8 @@ LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 
 # dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
 LIVE_SEEN_MAX = 20000
 GATE_WINDOW_DEFAULT = 50        # gate PF over each Set's last N closed orders
-GATE_MIN_DEFAULT = 30           # fewer orders than this: not judged, not eligible
+GATE_MIN_DEFAULT = 0            # minimum orders behind a Base verdict: 0 = off (owner 2026-10-29), a Set is judged on the orders it has
+GATE_MAX_DDT_HOURS_DEFAULT = 24.0   # the longest drawdown over the gate window must stay under this (owner 2026-10-29; setMaxDdtHours 2..36)
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -1070,7 +1071,7 @@ class SetBook:
         self.max_flat_share = 0.35
         self.max_jump = 0.5
         self.gate_window = GATE_WINDOW_DEFAULT
-        self.gate_min = GATE_MIN_DEFAULT
+        self.gate_min = max(1, GATE_MIN_DEFAULT)
         self.max_dd_s = 420.0
         self.use_historic_gate = True
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
@@ -1138,7 +1139,10 @@ class SetBook:
         self.pf_n = max(MIN_VALIDATION_N, min(200, window_n(ov, "setPfWindow", "pfWindow", fallback=PF_N_DEFAULT)))   # follows the overall validation N unless unlinked
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
-        self.gate_min = max(MIN_VALIDATION_N, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
+        # 0 (the default) = no minimum: the Base gate judges a Set on the orders it has, only a Set without a closed order is not judged
+        # (gate_min 1). No floor of 8 here (owner 2026-10-29); the windows and the hold sample keep theirs.
+        gm = ov.get("setGateMinTrades")
+        self.gate_min = max(1, min(self.gate_window, int(GATE_MIN_DEFAULT if gm is None else gm)))
         # the Main gate: every Set, besides the Base gate, must hold the minimum PF over its own last mainGateN processed orders (default 8);
         # execution picks only Sets that pass both, and the minimum PF is the Set's Base minimum PF (one value for every validation gate)
         # stages: Base (each Set on its own tape) -> Main (the last-N validation, on the Set's Main Set: the orders it opened while
@@ -1154,9 +1158,9 @@ class SetBook:
         sr_min = ov.get("shortRangeMinPf")
         self.pack_min_pf = {SHORT_PACK: float(sr_min) if sr_min is not None else SHORT_MIN_PF_DEFAULT}
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
-        # hours. setMaxDdtHours is 2..36 in steps of 2, default 12. max_dd_s holds the threshold in seconds.
+        # hours. setMaxDdtHours is 2..36 in steps of 2, default 24. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
-        hrs = 12.0 if hrs is None else float(hrs)
+        hrs = GATE_MAX_DDT_HOURS_DEFAULT if hrs is None else float(hrs)
         hrs = max(2.0, min(36.0, round(hrs / 2.0) * 2.0))
         self.max_ddt_h = hrs
         self.max_dd_s = hrs * 3600.0
@@ -2150,7 +2154,7 @@ class SetBook:
             return None
         rows = [s for s in rows if s.active] or rows
         # a Set with fewer orders than the gate floor is not judged: its PF (99 after one winning order) must not outrank a
-        # Set that has the orders
+        # Set that has the orders (with the minimum off, rank_key shrinks a PF toward 1 by the orders behind it)
         rows.sort(key=lambda s: (s.gate_n >= self.gate_min,) + self.rank_key(s), reverse=True)
         return rows[0]
 
@@ -3033,10 +3037,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
         x.max_dd_s = 0.0
     out.append(("set-pick-ranks-base-and-exit", xb.pick_any("general") is xst and xb.pack_open("general"),
                 f"pick={getattr(xb.pick_any('general'), 'id', None)}"))
-    # last N: the Base gate minimum, the hold Auto floor and the linked windows read at least MIN_VALIDATION_N orders
+    # last N: the hold Auto floor and the linked windows read at least MIN_VALIDATION_N orders; the Base gate's minimum order count has
+    # no floor (0 = off, owner 2026-10-29): a value of 3 is taken as it is
     ln = SetBook()
     ln.load({"setPfWindow": 3, "pfWindow": 3, "setGateMinTrades": 3, "setGateWindow": 20, "holdAutoMin": 3})
-    out.append(("set-last-n-at-least-8", ln.pf_n >= MIN_VALIDATION_N and ln.gate_min >= MIN_VALIDATION_N and ln.hold_auto_min >= MIN_VALIDATION_N
+    out.append(("set-last-n-at-least-8", ln.pf_n >= MIN_VALIDATION_N and ln.gate_min == 3 and ln.hold_auto_min >= MIN_VALIDATION_N
                 and MIN_VALIDATION_N == 8, f"pf_n={ln.pf_n} gate_min={ln.gate_min} hold_auto_min={ln.hold_auto_min}"))
     try:
         from exit_engine import ExitBook
