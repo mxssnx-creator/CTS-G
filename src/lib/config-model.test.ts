@@ -35,4 +35,7 @@ test("the Main minimal window is held to 0..3 and to a mode of positive or negat
   assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "Both" })).mainMinMode, "both");
   assert.equal(overlayFromCts(cts({ setGateMinN: 2, setGateMinMode: "both" })).setGateMinMode, "both");
   assert.equal(overlayFromCts(cts({ setGateMinN: 2, setGateMinMode: "negative" })).setGateMinMode, "negative", "the Base minimal window reads the same way");
+  assert.equal(overlayFromCts(cts({ setGateMinN: 2, setGateMinMode: "AvgNegative" })).setGateMinMode, "avgnegative", "the average rule loads");
+  assert.equal(overlayFromCts(cts({ mainMinN: 3, mainMinMode: "avgboth" })).mainMinMode, "avgboth");
+  assert.equal(overlayFromCts(cts({ mainMinN: 1, mainMinMode: "avgpositive" })).mainMinMode, "avgpositive");
 });

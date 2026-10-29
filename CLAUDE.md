@@ -345,6 +345,12 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   orders. Base minimal both against the same cells without it (0.938, 72,654 orders): ±1 0.938 (identical: one result of one sign is every non-zero result, a sanity check of the rule), ±2 0.945,
   ±3 0.890; Main minimal both against its twins (0.986 on 9,612 orders): ±1 0.986 (identical), ±2 0.936, ±3 0.918. No minimal value, either sign rule, lifts the executed PF beyond the noise except
   Base -1 (0.979 against 0.938 on the Negative-off cells). The minimal windows run at every N beside every short window (no ratio rule).
+- **Minimal window on the average** (owner 2026-10-29: "both positive and negative average"): `setGateMinMode` / `mainMinMode` also take `avgpositive`,
+  `avgnegative`, `avgboth`, each of Base and Main on its own: the AVERAGE of the newest N results (net after PositionCost) is above zero, below zero, or
+  either (an average within `NEG_EPS` of zero is neither); the sign rule (every result one sign) lies inside the average rule of the same sign.
+  `sign_ok(w, positive, both, avg)`, the chain (Base loop, `main_minimal`), the verdict, the simulator, `stage_debug`, the audit's plain chain, the desk
+  selects and the grid (`--minimal 'a+2;a-2;a±2'`). Checks `set-minimal-window-average-equals-the-rules`, `gates.main-minimal-window-positive-and-negative`
+  (avg cases), `minimal average:` mutants. Off by default; not yet measured on the grid.
 - **Why the PF drops after Base (audit 2026-10-29, both chats; no accounting defect left)**. The effective PF is not the number a Set's
   next orders deliver, for three measured reasons, two of them fixed in the engine:
   1. **Selection (in-sample)**: a Set passes at the end of a good stretch; its next orders are near the ungated average (selection PF

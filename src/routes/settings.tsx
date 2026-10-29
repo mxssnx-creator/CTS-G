@@ -25,7 +25,7 @@ import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
-import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS } from "@/lib/config-model";
+import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS, minMode } from "@/lib/config-model";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -693,11 +693,14 @@ function SettingsPage() {
                   <select
                     className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
                     value={overlay.setGateMinMode}
-                    onChange={(e) => patch("setGateMinMode", e.target.value === "negative" ? "negative" : e.target.value === "both" ? "both" : "positive")}
+                    onChange={(e) => patch("setGateMinMode", minMode(e.target.value))}
                   >
                     <option value="positive">positive (every one of the newest results above zero)</option>
                     <option value="negative">negative (every one of the newest results below zero)</option>
                     <option value="both">both (the newest results share one sign: all positive or all negative)</option>
+                    <option value="avgpositive">average positive (the mean of the newest results above zero)</option>
+                    <option value="avgnegative">average negative (the mean of the newest results below zero)</option>
+                    <option value="avgboth">average both (the mean of the newest results above or below zero)</option>
                   </select>
                 </label>
                 <Slider
@@ -778,11 +781,14 @@ function SettingsPage() {
                   <select
                     className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
                     value={overlay.mainMinMode}
-                    onChange={(e) => patch("mainMinMode", e.target.value === "negative" ? "negative" : e.target.value === "both" ? "both" : "positive")}
+                    onChange={(e) => patch("mainMinMode", minMode(e.target.value))}
                   >
                     <option value="positive">positive (every one of the newest results above zero)</option>
                     <option value="negative">negative (every one of the newest results below zero)</option>
                     <option value="both">both (the newest results share one sign: all positive or all negative)</option>
+                    <option value="avgpositive">average positive (the mean of the newest results above zero)</option>
+                    <option value="avgnegative">average negative (the mean of the newest results below zero)</option>
+                    <option value="avgboth">average both (the mean of the newest results above or below zero)</option>
                   </select>
                 </label>
                 <Toggle label="Main · Negative lane (a dip opens Real Negative)" on={overlay.mainNegEnabled !== false} onChange={(v) => patch("mainNegEnabled", v)} />

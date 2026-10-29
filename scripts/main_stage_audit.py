@@ -123,7 +123,7 @@ def naive_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
                 continue
         if P.base_min_n:
             mw = [nets[j] for j in idx[-P.base_min_n:]]
-            if len(mw) < (P.base_min_n if full else 1) or not se.sign_ok(mw, P.base_min_positive, P.base_min_both):
+            if len(mw) < (P.base_min_n if full else 1) or not se.sign_ok(mw, P.base_min_positive, P.base_min_both, P.base_min_avg):
                 continue
         main.append(k)
     mt, mn = [ts[k] for k in main], [nets[k] for k in main]
@@ -158,7 +158,7 @@ def naive_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
                 continue
             if P.main_min_n:
                 kw = [mn[i] for i in _closed(mt, entry, P.lookback_s, P.main_min_n)]
-                if len(kw) < (P.main_min_n if full else 1) or not se.sign_ok(kw, P.main_min_positive, P.main_min_both):
+                if len(kw) < (P.main_min_n if full else 1) or not se.sign_ok(kw, P.main_min_positive, P.main_min_both, P.main_min_avg):
                     continue
         real.append(k)
     realneg = []

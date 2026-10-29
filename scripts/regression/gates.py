@@ -237,13 +237,22 @@ def main_minimal_window_positive_and_negative():
         "both: two losses": reason(base + [W, L, L], mainMinN=2, mainMinMode="both"),
         "both: a win and a loss": reason(base + [W, L, W], mainMinN=2, mainMinMode="both"),
         "both: three, one differs": reason(base + [L, L, W], mainMinN=3, mainMinMode="both"),
+        "avg+2: a win and a smaller loss": reason(base + [W, L], mainMinN=2, mainMinMode="avgpositive"),
+        "avg+2: a loss and a smaller win": reason(base + [W, L, L, 0.003], mainMinN=2, mainMinMode="avgpositive"),
+        "avg-3: two losses, one smaller win": reason(base + [W, L, L, 0.003], mainMinN=3, mainMinMode="avgnegative"),
+        "avg-2: a win and a smaller loss": reason(base + [W, L], mainMinN=2, mainMinMode="avgnegative"),
+        "avg±2: mean above zero": reason(base + [L, W], mainMinN=2, mainMinMode="avgboth"),
+        "avg±2: mean below zero": reason(base + [W, L, 0.003], mainMinN=2, mainMinMode="avgboth"),
+        "avg±2: mean exactly zero": reason(base + [0.004, -0.004], mainMinN=2, mainMinMode="avgboth"),
         "Main stage off": reason(base + [L], mainMinN=1, mainMinMode="positive", mainGateEnabled=False),
         "stages off": reason(base + [L], mainMinN=1, mainMinMode="positive", stagesEnabled=False),
     }
     want = {"off by default": "", "+1 last win": "", "+1 last loss": "mainminimal", "+2 last win, loss before": "mainminimal", "+2 last two wins": "",
             "-1 last loss": "", "-1 last win": "mainminimal", "-2 last two losses": "", "-3 loss loss win": "mainminimal", "-3 three losses": "",
             "count held to 3 (9 -> 3)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "mainminimal",
-            "both: three, one differs": "mainminimal", "Main stage off": "", "stages off": ""}
+            "both: three, one differs": "mainminimal", "Main stage off": "", "stages off": "",
+            "avg+2: a win and a smaller loss": "", "avg+2: a loss and a smaller win": "mainminimal", "avg-3: two losses, one smaller win": "",
+            "avg-2: a win and a smaller loss": "mainminimal", "avg±2: mean above zero": "", "avg±2: mean below zero": "", "avg±2: mean exactly zero": "mainminimal"}
     b9, b0, bs = SetBook(), SetBook(), SetBook()
     b9.load(overlay(stagesEnabled=True, mainMinN=9))
     b0.load(overlay())

@@ -215,19 +215,22 @@ def run_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 
-SIGN = {"positive": "+", "negative": "-", "both": "±", "": ""}
+SIGN = {"positive": "+", "negative": "-", "both": "±", "avgpositive": "a+", "avgnegative": "a-", "avgboth": "a±", "": ""}
 
 
 def parse_minimal(raw: str) -> List[Tuple[int, str]]:
     """'0;+1;+2;-1;±2' -> [(0, ''), (1, 'positive'), (2, 'positive'), (1, 'negative'), (2, 'both')]: the Base minimal window (newest N results all positive /
-    all negative / one sign throughout, '±N' or 'bN')."""
+    all negative / one sign throughout, '±N' or 'bN'); a leading 'a' judges the average of the newest N instead: 'a+2', 'a-2', 'a±2' (avgpositive /
+    avgnegative / avgboth)."""
     out: List[Tuple[int, str]] = []
     for tok in [t.strip() for t in raw.replace(",", ";").split(";") if t.strip()]:
         if tok in ("0", "off"):
             out.append((0, ""))
         else:
-            n = int(tok.lstrip("+-±b"))
-            out.append((n, "both" if tok[0] in "±b" else "negative" if tok.startswith("-") else "positive"))
+            avg = tok.startswith("a")
+            t = tok[1:] if avg else tok
+            n = int(t.lstrip("+-±b"))
+            out.append((n, ("avg" if avg else "") + ("both" if t[0] in "±b" else "negative" if t.startswith("-") else "positive")))
     return out or [(0, "")]
 
 

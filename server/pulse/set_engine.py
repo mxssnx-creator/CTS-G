@@ -279,6 +279,8 @@ class StageParams:
     main_min_positive: bool = True  # mainMinMode
     base_min_both: bool = False     # setGateMinMode "both": the newest N results share one sign, all positive OR all negative (base_min_positive is then unused)
     main_min_both: bool = False     # mainMinMode "both"
+    base_min_avg: bool = False      # setGateMinMode avgpositive / avgnegative / avgboth: the AVERAGE of the newest N results is above / below zero / either
+    main_min_avg: bool = False      # mainMinMode avg*
     size_floors: Tuple[Tuple[int, float], ...] = ()   # minimum PF by window size: ((up to N orders, PF), ...) ascending; empty = floor for every window
     long_floor: float = 0.0         # the minimum PF of a window longer than the last bound
 
@@ -426,7 +428,10 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
             c_ = e - t0
             if c_ < m_need:
                 continue
-            if P.base_min_both:
+            if P.base_min_avg:
+                if not sign_ok(nets[t0:e], P.base_min_positive, P.base_min_both, True):
+                    continue
+            elif P.base_min_both:
                 if pos_pre[e] - pos_pre[t0] != c_ and neg_pre[e] - neg_pre[t0] != c_:
                     continue
             elif (pos_pre[e] - pos_pre[t0] if P.base_min_positive else neg_pre[e] - neg_pre[t0]) != c_:
@@ -514,8 +519,12 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     return {"main": main, "real": real, "realneg": realneg, "short_n": short_n, "short_by_order": choice if choice is not None else [P.main_n] * m}
 
 
-def sign_ok(w: Sequence[float], positive: bool, both: bool = False) -> bool:
-    """The minimal-window rule on the results w: all above zero (positive), all below zero (not positive), or one sign throughout (both)."""
+def sign_ok(w: Sequence[float], positive: bool, both: bool = False, avg: bool = False) -> bool:
+    """The minimal-window rule on the results w: all above zero (positive), all below zero (not positive), or one sign throughout (both).
+    avg: the average (sum) of w instead: above zero, below zero, or either one (both); a sum within NEG_EPS of zero is neither."""
+    if avg:
+        t = sum(w)
+        return (t > NEG_EPS or t < -NEG_EPS) if both else (t > NEG_EPS if positive else t < -NEG_EPS)
     if both:
         return all(x > 0 for x in w) or all(x < 0 for x in w)
     return all(x > 0 for x in w) if positive else all(x < 0 for x in w)
@@ -543,7 +552,10 @@ def main_minimal(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: 
         s0 = e - P.main_min_n
         if s0 < mlo[j]:
             s0 = mlo[j]
-        out.append(e - s0 >= need and (cnt[e] - cnt[s0] == e - s0 or (P.main_min_both and neg_pre[e] - neg_pre[s0] == e - s0)))
+        if P.main_min_avg:
+            out.append(e - s0 >= need and sign_ok(mn[s0:e], P.main_min_positive, P.main_min_both, True))
+        else:
+            out.append(e - s0 >= need and (cnt[e] - cnt[s0] == e - s0 or (P.main_min_both and neg_pre[e] - neg_pre[s0] == e - s0)))
     return out
 
 
@@ -561,7 +573,7 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     if P.main_min_n:
         mw = list(main[-P.main_min_n:])
         k_n = len(mw)
-        k_ok = k_n >= (P.main_min_n if P.full_window else 1) and sign_ok(mw, P.main_min_positive, P.main_min_both)
+        k_ok = k_n >= (P.main_min_n if P.full_window else 1) and sign_ok(mw, P.main_min_positive, P.main_min_both, P.main_min_avg)
     else:
         k_ok, k_n = True, 0
     neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)
@@ -1476,6 +1488,7 @@ class SetBook:
         self.base_min_n = 0
         self.base_min_positive = True
         self.base_min_both = False
+        self.base_min_avg = False
         self.short_on = True
         self.short_windows: Tuple[int, ...] = MAIN_SHORT_WINDOWS
         self.short_ratio = MAIN_SHORT_MAX_RATIO
@@ -1484,6 +1497,7 @@ class SetBook:
         self.main_min_n = 0
         self.main_min_positive = True
         self.main_min_both = False
+        self.main_min_avg = False
         self.neg_on = True
         self.neg_windows: Tuple[int, ...] = MAIN_NEG_WINDOWS
         self.realst_on = True
@@ -1590,6 +1604,8 @@ class SetBook:
         self.base_short = max(0, min(short_cap, int(num(ov, "setGateShortN", BASE_SHORT_N_DEFAULT)))) if self.stages_on else 0
         # the Base minimal window, a third last-N next to the long and the short one: the newest 1-3 results all positive (or all negative)
         mode = str(ov.get("setGateMinMode") or "positive").strip().lower()
+        self.base_min_avg = mode.startswith("avg")        # avgpositive / avgnegative / avgboth: judged on the average of the newest N results
+        mode = mode[3:] if self.base_min_avg else mode
         self.base_min_positive = mode != "negative"
         self.base_min_both = mode == "both"
         # no ratio rule on the minimal window (owner 2026-10-29): 1-3 whatever the short window is
@@ -1607,6 +1623,8 @@ class SetBook:
         self.short_margin = max(1.0, min(2.0, float(MAIN_SHORT_MARGIN if sov["Margin"] is None else sov["Margin"])))
         # the Main minimal window, a third last-N next to the long and the short one: the newest 1-3 results of the Main Set all positive (or all negative)
         mmode = str(ov.get("mainMinMode") or "positive").strip().lower()
+        self.main_min_avg = mmode.startswith("avg")
+        mmode = mmode[3:] if self.main_min_avg else mmode
         self.main_min_positive = mmode != "negative"
         self.main_min_both = mmode == "both"
         self.main_min_n = max(0, min(MAIN_MIN_N_MAX, int(num(ov, "mainMinN", 0)))) if self.main_on else 0
@@ -2370,7 +2388,8 @@ class SetBook:
                            short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
                            neg_on=self.neg_on, neg_windows=tuple(self.neg_windows), real_on=self.realst_on, real_n=self.realst_n,
                            full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
-                           base_min_both=self.base_min_both, main_min_both=self.main_min_both)
+                           base_min_both=self.base_min_both, main_min_both=self.main_min_both,
+                           base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
 
     def _chain_of(self, st: SetState, full: Sequence[tuple]) -> Dict[str, Any]:
         """The Set's chain (stage_chain) over replayed rows: {"main", "real", "realneg": [(exit t, net)], "short_n"}."""
@@ -2476,7 +2495,7 @@ class SetBook:
         st.base_min_n = len(mw)
         st.base_min_gp, st.base_min_gl = round(sum(x for x in mw if x > 0), 8), round(-sum(x for x in mw if x < 0), 8)
         st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
-                                                    and sign_ok(mw, self.base_min_positive, self.base_min_both))
+                                                    and sign_ok(mw, self.base_min_positive, self.base_min_both, self.base_min_avg))
         m_, r_, q_, short_n = self._streams(st)      # the stages after Base read the Set's Main / Real / Real Negative Sets
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack))
         st.stage = v
@@ -2958,8 +2977,8 @@ class SetBook:
             if self.main_on and self.short_on:
                 chosen[str(int(x.main_short_win or self.main_n))] = chosen.get(str(int(x.main_short_win or self.main_n)), 0) + 1
         windows["mainShort"]["chosen"] = chosen          # how many Base-passing Sets run each short window (the Set's own pick among the candidates)
-        windows["baseMinimal"]["mode"] = "both" if self.base_min_both else ("positive" if self.base_min_positive else "negative")
-        windows["mainMinimal"]["mode"] = "both" if self.main_min_both else ("positive" if self.main_min_positive else "negative")
+        windows["baseMinimal"]["mode"] = ("avg" if self.base_min_avg else "") + ("both" if self.base_min_both else ("positive" if self.base_min_positive else "negative"))
+        windows["mainMinimal"]["mode"] = ("avg" if self.main_min_avg else "") + ("both" if self.main_min_both else ("positive" if self.main_min_positive else "negative"))
         # stages: `base` is the end figure (the Sets that pass Base and Main, pooled over their Base windows), `baseOnly` the Base gate
         # alone; `main` the same end Sets over the Main gate's last N of their Main Sets; `processed` the Main Sets (orders opened while
         # Base passed) of every Base-passing Set; `real` the Real Sets (orders opened while Base and Main passed) of the end Sets, which
@@ -3844,6 +3863,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
         allk = list(range(len(ts_)))
         def mok(t, n, pos):                   # the Base minimal window: the newest n results before t all positive (negative; both: one sign)
             w = [nt_[k] for k in allk if ts_[k] < t][-n:]
+            if Q.base_min_avg:                # the average rule, read plainly: the mean of the newest n above / below zero, or either (both)
+                a_ = sum(w) / len(w) if w else 0.0
+                return len(w) >= (n if Q.full_window else 1) and (abs(a_) * len(w) > NEG_EPS if Q.base_min_both else (a_ * len(w) > NEG_EPS if pos else a_ * len(w) < -NEG_EPS))
             return len(w) >= (n if Q.full_window else 1) and ((all(x > 0 for x in w) or all(x < 0 for x in w)) if Q.base_min_both else (all(x > 0 for x in w) if pos else all(x < 0 for x in w)))
         main_ = [k for k in allk if processed_flag(ts_, nt_, g_, l_, en_[k], Q.base_long, Q.gate_min, Q.floor, Q.max_dd_s, Q.lookback_s, 0, Q.consistency)
                  and (not Q.base_short or ok(allk, en_[k], Q.base_short))
@@ -3867,6 +3889,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
 
         def kok(k):                           # the Main minimal window: the newest main_min_n Main results before the entry all positive (negative)
             w = [nt_[j] for j in main_ if ts_[j] < en_[k]][-Q.main_min_n:] if Q.main_min_n else []
+            if Q.main_min_n and Q.main_min_avg:
+                a_ = sum(w) / len(w) if w else 0.0
+                return len(w) >= (Q.main_min_n if Q.full_window else 1) and (abs(a_) * len(w) > NEG_EPS if Q.main_min_both
+                                                                              else (a_ * len(w) > NEG_EPS if Q.main_min_positive else a_ * len(w) < -NEG_EPS))
             return (not Q.main_min_n) or (len([x for x in w]) >= (Q.main_min_n if Q.full_window else 1)
                                           and ((all(x > 0 for x in w) or all(x < 0 for x in w)) if Q.main_min_both else (all(x > 0 for x in w) if Q.main_min_positive else all(x < 0 for x in w))))
         real_ = []
@@ -3969,6 +3995,36 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-main-minimal-window-equals-the-rules", same_k and disjoint_k and only_real and main_same and short_same and narrowed_k > 0 and union_k,
                 f"Real Set equals the brute-force reading for N 1-3 positive and negative, both rules={same_k}; positive and negative disjoint={disjoint_k}; "
                 f"only removes Real orders={only_real}; Main Set unchanged={main_same}; short window unchanged={short_same}; mode both = positive or negative={union_k} (narrowed {narrowed_k} cases)"))
+    # the minimal windows on the AVERAGE (mode avgpositive / avgnegative / avgboth, Base and Main each on its own): the chain equals the plain reading of the
+    # mean for N 1-3 in both window rules; positive and negative average are disjoint and together give avgboth; the sign rule (every result one sign)
+    # lies inside the average rule of the same sign; the average rule only removes orders (Base: Main orders, Main: Real orders, the Main Set unchanged)
+    same_v, disj_v, union_v, inside_v, only_v, diff_v = True, True, True, True, True, 0
+    for _ in range(6):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005, 0.001, -0.002)) for _ in range(300)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        plain = stage_chain(ts_, en_, nt_, Pa)
+        for full_ in (False, True):
+            for n_ in (1, 2, 3):
+                for lvl, key, ix in (("base", "main", 0), ("main", "real", 1)):
+                    cfg = {f"{lvl}_min_n": n_, "full_window": full_}
+                    qp = _dc_replace(Pa, **cfg, **{f"{lvl}_min_avg": True, f"{lvl}_min_positive": True})
+                    qn = _dc_replace(Pa, **cfg, **{f"{lvl}_min_avg": True, f"{lvl}_min_positive": False})
+                    qb = _dc_replace(Pa, **cfg, **{f"{lvl}_min_avg": True, f"{lvl}_min_both": True})
+                    qs = _dc_replace(Pa, **cfg, **{f"{lvl}_min_positive": True})
+                    gp_, gn_, gb_, gs_ = (stage_chain(ts_, en_, nt_, q)[key] for q in (qp, qn, qb, qs))
+                    same_v = same_v and all(stage_chain(ts_, en_, nt_, q)[key] == _ref_chain(ts_, en_, nt_, q)[ix] for q in (qp, qn, qb))
+                    disj_v = disj_v and not (set(gp_) & set(gn_))
+                    union_v = union_v and set(gb_) == set(gp_) | set(gn_)
+                    inside_v = inside_v and set(gs_) <= set(gp_)
+                    diff_v += n_ > 1 and set(gs_) != set(gp_)
+                    if not full_:
+                        only_v = only_v and set(gp_) <= set(plain[key]) and set(gn_) <= set(plain[key])
+                        if lvl == "main":
+                            only_v = only_v and stage_chain(ts_, en_, nt_, qp)["main"] == plain["main"]
+    out.append(("set-minimal-window-average-equals-the-rules", same_v and disj_v and union_v and inside_v and only_v and diff_v > 0,
+                f"chain equals the plain mean for N 1-3, Base and Main, both window rules={same_v}; positive / negative average disjoint={disj_v}; "
+                f"avgboth = their union={union_v}; the sign rule lies inside the average rule={inside_v} (differs in {diff_v} cases); only removes orders={only_v}"))
     # the shortcuts of the chain's Base loop keep the rules: the PF rounding near the floor (a PF of 1.24996 rounds to 1.25 and passes, 1.24994 does not), the
     # lookback on the window start and the drawdown time (a window shorter than the limit cannot reach it; a longer one is measured) against processed_flag
     # and an independent drawdown reading

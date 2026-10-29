@@ -203,7 +203,7 @@ def _short_ok(book, e: Dict[str, Any]) -> bool:
 
 def _min_ok(book, e: Dict[str, Any]) -> bool:
     mw = [x - e["cf"] for x in e["w"][-book.base_min_n:]]
-    return len(mw) >= (book.base_min_n if getattr(book, "stage_full", False) else 1) and se.sign_ok(mw, book.base_min_positive, getattr(book, "base_min_both", False))
+    return len(mw) >= (book.base_min_n if getattr(book, "stage_full", False) else 1) and se.sign_ok(mw, book.base_min_positive, getattr(book, "base_min_both", False), getattr(book, "base_min_avg", False))
 
 
 def gate_base(book, tapes: Tapes, st, now: float):

@@ -279,7 +279,7 @@ export type PulseOverlay = {
   setGateShortMaxRatio: number;
   /** Base minimal window: the newest N (1-3) results of a Set must all be positive / negative (0 = off). */
   setGateMinN: number;
-  setGateMinMode: "positive" | "negative" | "both";
+  setGateMinMode: MinMode;
   mainGateEnabled: boolean;
   mainGateN: number;
   /** Main short window (earlier "Auto"): each Set picks its own window from these on its Main Set; the long window and the short one must both pass. */
@@ -291,7 +291,7 @@ export type PulseOverlay = {
   mainShortMargin: number;
   /** Main minimal window: the newest N (1-3) results of a Set's Main Set must all be positive / negative (0 = off). */
   mainMinN: number;
-  mainMinMode: "positive" | "negative" | "both";
+  mainMinMode: MinMode;
   /** Main Negative lane: the average of the last N Main orders below zero (for some N) opens the Real Negative lane. */
   mainNegEnabled: boolean;
   mainNegWindows: number[];
@@ -802,9 +802,13 @@ function arr<T>(v: unknown, d: T[] = []): T[] {
   return Array.isArray(v) ? (v as T[]) : d;
 }
 
-function minMode(v: unknown): "positive" | "negative" | "both" {
-  const m = String(v ?? "positive").toLowerCase();
-  return m === "negative" ? "negative" : m === "both" ? "both" : "positive";
+/** Minimal window rule: every one of the newest N results of one sign (positive / negative / both), or their average (avg*). */
+export type MinMode = "positive" | "negative" | "both" | "avgpositive" | "avgnegative" | "avgboth";
+const MIN_MODES: MinMode[] = ["positive", "negative", "both", "avgpositive", "avgnegative", "avgboth"];
+
+export function minMode(v: unknown): MinMode {
+  const m = String(v ?? "positive").toLowerCase() as MinMode;
+  return MIN_MODES.includes(m) ? m : "positive";
 }
 
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
