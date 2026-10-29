@@ -31,6 +31,22 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("stage: the Base short window is skipped in the chain",
+     "set_engine.py", "        if P.base_short and not _window_ok(ts, gpre, lpre, ents[k], P.base_short, P.floor, P.lookback_s):\n            continue", "        if False:\n            continue"),
+    ("stage: the Base short window does not gate",
+     "set_engine.py", "            return \"short\"           # the Base short window", "            pass  # return \"short\"           # the Base short window"),
+    ("stage: the Main Auto window is ignored for the Real Set",
+     "set_engine.py", "                              and _window_ok(mt, mg, ml, ents[k], auto_n, P.floor, P.lookback_s)):", "                              and True):"),
+    ("stage: the Auto window picks the worst candidate",
+     "set_engine.py", "            if pf > best and pf >= ref * P.auto_margin:", "            if pf < best or pf >= ref * P.auto_margin:"),
+    ("stage: the Negative lane takes a positive average",
+     "set_engine.py", "    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < 0 for w in P.neg_windows)", "    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) > 0 for w in P.neg_windows)"),
+    ("stage: the Real stage does not gate the positive lane",
+     "set_engine.py", "            \"pos\": main_pass and (r_ok if P.real_on else True),", "            \"pos\": main_pass,"),
+    ("stage: the Negative lane is picked first",
+     "set_engine.py", "            for lane in (\"pos\", \"neg\"):", "            for lane in (\"neg\", \"pos\"):"),
+    ("trader: stage: the client id loses the lane",
+     "pulse_trader.py", "        nonce = (CID_NEG_MARK if lane == \"neg\" else random.choice(alphabet))", "        nonce = (random.choice(alphabet))"),
     ("processed lane: the Main gate reads the raw tape again",
      "set_engine.py", "        rw = self.processed_stream(st)[-self.main_n:]", "        rw = win[-self.main_n:]"),
     ("processed lane: every order counts as processed",

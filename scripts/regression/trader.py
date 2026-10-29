@@ -1427,8 +1427,55 @@ def a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes():
                 f"8th loss pauses the book: Set close={paused_by_set}, Exit-lane close={paused_by_exit_lane}")
 
 
+def every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats():
+    """The stage chain end to end in the trader: pick_any takes the positive lane (Base -> Main -> Real) first and the Real Negative
+    lane only when no positive Set is valid; the client id carries the lane (a recovered or fill-synced order keeps it); a live close
+    joins the Real Set of its own lane only; the execution stats count Sets per stage and orders per lane; the overall strategies
+    read the Real Sets' paper stream."""
+    b, se = _signal_book()
+    p = _bare_pulse()
+    p.sets = b
+    base = [x for x in b.by_idx if x.kind == "base" and x.pack == b.packs[0]][:2]
+    pos_st, neg_st = base
+    for x in b.by_idx:
+        x.active, x.gate_n, x.gate_pf, x.max_dd_s, x.n = False, 0, 0.0, 0.0, 0
+    for x in base:
+        x.active, x.gate_n, x.gate_pf, x.gate_pf_old, x.gate_pf_new, x.n = True, 50, 2.0, 2.0, 2.0, 100
+        x.base_short_n, x.base_short_pf = 15, 2.0
+    pos_st.stage = {"pos": True, "negl": False, "main": True, "auto": True, "neg": False}
+    neg_st.stage = {"pos": False, "negl": True, "main": False, "auto": True, "neg": True}
+    lanes = (b.lane_of(pos_st), b.lane_of(neg_st))
+    first = b.pick_any(pos_st.pack)
+    pos_st.stage = {"pos": False, "negl": False, "main": False, "auto": False, "neg": False}
+    second = b.pick_any(pos_st.pack)
+    cid_neg = p.cid("o", set_id=neg_st.id, pack=neg_st.pack, set_idx=neg_st.idx, lane="neg")
+    cid_pos = p.cid("o", set_id=pos_st.id, pack=pos_st.pack, set_idx=pos_st.idx, lane="pos")
+    rt = ((p.parse_track(cid_neg) or {}).get("lane"), (p.parse_track(cid_pos) or {}).get("lane"))
+    close_pos = p.cid("c", pos=types.SimpleNamespace(set_id=neg_st.id, pack=neg_st.pack, set_idx=neg_st.idx, lane="neg"))
+    close_lane = (p.parse_track(close_pos) or {}).get("lane")
+    # a live close joins the Real Set of its lane only
+    neg_st.proc_replayed, neg_st.proc, neg_st.exe, neg_st.neg, neg_st.live = True, [], [], [], []
+    neg_st.live.append({"t": 1.0, "pnl_pct": 0.01, "lane": "neg"})
+    m_, r_, q_, _n = b._streams(neg_st)
+    joins = (len(m_), len(r_), len(q_))
+    # execution stats per lane
+    p.open = {"A": types.SimpleNamespace(set_id=neg_st.id, lane="neg", pack=neg_st.pack), "B": types.SimpleNamespace(set_id=pos_st.id, lane="pos", pack=pos_st.pack)}
+    p.exec_n = {}
+    p._exec_note(pt.Closed(1.0, "A", "LONG", 1, 1, 1, 0.5, 0.01, "tp", 60, set_id=neg_st.id, lane="neg"))
+    p._exec_note(pt.Closed(1.0, "B", "LONG", 1, 1, 1, -0.5, -0.01, "sl", 60, set_id=pos_st.id, lane="pos"))
+    ex = p.execution_snapshot()
+    paper = b.real_paper(10)
+    ok = (lanes == ("pos", "neg") and first is pos_st and second is neg_st and rt == ("neg", "pos") and close_lane == "neg"
+          and joins == (1, 0, 1) and ex["lanes"]["openPos"] == 1 and ex["lanes"]["openNeg"] == 1 and ex["lanes"]["closedNeg"] == 1
+          and ex["lanes"]["winsNeg"] == 1 and ex["lanes"]["closedPos"] == 1 and ex["lanes"]["lossesPos"] == 1
+          and set(ex["sets"]["stages"]) == {"base", "main", "negative", "real", "realNeg"} and isinstance(paper, list))
+    return ok, (f"lanes {lanes}; pick {getattr(first, 'id', None) == pos_st.id}/{getattr(second, 'id', None) == neg_st.id}; cid lanes {rt} close {close_lane}; "
+                f"live close joins (Main, Real, Real Neg) {joins}; stats {ex['lanes']} stages {ex['sets']['stages']}")
+
+
 CHECKS = [
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
+    ("trader.lanes-every-stage-on-its-own-lane", every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats),
     ("trader.lanes-set-close-waits-only-its-own-cooldown", a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes),
     ("trader.entry-loop-places-the-set-signal", the_entry_loop_places_the_set_signal_and_not_the_live_score),
     ("trader.entry-mirrors-set-signal-without-last-n-validation", the_entry_loop_mirrors_the_set_signal_without_any_last_n_validation),

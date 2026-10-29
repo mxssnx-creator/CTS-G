@@ -608,34 +608,98 @@ function SettingsPage() {
                   hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 24 h, owner 2026-10-29)."
                   onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
                 />
+                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Stages · Base → Main → Real</div>
+                <p className="col-span-full text-xs text-muted">
+                  Each stage validates only on the orders the stage before it let through, and those orders form a new Set of the Base Set:
+                  the Main Set (opened while Base passed), the Real Set (opened while Main passed) and the Real Negative Set (opened in a
+                  Main dip). Execution uses Sets that pass Real; their orders mirror to the exchange.
+                </p>
+                <Toggle label="Stages after Base (off: the Base long window alone)" on={overlay.stagesEnabled !== false} onChange={(v) => patch("stagesEnabled", v)} />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
                 <Slider
-                  label="Base gate · last N orders"
+                  label="Base · long window (last N orders)"
                   value={overlay.setGateWindow}
                   min={10}
                   max={100}
                   step={1}
-                  hint="each Set is judged on its own last N orders (default 30 for the small-cap universe)"
+                  hint="default 50 · each Set on its own last N orders, at the minimum PF, with the drawdown time"
                   onChange={(v) => patch("setGateWindow", v)}
                 />
                 <Slider
-                  label="Base gate · min orders"
+                  label="Base · short window (last N orders)"
+                  value={overlay.setGateShortN}
+                  min={0}
+                  max={25}
+                  step={5}
+                  hint="the second Base window, 0 = off · tested 5-25 step 5, the best is the default"
+                  onChange={(v) => patch("setGateShortN", v)}
+                />
+                <Slider
+                  label="Base · min orders"
                   value={overlay.setGateMinTrades}
                   min={0}
                   max={100}
                   step={1}
-                  hint="0 = off (default, owner 2026-10-29): a Set is judged on the orders it has. Above 0: fewer orders than this are not judged (at most the last N)."
+                  hint="0 = off (default, owner 2026-10-29): a Set is judged on the orders it has. Above 0: fewer orders than this are not judged (at most the long window)."
                   onChange={(v) => patch("setGateMinTrades", v)}
                 />
-                <Toggle label="Main stage gate (last-N validation of each Set's Main Set: orders opened while Base passed; execution uses Sets that pass Base and Main)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Main · additional strategies, coordinations, processings · the last-N validation, on the Main Set</div>
+                <Toggle label="Main · static window" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
                 <Slider
-                  label="Main stage · last N orders"
+                  label="Main · static window (last N Main orders)"
                   value={overlay.mainGateN}
                   min={8}
                   max={50}
                   step={1}
-                  hint="default 8 · reads each Set's processed lane (orders it opened while it passed Base) · same minimum PF as Base"
+                  hint="default 8 · the first Main window, at the Base minimum PF"
                   onChange={(v) => patch("mainGateN", v)}
                 />
+                <Toggle label="Main · Auto window (each Set picks its own; both Main windows must pass)" on={overlay.mainAutoEnabled !== false} onChange={(v) => patch("mainAutoEnabled", v)} />
+                <WindowChips
+                  label="Main · Auto candidates"
+                  value={overlay.mainAutoWindows}
+                  options={[5, 10, 15, 20, 25]}
+                  hint="default 5-25 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set"
+                  onChange={(v) => patch("mainAutoWindows", v)}
+                />
+                <Slider
+                  label="Main · Auto min orders"
+                  value={overlay.mainAutoMin}
+                  min={3}
+                  max={50}
+                  step={1}
+                  hint="a candidate needs this many validated Main orders"
+                  onChange={(v) => patch("mainAutoMin", v)}
+                />
+                <Slider
+                  label="Main · Auto margin"
+                  value={overlay.mainAutoMargin}
+                  min={1}
+                  max={1.5}
+                  step={0.01}
+                  hint="a candidate must beat the static window's PF by this factor (default 1.02)"
+                  onChange={(v) => patch("mainAutoMargin", v)}
+                />
+                <Toggle label="Main · Negative lane (a dip opens Real Negative)" on={overlay.mainNegEnabled !== false} onChange={(v) => patch("mainNegEnabled", v)} />
+                <WindowChips
+                  label="Main · Negative windows"
+                  value={overlay.mainNegWindows}
+                  options={[5, 10]}
+                  hint="default 5 and 10 · the average of the last N Main orders below zero, for some N, makes the Set's Real Negative Set"
+                  onChange={(v) => patch("mainNegWindows", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Real · evals and overall strategies · Active execution and mirroring to the exchange</div>
+                <Toggle label="Real · validation (last N of the lane's Real Set)" on={overlay.realGateEnabled !== false} onChange={(v) => patch("realGateEnabled", v)} />
+                <Slider
+                  label="Real · last N orders"
+                  value={overlay.realGateN}
+                  min={3}
+                  max={50}
+                  step={1}
+                  hint="default 15 · single window, on the Real Set (positive lane) and on the Real Negative Set (Negative lane)"
+                  onChange={(v) => patch("realGateN", v)}
+                />
+                <Toggle label="Real · overall strategies read the Real Sets' paper stream" on={overlay.realStagePaper !== false} onChange={(v) => patch("realStagePaper", v)} />
                 <Toggle label="All validation gates use the Base minimum PF (Real, Exit, DCA, Block, coordinator)" on={overlay.minPfLinked !== false} onChange={(v) => patch("minPfLinked", v)} />
                 <Toggle label="Pre-history grows when too many Sets lack orders" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />
                 <Slider
@@ -1726,6 +1790,46 @@ function Num({
       ) : null}
       {hint ? <p className="mt-1 text-xs text-muted">{hint}</p> : null}
     </label>
+  );
+}
+
+function WindowChips({
+  label,
+  value,
+  options,
+  hint,
+  onChange,
+}: {
+  label: string;
+  value: number[] | undefined;
+  options: number[];
+  hint?: string;
+  onChange: (v: number[]) => void;
+}) {
+  const on = new Set(value ?? options);
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-border bg-bg2 px-3 py-2 text-sm">
+      <span>{label}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((n) => (
+          <button
+            key={n}
+            type="button"
+            aria-pressed={on.has(n)}
+            onClick={() => {
+              const next = new Set(on);
+              if (next.has(n)) next.delete(n);
+              else next.add(n);
+              if (next.size) onChange([...next].sort((a, b) => a - b));
+            }}
+            className={`min-h-9 min-w-11 rounded-md border px-2 font-mono text-xs ${on.has(n) ? "border-primary text-primary" : "border-border text-muted"}`}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+      {hint ? <span className="text-xs text-muted">{hint}</span> : null}
+    </div>
   );
 }
 
