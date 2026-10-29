@@ -524,6 +524,8 @@ def sim_gate_equals_the_engine_for_every_window_configuration():
             "Main minimal +1": {"mainMinN": 1}, "Main minimal -2": {"mainMinN": 2, "mainMinMode": "negative"}, "Main minimal +3 full windows": {"mainMinN": 3, "stageFullWindow": True},
             "Main short off, minimal -1": {"mainShortEnabled": False, "mainMinN": 1, "mainMinMode": "negative"},
             "Base minimal -1 and Main minimal +2": {"setGateMinN": 1, "setGateMinMode": "negative", "mainMinN": 2},
+            "minimal both 2": {"setGateMinN": 2, "setGateMinMode": "both"}, "Main minimal both 3, Negative off": {"mainMinN": 3, "mainMinMode": "both", "mainNegEnabled": False},
+            "minimal 3 beside short 2": {"setGateShortN": 2, "setGateMinN": 3, "setGateMinMode": "negative"},
             "legacy mainAuto keys": {"mainAutoWindows": [4, 6], "mainAutoMin": 4, "mainAutoMargin": 1.0},
             "stages off": {"stagesEnabled": False},
         }

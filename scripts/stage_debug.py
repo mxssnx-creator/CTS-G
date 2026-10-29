@@ -72,7 +72,7 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
             if not o["base_stop"] and P.base_min_n:
                 mw = _window(ts, nets, entry, P.base_min_n, lb, full)
                 o["base_minimal"] = mw["results"]
-                if not (mw["judged"] and (all(x > 0 for x in mw["results"]) if P.base_min_positive else all(x < 0 for x in mw["results"]))):
+                if not (mw["judged"] and se.sign_ok(mw["results"], P.base_min_positive, P.base_min_both)):
                     o["base_stop"] = "minimal"
         o["in_main"] = k in main_pos
         if o["in_main"]:
@@ -91,7 +91,7 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
                 if P.main_min_n:
                     kw = _window(mt, mn, entry, P.main_min_n, lb, full)
                     o["main_minimal"] = kw["results"]
-                    if not stop and not (kw["judged"] and (all(x > 0 for x in kw["results"]) if P.main_min_positive else all(x < 0 for x in kw["results"]))):
+                    if not stop and not (kw["judged"] and se.sign_ok(kw["results"], P.main_min_positive, P.main_min_both)):
                         stop = "mainminimal"
             o["main_stop"] = stop
             o["in_real"] = k in real_set

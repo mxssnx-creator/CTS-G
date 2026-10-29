@@ -653,10 +653,11 @@ function SettingsPage() {
                   <select
                     className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
                     value={overlay.setGateMinMode}
-                    onChange={(e) => patch("setGateMinMode", e.target.value === "negative" ? "negative" : "positive")}
+                    onChange={(e) => patch("setGateMinMode", e.target.value === "negative" ? "negative" : e.target.value === "both" ? "both" : "positive")}
                   >
                     <option value="positive">positive (every one of the newest results above zero)</option>
                     <option value="negative">negative (every one of the newest results below zero)</option>
+                    <option value="both">both (the newest results share one sign: all positive or all negative)</option>
                   </select>
                 </label>
                 <Slider
@@ -729,7 +730,7 @@ function SettingsPage() {
                   min={0}
                   max={3}
                   step={1}
-                  hint="the third Main window, 0 = off · the newest 1-3 results of the Set's Main Set must all be positive (or all negative, below) · at most the smallest short candidate"
+                  hint="the third Main window, 0 = off · the newest 1-3 results of the Set's Main Set must all be positive (or all negative, below) · no share rule against the short window"
                   onChange={(v) => patch("mainMinN", v)}
                 />
                 <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
@@ -737,10 +738,11 @@ function SettingsPage() {
                   <select
                     className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
                     value={overlay.mainMinMode}
-                    onChange={(e) => patch("mainMinMode", e.target.value === "negative" ? "negative" : "positive")}
+                    onChange={(e) => patch("mainMinMode", e.target.value === "negative" ? "negative" : e.target.value === "both" ? "both" : "positive")}
                   >
                     <option value="positive">positive (every one of the newest results above zero)</option>
                     <option value="negative">negative (every one of the newest results below zero)</option>
+                    <option value="both">both (the newest results share one sign: all positive or all negative)</option>
                   </select>
                 </label>
                 <Toggle label="Main · Negative lane (a dip opens Real Negative)" on={overlay.mainNegEnabled !== false} onChange={(v) => patch("mainNegEnabled", v)} />

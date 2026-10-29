@@ -50,7 +50,9 @@ def cell_patch(cell: Dict[str, Any], lookback: int) -> Dict[str, Any]:
     p["setGateWindow"] = cell["long"]
     if cell["stages"]:
         p.update({"stagesEnabled": True, "setGateShortN": cell["short"], "mainGateN": cell["main"], "realGateN": cell["real"]})
-        if cell.get("neg"):
+        if cell.get("neg") == "off":
+            p["mainNegEnabled"] = False                  # the process without the Negative lane: no dip, no Real Negative Set
+        elif cell.get("neg"):
             p["mainNegWindows"] = cell["neg"]
         if cell.get("min_n"):
             p["setGateMinN"] = cell["min_n"]
@@ -185,7 +187,7 @@ def run_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
         "hours_pos": whole["hours_positive"],
         "wins": sum(1 for r in trades if r["net"] > 0), "neg_lane_orders": sum(1 for r in trades if r.get("lane") == "neg"),
         "pos_lane": gp_gl([r for r in trades if r.get("lane") != "neg"]), "neg_lane": gp_gl([r for r in trades if r.get("lane") == "neg"]),
-        "neg_windows": list(book.neg_windows) if cell["stages"] else None,
+        "neg_windows": list(book.neg_windows) if cell["stages"] and book.neg_on else None,
         "min_n_eff": book.base_min_n if cell["stages"] else 0,
         "main_min_eff": book.main_min_n if cell["stages"] else 0,
         "half1": {"pf": h1["pf"], "orders": h1["orders"], "net_pct": h1["net_pct"], "gp_pct": h1["gp_pct"], "gl_pct": h1["gl_pct"]},
@@ -213,15 +215,19 @@ def run_cell(cell: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 
+SIGN = {"positive": "+", "negative": "-", "both": "±", "": ""}
+
+
 def parse_minimal(raw: str) -> List[Tuple[int, str]]:
-    """'0;+1;+2;-1' -> [(0, ''), (1, 'positive'), (2, 'positive'), (1, 'negative')]: the Base minimal window (newest N results all positive / negative)."""
+    """'0;+1;+2;-1;±2' -> [(0, ''), (1, 'positive'), (2, 'positive'), (1, 'negative'), (2, 'both')]: the Base minimal window (newest N results all positive /
+    all negative / one sign throughout, '±N' or 'bN')."""
     out: List[Tuple[int, str]] = []
     for tok in [t.strip() for t in raw.replace(",", ";").split(";") if t.strip()]:
         if tok in ("0", "off"):
             out.append((0, ""))
         else:
-            n = int(tok.lstrip("+-"))
-            out.append((n, "negative" if tok.startswith("-") else "positive"))
+            n = int(tok.lstrip("+-±b"))
+            out.append((n, "both" if tok[0] in "±b" else "negative" if tok.startswith("-") else "positive"))
     return out or [(0, "")]
 
 
@@ -231,7 +237,7 @@ def enumerate_cells(longs, shorts, mains, reals, main_default, real_default, neg
     def add(L, S, M, R, neg, mn=0, mm="", kn=0, km="", stages=True):
         key = (L, S, M, R, neg, mn, mm, kn, km, stages)
         if key not in seen:
-            tag = (f"_m{'+' if mm == 'positive' else '-'}{mn}" if mn else "") + (f"_k{'+' if km == 'positive' else '-'}{kn}" if kn else "")
+            tag = (f"_m{SIGN[mm]}{mn}" if mn else "") + (f"_k{SIGN[km]}{kn}" if kn else "")
             seen[key] = {"long": L, "short": S, "main": M, "real": R, "neg": neg, "min_n": mn, "min_mode": mm, "main_min_n": kn, "main_min_mode": km, "stages": stages,
                          "id": (f"L{L}_S{S}_M{M}_R{R}" + (f"_N{neg.replace(',', '-')}" if neg else "") + tag) if stages else f"L{L}_base_alone"}
         return seen[key]
@@ -242,8 +248,7 @@ def enumerate_cells(longs, shorts, mains, reals, main_default, real_default, neg
                 continue                                   # the short window at or over the long window is the long window itself; over the allowed share it is clamped
             for neg in negs:
                 for mn, mm in minimals:
-                    if mn and mn > S:
-                        continue                           # the minimal window is at most the short window
+                    # no ratio or short-window rule on the minimal window (owner 2026-10-29): every N of 1-3 runs beside every short window
                     for kn, km in main_minimals:
                         for R in reals:
                             add(L, S, main_default, R, neg, mn, mm, kn, km)["real_third"] = True
@@ -334,7 +339,7 @@ def main() -> int:
     ap.add_argument("--reals", default="15,25")
     ap.add_argument("--minimal", default="0", help="Base minimal window variants separated by ';': 0 = off, +N = the newest N results all positive, -N = all negative (N 1-3)")
     ap.add_argument("--main-minimal", default="0", help="Main minimal window variants separated by ';' like --minimal: 0 = off, +N = the newest N Main results all positive, -N = all negative (N 1-3)")
-    ap.add_argument("--neg", default="", help="Negative-window sets separated by ';', e.g. '5,10;1,2' (empty = the shipped 5,10)")
+    ap.add_argument("--neg", default="", help="Negative-window sets separated by ';', e.g. '5,10;1,2;off' (empty = the shipped 5,10; 'off' = the process without the Negative lane)")
     ap.add_argument("--hours", type=int, default=24)
     ap.add_argument("--lookback", type=int, default=1440)
     ap.add_argument("--jobs", type=int, default=4)
@@ -405,8 +410,8 @@ def main() -> int:
             "shipped": {"long": int(ov.get("setGateWindow", 50)), "short": int(ov.get("setGateShortN", 25)), "main": main_default, "real": real_default},
             "longs": longs, "shorts": shorts, "mains": mains, "reals": reals, "main_default": main_default, "real_default": real_default,
             "short_max_ratio": ratio, "negs": [x or neg_default for x in negs], "neg_default": neg_default,
-            "minimals": [{"n": n, "mode": m, "label": ("off" if not n else f"{'+' if m == 'positive' else '-'}{n}")} for n, m in minimals],
-            "main_minimals": [{"n": n, "mode": m, "label": ("off" if not n else f"{'+' if m == 'positive' else '-'}{n}")} for n, m in main_minimals],
+            "minimals": [{"n": n, "mode": m, "label": ("off" if not n else f"{SIGN[m]}{n}")} for n, m in minimals],
+            "main_minimals": [{"n": n, "mode": m, "label": ("off" if not n else f"{SIGN[m]}{n}")} for n, m in main_minimals],
             "min_orders": int(ov.get("setGateMinTrades", 0)), "max_ddt_h": float(ov.get("setMaxDdtHours", 24)), "min_pf": float(ov.get("setMinPf", 1.25)),
             "cost_pct": book0.cost_pct, "sets": len(book0.by_idx), "self_check": checks, "hold": "off (as every window evaluation)", "groups": len(groups),
             "inconsistent_cells": len(bad_cells)}

@@ -32,5 +32,7 @@ test("the Main minimal window is held to 0..3 and to a mode of positive or negat
   assert.equal(overlayFromCts(cts({ mainMinN: -2 })).mainMinN, 0);
   assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "NEGATIVE" })).mainMinMode, "negative");
   assert.equal(overlayFromCts(cts({ mainMinMode: "sideways" })).mainMinMode, "positive");
+  assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "Both" })).mainMinMode, "both");
+  assert.equal(overlayFromCts(cts({ setGateMinN: 2, setGateMinMode: "both" })).setGateMinMode, "both");
   assert.equal(overlayFromCts(cts({ setGateMinN: 2, setGateMinMode: "negative" })).setGateMinMode, "negative", "the Base minimal window reads the same way");
 });

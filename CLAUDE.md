@@ -170,8 +170,9 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
   **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
   25, 0 = off), plus minimum orders and drawdown time. Reason `short` for the short one. A third Base window, the
-  **minimal** window (`setGateMinN` 0 = off, 1-3; `setGateMinMode` positive / negative; reason `minimal`): the newest N results of the Set's own tape (net after
-  PositionCost) must all be positive (or all negative); judged on the results it has unless `stageFullWindow`; at most the short window; part of the chain
+  **minimal** window (`setGateMinN` 0 = off, 1-3; `setGateMinMode` positive / negative / **both**; reason `minimal`): the newest N results of the Set's own tape (net after
+  PositionCost) must all be positive, all negative, or (both, owner 2026-10-29) share one sign throughout (`set_engine.sign_ok`; at N 1 that is any result but an exact zero);
+  judged on the results it has unless `stageFullWindow`; **no ratio rule** (owner 2026-10-29: 1-3 whatever the short window, the 0.5 share applies to the short windows only); part of the chain
   (`set_engine.stage_chain`, the Base loop), the simulator (`stage_eval.gate_base`) and the desk Settings (`gates.base-minimal-window-...`, `set-base-minimal-window-equals-the-rules`,
   `processing.sim-gate-equals-the-engine-for-every-window-configuration`, `base minimal:` mutants). The short window
   is at most `setGateShortMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the long window: long 40 allows at most 20, long 20 at most 10 (`gates.short-window-is-at-most-half-of-the-long-window`, `short window:` mutants).
@@ -199,8 +200,8 @@ Every strategy type runs its own lane; none may close, tighten or score another'
     (`stage_chain` returns `short_by_order`); the pick for the verdict now reads every Main order. Before, one pick over the whole tape was applied to every
     earlier order, so the Real Set's history held hindsight (the order's own result was in the pick that admitted it): 13 % of the Real orders differed and
     the realised PF of the Real Set read 0.925 against 0.878 without it (20 symbols, 24 h, 61k orders) - the gain was the leak, not an edge;
-  - **minimal** (`mainMinN` 0 = off, 1-3; `mainMinMode` positive / negative; reason `mainminimal`): the newest N results of the Main Set (net after
-    PositionCost) must all be positive (or all negative), judged on the results it has unless `stageFullWindow`; at most the smallest short candidate; it
+  - **minimal** (`mainMinN` 0 = off, 1-3; `mainMinMode` positive / negative / both; reason `mainminimal`): the newest N results of the Main Set (net after
+    PositionCost) must all be positive, all negative or (both) share one sign, judged on the results it has unless `stageFullWindow`; no ratio rule (not capped by the short candidates); it
     only removes Real Set orders and never changes the Main Set or the short pick (`gates.main-minimal-window-positive-and-negative`,
     `set-main-minimal-window-equals-the-rules`, `main minimal:` mutants).
 - **Main Negative lane** (separate, `mainNegEnabled`): the average net of the last 5 or the last 10 Main-Set orders (`mainNegWindows`) is

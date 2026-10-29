@@ -268,7 +268,7 @@ export type PulseOverlay = {
   setGateShortMaxRatio: number;
   /** Base minimal window: the newest N (1-3) results of a Set must all be positive / negative (0 = off). */
   setGateMinN: number;
-  setGateMinMode: "positive" | "negative";
+  setGateMinMode: "positive" | "negative" | "both";
   mainGateEnabled: boolean;
   mainGateN: number;
   /** Main short window (earlier "Auto"): each Set picks its own window from these on its Main Set; the long window and the short one must both pass. */
@@ -280,7 +280,7 @@ export type PulseOverlay = {
   mainShortMargin: number;
   /** Main minimal window: the newest N (1-3) results of a Set's Main Set must all be positive / negative (0 = off). */
   mainMinN: number;
-  mainMinMode: "positive" | "negative";
+  mainMinMode: "positive" | "negative" | "both";
   /** Main Negative lane: the average of the last N Main orders below zero (for some N) opens the Real Negative lane. */
   mainNegEnabled: boolean;
   mainNegWindows: number[];
@@ -771,6 +771,11 @@ function arr<T>(v: unknown, d: T[] = []): T[] {
   return Array.isArray(v) ? (v as T[]) : d;
 }
 
+function minMode(v: unknown): "positive" | "negative" | "both" {
+  const m = String(v ?? "positive").toLowerCase();
+  return m === "negative" ? "negative" : m === "both" ? "both" : "positive";
+}
+
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
   const coord = (cts.coordination_settings ?? cts.coordinationSettings ?? {}) as Record<string, unknown>;
   const trails = arr<string>(cts.strategyBaseTrailingVariants ?? coord.trailingVariants, [
@@ -895,7 +900,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
     setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
     setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
-    setGateMinMode: String(cts.setGateMinMode ?? "positive").toLowerCase() === "negative" ? "negative" : "positive",
+    setGateMinMode: minMode(cts.setGateMinMode),
     mainGateEnabled: bool(cts.mainGateEnabled, true),
     mainGateN: Math.max(8, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
     mainShortEnabled: bool(cts.mainShortEnabled ?? cts.mainAutoEnabled, true),
@@ -904,7 +909,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     mainShortMin: Math.max(3, Math.min(200, Math.round(num(cts.mainShortMin ?? cts.mainAutoMin, 8)))),
     mainShortMargin: Math.max(1, Math.min(2, num(cts.mainShortMargin ?? cts.mainAutoMargin, 1.02))),
     mainMinN: Math.max(0, Math.min(3, Math.round(num(cts.mainMinN, 0)))),
-    mainMinMode: String(cts.mainMinMode ?? "positive").toLowerCase() === "negative" ? "negative" : "positive",
+    mainMinMode: minMode(cts.mainMinMode),
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
     realGateEnabled: bool(cts.realGateEnabled, true),

@@ -276,6 +276,8 @@ class StageParams:
     base_min_positive: bool = True  # setGateMinMode: positive = every one of them above zero after PositionCost, negative = every one below zero
     main_min_n: int = 0             # Main: the minimal window (mainMinN, 0 = off): the newest 1-3 results of the Main Set must all be positive / negative
     main_min_positive: bool = True  # mainMinMode
+    base_min_both: bool = False     # setGateMinMode "both": the newest N results share one sign, all positive OR all negative (base_min_positive is then unused)
+    main_min_both: bool = False     # mainMinMode "both"
 
 
 NEG_EPS = 1e-12                  # a Negative window's sum is below zero when it is under -NEG_EPS (a window of results that cancel exactly is not negative, whatever the float rounding of a prefix-sum difference says)
@@ -371,7 +373,12 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
             if t0 < lo:
                 t0 = lo
             c_ = e - t0
-            if c_ < m_need or (pos_pre[e] - pos_pre[t0] if P.base_min_positive else neg_pre[e] - neg_pre[t0]) != c_:
+            if c_ < m_need:
+                continue
+            if P.base_min_both:
+                if pos_pre[e] - pos_pre[t0] != c_ and neg_pre[e] - neg_pre[t0] != c_:
+                    continue
+            elif (pos_pre[e] - pos_pre[t0] if P.base_min_positive else neg_pre[e] - neg_pre[t0]) != c_:
                 continue
         main.append(k)
     m = len(main)
@@ -455,6 +462,13 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     return {"main": main, "real": real, "realneg": realneg, "short_n": short_n, "short_by_order": choice if choice is not None else [P.main_n] * m}
 
 
+def sign_ok(w: Sequence[float], positive: bool, both: bool = False) -> bool:
+    """The minimal-window rule on the results w: all above zero (positive), all below zero (not positive), or one sign throughout (both)."""
+    if both:
+        return all(x > 0 for x in w) or all(x < 0 for x in w)
+    return all(x > 0 for x in w) if positive else all(x < 0 for x in w)
+
+
 def sign_prefix(nets: Sequence[float]) -> Tuple[List[int], List[int]]:
     """Prefix counts of the positive and of the negative results of nets (for the minimal windows: the newest n are all positive iff the count
     over them is n)."""
@@ -477,7 +491,7 @@ def main_minimal(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: 
         s0 = e - P.main_min_n
         if s0 < mlo[j]:
             s0 = mlo[j]
-        out.append(e - s0 >= need and cnt[e] - cnt[s0] == e - s0)
+        out.append(e - s0 >= need and (cnt[e] - cnt[s0] == e - s0 or (P.main_min_both and neg_pre[e] - neg_pre[s0] == e - s0)))
     return out
 
 
@@ -495,7 +509,7 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     if P.main_min_n:
         mw = list(main[-P.main_min_n:])
         k_n = len(mw)
-        k_ok = k_n >= (P.main_min_n if P.full_window else 1) and (all(x > 0 for x in mw) if P.main_min_positive else all(x < 0 for x in mw))
+        k_ok = k_n >= (P.main_min_n if P.full_window else 1) and sign_ok(mw, P.main_min_positive, P.main_min_both)
     else:
         k_ok, k_n = True, 0
     neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)
@@ -1363,6 +1377,7 @@ class SetBook:
         self.short_max_ratio = BASE_SHORT_MAX_RATIO
         self.base_min_n = 0
         self.base_min_positive = True
+        self.base_min_both = False
         self.short_on = True
         self.short_windows: Tuple[int, ...] = MAIN_SHORT_WINDOWS
         self.short_ratio = MAIN_SHORT_MAX_RATIO
@@ -1370,6 +1385,7 @@ class SetBook:
         self.short_margin = MAIN_SHORT_MARGIN
         self.main_min_n = 0
         self.main_min_positive = True
+        self.main_min_both = False
         self.neg_on = True
         self.neg_windows: Tuple[int, ...] = MAIN_NEG_WINDOWS
         self.realst_on = True
@@ -1474,8 +1490,9 @@ class SetBook:
         # the Base minimal window, a third last-N next to the long and the short one: the newest 1-3 results all positive (or all negative)
         mode = str(ov.get("setGateMinMode") or "positive").strip().lower()
         self.base_min_positive = mode != "negative"
-        min_cap = min(BASE_MIN_N_MAX, self.base_short) if self.base_short else BASE_MIN_N_MAX
-        self.base_min_n = max(0, min(min_cap, int(num(ov, "setGateMinN", 0)))) if self.stages_on else 0
+        self.base_min_both = mode == "both"
+        # no ratio rule on the minimal window (owner 2026-10-29): 1-3 whatever the short window is
+        self.base_min_n = max(0, min(BASE_MIN_N_MAX, int(num(ov, "setGateMinN", 0)))) if self.stages_on else 0
         self.main_on = self.stages_on and bool(ov.get("mainGateEnabled", True))
         self.main_n = max(MIN_VALIDATION_N, min(self.gate_window, int(num(ov, "mainGateN", MAIN_GATE_N_DEFAULT))))
         # the Main short window (was "Auto"): each Set's own window of the candidates, at most mainShortMaxRatio of the long window; the
@@ -1490,8 +1507,8 @@ class SetBook:
         # the Main minimal window, a third last-N next to the long and the short one: the newest 1-3 results of the Main Set all positive (or all negative)
         mmode = str(ov.get("mainMinMode") or "positive").strip().lower()
         self.main_min_positive = mmode != "negative"
-        main_min_cap = min(MAIN_MIN_N_MAX, min(self.short_windows) if self.short_on else self.main_n)
-        self.main_min_n = max(0, min(main_min_cap, int(num(ov, "mainMinN", 0)))) if self.main_on else 0
+        self.main_min_both = mmode == "both"
+        self.main_min_n = max(0, min(MAIN_MIN_N_MAX, int(num(ov, "mainMinN", 0)))) if self.main_on else 0
         self.neg_on = self.stages_on and bool(ov.get("mainNegEnabled", True))
         self.neg_windows = parse_windows(ov.get("mainNegWindows"), MAIN_NEG_WINDOWS)
         self.realst_on = self.stages_on and bool(ov.get("realGateEnabled", True))
@@ -2228,7 +2245,8 @@ class SetBook:
                            consistency=self.consistency_pf, main_on=self.main_on, main_n=self.main_n, short_on=self.short_on,
                            short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
                            neg_on=self.neg_on, neg_windows=tuple(self.neg_windows), real_on=self.realst_on, real_n=self.realst_n,
-                           full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive)
+                           full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
+                           base_min_both=self.base_min_both, main_min_both=self.main_min_both)
 
     def _chain_of(self, st: SetState, full: Sequence[tuple]) -> Dict[str, Any]:
         """The Set's chain (stage_chain) over replayed rows: {"main", "real", "realneg": [(exit t, net)], "short_n"}."""
@@ -2334,7 +2352,7 @@ class SetBook:
         st.base_min_n = len(mw)
         st.base_min_gp, st.base_min_gl = round(sum(x for x in mw if x > 0), 8), round(-sum(x for x in mw if x < 0), 8)
         st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
-                                                    and (all(x > 0 for x in mw) if self.base_min_positive else all(x < 0 for x in mw)))
+                                                    and sign_ok(mw, self.base_min_positive, self.base_min_both))
         m_, r_, q_, short_n = self._streams(st)      # the stages after Base read the Set's Main / Real / Real Negative Sets
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack))
         st.stage = v
@@ -2794,8 +2812,8 @@ class SetBook:
             if self.main_on and self.short_on:
                 chosen[str(int(x.main_short_win or self.main_n))] = chosen.get(str(int(x.main_short_win or self.main_n)), 0) + 1
         windows["mainShort"]["chosen"] = chosen          # how many Base-passing Sets run each short window (the Set's own pick among the candidates)
-        windows["baseMinimal"]["mode"] = "positive" if self.base_min_positive else "negative"
-        windows["mainMinimal"]["mode"] = "positive" if self.main_min_positive else "negative"
+        windows["baseMinimal"]["mode"] = "both" if self.base_min_both else ("positive" if self.base_min_positive else "negative")
+        windows["mainMinimal"]["mode"] = "both" if self.main_min_both else ("positive" if self.main_min_positive else "negative")
         # stages: `base` is the end figure (the Sets that pass Base and Main, pooled over their Base windows), `baseOnly` the Base gate
         # alone; `main` the same end Sets over the Main gate's last N of their Main Sets; `processed` the Main Sets (orders opened while
         # Base passed) of every Base-passing Set; `real` the Real Sets (orders opened while Base and Main passed) of the end Sets, which
@@ -3676,9 +3694,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
             return len(w) >= (n if Q.full_window else 1) and pf_of(sum(x for x in w if x > 0), -sum(x for x in w if x < 0)) + 1e-9 >= Q.floor
         g_, l_ = prefix_sums(nt_)
         allk = list(range(len(ts_)))
-        def mok(t, n, pos):                   # the Base minimal window: the newest n results before t all positive (negative)
+        def mok(t, n, pos):                   # the Base minimal window: the newest n results before t all positive (negative; both: one sign)
             w = [nt_[k] for k in allk if ts_[k] < t][-n:]
-            return len(w) >= (n if Q.full_window else 1) and (all(x > 0 for x in w) if pos else all(x < 0 for x in w))
+            return len(w) >= (n if Q.full_window else 1) and ((all(x > 0 for x in w) or all(x < 0 for x in w)) if Q.base_min_both else (all(x > 0 for x in w) if pos else all(x < 0 for x in w)))
         main_ = [k for k in allk if processed_flag(ts_, nt_, g_, l_, en_[k], Q.base_long, Q.gate_min, Q.floor, Q.max_dd_s, Q.lookback_s, 0, Q.consistency)
                  and (not Q.base_short or ok(allk, en_[k], Q.base_short))
                  and (not Q.base_min_n or mok(en_[k], Q.base_min_n, Q.base_min_positive))]
@@ -3702,7 +3720,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         def kok(k):                           # the Main minimal window: the newest main_min_n Main results before the entry all positive (negative)
             w = [nt_[j] for j in main_ if ts_[j] < en_[k]][-Q.main_min_n:] if Q.main_min_n else []
             return (not Q.main_min_n) or (len([x for x in w]) >= (Q.main_min_n if Q.full_window else 1)
-                                          and (all(x > 0 for x in w) if Q.main_min_positive else all(x < 0 for x in w)))
+                                          and ((all(x > 0 for x in w) or all(x < 0 for x in w)) if Q.main_min_both else (all(x > 0 for x in w) if Q.main_min_positive else all(x < 0 for x in w))))
         real_ = []
         for j, k in enumerate(main_):
             if Q.main_on and Q.short_on:
@@ -3753,7 +3771,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         wider += len(got["real"]) - len(stage_chain(ts_, en_, nt_, Pr)["real"])
     # the Base minimal window (third last-N next to the long and the short one): the chain equals the brute-force reading for 1-3 results, positive and
     # negative, in both window rules; a positive and a negative window never admit the same order; any minimal window only removes Main orders
-    same_m, disjoint, never_more, narrowed = True, True, True, 0
+    same_m, disjoint, never_more, narrowed, union_b = True, True, True, 0, True
     for _ in range(8):
         nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(300)]
         ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
@@ -3766,16 +3784,20 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 gp_, gn_ = stage_chain(ts_, en_, nt_, pos_), stage_chain(ts_, en_, nt_, neg_)
                 same_m = same_m and gp_["main"] == _ref_chain(ts_, en_, nt_, pos_)[0] and gn_["main"] == _ref_chain(ts_, en_, nt_, neg_)[0]
                 disjoint = disjoint and not (set(gp_["main"]) & set(gn_["main"]))
+                bth_ = _dc_replace(Pa, base_min_n=n_, base_min_both=True, full_window=full_)          # "both": one sign throughout = the positive or the negative window
+                gb_ = stage_chain(ts_, en_, nt_, bth_)
+                union_b = union_b and gb_["main"] == _ref_chain(ts_, en_, nt_, bth_)[0] and set(gb_["main"]) == set(gp_["main"]) | set(gn_["main"])
                 if not full_:
                     never_more = never_more and set(gp_["main"]) <= set(plain) and set(gn_["main"]) <= set(plain)
                     narrowed += len(plain) - len(gp_["main"]) > 0 and len(plain) - len(gn_["main"]) > 0
-    out.append(("set-base-minimal-window-equals-the-rules", same_m and disjoint and never_more and narrowed > 0,
+    out.append(("set-base-minimal-window-equals-the-rules", same_m and disjoint and never_more and narrowed > 0 and union_b,
                 f"chain equals the brute-force reading for N 1-3 positive and negative, both window rules={same_m}; positive and negative windows disjoint={disjoint}; "
+                f"mode both = the positive or the negative window={union_b}; "
                 f"a minimal window only removes Main orders={never_more} (narrowed {narrowed} cases)"))
     # the Main minimal window (a third last-N on the Main Set, next to the long and the short one): the chain equals the brute-force reading for 1-3 results,
     # positive and negative, in both window rules; positive and negative never admit the same Real order; it only removes Real orders and never touches the
     # Main Set; the Main short window chosen is the same with and without it (each window of a stage is judged on its own)
-    same_k, disjoint_k, only_real, main_same, narrowed_k, short_same = True, True, True, True, 0, True
+    same_k, disjoint_k, only_real, main_same, narrowed_k, short_same, union_k = True, True, True, True, 0, True, True
     for _ in range(8):
         nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(300)]
         ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
@@ -3788,14 +3810,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 cp, cn = stage_chain(ts_, en_, nt_, kp), stage_chain(ts_, en_, nt_, kn)
                 same_k = same_k and cp["real"] == _ref_chain(ts_, en_, nt_, kp)[1] and cn["real"] == _ref_chain(ts_, en_, nt_, kn)[1]
                 disjoint_k = disjoint_k and not (set(cp["real"]) & set(cn["real"]))
+                kb = _dc_replace(Pa, main_min_n=n_, main_min_both=True, full_window=full_)
+                cb = stage_chain(ts_, en_, nt_, kb)
+                union_k = union_k and cb["real"] == _ref_chain(ts_, en_, nt_, kb)[1] and set(cb["real"]) == set(cp["real"]) | set(cn["real"])
                 if not full_:
                     only_real = only_real and set(cp["real"]) <= set(plain["real"]) and set(cn["real"]) <= set(plain["real"])
                     narrowed_k += len(plain["real"]) - len(cp["real"]) > 0 and len(plain["real"]) - len(cn["real"]) > 0
                     main_same = main_same and cp["main"] == plain["main"] == cn["main"]
                     short_same = short_same and cp["short_n"] == plain["short_n"] == cn["short_n"]
-    out.append(("set-main-minimal-window-equals-the-rules", same_k and disjoint_k and only_real and main_same and short_same and narrowed_k > 0,
+    out.append(("set-main-minimal-window-equals-the-rules", same_k and disjoint_k and only_real and main_same and short_same and narrowed_k > 0 and union_k,
                 f"Real Set equals the brute-force reading for N 1-3 positive and negative, both rules={same_k}; positive and negative disjoint={disjoint_k}; "
-                f"only removes Real orders={only_real}; Main Set unchanged={main_same}; short window unchanged={short_same} (narrowed {narrowed_k} cases)"))
+                f"only removes Real orders={only_real}; Main Set unchanged={main_same}; short window unchanged={short_same}; mode both = positive or negative={union_k} (narrowed {narrowed_k} cases)"))
     # the shortcuts of the chain's Base loop keep the rules: the PF rounding near the floor (a PF of 1.24996 rounds to 1.25 and passes, 1.24994 does not), the
     # lookback on the window start and the drawdown time (a window shorter than the limit cannot reach it; a longer one is measured) against processed_flag
     # and an independent drawdown reading

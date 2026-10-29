@@ -75,7 +75,7 @@ export type StageFigure = { sets: number; pct: number; pf: number; meanPf: numbe
  * One last-N window on its own (`pfBase.windows`): the Sets of the stage's population that pass THIS window alone (`pop` of them are judged: all Sets for Base,
  * the Base-passing Sets for Main, the Main-passing Sets for Real), their share of that population (`pct`) and of every configured Set (`pctAll`), the pooled PF of
  * the orders this window reads (`pf`, `orders` behind it) and the mean of the Sets' own PFs. `n` is the configured window (a list for the Main short and
- * Negative candidates), `chosen` (Main short) how many Sets run each candidate, `mode` (minimal windows) positive / negative.
+ * Negative candidates), `chosen` (Main short) how many Sets run each candidate, `mode` (minimal windows) positive / negative / both.
  */
 export type WindowFigure = {
   on: boolean;
@@ -88,7 +88,7 @@ export type WindowFigure = {
   meanPf: number;
   orders: number;
   chosen?: Record<string, number>;
-  mode?: "positive" | "negative";
+  mode?: "positive" | "negative" | "both";
 };
 export type WindowKey = "baseLong" | "baseShort" | "baseMinimal" | "mainLong" | "mainShort" | "mainMinimal" | "negative" | "real" | "realNeg";
 export type PfBase = {

@@ -111,16 +111,19 @@ def fmt(v: Optional[float], f: str) -> str:
     return "no loss" if f == "{:.2f}" and v >= 99.0 else f.format(v)
 
 
+SIGN = {"positive": "+", "negative": "-", "both": "±"}
+
+
 def min_label(c: Dict[str, Any]) -> str:
     """The Base minimal window of a cell: off, +N (the newest N results all positive) or -N (all negative)."""
     n = c.get("min_n") or 0
-    return "off" if not n else f"{'+' if c.get('min_mode') == 'positive' else '-'}{n}"
+    return "off" if not n else f"{SIGN.get(c.get('min_mode'), '-')}{n}"
 
 
 def main_min_label(c: Dict[str, Any]) -> str:
     """The Main minimal window of a cell, the same way."""
     n = c.get("main_min_n") or 0
-    return "off" if not n else f"{'+' if c.get('main_min_mode') == 'positive' else '-'}{n}"
+    return "off" if not n else f"{SIGN.get(c.get('main_min_mode'), '-')}{n}"
 
 
 def rank_cells(cells, third, floor, neg=None, neg_default="", mn=None, km=None):
@@ -541,9 +544,9 @@ Main long, the Main short window (5/10), the Negative lane and the Real stage ar
   function tipText(c) {{
     var f = function (x, d) {{ return x === null || x === undefined ? "–" : Number(x).toFixed(d); }};
     var p = ["Base long " + c.long + (c.stages ? " / short " + c.short_eff : " alone (stages off)")];
-    if (c.stages) p.push("Main long " + c.main_eff + " / Real " + c.real_eff + (c.neg_windows ? " / Negative windows " + c.neg_windows.join(",") : ""));
-    if (c.min_n) p.push("Base minimal window " + (c.min_mode === "positive" ? "+" : "-") + c.min_n + " (the newest " + c.min_n + " result(s) all " + c.min_mode + ")");
-    if (c.main_min_n) p.push("Main minimal window " + (c.main_min_mode === "positive" ? "+" : "-") + c.main_min_n + " (the newest " + c.main_min_n + " Main result(s) all " + c.main_min_mode + ")");
+    if (c.stages) p.push("Main long " + c.main_eff + " / Real " + c.real_eff + (c.neg_windows ? " / Negative windows " + c.neg_windows.join(",") : " / Negative lane off"));
+    if (c.min_n) p.push("Base minimal window " + (c.min_mode === "positive" ? "+" : c.min_mode === "both" ? "±" : "-") + c.min_n + " (the newest " + c.min_n + " result(s) " + (c.min_mode === "both" ? "share one sign" : "all " + c.min_mode) + ")");
+    if (c.main_min_n) p.push("Main minimal window " + (c.main_min_mode === "positive" ? "+" : c.main_min_mode === "both" ? "±" : "-") + c.main_min_n + " (the newest " + c.main_min_n + " Main result(s) " + (c.main_min_mode === "both" ? "share one sign" : "all " + c.main_min_mode) + ")");
     p.push("executed PF " + f(c.exec_pf, 3) + " on " + c.exec_orders + " orders (" + (c.exec_orders ? Math.round(100 * c.wins / c.exec_orders) : 0) + "% wins)");
     p.push("halves " + f(c.half1.pf, 2) + " (" + c.half1.orders + ") / " + f(c.half2.pf, 2) + " (" + c.half2.orders + ")");
     p.push("effective PF " + f(c.eff_pf, 2) + " on " + (c.eff_orders === undefined ? "–" : c.eff_orders) + " orders (pooled over all hours, in-sample), validated " + f(c.valid_pct, 2) + "%");

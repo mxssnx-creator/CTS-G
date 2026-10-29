@@ -76,6 +76,7 @@ def page_embeds_valid_json_and_script():
 def _grid_fixture():
     """A small window grid: Base long 20/30 x short 5/10 x Real 15/25 (Main static 25) and Main static 15/25 (Real 15), plus the long windows alone."""
     cells, k = [], 0
+    SIGN = {"positive": "+", "negative": "-", "both": "±"}
 
     def cell(L, S, M, R, stages=True, **flags):
         nonlocal k
@@ -93,8 +94,8 @@ def _grid_fixture():
         c["windows"]["baseMinimal"] = {"on": False, "n": 0, "judged_per_hour": 0, "sets_per_hour": 0, "pct": 0, "pf": None, "gp": 0, "gl": 0, "orders": 0, "mean_set_pf": None}
         c.update(flags)
         if stages:                      # the id carries every dimension, as the grid's own ids do
-            c["id"] += (f"_N{c['neg'].replace(',', '-')}" if c.get("neg") else "") + (f"_m{'+' if c.get('min_mode') == 'positive' else '-'}{c['min_n']}" if c.get("min_n") else "") \
-                + (f"_k{'+' if c.get('main_min_mode') == 'positive' else '-'}{c['main_min_n']}" if c.get("main_min_n") else "")
+            c["id"] += (f"_N{c['neg'].replace(',', '-')}" if c.get("neg") else "") + (f"_m{SIGN[c['min_mode']]}{c['min_n']}" if c.get("min_n") else "") \
+                + (f"_k{SIGN[c['main_min_mode']]}{c['main_min_n']}" if c.get("main_min_n") else "")
         cells.append(c)
         return c
     for L in (20, 30):
@@ -108,6 +109,8 @@ def _grid_fixture():
                 cell(L, S, 25, R, real_third=True, neg="1,2")             # the Negative windows 1,2 and the ongoing windows 1 and 5
             cell(L, S, 25, 15, real_third=True, min_n=2, min_mode="negative")      # the Base minimal window: the newest 2 results all negative
             cell(L, S, 25, 15, real_third=True, main_min_n=1, main_min_mode="positive")      # the Main minimal window: the newest Main result positive
+            cell(L, S, 25, 15, real_third=True, neg="off")                                    # the process without the Negative lane
+            cell(L, S, 25, 15, real_third=True, min_n=2, min_mode="both")                     # the Base minimal window, mode both: the newest 2 results share one sign
     for L in (20, 30):
         cell(L, None, None, None, stages=False)
     trap = next(c for c in cells if c["id"] == "L20_S5_M25_R25")      # a higher PF on twenty orders: under the floor, never "best"
@@ -115,8 +118,8 @@ def _grid_fixture():
     meta = {"symbols": ["A-USDT", "B-USDT"], "hours": [1_800_000_000 + 3600 * h for h in range(24)], "lookback_bars": 1440, "prehistory_h": 24.0,
             "bars_per_symbol": 3180, "created": 1_800_100_000, "order_floor": 150, "shipped": {"long": 30, "short": 10, "main": 25, "real": 15},
             "longs": [20, 30], "shorts": [5, 10], "mains": [15, 25], "reals": [1, 5, 15, 25], "main_default": 25, "real_default": 15, "min_orders": 0,
-            "negs": ["5,10", "1,2"], "neg_default": "5,10",
-            "minimals": [{"n": 0, "mode": "", "label": "off"}, {"n": 2, "mode": "negative", "label": "-2"}],
+            "negs": ["5,10", "1,2", "off"], "neg_default": "5,10",
+            "minimals": [{"n": 0, "mode": "", "label": "off"}, {"n": 2, "mode": "negative", "label": "-2"}, {"n": 2, "mode": "both", "label": "±2"}],
             "main_minimals": [{"n": 0, "mode": "", "label": "off"}, {"n": 1, "mode": "positive", "label": "+1"}],
             "max_ddt_h": 24.0, "min_pf": 1.25, "cost_pct": 0.12, "sets": 1538, "self_check": [{"cell": "x", "samples": 10, "bad": 0}], "hold": "off"}
     return {"meta": meta, "cells": cells}
@@ -133,7 +136,7 @@ def window_grid_html_has_heatmap_and_best_cell():
     staged = [c for c in data["cells"] if c["stages"]]
     neg_of = lambda c: c.get("neg") or "5,10"  # noqa: E731
     panels = re.findall(r'<section class="panel" data-third="(\w+)" data-neg="([^"]+)" data-min="([^"]+)" data-kmin="([^"]+)" hidden>(.*?)</section>', page, re.S)
-    ok = len(panels) == 2 * 2 * 2 * 2
+    ok = len(panels) == 2 * 3 * 3 * 2
     want_best, got_best = [], []
     for t, neg, mn, kmn, body in panels:
         ok = ok and all(len(v.split("|")) == len(WG.METRICS) for v in re.findall(r'data-v="([^"]+)"', body))
@@ -145,7 +148,7 @@ def window_grid_html_has_heatmap_and_best_cell():
         got_best += re.findall(r'data-cell="([^"]+)" data-best="1"', body)
     ok = ok and sorted(got_best) == sorted(want_best) and len(want_best) >= 4 and "L20_S5_M25_R25" not in got_best
     ship_cells = set(re.findall(r'<td class="cell[^"]*\bship\b[^"]*" data-cell="([^"]+)"', page))
-    ok = ok and "†" in page and "n/a" in page and ship_cells == {"L30_S10_M25_R15"} and 'data-neg="1,2"' in page and 'data-min="-2"' in page \
+    ok = ok and "†" in page and "n/a" in page and ship_cells == {"L30_S10_M25_R15"} and 'data-neg="1,2"' in page and 'data-neg="off"' in page and 'data-min="-2"' in page and 'data-min="±2"' in page \
         and "Mean of cell PFs" in page and "Best cell per Negative windows" in page and 'data-kmin="+1"' in page and "Main minimal +1" in page
     emb = re.search(r'<script type="application/json" id="data">(.*?)</script>', page, re.S)
     emb_ok = bool(emb) and {c["id"] for c in json.loads(emb.group(1).replace("<\\/", "</"))["cells"]} == {c["id"] for c in data["cells"]}
@@ -197,9 +200,33 @@ def window_grid_files_of_one_window_merge_into_one_report():
     return ok, f"cells {len(merged['cells'])}/{len(whole['cells'])} ids equal={ids_ok}; Main minimal values {labels}; identical duplicate kept once={dup_once}; clashing duplicate refused={dup_refused}; page equals the unsplit one={same_page}"
 
 
+def window_grid_runs_the_process_without_negative_windows_and_minimal_both():
+    """The grid's dimensions: the Negative windows include "off" (the process without the Negative lane: mainNegEnabled false, the engine reads it), the minimal
+    window runs at every N of 1-3 beside every short window (no ratio rule) and in the modes positive, negative and both (one sign throughout)."""
+    import window_grid as WGR
+    from set_engine import SetBook
+    mins = WGR.parse_minimal("0;+1;-2;±3;b2")
+    cells = WGR.enumerate_cells([30], [5, 10], [25], [15], 25, 15, ("5,10", "off"), 0.5, mins, WGR.parse_minimal("0;±1"))
+    ids = {c["id"] for c in cells}
+    big_under_small = any(c["min_n"] == 3 and c["short"] == 5 for c in cells)              # a minimal window of 3 beside a short window of 5 (and 2 beside none smaller)
+    off = next(c for c in cells if c["neg"] == "off" and not c["min_n"] and not c["main_min_n"] and c["short"] == 5)
+    both = next(c for c in cells if c["min_mode"] == "both" and c["min_n"] == 3 and c["neg"] == "off" and c["short"] == 5 and not c["main_min_n"])
+    po, pb = WGR.cell_patch(off, 1440), WGR.cell_patch(both, 1440)
+    bk = SetBook()
+    bk.load({**po, "setGateWindow": 30})
+    bb = SetBook()
+    bb.load({**pb, "setGateWindow": 30})
+    ok = (mins == [(0, ""), (1, "positive"), (2, "negative"), (3, "both"), (2, "both")] and big_under_small and "L30_S5_M25_R15_Noff" in ids
+          and "L30_S5_M25_R15_Noff_m±3" in ids and po.get("mainNegEnabled") is False and "mainNegWindows" not in po and not bk.neg_on
+          and pb["setGateMinMode"] == "both" and bb.base_min_both and bb.base_min_n == 3 and bb.base_short == 5 and bb.neg_on is False)
+    return ok, (f"minimals {mins}; N 3 beside short 5={big_under_small}; Negative off patch {po.get('mainNegEnabled')} -> engine neg_on={bk.neg_on}; "
+                f"both patch -> engine mode both={bb.base_min_both}, N {bb.base_min_n}, short {bb.base_short}")
+
+
 CHECKS = [
     ("report.window-grid-html-has-heatmap-and-best-cell", window_grid_html_has_heatmap_and_best_cell),
     ("report.window-grid-files-merge-into-one-report", window_grid_files_of_one_window_merge_into_one_report),
+    ("report.window-grid-negative-off-and-minimal-both", window_grid_runs_the_process_without_negative_windows_and_minimal_both),
     ("report.hand-computed-pf", hand_computed_pf),
     ("report.summary-pools-sets-and-picks", summary_pools_sets_and_picks_separately),
     ("report.page-embeds-json-and-valid-script", page_embeds_valid_json_and_script),

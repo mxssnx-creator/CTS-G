@@ -62,6 +62,9 @@ def _configs():
         for pos in (True, False):
             out[f"base minimal {'+' if pos else '-'}{n}"] = replace(CFG_FULL, base_min_n=n, base_min_positive=pos)
             out[f"main minimal {'+' if pos else '-'}{n}"] = replace(CFG_FULL, main_min_n=n, main_min_positive=pos)
+    for n in (1, 2, 3):
+        out[f"base minimal both {n}"] = replace(CFG_FULL, base_min_n=n, base_min_both=True)
+        out[f"main minimal both {n}"] = replace(CFG_FULL, main_min_n=n, main_min_both=True)
     out["both minimal"] = replace(CFG_FULL, base_min_n=2, base_min_positive=False, main_min_n=2, main_min_positive=True)
     out["no short windows"] = replace(CFG_FULL, base_short=0, short_on=False)
     out["main off"] = replace(CFG_FULL, main_on=False)
