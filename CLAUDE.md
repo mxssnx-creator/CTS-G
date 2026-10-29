@@ -339,6 +339,12 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   One window, a few hundred to a few thousand orders per cell, every cell walking the same hours (comparisons between settings, not independent samples): a gap of 0.03-0.05 between pooled
   marginals is noise; the shape that repeats across both grid runs is -1 above +1 (requiring the newest result to be negative, mean reversion on these tapes) and a longer Base long window
   raising the executed PF while lowering the effective one (in-sample gap). Read a second window before shipping any minimal window or a Real N other than 15.
+  **Process without the Negative lane and minimal mode both** (2026-10-29, 1,178 cells in all, engine before the minimum-PF-by-window-size change, so comparable with the cells above; the grid takes
+  Negative windows `off` = `mainNegEnabled` false, and minimal `±N` = mode both): Negative windows off 0.929 on 402,158 orders (effective PF 2.34, validated 1.35 %, no Negative-lane orders) against
+  5,10 0.926 and 1,2 0.925; on the same long / short / Real cells off reads 0.938 on 72,654 orders against 0.937 on 89,880 with the lane, so dropping the lane changes nothing measurable and loses its
+  orders. Base minimal both against the same cells without it (0.938, 72,654 orders): ±1 0.938 (identical: one result of one sign is every non-zero result, a sanity check of the rule), ±2 0.945,
+  ±3 0.890; Main minimal both against its twins (0.986 on 9,612 orders): ±1 0.986 (identical), ±2 0.936, ±3 0.918. No minimal value, either sign rule, lifts the executed PF beyond the noise except
+  Base -1 (0.979 against 0.938 on the Negative-off cells). The minimal windows run at every N beside every short window (no ratio rule).
 - **Why the PF drops after Base (audit 2026-10-29, both chats; no accounting defect left)**. The effective PF is not the number a Set's
   next orders deliver, for three measured reasons, two of them fixed in the engine:
   1. **Selection (in-sample)**: a Set passes at the end of a good stretch; its next orders are near the ungated average (selection PF

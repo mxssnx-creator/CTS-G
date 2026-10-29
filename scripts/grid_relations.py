@@ -11,6 +11,9 @@ import sys
 from collections import defaultdict
 
 
+SIGN = {"positive": "+", "negative": "-", "both": "±"}
+
+
 def main() -> int:
     data = json.load(open(sys.argv[1]))
     meta, cells = data["meta"], data["cells"]
@@ -62,8 +65,8 @@ def main() -> int:
             epooled = f"{egp / egl:.2f}" if egl > 0 else "n/a"
             print(f"  {str(k):<14s} {n:>4d}  {pooled:>6s}  {sum(c['exec_pf'] for c in cs) / n:.3f}  {sum(c['exec_orders'] for c in cs):>9d}  {epooled:>6s}  "
                   f"{sum(c.get('eff_orders') or 0 for c in cs):>10d}  {sum(c['valid_pct'] for c in cs) / n:5.2f}  {sum((c.get('neg_lane') or {}).get('orders', 0) for c in cs):>8d}")
-    lab = lambda c: "off" if not c.get("min_n") else f"{'+' if c['min_mode'] == 'positive' else '-'}{c['min_n']}"  # noqa: E731
-    klab = lambda c: "off" if not c.get("main_min_n") else f"{'+' if c['main_min_mode'] == 'positive' else '-'}{c['main_min_n']}"  # noqa: E731
+    lab = lambda c: "off" if not c.get("min_n") else f"{SIGN[c['min_mode']]}{c['min_n']}"  # noqa: E731
+    klab = lambda c: "off" if not c.get("main_min_n") else f"{SIGN[c['main_min_mode']]}{c['main_min_n']}"  # noqa: E731
     marg("Base minimal window", lab)
     marg("Main minimal window", klab)
     marg("Negative windows", lambda c: c.get("neg") or meta.get("neg_default"))
