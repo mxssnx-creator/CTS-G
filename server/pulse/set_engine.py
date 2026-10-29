@@ -1153,12 +1153,12 @@ class SetLane:
         return out
 
 BASE_SHORT_N_DEFAULT = 15        # Base: the second last N (set by the window test, setGateShortN; 0 = off)
-MAIN_AUTO_WINDOWS = (5, 10, 15, 20, 25)    # Main Auto: the candidates of each Set's own window
+MAIN_AUTO_WINDOWS = (5, 10, 15)    # owner, 2026-10-29: Main Auto, the candidates of each Set's own window (5-15 step 5)
 MAIN_AUTO_MIN_DEFAULT = 8        # orders a candidate needs on the Main Set
 MAIN_AUTO_MARGIN = 1.02          # a candidate must beat the static window's PF by 2 %
 MAIN_NEG_WINDOWS = (5, 10)       # Main Negative lane: the average of the last N Main orders is negative, for some N
 REAL_GATE_N_DEFAULT = 15         # Real: the last N of the lane's Real Set
-MAIN_GATE_N_DEFAULT = 8         # owner, 2026-10-28: the Main gate reads the last 8 processed orders
+MAIN_GATE_N_DEFAULT = 25        # owner, 2026-10-29: the Main static window reads the last 25 Main-Set orders
 REAL_SUFFIX = ":real"              # a Base Set's Real Set (the last of the chain: opened while Base and Main passed): "<id>:real"
 REALNEG_SUFFIX = ":realneg"        # a Base Set's Real Negative Set (Main orders opened in a dip): "<id>:realneg"
 MAIN_SUFFIX = ":main"              # a Base Set's Main Set (opened while Base passed; the Main gate's last N reads it): "<id>:main"
@@ -1298,7 +1298,7 @@ class SetBook:
         # (gate_min 1). No floor of 8 here (owner 2026-10-29); the windows and the hold sample keep theirs.
         gm = ov.get("setGateMinTrades")
         self.gate_min = max(1, min(self.gate_window, int(GATE_MIN_DEFAULT if gm is None else gm)))
-        # the Main gate: every Set, besides the Base gate, must hold the minimum PF over its own last mainGateN processed orders (default 8);
+        # the Main gate: every Set, besides the Base gate, must hold the minimum PF over its own last mainGateN processed orders (default 25);
         # execution picks only Sets that pass both, and the minimum PF is the Set's Base minimum PF (one value for every validation gate)
         # stages: Base (each Set on its own tape: the long last N and the short last N, both) -> Main (on the Set's Main Set, the
         # orders it opened while Base passed: the static last N and the Set's Auto window, both; or the Negative lane: the average of
@@ -3425,7 +3425,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     lk = SetBook(); lk.load({"realGateN": 12, "realGateEnabled": False, "mainGateN": 9})
     lo_ = SetBook(); lo_.load({"stagesEnabled": False})
     out.append(("set-main-stage-keys-and-legacy-names", lk.realst_n == 12 and lk.realst_on is False and lk.main_n == 9 and lk.main_on is True
-                and SetBook().main_n == MAIN_GATE_N_DEFAULT == 8 and SetBook().realst_n == REAL_GATE_N_DEFAULT == 15
+                and SetBook().main_n == MAIN_GATE_N_DEFAULT == 25 and SetBook().auto_windows == (5, 10, 15) and SetBook().realst_n == REAL_GATE_N_DEFAULT == 15
                 and not (lo_.main_on or lo_.neg_on or lo_.realst_on or lo_.base_short),
 f"Real N {lk.realst_n} on {lk.realst_on}; Main N {lk.main_n}; stages off -> Base alone"))
     return out

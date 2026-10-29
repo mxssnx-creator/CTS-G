@@ -184,7 +184,7 @@
   "blockMinSamples": 8,
   "blockWindow": 25,
   "mainGateEnabled": true,
-  "mainGateN": 8,
+  "mainGateN": 25,
   "minPfLinked": true,
   "histLookbackAuto": true,
   "histLookbackMax": 2880,
@@ -194,9 +194,7 @@
   "mainAutoWindows": [
     5,
     10,
-    15,
-    20,
-    25
+    15
   ],
   "mainAutoMin": 8,
   "mainAutoMargin": 1.02,

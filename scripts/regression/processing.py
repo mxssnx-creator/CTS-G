@@ -833,7 +833,7 @@ MAIN_ONLY = {"setGateShortN": 0, "mainAutoEnabled": False, "mainNegEnabled": Fal
 
 
 def real_gate_is_per_set_at_the_base_minimum_pf():
-    """The Main gate: besides Base, a Set must hold the Base minimum PF over its own last mainGateN processed orders (default 8; the
+    """The Main gate: besides Base, a Set must hold the Base minimum PF over its own last mainGateN processed orders (default 25; the
     fixtures below read N 12). Per Set (another
     Set's tape never moves it), the same minimum PF as Base (setMinPf, the Short Range floor), reason "main", and the execution pool
     (valid_for / pick) holds only Sets that pass both. Switched off it is the Base gate alone."""

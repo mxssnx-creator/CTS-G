@@ -651,7 +651,7 @@ function SettingsPage() {
                   min={8}
                   max={50}
                   step={1}
-                  hint="default 8 · the first Main window, at the Base minimum PF"
+                  hint="default 25 · the first Main window, at the Base minimum PF"
                   onChange={(v) => patch("mainGateN", v)}
                 />
                 <Toggle label="Main · Auto window (each Set picks its own; both Main windows must pass)" on={overlay.mainAutoEnabled !== false} onChange={(v) => patch("mainAutoEnabled", v)} />
@@ -659,7 +659,7 @@ function SettingsPage() {
                   label="Main · Auto candidates"
                   value={overlay.mainAutoWindows}
                   options={[5, 10, 15, 20, 25]}
-                  hint="default 5-25 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set"
+                  hint="default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set"
                   onChange={(v) => patch("mainAutoWindows", v)}
                 />
                 <Slider

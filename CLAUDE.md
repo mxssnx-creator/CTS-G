@@ -170,8 +170,8 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   15, 0 = off; tested 5-25 step 5, `scripts/trade_sim.py --patch`), plus minimum orders and drawdown time. Reason `short` for the short one.
 - **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
   (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
-  windows on the Main Set, both must pass: static `mainGateN` (8, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
-  `mainAutoWindows` 5/10/15/20/25 the window whose past verdicts were followed by the best PF on its own Main Set; a candidate needs
+  windows on the Main Set, both must pass: static `mainGateN` (25, owner 2026-10-29, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
+  `mainAutoWindows` 5/10/15 (owner 2026-10-29) the window whose past verdicts were followed by the best PF on its own Main Set; a candidate needs
   `mainAutoMin` (8) orders and `mainAutoMargin` (1.02) x the static result, like `_choose_hold`; `st.main_auto_n`, reason `mainauto`).
 - **Main Negative lane** (separate, `mainNegEnabled`): the average net of the last 5 or the last 10 Main-Set orders (`mainNegWindows`) is
   negative. Its orders form the **Real Negative Set** (`<id>:realneg`), with its own Real validation, stats and rank.
@@ -198,7 +198,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
   another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
 - **Base last N** (`setGateWindow`) **50** plus the short window `setGateShortN`, its minimum order count `setGateMinTrades` is off (0) since 2026-10-29 (was 30). **Main gate**
-  (`mainGateN` 8 plus Auto, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
+  (`mainGateN` 25 plus Auto 5/10/15, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
   Sets that pass every stage on a lane (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
   over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
   (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.
