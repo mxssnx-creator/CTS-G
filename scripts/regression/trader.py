@@ -48,7 +48,7 @@ def _bare_pulse():
 
 def restored_book_drops_a_position_only_when_two_reads_agree():
     """A position in the saved book that the venue does not list at start is dropped only when a second read agrees (a lagging
-    positions list must not unprotect a live position); one the venue still lists, in either mode, stays."""
+    positions list must not unprotect a live position, empty or not); one the venue still lists, in either mode, stays."""
     def pos(sym, side):
         return pt.Position(symbol=sym, side=side, qty=1.0, entry=10.0, opened_at=1.0, sl=9.0, tp=11.0, peak=10.0)
 
@@ -80,9 +80,11 @@ def restored_book_drops_a_position_only_when_two_reads_agree():
     gone = run([other], [other], [("A-USDT", "LONG")])                       # two reads agree: dropped
     held = run([other, mine], [other, mine], [("A-USDT", "LONG")])           # listed: kept
     both = run([oneway], [oneway], [("A-USDT", "SHORT")])                    # one-way mode: the sign of the amount is the side
-    empty = run([], [], [("A-USDT", "LONG")])                                # an empty list can be lag: nothing is dropped
-    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == ["A-USDT"]
-    return ok, f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, empty list kept={empty}"
+    empty = run([], [], [("A-USDT", "LONG")])                                # two empty reads: the account is flat, the ghost is dropped
+    empty_lag = run([], [mine], [("A-USDT", "LONG")])                        # an empty first read that the second read contradicts: kept
+    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == [] and empty_lag == ["A-USDT"]
+    return ok, (f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, "
+                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}")
 
 
 def cycles_start_at_least_scan_apart():

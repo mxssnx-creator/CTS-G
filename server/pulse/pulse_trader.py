@@ -3136,7 +3136,7 @@ class Pulse:
         engine was down. Settle them from one positions read before the first cycle, sending no order: a close or a stop for
         a position that does not exist draws "position not exist", and 20 of those in 8 minutes ban the whole order API
         (x02 lost its order path for minutes after every restart this way). A venue fill is recorded as that lane's close;
-        a position with no fill found is dropped only when the venue lists other positions (an empty list can be lag)."""
+        a position with no fill found is dropped only when a second read, 2 s later, does not hold it either."""
         if not self.open:
             return
         try:
@@ -3164,8 +3164,8 @@ class Pulse:
             if self.close_from_venue(pos, "restart"):
                 self.cooldown[pos.symbol] = time.time() + 90.0
                 continue
-            if not held:
-                continue
+            # an empty list is a real answer too (the account is flat): the second read below decides it, so a lagging empty
+            # read cannot drop a live position, and a flat account no longer keeps its ghosts (x02 kept 15 after its venue went flat)
             if confirmed is None:
                 time.sleep(2.0)
                 try:
