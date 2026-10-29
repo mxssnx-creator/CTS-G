@@ -631,7 +631,7 @@ function SettingsPage() {
                   min={0}
                   max={25}
                   step={5}
-                  hint="the second Base window, 0 = off · default 25: best of the 24 h grid (long 20-50 x short 5-25, scripts/window_grid.py)"
+                  hint="the second Base window, 0 = off · default 25: best of the 24 h grid (long 20-50 x short 5-25, scripts/base_window_grid.py)"
                   onChange={(v) => patch("setGateShortN", v)}
                 />
                 <Slider

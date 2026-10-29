@@ -170,14 +170,16 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
   **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
   25, 0 = off), plus minimum orders and drawdown time. Reason `short` for the short one.
-- **The standard window test** (owner, 2026-10-29): `scripts/window_grid.py` runs every Base long x short cell (long 20-50 step 10, short
+- **The standard window test** (owner, 2026-10-29): `scripts/base_window_grid.py` runs every Base long x short cell (long 20-50 step 10, short
   off / 5-25 step 5) through `trade_sim.py` on 20 symbols, the last 24 h simulated after 24 h of pre-history (`histLookbackBars` 1440),
   and writes an HTML report (heatmaps of executed PF, next 15 / next 25 orders PF, effective PF, validated share and orders; cumulative
   net per hour per cell; the best cell hour by hour and by type). Ranking: the geometric mean of the executed PF and the next 15 / 25
-  orders PF (at least 100 executed orders). Run 2026-10-28 04:00 - 10-29 04:00 UTC (`reports/window_grid_24h.html`): best long 50 /
+  orders PF (at least 100 executed orders). Run 2026-10-28 04:00 - 10-29 04:00 UTC (`reports/base_window_grid_24h.html`): best long 50 /
   short 25 (executed PF 0.75 on 617 orders, next 15 orders 0.85, next 25 orders 1.09, validated 2.4 %, effective PF 2.86 in-sample);
-  every cell executed 0.58-0.82, next 25 orders 0.30-1.09. One 24 h window: the ranking is inside the noise; no cell carries a PF above 1
-  in execution.
+  every cell executed 0.58-0.82, next 25 orders 0.30-1.09 (the 20 majors of the 30-day set). The parallel grid on the live small-cap
+  universe (`scripts/window_grid.py`, `reports/window_grid_24h.html`, 10-28 01:00 - 10-29 01:00, x Main / Real 15 / 25): best long 30 /
+  short 15 / Main 15 / Real 15 executed 1.07 on 1,629 orders (halves 1.15 / 0.95); long 50 short 15 0.96, short 25 0.94. The two
+  universes rank the cells differently; one 24 h window is inside the noise.
 - **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
   (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
   windows on the Main Set, both must pass: static `mainGateN` (25, owner 2026-10-29, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
