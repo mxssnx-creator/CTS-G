@@ -17,11 +17,13 @@ import contextlib
 import hashlib
 import json
 import os
+from collections import OrderedDict
 
 from set_engine import SetBook
 
 _ORIG = SetBook._replay_symbol
-_CACHE: dict = {}
+_CACHE: dict = OrderedDict()
+MAX_CACHED_SYMBOLS = 2  # bound regression memory even when many distinct full-grid fixtures run
 _ACTIVE = False
 MODE = os.environ.get("CTSG_MEMO", "on").lower()
 STATS = {"hit": 0, "miss": 0, "verified": 0}
@@ -49,6 +51,8 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
         fresh = {sid: [] for sid in hist}
         _ORIG(self, symbol, fresh, now, on_step=on_step)
         _CACHE[key] = _rows_of(fresh)
+        while len(_CACHE) > MAX_CACHED_SYMBOLS:
+            _CACHE.popitem(last=False)
         STATS["miss"] += 1
         for sid, rows in fresh.items():
             hist.setdefault(sid, []).extend(dict(r) for r in rows)
@@ -60,6 +64,7 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
             raise AssertionError(f"memo mismatch for {symbol} at {now}: cached rows differ from a fresh replay")
         STATS["verified"] += 1
     STATS["hit"] += 1
+    _CACHE.move_to_end(key)
     for sid, rows in cached.items():
         hist.setdefault(sid, []).extend(dict(r) for r in rows)
     if self.by_idx:

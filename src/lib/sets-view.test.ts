@@ -86,6 +86,16 @@ test("the summary pools gross profit over gross loss of the valid Sets, as the e
   assert.equal(s.orders, 100, "the valid Sets' gate-window orders");
 });
 
+test("PF validation includes a Set waiting for coordination while readiness remains separate", () => {
+  const rows = [base(2, 1, 3, 1, { v: 1 }), base(3, 0, 1, 1, { v: 1 }), base(4, 0, 0.5, 3, { v: 0 })];
+  const s = summarize(rows);
+  assert.equal(s.valid, 2);
+  assert.equal(s.eligible, 1);
+  assert.equal(s.effectivePf, 2);
+  assert.deepEqual(stepHistogram(rows, COST).map((r) => r.valid), [1, 1, 0]);
+  assert.deepEqual(pfByStep(rows, COST).map((r) => r.step), [2, 3]);
+});
+
 test("a mean of the Sets' own PFs is not the effective PF", () => {
   // two valid Sets: PF 9 on tiny volume and PF 1.1 on large volume. The mean of PFs is 5.05; the pool is 1.1x.
   const rows = [base(2, 1, 0.09, 0.01), base(3, 1, 1.1, 1.0)];
@@ -155,7 +165,7 @@ test("stage figures show the Sets that pass each stage, their share of all Sets 
     stages: {
       base: fig(558, 45.22, 1.6995, 1.71, 27900),
       main: fig(0, 0, 0, 0, 0),
-      real: fig(0, 0, 0, 0, 0),
+      real: fig(2, 0.16, 0, 0, 0),
       realNeg: fig(3, 0.24, 0.91, 0.9, 75),
       valid: fig(3, 0.24, 0.91, 0.9, 75),
       allSets: 1234,
@@ -167,6 +177,7 @@ test("stage figures show the Sets that pass each stage, their share of all Sets 
   assert.equal(rows[0].pf, 1.6995);
   assert.equal(rows[1].pf, null, "a stage nobody passes has no PF, not 0.00 and not the overall figure");
   assert.equal(rows[1].meanPf, null);
+  assert.equal(rows[2].pf, null, "Sets with no stage orders do not show a fabricated PF of zero");
   assert.equal(rows[3].orders, 75);
   assert.deepEqual(stageFigures(undefined), []);
   assert.deepEqual(stageFigures({}), []);
@@ -195,6 +206,8 @@ test("window figures: each last-N window on its own, an off window counts nothin
   assert.equal(rows[4].pf, null, "a window nobody passes has no PF, not 0.00");
   assert.equal(rows[4].chosen, "5: 320 · 10: 90", "the Sets per chosen short window, in window order");
   assert.equal(rows[5].setting, "newest 2 negative");
+  assert.equal(rows[5].pf, null, "negative minimal coordination has no PF verdict");
+  assert.equal(rows[5].orders, 118);
   assert.equal(rows[0].pct, 45.51);
   assert.equal(rows[0].orders, 33000);
   assert.deepEqual(windowFigures(undefined), []);

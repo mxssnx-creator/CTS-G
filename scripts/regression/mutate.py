@@ -774,7 +774,7 @@ MUTATIONS = [
     ("main gate: its own minimum PF instead of the Base one",
      "set_engine.py", "floor=self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s", "floor=1.0, max_dd_s=self.max_dd_s"),
     ("real gate: N below the floor of 8",
-     "set_engine.py", "self.main_n = max(MIN_VALIDATION_N, min(self.gate_window,", "self.main_n = max(2, min(self.gate_window,"),
+     "set_engine.py", "self.main_n = max(10, min(200,", "self.main_n = max(2, min(200,"),
     ("gates: Exit keeps its own minimum PF while linked",
      "position_cost.py", "    if ov.get(\"minPfLinked\", True):\n        return base_min_pf(ov)", "    if False:\n        return base_min_pf(ov)"),
     ("gates: the coordinator keeps its own minimum PF while linked",

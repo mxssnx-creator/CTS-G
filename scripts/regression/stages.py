@@ -70,6 +70,7 @@ def _configs():
     out["main off"] = replace(CFG_FULL, main_on=False)
     out["negative off"] = replace(CFG_FULL, neg_on=False)
     out["consistency"] = replace(CFG_FULL, consistency=1.0)
+    out["size-dependent PF floors"] = replace(CFG_FULL, size_floors=((4, 1.05), (8, 1.1), (20, 1.4)), long_floor=1.7)
     out["lookback 4000 s"] = replace(CFG_FULL, lookback_s=4000.0)
     out["drawdown limit 900 s"] = replace(CFG_FULL, max_dd_s=900.0, lookback_s=1e12)
     return out
@@ -194,6 +195,31 @@ def a_negative_window_of_cancelling_results_is_not_negative():
     return (not cancel) and (not cancel2) and below and bad == 0, f"[0.2, -0.2] negative={cancel}; [0.005, -0.005] negative={cancel2}; [0.005, -0.006] negative={below}; chain orders whose window does not sum below zero: {bad}"
 
 
+def replay_and_current_verdict_use_the_same_pf_rounding():
+    """Values either side of a four-decimal PF boundary have the same verdict in live scoring and the historical chain."""
+    from common import ROOT
+    import os
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import main_stage_audit as audit
+    import stage_eval as sg
+    p = replace(CFG_FULL, base_long=10, base_short=0, main_n=2, short_on=False, neg_on=False, real_on=False,
+                floor=0.1, size_floors=((2, 1.25), (10, 0.1)), long_floor=0.1)
+    ts = [1000.0 + i * 60 for i in range(4)]
+    entries = [t - 1 for t in ts]
+    cases = []
+    for target, passes in ((1.24996, True), (1.24994, False)):
+        vals = [0.01, 0.005, -0.005 / target, 0.001]
+        chain = stage_chain(ts, entries, vals, p)
+        current = stage_verdicts(vals[1:3], [], [], 2, p)["main"]
+        base_params = replace(p, base_short=2, main_on=False)
+        base_chain = stage_chain(ts[1:], entries[1:], vals[1:], base_params)
+        b = SetBook()
+        b.load(overlay(setGateWindow=10, setGateShortN=2, setMinPf=1.25))
+        e = {"w": vals[1:3], "cf": 0.0, "floor_short": 1.25}
+        cases.append((current, 3 in chain["real"], 2 in base_chain["main"], sg._short_ok(b, e), chain == audit.naive_chain(ts, entries, vals, p), passes))
+    return all(row[:4] == (row[5],) * 4 and row[4] for row in cases), f"(current Main, replay Main, replay Base short, evaluator Base short, independent match, expected): {cases}"
+
+
 def _scored_book(min_pf=None, **extra):
     """A book of the small Set grid with a streaky tape of 140 orders on every Set (seeded per Set: the same tapes in every book of a check), scored once, so that
     Sets pass the Base windows, the Main windows and Real in numbers worth comparing. min_pf: the floor every stage asks (None: the overlay's)."""
@@ -261,8 +287,7 @@ def window_figures_pool_exactly_the_orders_each_window_reads():
     def pool(vals):
         gp, gl = sum(x for x in vals if x > 0), -sum(x for x in vals if x < 0)
         return round(se.pf_of(gp, gl), 4)
-    reasons = {x.id: b.gate_reason(x) for x in b.by_idx}
-    base_only = [x for x in b.by_idx if reasons[x.id] in ("",) + se.STAGE_REASONS]
+    base_only = [x for x in b.by_idx if not b.base_validation_reason(x)]
     tapes = {x.id: [se.finite(r.get("pnl_pct")) - cf for r in sorted(x.tape(), key=lambda r: se.finite(r.get("t"))) if r.get("pnl_pct") is not None] for x in b.by_idx}
     floor = b.min_pf
     want = {}
@@ -272,7 +297,7 @@ def window_figures_pool_exactly_the_orders_each_window_reads():
     pass_min = [x for x in b.by_idx if tapes[x.id][-b.base_min_n:] and all(v > 0 for v in tapes[x.id][-b.base_min_n:])]
     want["baseLong"] = (len(pass_long), sum(len(tapes[x.id][-b.gate_window:]) for x in pass_long), pool([v for x in pass_long for v in tapes[x.id][-b.gate_window:]]))
     want["baseShort"] = (len(pass_short), sum(len(tapes[x.id][-b.base_short:]) for x in pass_short), pool([v for x in pass_short for v in tapes[x.id][-b.base_short:]]))
-    want["baseMinimal"] = (len(pass_min), sum(len(tapes[x.id][-b.base_min_n:]) for x in pass_min), pool([v for x in pass_min for v in tapes[x.id][-b.base_min_n:]]))
+    want["baseMinimal"] = (len(pass_min), sum(len(tapes[x.id][-b.base_min_n:]) for x in pass_min), None)
     # Main long / short / minimal on the Main Sets of the Base-passing Sets
     m = {x.id: b._streams(x)[0] for x in base_only}
     pm = [x for x in base_only if m[x.id][-b.main_n:] and pool(m[x.id][-b.main_n:]) + 1e-9 >= floor]
@@ -280,9 +305,9 @@ def window_figures_pool_exactly_the_orders_each_window_reads():
     pk = [x for x in base_only if m[x.id][-b.main_min_n:] and all(v > 0 for v in m[x.id][-b.main_min_n:])]
     want["mainLong"] = (len(pm), sum(len(m[x.id][-b.main_n:]) for x in pm), pool([v for x in pm for v in m[x.id][-b.main_n:]]))
     want["mainShort"] = (len(ps), sum(len(m[x.id][-(x.main_short_win or b.main_n):]) for x in ps), pool([v for x in ps for v in m[x.id][-(x.main_short_win or b.main_n):]]))
-    want["mainMinimal"] = (len(pk), sum(len(m[x.id][-b.main_min_n:]) for x in pk), pool([v for x in pk for v in m[x.id][-b.main_min_n:]]))
+    want["mainMinimal"] = (len(pk), sum(len(m[x.id][-b.main_min_n:]) for x in pk), None)
     got = {k: (w[k]["sets"], w[k]["orders"], w[k]["pf"]) for k in want}
-    bad = {k: (got[k], want[k]) for k in want if got[k][0] != want[k][0] or got[k][1] != want[k][1] or abs(got[k][2] - want[k][2]) > 1e-3}
+    bad = {k: (got[k], want[k]) for k in want if got[k][0] != want[k][0] or got[k][1] != want[k][1] or (got[k][2] != want[k][2] if want[k][2] is None else got[k][2] is None or abs(got[k][2] - want[k][2]) > 1e-3)}
     pops = (w["baseLong"]["pop"] == len(b.by_idx) and w["mainLong"]["pop"] == len(base_only) and w["baseShort"]["pop"] == len(b.by_idx))
     shares = all(abs(w[k]["pct"] - (100.0 * w[k]["sets"] / w[k]["pop"] if w[k]["pop"] else 0.0)) < 0.011 for k in want)
     chosen = sum(w["mainShort"]["chosen"].values()) == len(base_only)
@@ -361,7 +386,7 @@ def the_statistics_relations_hold():
     pb = b.snapshot()["pfBase"]
     st, w = pb["stages"], pb["windows"]
     total = len(b.by_idx)
-    reasons = {x.id: b.gate_reason(x) for x in b.by_idx}
+    reasons = {x.id: b.validation_reason(x) for x in b.by_idx}
     valid = [x for x in b.by_idx if not reasons[x.id]]
     gp = sum(x.gate_gp for x in valid)
     gl = sum(x.gate_gl for x in valid)
@@ -369,8 +394,10 @@ def the_statistics_relations_hold():
         "all Sets": pb["total"] == total == st["allSets"] == w["baseLong"]["pop"] == pb["unfiltered"]["sets"],
         "main <= base <= all, valid <= base": st["main"]["sets"] <= st["base"]["sets"] <= total and st["valid"]["sets"] <= st["base"]["sets"],
         "base stage = baseOnly": st["base"]["sets"] == pb["baseOnly"]["sets"] == pb["stageSets"]["base"],
-        "base stage <= each Base window": st["base"]["sets"] <= min(w["baseLong"]["sets"], w["baseShort"]["sets"], w["baseMinimal"]["sets"]),
-        "main stage <= each Main window": st["main"]["sets"] <= min(w["mainLong"]["sets"], w["mainShort"]["sets"], w["mainMinimal"]["sets"]),
+        "Main figure uses Main PF-passing Sets": pb["main"]["sets"] == st["main"]["sets"] and pb["main"]["pf"] == st["main"]["pf"] and pb["main"]["n"] == st["main"]["n"],
+        "all-lane Main pool is explicit": pb["mainAllLanes"]["sets"] == len(valid) and pb["mainAllLanes"]["n"] == sum(x.main_n for x in valid),
+        "base stage <= each Base PF window": st["base"]["sets"] <= min(w["baseLong"]["sets"], w["baseShort"]["sets"]),
+        "main stage <= each Main PF window": st["main"]["sets"] <= min(w["mainLong"]["sets"], w["mainShort"]["sets"]),
         "Main windows judge the Base-passing Sets": w["mainLong"]["pop"] == w["mainShort"]["pop"] == w["mainMinimal"]["pop"] == w["negative"]["pop"] == st["base"]["sets"],
         "Real judges the Main-passing Sets": w["real"]["pop"] == st["main"]["sets"],
         "Real Negative judges the Sets in a dip": w["realNeg"]["pop"] == w["negative"]["sets"],
@@ -381,6 +408,28 @@ def the_statistics_relations_hold():
     }
     bad = [k for k, v in rel.items() if not v]
     return not bad, f"{total} Sets: valid {len(valid)}, Main {st['main']['sets']}, Base {st['base']['sets']}; relations broken: {bad or 0}"
+
+
+def negative_lane_does_not_pollute_main_passing_pf():
+    """The Negative fallback has its own population; it can pass while the positive Main PF fails."""
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "setGateShortN": 0, "mainShortEnabled": False, "realGateEnabled": False, "mainNegEnabled": True}))
+    a, c = [x for x in b.by_idx if x.kind == "base"][:2]
+    b.by_idx = [a, c]
+    b.sets = {x.id: x for x in b.by_idx}
+    for x in (a, c):
+        x.active, x.locked, x.last_error, x.gate_n, x.gate_pf, x.max_dd_s = True, False, "", 10, 2.0, 0.0
+        x.gate_gp, x.gate_gl = 0.02, 0.01
+        x.main_n = 10
+    a.main_gp, a.main_gl = 0.02, 0.01
+    a.stage = {"main": True, "short": True, "minimal": True, "pos": True, "neg": False, "negl": False}
+    c.main_gp, c.main_gl = 0.01, 0.03
+    c.stage = {"main": False, "short": True, "minimal": True, "pos": False, "neg": True, "negl": True}
+    p = b.snapshot()["pfBase"]
+    ok = (b.validation_lane(a) == "pos" and b.validation_lane(c) == "neg" and p["valid"] == 2
+          and p["main"]["sets"] == 1 and p["main"]["pf"] == 2.0
+          and p["mainAllLanes"]["sets"] == 2 and p["mainAllLanes"]["pf"] == 0.75)
+    return ok, f"Main-pass PF {p['main']['pf']} on {p['main']['sets']}; all-lane PF {p['mainAllLanes']['pf']} on {p['mainAllLanes']['sets']}"
 
 
 def set_and_lane_ids_never_collide():
@@ -402,6 +451,8 @@ def set_and_lane_ids_never_collide():
 
 
 CHECKS = [
+    ("stages.replay-and-current-verdict-use-same-pf-rounding", replay_and_current_verdict_use_the_same_pf_rounding),
+    ("stages.negative-lane-does-not-pollute-main-passing-pf", negative_lane_does_not_pollute_main_passing_pf),
     ("stages.every-window-is-judged-on-its-own", every_window_is_judged_on_its_own),
     ("stages.window-figures-pool-exactly-the-orders-each-window-reads", window_figures_pool_exactly_the_orders_each_window_reads),
     ("stages.the-plain-reading-equals-the-chain", the_plain_reading_equals_the_chain),

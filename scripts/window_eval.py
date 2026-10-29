@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""What the secondary last-N windows (pfWindow and friends) do as a validation on top of the Base gate. Arms (--arms): 'none' = the Base gate alone (Main gate off)
-(every window follows the overall validation N, nothing extra), and N = 6 (the old shipped value, below the floor of 8), 8, 12, 15, 20, 25: a Base-valid
+"""What the Main long window does as a validation on top of the Base gate. Arms (--arms): 'none' = the Base gate alone
+(Main, Negative and Real gates off), and N = 10, 12, 15, 20, 25: a Base-valid
 Set must in addition have its last N orders at or above the minimum PF. Same hours, tapes and execution as stage_eval; development window
 only (--sealed reads the last third once). Per arm: validated share, post-Base effective PF with its orders, executed PF with orders,
 net, drawdown, hours positive.
@@ -24,7 +24,7 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--symbols", type=int, default=20)
     ap.add_argument("--sealed", action="store_true")
-    ap.add_argument("--arms", default="none,6,8,12,15,20,25")
+    ap.add_argument("--arms", default="none,10,12,15,20,25")
     ap.add_argument("--base-list", default="", help="grid: Base last N values (e.g. 10,15,20,25,30,35); with --arms the Main gate N values")
     ap.add_argument("--gate-window", type=int, default=0, help="the Base gate's last N (setGateWindow); 0 = the shipped overlay value")
     ap.add_argument("--patch", default="", help='extra overlay keys as JSON, e.g. {"setGateMinTrades": 25, "setMaxDdtHours": 12}')
@@ -47,22 +47,20 @@ def main():
     res = {}
     bases = [int(x) for x in a.base_list.split(",")] if a.base_list else [book.gate_window]
     arms_all = [x if x == "none" else int(x) for x in a.arms.split(",")]
-    gate_min_cfg = max(1, min(200, int(json.loads(os.environ["STAGE_OVERLAY_PATCH"]).get("setGateMinTrades", book.gate_min))))   # 0 = off -> one order
-    print(f"{'Base N':>6s} {'Real N':>7s} {'valid %':>8s} {'eff PF':>7s} {'eff orders/h':>12s} {'exec PF':>8s} {'orders':>7s} {'net %':>9s} {'maxDD %':>9s} {'hours+':>9s}")
+    base_patch = json.loads(os.environ["STAGE_OVERLAY_PATCH"])
+    print(f"{'Base N':>6s} {'Main N':>7s} {'valid %':>8s} {'eff PF':>7s} {'eff orders/h':>12s} {'exec PF':>8s} {'orders':>7s} {'net %':>9s} {'maxDD %':>9s} {'hours+':>9s}")
     for G in bases:
-        book.gate_window = max(10, G)
-        book.gate_min = max(1, min(book.gate_window, gate_min_cfg))
         for arm in arms_all:
-            if arm != "none" and int(arm) >= book.gate_window:
-                continue                                  # a Real N at or over the Base window is the Base gate itself
-            book.main_on = arm != "none"
-            book.main_n = max(8, int(arm)) if arm != "none" else book.main_n
+            patch = {**base_patch, "setGateWindow": G, "mainGateEnabled": arm != "none"}
+            patch.update({"mainNegEnabled": False, "realGateEnabled": False} if arm == "none" else {"mainGateN": int(arm)})
+            os.environ["STAGE_OVERLAY_PATCH"] = json.dumps(patch)
+            book = sg.make_book()  # recompute all dependent short-window candidates for this arm
             pools = [ha.pool(book, tapes, h) for h in sample]
             rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours)
             r = sg.summarize(rows, lo, hi, False)
             eff = [p["pf_post"] for p in pools if p["pf_post"] is not None]
             tot = pools[0]["total"]
-            name = f"Base {book.gate_window} / Real {'off' if arm == 'none' else book.main_n}"
+            name = f"Base {book.gate_window} / Main {'off' if arm == 'none' else book.main_n}"
             res[name] = {"base_n": book.gate_window, "main_n": None if arm == "none" else book.main_n,
                          "valid_pct": round(100 * sum(p["valid"] for p in pools) / max(1, tot * len(pools)), 2), "eff_pf": round(statistics.median(eff), 3) if eff else None,
                          "eff_orders_per_hour": round(sum(p["orders"] for p in pools) / len(pools)), "exec_pf": r["pf"], "exec_orders": r["orders"],

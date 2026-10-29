@@ -362,7 +362,7 @@ def every_name_gets_the_history_its_timeframe_needs():
         except Exception as e:      # noqa: BLE001
             raised.append((k, repr(e)))
     revived = ("bbb_n5_t1", "bbrev_n5_t1", "vwapz_n5_t1", "vwapz_n8_t1", "adx_n21_t15", "ichi_n14_t15", "trend_n40_t15", "ao_htfpb_n8_t5")
-    bars = _regime_bars(3, 6000)
+    bars = _regime_bars(3, 4320)
     fired = {k: 0 for k in revived}
     for i in range(1500, len(bars), 7):
         for k in revived:
@@ -441,7 +441,7 @@ def thirty_minute_names_fire_and_read_their_history():
     t30 = [k for k in ix.INDICATORS if k.endswith("_t30")]
     x = [k for k in ix.INDICATORS if k.rsplit("_", 1)[-1][:1] == "x" and k.rsplit("_", 1)[-1][1:].isdigit()]
     wins = {ix.window_of(k) for k in t30 + x}
-    bars = _regime_bars(5, 4500)
+    bars = _regime_bars(5, 4320)
     probe = ("adx_n14_t30", "trend_n20_t30", "brk_n10_t30", "ao_cfltrend_n8_t30", "macdh_x8", "trend_x10")
     fired = {k: sum(1 for i in range(2000, len(bars), 5) if ix.resolve(k)(bars[i + 1 - ix.window_of(k):i + 1])) for k in probe}
     ok = len(t30) >= 200 and len(x) >= 200 and wins == {rows_for(30)} and rows_for(30) == 1920 and all(fired.values()) and ix.window_of("adx_c14") == rows_for(15)

@@ -665,7 +665,7 @@ function SettingsPage() {
                   label="Base · long window (last N orders)"
                   value={overlay.setGateWindow}
                   min={10}
-                  max={100}
+                  max={200}
                   step={1}
                   hint="default 50 · each Set on its own last N orders, at the minimum PF, with the drawdown time"
                   onChange={(v) => patch("setGateWindow", v)}
@@ -685,7 +685,7 @@ function SettingsPage() {
                   min={0}
                   max={3}
                   step={1}
-                  hint="the third Base window, 0 = off · the newest 1-3 results of the Set's own orders must all be positive (or all negative, below)"
+                  hint="0 = off · newest 1–3 Base results coordinate entry using the selected sign or average below; this does not change PF validation"
                   onChange={(v) => patch("setGateMinN", v)}
                 />
                 <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
@@ -722,12 +722,12 @@ function SettingsPage() {
                   onChange={(v) => patch("setGateMinTrades", v)}
                 />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Main · additional strategies, coordinations, processings · the last-N validation, on the Main Set</div>
-                <Toggle label="Main · stage (long, short and minimal window, each on the Main Set)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
+                <Toggle label="Main · stage (long and short PF, plus minimal coordination on each Main Set)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
                 <Slider
                   label="Main · long window (last N Main orders)"
                   value={overlay.mainGateN}
-                  min={8}
-                  max={50}
+                  min={10}
+                  max={200}
                   step={1}
                   hint="default 25 · the first Main window, at the Base minimum PF"
                   onChange={(v) => patch("mainGateN", v)}
@@ -773,7 +773,7 @@ function SettingsPage() {
                   min={0}
                   max={3}
                   step={1}
-                  hint="the third Main window, 0 = off · the newest 1-3 results of the Set's Main Set must all be positive (or all negative, below) · no share rule against the short window"
+                  hint="0 = off · newest 1–3 Main results coordinate entry using the selected sign or average below; this does not change PF validation"
                   onChange={(v) => patch("mainMinN", v)}
                 />
                 <label className="rounded-lg border border-border bg-bg2 px-3 py-3">

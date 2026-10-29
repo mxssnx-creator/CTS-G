@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 from array import array
 import threading
 import time
@@ -390,6 +391,7 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     bl, bs, bm = P.base_long, P.base_short, P.base_min_n
     gm, floor = P.gate_min, P.floor_for(bl)            # every window asks the minimum PF of its own size (P.floor_for)
     floor_s = P.floor_for(bs) if bs else floor
+    short_lo, short_hi = floor_s - 1e-4, floor_s + 1e-4
     s_need, m_need = (bs if full else 1), (bm if full else 1)
     pos_pre = neg_pre = None
     if bm:
@@ -419,7 +421,10 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
             t0 = e - bs
             if t0 < lo:
                 t0 = lo
-            if e - t0 < s_need or pf_of(gpre[e] - gpre[t0], lpre[e] - lpre[t0]) + 1e-9 < floor_s:
+            if e - t0 < s_need:
+                continue
+            short_pf = pf_of(gpre[e] - gpre[t0], lpre[e] - lpre[t0])
+            if short_pf < short_lo or (short_pf < short_hi and round(short_pf, 4) + 1e-9 < floor_s):
                 continue
         if bm:
             t0 = e - bm
@@ -456,13 +461,18 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
         if v is None:
             need = w if full else 1
             floor_w = P.floor_for(w)
+            lo_pf, hi_pf = floor_w - 1e-4, floor_w + 1e-4
             v = []
             for j in range(m):
                 e = me[j]
                 s0 = e - w
                 if s0 < mlo[j]:
                     s0 = mlo[j]
-                v.append(e - s0 >= need and pf_of(mg[e] - mg[s0], ml[e] - ml[s0]) + 1e-9 >= floor_w)
+                if e - s0 < need:
+                    v.append(False)
+                    continue
+                result_pf = pf_of(mg[e] - mg[s0], ml[e] - ml[s0])
+                v.append(result_pf >= hi_pf or (result_pf >= lo_pf and round(result_pf, 4) + 1e-9 >= floor_w))
             vec[w] = v
         return v
 
@@ -985,6 +995,8 @@ class SetState:
     last_error: str = ""            # last replay/score failure for this Set; cleared on the next clean pass
     n: int = 0
     live_n: int = 0                  # live closes accepted for this Set; n = replayed fills + live_n
+    live_pos_n: int = 0              # accepted closes on the positive Real lane
+    live_neg_n: int = 0              # accepted closes on the Negative Real lane
     wins: int = 0
     gp: float = 0.0
     gl: float = 0.0
@@ -1611,7 +1623,7 @@ class SetBook:
         # no ratio rule on the minimal window (owner 2026-10-29): 1-3 whatever the short window is
         self.base_min_n = max(0, min(BASE_MIN_N_MAX, int(num(ov, "setGateMinN", 0)))) if self.stages_on else 0
         self.main_on = self.stages_on and bool(ov.get("mainGateEnabled", True))
-        self.main_n = max(MIN_VALIDATION_N, min(self.gate_window, int(num(ov, "mainGateN", MAIN_GATE_N_DEFAULT))))
+        self.main_n = max(10, min(200, int(num(ov, "mainGateN", MAIN_GATE_N_DEFAULT))))
         # the Main short window (was "Auto"): each Set's own window of the candidates, at most mainShortMaxRatio of the long window; the
         # old mainAuto* keys still load when the mainShort* ones are absent (overlays and runtime files written before the rename)
         sov = {k: _alias(ov, "mainShort" + k, "mainAuto" + k) for k in ("Enabled", "Windows", "MaxRatio", "Min", "Margin")}
@@ -2091,14 +2103,18 @@ class SetBook:
             return
         sid = str(get("set_id") or get("setId") or "")
         pct_raw = get("pnl_pct")
-        if pct_raw is None:
+        try:
+            pct = float(pct_raw)
+        except (TypeError, ValueError, OverflowError):
+            pct = float("nan")
+        if not math.isfinite(pct):
             self.live_skipped += 1
             return
         row = {
             "t": finite(get("t")),
             "symbol": str(get("symbol") or ""),
             "side": str(get("side") or ""),
-            "pnl_pct": finite(pct_raw),
+            "pnl_pct": pct,
             "pnl_usdt": finite(get("pnl")),
             "hold_s": finite(get("hold_s")),
             "reason": str(get("reason") or ""),
@@ -2106,13 +2122,12 @@ class SetBook:
             "lane": str(get("lane") or "pos"),          # the lane it was executed on: its close joins that lane's Real Set
         }
         row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
-        if not sid and not str(get("trail_set_id") or get("trailSetId") or ""):
+        if not sid:
             # no Set id: the close cannot be attributed. It is counted, never guessed onto a Set.
             self.live_unmatched += 1
             return
-        extra = str(get("trail_set_id") or get("trailSetId") or "")
         targets: List[SetState] = []
-        for x in (sid, extra):
+        for x in (sid,):
             if not x:
                 continue
             st = self.sets.get(x) or self.retired.get(x)
@@ -2129,9 +2144,18 @@ class SetBook:
             while len(self._live_seen) > LIVE_SEEN_MAX:
                 self._live_seen.pop(next(iter(self._live_seen)))
             st.live.append(row)
-            st.live = st.live[-80:]
+            # Keep enough recent live closes for the independent 200-order positive and Negative Real windows.
+            # Sort first: venue history can be delivered out of order.
+            ordered = sorted(st.live, key=lambda r: finite(r.get("t")))
+            pos = [r for r in ordered if str(r.get("lane") or "pos") != "neg"][-PROC_KEEP:]
+            neg = [r for r in ordered if str(r.get("lane") or "pos") == "neg"][-PROC_KEEP:]
+            st.live = sorted(pos + neg, key=lambda r: finite(r.get("t")))
             st.n += 1
             st.live_n += 1
+            if row["lane"] == "neg":
+                st.live_neg_n += 1
+            else:
+                st.live_pos_n += 1
             self._score_one(st, now=row["t"] or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
@@ -2547,12 +2571,8 @@ class SetBook:
         st.evaluated_at = time.time()
         st.deact_reason = self.gate_reason(st)
 
-    def gate_reason(self, st: SetState) -> str:
-        """The one eligibility rule. '' when the Set is valid; otherwise the reason it is not.
-
-        A locked Set, a Set whose last evaluation failed, and a Set below the order floor, below the PF gate or at or
-        over the max drawdown time are all invalid on their own tape. Freshness applies only when fresh_s is set (live).
-        """
+    def base_validation_reason(self, st: SetState) -> str:
+        """Base PF/risk validation, independent of the minimal coordination condition."""
         if st.locked:
             return "lock"
         if not st.active:
@@ -2569,6 +2589,30 @@ class SetBook:
             return "ddt"
         if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(self.base_short, st.pack)):
             return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
+        if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
+            return "stale"
+        return ""
+
+    def validation_reason(self, st: SetState) -> str:
+        """PF/risk validation on the positive or Negative lane, without minimal sign coordination."""
+        reason = self.base_validation_reason(st)
+        if reason:
+            return reason
+        v = getattr(st, "stage", None) or {}
+        positive = self._main_pf_pass(st) and (bool(v.get("real")) if self.realst_on else True)
+        if (self.main_on or self.neg_on or self.realst_on) and not (positive or v.get("negl")):
+            if self.main_on and not v.get("main"):
+                return "main"
+            if self.main_on and self.short_on and not v.get("short"):
+                return "mainshort"
+            return "real"
+        return ""
+
+    def gate_reason(self, st: SetState) -> str:
+        """Entry readiness: PF/risk validation plus the Set's own minimal coordination."""
+        reason = self.base_validation_reason(st)
+        if reason:
+            return reason
         if self.base_min_n and not st.base_min_ok:
             return "minimal"         # the Base minimal window (setGateMinN): the newest results are not all positive / negative as asked
         v = getattr(st, "stage", None) or {}
@@ -2581,15 +2625,17 @@ class SetBook:
             if self.main_on and self.main_min_n and not v.get("minimal"):
                 return "mainminimal"   # the Main minimal window (mainMinN): the newest Main results are not all positive / negative as asked
             return "real"            # the lane's Real Set (its last realGateN) is below the minimum PF
-        if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
-            return "stale"
         return ""
 
     def state_of(self, st: SetState) -> Tuple[str, str]:
-        """(state, reason) for display and counts: valid, invalid, locked or error. Every Set is in exactly one."""
+        """One state: ready, waiting for coordination, invalid, locked or error."""
         reason = self.gate_reason(st)
         if not reason:
             return "valid", ""
+        validation = self.validation_reason(st)
+        if not validation and reason in ("minimal", "mainminimal"):
+            return "waiting", reason
+        reason = validation or reason
         if reason == "lock":
             return "locked", reason
         if reason == "error":
@@ -2792,18 +2838,17 @@ class SetBook:
         return out
 
     def stage_counts(self) -> Dict[str, int]:
-        """Sets at each stage now: passed Base, passed Main (long, short and minimal window), in a Main Negative dip, valid on Real, valid on Real Negative."""
+        """PF-validated stage populations; coordination readiness is counted separately."""
         with self._lock:
             out = {"base": 0, "main": 0, "negative": 0, "real": 0, "realNeg": 0}
             for st in self.by_idx:
-                why = self.gate_reason(st)
-                if why not in ("",) + STAGE_REASONS:
+                if self.base_validation_reason(st):
                     continue
                 v = st.stage or {}
                 out["base"] += 1
-                out["main"] += int(self._main_pass(st))
+                out["main"] += int(self._main_pf_pass(st))
                 out["negative"] += int(bool(v.get("neg")))
-                lane = self.lane_of(st)
+                lane = self.validation_lane(st)
                 out["real"] += int(lane == "pos")
                 out["realNeg"] += int(lane == "neg")
             return out
@@ -2814,6 +2859,24 @@ class SetBook:
             return True
         v = st.stage or {}
         return bool(v.get("main") and (v.get("short") or not self.short_on) and (v.get("minimal", True) or not self.main_min_n))
+
+    def _main_pf_pass(self, st: SetState) -> bool:
+        """Main long and short PF gates, independently of minimal coordination."""
+        if not self.main_on:
+            return True
+        v = st.stage or {}
+        return bool(v.get("main") and (v.get("short") or not self.short_on))
+
+    def validation_lane(self, st: SetState) -> str:
+        """PF-validated lane, which may still be waiting for minimal coordination."""
+        if self.validation_reason(st):
+            return ""
+        if not (self.main_on or self.neg_on or self.realst_on):
+            return "pos"
+        v = st.stage or {}
+        if self._main_pf_pass(st) and (bool(v.get("real")) if self.realst_on else True):
+            return "pos"
+        return "neg" if v.get("negl") else ""
 
     def lane_of(self, st: SetState) -> str:
         """The lane a valid Set executes on: "pos" (Base -> Main -> Real), "neg" (Base -> Main Negative -> Real Negative), "" when it
@@ -2853,7 +2916,7 @@ class SetBook:
             return self._counts()
 
     def _counts(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {"valid": 0, "invalid": 0, "locked": 0, "error": 0, "reasons": {}}
+        out: Dict[str, Any] = {"valid": 0, "waiting": 0, "invalid": 0, "locked": 0, "error": 0, "reasons": {}}
         for st in self.by_idx:
             state, reason = self.state_of(st)
             out[state] += 1
@@ -2862,7 +2925,8 @@ class SetBook:
         out["configured"] = len(self.by_idx)
         out["retired"] = len(self.retired)
         out["total"] = len(self.by_idx) + len(self.retired)
-        out["sum"] = out["valid"] + out["invalid"] + out["locked"] + out["error"]
+        out["pfValid"] = out["valid"] + out["waiting"]
+        out["sum"] = out["valid"] + out["waiting"] + out["invalid"] + out["locked"] + out["error"]
         return out
 
     def snapshot(self) -> Dict[str, Any]:
@@ -2892,7 +2956,7 @@ class SetBook:
             n_rows = 0
             for x in sts:
                 rk = self.rank_key(x)
-                for r in (x.hist or [])[-self.gate_window:]:
+                for r in by_time(x.tape())[-self.gate_window:]:
                     n_rows += 1
                     k = (r.get("symbol"), int(round(finite(r.get("t")) - finite(r.get("hold_s")))), x.pack, r.get("side"))
                     cur = best.get(k)
@@ -2903,30 +2967,36 @@ class SetBook:
             return {"pf": round(pf_of(gp_, gl_), 4), "entries": len(nets_), "orders": n_rows,
                     "setsPerEntry": round(n_rows / len(nets_), 2) if nets_ else 0.0}
         allsets = list(self.by_idx)
-        reasons = {x.id: self.gate_reason(x) for x in allsets}
+        reasons = {x.id: self.validation_reason(x) for x in allsets}
         valid = [x for x in allsets if not reasons[x.id]]
-        base_only = [x for x in allsets if reasons[x.id] in ("",) + STAGE_REASONS]   # passed the Base gate (the later stages not applied)
+        base_only = [x for x in allsets if not self.base_validation_reason(x)]
+        eligible = [x for x in allsets if not self.gate_reason(x)]
         total = len(allsets)
         by_pack: Dict[str, Any] = {}
         for pack in self.packs:
             ps = [x for x in allsets if x.pack == pack]
             pv = [x for x in ps if not reasons[x.id]]
-            by_pack[pack] = {"base": pool(pv), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv),
+            pe = [x for x in eligible if x.pack == pack]
+            pb = [x for x in base_only if x.pack == pack]
+            by_pack[pack] = {"base": pool(pv), "baseOnly": pool(pb), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv), "eligible": len(pe),
+                             "validatedBasePct": round(100.0 * len(pb) / len(ps), 2) if ps else 0.0,
                              "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
                              "minPf": self.floor_for(self.gate_window, pack)}
-        rgp, rgl = sum(x.main_gp for x in valid), sum(x.main_gl for x in valid)
-        main = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.main_n for x in valid), "sets": len(valid),
+        main_pass = [x for x in base_only if self._main_pf_pass(x)]
+        rgp, rgl = sum(x.main_gp for x in main_pass), sum(x.main_gl for x in main_pass)
+        main = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.main_n for x in main_pass), "sets": len(main_pass),
                 "on": self.main_on, "lastN": self.main_n}
+        agp, agl = sum(x.main_gp for x in valid), sum(x.main_gl for x in valid)
+        main_all_lanes = {"pf": round(pf_of(agp, agl), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": self.main_n}
         pgp, pgl = sum(x.main_gp for x in base_only), sum(x.main_gl for x in base_only)
         processed = {"pf": round(pgp / pgl, 4) if pgl > 0 else (99.0 if pgp > 0 else 0.0), "n": sum(x.main_n for x in base_only),
-                     "sets": len(base_only), "orders": sum(int(x.proc_total) + len(x.live) for x in base_only), "lastN": self.main_n}
-        pos = [x for x in valid if self.lane_of(x) == "pos"]
-        neg = [x for x in valid if self.lane_of(x) == "neg"]
-        executable = {"pf": round(pf_of(sum(x.exe_gp for x in pos), sum(x.exe_gl for x in pos)), 4), "sets": len(pos),
-                      "orders": sum(int(x.exe_total) for x in pos), "lastN": self.realst_n, "on": self.realst_on}
-        realneg = {"pf": round(pf_of(sum(x.neg_gp for x in neg), sum(x.neg_gl for x in neg)), 4), "sets": len(neg),
-                   "orders": sum(int(x.neg_total) for x in neg), "lastN": self.realst_n, "on": self.neg_on}
-        main_pass = [x for x in base_only if self._main_pass(x)]
+                     "sets": len(base_only), "orders": sum(int(x.proc_total) + x.live_n for x in base_only), "lastN": self.main_n}
+        pos = [x for x in valid if self.validation_lane(x) == "pos"]
+        neg = [x for x in valid if self.validation_lane(x) == "neg"]
+        executable = {"pf": round(pf_of(sum(x.exe_gp for x in pos), sum(x.exe_gl for x in pos)), 4), "sets": len(pos), "n": sum(x.exe_n for x in pos),
+                      "orders": sum(int(x.exe_total) + x.live_pos_n for x in pos), "lastN": self.realst_n, "on": self.realst_on}
+        realneg = {"pf": round(pf_of(sum(x.neg_gp for x in neg), sum(x.neg_gl for x in neg)), 4), "sets": len(neg), "n": sum(x.neg_n for x in neg),
+                   "orders": sum(int(x.neg_total) + x.live_neg_n for x in neg), "lastN": self.realst_n, "on": self.neg_on}
         stage_sets = {"base": len(base_only), "main": len(main_pass),
                       "negative": sum(1 for x in base_only if (x.stage or {}).get("neg")), "real": len(pos), "realNeg": len(neg)}
 
@@ -2935,9 +3005,10 @@ class SetBook:
             window orders and the plain mean of their own PFs (a window without a loss counts RANK_PF_CAP), never an average over all Sets."""
             gp, gl = sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts)
             pfs = [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
+            live_key = {"proc_total": "live_n", "exe_total": "live_pos_n", "neg_total": "live_neg_n"}.get(orders_key)
             return {"sets": len(sts), "pct": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),
                     "meanPf": round(sum(pfs) / len(pfs), 4) if pfs else 0.0, "n": sum(int(getattr(x, n_key)) for x in sts),
-                    "orders": sum(int(getattr(x, orders_key)) for x in sts)}
+                    "orders": sum(int(getattr(x, orders_key)) + (int(getattr(x, live_key)) if live_key else 0) for x in sts)}
         stages = {"base": stage_row(base_only, "gate_gp", "gate_gl", "gate_n", "gate_n"),
                   "main": stage_row(main_pass, "main_gp", "main_gl", "main_n", "proc_total"),
                   "real": stage_row(pos, "exe_gp", "exe_gl", "exe_n", "exe_total"),
@@ -2945,29 +3016,32 @@ class SetBook:
                   "valid": stage_row(valid, "gate_gp", "gate_gl", "gate_n", "gate_n"),
                   "allSets": total}
 
-        def window_row(on: bool, n: Any, pop: List[SetState], sts: List[SetState], gp_key: str, gl_key: str, n_key: Any) -> Dict[str, Any]:
+        def window_row(on: bool, n: Any, pop: List[SetState], sts: List[SetState], gp_key: str, gl_key: str, n_key: Any, coordination: bool = False) -> Dict[str, Any]:
             """One last-N window on its own: the Sets of its stage's population that pass THIS window alone (the other windows of the stage do not
             enter), their share of that population and of every configured Set, and the figures of the orders this window reads: the pooled PF
             (gains over losses of all those orders together) and the plain mean of the Sets' own PFs. `orders` is the count behind the PF."""
             sts = sts if on else []
-            gp, gl = sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts)
-            pfs = [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
+            gp, gl = (0.0, 0.0) if coordination else (sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts))
+            pfs = [] if coordination else [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
             nn = (lambda x: int(getattr(x, n_key))) if isinstance(n_key, str) else n_key
-            return {"on": bool(on), "n": n, "pop": len(pop), "sets": len(sts), "pct": round(100.0 * len(sts) / len(pop), 2) if pop else 0.0,
-                    "pctAll": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),
-                    "meanPf": round(sum(pfs) / len(pfs), 4) if pfs else 0.0, "orders": sum(nn(x) for x in sts)}
+            row = {"on": bool(on), "n": n, "pop": len(pop), "sets": len(sts), "pct": round(100.0 * len(sts) / len(pop), 2) if pop else 0.0,
+                   "pctAll": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": None if coordination else round(pf_of(gp, gl), 4),
+                   "meanPf": None if coordination else (round(sum(pfs) / len(pfs), 4) if pfs else 0.0), "orders": sum(nn(x) for x in sts)}
+            if coordination:
+                row["role"] = "coordination"
+            return row
         sv = lambda x: x.stage or {}                                                      # noqa: E731
-        mp = [x for x in base_only if self._main_pass(x)]
+        mp = main_pass
         neg_in = [x for x in base_only if sv(x).get("neg")]
         windows = {
             "baseLong": window_row(True, self.gate_window, allsets, [x for x in allsets if x.base_long_ok], "gate_gp", "gate_gl", "gate_n"),
             "baseShort": window_row(bool(self.base_short), self.base_short, allsets, [x for x in allsets if x.base_short_ok], "base_short_gp", "base_short_gl", "base_short_n"),
-            "baseMinimal": window_row(bool(self.base_min_n), self.base_min_n, allsets, [x for x in allsets if x.base_min_ok], "base_min_gp", "base_min_gl", "base_min_n"),
+            "baseMinimal": window_row(bool(self.base_min_n), self.base_min_n, allsets, [x for x in allsets if x.base_min_ok], "base_min_gp", "base_min_gl", "base_min_n", coordination=True),
             "mainLong": window_row(self.main_on, self.main_n, base_only, [x for x in base_only if sv(x).get("main")], "main_gp", "main_gl", "main_n"),
             "mainShort": window_row(self.main_on and self.short_on, list(self.short_windows), base_only, [x for x in base_only if sv(x).get("short")],
                                     "main_short_gp", "main_short_gl", "main_short_n"),
             "mainMinimal": window_row(self.main_on and bool(self.main_min_n), self.main_min_n, base_only, [x for x in base_only if sv(x).get("minimal")],
-                                      "main_min_gp", "main_min_gl", "main_min_have"),
+                                      "main_min_gp", "main_min_gl", "main_min_have", coordination=True),
             "negative": window_row(self.neg_on, list(self.neg_windows), base_only, neg_in, "neg_win_gp", "neg_win_gl", "neg_win"),
             "real": window_row(self.realst_on, self.realst_n, mp, [x for x in mp if sv(x).get("real")], "exe_gp", "exe_gl", "exe_n"),
             "realNeg": window_row(self.realst_on and self.neg_on, self.realst_n, neg_in, [x for x in neg_in if sv(x).get("realneg")], "neg_gp", "neg_gl", "neg_n"),
@@ -2980,15 +3054,17 @@ class SetBook:
         windows["baseMinimal"]["mode"] = ("avg" if self.base_min_avg else "") + ("both" if self.base_min_both else ("positive" if self.base_min_positive else "negative"))
         windows["mainMinimal"]["mode"] = ("avg" if self.main_min_avg else "") + ("both" if self.main_min_both else ("positive" if self.main_min_positive else "negative"))
         # stages: `base` is the end figure (the Sets that pass Base and Main, pooled over their Base windows), `baseOnly` the Base gate
-        # alone; `main` the same end Sets over the Main gate's last N of their Main Sets; `processed` the Main Sets (orders opened while
+        # alone; `main` the Main PF-passing Sets over their Main long windows; `mainAllLanes` the final Sets including Negative-lane
+        # bypasses; `processed` the Main Sets (orders opened while
         # Base passed) of every Base-passing Set; `real` the Real Sets (orders opened while Base and Main passed) of the end Sets, which
         # the overall Real stage (the coordinator's real evaluation) reads
         # `baseEntry` / `baseOnlyEntry`: the same window orders, one result per entry from its best-ranked Set (per_entry)
         return {"base": pool(valid), "baseOnly": pool(base_only), "baseEntry": per_entry(valid), "baseOnlyEntry": per_entry(base_only),
-                "main": main, "processed": processed, "real": executable,
+                "main": main, "mainAllLanes": main_all_lanes, "processed": processed, "real": executable,
                 "realneg": realneg, "stageSets": stage_sets, "stages": stages, "windows": windows,
                 "unfiltered": pool(allsets),
-                "total": total, "valid": len(valid),
+                "total": total, "valid": len(valid), "eligible": len(eligible), "coordinationWaiting": len(valid) - len(eligible),
+                "eligiblePct": round(100.0 * len(eligible) / total, 2) if total else 0.0,
                 "validatedBasePct": round(100.0 * len(base_only) / total, 2) if total else 0.0,
                 "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack,
                 "basis": "gate-window", "history": list(self.pf_history[-240:])}
@@ -3041,13 +3117,13 @@ class SetBook:
                     # the Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set
                     # (opened while Base and Main passed)
                     "mainId": st.id + MAIN_SUFFIX,
-                    "mainN": int(st.proc_total) + len(st.live),
+                    "mainN": int(st.proc_total) + st.live_n,
                     "mainPf": round(st.main_pf, 4),
                     "mainLastN": st.main_n,
                     "realId": st.id + REAL_SUFFIX,
-                    "realN": int(st.exe_total) + len(st.live),
+                    "realN": int(st.exe_total) + st.live_pos_n,
                     "realPf": round(st.exe_pf, 4),
-                    "realNegN": int(st.neg_total),
+                    "realNegN": int(st.neg_total) + st.live_neg_n,
                     "realNegPf": round(st.neg_pf, 4),
                     "shortPf": round(st.base_short_pf, 4),
                     "mainShortN": int(st.main_short_win or self.main_n),
@@ -3105,6 +3181,8 @@ class SetBook:
                 "tr": st.trail_key,
                 "st": st.step,
                 "on": int(self.is_eligible(st)),
+                "v": int(not self.validation_reason(st)),
+                "baseV": int(not self.base_validation_reason(st)),
                 "pf": round(st.gate_pf, 4),
                 "dd": st.max_dd_s,
                 # what the desk needs to pool the PF of any selection like _pf_split: orders, gate-window orders and
@@ -3123,13 +3201,13 @@ class SetBook:
                 # the Set's lane chain: its processed Set (orders opened while Base passed) and its executable Set (opened
                 # while every gate passed), each with its orders and PF
                 "mainId": st.id + MAIN_SUFFIX,
-                "mainN": int(st.proc_total) + len(st.live),
+                "mainN": int(st.proc_total) + st.live_n,
                 "mainPf": round(st.main_pf, 4),
                 "realId": st.id + REAL_SUFFIX,
-                "realN": int(st.exe_total) + len(st.live),
+                "realN": int(st.exe_total) + st.live_pos_n,
                 "realPf": round(st.exe_pf, 4),
                 "realNegId": st.id + REALNEG_SUFFIX,
-                "realNegN": int(st.neg_total),
+                "realNegN": int(st.neg_total) + st.live_neg_n,
                 "realNegPf": round(st.neg_pf, 4),
                 "shortPf": round(st.base_short_pf, 4),
                 "mainShortN": int(st.main_short_win or self.main_n),
@@ -4121,7 +4199,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # the stage keys: mainGate* the Main static window, realGate* the Real stage, stagesEnabled off = the Base long window alone
     lk = SetBook(); lk.load({"realGateN": 12, "realGateEnabled": False, "mainGateN": 9})
     lo_ = SetBook(); lo_.load({"stagesEnabled": False})
-    out.append(("set-main-stage-keys-and-legacy-names", lk.realst_n == 12 and lk.realst_on is False and lk.main_n == 9 and lk.main_on is True
+    out.append(("set-main-stage-keys-and-legacy-names", lk.realst_n == 12 and lk.realst_on is False and lk.main_n == 10 and lk.main_on is True
                 and SetBook().main_n == MAIN_GATE_N_DEFAULT == 25 and SetBook().short_windows == (5, 10, 15) and SetBook().realst_n == REAL_GATE_N_DEFAULT == 15
                 and not (lo_.main_on or lo_.neg_on or lo_.realst_on or lo_.base_short),
 f"Real N {lk.realst_n} on {lk.realst_on}; Main N {lk.main_n}; stages off -> Base alone"))

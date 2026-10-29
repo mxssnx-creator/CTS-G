@@ -60,6 +60,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     if (!counts) return [];
     const reasons = counts.reasons ?? {};
     const rows = [{ name: "valid", n: counts.valid, color: "var(--color-good, #2fbf71)" }];
+    rows.push({ name: "coordination wait", n: counts.waiting ?? 0, color: "var(--color-warn, #e0a030)" });
     for (const [k, v] of Object.entries(reasons)) rows.push({ name: k, n: v, color: "var(--color-muted, #8a93a6)" });
     rows.push({ name: "locked", n: counts.locked, color: "var(--color-warn, #e0a030)" });
     rows.push({ name: "error", n: counts.error, color: "var(--color-danger, #e5484d)" });
@@ -69,7 +70,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     () =>
       (pb?.history ?? []).map((h) => ({
         time: new Date(h.t * 1000).toISOString().slice(11, 16),
-        pf: Math.min(h.pf, 9.99),
+        pf: h.n ? Math.min(h.pf, 9.99) : null,
         validated: h.validatedPct,
       })),
     [pb],
@@ -81,7 +82,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     <div className="grid gap-3 lg:grid-cols-2" data-testid="base-validation-panel">
       <Panel
         title="Effective PF after Base"
-        hint={`${pb.base.sets} of ${pb.total ?? pb.unfiltered.sets} Sets validated (${(pb.validatedPct ?? 0).toFixed(1)}%) · n ${pb.base.n} · before Base ${pb.unfiltered.pf.toFixed(2)} (under 1 is normal)`}
+        hint={`${pb.base.sets} of ${pb.total ?? pb.unfiltered.sets} PF-validated (${(pb.validatedPct ?? 0).toFixed(1)}%)${pb.eligible != null ? ` · ${pb.eligible} ready for entry` : ""} · n ${pb.base.n} · before Base ${pb.unfiltered.pf.toFixed(2)}`}
       >
         <ClientChart height={200}>
           <BarChart data={packs} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
@@ -97,7 +98,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
           </BarChart>
         </ClientChart>
       </Panel>
-      <Panel title="Validated Sets" hint="Share of each strategy's Sets that pass Base validation (orders, PF and drawdown time).">
+      <Panel title="Validated Sets" hint="Share of each strategy's Sets that pass the configured PF and risk validation, independent of minimal coordination.">
         <ClientChart height={200}>
           <BarChart data={packs} layout="vertical" margin={{ top: 6, right: 16, left: 12, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #2a2f3a)" />
@@ -142,7 +143,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
           </LineChart>
         </ClientChart>
       </Panel>
-      <Panel title="Set states" hint="Every configured Set is in exactly one state; invalid Sets show the reason they fail Base.">
+      <Panel title="Set states" hint="Every Set is ready, waiting for minimal coordination, invalid, locked or in error.">
         <ClientChart height={200}>
           <BarChart data={states} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #2a2f3a)" />

@@ -4,6 +4,12 @@ import { overlayFromCts, type CtsSettings } from "./config-model.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
 
+test("Main long N is independently limited to 10 through 200", () => {
+  assert.equal(overlayFromCts(cts({ setGateWindow: 10, mainGateN: 200 })).mainGateN, 200);
+  assert.equal(overlayFromCts(cts({ mainGateN: 3 })).mainGateN, 10);
+  assert.equal(overlayFromCts(cts({ mainGateN: 250 })).mainGateN, 200);
+});
+
 test("the Main short window and the Main minimal window default to the owner's settings", () => {
   const o = overlayFromCts(cts());
   assert.equal(o.mainShortEnabled, true);

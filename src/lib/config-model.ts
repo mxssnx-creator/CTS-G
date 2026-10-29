@@ -947,7 +947,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
     setGateMinMode: minMode(cts.setGateMinMode),
     mainGateEnabled: bool(cts.mainGateEnabled, true),
-    mainGateN: Math.max(8, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
+    mainGateN: Math.max(10, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
     mainShortEnabled: bool(cts.mainShortEnabled ?? cts.mainAutoEnabled, true),
     mainShortWindows: windows(cts.mainShortWindows ?? cts.mainAutoWindows, [5, 10, 15]),
     mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),

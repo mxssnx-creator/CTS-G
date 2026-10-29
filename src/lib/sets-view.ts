@@ -22,8 +22,11 @@ export type SetIndexRow = {
   tr: string;
   /** TP step (one step = one PositionCost); 0 for a trailing Set. */
   st: number;
-  /** 1 when the Set passes Base validation. */
+  /** 1 when the Set is ready for an entry. */
   on: number;
+  /** PF/risk validation, independent of minimal coordination (older servers omit it). */
+  v?: number;
+  baseV?: number;
   /** PF over the gate window. */
   pf: number;
   /** Max drawdown time in seconds. */
@@ -136,6 +139,7 @@ export function filterSets(
 export type SetsSummary = {
   total: number;
   valid: number;
+  eligible: number;
   /** Share of the shown Sets that pass Base validation, percent with two decimals. */
   validatedPct: number;
   /** Effective PF: pooled over the valid Sets' gate windows. null when no Set is valid. */
@@ -159,10 +163,11 @@ function pooledPf(rows: readonly SetIndexRow[]): number | null {
 }
 
 export function summarize(rows: readonly SetIndexRow[]): SetsSummary {
-  const valid = rows.filter((r) => r.on === 1);
+  const valid = rows.filter((r) => (r.v ?? r.on) === 1);
   return {
     total: rows.length,
     valid: valid.length,
+    eligible: rows.filter((r) => r.on === 1).length,
     validatedPct: rows.length ? Math.round((10000 * valid.length) / rows.length) / 100 : 0,
     effectivePf: pooledPf(valid),
     orders: valid.reduce((a, r) => a + Number(r.gn ?? 0), 0),
@@ -199,7 +204,7 @@ export function stepHistogram(rows: readonly SetIndexRow[], costPct: number): Ar
     if (!Number.isFinite(s)) continue;
     const e = acc.get(s) ?? { total: 0, valid: 0 };
     e.total += 1;
-    if (r.on === 1) e.valid += 1;
+    if ((r.v ?? r.on) === 1) e.valid += 1;
     acc.set(s, e);
   }
   return [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([step, e]) => ({ step, ...e }));
@@ -212,7 +217,7 @@ export function pfByStep(
 ): Array<{ step: number; pf: number | null; valid: number; orders: number }> {
   const by = new Map<number, SetIndexRow[]>();
   for (const r of rows) {
-    if (r.on !== 1) continue;
+    if ((r.v ?? r.on) !== 1) continue;
     const s = stepOf(r, costPct);
     if (!Number.isFinite(s)) continue;
     by.set(s, [...(by.get(s) ?? []), r]);
@@ -225,8 +230,8 @@ export function pfByStep(
 export type StageRow = { key: string; label: string; sets: number; pct: number; pf: number | null; meanPf: number | null; orders: number };
 
 const STAGE_LABELS: Array<[StageRow["key"], string]> = [
-  ["base", "Base · long, short, minimal window"],
-  ["main", "Main · long, short, minimal window"],
+  ["base", "Base · long and short PF"],
+  ["main", "Main · long and short PF"],
   ["real", "Real · positive lane"],
   ["realNeg", "Real Negative lane"],
   ["valid", "Valid on any lane"],
@@ -241,7 +246,7 @@ export function stageFigures(pb: Pick<PfBase, "stages"> | null | undefined): Sta
   if (!st) return [];
   return STAGE_LABELS.map(([key, label]) => {
     const r = st[key as "base" | "main" | "real" | "realNeg" | "valid"];
-    return { key, label, sets: r.sets, pct: r.pct, pf: r.sets > 0 ? r.pf : null, meanPf: r.sets > 0 ? r.meanPf : null, orders: r.n };
+    return { key, label, sets: r.sets, pct: r.pct, pf: r.sets > 0 && r.n > 0 ? r.pf : null, meanPf: r.sets > 0 && r.n > 0 ? r.meanPf : null, orders: r.n };
   });
 }
 
@@ -264,10 +269,10 @@ export type WindowRow = {
 const WINDOW_LABELS: Array<[WindowKey, WindowRow["stage"], string]> = [
   ["baseLong", "Base", "long window"],
   ["baseShort", "Base", "short window"],
-  ["baseMinimal", "Base", "minimal window"],
+  ["baseMinimal", "Base", "minimal coordination"],
   ["mainLong", "Main", "long window"],
   ["mainShort", "Main", "short window"],
-  ["mainMinimal", "Main", "minimal window"],
+  ["mainMinimal", "Main", "minimal coordination"],
   ["negative", "Negative", "dip windows"],
   ["real", "Real", "last N"],
   ["realNeg", "Real", "Negative lane last N"],
@@ -289,7 +294,8 @@ export function windowFigures(pb: Pick<PfBase, "windows"> | null | undefined): W
   return WINDOW_LABELS.map(([key, stage, label]) => {
     const w = ws[key];
     const chosen = key === "mainShort" && w.on && w.chosen ? Object.entries(w.chosen).sort((a, b) => Number(a[0]) - Number(b[0])).map(([n, c]) => `${n}: ${c}`).join(" · ") : undefined;
-    return { key, stage, label, setting: windowSetting(key, w), on: w.on, pop: w.pop, sets: w.sets, pct: w.pct, pf: w.on && w.sets > 0 ? w.pf : null, meanPf: w.on && w.sets > 0 ? w.meanPf : null, orders: w.orders, chosen };
+    const coordination = key === "baseMinimal" || key === "mainMinimal";
+    return { key, stage, label, setting: windowSetting(key, w), on: w.on, pop: w.pop, sets: w.sets, pct: w.pct, pf: !coordination && w.on && w.sets > 0 ? w.pf : null, meanPf: !coordination && w.on && w.sets > 0 ? w.meanPf : null, orders: w.orders, chosen };
   });
 }
 

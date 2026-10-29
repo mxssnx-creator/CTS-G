@@ -109,7 +109,7 @@ def hour_figures(book, tapes, hour: float) -> Dict[str, Any]:
     n_v = 0
     for st in book.by_idx:
         total += 1
-        lane = sg.gate_metrics(book, tapes, st, hour)[0]
+        lane = sg.validation_lane(book, tapes, st, hour)
         fig = sg.window_figures(book, tapes, st, hour)
         for k, f in fig.items():
             if f is None:
@@ -118,10 +118,11 @@ def hour_figures(book, tapes, hour: float) -> Dict[str, Any]:
             a[0] += 1
             if f[0]:
                 a[1] += 1
-                a[2] += f[1]
-                a[3] += f[2]
                 a[4] += f[3]
-                a[5] += min(RANK_PF_CAP, pf_of(f[1], f[2]))
+                if k not in ("baseMinimal", "mainMinimal"):
+                    a[2] += f[1]
+                    a[3] += f[2]
+                    a[5] += min(RANK_PF_CAP, pf_of(f[1], f[2]))
         if lane:
             valid += 1
             f = fig["baseLong"]
@@ -140,14 +141,17 @@ def window_summary(per_hour: List[Dict[str, Any]], book, cell: Dict[str, Any]) -
     out: Dict[str, Any] = {}
     hrs = max(1, len(per_hour))
     for k in WINDOW_KEYS:
+        coordination = k in ("baseMinimal", "mainMinimal")
         judged = sum(h["windows"][k][0] for h in per_hour)
         passing = sum(h["windows"][k][1] for h in per_hour)
         gp = sum(h["windows"][k][2] for h in per_hour)
         gl = sum(h["windows"][k][3] for h in per_hour)
         out[k] = {"on": bool(on[k]), "n": nominal[k], "judged_per_hour": round(judged / hrs, 1), "sets_per_hour": round(passing / hrs, 1),
-                  "pct": round(100.0 * passing / judged, 2) if judged else 0.0, "pf": round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else None),
-                  "gp": round(gp, 6), "gl": round(gl, 6), "orders": sum(h["windows"][k][4] for h in per_hour),
-                  "mean_set_pf": round(sum(h["windows"][k][5] for h in per_hour) / passing, 4) if passing else None}
+                  "pct": round(100.0 * passing / judged, 2) if judged else 0.0, "pf": None if coordination else (round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else None)),
+                  "gp": None if coordination else round(gp, 6), "gl": None if coordination else round(gl, 6), "orders": sum(h["windows"][k][4] for h in per_hour),
+                  "mean_set_pf": round(sum(h["windows"][k][5] for h in per_hour) / passing, 4) if passing and not coordination else None}
+        if coordination:
+            out[k]["role"] = "coordination"
     return out
 
 

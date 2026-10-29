@@ -84,11 +84,12 @@ export type WindowFigure = {
   sets: number;
   pct: number;
   pctAll: number;
-  pf: number;
-  meanPf: number;
+  pf: number | null;
+  meanPf: number | null;
   orders: number;
   chosen?: Record<string, number>;
-  mode?: "positive" | "negative" | "both";
+  mode?: "positive" | "negative" | "both" | "avgpositive" | "avgnegative" | "avgboth";
+  role?: "coordination";
 };
 export type WindowKey = "baseLong" | "baseShort" | "baseMinimal" | "mainLong" | "mainShort" | "mainMinimal" | "negative" | "real" | "realNeg";
 export type PfBase = {
@@ -99,14 +100,16 @@ export type PfBase = {
   /** The same window orders, one result per entry (the best-ranked Set's): a pack's Sets share entries, the pool counts each once per Set. */
   baseEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
   baseOnlyEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
-  /** Main stage: the end Sets over the Main gate's last N of their Main Sets (orders opened while Base passed). */
+  /** Main PF-passing Sets over their Main long windows. */
   main?: PfPool & { on: boolean; lastN: number };
+  /** Main windows of all final PF-validated Sets, including the separate Negative lane. */
+  mainAllLanes?: PfPool & { lastN: number };
   /** The Main Sets of every Base-passing Set. */
   processed?: PfPool & { orders: number; lastN: number };
   /** Real stage: the Real Sets (orders opened while Base and Main passed) of the Sets valid on the positive lane, over the Real last N. */
-  real?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
+  real?: { pf: number; sets: number; n?: number; orders: number; lastN: number; on: boolean };
   /** Real stage, Negative lane: the Real Negative Sets of the Sets valid on it. */
-  realneg?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
+  realneg?: { pf: number; sets: number; n?: number; orders: number; lastN: number; on: boolean };
   stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
   /** Per stage, over the Sets that pass it (never over all Sets): how many, their share of every configured Set, the pooled PF and the mean of their own PFs. */
   stages?: Record<"base" | "main" | "real" | "realNeg" | "valid", StageFigure> & { allSets: number };
@@ -116,6 +119,9 @@ export type PfBase = {
   unfiltered: PfPool;
   total?: number;
   valid?: number;
+  eligible?: number;
+  eligiblePct?: number;
+  coordinationWaiting?: number;
   validatedPct?: number;
   byPack?: Record<string, { base: PfPool; unfiltered: PfPool; total: number; valid: number; validatedPct: number; minPf?: number }>;
   /** "gate-window": pooled over each Set's last setGateWindow orders, never the whole tape. */
@@ -143,6 +149,8 @@ export type Execution = {
   sets: {
     configured: number;
     valid: number;
+    waiting?: number;
+    pfValid?: number;
     baseValid: number;
     invalid: number;
     reasons: Record<string, number>;
@@ -561,7 +569,7 @@ export type LiveStats = {
     index?: SetIndexRow[];
     /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
     pfBase?: PfBase;
-    counts?: { valid: number; invalid: number; locked: number; error: number; configured: number; retired?: number;
+    counts?: { valid: number; waiting?: number; pfValid?: number; invalid: number; locked: number; error: number; configured: number; retired?: number;
       reasons?: Record<string, number> };
     minStep?: number;
     minStepCfg?: number;

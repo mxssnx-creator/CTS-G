@@ -200,6 +200,19 @@ def window_grid_files_of_one_window_merge_into_one_report():
     return ok, f"cells {len(merged['cells'])}/{len(whole['cells'])} ids equal={ids_ok}; Main minimal values {labels}; identical duplicate kept once={dup_once}; clashing duplicate refused={dup_refused}; page equals the unsplit one={same_page}"
 
 
+def minimal_grid_reports_coordination_without_pf():
+    import types
+    import window_grid as WGR
+    b = types.SimpleNamespace(base_short=5, base_min_n=2, main_on=True, short_on=True, main_min_n=2,
+                              neg_on=True, realst_on=True, gate_window=20, main_n=10, short_windows=(5,), neg_windows=(2,), realst_n=5)
+    hour = {"windows": {k: [3, 2, 2.0, 1.0, 4, 4.0] for k in WGR.WINDOW_KEYS}}
+    result = WGR.window_summary([hour], b, {})
+    ok = (result["baseLong"]["pf"] == 2.0 and all(result[k]["role"] == "coordination" and result[k]["pf"] is None
+          and result[k]["mean_set_pf"] is None and result[k]["gp"] is None and result[k]["gl"] is None
+          and result[k]["sets_per_hour"] == 2 and result[k]["orders"] == 4 for k in ("baseMinimal", "mainMinimal")))
+    return ok, f"minimal windows: {[(k, result[k]['sets_per_hour'], result[k]['orders'], result[k]['pf']) for k in ('baseMinimal', 'mainMinimal')]}"
+
+
 def window_grid_runs_the_process_without_negative_windows_and_minimal_both():
     """The grid's dimensions: the Negative windows include "off" (the process without the Negative lane: mainNegEnabled false, the engine reads it), the minimal
     window runs at every N of 1-3 beside every short window (no ratio rule) and in the modes positive, negative and both (one sign throughout)."""
@@ -224,6 +237,7 @@ def window_grid_runs_the_process_without_negative_windows_and_minimal_both():
 
 
 CHECKS = [
+    ("report.minimal-grid-reports-coordination-without-pf", minimal_grid_reports_coordination_without_pf),
     ("report.window-grid-html-has-heatmap-and-best-cell", window_grid_html_has_heatmap_and_best_cell),
     ("report.window-grid-files-merge-into-one-report", window_grid_files_of_one_window_merge_into_one_report),
     ("report.window-grid-negative-off-and-minimal-both", window_grid_runs_the_process_without_negative_windows_and_minimal_both),

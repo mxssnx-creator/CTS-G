@@ -101,7 +101,7 @@ def naive_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
 
     def win_ok(lane_t, lane_net, entry, w):
         idx = _closed(lane_t, entry, P.lookback_s, w)
-        return len(idx) >= (w if full else 1) and round(_pf([lane_net[j] for j in idx]), 12) + 1e-9 >= P.floor, idx
+        return len(idx) >= (w if full else 1) and round(_pf([lane_net[j] for j in idx]), 4) + 1e-9 >= P.floor_for(w), idx
 
     main = []
     for k in range(n):
@@ -109,7 +109,7 @@ def naive_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
         idx = _closed(ts, entry, P.lookback_s, P.base_long)
         if len(idx) < P.gate_min:
             continue
-        if round(_pf([nets[j] for j in idx]), 4) + 1e-9 < P.floor:
+        if round(_pf([nets[j] for j in idx]), 4) + 1e-9 < P.floor_for(P.base_long):
             continue
         if P.consistency > 0:
             h = len(idx) // 2
@@ -119,7 +119,7 @@ def naive_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
             continue
         if P.base_short:
             sw = idx[-P.base_short:]
-            if len(sw) < (P.base_short if full else 1) or _pf([nets[j] for j in sw]) + 1e-9 < P.floor:
+            if len(sw) < (P.base_short if full else 1) or round(_pf([nets[j] for j in sw]), 4) + 1e-9 < P.floor_for(P.base_short):
                 continue
         if P.base_min_n:
             mw = [nets[j] for j in idx[-P.base_min_n:]]
@@ -481,7 +481,8 @@ def main() -> int:
         book, rows, hours = build_rows(a, names, bars, times, hi - span, hi)
         cf = cost_as_frac(book.cost_pct)
         if w == 0:
-            res["meta"] = {"symbols": names, "lookback_bars": a.lookback, "created": int(time.time()), "sets": len(book.by_idx), "cost_pct": book.cost_pct,
+            res["meta"] = {"symbols": names, "lookback_bars": a.lookback, "test_hours": a.hours, "created": int(time.time()), "sets": len(book.by_idx), "cost_pct": book.cost_pct,
+                           "hold_enabled": book.hold_on, "hold_auto": book.hold_auto,
                            "config": {"setGateWindow": book.gate_window, "setGateShortN": book.base_short, "setGateMinN": book.base_min_n, "mainGateN": book.main_n,
                                       "mainShortWindows": list(book.short_windows), "mainMinN": book.main_min_n, "realGateN": book.realst_n, "minPf": book.min_pf,
                                       "stageFullWindow": book.stage_full}}
@@ -534,8 +535,8 @@ def render(r: Dict[str, Any], shuffles: int = 2) -> str:
     m, T, W = r["meta"], r["totals"], r["windows"]
     c = m["config"]
     o: List[str] = []
-    o.append(f"Main-stage audit · {len(m['symbols'])} symbols · {len(W)} test window(s) of 24 h, {time.strftime('%d %b %H:%M', time.gmtime(W[-1]['test_start']))} - "
-             f"{time.strftime('%d %b %H:%M', time.gmtime(W[0]['test_end']))} UTC · pre-history 24 h · {m['sets']} Sets · PositionCost {m['cost_pct']} %")
+    o.append(f"Main-stage audit · {len(m['symbols'])} symbols · {len(W)} test window(s) of {m.get('test_hours', 24)} h, {time.strftime('%d %b %H:%M', time.gmtime(W[-1]['test_start']))} - "
+             f"{time.strftime('%d %b %H:%M', time.gmtime(W[0]['test_end']))} UTC · pre-history {m['lookback_bars'] / 60:g} h · {m['sets']} Sets · PositionCost {m['cost_pct']} %")
     o.append(f"config: Base long {c['setGateWindow']} / short {c['setGateShortN']} / minimal {c['setGateMinN']}, Main long {c['mainGateN']} / short {c['mainShortWindows']} / minimal {c['mainMinN']}, "
              f"Real {c['realGateN']}, min PF {c['minPf']}, full windows {c['stageFullWindow']}. Every PF below is gains over losses of the POOLED orders (never a mean of PFs).")
     A = r["accounting"]
@@ -624,7 +625,7 @@ def render(r: Dict[str, Any], shuffles: int = 2) -> str:
         o.append(f"   Main {I.get('main')}; Main Sets of the Base-passing Sets {I.get('processed')}; Real {I.get('real')}; Real Negative {I.get('realneg')}; Sets per stage {I.get('stageSets')}")
         if I.get("closed"):
             o.append(f"   closed orders: {I['closed']}")
-    return "\n".join(o)
+    return "\n".join(line.rstrip() for line in "\n".join(o).splitlines())
 
 
 if __name__ == "__main__":

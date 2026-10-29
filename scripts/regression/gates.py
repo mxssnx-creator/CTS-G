@@ -144,13 +144,14 @@ def stage_short_window_judges_the_orders_it_has():
 
 def stage_windows_accept_one_and_two():
     """The ongoing (Real) window may be one result and the Negative windows the last one or two results (owner 2026-10-29): realGateN 1 is read as 1
-    (not raised to 3), mainNegWindows "1,2" and [2, 1] as (1, 2), a value under 1 as 1; the Main static window keeps its floor of 8."""
+    (not raised to 3), mainNegWindows "1,2" and [2, 1] as (1, 2), a value under 1 as 1; Main long starts at 10."""
     def load(**ov):
         b = SetBook()
         b.load(overlay(**ov))
         return b
     a, b2, c = load(realGateN=1, mainNegWindows="1,2"), load(realGateN=0, mainNegWindows=[2, 1, 2]), load(mainGateN=1)
-    ok = a.realst_n == 1 and a.neg_windows == (1, 2) and b2.realst_n == 1 and b2.neg_windows == (1, 2) and c.main_n == 8
+    independent = load(setGateWindow=10, mainGateN=200)
+    ok = a.realst_n == 1 and a.neg_windows == (1, 2) and b2.realst_n == 1 and b2.neg_windows == (1, 2) and c.main_n == 10 and independent.main_n == 200
     return ok, f"Real 1 -> {a.realst_n}, Negative '1,2' -> {a.neg_windows}; Real 0 -> {b2.realst_n}, [2,1,2] -> {b2.neg_windows}; Main static 1 -> {c.main_n}"
 
 
@@ -186,7 +187,7 @@ def main_short_windows_are_at_most_half_of_the_long_window():
            "25 ratio .3": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=0.3), "shipped": shorts(),
            "legacy keys": shorts(mainGateN=25, mainShortWindows=None, mainShortMaxRatio=None, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
            "new key wins": shorts(mainGateN=25, mainShortWindows=[5, 10], mainAutoWindows=[5]) }
-    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (4,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
+    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (5,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
             "legacy keys": (5,), "new key wins": (5, 10)}
     bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
     bare.load({"mainGateN": 25, "mainShortWindows": [5, 10, 15]})
@@ -377,7 +378,64 @@ def every_window_asks_the_minimum_pf_of_its_size():
     return ok, f"floors {got}; off {off.floor_for(5, 'x')}; micro 0.9 -> {low.floor_for(3, 'x')}; Real 15 at 1.15 {v['real']}, at 1.10 {v_low['real']}; long 1.4 '{long_14}', 1.5 '{long_15}'"
 
 
+def minimal_coordination_is_not_pf_validation():
+    """Both stages and all sign modes coordinate entry without removing PF-valid Sets from statistics."""
+    from common import SMALL
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "stagesEnabled": True, "setGateWindow": 10, "setGateShortN": 5,
+                      "mainGateN": 10, "mainShortWindows": [5], "mainNegEnabled": False,
+                      "realGateEnabled": False, "setMinPf": 1.1}))
+    st = _set(b)
+    b.by_idx = [st]
+    b.sets = {st.id: st}
+    modes = ("positive", "negative", "both", "avgpositive", "avgnegative", "avgboth")
+    cases = 0
+    errors = []
+    cf = b.cost_pct / 100.0
+
+    def expected(mode, xs):
+        if mode.startswith("avg"):
+            sign = sum(xs)
+            return sign > 1e-12 if mode == "avgpositive" else sign < -1e-12 if mode == "avgnegative" else abs(sign) > 1e-12
+        pos, neg = all(x > 0 for x in xs), all(x < 0 for x in xs)
+        return pos if mode == "positive" else neg if mode == "negative" else pos or neg
+
+    for n in (1, 2, 3):
+        samples = ([0.002] * n, [-0.002] * n, [0.0] * n, ([0.003, -0.002] * n)[:n])
+        for mode in modes:
+            for tail in samples:
+                vals = [0.02] * 7 + list(tail)
+                st.hist = [{"t": O + 60 * i, "symbol": "X", "side": "LONG", "hold_s": 30,
+                            "pnl": x, "pnl_pct": x + cf} for i, x in enumerate(vals)]
+                st.live = []
+                st.proc_replayed = True
+                st.proc = [(O + 60 * i, x) for i, x in enumerate(vals)]
+                st.main_short_win = 5
+                for stage in ("base", "main"):
+                    b.base_min_n = n if stage == "base" else 0
+                    b.main_min_n = n if stage == "main" else 0
+                    for prefix in ("base", "main"):
+                        setattr(b, prefix + "_min_positive", not mode.endswith("negative"))
+                        setattr(b, prefix + "_min_both", mode.endswith("both"))
+                        setattr(b, prefix + "_min_avg", mode.startswith("avg"))
+                    b._score_one(st, now=O + 60 * len(vals))
+                    want = expected(mode, tail)
+                    pb, counts = b.snapshot()["pfBase"], b.counts()
+                    win = pb["windows"]["baseMinimal" if stage == "base" else "mainMinimal"]
+                    actual = (b.validation_reason(st), b.gate_reason(st), b.state_of(st)[0], pb["valid"], pb["eligible"], counts["pfValid"], win["pf"], win["meanPf"])
+                    goal = ("", "" if want else ("minimal" if stage == "base" else "mainminimal"), "valid" if want else "waiting", 1, int(want), 1, None, None)
+                    if actual != goal or not (st.base_long_ok and st.base_short_ok and b._main_pf_pass(st)):
+                        errors.append((n, mode, tail, stage, actual, goal))
+                    cases += 1
+    # A true PF failure must not be masked by an unrelated coordination wait.
+    b.base_min_n, b.main_min_n, st.base_min_ok, st.gate_pf = 1, 0, False, 0.5
+    if b.state_of(st) != ("invalid", "pf<min") or b.validation_reason(st) != "pf<min":
+        errors.append(("masked PF failure", b.state_of(st), b.validation_reason(st)))
+    return not errors, f"{cases} Base/Main coordination cases (N 1–3, six modes, positive, negative, mixed and zero); mismatches {errors[:3] or 0}"
+
+
 CHECKS = [
+    ("gates.minimal-coordination-is-not-pf-validation", minimal_coordination_is_not_pf_validation),
     ("gates.every-window-asks-the-minimum-pf-of-its-size", every_window_asks_the_minimum_pf_of_its_size),
     ("gates.base-minimal-window-positive-and-negative", base_minimal_window_positive_and_negative),
     ("gates.main-short-windows-are-at-most-half-of-the-long-window", main_short_windows_are_at_most_half_of_the_long_window),

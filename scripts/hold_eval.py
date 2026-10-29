@@ -33,7 +33,7 @@ def pool_step(book, tapes, hour, step):
     for st in book.by_idx:
         if st.kind != "base" or st.step != step:
             continue
-        ok, key, n, pf = sg.gate_metrics(book, tapes, st, hour)
+        ok = sg.validation_lane(book, tapes, st, hour)
         tx, te, pp = tapes.window(st.idx, hour, lb, max(book.gate_window, book.deact_n))
         w = pp[-book.gate_window:]
         gp = sum(x - cf for x in w if x - cf > 0)

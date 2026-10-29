@@ -359,7 +359,7 @@ def render(data: Dict[str, Any]) -> str:
                     best_rows.append(f"<tr><td>{esc(nn)}</td><td>{esc(mn)}</td><td>{esc(km)}</td><td>{b['long']}</td><td>{b['short_eff']}</td><td>{b['real_eff']}</td><td><b>{b['exec_pf']}</b></td><td>{b['exec_orders']}</td>"
                                      f"<td>{b['eff_pf']} ({b.get('eff_orders', '–')})</td><td>{b['valid_pct']}</td><td>{b['half1']['pf']} / {b['half2']['pf']}</td><td>{fmt(val(b, 'neg_pf'), '{:.2f}')} on {val(b, 'neg_orders') or 0:.0f}</td></tr>")
     best_table = ("<h2>Best cell per Negative windows × minimal windows</h2><p class=\"sub\">The cell with the highest executed PF (at least " + str(floor) + " orders) for each combination: "
-                  "a minimal window decides which of the newest 1-3 results must be positive or negative before a Set is valid (Base: the Set's own results; Main: its Main Set's).</p>"
+                  "minimal windows coordinate entry using the newest 1-3 results; PF validation uses the long and short windows.</p>"
                   "<div class=\"wrap\"><table class=\"t\"><thead><tr><th>Negative windows</th><th>Base minimal</th><th>Main minimal</th><th>Long</th><th>Short</th><th>Real</th><th>Exec PF</th><th>Orders</th><th>Eff PF (orders)</th><th>Valid %</th>"
                   "<th>PF 1st / 2nd 12 h</th><th>Negative lane</th></tr></thead><tbody>" + "".join(best_rows) + "</tbody></table></div>") if best_rows and (len(minimals) > 1 or len(kmins) > 1) else ""
     marg = ""

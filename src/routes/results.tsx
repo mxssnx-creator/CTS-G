@@ -12,6 +12,7 @@ import { CoveragePanel } from "@/components/coverage-overview";
 import { BaseValidationPanel } from "@/components/base-validation-panel";
 import { SetsOverview } from "@/components/sets-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
+import { formatPf } from "@/lib/sets-view";
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
 
@@ -232,7 +233,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
         gate {gate?.allow ? "open" : "paused"} · intern {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
-        {sets?.pfBase ? ` · effective PF after Base ${sets.pfBase.base.pf.toFixed(2)} (${sets.pfBase.base.sets} valid) · before Base ${sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)` : ""}
+        {sets?.pfBase ? ` · effective PF after Base ${formatPf(sets.pfBase.base.n ? sets.pfBase.base.pf : null)} (${sets.pfBase.base.sets} PF-validated) · before Base ${formatPf(sets.pfBase.unfiltered.n ? sets.pfBase.unfiltered.pf : null)}` : ""}
       </p>
       {gate?.reasons?.length ? (
         <p className="mb-3 font-mono text-xs text-danger">{gate.reasons.join(" · ")}</p>

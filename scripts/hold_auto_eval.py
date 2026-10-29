@@ -9,12 +9,14 @@ usage: hold_auto_eval.py --data DIR [--cache DIR] [--out FILE] [--sealed]"""
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import pickle
 import statistics
 import sys
 import time
+from collections import OrderedDict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -30,7 +32,8 @@ class AutoTapes:
     def __init__(self, book, by_hold, mode, cap=se.HOLD_AUTO_MAX_ORDERS, floor=se.HOLD_AUTO_MIN_ORDERS):
         self.book, self.by_hold, self.mode, self.cap, self.floor = book, by_hold, mode, cap, floor
         self.cf = by_hold[0].cf
-        self.memo = {}
+        self.memo = OrderedDict()
+        self.memo_limit = max(128, min(100_000, 4 * len(book.by_idx)))
         self.chosen = {}
 
     def pf(self, pp):
@@ -41,6 +44,8 @@ class AutoTapes:
     def choose(self, idx, now, lb):
         key = (idx, now)
         if key in self.memo:
+            self.memo.move_to_end(key)
+            self.book.by_idx[idx].hold_bars = self.memo[key]
             return self.memo[key]
         st = self.book.by_idx[idx]
         best = 0
@@ -53,6 +58,8 @@ class AutoTapes:
                 if n >= self.floor and pf > top and pf >= ref * se.HOLD_AUTO_MARGIN:
                     top, best = pf, h
         self.memo[key] = best
+        while len(self.memo) > self.memo_limit:
+            self.memo.popitem(last=False)
         st.hold_bars = best
         self.chosen[best] = self.chosen.get(best, 0) + 1
         return best
@@ -60,13 +67,33 @@ class AutoTapes:
     def window(self, idx, now, lookback_s, n):
         return self.by_hold[self.choose(idx, now, lookback_s)].window(idx, now, lookback_s, n)
 
+    def tape_source(self, idx, now, lookback_s):
+        return self.by_hold[self.choose(idx, now, lookback_s)]
+
+    def next_change_time(self, idx, now, lookback_s):
+        """A different hold's next close or expiry can change the selected tape."""
+        if self.mode != "auto":
+            return float("inf")
+        st = self.book.by_idx[idx]
+        holds = se.HOLD_AUTO_LOW if self.book.step_of(st) <= 5 else se.HOLD_AUTO_HIGH
+        until = float("inf")
+        for hold in (0,) + holds:
+            tx = self.by_hold[hold].by_set[idx][0]
+            end = bisect.bisect_left(tx, now)
+            lo = bisect.bisect_left(tx, now - lookback_s)
+            if end < len(tx):
+                until = min(until, float(tx[end]))
+            if lo < end:
+                until = min(until, float(tx[max(lo, end - self.cap)]) + lookback_s)
+        return until
+
 
 def pool(book, tapes, hour):
     cf, lb = tapes.cf, book.lookback * 60.0
     tot = val = n_v = 0
     gp_a = gl_a = gp_v = gl_v = 0.0
     for st in book.by_idx:
-        ok, key, n, pf = sg.gate_metrics(book, tapes, st, hour)
+        ok = sg.validation_lane(book, tapes, st, hour)
         tx, te, pp = tapes.window(st.idx, hour, lb, max(book.gate_window, book.deact_n))
         w = pp[-book.gate_window:]
         gp = sum(x - cf for x in w if x - cf > 0)

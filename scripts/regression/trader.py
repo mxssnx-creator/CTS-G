@@ -665,12 +665,15 @@ def a_manager_close_is_not_counted_again_by_the_fill_sync():
         p.sets.on_live_close = lambda rec: counted.append(rec)
         fills = [{"clientOrderID": close_cids[0], "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "101", "profit": "1.0"},
                  {"clientOrderID": p.cid("s", pos=pos), "orderId": "9001", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"},
-                 {"clientOrderID": p.cid("s", pos=pos), "orderId": "7777", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"}]
+                 {"clientOrderID": p.cid("s", pos=pos), "orderId": "7777", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "99", "profit": "-1.0"},
+                 {"clientOrderID": p.cid("t", pos=pos), "orderId": "7778", "status": "FILLED", "symbol": sym, "executedQty": "1", "avgPrice": "101"}]
         p.api.get = lambda path, extra=None: {"code": 0, "data": {"orders": fills}}
+        before = p.__dict__.get("exec_n", {}).get("skipped", 0)
         p.sync_own_fills()
-        return sent_all_seen, len(counted)
-    seen, n = _isolated(run)
-    return seen and n == 1, f"close cids seen={seen} fills counted={n} (only the unknown stop fill counts)"
+        p.sync_own_fills()
+        return sent_all_seen, len(counted), p.__dict__.get("exec_n", {}).get("skipped", 0) - before
+    seen, n, skipped = _isolated(run)
+    return seen and n == 0 and skipped == 2, f"close cids seen={seen}; scored orphan fills={n}; skipped once each={skipped} (including a fill without profit)"
 
 
 def a_set_fill_keeps_the_sets_own_sl_and_tp():

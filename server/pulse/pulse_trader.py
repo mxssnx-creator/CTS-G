@@ -3589,12 +3589,13 @@ class Pulse:
             e = executed.get(k, [0, 0, 0.0, 0.0])
             scopes[k] = {**(judged.get(k) or {}), "executed": {"orders": int(e[0]), "wins": int(e[1]),
                                                                  "pf": round(e[2] / e[3], 3) if e[3] > 0 else (99.0 if e[2] > 0 else None)}}
+        stage_counts = self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}
         return {
             "overall": {"scopes": scopes, "blocked": int(n.get("scopeBlocked", 0))},
             "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0),
-                     "baseValid": counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in STAGE_REASONS),
-                     "invalid": counts.get("invalid", 0), "reasons": dict(reasons),
-                     "stages": self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}},
+                     "baseValid": stage_counts.get("base", counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in STAGE_REASONS)),
+                     "waiting": counts.get("waiting", 0), "pfValid": counts.get("pfValid", counts.get("valid", 0)),
+                     "invalid": counts.get("invalid", 0), "reasons": dict(reasons), "stages": stage_counts},
             "lanes": {"openPos": open_lane["pos"], "openNeg": open_lane["neg"],
                       "closedPos": int(n.get("lanePos", 0)), "closedNeg": int(n.get("laneNeg", 0)),
                       "winsPos": int(n.get("lanePosWin", 0)), "lossesPos": int(n.get("lanePosLoss", 0)),
@@ -4973,13 +4974,12 @@ class Pulse:
             try:
                 qty = float(o.get("executedQty") or o.get("origQty") or o.get("quantity") or 0)
                 px = float(o.get("avgPrice") or o.get("price") or 0)
-                pnl = float(o.get("profit") or o.get("realizedPnl") or o.get("pnl") or 0)
             except Exception:
                 continue
-            if qty <= 0 or px <= 0:
+            if not math.isfinite(qty) or not math.isfinite(px) or qty <= 0 or px <= 0:
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
-            held = next((p for p in self.open.values() if oid and kind in ("s", "t")
+            held = next((p for p in self.open.values() if oid and kind in ("s", "t") and str(o.get("symbol") or "") == p.symbol
                          and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
             if held is not None:
                 # the venue closed a position we still hold: record it as that lane's close (once; close_pos marks the
@@ -4989,31 +4989,10 @@ class Pulse:
                 self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
                 n += 1
                 continue
-            pnl_pct = pnl / (qty * px) if qty * px else 0.0
-            rec = {
-                "t": time.time(),
-                "symbol": str(o.get("symbol") or ""),
-                "side": str(o.get("positionSide") or ""),
-                "qty": qty,
-                "entry": px,
-                "exit": px,
-                "pnl": pnl,
-                "pnl_pct": pnl_pct,
-                "reason": f"exch:{kind}",
-                "hold_s": 0.0,
-                "set_id": track.get("set_id") or "",
-                "pack": track.get("pack") or "",
-                "client_id": cid,
-                "ours": True,
-                "conn": CONN_SHORT,
-                "sl_ratio": track.get("sl") or 0.6,
-                "trail_key": track.get("trail") or "",
-            }
+            # An orphan fill has no verified entry price or fee basis. Scoring an exchange-reported
+            # profit divided by the exit notional (or a missing profit as zero) invents a Set return.
             self.seen_fill_cids.add(cid)
-            try:
-                self.sets.on_live_close(rec)
-            except Exception:
-                pass
+            self._exec_inc("skipped")
             n += 1
         if n:
             log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)

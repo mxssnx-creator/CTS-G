@@ -1,0 +1,58 @@
+Main-stage audit · 2 symbols · 1 test window(s) of 6 h, 14 Oct 18:00 - 15 Oct 00:00 UTC · pre-history 6 h · 122 Sets · PositionCost 0.12 %
+config: Base long 50 / short 25 / minimal 1, Main long 25 / short [5, 10] / minimal 1, Real 15, min PF 1.25, full windows False. Every PF below is gains over losses of the POOLED orders (never a mean of PFs).
+
+A. ACCOUNTING AND INDEPENDENCE (first window)
+  chains recomputed by a plain reading of the rules: 20 Sets, 215 orders - differing: 0 []
+  Real and Real Negative inside Main (every Set): violations 0; Sets with a Main Set 8, with a Real Set 0
+  costs and ranges: 553 stop exits equal -SL distance (max deviation 1.7e-16), 110 target exits equal +TP distance (max deviation 1.4e-16); net = gross - 0.0012 once per order
+
+B. ZERO-EDGE BENCHMARK (base Sets, unfiltered tape: observed PF against the PF of a random entry with the same stop and target and one cost per order)
+  step range   observed PF  zero-edge PF    orders
+  2-6                0.665         0.509       116
+  7-12              99.000         0.794        53
+  13-20             99.000         0.885        45
+  21-30             99.000         0.924        68
+  mean gross result per order (cost 0.12 %): base +0.1560 %, exit +0.1477 %, trail +0.2670 %
+
+C / D. THE STAGE LADDER: selection PF (the window that picked each order) against the PF its results delivered; placebo = the same chain on results shuffled inside each Set
+  lane                                                orders  selection PF  realised PF  placebo realised  real - placebo
+  Base tape (every order of every Set)                   579         0.645        1.602  0.576 (sel 0.60)          +1.026
+  Main Set (opened while Base passed)                      7         2.237       99.000 99.000 (sel 2.23)          +0.000
+  Real Set (opened while Base and Main passed)             0             –            –                 –
+  Real Negative Set (opened in a Main dip)                 0             –            –                 –
+  Real Set orders were also selected by the Main long window: its pooled PF at their entry None
+
+E. PERSISTENCE: every (Set, hour) by its Base window PF at the hour start (deciles) against the PF of the Set's next orders (pooled over all windows)
+  decile  window PF mean  next hour PF   orders   next 25 PF   orders
+       1           0.272         0.431       51        0.697      169
+       2           0.382         0.316       27        0.538      164
+       3           0.481         0.474       29        0.513      109
+       4           0.580         0.697       52        0.563      159
+       5           0.742         2.784       64        0.730      137
+       6           0.934         0.897       41        1.496       90
+       7           1.193         2.147       25        6.599       75
+       8           1.593        99.000       26        3.130       75
+       9           3.331         5.880       53       13.952      131
+      10           5.000        99.000       15       99.000       51
+  rank correlation (window PF vs PF of the next 25 orders), per window: mean +0.2433, min +0.2433, max +0.2433, negative in 0 of 1 windows
+  base   lowest decile: window PF 0.27 -> next 25 PF 0.491 (101 orders); highest decile: window PF 5.00 -> next 25 PF 99.000 (16 orders)
+  exit   lowest decile: window PF 0.27 -> next 25 PF 1.045 (61 orders); highest decile: window PF 5.00 -> next 25 PF 99.000 (16 orders)
+  trail  lowest decile: window PF 0.49 -> next 25 PF 99.000 (6 orders); highest decile: window PF 5.00 -> next 25 PF 99.000 (10 orders)
+
+F. LAG: realised PF by the number of the Set's own positions still open when the order was opened
+  base  [0: PF 0.903 on 67]  [1-2: PF 1.689 on 512]
+  main  [1-2: PF 99.000 on 7]
+
+G. EXIT REASONS by lane (share of the lane's orders, PF, average hold in minutes)
+  base    [scratch+ 83.1% PF – 56.2m]  [sl 13.1% PF 0.008 26.0m]  [tp 3.8% PF – 9.6m]
+  main
+  real
+  realneg
+
+H. BY CATEGORY AND TYPE: pooled PF / orders on the Base tape, Main Set, Real Set, Real Negative Set; and in how many of the windows the lane held above 1
+  general     base      1.878/111        99.000/4               –/0               –/0
+  general     exit      1.535/108        99.000/3               –/0               –/0
+  general     trail    99.000/12              –/0               –/0               –/0
+  indications base      1.433/171             –/0               –/0               –/0
+  indications exit      1.377/168             –/0               –/0               –/0
+  indications trail    99.000/9               –/0               –/0               –/0

@@ -170,6 +170,106 @@ def live_close_counted_once_and_gate_updates():
     return ok, f"added={added} skipped={b.live_skipped} live_unit_net={st.live[-1]['pnl']:.6f}"
 
 
+def live_windows_preserve_owner_and_lane_history():
+    """A live result belongs only to its actual Set and 200 newest results remain available on each lane."""
+    b = _book(n_syms=1, bars=300, setGateWindow=200, mainGateN=200, realGateN=200, **SMALL)
+    owner = next(x for x in b.by_idx if x.kind == "base")
+    foreign = next(x for x in b.by_idx if x.kind == "trail")
+    common = {"set_id": owner.id, "trail_set_id": foreign.id, "symbol": "X", "side": "LONG", "hold_s": 60, "reason": "tp"}
+    for i in range(205):
+        for lane in ("pos", "neg"):
+            b.on_live_close({**common, "t": T0 + i * 60 + (lane == "neg"), "client_id": f"{lane}-{i}",
+                             "pnl_pct": 0.004 if lane == "pos" else -0.002, "lane": lane})
+    b.on_live_close({**common, "t": T0 - 60, "client_id": "late-old", "pnl_pct": 0.2, "lane": "pos"})
+    for i, bad in enumerate((None, "bad", float("nan"), float("inf"), float("-inf"))):
+        b.on_live_close({**common, "t": T0 + 20000 + i, "client_id": f"bad-{i}", "pnl_pct": bad})
+    b.on_live_close({"trail_set_id": foreign.id, "t": T0, "pnl_pct": 0.002})
+    main, pos, neg, _ = b._streams(owner)
+    pos_rows = [r for r in owner.live if r["lane"] == "pos"]
+    neg_rows = [r for r in owner.live if r["lane"] == "neg"]
+    index = next(r for r in b.snapshot()["index"] if r["id"] == owner.id)
+    ok = (len(owner.live) == 400 and len(pos_rows) == len(neg_rows) == 200 and not foreign.live
+          and pos_rows[0]["t"] == T0 + 5 * 60 and neg_rows[0]["t"] == T0 + 5 * 60 + 1
+          and len(main[-200:]) == len(pos[-200:]) == len(neg[-200:]) == 200
+          and all(abs(x - (0.004 - COST / 100)) < 1e-12 for x in pos[-200:])
+          and all(abs(x - (-0.002 - COST / 100)) < 1e-12 for x in neg[-200:])
+          and owner.live_n == 411 and owner.live_pos_n == 206 and owner.live_neg_n == 205
+          and index["mainN"] == owner.proc_total + 411 and index["realN"] == owner.exe_total + 206 and index["realNegN"] == owner.neg_total + 205
+          and b.live_skipped == 5 and b.live_unmatched == 1)
+    return ok, f"retained {len(pos_rows)} positive / {len(neg_rows)} negative; foreign={len(foreign.live)}; skipped={b.live_skipped}; unmatched={b.live_unmatched}"
+
+
+def hold_adapter_uses_the_selected_sets_tape():
+    """Walk-forward hold adapters support the same Set-specific lookups as direct tapes, including cache hits."""
+    import os, sys
+    from array import array
+    from common import ROOT
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import stage_eval as sg
+    import hold_auto_eval as ha
+    import set_engine as se
+    b = _book(n_syms=1, bars=300, stagesEnabled=False, mainGateEnabled=False, **SMALL)
+    st = next(x for x in b.by_idx if x.kind == "base" and b.step_of(x) <= 5)
+
+    def tape(nets):
+        x = sg.Tapes.__new__(sg.Tapes)
+        x.cf = COST / 100.0
+        ts = [T0 + i * 60 for i in range(len(nets))]
+        x.by_set = {st.idx: (array("d", ts), array("d", [t - 30 for t in ts]), array("d", [v + x.cf for v in nets]))}
+        return x
+    reference = tape([0.002, -0.002] * 6)
+    better = tape([0.004] * 12)
+    by_hold = {0: reference, **{h: (better if h == 15 else reference) for h in se.HOLD_AUTO_LOW}}
+    upcoming = tape([0.002, -0.002] * 6)
+    upcoming.by_set[st.idx][0][-1] = T0 + 14 * 60
+    by_hold[30] = upcoming
+    auto = ha.AutoTapes(b, by_hold, "auto", floor=1)
+    now = T0 + 13 * 60
+    direct = sg.gate_metrics(b, better, st, now)
+    via = sg.gate_metrics(b, auto, st, now)
+    st.hold_bars = 0
+    via_cached = sg.gate_metrics(b, auto, st, now)
+    lane = sg.validation_lane(b, auto, st, now)
+    chain = sg.chain_at(b, auto, st, now)
+    until = sg.gate_until(b, auto, st, now)
+    ok = (auto.choose(st.idx, now, b.lookback * 60) == 15 and st.hold_bars == 15 and via == direct == via_cached
+          and bool(lane) == bool(direct[0]) and isinstance(chain[0], dict) and until == now + 60)
+    return ok, f"selected hold {st.hold_bars}; direct and adapter gates equal={via == direct == via_cached}; validation lane={lane!r}"
+
+
+def simulator_validates_at_entry_and_refreshes_at_the_boundary():
+    """The completed candle's entry time drives gate checks, including an exact cache-expiry boundary."""
+    import os, sys, types
+    from common import ROOT
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import stage_eval as sg
+    import set_engine as se
+    b = _book(n_syms=1, bars=300, stagesEnabled=False, mainGateEnabled=False, **SMALL)
+    st = next(x for x in b.by_idx if x.kind == "base")
+    b.by_idx, b.packs = [st], [st.pack]
+    hour = float((int(T0) // 3600) * 3600)
+    bars = [[100.0, 101.0, 99.0, 100.0, 1.0] for _ in range(60)]
+    times = [int(hour) + i * 60 for i in range(60)]
+    dirs = [1 if i in (0, 2) else 0 for i in range(60)]
+    conf = [0.9] * 60
+    shadow = {"S": (0, {st.pack: dirs}, {st.pack: conf}, {})}
+    calls = []
+    gate, until, scan = sg.gate_metrics, sg.gate_until, se.SetLane.scan
+    try:
+        sg.gate_metrics = lambda _b, _t, _s, t: (calls.append(t) or True, (True, 1, 1, 0, 0), 1, 2.0)
+        sg.gate_until = lambda _b, _t, _s, t: hour + 180.0
+        def fake_scan(_self, i, *_args, **_kwargs):
+            return [{"entry_i": i, "exit_i": i + 1, "entry_px": 100.0, "exit_px": 100.3,
+                     "dir": 1, "pnl_pct": 0.003, "reason": "tp"}]
+        se.SetLane.scan = fake_scan
+        rows = sg.execute(b, ["S"], {"S": bars}, {"S": times}, shadow, types.SimpleNamespace(cf=COST / 100), [hour], refresh_s=0)
+    finally:
+        sg.gate_metrics, sg.gate_until, se.SetLane.scan = gate, until, scan
+    entries = [r["t_in"] for r in rows if "t_in" in r]
+    want = [hour + 60.0, hour + 180.0]
+    return entries == want and calls == want, f"entry times {entries}; gate times {calls}; expected {want}"
+
+
 def concurrent_replay_and_live_closes():
     b = _book(n_syms=3, bars=900, **SMALL)
     b.replay_all(now=T0)
@@ -273,7 +373,7 @@ def live_dedupe_and_history_rows_stay_bounded():
     try:
         se.LIVE_SEEN_MAX = 50
         st = b.by_idx[0]
-        base = st.n                              # counts accepted closes; st.live itself is trimmed to 80
+        base = st.n                              # accepted close count, independent of bounded live history
         for k in range(200):
             b.on_live_close({"set_id": st.id, "t": T0 + 9000 + k, "symbol": "M-USDT", "side": "LONG",
                              "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": f"bound-{k}"})
@@ -465,12 +565,12 @@ def stage_figures_average_the_valid_sets_and_report_the_validated_share():
     snap = b.snapshot()["pfBase"]
     stg = snap["stages"]
     from set_engine import STAGE_REASONS, RANK_PF_CAP, pf_of
-    reasons = {x.id: b.gate_reason(x) for x in b.by_idx}
-    base_only = [x for x in b.by_idx if reasons[x.id] in ("",) + STAGE_REASONS]
-    main_pass = [x for x in base_only if b._main_pass(x)]
+    reasons = {x.id: b.validation_reason(x) for x in b.by_idx}
+    base_only = [x for x in b.by_idx if not b.base_validation_reason(x)]
+    main_pass = [x for x in base_only if b._main_pf_pass(x)]
     valid = [x for x in b.by_idx if not reasons[x.id]]
-    pos = [x for x in valid if b.lane_of(x) == "pos"]
-    neg = [x for x in valid if b.lane_of(x) == "neg"]
+    pos = [x for x in valid if b.validation_lane(x) == "pos"]
+    neg = [x for x in valid if b.validation_lane(x) == "neg"]
     total = len(b.by_idx)
 
     def want(sts, gp, gl):
@@ -976,17 +1076,17 @@ def real_gate_is_per_set_at_the_base_minimum_pf():
         return s20.gate_n, s20.main_n, b20.gate_reason(s20)
     out["20 orders, Real N 30"] = short_tape(True)                       # the strict rule: the window must hold its 30 orders
     out["20 orders, Real N 30, available"] = short_tape(False)           # the default: judged on the 20 it has
-    floor3 = _book(n_syms=1, bars=300, mainGateN=3)                        # an N under the floor is read as 8
+    floor3 = _book(n_syms=1, bars=300, mainGateN=3)                        # an N under the floor is read as 10
     out["Real N 3"] = floor3.main_n
     b2, st2, _ = judged(True, bad)
     pool_off = [x.id for x in judged(False, bad)[0].valid_for(st2.pack, "base")]
     pool_on = [x.id for x in b2.valid_for(st2.pack, "base")]
     snap = judged(True, good)[0].snapshot()["pfBase"]
     ok = (out["boundary 1.25"] == "" and out["just under"] == "main" and out["bad last 12"] == "main" and out["bad, Real off"] == ""
-          and out["min PF 1.5 moves Real too"] in ("pf<min", "main") and out["N=8"][0] == 8 and before == after
+          and out["min PF 1.5 moves Real too"] in ("pf<min", "main") and out["N=8"][0] == 10 and before == after
           and out["20 orders, Real N 30"][0] == 20 and out["20 orders, Real N 30"][1] < 30 and out["20 orders, Real N 30"][2] == "main"
           and out["20 orders, Real N 30, available"][2] == ""
-          and out["Real N 3"] == 8
+          and out["Real N 3"] == 10
           and st2.id in pool_off and st2.id not in pool_on and "main" in snap and "real" in snap and "baseOnly" in snap)
     return ok, f"reasons {out}; other Set left it alone={before == after}; pool off/on holds the Set={st2.id in pool_off}/{st2.id in pool_on}; pfBase keys {sorted(snap)[:6]}"
 
@@ -1027,7 +1127,7 @@ def pre_history_grows_when_too_many_sets_lack_orders():
     b, l0 = after(1)
     grown1 = b.lookback
     b2, _ = after(1, histLookbackAuto=False)
-    b3, _ = after(30, histLookbackMax=1000)
+    b3, _ = after(5, histLookbackMax=1000)  # three passes reach the cap; two further passes check it remains there
     b.load(overlay(setGateMinTrades=400, histLookbackBars=500))         # a live-config reload keeps what was grown
     kept = b.lookback
     ok = l0 == 500 and grown1 == l0 + LOOKBACK_GROW_STEP and b2.lookback == 500 and b3.lookback == 1000 and kept == grown1
@@ -1165,6 +1265,9 @@ def effective_pf_per_entry_counts_each_entry_once():
 
 
 CHECKS = [
+    ("processing.simulator-validates-at-entry-and-refreshes-at-boundary", simulator_validates_at_entry_and_refreshes_at_the_boundary),
+    ("processing.hold-adapter-uses-selected-sets-tape", hold_adapter_uses_the_selected_sets_tape),
+    ("processing.live-windows-preserve-owner-and-lane-history", live_windows_preserve_owner_and_lane_history),
     ("processing.sim-gate-equals-the-engine-for-every-window-configuration", sim_gate_equals_the_engine_for_every_window_configuration),
     ("processing.stage-figures-average-the-valid-sets-and-report-the-validated-share", stage_figures_average_the_valid_sets_and_report_the_validated_share),
     ("processing.few-order-sets-judged-when-the-minimum-is-off", sets_with_few_orders_are_judged_when_the_minimum_is_off),

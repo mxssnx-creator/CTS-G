@@ -132,7 +132,7 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
     <div className="space-y-3" data-testid="sets-overview-body">
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <Kpi k="Sets shown" v={String(sum.total)} s={`${type === "normal" ? "base" : type === "exit" ? "exit (no TP)" : "trailing"} · step ${rangeById(rangeId).label}`} />
-        <Kpi k="Validated" v={`${num(sum.validatedPct, 1)}%`} s={`${sum.valid} of ${sum.total} pass Base`} good={sum.validatedPct >= 25} />
+        <Kpi k="PF validated" v={`${num(sum.validatedPct, 1)}%`} s={`${sum.valid} of ${sum.total} · ${sum.eligible} ready`} good={sum.validatedPct >= 25} />
         <Kpi
           k="Effective PF"
           v={formatPf(sum.effectivePf)}
