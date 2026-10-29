@@ -591,33 +591,60 @@ def client_order_ids_round_trip_to_their_own_set():
 
 
 def a_signal_needs_its_own_pack_to_hold_a_valid_set():
-    """A general signal must not enter on the strength of a valid indications Set: the pack gate is per pack."""
+    """Under the Base gate an entry opens only under a Set picked for its own pack (pick_any). A pack with a valid Set that is not on a
+    lane must take no entry either: the gate answers "set-gate" rather than letting the no-Set fallback open the position."""
     import types
     p = _bare_pulse()
-    ind = types.SimpleNamespace(id="i1", step=2)
+    p.px = {"A-USDT": 1.0}
+    p.open = {}
+    ind = types.SimpleNamespace(id="i1", step=2, idx=0, pack="indications", kind="base")
 
     class _Sets:
         enabled = True
         use_historic_gate = True
+        entry_conf = 0.0
+
+        def symbol_ok(self, sym):
+            return True
 
         def pick_any(self, pack):
             return ind if pack == "indications" else None
 
-        def pack_open(self, pack):
-            return pack == "indications"
+        def pack_open(self, pack):          # both packs hold a valid Set somewhere; only indications has one on a lane
+            return True
+
+        def lane_of(self, st):
+            return "pos"
 
     p.sets = _Sets()
     p.strat_ind = True
     p.indications = types.SimpleNamespace(settings={"enabled": True}, primary=lambda s: None)
-    reasons = {}
-    for pack, why in (("general", "gen:test"), ("indications", "ind:state:tf:0.6:a2:s")):
-        try:
-            reasons[pack] = p.entry_sense("A-USDT", 1 if pack == "general" else 1, why, "LONG") if False else None
-        except Exception as e:
-            reasons[pack] = repr(e)[:40]
-    src = open(os.path.join(pt.__file__ and os.path.dirname(pt.__file__), "pulse_trader.py")).read()
-    gate_is_per_pack = "if not self.sets.pack_open(pack):" in src and "or self.sets.pack_open(\"general\") or self.sets.pack_open(\"indications\")" not in src
-    return gate_is_per_pack, f"per-pack gate in entry_sense={gate_is_per_pack}"
+    general = p.entry_sense("A-USDT", 1, "gen:test", 0.9, "general")
+    own = p.entry_sense("A-USDT", 1, "set:indications", 0.9, "indications")
+    ok = general == "set-gate" and own is None
+    return ok, f"general without its own Set: {general!r} (want 'set-gate'); indications with its Set: {own!r} (want None)"
+
+
+def a_venue_order_of_another_symbol_is_not_this_exit():
+    """The venue answers an order id under any symbol. A stop or TP fill of another symbol must never be recorded as this
+    position's exit (x02 recorded ZCAT closed at WLD's take-profit, +20 %); a fill of the position's own symbol still is."""
+    import types
+    p = _bare_pulse()
+    pos = types.SimpleNamespace(symbol="ZCAT-USDT", sl_oid="", sec_sl_oid="", tp_oid="2115874311641849856", sec_tp_oid="")
+
+    class _Api:
+        def __init__(self, sym, px):
+            self.sym, self.px = sym, px
+
+        def get(self, path, params=None):
+            return {"code": 0, "data": {"order": {"symbol": self.sym, "status": "FILLED", "avgPrice": self.px}}}
+
+    p.api = _Api("WLD-USDT", "0.3985")
+    other = pt.Pulse.venue_exit(p, pos)
+    p.api = _Api("ZCAT-USDT", "0.0422")
+    own = pt.Pulse.venue_exit(p, pos)
+    ok = other is None and own == ("tp", 0.0422)
+    return ok, f"another symbol's fill -> {other}; own symbol's fill -> {own}"
 
 
 def a_manager_close_is_not_counted_again_by_the_fill_sync():
@@ -1561,6 +1588,7 @@ CHECKS = [
     ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),
     ("trader.cids-round-trip-to-their-own-set", client_order_ids_round_trip_to_their_own_set),
     ("trader.signal-needs-its-own-pack", a_signal_needs_its_own_pack_to_hold_a_valid_set),
+    ("trader.venue-order-of-another-symbol-is-not-the-exit", a_venue_order_of_another_symbol_is_not_this_exit),
     ("trader.manager-close-not-counted-twice", a_manager_close_is_not_counted_again_by_the_fill_sync),
     ("trader.set-fill-keeps-its-sl-and-tp", a_set_fill_keeps_the_sets_own_sl_and_tp),
     ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),

@@ -2693,6 +2693,7 @@ class Pulse:
         for f in forms:                       # the manager records this close itself: the fill sync must not count it again
             self.seen_fill_cids.add(f["clientOrderID"])
         r: Dict[str, Any] = {}
+        first_msg = ""       # the quantity form's own rejection (the later forms only repeat it as "quantity is must")
         done_qty = 0.0       # closed by earlier partial fills of this close
         done_val = 0.0
         for extra in forms:
@@ -2724,12 +2725,14 @@ class Pulse:
                     px = (done_val + rest * px) / total if total > 0 else px
                 return True, px
             msg = str(r.get("msg") or "")
+            if "closePosition" not in body and msg:
+                first_msg = first_msg or msg
             if ctrl_err_kind(msg) == "qty_close":
                 continue
             if "position not exist" in msg.lower() or "no position to close" in msg.lower():
                 return True, self.px.get(pos.symbol) or pos.entry     # the venue already closed it (its stop or TP)
         self.errors += 1
-        self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
+        self.last_error = f"close {pos.symbol} {first_msg or r.get('msg')}"[:240]
         return False, self.px.get(pos.symbol) or pos.entry     # pos.qty already holds what a partial close left
 
     def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
@@ -2784,9 +2787,9 @@ class Pulse:
                 return "set-slot"
             return None
         elif self.sets.enabled and self.sets.use_historic_gate:
-            if not self.sets.pack_open(pack):
-                # Positive-PF-only: a signal binds to its own pack, and a pack with no validated Set takes no entry.
-                return "set-gate"
+            # Base gate on: an entry opens only under a Set that is valid on its lane (pick_any). A pack with a valid Set that is
+            # not on a lane (pack_open true) takes no entry either: the no-Set fallback in place() must never run under the gate.
+            return "set-gate"
         return None
 
     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
@@ -3111,6 +3114,11 @@ class Pulse:
                 data = r.get("data") if isinstance(r, dict) else None
                 o = (data.get("order") if isinstance(data, dict) and isinstance(data.get("order"), dict) else data) or {}
                 if not isinstance(o, dict):
+                    continue
+                # the venue answers an order id under any symbol: an order of another symbol is never this position's exit
+                # (x02 read WLD's take-profit fill, 0.3985, as ZCAT's exit: a fake +20 % close)
+                if str(o.get("symbol") or pos.symbol) != pos.symbol:
+                    log(f"VENUE-OID mismatch {pos.symbol} {kind} oid={oid} venue symbol={o.get('symbol')}", every=60.0, key=f"oidmis:{pos.symbol}")
                     continue
                 status = str(o.get("status") or o.get("orderStatus") or "").upper()
                 if status not in ("FILLED", "FINISHED", "FILLED_FULLY"):
