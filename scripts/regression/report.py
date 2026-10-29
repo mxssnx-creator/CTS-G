@@ -73,7 +73,72 @@ def page_embeds_valid_json_and_script():
     return ok, f"embedded trades={len(data.get('trades', []))} script syntax ok={ok_js} bytes={len(page)}"
 
 
+def _grid_fixture():
+    """A small window grid: Base long 20/30 x short 5/10 x Real 15/25 (Main static 25) and Main static 15/25 (Real 15), plus the long windows alone."""
+    cells, k = [], 0
+
+    def cell(L, S, M, R, stages=True, **flags):
+        nonlocal k
+        k += 1
+        c = {"long": L, "short": S, "main": M, "real": R, "stages": stages, "id": f"L{L}_S{S}_M{M}_R{R}" if stages else f"L{L}_base_alone",
+             "short_eff": S if stages else 0, "main_eff": M, "real_eff": R, "valid_pct": 5.0 + k, "eff_pf": 2.0 + k / 10.0,
+             "eff_orders_per_hour": 100 + k, "exec_pf": round(0.6 + k / 50.0, 3), "exec_orders": 300 + k, "net_pct": -20.0 + k, "max_dd_pct": 30.0 + k,
+             "hours_pos": "9/24", "wins": 150 + k, "neg_lane_orders": 0, "half1": {"pf": 0.7, "orders": 150, "net_pct": -5.0},
+             "half2": {"pf": 0.9, "orders": 150 + k, "net_pct": -3.0}, "secs": 1.0,
+             "hourly": [{"hour": 1_800_000_000 + 3600 * h, "orders": h, "pf": 0.5 + h / 20.0, "net_pct": -1.0 + h / 10.0, "valid_pct": 4.0 + h / 10.0} for h in range(24)]}
+        c.update(flags)
+        cells.append(c)
+        return c
+    for L in (20, 30):
+        for S in (5, 10):
+            if S >= L:
+                continue
+            for R in (15, 25):
+                cell(L, S, 25, R, real_third=True, **({"main_third": True} if R == 15 else {}))
+            cell(L, S, 15, 15, main_third=True)
+    for L in (20, 30):
+        cell(L, None, None, None, stages=False)
+    trap = next(c for c in cells if c["id"] == "L20_S5_M25_R25")      # a higher PF on twenty orders: under the floor, never "best"
+    trap.update({"exec_pf": 9.9, "exec_orders": 20})
+    meta = {"symbols": ["A-USDT", "B-USDT"], "hours": [1_800_000_000 + 3600 * h for h in range(24)], "lookback_bars": 1440, "prehistory_h": 24.0,
+            "bars_per_symbol": 3180, "created": 1_800_100_000, "order_floor": 150, "shipped": {"long": 30, "short": 10, "main": 25, "real": 15},
+            "longs": [20, 30], "shorts": [5, 10], "mains": [15, 25], "reals": [15, 25], "main_default": 25, "real_default": 15, "min_orders": 0,
+            "max_ddt_h": 24.0, "min_pf": 1.25, "cost_pct": 0.12, "sets": 1538, "self_check": [{"cell": "x", "samples": 10, "bad": 0}], "hold": "off"}
+    return {"meta": meta, "cells": cells}
+
+
+def window_grid_html_has_heatmap_and_best_cell():
+    """The window-grid report renders every staged cell once per heatmap panel (2 thirds x 7 metrics), marks exactly one best cell per panel (the
+    highest executed PF among cells with at least the order floor: a higher PF on 20 orders is not ranked), flags the shipped cell, writes n/a
+    where the short window is not under the long window, embeds the data as valid JSON and makes no external request."""
+    import window_grid_report as WG
+    data = _grid_fixture()
+    page = WG.render(data)
+    staged = [c for c in data["cells"] if c["stages"]]
+    panels = re.findall(r'<section class="panel" data-third="(\w+)" data-metric="(\w+)" hidden>(.*?)</section>', page, re.S)
+    per_panel = {(t, m): body for t, m, body in panels}
+    real_ids = {c["id"] for c in staged if c.get("real_third")}
+    ok = len(panels) == 14
+    for (t, m), body in per_panel.items():
+        ids = re.findall(r'data-cell="([^"]+)"', body)
+        want = {c["id"] for c in staged if c.get("real_third" if t == "real" else "main_third")}
+        ok = ok and set(ids) == want and len(ids) == len(want)
+    best = re.findall(r'data-cell="([^"]+)" data-best="1"', page)
+    ranked_real = sorted([c for c in staged if c.get("real_third") and c["exec_orders"] >= 150], key=lambda c: (c["exec_pf"], c["exec_orders"]), reverse=True)
+    ranked_main = sorted([c for c in staged if c.get("main_third") and c["exec_orders"] >= 150], key=lambda c: (c["exec_pf"], c["exec_orders"]), reverse=True)
+    want_best = [ranked_real[0]["id"]] * 7 + [ranked_main[0]["id"]] * 7
+    ok = ok and sorted(best) == sorted(want_best) and "L20_S5_M25_R25" not in best
+    ship_cells = set(re.findall(r'<td class="cell[^"]*\bship\b[^"]*" data-cell="([^"]+)"', page))
+    ok = ok and "†" in page and "n/a" in page and ship_cells == {"L30_S10_M25_R15"}
+    emb = re.search(r'<script type="application/json" id="data">(.*?)</script>', page, re.S)
+    emb_ok = bool(emb) and {c["id"] for c in json.loads(emb.group(1).replace("<\\/", "</"))["cells"]} == {c["id"] for c in data["cells"]}
+    external = re.findall(r'(?:src|href)=["\']https?://|url\(https?://|@import', page)
+    ok = ok and emb_ok and not external
+    return ok, f"panels={len(panels)} best per panel={sorted(set(best))} embedded={emb_ok} external={external} real cells={len(real_ids)}"
+
+
 CHECKS = [
+    ("report.window-grid-html-has-heatmap-and-best-cell", window_grid_html_has_heatmap_and_best_cell),
     ("report.hand-computed-pf", hand_computed_pf),
     ("report.summary-pools-sets-and-picks", summary_pools_sets_and_picks_separately),
     ("report.page-embeds-json-and-valid-script", page_embeds_valid_json_and_script),
