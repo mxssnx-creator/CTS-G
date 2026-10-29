@@ -22,6 +22,15 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 Row = Sequence[float]
 Signal = Optional[Tuple[int, float]]
 WINDOW = 300
+TF_BARS = 96                    # bars of a higher timeframe the library reads (the longest family, htfpb, needs 96): 480 rows for 5m, 1440 for 15m
+
+
+def rows_for(tf: int) -> int:
+    """1m rows a tf-minute series is built from: the 300-row window, or TF_BARS bars of the timeframe when that is longer."""
+    return max(WINDOW, TF_BARS * int(tf))
+
+
+HISTORY = rows_for(15)           # the most 1m rows any library name reads (its 15m series)
 RANGES = {"min": (5, 8), "med": (14, 21)}
 TFS = (1, 5, 15)
 
@@ -33,7 +42,7 @@ def _conf(base: float, extra: float, cap: float = 0.93) -> float:
 
 
 def _agg(rows: Sequence[Row], tf: int) -> List[List[float]]:
-    """Causal tf-minute bars of the newest WINDOW rows, aligned to the newest row. Memoised in one thread-local slot keyed by the rows
+    """Causal tf-minute bars of the newest rows_for(tf) rows, aligned to the newest row. Memoised in one thread-local slot keyed by the rows
     object, its length and its newest row: a list that grew (or changed its newest row) in place is aggregated again, never served
     the bars of its earlier state; every family of one evaluation shares the slot."""
     key = (len(rows), id(rows[-1]), tuple(rows[-1][:5])) if len(rows) else (0, 0, ())
@@ -44,8 +53,8 @@ def _agg(rows: Sequence[Row], tf: int) -> List[List[float]]:
     got = slot[1].get(tf)
     if got is not None:
         return got
-    if len(rows) > WINDOW:
-        rows = rows[-WINDOW:]
+    if len(rows) > rows_for(tf):
+        rows = rows[-rows_for(tf):]
     if tf == 1:
         out = [[float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])] for r in rows]
     else:
@@ -128,6 +137,12 @@ def _lo(b):
 
 def _vo(b):
     return [float(x[4]) for x in b]
+
+
+def _band_k(n: int) -> float:
+    """Band width in standard deviations a close can reach inside its own n-bar window: a sample point is at most sqrt(n - 1)
+    population deviations from the mean, so 2 sd is out of reach at n = 5 (the signal could never fire). 2 from n = 10 on."""
+    return min(2.0, 0.7 * math.sqrt(max(1, n - 1)))
 
 
 def _side(x: float) -> int:
@@ -505,10 +520,11 @@ def f_bbb(b, n):
     m3, sd3 = band(len(c) - 4)
     if sd <= 0 or sd <= sd3:               # the bands must be widening
         return None
-    if c[-1] > m + 2 * sd and c[-2] <= m1 + 2 * sd1:       # the first close outside the band
-        return 1, _conf(0.6, min(0.2, (sd / sd3 - 1) * 0.3))
-    if c[-1] < m - 2 * sd and c[-2] >= m1 - 2 * sd1:
-        return -1, _conf(0.6, min(0.2, (sd / sd3 - 1) * 0.3))
+    k = _band_k(n)
+    if c[-1] > m + k * sd and c[-2] <= m1 + k * sd1:       # the first close outside the band
+        return 1, _conf(0.6, min(0.2, (sd / sd3 - 1 if sd3 > 0 else 1.0) * 0.3))
+    if c[-1] < m - k * sd and c[-2] >= m1 - k * sd1:
+        return -1, _conf(0.6, min(0.2, (sd / sd3 - 1 if sd3 > 0 else 1.0) * 0.3))
     return None
 
 
@@ -659,10 +675,11 @@ def f_bbrev(b, n):
     sd = math.sqrt(sum((v - m) ** 2 for v in w) / n)
     if sd <= 0:
         return None
-    if c[-2] < m - 2 * sd and c[-1] > c[-2]:
-        return 1, _conf(0.6, min(0.2, (m - 2 * sd - c[-2]) / sd * 0.1))
-    if c[-2] > m + 2 * sd and c[-1] < c[-2]:
-        return -1, _conf(0.6, min(0.2, (c[-2] - m - 2 * sd) / sd * 0.1))
+    k = _band_k(n)
+    if c[-2] < m - k * sd and c[-1] > c[-2]:
+        return 1, _conf(0.6, min(0.2, (m - k * sd - c[-2]) / sd * 0.1))
+    if c[-2] > m + k * sd and c[-1] < c[-2]:
+        return -1, _conf(0.6, min(0.2, (c[-2] - m - k * sd) / sd * 0.1))
     return None
 
 
@@ -702,11 +719,12 @@ def f_vwapz(b, n):
     sd = math.sqrt(sum((v - vw) ** 2 for v in c) / n)
     if sd <= 0:
         return None
-    z = (c[-1] - vw) / sd
-    if z <= -2.0 and c[-1] > c[-2]:
-        return 1, _conf(0.6, min(0.2, (-z - 2.0) * 0.08))
-    if z >= 2.0 and c[-1] < c[-2]:
-        return -1, _conf(0.6, min(0.2, (z - 2.0) * 0.08))
+    z = (c[-2] - vw) / sd                 # the stretched close, then the turn on the newest one (a turning close is never the extreme)
+    k = _band_k(n)
+    if z <= -k and c[-1] > c[-2]:
+        return 1, _conf(0.6, min(0.2, (-z - k) * 0.08))
+    if z >= k and c[-1] < c[-2]:
+        return -1, _conf(0.6, min(0.2, (z - k) * 0.08))
     return None
 
 
@@ -835,7 +853,7 @@ def _single(fam: str, n: int, tf: int) -> Callable[[Sequence[Row]], Signal]:
     fn = FAMILIES[fam][1]
 
     def run(rows: Sequence[Row]) -> Signal:
-        return fn(_agg(rows, tf), n)       # _agg reads the newest WINDOW rows
+        return fn(_agg(rows, tf), n)       # _agg reads the newest rows_for(tf) rows
     return run
 
 

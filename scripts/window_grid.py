@@ -316,7 +316,7 @@ def main() -> int:
     neg_default = ",".join(str(w) for w in book0.neg_windows)
     meta = {"symbols": names, "hours": [int(h) for h in hours], "lookback_bars": a.lookback, "prehistory_h": a.lookback / 60.0,
             "bars_per_symbol": len(bars[names[0]]), "created": int(time.time()), "order_floor": ORDER_FLOOR,
-            "shipped": {"long": int(ov.get("setGateWindow", 50)), "short": int(ov.get("setGateShortN", 15)), "main": main_default, "real": real_default},
+            "shipped": {"long": int(ov.get("setGateWindow", 50)), "short": int(ov.get("setGateShortN", 25)), "main": main_default, "real": real_default},
             "longs": longs, "shorts": shorts, "mains": mains, "reals": reals, "main_default": main_default, "real_default": real_default,
             "short_max_ratio": ratio, "negs": [x or neg_default for x in negs], "neg_default": neg_default,
             "minimals": [{"n": n, "mode": m, "label": ("off" if not n else f"{'+' if m == 'positive' else '-'}{n}")} for n, m in minimals],

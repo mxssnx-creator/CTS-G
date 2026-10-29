@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from indication_lib import (RANGES, TFS, WINDOW, Row, Signal, _agg, _atr, _combine, _conf, _cl, _ema, _hi, _lo, _tr, _vo,
+from indication_lib import (RANGES, TFS, Row, Signal, _agg, _atr, _combine, _conf, _cl, _ema, _hi, _lo, _tr, _vo,
                             f_adx)
 
 # ---- helpers -------------------------------------------------------------------------------------------------------
@@ -424,9 +424,7 @@ def _single(fam: str, n: int, tf: int) -> Callable[[Sequence[Row]], Signal]:
     fn = AO_FAMILIES[fam][1]
 
     def run(rows: Sequence[Row]) -> Signal:
-        if len(rows) > WINDOW:
-            rows = rows[-WINDOW:]
-        return fn(_agg(rows, tf), n)
+        return fn(_agg(rows, tf), n)       # _agg reads rows_for(tf) rows (60 bars of a higher timeframe)
     return run
 
 

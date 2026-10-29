@@ -384,7 +384,9 @@ def _break_tape(sgn):
 def family_is_registered_in_every_range_and_timeframe():
     names = [f"{fam}_n{n}_t{tf}" for fam in ("trend", "brk") for n in ix.FAMILY_RANGES for tf in ix.FAMILY_TFS]
     combos = [f"{fam}_c{n}" for fam in ("trend", "brk", "tb") for n in ix.FAMILY_RANGES]
-    missing = [x for x in names + combos if x not in ix.INDICATORS or ix.window_of(x) != ix.FAMILY_WINDOW]
+    import indication_lib as lib
+    # a name reads the family window, or TF_BARS bars of its highest timeframe when that is longer
+    missing = [x for x in names + combos if x not in ix.INDICATORS or ix.window_of(x) != max(ix.FAMILY_WINDOW, lib.rows_for(ix._highest_tf(x)))]
     ok = not missing and ix.FAMILY_RANGES == (6, 10, 20, 40) and ix.FAMILY_TFS == (1, 5, 15)
     return ok, f"{len(names)} single + {len(combos)} combined; missing/other window: {missing}"
 
@@ -511,7 +513,7 @@ def lib_is_registered_for_every_family_range_and_timeframe():
         for ns in lib.RANGES.values():
             for n in ns:
                 for nm in [f"{fam}_n{n}_t{tf}" for tf in lib.TFS] + [f"{fam}_c{n}"]:
-                    if nm not in ix.INDICATORS or ix.window_of(nm) != lib.WINDOW:
+                    if nm not in ix.INDICATORS or ix.window_of(nm) != lib.rows_for(ix._highest_tf(nm)):
                         missing.append(nm)
     for g in ("trend", "break", "revert", "volume", "all"):
         for r in lib.RANGES:
@@ -603,12 +605,13 @@ CHECKS += [
 
 def ao_is_registered_and_windowed():
     import indication_ao as ao
+    from indication_lib import rows_for
     missing = []
     for fam in ao.AO_FAMILIES:
         for ns in ao.RANGES.values():
             for n in ns:
                 for nm in [f"ao_{fam}_n{n}_t{tf}" for tf in ao.TFS] + [f"ao_{fam}_c{n}"]:
-                    if nm not in ix.INDICATORS or ix.window_of(nm) != ao.WINDOW:
+                    if nm not in ix.INDICATORS or ix.window_of(nm) != rows_for(ix._highest_tf(nm)):
                         missing.append(nm)
     for r in ao.RANGES:
         if f"g_ao_{r}" not in ix.INDICATORS:

@@ -38,7 +38,9 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
   "n<min", 152 on drawdown time at 12 h); read it there, next to the executed PF.
 
 - The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
-  (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`, Short Range floor). The volume factor default is the minimum, **0.05**.
+  (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`); the Short Range strategy keeps its own earlier floor **1.1** (`shortRangeMinPf`,
+  owner 2026-10-29). No gate asks less than **1.1** whatever is configured (`position_cost.MIN_PF_FLOOR`, `pf_floor`; desk the same).
+  The volume factor default is the minimum, **0.05**.
 - Block and DCA are enabled (DCA auto plan; its Set and Axis options `dcaOnSets` / `dcaOnAxis` stay off, so under the Base
   gate, where every position is a Set position, both add-ons are idle until a position without a Set exists or an option is
   turned on).
@@ -167,12 +169,22 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 - **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
   **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
-  15, 0 = off; tested 5-25 step 5, `scripts/trade_sim.py --patch`), plus minimum orders and drawdown time. Reason `short` for the short one. A third Base window, the
+  25, 0 = off), plus minimum orders and drawdown time. Reason `short` for the short one. A third Base window, the
   **minimal** window (`setGateMinN` 0 = off, 1-3; `setGateMinMode` positive / negative; reason `minimal`): the newest N results of the Set's own tape (net after
   PositionCost) must all be positive (or all negative); judged on the results it has unless `stageFullWindow`; at most the short window; part of the chain
   (`set_engine.minimal_ok`), the simulator (`stage_eval.gate_base`) and the desk Settings (`gates.base-minimal-window-...`, `set-base-minimal-window-equals-the-rules`,
   `processing.sim-gate-equals-the-engine-for-every-window-configuration`, `base minimal:` mutants). The short window
   is at most `setGateShortMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the long window: long 40 allows at most 20, long 20 at most 10 (`gates.short-window-is-at-most-half-of-the-long-window`, `short window:` mutants).
+- **The standard window test** (owner, 2026-10-29): `scripts/base_window_grid.py` runs every Base long x short cell (long 20-50 step 10, short
+  off / 5-25 step 5) through `trade_sim.py` on 20 symbols, the last 24 h simulated after 24 h of pre-history (`histLookbackBars` 1440),
+  and writes an HTML report (heatmaps of executed PF, next 15 / next 25 orders PF, effective PF, validated share and orders; cumulative
+  net per hour per cell; the best cell hour by hour and by type). Ranking: the geometric mean of the executed PF and the next 15 / 25
+  orders PF (at least 100 executed orders). Run 2026-10-28 04:00 - 10-29 04:00 UTC (`reports/base_window_grid_24h.html`): best long 50 /
+  short 25 (executed PF 0.75 on 617 orders, next 15 orders 0.85, next 25 orders 1.09, validated 2.4 %, effective PF 2.86 in-sample);
+  every cell executed 0.58-0.82, next 25 orders 0.30-1.09 (the 20 majors of the 30-day set). The parallel grid on the live small-cap
+  universe (`scripts/window_grid.py`, `reports/window_grid_24h.html`, 10-28 01:00 - 10-29 01:00, x Main / Real 15 / 25): best long 30 /
+  short 15 / Main 15 / Real 15 executed 1.07 on 1,629 orders (halves 1.15 / 0.95); long 50 short 15 0.96, short 25 0.94. The two
+  universes rank the cells differently; one 24 h window is inside the noise.
 - **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
   (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
   windows on the Main Set, both must pass: static `mainGateN` (25, owner 2026-10-29, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
@@ -263,7 +275,14 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   5, 8 (minimal) and 14, 21 (medial) on the 1m, 5m and 15m series (`<family>_n<range>_t<minutes>`), the three timeframes
   combined (`<family>_c<range>`, at least two agree, none disagrees) and group votes (`g_<group>_<min|med>`). They are in
   `indication_extra.INDICATORS` next to the older ones, so any name works in `extraIndicators` (a vote of the
-  indications pack) or in a pack's variant list. The 15m series is limited by the 300-row window (ranges up to about 17).
+  indications pack) or in a pack's variant list. A name on a higher timeframe reads `indication_lib.TF_BARS` (96) bars of it
+  (`rows_for`: 480 one-minute rows for 5m, 1440 for 15m; combined and group votes the 15m history; `indication_extra.window_of`),
+  replay and live alike, and `pack_signals` keys its memo on `set_engine.signal_window` (every bar a pack reads). Audit on 30 days
+  (2026-10-29): 124 of 880 names could never fire on the old 300-row window, and `bbb` / `bbrev` / `vwapz` asked a 2 sd band a close
+  cannot reach in its own 5-bar window (`_band_k`); after the fix 4 rarely firing names remain (`ao_ultimate` at n21 on 5m / 15m).
+  The library's 5m / 15m memo is keyed by the rows object, its length and newest row (a list changed in place got its earlier bars).
+  Checks `indication.every-name-gets-its-timeframe-history`, `indication.signal-memo-key-covers-the-window`,
+  `indication.library-memo-never-stale`, with mutants. The live defaults (indications without `extraIndicators`, general) are unchanged.
 - Extra packs (`set_engine.EXTRA_PACKS`: trend, breakout, reversion, flow, multi): each its own Sets and its own Base
   validation, switched by `stratTrend` etc. (off by default), indicator names by `trendVariants` etc. They exist in the Set
   engine and the evaluation scripts (`scripts/indicator_postbase.py`: effective PF, validated share and orders per pack and
@@ -271,6 +290,11 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Measured so far (8 and 30 day walk-forward, 20 symbols): every single indicator has an unfiltered PF of 0.4 to 0.65; the
   effective PF after Base reads 1.3 to 1.7 in-sample and the executed PF of the walk-forward stays under 1 (best 0.87 on 459
   orders). Choose on development windows; do not read these as an edge until an executed PF above 1 holds on the sealed window.
+- Audit of all 880 names (2026-10-29, 6 symbols, development window, average signed gross move after 5 / 15 / 30 bars): 5 reach about
+  the PositionCost after 30 bars (kelt_n8_t5 0.120 %, donch_n21_t5 0.129 %, atrx_n8_t1, brk_n10_t5, brk_n6_t5). As the Breakout pack
+  alone through Base -> Main -> Real (30 days, 20 symbols, development, `trade_sim.py`): the five together executed PF 0.57 on 4,102
+  orders (`reports/edge_near_cost5_dev.txt`); donch_n21_t5 alone 0.80 on 2,547 orders, next 25 orders after a validation 0.79, 20 of 50
+  blocks of 50 orders at PF 1 or more (`reports/edge_donch_n21_t5_dev.txt`), the best single pack measured so far and still under 1.
 
 ## Venues
 

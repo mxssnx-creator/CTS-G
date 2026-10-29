@@ -636,7 +636,7 @@ function SettingsPage() {
                   min={0}
                   max={Math.max(5, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
                   step={5}
-                  hint={`the second Base window, 0 = off · at most ${Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)} with the long window ${overlay.setGateWindow} and the ratio below · tested 5-25 step 5`}
+                  hint={`the second Base window, 0 = off · at most ${Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)} with the long window ${overlay.setGateWindow} and the ratio below · default 25: best of the 24 h grid (scripts/base_window_grid.py)`}
                   onChange={(v) => patch("setGateShortN", v)}
                 />
                 <Slider
@@ -785,7 +785,7 @@ function SettingsPage() {
                   min={1.1}
                   max={2.3}
                   step={0.02}
-                  hint="Base PF floor of the Short Range strategy alone (default 1.25, at least 1.10); the other strategies use the Set min PF above."
+                  hint="Base PF floor of the Short Range strategy alone (default 1.10, the floor; the other Sets 1.25); the other strategies use the Set min PF above."
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider

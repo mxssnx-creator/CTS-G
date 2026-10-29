@@ -55,7 +55,7 @@
   "order_floor": 150,
   "shipped": {
    "long": 50,
-   "short": 15,
+   "short": 25,
    "main": 25,
    "real": 15
   },

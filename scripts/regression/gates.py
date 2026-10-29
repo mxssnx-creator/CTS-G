@@ -156,7 +156,7 @@ def stage_windows_accept_one_and_two():
 
 def short_window_is_at_most_half_of_the_long_window():
     """The Base short window is capped at setGateShortMaxRatio (default 0.5) of the long window (owner 2026-10-29): long 40 allows at most 20, long 50 allows
-    the default 15 and at most 25, a ratio of 0.3 caps long 40 at 12, a ratio of 1 at the long window, 0 stays off, the ratio is held to 0.1..1."""
+    the default 25 (also the most it can be), a ratio of 0.3 caps long 40 at 12, a ratio of 1 at the long window, 0 stays off, the ratio is held to 0.1..1."""
     def short(**ov):
         b = SetBook()
         b.load(overlay(**{"stagesEnabled": True, **ov}))
@@ -165,7 +165,7 @@ def short_window_is_at_most_half_of_the_long_window():
            "50/40": short(setGateWindow=50, setGateShortN=40), "40 ratio .3": short(setGateWindow=40, setGateShortN=25, setGateShortMaxRatio=0.3),
            "40 ratio 1": short(setGateWindow=40, setGateShortN=25, setGateShortMaxRatio=1.0), "40 ratio 9": short(setGateWindow=40, setGateShortN=39, setGateShortMaxRatio=9),
            "off": short(setGateWindow=40, setGateShortN=0), "20/15": short(setGateWindow=20, setGateShortN=15), "stages off": short(setGateWindow=40, setGateShortN=20, stagesEnabled=False)}
-    want = {"40/25": 20, "40/20": 20, "50/default": 15, "50/40": 25, "40 ratio .3": 12, "40 ratio 1": 25, "40 ratio 9": 39, "off": 0, "20/15": 10, "stages off": 0}
+    want = {"40/25": 20, "40/20": 20, "50/default": 25, "50/40": 25, "40 ratio .3": 12, "40 ratio 1": 25, "40 ratio 9": 39, "off": 0, "20/15": 10, "stages off": 0}
     bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
     bare.load({"setGateWindow": 40, "setGateShortN": 25})
     got["engine default"] = bare.base_short

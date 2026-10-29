@@ -1441,7 +1441,7 @@ def every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats():
         x.active, x.gate_n, x.gate_pf, x.max_dd_s, x.n = False, 0, 0.0, 0.0, 0
     for x in base:
         x.active, x.gate_n, x.gate_pf, x.gate_pf_old, x.gate_pf_new, x.n = True, 50, 2.0, 2.0, 2.0, 100
-        x.base_short_n, x.base_short_pf = 15, 2.0
+        x.base_short_n, x.base_short_pf = max(b.base_short, 1), 2.0     # the Base short window full (its default)
     pos_st.stage = {"pos": True, "negl": False, "main": True, "auto": True, "neg": False}
     neg_st.stage = {"pos": False, "negl": True, "main": False, "auto": True, "neg": True}
     lanes = (b.lane_of(pos_st), b.lane_of(neg_st))

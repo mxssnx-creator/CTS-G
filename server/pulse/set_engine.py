@@ -55,13 +55,13 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes
+from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes, window_of
 from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
-SHORT_MIN_PF_DEFAULT = 1.25
+SHORT_MIN_PF_DEFAULT = 1.1       # owner: the Short Range Base floor defined earlier (a770ec1), the other Sets 1.25
 SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
 TREND_PACK = "trend"                  # additional strategy: the Trend family (indication_extra), judged by Base on its own Sets
 BREAK_PACK = "breakout"               # additional strategy: the Breakout family
@@ -490,7 +490,8 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     return 0, max(long_c, short_c), "flat"
 
 
-def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
+def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float,
+                      extra_rows: Optional[Sequence[Sequence[float]]] = None) -> Tuple[int, float, str]:
     """Set-level indication pack, causal, 1m rows [o,h,l,c,v] (newest last).
     The switches are the ones IndicationBook reads, with the same meaning:
       tf1m / tf5m / tf15m   timeframe lanes that take part (timeframe_evals skips a lane that is off);
@@ -531,7 +532,7 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
         pass
     extras = settings.get("extraIndicators") or []
     if extras:
-        votes.extend(extra_votes(rows[-EXTRA_WINDOW:], extras))
+        votes.extend(extra_votes(extra_rows if extra_rows is not None else rows[-EXTRA_WINDOW:], extras))     # each name its own window
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -571,6 +572,20 @@ def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tu
     return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
 
 
+def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
+    """The most closed 1m bars any pack reads for one bar's signal: the indication pack's window, or the longest window of
+    the indicators named in extraIndicators and in the Short Range and extra packs' variant lists (a 15m name reads 900).
+    pack_signals keys its memo on this many bars, so two bars share a signal only when everything they read is equal."""
+    names = list(ind_settings.get("extraIndicators") or []) if "indications" in packs else []
+    if SHORT_PACK in packs:
+        names += list(ind_settings.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT)
+    for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
+        if pk in packs:
+            names += list(ind_settings.get(vkey) or default)
+    w = IND_WINDOW_BARS if "indications" in packs else GENERAL_WINDOW_BARS
+    return max([w, EXTRA_WINDOW if names else 0] + [window_of(str(n)) for n in names])
+
+
 def bar_signal(
     bars: Sequence[Sequence[float]],
     i: int,
@@ -582,17 +597,20 @@ def bar_signal(
     The one per-bar rule: the replay (pack_signals) and the live entries (SetBook.entry_signal) both call it, so a live
     entry is taken on exactly the bar and direction the Sets were validated on."""
     row: Dict[str, Tuple[int, float, str]] = {}
+    hw = signal_window(packs, ind_settings)
+    hist = bars[max(0, i + 1 - hw) : i + 1]          # the longest window: the extra indicators slice their own from it
     if "general" in packs:
         lo = i + 1 - GENERAL_WINDOW_BARS
         row["general"] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
     if "indications" in packs:
         lo = i + 1 - IND_WINDOW_BARS
-        row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+        row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts,
+                                               hist if ind_settings.get("extraIndicators") else None)
     if SHORT_PACK in packs:
-        row[SHORT_PACK] = short_range_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings)    # each name reads its own window
+        row[SHORT_PACK] = short_range_signal(hist, ind_settings)    # each name reads its own window
     for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
         if pk in packs:
-            row[pk] = _variant_signal(bars[max(0, i + 1 - EXTRA_WINDOW) : i + 1], ind_settings.get(vkey) or list(default))
+            row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
     return row
 
 
@@ -617,10 +635,11 @@ def pack_signals(
     signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
     hs = [hash(tuple(b)) for b in bars] if cache is not None else None
     used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    sig_w = signal_window(packs, ind_settings)      # the memo key covers every bar a pack reads
     for i in range(warmup, n):
         key = None
         if cache is not None:
-            lo_w = max(0, i + 1 - IND_WINDOW_BARS)
+            lo_w = max(0, i + 1 - sig_w)
             key = hash((salt, tuple(hs[lo_w : i + 1])))
             hit = used.get(key)
             if hit is None:
@@ -1173,7 +1192,7 @@ class SetLane:
         self.cool = cool
         return out
 
-BASE_SHORT_N_DEFAULT = 15        # Base: the second last N (set by the window test, setGateShortN; 0 = off)
+BASE_SHORT_N_DEFAULT = 25        # Base: the second last N (setGateShortN; 0 = off): best cell of the 24 h window grid (owner, 2026-10-29)
 MAIN_AUTO_MAX_RATIO = 0.5        # the Main Auto windows are at most this share of the Main static window (owner 2026-10-29, mainAutoMaxRatio)
 BASE_MIN_N_MAX = 3               # the Base minimal window: the newest 1-3 results (setGateMinN, 0 = off), all positive or all negative (setGateMinMode)
 BASE_SHORT_MAX_RATIO = 0.5       # the short window is at most this share of the long window (owner 2026-10-29: long 40 -> short at most 20; setGateShortMaxRatio)
@@ -3379,7 +3398,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # times the size, then 12 wins opened while the Set was not valid. Base passes at the end (PF 1.33 over the last 30) and the
     # raw last 12 are all wins; the processed last 12 hold the losses (PF 1.0), so the Set fails the Main gate.
     pr = SetBook()
-    pr.load({"setGateWindow": 30, "setGateMinTrades": 20, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+    pr.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
              "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
     pst = next(x for x in pr.by_idx if x.kind == "base")
     cfp = cost_as_frac(pr.cost_pct)
@@ -3391,7 +3410,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pr._score_one(pst, now=rows_p[-1][0] + 60.0)
     raw12 = [r[3] for r in rows_p[-12:]]
     held = SetBook()
-    held.load({"setGateWindow": 30, "setGateMinTrades": 20, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+    held.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
                "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
     hst = next(x for x in held.by_idx if x.kind == "base")
     hst.active = True
@@ -3477,6 +3496,16 @@ def self_test() -> List[Tuple[str, bool, str]]:
         short_cut += len(_ref_chain(ts_, en_, nt_, _dc_replace(Pr, base_short=0))[0]) - len(m_)
         auto_moved += an_ != Pr.main_n
         auto_cut += len([k for k in m_ if k not in r_]) > 0 and an_ != Pr.main_n
+    # the Main Set holds only orders opened while Base passed: a Set that loses from the start has an empty Main Set, its winning
+    # twin's Main Set starts after gate_min orders (before that Base has too few orders to pass)
+    lose = [(-0.004 if k % 3 else 0.002) for k in range(200)]
+    win_ = [(0.006 if k % 3 else -0.004) for k in range(200)]
+    tl = [1000.0 + 60.0 * k for k in range(200)]
+    el = [t - 300.0 for t in tl]
+    m_lose = stage_chain(tl, el, lose, Pr)["main"]
+    m_win = stage_chain(tl, el, win_, Pr)["main"]
+    out.append(("set-main-set-only-orders-opened-while-base-passed", not m_lose and bool(m_win) and min(m_win) >= Pr.gate_min,
+                f"losing Set: {len(m_lose)} Main orders; winning Set: {len(m_win)} from order {min(m_win) if m_win else None} (gate minimum {Pr.gate_min})"))
     out.append(("set-stage-chain-equals-the-rules", same and short_cut > 0 and auto_moved > 0 and auto_cut > 0,
                 f"equal={same}; short window removed {short_cut} Main orders; Auto window moved on {auto_moved}/12 tapes"))
     # the default judges every stage window on the orders it has (at least one): the same brute-force reading with full_window off, and the
