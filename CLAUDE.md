@@ -37,6 +37,14 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
   executed PF 0.61 on 743 orders in both). The effect belongs to the live book (sparse orders per Set: on x02 220 of 988 Sets were
   "n<min", 152 on drawdown time at 12 h); read it there, next to the executed PF.
 
+- **Minimum PF by window size (owner, 2026-10-29)**: every last-N window asks the PF of its size class (`minPfBySize`, default on;
+  `SetBook.floor_for`, `StageParams.floor_for`, the simulator the same): **Micro** up to 5 orders **1.05**, **Minimal** up to 10 **1.08**,
+  **Short** up to 20 **1.12**, **Medium** (general / normal) up to 35 **1.25**, **Long** above **1.5** (`minPfMicro` / `minPfMinimal` / `minPfShort` /
+  `minPfMedium` / `minPfLong`, bounds `minPf*N`; overlays and desk Settings). With the defaults: Base long 50 asks 1.5, Base short 25 and Main
+  static 25 1.25, Real 15 1.12, the Main short windows 5 / 10 1.05 / 1.08. Off: `setMinPf` (and the Short Range floor) for every window. No
+  class is under `MIN_PF_FLOOR` (**1.05**, lowered from 1.1 for the Micro class). The other gates (Exit, DCA, Block, coordinator) keep
+  `setMinPf`. Check `gates.every-window-asks-the-minimum-pf-of-its-size`, `min PF by size:` mutants; test fixtures run one floor
+  (`common.overlay` sets `minPfBySize` off unless a check asks for the classes).
 - The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
   (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`); the Short Range strategy keeps its own earlier floor **1.1** (`shortRangeMinPf`,
   owner 2026-10-29). No gate asks less than **1.1** whatever is configured (`position_cost.MIN_PF_FLOOR`, `pf_floor`; desk the same).
@@ -143,6 +151,12 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   with the best cost PF over its last orders (as many as it has, at most `holdAutoMax`; a candidate needs `holdAutoMin` orders and
   `HOLD_AUTO_MARGIN` x the global stop's PF). `SetBook._choose_hold`; the Set is validated on the tape of its chosen hold; live reads
   `st.hold_bars` (`Pulse.manage_set_lane`), the same bar as the replay (`trader.auto-hold-same-in-replay-and-live`).
+- **The judged tape is causal** (2026-10-29, `set_engine.causal_hold_tape` / `hold_choice_at`): each order comes from the hold that was
+  chosen at its entry, on the candidates' orders closed before it, as live positions open with the hold in effect then. Before, the hold
+  chosen now was applied to every earlier order of the tape that Base, Main and Real are built from (hindsight): on 8 symbols x 40 h the
+  unfiltered PF read 0.64 with it against 0.46 causal, on the same orders. `st.hold_bars` (what a new position opens with) is unchanged. A
+  candidate keeps its newest 50 orders per symbol (memory), so older entries without candidate history fall back to the global stop
+  (conservative, never hindsight). Check `processing.hold-auto-tape-is-causal`, `hold auto:` mutants.
 - The choice is made on the orders the Set is then judged on, so the effective PF after Base is in-sample (higher than the executed PF).
   Measured results: `scripts/hold_eval.py` (fixed hold per step), `scripts/hold_auto_eval.py` (Auto Mode against the global stop, both
   PFs, development window; `--sealed` once). Do not read a better effective PF as an edge without the executed PF.
@@ -324,6 +338,20 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   One window, a few hundred to a few thousand orders per cell, every cell walking the same hours (comparisons between settings, not independent samples): a gap of 0.03-0.05 between pooled
   marginals is noise; the shape that repeats across both grid runs is -1 above +1 (requiring the newest result to be negative, mean reversion on these tapes) and a longer Base long window
   raising the executed PF while lowering the effective one (in-sample gap). Read a second window before shipping any minimal window or a Real N other than 15.
+- **Why the PF drops after Base (audit 2026-10-29, both chats; no accounting defect left)**. The effective PF is not the number a Set's
+  next orders deliver, for three measured reasons, two of them fixed in the engine:
+  1. **Selection (in-sample)**: a Set passes at the end of a good stretch; its next orders are near the ungated average (selection PF
+     1.75 / 2.11 at Main / Real entry against 0.91 / 0.93 delivered; a placebo chain on shuffled results 0.88 / 0.89:
+     `reports/main_stage_audit_26x24h.txt`). The stages add +0.03-0.04 over the placebo, they cannot remove the gap.
+  2. **Hindsight in the hold choice (fixed)**: hold Auto applied the hold chosen now to every earlier order of the tape all stages are
+     built from (8 symbols x 2 days: unfiltered PF 1.19 -> 0.70, Base-alone effective 4.65 -> 2.17 with the causal tape); and the Main short
+     window was picked over the whole tape (13 % of the Real Set; fixed by the other chat).
+  3. **Entries counted once per Set (statistic added)**: a pack's Sets trade the same signals and differ only in their exits, so one entry
+     sits in about 50 valid Sets' windows and the pooled effective PF counts it 50 times (a winning entry validates many Sets at once).
+     `pfBase.baseEntry` / `baseOnlyEntry` count each entry once, with its best-ranked Set's result (what execution takes): 8 symbols x 2
+     days, Base-passing pooled 2.17 against 1.29 per entry (361 entries, 50 Sets each); valid through every gate 2.17 against 1.62 (303
+     entries). Desk: "per entry PF" next to the effective PF. Check `processing.effective-pf-per-entry-counts-each-entry-once`.
+  Read the per-entry PF next to the Main / Real figures: that is the like-for-like comparison.
 - One chain function, `set_engine.stage_chain` (each stage reads only the lane the stage before it built; each lane a subset of the one
   before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
   `realId/N/Pf`, `realNegId/N/Pf`, `shortPf`, `autoN`, `lane`; `pfBase`: `base`, `baseOnly`, `main`, `processed`, `real`, `realneg`,
@@ -438,6 +466,16 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   (`setUseHistoricGate` true) is the default on every connection: entries open only under a Base-validated Set. (x02 ran
   with it off from 01e842b, 2026-10-21, until 2026-10-28; switched back on by the owner.) Credentials are never printed or stored in the repo; rotate any that appeared in a session.
 - State files of the live engine live in the pulse directory; tests must use private temp paths.
+
+## Memory and speed (2026-10-29)
+
+- Replay rows are stored per Set and symbol as columns (`set_engine.RowCols`: exit time, pnl, pnl_pct and hold as doubles, side and reason
+  as one-byte codes; about 34 bytes a row instead of about 200 as tuples), read as the same row tuples (`len`, iteration, index). 2 symbols x
+  1,920 bars (1.04 M rows with the hold candidates): Python heap 253 -> 94 MB. The replay still builds one symbol's rows as dicts before
+  packing them (the golden and memo harnesses read that form): that peak is per symbol and does not grow with the universe.
+- Indicators: one bounded per-thread memo (`indication_lib._memo`, `MEMO_CAP` 4,096) for aggregated bars, single results and relation
+  features; 1,296 names cost about 1 ms each per bar. `scripts/stress_test.py` (every pack, repeated passes: time, peak RSS, heap, cache
+  sizes, the same result every pass). Simulations and tests run on at most 3 days of data (owner, 2026-10-29).
 
 ## Checks
 

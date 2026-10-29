@@ -2844,6 +2844,27 @@ class SetBook:
             gl = sum(x.gate_gl for x in sts)
             pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
             return {"pf": pf, "n": sum(x.gate_n for x in sts), "sets": len(sts)}
+        cf_ = cost_as_frac(self.cost_pct)
+
+        def per_entry(sts: List[SetState]) -> Dict[str, Any]:
+            """The same window orders, one result per entry: a pack's Sets trade the same signals (they differ only in their exits),
+            so one entry sits in many Sets' windows and the pool counts it once per Set (a winning entry validates many Sets at once).
+            Here each entry (symbol, entry minute, pack, side) counts once, with the result of its best-ranked Set: what execution
+            takes from the same Sets."""
+            best: Dict[tuple, Tuple[tuple, float]] = {}
+            n_rows = 0
+            for x in sts:
+                rk = self.rank_key(x)
+                for r in (x.hist or [])[-self.gate_window:]:
+                    n_rows += 1
+                    k = (r.get("symbol"), int(round(finite(r.get("t")) - finite(r.get("hold_s")))), x.pack, r.get("side"))
+                    cur = best.get(k)
+                    if cur is None or rk > cur[0]:
+                        best[k] = (rk, finite(r.get("pnl_pct")) - cf_)
+            nets_ = [v[1] for v in best.values()]
+            gp_, gl_ = sum(v for v in nets_ if v > 0), -sum(v for v in nets_ if v < 0)
+            return {"pf": round(pf_of(gp_, gl_), 4), "entries": len(nets_), "orders": n_rows,
+                    "setsPerEntry": round(n_rows / len(nets_), 2) if nets_ else 0.0}
         allsets = list(self.by_idx)
         reasons = {x.id: self.gate_reason(x) for x in allsets}
         valid = [x for x in allsets if not reasons[x.id]]
@@ -2925,7 +2946,9 @@ class SetBook:
         # alone; `main` the same end Sets over the Main gate's last N of their Main Sets; `processed` the Main Sets (orders opened while
         # Base passed) of every Base-passing Set; `real` the Real Sets (orders opened while Base and Main passed) of the end Sets, which
         # the overall Real stage (the coordinator's real evaluation) reads
-        return {"base": pool(valid), "baseOnly": pool(base_only), "main": main, "processed": processed, "real": executable,
+        # `baseEntry` / `baseOnlyEntry`: the same window orders, one result per entry from its best-ranked Set (per_entry)
+        return {"base": pool(valid), "baseOnly": pool(base_only), "baseEntry": per_entry(valid), "baseOnlyEntry": per_entry(base_only),
+                "main": main, "processed": processed, "real": executable,
                 "realneg": realneg, "stageSets": stage_sets, "stages": stages, "windows": windows,
                 "unfiltered": pool(allsets),
                 "total": total, "valid": len(valid),

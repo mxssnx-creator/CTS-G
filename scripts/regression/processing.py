@@ -1133,6 +1133,35 @@ def hold_auto_tape_is_causal():
     return ok, f"orders {len(tape)}; from the 20-min hold {len(from_alt)} (all winners {all(r[4] > 0 for r in from_alt)}), first entry {first_alt_entry}; choice now {now_choice}"
 
 
+def effective_pf_per_entry_counts_each_entry_once():
+    """pfBase.baseEntry: a pack's Sets trade the same entries (they differ in their exits), so the pooled effective PF counts one entry
+    once per Set that holds it. The per-entry figure counts every entry (symbol, entry minute, pack, side) once, with the result of its
+    best-ranked Set; it equals the pool when no entry is shared and differs when a lucky entry sits in several Sets' windows."""
+    b = _book(n_syms=1, bars=300, setMinPf=1.0, stagesEnabled=False, mainGateEnabled=False, **SMALL)
+    a_, c_ = [x for x in b.by_idx if x.kind == "base" and x.pack == b.packs[0]][:2]
+    def rows(sid, wins_first):
+        out = []
+        for k in range(10):
+            win = (k < 6) if wins_first else (k >= 4)
+            out.append({"t": 1000.0 + 600 * k, "symbol": "S", "side": "LONG", "pnl": 0.0, "pnl_pct": (0.004 if win else -0.002) + 0.0012,
+                        "hold_s": 300.0, "reason": "x", "set_id": sid})
+        return out
+    for x in b.by_idx:
+        x.active, x.gate_n, x.gate_pf, x.hist = False, 0, 0.0, []
+    for x, first in ((a_, True), (c_, True)):              # the same ten entries in both Sets' windows
+        x.hist = rows(x.id, first)
+        x.active, x.locked, x.last_error, x.max_dd_s, x.gate_n = True, False, "", 0.0, 10
+        x.gate_gp, x.gate_gl = 6 * 0.004, 4 * 0.002
+        x.gate_pf, x.gate_pf_old, x.gate_pf_new = 3.0, 3.0, 3.0
+    snap = b.snapshot()["pfBase"]
+    shared = snap["baseEntry"]
+    c_.hist = [dict(r, t=r["t"] + 60.0) for r in c_.hist]   # now the second Set's entries are its own
+    apart = b.snapshot()["pfBase"]["baseEntry"]
+    ok = (snap["base"]["sets"] == 2 and shared["entries"] == 10 and shared["orders"] == 20 and shared["setsPerEntry"] == 2.0
+          and abs(shared["pf"] - 3.0) < 1e-3 and apart["entries"] == 20 and apart["setsPerEntry"] == 1.0)
+    return ok, f"pooled {snap['base']}; shared entries {shared}; separate entries {apart}"
+
+
 CHECKS = [
     ("processing.sim-gate-equals-the-engine-for-every-window-configuration", sim_gate_equals_the_engine_for_every_window_configuration),
     ("processing.stage-figures-average-the-valid-sets-and-report-the-validated-share", stage_figures_average_the_valid_sets_and_report_the_validated_share),
@@ -1174,6 +1203,7 @@ CHECKS = [
     ("processing.real-gate-per-set-at-the-base-minimum-pf", real_gate_is_per_set_at_the_base_minimum_pf),
     ("processing.no-gate-asks-less-than-pf-1.1", no_gate_asks_less_than_pf_1_1),
     ("processing.stage-pools-count-every-set-that-passed-base", stage_pools_count_every_set_that_passed_base),
+    ("processing.effective-pf-per-entry-counts-each-entry-once", effective_pf_per_entry_counts_each_entry_once),
     ("processing.every-validation-gate-asks-the-base-minimum-pf", every_validation_gate_asks_the_base_minimum_pf),
     ("processing.pre-history-grows-when-sets-lack-orders", pre_history_grows_when_too_many_sets_lack_orders),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),

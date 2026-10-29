@@ -31,6 +31,8 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("stats: the per-entry PF counts every Set's row again",
+     "set_engine.py", "                    k = (r.get(\"symbol\"), int(round(finite(r.get(\"t\")) - finite(r.get(\"hold_s\")))), x.pack, r.get(\"side\"))", "                    k = (x.id, finite(r.get(\"t\")))"),
     ("min PF by size: the Real window asks the one floor",
      "set_engine.py", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor_for(n), pf, len(w)", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor, pf, len(w)"),
     ("min PF by size: the Base long window asks the one floor",

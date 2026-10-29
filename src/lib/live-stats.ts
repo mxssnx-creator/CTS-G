@@ -96,6 +96,9 @@ export type PfBase = {
   base: PfPool;
   /** The pool of the Sets that pass the Base gate alone. */
   baseOnly?: PfPool;
+  /** The same window orders, one result per entry (the best-ranked Set's): a pack's Sets share entries, the pool counts each once per Set. */
+  baseEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
+  baseOnlyEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
   /** Main stage: the end Sets over the Main gate's last N of their Main Sets (orders opened while Base passed). */
   main?: PfPool & { on: boolean; lastN: number };
   /** The Main Sets of every Base-passing Set. */
