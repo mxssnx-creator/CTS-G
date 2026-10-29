@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from indication_lib import (RANGES, TFS, Row, Signal, _agg, _atr, _combine, _conf, _cl, _ema, _hi, _lo, _tr, _vo,
+from indication_lib import (RANGES, TFS, TFS_EXT, Row, Signal, _agg, _key, _memo, _atr, _combine, _conf, _cl, _ema, _hi, _lo, _tr, _vo,
                             f_adx)
 
 # ---- helpers -------------------------------------------------------------------------------------------------------
@@ -424,7 +424,15 @@ def _single(fam: str, n: int, tf: int) -> Callable[[Sequence[Row]], Signal]:
     fn = AO_FAMILIES[fam][1]
 
     def run(rows: Sequence[Row]) -> Signal:
-        return fn(_agg(rows, tf), n)       # _agg reads rows_for(tf) rows (60 bars of a higher timeframe)
+        # _agg reads rows_for(tf) rows; the result is memoised like the library singles (a group vote shares it)
+        k = ("ao", fam, n) + _key(rows, tf)
+        m = _memo()
+        got = m.get(k)
+        if got is not None:
+            return got[1]
+        sig = fn(_agg(rows, tf), n)
+        m[k] = (rows[-1] if len(rows) else None, sig)
+        return sig
     return run
 
 
@@ -433,10 +441,12 @@ def build() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
     for fam in AO_FAMILIES:
         for ns in RANGES.values():
             for n in ns:
-                singles = [_single(fam, n, tf) for tf in TFS]
-                for tf, s in zip(TFS, singles):
+                singles = [_single(fam, n, tf) for tf in TFS_EXT]
+                for tf, s in zip(TFS_EXT, singles):
                     out[f"ao_{fam}_n{n}_t{tf}"] = s
-                out[f"ao_{fam}_c{n}"] = (lambda rows, ss=singles: _combine([s(rows) for s in ss], 2))
+                base3 = singles[:len(TFS)]          # the combined vote over 1 / 5 / 15 (unchanged), _x over all four
+                out[f"ao_{fam}_c{n}"] = (lambda rows, ss=base3: _combine([s(rows) for s in ss], 2))
+                out[f"ao_{fam}_x{n}"] = (lambda rows, ss=singles: _combine([s(rows) for s in ss], 2))
     for rng, ns in RANGES.items():
         parts = [_single(fam, n, tf) for fam in AO_FAMILIES for n in ns for tf in TFS]
 

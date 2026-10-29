@@ -1473,9 +1473,69 @@ def every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats():
                 f"live close joins (Main, Real, Real Neg) {joins}; stats {ex['lanes']} stages {ex['sets']['stages']}")
 
 
+def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
+    """The Real stage's overall strategies per scope: real_paper_scopes splits the Real paper stream into "overall", each lane and
+    each pack (every row of a scope comes from that scope's Sets only, each scope at most n rows, oldest first); judge_scopes gives
+    each its own verdict (with the last axis on, a losing Real Negative lane blocks only that lane and that pack on that lane, never
+    the positive lane: the mixed overall and pack-wide scopes are figures, not gates); place() holds an entry whose scope blocks and counts it; the execution stats list every scope with its executed orders."""
+    from common import SMALL, overlay
+    from set_engine import SetBook
+    b = SetBook()
+    b.load(overlay(stratTrend=True, **SMALL))
+    packs = list(b.packs)
+    sts = [x for x in b.by_idx if x.kind == "base"]
+    by_pack = {}
+    for st in sts:
+        by_pack.setdefault(st.pack, st)
+    t = 1000.0
+    for k, st in enumerate(by_pack.values()):
+        st.exe = [(t + 60 * j + k, 0.004) for j in range(12)]              # winning Real Sets
+        st.neg = [(t + 60 * j + k + 1, -0.004) for j in range(12)]         # losing Real Negative Sets
+    streams = b.real_paper_scopes(40)
+    lane_ok = all(r["lane"] == "neg" for r in streams["lane:neg"]) and all(r["lane"] == "pos" for r in streams["lane:pos"])
+    pack_rows = {p_: len(streams.get(f"pack:{p_}", [])) for p_ in packs}
+    sizes_ok = all(len(v) <= 40 for v in streams.values()) and all(v == sorted(v, key=lambda r: r["t"]) for v in streams.values())
+    co = __import__("coord_engine").Coordinator()
+    co.load({}, {"axisLastEnabled": True, "axisLastMaxWindow": 6, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False})
+    sc = co.judge_scopes({k: streams[k] for k in ("lane:pos", "lane:neg", f"pack:{packs[0]}", f"pack:{packs[0]}:pos", f"pack:{packs[0]}:neg")})
+    verdicts = {k: v["allow"] for k, v in sc.items()}
+    allows = (co.scope_allows(packs[0], "pos"), co.scope_allows(packs[0], "neg"))
+    # place(): a Set whose lane scope blocks is held, counted, and nothing is ordered
+    def run():
+        sym = "BTC-USDT"
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+        out = []
+        for lane in ("neg", "pos"):
+            if os.path.exists(pt.OPEN_PATH):
+                os.remove(pt.OPEN_PATH)
+            p = pt.Pulse(_StubExchange(executed="1", requested="1"), contracts)
+            p.boot_ts, p.available, p.halted = 0.0, 50.0, False
+            p.px[sym] = 100.0
+            p.entry_sense = lambda *a, **k: None
+            st = p.sets.by_idx[0]
+            p.sets.pick_any = lambda pack, _st=st: _st
+            p.sets.pick_trail = lambda pack: None
+            p.sets.lane_of = lambda _st, _l=lane: _l
+            p.coord.scopes = {"lane:neg": {"allow": False}, "lane:pos": {"allow": True}}
+            p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+            out.append((lane, sym in p.open, int(p.exec_n.get("scopeBlocked", 0))))
+            p._exec_note(pt.Closed(2000.0, sym, "LONG", 1, 1, 1, 0.5, 0.01, "tp", 60, set_id=st.id, pack=st.pack, lane=lane))
+            ex = p.execution_snapshot()
+            out.append(sorted(ex["overall"]["scopes"]))
+        return out
+    placed = _isolated(run)
+    pk_lane_ok = all(r["lane"] == "neg" for r in streams[f"pack:{packs[0]}:neg"]) and all(r["lane"] == "pos" for r in streams[f"pack:{packs[0]}:pos"])
+    ok = (lane_ok and pk_lane_ok and sizes_ok and all(v > 0 for v in pack_rows.values()) and verdicts["lane:neg"] is False and verdicts["lane:pos"] is True
+          and verdicts[f"pack:{packs[0]}:pos"] is True and verdicts[f"pack:{packs[0]}:neg"] is False
+          and allows[0] == (True, "") and allows[1] == (False, "lane:neg")
+          and placed[0] == ("neg", False, 1) and placed[2] == ("pos", True, 0) and "lane:neg" in placed[1] and "overall" in placed[3])
+    return ok, f"rows per pack {pack_rows}; verdicts {verdicts}; scope_allows pos/neg {allows}; place {placed}"
+
+
 CHECKS = [
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
     ("trader.lanes-every-stage-on-its-own-lane", every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats),
+    ("trader.real-overall-strategies-per-scope", real_stage_overall_strategies_judge_every_scope_on_its_own_stream),
     ("trader.lanes-set-close-waits-only-its-own-cooldown", a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes),
     ("trader.entry-loop-places-the-set-signal", the_entry_loop_places_the_set_signal_and_not_the_live_score),
     ("trader.entry-mirrors-set-signal-without-last-n-validation", the_entry_loop_mirrors_the_set_signal_without_any_last_n_validation),

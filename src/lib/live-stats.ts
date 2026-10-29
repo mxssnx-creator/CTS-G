@@ -100,6 +100,20 @@ export type PfBase = {
 };
 
 /** Sets and orders as executed, after every validation gate (Pulse.execution_snapshot). */
+export type OverallScope = {
+  allow?: boolean;
+  reasons?: string[];
+  orders?: number;
+  consecLoss?: number;
+  lastPf?: number;
+  prevPf?: number;
+  pf?: number;
+  n?: number;
+  realPf?: number;
+  realN?: number;
+  executed: { orders: number; wins: number; pf: number | null };
+};
+
 export type Execution = {
   sets: {
     configured: number;
@@ -112,6 +126,8 @@ export type Execution = {
   };
   /** Positions and closes per lane: Real (positive) and Real Negative. */
   lanes?: { openPos: number; openNeg: number; closedPos: number; closedNeg: number; winsPos: number; lossesPos: number; winsNeg: number; lossesNeg: number };
+  /** The Real stage's overall strategies per scope ("overall", "lane:pos|neg", "pack:<pack>"), each judged on its own paper stream. */
+  overall?: { scopes: Record<string, OverallScope>; blocked: number };
   open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
   closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number };
 };

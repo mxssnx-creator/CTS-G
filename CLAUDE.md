@@ -198,6 +198,15 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   passed. One window, the last `realGateN` (15, `realGateEnabled`, reason `real`) of the lane's Real Set at the minimum PF; the Real
   Negative Set is judged the same way on its own orders. The overall strategies (coordinator real stage) read the Real Sets' pooled
   paper stream (`SetBook.real_paper`, `realStagePaper`).
+- **Real stage overall strategies per scope** (2026-10-29): the coordinator judges the Real paper stream per scope, each on its own stream
+  with its own consecutive losses, verdict and figures (`SetBook.real_paper_scopes` in one pass, `Coordinator.judge_scopes` /
+  `judge`): `overall`, `lane:pos`, `lane:neg`, `pack:<pack>` (both lanes) and `pack:<pack>:<lane>`. An entry under a Set passes only when
+  its lane scope and its pack's scope on that lane allow (`Coordinator.scope_allows`, `Pulse.place`; held entries counted as
+  `scopeBlocked`): a losing Real Negative lane never stops the positive lane, one pack never another; the overall and pack-wide scopes
+  mix lanes and are figures (the book-wide soft gate stays `Coordinator.gate`). With the axes off (the default) every scope allows and only
+  the figures are kept. The coordinator's intern evidence covers every configured pack (it read only indications and general before).
+  Execution stats `overall.scopes` (verdict, paper PF / orders, last / prev / Real PF, consecutive losses, and the executed orders, wins
+  and PF of that scope), desk card "Real · overall strategies by scope". Check `trader.real-overall-strategies-per-scope`, `real scopes:` mutants.
 - **Active execution**: `pick_any` takes only Sets valid through Real on a lane (`SetBook.lane_of`), the positive lane first, then the
   Real Negative lane; the position carries its lane (`pos.lane`, client id nonce marker `CID_NEG_MARK`), a live close joins only its own
   lane's Real Set, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
@@ -283,6 +292,26 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   The library's 5m / 15m memo is keyed by the rows object, its length and newest row (a list changed in place got its earlier bars).
   Checks `indication.every-name-gets-its-timeframe-history`, `indication.signal-memo-key-covers-the-window`,
   `indication.library-memo-never-stale`, with mutants. The live defaults (indications without `extraIndicators`, general) are unchanged.
+- **30m timeframe** (2026-10-29): every library, AO and Trend / Break family also on the 30m series (`<family>_n<range>_t30`) and a
+  combined vote over 1 / 5 / 15 / 30 (`<family>_x<range>`, at least two agree, none disagrees); the existing `_c<range>` votes stay over
+  1 / 5 / 15. A 30m name reads 64 bars (`indication_lib.rows_for` is capped at `ROWS_CAP` 1920 rows, the Set history's default
+  lookback). 1,296 names in all.
+- **Relations** (`server/pulse/indication_rel.py`, 2026-10-29): any name composes with conditions on the market around its signal as
+  one name, `<indicator>@<relation>[@...]`, applied left to right on the signal's direction (upper case with it, lower case against it):
+  `T<tf>[n<k>]` / `t<tf>` / `N<tf>` the Trend family on that series agrees / opposes / is absent; `B<tf>[n<k>]` / `b<tf>` the close is beyond
+  / inside the prior k-bar range of the series; `M<n>` / `m<n>` the earlier move (n 1m bars before the last part of 5) went with / against
+  by one random-walk unit; `A` / `a` last-part activity (true range 1.5x / 0.7x the 30 bars before); `V` / `v` last-part volume; `D` / `d` /
+  `X` a 0.5-2.5 ATR pullback from the 30-bar extreme / at the extreme / a deep drawdown; `C` / `c` volatility contraction / expansion;
+  tactics `I` invert, `K` confirmed on the bar before, `F` fresh, `G` a go candle. Any composite works wherever a name does
+  (`extraIndicators`, every pack's variant list; `indication_extra.resolve` / `known`); an unknown base or relation is an unknown name
+  (dropped from a list, never a silent vote); `window_of` covers every part. Checks `indication.relations-compose-by-their-rules`,
+  `indication.thirty-minute-names-fire`, `relations:` mutants. Sources for the relations: trend / regime filters for reversion, volatility
+  contraction before a break, earlier-move momentum and intraday reversal (see `reports/indicator_audit.html`).
+- **Indicator memo** (2026-10-29): the library's aggregated bars, every single name's result (library and AO) and the relation features
+  are memoised per thread in one bounded dict (`indication_lib._memo`, cleared past `MEMO_CAP` 4,096 entries) keyed by the rows the
+  series reads (first and newest row objects, count, newest values): a group vote and its singles share one result per bar, every window
+  of one evaluation hits the same entry, a list changed in place is never served its earlier state. 1,296 names cost about 1.0 ms each
+  per bar (5.8 ms before), peak heap 2.1 MB; every existing name gives the same signals as before (checked on 40 bars x 896 names).
 - Extra packs (`set_engine.EXTRA_PACKS`: trend, breakout, reversion, flow, multi): each its own Sets and its own Base
   validation, switched by `stratTrend` etc. (off by default), indicator names by `trendVariants` etc. They exist in the Set
   engine and the evaluation scripts (`scripts/indicator_postbase.py`: effective PF, validated share and orders per pack and
