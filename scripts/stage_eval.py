@@ -185,7 +185,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     h = n // 2
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
-            "floor": book.pack_min_pf.get(st.pack, book.min_pf), "cf": cf}
+            "floor": book.floor_for(book.gate_window, st.pack), "floor_short": book.floor_for(book.base_short, st.pack), "cf": cf}
 
 
 def _long_ok(book, e: Dict[str, Any]) -> bool:
@@ -198,7 +198,7 @@ def _long_ok(book, e: Dict[str, Any]) -> bool:
 
 def _short_ok(book, e: Dict[str, Any]) -> bool:
     sw = [x - e["cf"] for x in e["w"][-book.base_short:]]
-    return len(sw) >= (book.base_short if getattr(book, "stage_full", False) else 1) and se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)) + 1e-9 >= e["floor"]
+    return len(sw) >= (book.base_short if getattr(book, "stage_full", False) else 1) and se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)) + 1e-9 >= e["floor_short"]
 
 
 def _min_ok(book, e: Dict[str, Any]) -> bool:
@@ -296,7 +296,7 @@ def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
     nets, gpre, lpre = tapes.prefix(st.idx)
     e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - lb)
-    floor = book.pack_min_pf.get(st.pack, book.min_pf)
+    floor = book.floor_for(book.gate_window, st.pack)
     out: List[float] = []
     for k in range(e - 1, lo - 1, -1):
         if se.processed_flag(tx, nets, gpre, lpre, te[k], book.gate_window, book.gate_min, floor, book.max_dd_s, lb, lo,

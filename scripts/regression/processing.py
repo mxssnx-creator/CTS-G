@@ -839,8 +839,9 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
 
 
 def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
-    """After a full pass each auto Set carries one of its candidate holds, its tape is the one of that hold (no time exit later
-    than it), and the Sets stay deterministic across two passes."""
+    """After a full pass each auto Set carries one of its candidate holds; its judged tape is causal (each order from the hold that was
+    chosen at its entry), so every time exit on it sits at one of the Set's candidate holds or the global time stop, never elsewhere;
+    and the Sets stay deterministic across two passes."""
     from set_engine import HOLD_AUTO_HIGH, HOLD_AUTO_LOW
     b = _book(n_syms=3, bars=1200)
     b.replay_all(now=T0)
@@ -852,9 +853,10 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
             bad.append((st.id, st.hold_bars))
         if st.hold_bars:
             chosen += 1
-            late = [r for r in st.hist if r["reason"] == "time" and r["hold_s"] > st.hold_bars * 60 + 1]
+            stops = {h * 60 for h in allowed if h} | {b.hist_time_bars * 60}
+            late = [r for r in st.hist if r["reason"] == "time" and not any(abs(r["hold_s"] - x) <= 61 for x in stops)]
             if late:
-                bad.append((st.id, "time exit after the chosen hold", late[0]["hold_s"]))
+                bad.append((st.id, "time exit at no candidate hold", late[0]["hold_s"]))
     b.replay_all(now=T0)
     same = first == {st.id: st.hold_bars for st in b.by_idx}
     return not bad and chosen > 0 and same, f"sets={len(first)} with an own hold={chosen} bad={bad[:3]} same_on_second_pass={same}"
@@ -1033,7 +1035,7 @@ def pre_history_grows_when_too_many_sets_lack_orders():
 
 
 def no_gate_asks_less_than_pf_1_1():
-    """MIN_PF_FLOOR (1.1): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
+    """MIN_PF_FLOOR (1.05): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
     1.0 or 0.5, Block at a small volume ratio), no validation gate asks less than a net PF of 1.1; the desk parses with the same floor."""
     import os, re, tempfile
     from block_engine import BlockBook, calculate_block_minimum_profit_factor
@@ -1052,7 +1054,7 @@ def no_gate_asks_less_than_pf_1_1():
     root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     desk = open(os.path.join(root, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     m = re.search(r"export const MIN_PF_FLOOR = ([0-9.]+);", desk)
-    ok = MIN_PF_FLOOR == 1.1 and all(v is not None and v + 1e-12 >= 1.1 for v in got.values()) and bool(m) and float(m.group(1)) == MIN_PF_FLOOR
+    ok = MIN_PF_FLOOR == 1.05 and all(v is not None and v + 1e-12 >= 1.05 for v in got.values()) and bool(m) and float(m.group(1)) == MIN_PF_FLOOR
     return ok, f"{got}; desk floor {m and m.group(1)}"
 
 
@@ -1109,6 +1111,59 @@ def sets_with_few_orders_are_judged_when_the_minimum_is_off():
     return ok, f"valid off {len(v0)} (with under 25 orders {len(few0)}, n<min {len(short0)}); valid at minimum 25 {len(v25)} (under 25 orders {len(few25)}, n<min {len(short25)})"
 
 
+def hold_auto_tape_is_causal():
+    """causal_hold_tape: an order comes from the hold that was chosen at its entry, judged on the orders closed before it. A candidate
+    hold that is poor early and strong late replaces the reference only for the orders opened after it became the better one; the
+    old rule (the hold chosen now applied to the whole tape) took its early losses too. The choice now equals hold_choice_at(+inf)."""
+    from set_engine import causal_hold_tape, hold_choice_at, prefix_sums, HOLD_AUTO_MARGIN
+    cf = 0.0012
+    # reference: alternating +0.3 % / -0.2 % net (PF 1.5); the 20-minute hold: 15 losing orders, then 15 strong ones; an order every 10 min
+    ref = [(1000.0 + 600 * k + 300, "S", "LONG", 0, (0.003 if k % 2 else -0.002) + cf, 300.0, "tp", "x") for k in range(30)]
+    alt = [(1000.0 + 600 * k + 300, "S", "LONG", 0, (-0.004 if k < 15 else 0.01) + cf, 300.0, "time", "x") for k in range(30)]
+    cands = [(0, ref), (20, alt)]
+    tape = causal_hold_tape(cands, 50, 8, HOLD_AUTO_MARGIN, cf)
+    from_alt = [r for r in tape if r[6] == "time"]
+    prefix = []
+    for _h, rows in cands:
+        g, l_ = prefix_sums([r[4] - cf for r in rows])
+        prefix.append(([r[0] for r in rows], g, l_))
+    now_choice = hold_choice_at(cands, prefix, float("inf"), 50, 8, HOLD_AUTO_MARGIN)
+    first_alt_entry = min(r[0] - r[5] for r in from_alt) if from_alt else None
+    # the alt hold is chosen only once its orders before the entry beat the reference: never for the first 15 orders' entries
+    ok = (len(tape) == 30 and now_choice == 1 and from_alt and all(r[4] > 0 for r in from_alt)
+          and first_alt_entry is not None and first_alt_entry > alt[14][0])
+    return ok, f"orders {len(tape)}; from the 20-min hold {len(from_alt)} (all winners {all(r[4] > 0 for r in from_alt)}), first entry {first_alt_entry}; choice now {now_choice}"
+
+
+def effective_pf_per_entry_counts_each_entry_once():
+    """pfBase.baseEntry: a pack's Sets trade the same entries (they differ in their exits), so the pooled effective PF counts one entry
+    once per Set that holds it. The per-entry figure counts every entry (symbol, entry minute, pack, side) once, with the result of its
+    best-ranked Set; it equals the pool when no entry is shared and differs when a lucky entry sits in several Sets' windows."""
+    b = _book(n_syms=1, bars=300, setMinPf=1.0, stagesEnabled=False, mainGateEnabled=False, **SMALL)
+    a_, c_ = [x for x in b.by_idx if x.kind == "base" and x.pack == b.packs[0]][:2]
+    def rows(sid, wins_first):
+        out = []
+        for k in range(10):
+            win = (k < 6) if wins_first else (k >= 4)
+            out.append({"t": 1000.0 + 600 * k, "symbol": "S", "side": "LONG", "pnl": 0.0, "pnl_pct": (0.004 if win else -0.002) + 0.0012,
+                        "hold_s": 300.0, "reason": "x", "set_id": sid})
+        return out
+    for x in b.by_idx:
+        x.active, x.gate_n, x.gate_pf, x.hist = False, 0, 0.0, []
+    for x, first in ((a_, True), (c_, True)):              # the same ten entries in both Sets' windows
+        x.hist = rows(x.id, first)
+        x.active, x.locked, x.last_error, x.max_dd_s, x.gate_n = True, False, "", 0.0, 10
+        x.gate_gp, x.gate_gl = 6 * 0.004, 4 * 0.002
+        x.gate_pf, x.gate_pf_old, x.gate_pf_new = 3.0, 3.0, 3.0
+    snap = b.snapshot()["pfBase"]
+    shared = snap["baseEntry"]
+    c_.hist = [dict(r, t=r["t"] + 60.0) for r in c_.hist]   # now the second Set's entries are its own
+    apart = b.snapshot()["pfBase"]["baseEntry"]
+    ok = (snap["base"]["sets"] == 2 and shared["entries"] == 10 and shared["orders"] == 20 and shared["setsPerEntry"] == 2.0
+          and abs(shared["pf"] - 3.0) < 1e-3 and apart["entries"] == 20 and apart["setsPerEntry"] == 1.0)
+    return ok, f"pooled {snap['base']}; shared entries {shared}; separate entries {apart}"
+
+
 CHECKS = [
     ("processing.sim-gate-equals-the-engine-for-every-window-configuration", sim_gate_equals_the_engine_for_every_window_configuration),
     ("processing.stage-figures-average-the-valid-sets-and-report-the-validated-share", stage_figures_average_the_valid_sets_and_report_the_validated_share),
@@ -1145,10 +1200,12 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
+    ("processing.hold-auto-tape-is-causal", hold_auto_tape_is_causal),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
     ("processing.real-gate-per-set-at-the-base-minimum-pf", real_gate_is_per_set_at_the_base_minimum_pf),
     ("processing.no-gate-asks-less-than-pf-1.1", no_gate_asks_less_than_pf_1_1),
     ("processing.stage-pools-count-every-set-that-passed-base", stage_pools_count_every_set_that_passed_base),
+    ("processing.effective-pf-per-entry-counts-each-entry-once", effective_pf_per_entry_counts_each_entry_once),
     ("processing.every-validation-gate-asks-the-base-minimum-pf", every_validation_gate_asks_the_base_minimum_pf),
     ("processing.pre-history-grows-when-sets-lack-orders", pre_history_grows_when_too_many_sets_lack_orders),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),

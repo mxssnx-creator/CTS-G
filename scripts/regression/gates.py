@@ -333,7 +333,43 @@ def default_max_drawdown_time_is_24_hours():
     return ok, f"engine default {bare.max_ddt_h:g} h; 12 -> {o12.max_ddt_h:g}, 36 -> {o36.max_ddt_h:g}, 49 -> {odd.max_ddt_h:g}; overlays {sorted(set(shipped.values()))}; desk {desk}"
 
 
+def every_window_asks_the_minimum_pf_of_its_size():
+    """Minimum PF by window size (minPfBySize, default on): up to 5 orders Micro 1.05, up to 10 Minimal 1.08, up to 20 Short 1.12, up to
+    35 Medium 1.25, above Long 1.5; the Base long window (50) asks 1.5, the Base short (25) and Main static (25) 1.25, the Real window (15)
+    1.12, the Main short windows 5 / 10 1.05 / 1.08. Off: setMinPf for every window. A class is never under MIN_PF_FLOOR (1.05)."""
+    import set_engine as se
+    from position_cost import MIN_PF_FLOOR
+    b = SetBook(); b.load(overlay(minPfBySize=True))
+    got = {n: b.floor_for(n, "indications") for n in (1, 5, 6, 10, 15, 20, 25, 35, 36, 50)}
+    want = {1: 1.05, 5: 1.05, 6: 1.08, 10: 1.08, 15: 1.12, 20: 1.12, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}
+    off = SetBook(); off.load(overlay(minPfBySize=False, setMinPf=1.3))
+    low = SetBook(); low.load(overlay(minPfBySize=True, minPfMicro=0.9))
+    P = b.stage_params("indications")
+    # stage verdicts: Real 15 at PF 1.15 passes (Short 1.12); Main static 25 at PF 1.2 fails (Medium 1.25); Main short 5 at 1.06 passes (Micro)
+    win15 = [0.0023] * 10 + [-0.004] * 5                 # PF 1.15 over 15: passes the Short class (1.12)
+    win15_low = [0.0022] * 10 + [-0.004] * 5             # PF 1.10: fails it
+
+    def pf(v):
+        g = sum(x for x in v if x > 0); l_ = -sum(x for x in v if x < 0)
+        return g / l_ if l_ else 99.0
+    m25 = [0.0024] * 15 + [-0.0024] * 10                 # PF 1.5 over 25: passes the Medium class (1.25)
+    v = se.stage_verdicts(main=m25, real=win15, realneg=[], short_n=5, P=P)
+    v_low = se.stage_verdicts(main=m25, real=win15_low, realneg=[], short_n=5, P=P)
+    # the Base gate on the long window: PF 1.4 over 50 fails, 1.5 passes
+    st = next(x for x in b.by_idx if x.kind == "base")
+    st.active, st.locked, st.last_error, st.gate_n, st.max_dd_s = True, False, "", 50, 0.0
+    st.gate_pf = 1.4
+    long_14 = b.gate_reason(st)
+    st.gate_pf = 1.5
+    st.base_short_n, st.base_short_pf = 25, 1.3
+    long_15 = b.gate_reason(st)
+    ok = (got == want and all(off.floor_for(n, "indications") == 1.3 for n in (5, 15, 50)) and low.floor_for(3, "x") == MIN_PF_FLOOR
+          and abs(pf(win15) - 1.15) < 1e-9 and v["real"] is True and v_low["real"] is False and v["main"] is True and long_14 == "pf<min" and long_15 not in ("pf<min", "short"))
+    return ok, f"floors {got}; off {off.floor_for(5, 'x')}; micro 0.9 -> {low.floor_for(3, 'x')}; Real 15 at 1.15 {v['real']}, at 1.10 {v_low['real']}; long 1.4 '{long_14}', 1.5 '{long_15}'"
+
+
 CHECKS = [
+    ("gates.every-window-asks-the-minimum-pf-of-its-size", every_window_asks_the_minimum_pf_of_its_size),
     ("gates.base-minimal-window-positive-and-negative", base_minimal_window_positive_and_negative),
     ("gates.main-short-windows-are-at-most-half-of-the-long-window", main_short_windows_are_at_most_half_of_the_long_window),
     ("gates.main-minimal-window-positive-and-negative", main_minimal_window_positive_and_negative),

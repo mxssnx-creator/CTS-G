@@ -89,8 +89,8 @@ export function capSymbols(list: string[]): string[] {
 }
 // Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
 export const GATE_MIN_PF_DEFAULT = 1.25;
-// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.1).
-export const MIN_PF_FLOOR = 1.1;
+// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.05).
+export const MIN_PF_FLOOR = 1.05;
 const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
@@ -264,6 +264,17 @@ export type PulseOverlay = {
   stageFullWindow: boolean;
   /** Base: the second last N; both Base windows must pass (0 = off). */
   setGateShortN: number;
+  /** Minimum PF by window size: every last-N window asks the PF of its class (Micro / Minimal / Short / Medium up to their bounds, Long above). */
+  minPfBySize: boolean;
+  minPfMicro: number;
+  minPfMinimal: number;
+  minPfShort: number;
+  minPfMedium: number;
+  minPfLong: number;
+  minPfMicroN: number;
+  minPfMinimalN: number;
+  minPfShortN: number;
+  minPfMediumN: number;
   /** The short window is at most this share of the long window (default 0.5: long 40, short at most 20). */
   setGateShortMaxRatio: number;
   /** Base minimal window: the newest N (1-3) results of a Set must all be positive / negative (0 = off). */
@@ -483,6 +494,16 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stagesEnabled: true,
   stageFullWindow: false,
   setGateShortN: 25,
+  minPfBySize: true,
+  minPfMicro: 1.05,
+  minPfMinimal: 1.08,
+  minPfShort: 1.12,
+  minPfMedium: 1.25,
+  minPfLong: 1.5,
+  minPfMicroN: 5,
+  minPfMinimalN: 10,
+  minPfShortN: 20,
+  minPfMediumN: 35,
   setGateShortMaxRatio: 0.5,
   setGateMinN: 0,
   setGateMinMode: "positive",
@@ -666,6 +687,16 @@ export type CtsSettings = {
   stagesEnabled?: boolean;
   stageFullWindow?: boolean;
   setGateShortN?: number;
+  minPfBySize?: boolean;
+  minPfMicro?: number;
+  minPfMinimal?: number;
+  minPfShort?: number;
+  minPfMedium?: number;
+  minPfLong?: number;
+  minPfMicroN?: number;
+  minPfMinimalN?: number;
+  minPfShortN?: number;
+  minPfMediumN?: number;
   setGateShortMaxRatio?: number;
   setGateMinN?: number;
   setGateMinMode?: string;
@@ -898,6 +929,16 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stagesEnabled: bool(cts.stagesEnabled, true),
     stageFullWindow: bool(cts.stageFullWindow, false),
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
+    minPfBySize: bool(cts.minPfBySize, true),
+    minPfMicro: pfFloor(num(cts.minPfMicro, 1.05)),
+    minPfMinimal: pfFloor(num(cts.minPfMinimal, 1.08)),
+    minPfShort: pfFloor(num(cts.minPfShort, 1.12)),
+    minPfMedium: pfFloor(num(cts.minPfMedium, 1.25)),
+    minPfLong: pfFloor(num(cts.minPfLong, 1.5)),
+    minPfMicroN: Math.max(1, Math.round(num(cts.minPfMicroN, 5))),
+    minPfMinimalN: Math.max(1, Math.round(num(cts.minPfMinimalN, 10))),
+    minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
+    minPfMediumN: Math.max(1, Math.round(num(cts.minPfMediumN, 35))),
     setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
     setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
     setGateMinMode: minMode(cts.setGateMinMode),
