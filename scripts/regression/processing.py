@@ -453,6 +453,97 @@ def effective_pf_is_pooled_over_valid_sets_only():
                 f"over {snap['unfiltered']['sets']}; validated {snap['validatedPct']}% ({snap['valid']}/{snap['total']}) packs={list(packs)}")
 
 
+def stage_figures_average_the_valid_sets_and_report_the_validated_share():
+    """pfBase.stages gives, per stage (Base, Main, Real, Real Negative, every valid Set), how many Sets pass it, their share of ALL configured Sets,
+    the pooled PF of those Sets' own window orders and the mean of their own PFs. Rebuilt here from each Set's own gross profit and loss: a figure
+    taken over all Sets (the overall average) or over the wrong stage's Sets fails."""
+    b = _book(n_syms=3, bars=900, **SMALL)
+    b.replay_all(now=T0)
+    b.min_pf = 0.3                                   # a low floor so that Sets pass each stage on this synthetic tape
+    for st in b.by_idx:
+        b._score_one(st)
+    snap = b.snapshot()["pfBase"]
+    stg = snap["stages"]
+    from set_engine import STAGE_REASONS, RANK_PF_CAP, pf_of
+    reasons = {x.id: b.gate_reason(x) for x in b.by_idx}
+    base_only = [x for x in b.by_idx if reasons[x.id] in ("",) + STAGE_REASONS]
+    main_pass = [x for x in base_only if (x.stage or {}).get("main") and (x.stage or {}).get("auto")]
+    valid = [x for x in b.by_idx if not reasons[x.id]]
+    pos = [x for x in valid if b.lane_of(x) == "pos"]
+    neg = [x for x in valid if b.lane_of(x) == "neg"]
+    total = len(b.by_idx)
+
+    def want(sts, gp, gl):
+        gps, gls = sum(getattr(x, gp) for x in sts), sum(getattr(x, gl) for x in sts)
+        pfs = [min(RANK_PF_CAP, pf_of(getattr(x, gp), getattr(x, gl))) for x in sts]
+        return len(sts), round(100.0 * len(sts) / total, 2), round(pf_of(gps, gls), 4), round(sum(pfs) / len(pfs), 4) if pfs else 0.0
+    rows = {"base": (base_only, "gate_gp", "gate_gl"), "main": (main_pass, "main_gp", "main_gl"), "real": (pos, "exe_gp", "exe_gl"),
+            "realNeg": (neg, "neg_gp", "neg_gl"), "valid": (valid, "gate_gp", "gate_gl")}
+    bad = {k: (got, w) for k, (sts, gp, gl) in rows.items()
+           for got, w in [((stg[k]["sets"], stg[k]["pct"], stg[k]["pf"], stg[k]["meanPf"]), want(sts, gp, gl))] if got != w}
+    allsets = pf_of(sum(x.gate_gp for x in b.by_idx), sum(x.gate_gl for x in b.by_idx))
+    ok = (not bad and stg["allSets"] == total and 0 < stg["valid"]["sets"] <= stg["real"]["sets"] + stg["realNeg"]["sets"] <= stg["main"]["sets"] + stg["realNeg"]["sets"]
+          and 0 < stg["main"]["sets"] <= stg["base"]["sets"] < total
+          and stg["valid"]["pf"] == snap["base"]["pf"] and abs(stg["base"]["pf"] - round(allsets, 4)) > 1e-9)
+    return ok, (f"sets / % of {total} / pooled PF / mean PF per stage: " + "; ".join(f"{k} {stg[k]['sets']} / {stg[k]['pct']}% / {stg[k]['pf']} / {stg[k]['meanPf']}" for k in rows)
+                + f"; all-Sets PF {allsets:.3f}; mismatches {bad}")
+
+
+def sim_gate_equals_the_engine_for_every_window_configuration():
+    """The walk-forward simulator's direct gate (stage_eval.gate_metrics) and the engine (SetBook._score_one / gate_reason / lane_of / rank_key) give the same
+    verdict, lane, window figures and rank for sampled (Set, hour) pairs under every window configuration: the Base long / short / minimal windows (1-3 results,
+    positive and negative), Main static and Auto, Real (down to 1), the Negative windows (1,2 and 5,10), both window rules and the stages off. Each configuration
+    is loaded into its own SetBook: no state is shared between them."""
+    import json as _json
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", ""))
+    import stage_eval as sg
+    from common import SMALL, T0, synth_bars
+    names = ["S0-USDT", "S1-USDT"]
+    bars = {s_: synth_bars(21 + i, 1100, drift=0.0006 if i % 2 == 0 else -0.0006, vol=0.003) for i, s_ in enumerate(names)}
+    times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
+    base_patch = {**SMALL, "holdEnabled": False, "histLookbackBars": 500, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+                  "setGateWindow": 20, "setGateShortN": 8, "mainGateN": 8, "mainAutoWindows": [4], "realGateN": 4, "setMaxDdtHours": 36, "setGateMinTrades": 0}
+    saved = _os.environ.get("STAGE_OVERLAY_PATCH")
+    try:
+        _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps(base_patch)
+        shadow = {}
+        for s_ in names:
+            _, warm, dirs, confs, out = sg._symbol_job((s_, bars[s_], times[s_][0]))
+            shadow[s_] = (warm, dirs, confs, out)
+        configs = {
+            "shipped stages": {},
+            "minimal +1": {"setGateMinN": 1}, "minimal +2": {"setGateMinN": 2}, "minimal +3": {"setGateMinN": 3},
+            "minimal -1": {"setGateMinN": 1, "setGateMinMode": "negative"}, "minimal -2": {"setGateMinN": 2, "setGateMinMode": "negative"},
+            "minimal -3": {"setGateMinN": 3, "setGateMinMode": "negative"},
+            "minimal -2 full windows": {"setGateMinN": 2, "setGateMinMode": "negative", "stageFullWindow": True},
+            "Real 1, Negative 1,2": {"realGateN": 1, "mainNegWindows": "1,2"}, "Real 5, Negative 1,2, minimal +1": {"realGateN": 5, "mainNegWindows": "1,2", "setGateMinN": 1},
+            "full windows": {"stageFullWindow": True}, "no short window": {"setGateShortN": 0, "setGateMinN": 2},
+            "Main static 12, Auto 5": {"mainGateN": 12, "mainAutoWindows": [5, 6]}, "long 30, short 12": {"setGateWindow": 30, "setGateShortN": 12},
+            "stages off": {"stagesEnabled": False},
+        }
+        res = {}
+        for label, extra in configs.items():
+            _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps({**base_patch, **extra})
+            book = sg.make_book()
+            book.min_pf = 0.6                                   # a low floor so that Sets pass each window on this synthetic tape
+            tapes = sg.Tapes(book, names, times, shadow)
+            start = max(times[s_][0] for s_ in names) + book.lookback * 60
+            end = min(times[s_][-1] for s_ in names)
+            hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
+            n_chk, bad = sg.self_check(book, tapes, hours, samples=36)
+            valid_share = sum(1 for st in book.by_idx for h in hours[::3] if sg.gate_metrics(book, tapes, st, h)[0]) / max(1, len(book.by_idx) * len(hours[::3]))
+            res[label] = (n_chk, bad, round(100 * valid_share, 1))
+    finally:
+        if saved is None:
+            _os.environ.pop("STAGE_OVERLAY_PATCH", None)
+        else:
+            _os.environ["STAGE_OVERLAY_PATCH"] = saved
+    bad_all = {k: v for k, v in res.items() if v[1] or v[0] < 20}
+    return not bad_all, f"{len(res)} configurations, {sum(v[0] for v in res.values())} sampled pairs, mismatches {bad_all or 0}; valid share % " + ", ".join(f"{k}: {v[2]}" for k, v in res.items())
+
+
 def the_signal_memo_holds_one_entry_per_bar_for_every_pack():
     """pack_signals memoises each bar's signals under that bar's window key. An extra pack's loop once reused the memo key name
     and stored every bar under one entry: no hit was ever possible. One entry per scored bar, and a second pass reads them."""
@@ -868,12 +959,15 @@ def real_gate_is_per_set_at_the_base_minimum_pf():
     after = (st_.main_pf, st_.main_n, b_.gate_reason(st_))
     # the execution pool holds only Sets that pass both
     # fewer orders than N: Base is satisfied (window 40, minimum 8) but the Set has only 20 orders for a Real N of 30
-    b20 = _book(n_syms=1, bars=300, mainGateEnabled=True, mainGateN=30, setGateWindow=40, setGateMinTrades=8, **MAIN_ONLY)
-    s20 = next(x for x in b20.by_idx if x.kind == "base" and x.pack == b20.packs[0])
-    s20.hist = [dict(zip(("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id"), (1000.0 + 60 * k, "S0-USDT", "LONG", 0.0028, 0.004, 600.0, "tp", s20.id))) for k in range(20)]
-    s20.live = []
-    b20._score_one(s20)
-    out["20 orders, Real N 30"] = (s20.gate_n, s20.main_n, b20.gate_reason(s20))
+    def short_tape(full):
+        b20 = _book(n_syms=1, bars=300, mainGateEnabled=True, mainGateN=30, setGateWindow=40, setGateMinTrades=8, stageFullWindow=full, **MAIN_ONLY)
+        s20 = next(x for x in b20.by_idx if x.kind == "base" and x.pack == b20.packs[0])
+        s20.hist = [dict(zip(("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id"), (1000.0 + 60 * k, "S0-USDT", "LONG", 0.0028, 0.004, 600.0, "tp", s20.id))) for k in range(20)]
+        s20.live = []
+        b20._score_one(s20)
+        return s20.gate_n, s20.main_n, b20.gate_reason(s20)
+    out["20 orders, Real N 30"] = short_tape(True)                       # the strict rule: the window must hold its 30 orders
+    out["20 orders, Real N 30, available"] = short_tape(False)           # the default: judged on the 20 it has
     floor3 = _book(n_syms=1, bars=300, mainGateN=3)                        # an N under the floor is read as 8
     out["Real N 3"] = floor3.main_n
     b2, st2, _ = judged(True, bad)
@@ -883,6 +977,7 @@ def real_gate_is_per_set_at_the_base_minimum_pf():
     ok = (out["boundary 1.25"] == "" and out["just under"] == "main" and out["bad last 12"] == "main" and out["bad, Real off"] == ""
           and out["min PF 1.5 moves Real too"] in ("pf<min", "main") and out["N=8"][0] == 8 and before == after
           and out["20 orders, Real N 30"][0] == 20 and out["20 orders, Real N 30"][1] < 30 and out["20 orders, Real N 30"][2] == "main"
+          and out["20 orders, Real N 30, available"][2] == ""
           and out["Real N 3"] == 8
           and st2.id in pool_off and st2.id not in pool_on and "main" in snap and "real" in snap and "baseOnly" in snap)
     return ok, f"reasons {out}; other Set left it alone={before == after}; pool off/on holds the Set={st2.id in pool_off}/{st2.id in pool_on}; pfBase keys {sorted(snap)[:6]}"
@@ -1009,6 +1104,8 @@ def sets_with_few_orders_are_judged_when_the_minimum_is_off():
 
 
 CHECKS = [
+    ("processing.sim-gate-equals-the-engine-for-every-window-configuration", sim_gate_equals_the_engine_for_every_window_configuration),
+    ("processing.stage-figures-average-the-valid-sets-and-report-the-validated-share", stage_figures_average_the_valid_sets_and_report_the_validated_share),
     ("processing.few-order-sets-judged-when-the-minimum-is-off", sets_with_few_orders_are_judged_when_the_minimum_is_off),
     ("processing.broken-or-flat-series-not-replayed", broken_or_flat_series_are_not_replayed),
     ("processing.base-lane-lookup-equals-walk", base_lane_lookup_equals_the_walk),

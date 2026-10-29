@@ -96,45 +96,52 @@ def _grid_fixture():
             for R in (15, 25):
                 cell(L, S, 25, R, real_third=True, **({"main_third": True} if R == 15 else {}))
             cell(L, S, 15, 15, main_third=True)
+            for R in (1, 5):
+                cell(L, S, 25, R, real_third=True, neg="1,2")             # the Negative windows 1,2 and the ongoing windows 1 and 5
+            cell(L, S, 25, 15, real_third=True, min_n=2, min_mode="negative")      # the Base minimal window: the newest 2 results all negative
     for L in (20, 30):
         cell(L, None, None, None, stages=False)
     trap = next(c for c in cells if c["id"] == "L20_S5_M25_R25")      # a higher PF on twenty orders: under the floor, never "best"
     trap.update({"exec_pf": 9.9, "exec_orders": 20})
     meta = {"symbols": ["A-USDT", "B-USDT"], "hours": [1_800_000_000 + 3600 * h for h in range(24)], "lookback_bars": 1440, "prehistory_h": 24.0,
             "bars_per_symbol": 3180, "created": 1_800_100_000, "order_floor": 150, "shipped": {"long": 30, "short": 10, "main": 25, "real": 15},
-            "longs": [20, 30], "shorts": [5, 10], "mains": [15, 25], "reals": [15, 25], "main_default": 25, "real_default": 15, "min_orders": 0,
+            "longs": [20, 30], "shorts": [5, 10], "mains": [15, 25], "reals": [1, 5, 15, 25], "main_default": 25, "real_default": 15, "min_orders": 0,
+            "negs": ["5,10", "1,2"], "neg_default": "5,10",
+            "minimals": [{"n": 0, "mode": "", "label": "off"}, {"n": 2, "mode": "negative", "label": "-2"}],
             "max_ddt_h": 24.0, "min_pf": 1.25, "cost_pct": 0.12, "sets": 1538, "self_check": [{"cell": "x", "samples": 10, "bad": 0}], "hold": "off"}
     return {"meta": meta, "cells": cells}
 
 
 def window_grid_html_has_heatmap_and_best_cell():
-    """The window-grid report renders every staged cell once per heatmap panel (2 thirds x 7 metrics), marks exactly one best cell per panel (the
-    highest executed PF among cells with at least the order floor: a higher PF on 20 orders is not ranked), flags the shipped cell, writes n/a
-    where the short window is not under the long window, embeds the data as valid JSON and makes no external request."""
+    """The window-grid report renders every staged cell once per heatmap panel (thirds x Negative-window sets x Base minimal windows), each cell carrying the
+    figures of every metric, marks exactly one best cell per panel that holds cells (the highest executed PF among cells with at least the order floor: a
+    higher PF on 20 orders is not ranked), flags the shipped cell, writes n/a where the short window is not allowed, embeds the data as valid JSON and makes
+    no external request."""
     import window_grid_report as WG
     data = _grid_fixture()
     page = WG.render(data)
     staged = [c for c in data["cells"] if c["stages"]]
-    panels = re.findall(r'<section class="panel" data-third="(\w+)" data-metric="(\w+)" hidden>(.*?)</section>', page, re.S)
-    per_panel = {(t, m): body for t, m, body in panels}
-    real_ids = {c["id"] for c in staged if c.get("real_third")}
-    ok = len(panels) == 14
-    for (t, m), body in per_panel.items():
+    neg_of = lambda c: c.get("neg") or "5,10"  # noqa: E731
+    panels = re.findall(r'<section class="panel" data-third="(\w+)" data-neg="([^"]+)" data-min="([^"]+)" hidden>(.*?)</section>', page, re.S)
+    ok = len(panels) == 2 * 2 * 2
+    want_best, got_best = [], []
+    for t, neg, mn, body in panels:
+        ok = ok and all(len(v.split("|")) == len(WG.METRICS) for v in re.findall(r'data-v="([^"]+)"', body))
         ids = re.findall(r'data-cell="([^"]+)"', body)
-        want = {c["id"] for c in staged if c.get("real_third" if t == "real" else "main_third")}
-        ok = ok and set(ids) == want and len(ids) == len(want)
-    best = re.findall(r'data-cell="([^"]+)" data-best="1"', page)
-    ranked_real = sorted([c for c in staged if c.get("real_third") and c["exec_orders"] >= 150], key=lambda c: (c["exec_pf"], c["exec_orders"]), reverse=True)
-    ranked_main = sorted([c for c in staged if c.get("main_third") and c["exec_orders"] >= 150], key=lambda c: (c["exec_pf"], c["exec_orders"]), reverse=True)
-    want_best = [ranked_real[0]["id"]] * 7 + [ranked_main[0]["id"]] * 7
-    ok = ok and sorted(best) == sorted(want_best) and "L20_S5_M25_R25" not in best
+        in_panel = [c for c in staged if c.get("real_third" if t == "real" else "main_third") and neg_of(c) == neg and WG.min_label(c) == mn]
+        ok = ok and set(ids) == {c["id"] for c in in_panel} and len(ids) == len(in_panel)
+        ranked = sorted([c for c in in_panel if c["exec_orders"] >= 150], key=lambda c: (c["exec_pf"], c["exec_orders"]), reverse=True)
+        want_best += [ranked[0]["id"]] if ranked else []
+        got_best += re.findall(r'data-cell="([^"]+)" data-best="1"', body)
+    ok = ok and sorted(got_best) == sorted(want_best) and len(want_best) >= 4 and "L20_S5_M25_R25" not in got_best
     ship_cells = set(re.findall(r'<td class="cell[^"]*\bship\b[^"]*" data-cell="([^"]+)"', page))
-    ok = ok and "†" in page and "n/a" in page and ship_cells == {"L30_S10_M25_R15"}
+    ok = ok and "†" in page and "n/a" in page and ship_cells == {"L30_S10_M25_R15"} and 'data-neg="1,2"' in page and 'data-min="-2"' in page \
+        and "Mean exec PF" in page and "Best cell per Negative windows" in page
     emb = re.search(r'<script type="application/json" id="data">(.*?)</script>', page, re.S)
     emb_ok = bool(emb) and {c["id"] for c in json.loads(emb.group(1).replace("<\\/", "</"))["cells"]} == {c["id"] for c in data["cells"]}
     external = re.findall(r'(?:src|href)=["\']https?://|url\(https?://|@import', page)
     ok = ok and emb_ok and not external
-    return ok, f"panels={len(panels)} best per panel={sorted(set(best))} embedded={emb_ok} external={external} real cells={len(real_ids)}"
+    return ok, f"panels={len(panels)} best markers={len(got_best)} (want {len(want_best)}) embedded={emb_ok} external={external}"
 
 
 CHECKS = [

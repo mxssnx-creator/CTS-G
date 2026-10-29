@@ -615,6 +615,11 @@ function SettingsPage() {
                   Main dip). Execution uses Sets that pass Real; their orders mirror to the exchange.
                 </p>
                 <Toggle label="Stages after Base (off: the Base long window alone)" on={overlay.stagesEnabled !== false} onChange={(v) => patch("stagesEnabled", v)} />
+                <Toggle
+                  label="Stage windows need their full N orders (off, default: a window judges the orders it has, at least one; on: a Set with fewer never passes Main or Real)"
+                  on={overlay.stageFullWindow === true}
+                  onChange={(v) => patch("stageFullWindow", v)}
+                />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
                 <Slider
                   label="Base · long window (last N orders)"
@@ -627,12 +632,41 @@ function SettingsPage() {
                 />
                 <Slider
                   label="Base · short window (last N orders)"
-                  value={overlay.setGateShortN}
+                  value={Math.min(overlay.setGateShortN, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
                   min={0}
-                  max={25}
+                  max={Math.max(5, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
                   step={5}
-                  hint="the second Base window, 0 = off · tested 5-25 step 5, the best is the default"
+                  hint={`the second Base window, 0 = off · at most ${Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)} with the long window ${overlay.setGateWindow} and the ratio below · tested 5-25 step 5`}
                   onChange={(v) => patch("setGateShortN", v)}
+                />
+                <Slider
+                  label="Base · minimal window (newest results)"
+                  value={overlay.setGateMinN}
+                  min={0}
+                  max={3}
+                  step={1}
+                  hint="the third Base window, 0 = off · the newest 1-3 results of the Set's own orders must all be positive (or all negative, below)"
+                  onChange={(v) => patch("setGateMinN", v)}
+                />
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Base · minimal window results</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.setGateMinMode}
+                    onChange={(e) => patch("setGateMinMode", e.target.value === "negative" ? "negative" : "positive")}
+                  >
+                    <option value="positive">positive (every one of the newest results above zero)</option>
+                    <option value="negative">negative (every one of the newest results below zero)</option>
+                  </select>
+                </label>
+                <Slider
+                  label="Base · short window max share of the long window"
+                  value={overlay.setGateShortMaxRatio}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  hint="default 0.5 (50 %): long 40 allows a short window of at most 20; the engine clamps the short window to this share"
+                  onChange={(v) => patch("setGateShortMaxRatio", v)}
                 />
                 <Slider
                   label="Base · min orders"
@@ -655,11 +689,20 @@ function SettingsPage() {
                   onChange={(v) => patch("mainGateN", v)}
                 />
                 <Toggle label="Main · Auto window (each Set picks its own; both Main windows must pass)" on={overlay.mainAutoEnabled !== false} onChange={(v) => patch("mainAutoEnabled", v)} />
+                <Slider
+                  label="Main · Auto window max share of the static window"
+                  value={overlay.mainAutoMaxRatio}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  hint="default 0.5 (50 %): static 25 allows Auto windows of at most 12; candidates above it are dropped by the engine"
+                  onChange={(v) => patch("mainAutoMaxRatio", v)}
+                />
                 <WindowChips
                   label="Main · Auto candidates"
                   value={overlay.mainAutoWindows}
                   options={[5, 10, 15, 20, 25]}
-                  hint="default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set"
+                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainAutoMaxRatio + 1e-9)} with the static window ${overlay.mainGateN} and the share below`}
                   onChange={(v) => patch("mainAutoWindows", v)}
                 />
                 <Slider
@@ -684,8 +727,8 @@ function SettingsPage() {
                 <WindowChips
                   label="Main · Negative windows"
                   value={overlay.mainNegWindows}
-                  options={[5, 10]}
-                  hint="default 5 and 10 · the average of the last N Main orders below zero, for some N, makes the Set's Real Negative Set"
+                  options={[1, 2, 5, 10]}
+                  hint="default 5 and 10 · the average of the last N Main orders below zero, for some N, makes the Set's Real Negative Set (1 and 2: the last one or two results)"
                   onChange={(v) => patch("mainNegWindows", v)}
                 />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Real · evals and overall strategies · Active execution and mirroring to the exchange</div>
@@ -693,7 +736,7 @@ function SettingsPage() {
                 <Slider
                   label="Real · last N orders"
                   value={overlay.realGateN}
-                  min={3}
+                  min={1}
                   max={50}
                   step={1}
                   hint="default 15 · single window, on the Real Set (positive lane) and on the Real Negative Set (Negative lane)"

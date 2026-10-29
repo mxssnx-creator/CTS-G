@@ -167,12 +167,19 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 - **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
   **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
-  15, 0 = off; tested 5-25 step 5, `scripts/trade_sim.py --patch`), plus minimum orders and drawdown time. Reason `short` for the short one.
+  15, 0 = off; tested 5-25 step 5, `scripts/trade_sim.py --patch`), plus minimum orders and drawdown time. Reason `short` for the short one. A third Base window, the
+  **minimal** window (`setGateMinN` 0 = off, 1-3; `setGateMinMode` positive / negative; reason `minimal`): the newest N results of the Set's own tape (net after
+  PositionCost) must all be positive (or all negative); judged on the results it has unless `stageFullWindow`; at most the short window; part of the chain
+  (`set_engine.minimal_ok`), the simulator (`stage_eval.gate_base`) and the desk Settings (`gates.base-minimal-window-...`, `set-base-minimal-window-equals-the-rules`,
+  `processing.sim-gate-equals-the-engine-for-every-window-configuration`, `base minimal:` mutants). The short window
+  is at most `setGateShortMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the long window: long 40 allows at most 20, long 20 at most 10 (`gates.short-window-is-at-most-half-of-the-long-window`, `short window:` mutants).
 - **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
   (`<id>:main`) holds the orders it opened while Base passed (both windows, each judged on the Set's own closes before that entry). Two
   windows on the Main Set, both must pass: static `mainGateN` (25, owner 2026-10-29, reason `main`) and Auto (`mainAutoEnabled`: each Set picks from
   `mainAutoWindows` 5/10/15 (owner 2026-10-29) the window whose past verdicts were followed by the best PF on its own Main Set; a candidate needs
-  `mainAutoMin` (8) orders and `mainAutoMargin` (1.02) x the static result, like `_choose_hold`; `st.main_auto_n`, reason `mainauto`).
+  `mainAutoMin` (8) orders and `mainAutoMargin` (1.02) x the static result, like `_choose_hold`; `st.main_auto_n`, reason `mainauto`). The Auto windows are at
+  most `mainAutoMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the static window, the same rule as the Base short window: static 25 keeps 5 and 10, drops 15
+  (`gates.main-auto-windows-are-at-most-half-of-the-static-window`, `main auto:` mutants).
 - **Main Negative lane** (separate, `mainNegEnabled`): the average net of the last 5 or the last 10 Main-Set orders (`mainNegWindows`) is
   negative. Its orders form the **Real Negative Set** (`<id>:realneg`), with its own Real validation, stats and rank.
 - **Real stage** (evals and overall strategies): the **Real Set** (`<id>:real`) holds the Main-Set orders opened while both Main windows
@@ -182,6 +189,38 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **Active execution**: `pick_any` takes only Sets valid through Real on a lane (`SetBook.lane_of`), the positive lane first, then the
   Real Negative lane; the position carries its lane (`pos.lane`, client id nonce marker `CID_NEG_MARK`), a live close joins only its own
   lane's Real Set, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
+- **Stage windows judge the orders their lane has** (2026-10-29, `stageFullWindow` false, the default; true = the strict rule): the Base short
+  window, the Main static and Auto windows, Real and Real Negative each judge the newest N orders of their lane, at least one, at the minimum PF.
+  The strict rule (a window must hold its full N) was a hidden minimum order count: a Set needed 25 Main orders before its first Real order and
+  15 Real orders after, so on a sparse live book nothing reached Real. Measured on x02 (28 Oct, 1,234 configured Sets): 725 passed Base, 558 stopped at
+  Main, 449 of those for lack of orders (median 18 Main orders in the 32 h lookback, 172 of them at PF 1.25 or more on the orders they had); of the 109 with
+  25 or more, none reached 1.25 (median Main PF 0.94). On dense tapes (20 symbols, 24 h) the two rules differ by under 0.02 executed PF. Real last N and
+  the Negative windows go down to 1 (`realGateN` 1..200, `mainNegWindows` such as 1,2; the Main static window keeps its floor of 8).
+  Checks `set-stage-windows-judge-the-orders-available`, `gates.stage-short-window-...`, `gates.stage-windows-accept-one-and-two`, `stage windows:` mutants.
+- **Stage figures** (`pfBase.stages`, desk "Stages" card, coverage strip): per stage (Base, Main, Real, Real Negative, valid on any lane) the Sets that
+  pass it, their share of all configured Sets, the pooled PF of those Sets' window orders and the mean of their own PFs. Never an average over all Sets
+  (`processing.stage-figures-average-the-valid-sets-...`, `stats stages:` mutants).
+- Measured, stage audit (`scripts/stage_audit.py`, 20 live-universe symbols, fresh 24 h test after 24 h pre-history, Base 50/15, Main 25 + Auto, Real 15;
+  `reports/stage_audit_24h.txt`): PF of the lanes in the test window, Base Sets (whole tape) 0.855 on 2.39 M orders, Main Sets 0.892 on 221,560, Real Sets
+  1.000 on 56,627, Real Negative Sets 0.887 on 131,966. By type (Base / Main / Real): trailing 0.894 / 1.032 / 1.254, exit 0.927 / 0.921 / 0.969, base (TP)
+  0.797 / 0.769 / 0.770; by category general 0.911 / 0.996 / 1.090, indications 0.816 / 0.787 / 0.853; by step range 2-6 0.615 / 0.889 / 0.997, 7-12 0.843 /
+  0.915 / 1.043, 13-20 0.885 / 0.925 / 1.085, 21-30 0.906 / 0.857 / 0.919. The Sets valid at an hour start read 1.64 in-sample (after Base alone, 270 Sets an
+  hour) and 0.88 on their next hour's orders (373,090 orders); after every gate 1.84 against 0.89 (56 Sets an hour, 69,825 orders): the drop after
+  selection is the in-sample gap, not a stage fault, and the stages do not close it. Only trailing Sets hold above 1 on their next orders (1.02 after Base,
+  1.19 after every gate); base (TP) 0.76 / 0.73 and exit 0.86 / 0.73 fall further after the stages; indications base and exit Sets in 13-30 and general exit 21-30
+  are the groups that lose most (0.64-0.78 next hour). Live x02, 485 closes (27-29 Oct): all on the Set lane, none closed by an Exit strategy or the
+  coordinator, PF net of cost 1.04.
+- Measured, window grid (`scripts/window_grid.py`, report `reports/window_grid_24h.html`, relations `scripts/grid_relations.py`; 20 live-universe symbols, fresh 24 h test after
+  24 h pre-history, hold Auto off, Main static 25 + Auto 5/10; 788 cells, each its own independent group of SetBooks; every cell's orders, net and PF agree however they are
+  cut): Base long 20/30/40/50 x short 5-25 (at most half the long window) x Base minimal window off / +1 / +2 / +3 / -1 / -2 / -3 x Real last N 1/5/15/25 x Negative
+  windows 5,10 / 1,2. Mean executed PF over the cells that carry the value (orders per cell, validated share): minimal off 0.937 (1,603, 4.45 %), +1 0.891, +2 0.908, +3 0.906,
+  -1 0.974 (1,620, 1.19 %), -2 0.950 (911), -3 0.855 (465, 0.10 %): requiring the newest result(s) to be negative lifts the mean, requiring them positive lowers it
+  (mean reversion, not momentum, on these tapes). Negative windows 1,2 0.916 against 5,10 0.920; Real N 1/5/15/25 0.923 / 0.919 / 0.917 / 0.912 (validated 3.14 / 2.06 /
+  1.71 / 1.57 %); Base long 20/30/40/50 0.868 / 0.915 / 0.926 / 0.934 (effective PF 2.02 / 1.80 / 1.66 / 1.60); Base short 5/10/15/20/25 0.918 / 0.913 / 0.927 / 0.923 / 0.897.
+  The shipped setting (50 / 15 / 25 / Real 15, Negative 5,10, minimal off) 0.968 on 1,365 orders. Best cells (chosen on the same 24 h, so in-sample for the choice):
+  long 50 short 5 Real 5 minimal -2 1.157 on 654 orders (halves 1.165 / 1.103), long 30 short 5 Real 25 minimal -1 1.121 on 1,740 (1.142 / 1.076), long 50 short 25 Real 5
+  Negative 1,2 1.099 on 1,629 (1.149 / 1.010); 104 of 755 cells with 150 or more orders reach 1.00. One window, a few hundred to a few thousand orders per cell: a gap of
+  0.05 between marginal means is noise, the order of -1 against +1 is the only stable shape; read it on a second window before shipping a minimal window.
 - One chain function, `set_engine.stage_chain` (each stage reads only the lane the stage before it built; each lane a subset of the one
   before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
   `realId/N/Pf`, `realNegId/N/Pf`, `shortPf`, `autoN`, `lane`; `pfBase`: `base`, `baseOnly`, `main`, `processed`, `real`, `realneg`,

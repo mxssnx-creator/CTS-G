@@ -41,6 +41,7 @@ export type LanePfDetail = {
   pf?: number;
   costPct?: number;
   netPct?: number;
+  netSumPct?: number;
   grossPct?: number;
 };
 
@@ -68,6 +69,8 @@ export type LiveClosed = {
 /** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
  * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
 export type PfPool = { pf: number; n: number; sets: number };
+/** One stage's figures over the Sets that pass it (`pfBase.stages`): `n` is the window orders behind the PF, `orders` all orders of the stage's Set. */
+export type StageFigure = { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };
 export type PfBase = {
   /** The end figure: the pool of the Sets that pass every gate (Base and Main). */
   base: PfPool;
@@ -82,6 +85,8 @@ export type PfBase = {
   /** Real stage, Negative lane: the Real Negative Sets of the Sets valid on it. */
   realneg?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
   stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
+  /** Per stage, over the Sets that pass it (never over all Sets): how many, their share of every configured Set, the pooled PF and the mean of their own PFs. */
+  stages?: Record<"base" | "main" | "real" | "realNeg" | "valid", StageFigure> & { allSets: number };
   validatedBasePct?: number;
   unfiltered: PfPool;
   total?: number;
@@ -475,6 +480,7 @@ export type LiveStats = {
     pf?: number;
     costPct?: number;
     netPct?: number;
+    netSumPct?: number;
     grossPct?: number;
     minPf?: number;
     pass?: boolean;

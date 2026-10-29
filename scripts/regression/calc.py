@@ -280,7 +280,52 @@ def report_window_is_chronological():
     return ok, f"report last15={got} newest15={want} export_newest_first={blob['closed'][0]['t'] == max(r['t'] for r in rows)}"
 
 
+def net_sum_mean_and_pf_share_one_basis():
+    """The window's PF, its net (summed over its positions) and its mean net per position come from the same net results: PF above 1 exactly when the net
+    is positive, the net is the PF's gross profit less its gross loss, and the mean times the count is the sum. Recomputed here from the gross fractions."""
+    rng = random.Random(4)
+    bad = []
+    for case in range(60):
+        n = rng.randint(3, 40)
+        gross = [rng.choice((0.0, 0.002, 0.004, -0.003, -0.0015, 0.0012)) + rng.uniform(-0.0004, 0.0004) for _ in range(n)]
+        rows = [{"pnl_pct": g, "pnl": 1.0} for g in gross]
+        m = last_n_cost_pf(rows, 25, COST)
+        win = gross[-25:]
+        nets = [ref_net(g, COST) for g in win]
+        gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+        net_sum = 100.0 * (gp - gl)
+        ok = (abs(m["netSumPct"] - net_sum) < 1e-3 and abs(m["netPct"] * m["count"] - net_sum) < 1e-3 * m["count"] + 1e-3
+              and abs(m["netPct"] - net_sum / len(win)) < 1e-3
+              and ((m["pf"] > 1.0) == (net_sum > 0) or abs(net_sum) < 1e-4))
+        if not ok:
+            bad.append((case, m["pf"], m["netSumPct"], round(net_sum, 4), m["netPct"]))
+    return not bad, f"60 random windows: PF, summed net and mean net per position agree; mismatches {bad[:3]}"
+
+
+def stage_summary_orders_pf_net_and_hours_share_one_basis():
+    """stage_eval.summarize reports the orders opened in the window: its PF, its net, its mean net per order and its hours positive all read those same
+    orders, and an hour is the hour a position was opened in (a position that leaves after the window end adds no hour of its own)."""
+    import stage_eval as sg
+    H = 3600.0
+    rows = [{"hour": 0.0, "valid": 1, "total": 10}]
+    nets = [0.004, -0.002, 0.003, -0.001, 0.002, -0.0025]
+    t_in = [10.0, 20.0, H + 10, H + 20, 2 * H - 5, 2 * H - 4]             # the last two open in hour 1 and leave in hour 2 (after the window end)
+    for i, (net, tin) in enumerate(zip(nets, t_in)):
+        rows.append({"t": tin + (3 * H if i >= 4 else 60.0), "t_in": tin, "net": net, "legs": []})
+    r = sg.summarize(rows, 0.0, 2 * H, False)
+    gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+    hours = {}
+    for x, tin in zip(nets, t_in):
+        hours[int(tin // H)] = hours.get(int(tin // H), 0.0) + x
+    pos = sum(1 for v in hours.values() if v > 0)
+    ok = (r["orders"] == 6 and r["pf"] == round(gp / gl, 3) and r["net_pct"] == round(100 * (gp - gl), 2)
+          and abs(r["net_per_order_pct"] - round(100 * (gp - gl) / 6, 4)) < 1e-9 and r["hours_positive"] == f"{pos}/{len(hours)}" and len(hours) == 2)
+    return ok, f"orders {r['orders']} PF {r['pf']} net {r['net_pct']}% ({r['net_per_order_pct']}% per order) hours positive {r['hours_positive']} (want {pos}/{len(hours)})"
+
+
 CHECKS = [
+    ("calc.net-sum-mean-and-pf-share-one-basis", net_sum_mean_and_pf_share_one_basis),
+    ("calc.stage-summary-orders-pf-net-and-hours-share-one-basis", stage_summary_orders_pf_net_and_hours_share_one_basis),
     ("calc.net-is-gross-minus-one-cost", net_is_gross_minus_one_cost),
     ("calc.cost-deducted-exactly-once", cost_deducted_exactly_once),
     ("calc.r-formula-and-identity", r_units_and_identity),

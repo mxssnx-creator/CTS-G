@@ -16,7 +16,7 @@ export const PULSE_SYMBOLS = [
 /** A list of last-N windows (2..200), sorted and unique; the fallback when empty (set_engine.parse_windows). */
 export function windows(raw: unknown, fallback: number[]): number[] {
   const src = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[,;]/) : [];
-  const out = [...new Set(src.map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x)).map((x) => Math.max(2, Math.min(200, x))))];
+  const out = [...new Set(src.map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x)).map((x) => Math.max(1, Math.min(200, x))))];
   return out.length ? out.sort((a, b) => a - b) : [...fallback];
 }
 
@@ -260,13 +260,22 @@ export type PulseOverlay = {
   setGateMinTrades: number;
   /** Stages Base -> Main -> Real (off: the Base long window alone). */
   stagesEnabled: boolean;
+  /** true: a stage window judges only once it holds its full N orders; false (default): the orders it has, at least one. */
+  stageFullWindow: boolean;
   /** Base: the second last N; both Base windows must pass (0 = off). */
   setGateShortN: number;
+  /** The short window is at most this share of the long window (default 0.5: long 40, short at most 20). */
+  setGateShortMaxRatio: number;
+  /** Base minimal window: the newest N (1-3) results of a Set must all be positive / negative (0 = off). */
+  setGateMinN: number;
+  setGateMinMode: "positive" | "negative";
   mainGateEnabled: boolean;
   mainGateN: number;
   /** Main Auto: each Set picks its own window from these on its Main Set. */
   mainAutoEnabled: boolean;
   mainAutoWindows: number[];
+  /** The Auto windows are at most this share of the Main static window (default 0.5: static 25, Auto at most 12). */
+  mainAutoMaxRatio: number;
   mainAutoMin: number;
   mainAutoMargin: number;
   /** Main Negative lane: the average of the last N Main orders below zero (for some N) opens the Real Negative lane. */
@@ -469,11 +478,16 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setGateWindow: 50,
   setGateMinTrades: 0,
   stagesEnabled: true,
+  stageFullWindow: false,
   setGateShortN: 15,
+  setGateShortMaxRatio: 0.5,
+  setGateMinN: 0,
+  setGateMinMode: "positive",
   mainGateEnabled: true,
   mainGateN: 25,
   mainAutoEnabled: true,
   mainAutoWindows: [5, 10, 15],
+  mainAutoMaxRatio: 0.5,
   mainAutoMin: 8,
   mainAutoMargin: 1.02,
   mainNegEnabled: true,
@@ -645,9 +659,14 @@ export type CtsSettings = {
   mainGateEnabled?: boolean;
   mainGateN?: number;
   stagesEnabled?: boolean;
+  stageFullWindow?: boolean;
   setGateShortN?: number;
+  setGateShortMaxRatio?: number;
+  setGateMinN?: number;
+  setGateMinMode?: string;
   mainAutoEnabled?: boolean;
   mainAutoWindows?: number[];
+  mainAutoMaxRatio?: number;
   mainAutoMin?: number;
   mainAutoMargin?: number;
   mainNegEnabled?: boolean;
@@ -859,17 +878,22 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
     setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
     stagesEnabled: bool(cts.stagesEnabled, true),
+    stageFullWindow: bool(cts.stageFullWindow, false),
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 15)))),
+    setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
+    setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
+    setGateMinMode: String(cts.setGateMinMode ?? "positive").toLowerCase() === "negative" ? "negative" : "positive",
     mainGateEnabled: bool(cts.mainGateEnabled, true),
     mainGateN: Math.max(8, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
     mainAutoEnabled: bool(cts.mainAutoEnabled, true),
     mainAutoWindows: windows(cts.mainAutoWindows, [5, 10, 15]),
+    mainAutoMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainAutoMaxRatio, 0.5))),
     mainAutoMin: Math.max(3, Math.min(200, Math.round(num(cts.mainAutoMin, 8)))),
     mainAutoMargin: Math.max(1, Math.min(2, num(cts.mainAutoMargin, 1.02))),
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
     realGateEnabled: bool(cts.realGateEnabled, true),
-    realGateN: Math.max(3, Math.min(200, Math.round(num(cts.realGateN, 15)))),
+    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 15)))),
     realStagePaper: bool(cts.realStagePaper, true),
     minPfLinked: bool(cts.minPfLinked, true),
     histLookbackAuto: bool(cts.histLookbackAuto, true),

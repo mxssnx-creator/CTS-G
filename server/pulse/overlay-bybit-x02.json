@@ -190,6 +190,10 @@
   "histLookbackMax": 2880,
   "stagesEnabled": true,
   "setGateShortN": 15,
+  "setGateShortMaxRatio": 0.5,
+  "setGateMinN": 0,
+  "setGateMinMode": "positive",
+  "mainAutoMaxRatio": 0.5,
   "mainAutoEnabled": true,
   "mainAutoWindows": [
     5,

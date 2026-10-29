@@ -179,6 +179,7 @@ def last_n_cost_pf(
             gp += net
         elif net < 0:
             gl += abs(net)
+    net_sum_pct = 100.0 * (gp - gl)       # the window's net result, the sum over its positions (percent of one position): the same net the PF divides
     count = len(rs)
     avg_r = sum(rs) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
@@ -191,8 +192,9 @@ def last_n_cost_pf(
         "ratio": round(ratio, 4),
         "pf": round(pf, 4),
         "costPct": float(cost_pct),
-        "netPct": round(net_move_pct(ratio, cost_pct), 4),
+        "netPct": round(net_move_pct(ratio, cost_pct), 4),            # the mean net per position (percent): netSumPct / count
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+        "netSumPct": round(net_sum_pct, 4),
         "skipped": float(skipped),
     }
 

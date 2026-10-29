@@ -27,6 +27,7 @@ if (!supportsStripTypes) {
 const files = [
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
+  "src/lib/analytics.test.ts",
   "src/lib/poll.test.ts",
   "src/lib/sets-view.test.ts",
   "src/lib/live-stats.test.ts",

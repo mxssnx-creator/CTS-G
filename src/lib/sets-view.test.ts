@@ -11,6 +11,7 @@ import {
   pfByStep,
   rangeById,
   rankRows,
+  stageFigures,
   stepHistogram,
   stepOf,
   summarize,
@@ -145,4 +146,27 @@ test("a PF for display: a window without a loss reads no loss, not 99.00; missin
   assert.equal(formatPf(undefined), "—");
   assert.equal(formatPf(Number.NaN), "—");
   assert.equal(formatPf(98.99), "98.99");
+});
+
+test("stage figures show the Sets that pass each stage, their share of all Sets and their own PF (never the overall average)", () => {
+  const fig = (sets: number, pct: number, pf: number, meanPf: number, n: number) => ({ sets, pct, pf, meanPf, n, orders: n });
+  const rows = stageFigures({
+    stages: {
+      base: fig(558, 45.22, 1.6995, 1.71, 27900),
+      main: fig(0, 0, 0, 0, 0),
+      real: fig(0, 0, 0, 0, 0),
+      realNeg: fig(3, 0.24, 0.91, 0.9, 75),
+      valid: fig(3, 0.24, 0.91, 0.9, 75),
+      allSets: 1234,
+    },
+  });
+  assert.deepEqual(rows.map((r) => r.key), ["base", "main", "real", "realNeg", "valid"]);
+  assert.equal(rows[0].sets, 558);
+  assert.equal(rows[0].pct, 45.22);
+  assert.equal(rows[0].pf, 1.6995);
+  assert.equal(rows[1].pf, null, "a stage nobody passes has no PF, not 0.00 and not the overall figure");
+  assert.equal(rows[1].meanPf, null);
+  assert.equal(rows[3].orders, 75);
+  assert.deepEqual(stageFigures(undefined), []);
+  assert.deepEqual(stageFigures({}), []);
 });

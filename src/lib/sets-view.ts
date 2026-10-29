@@ -8,6 +8,8 @@
  * "Trailing" together they equal `sets.pfBase`; a test pins that.
  */
 
+import type { PfBase } from "./live-stats.ts";
+
 /** One Set of `sets.index`. The gate-window fields are what the pooled PF needs; the others fill the table. */
 export type SetIndexRow = {
   i: number;
@@ -218,6 +220,29 @@ export function pfByStep(
   return [...by.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([step, rs]) => ({ step, pf: pooledPf(rs), valid: rs.length, orders: rs.reduce((a, r) => a + Number(r.gn ?? 0), 0) }));
+}
+
+export type StageRow = { key: string; label: string; sets: number; pct: number; pf: number | null; meanPf: number | null; orders: number };
+
+const STAGE_LABELS: Array<[StageRow["key"], string]> = [
+  ["base", "Base · long + short window"],
+  ["main", "Main · static + Auto window"],
+  ["real", "Real · positive lane"],
+  ["realNeg", "Real Negative lane"],
+  ["valid", "Valid on any lane"],
+];
+
+/**
+ * The stage figures the stats show: for each stage the Sets that pass it, their share of ALL configured Sets and the PF of those Sets only
+ * (pooled over their window orders, and the mean of their own PFs). A stage nobody passes has no PF ("—"), never the overall average.
+ */
+export function stageFigures(pb: Pick<PfBase, "stages"> | null | undefined): StageRow[] {
+  const st = pb?.stages;
+  if (!st) return [];
+  return STAGE_LABELS.map(([key, label]) => {
+    const r = st[key as "base" | "main" | "real" | "realNeg" | "valid"];
+    return { key, label, sets: r.sets, pct: r.pct, pf: r.sets > 0 ? r.pf : null, meanPf: r.sets > 0 ? r.meanPf : null, orders: r.n };
+  });
 }
 
 /** A PF for display: a window without a loss has no finite PF (the engine reports 99), so it reads "no loss" rather than 99.00. */

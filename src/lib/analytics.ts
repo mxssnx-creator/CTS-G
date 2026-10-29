@@ -35,8 +35,11 @@ export type CostPfMetric = {
   ratio: number;
   pf: number;
   costPct: number;
+  /** Mean net result per position, percent (netSumPct / count). */
   netPct: number;
   grossPct: number;
+  /** Net result of the window, summed over its positions (percent of one position): the net the PF divides. */
+  netSumPct: number;
   minPf: number;
   pass: boolean;
 };
@@ -194,6 +197,7 @@ export function lastNCostPf(
     costPct,
     netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
     grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),
+    netSumPct: round(100 * (gp - gl)),
     minPf,
     pass: count < 8 || pf + 1e-9 >= minPf,
   };
