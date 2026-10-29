@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import bisect
 import json
+from array import array
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -276,6 +277,17 @@ class StageParams:
     base_min_positive: bool = True  # setGateMinMode: positive = every one of them above zero after PositionCost, negative = every one below zero
     main_min_n: int = 0             # Main: the minimal window (mainMinN, 0 = off): the newest 1-3 results of the Main Set must all be positive / negative
     main_min_positive: bool = True  # mainMinMode
+    size_floors: Tuple[Tuple[int, float], ...] = ()   # minimum PF by window size: ((up to N orders, PF), ...) ascending; empty = floor for every window
+    long_floor: float = 0.0         # the minimum PF of a window longer than the last bound
+
+    def floor_for(self, n: int) -> float:
+        """The minimum PF a window of n orders asks (minPfBySize: Micro / Minimal / Short / Medium / Long), or the one floor."""
+        if not self.size_floors:
+            return self.floor
+        for lim, pf in self.size_floors:
+            if n <= lim:
+                return pf
+        return self.long_floor
 
 
 NEG_EPS = 1e-12                  # a Negative window's sum is below zero when it is under -NEG_EPS (a window of results that cancel exactly is not negative, whatever the float rounding of a prefix-sum difference says)
@@ -315,6 +327,44 @@ def _base_tail_ok(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[flo
     return max_s < max_dd_s
 
 
+def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequence[Tuple[List[float], List[float], List[float]]], t: float,
+                   max_n: int, min_n: int, margin: float) -> int:
+    """Index of the hold candidate chosen at time t (the Auto Mode's rule on the orders closed before t: the reference, cands[0],
+    unless a candidate with min_n orders beats it by the margin and is the best). prefix[c] = (exit times, gain prefix, loss prefix)."""
+    def pf_n(c: int) -> Tuple[float, int]:
+        ts, g, l_ = prefix[c]
+        e = bisect.bisect_left(ts, t)
+        s0 = max(0, e - max_n)
+        gp, gl = g[e] - g[s0], l_[e] - l_[s0]
+        return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
+    ref_pf, _ = pf_n(0)
+    best, best_pf = 0, ref_pf
+    for c in range(1, len(cands)):
+        pf, n = pf_n(c)
+        if n >= min_n and pf > best_pf and pf >= ref_pf * margin:
+            best, best_pf = c, pf
+    return best
+
+
+def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
+    """The hold Auto Mode's tape, causal: every candidate's order whose entry fell while that candidate was the chosen hold (chosen on
+    the orders closed before the entry, hold_choice_at), in exit order. cands = [(hold, rows)], the reference first; rows are the
+    replay's tuples (exit t at 0, pnl_pct at 4, hold_s at 5)."""
+    prefix = []
+    for _h, rows in cands:
+        ts = [finite(r[0]) for r in rows]
+        nets = [finite(r[4]) - cf for r in rows]
+        g, l_ = prefix_sums(nets)
+        prefix.append((ts, g, l_))
+    out: List[tuple] = []
+    for c, (_h, rows) in enumerate(cands):
+        for r in rows:
+            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:
+                out.append(r)
+    out.sort(key=_row_t)
+    return out
+
+
 def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float], P: StageParams) -> Dict[str, Any]:
     """A Base Set's chain of Sets, as indices into its tape (exit time ascending; ents: entry times; nets: net results).
       main     the Main Set: the orders opened while Base passed on the raw tape before each entry (the long window, its minimum
@@ -334,7 +384,8 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     bis = bisect.bisect_left
     lb, full = P.lookback_s, P.full_window
     bl, bs, bm = P.base_long, P.base_short, P.base_min_n
-    gm, floor = P.gate_min, P.floor
+    gm, floor = P.gate_min, P.floor_for(bl)            # every window asks the minimum PF of its own size (P.floor_for)
+    floor_s = P.floor_for(bs) if bs else floor
     s_need, m_need = (bs if full else 1), (bm if full else 1)
     pos_pre = neg_pre = None
     if bm:
@@ -364,7 +415,7 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
             t0 = e - bs
             if t0 < lo:
                 t0 = lo
-            if e - t0 < s_need or pf_of(gpre[e] - gpre[t0], lpre[e] - lpre[t0]) + 1e-9 < floor:
+            if e - t0 < s_need or pf_of(gpre[e] - gpre[t0], lpre[e] - lpre[t0]) + 1e-9 < floor_s:
                 continue
         if bm:
             t0 = e - bm
@@ -392,13 +443,14 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
         v = vec.get(w)
         if v is None:
             need = w if full else 1
+            floor_w = P.floor_for(w)
             v = []
             for j in range(m):
                 e = me[j]
                 s0 = e - w
                 if s0 < mlo[j]:
                     s0 = mlo[j]
-                v.append(e - s0 >= need and pf_of(mg[e] - mg[s0], ml[e] - ml[s0]) + 1e-9 >= floor)
+                v.append(e - s0 >= need and pf_of(mg[e] - mg[s0], ml[e] - ml[s0]) + 1e-9 >= floor_w)
             vec[w] = v
         return v
 
@@ -489,7 +541,7 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     def last_ok(v: Sequence[float], n: int) -> Tuple[bool, float, int]:
         w = list(v[-n:]) if n > 0 else []
         pf = round(pf_of(sum(x for x in w if x > 0), -sum(x for x in w if x < 0)), 4)
-        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor, pf, len(w)
+        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor_for(n), pf, len(w)
     m_ok, m_pf, m_n = last_ok(main, P.main_n)
     s_ok, s_pf, s_n = last_ok(main, short_n) if P.short_on else (True, m_pf, m_n)
     if P.main_min_n:
@@ -947,6 +999,52 @@ class Progress:
 
 
 _ROW_KEYS = ("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id")
+_CODES: List[str] = []                 # the words of the side and exit-reason columns (a handful: LONG, SHORT, tp, sl, time, ...)
+_CODE_IX: Dict[str, int] = {}
+_CODE_LOCK = threading.Lock()
+
+
+def _code(word: str) -> int:
+    i = _CODE_IX.get(word)
+    if i is None:
+        with _CODE_LOCK:
+            i = _CODE_IX.get(word)
+            if i is None:
+                if len(_CODES) >= 255:
+                    raise ValueError("more than 255 distinct row words")
+                _CODES.append(word)
+                i = _CODE_IX[word] = len(_CODES) - 1
+    return i
+
+
+class RowCols:
+    """One Set's replay rows of one symbol, stored as columns (about 34 bytes a row instead of about 200 for a tuple of eight with its
+    float objects): exit time, pnl, pnl_pct and hold as doubles, side and reason as one-byte codes, symbol and Set id once. It reads
+    as the sequence of row tuples it replaces (len, iteration, index), so every reader of the replay rows stays as it was."""
+    __slots__ = ("t", "pnl", "pct", "hold", "side", "reason", "symbol", "set_id")
+
+    def __init__(self, rows: Sequence[Dict[str, Any]]) -> None:
+        self.t, self.pnl, self.pct, self.hold = array("d"), array("d"), array("d"), array("d")
+        self.side, self.reason = bytearray(), bytearray()
+        self.symbol = str(rows[0]["symbol"]) if rows else ""
+        self.set_id = str(rows[0]["set_id"]) if rows else ""
+        for r in rows:
+            self.t.append(float(r["t"]))
+            self.pnl.append(float(r["pnl"]))
+            self.pct.append(float(r["pnl_pct"]))
+            self.hold.append(float(r["hold_s"]))
+            self.side.append(_code(str(r["side"])))
+            self.reason.append(_code(str(r["reason"])))
+
+    def __len__(self) -> int:
+        return len(self.t)
+
+    def __getitem__(self, k: int) -> tuple:
+        return (self.t[k], self.symbol, _CODES[self.side[k]], self.pnl[k], self.pct[k], self.hold[k], _CODES[self.reason[k]], self.set_id)
+
+    def __iter__(self):
+        for k in range(len(self.t)):
+            yield self[k]
 
 
 def _row_t(r: Tuple[Any, ...]) -> float:
@@ -1383,6 +1481,9 @@ class SetBook:
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = GATE_MIN_PF_DEFAULT
         self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
+        self.pf_by_size = True
+        self.size_floors: Tuple[Tuple[int, float], ...] = ((5, 1.05), (10, 1.08), (20, 1.12), (35, 1.25))
+        self.size_long_pf = 1.5
         self.consistency_pf = 0.0
         self.pf_history: List[Dict[str, Any]] = []
         self._adapt_pending: Optional[List[Any]] = None
@@ -1503,6 +1604,15 @@ class SetBook:
         self.consistency_pf = float(cons) if cons is not None else 0.0     # 0 = off
         sr_min = ov.get("shortRangeMinPf")
         self.pack_min_pf = {SHORT_PACK: pf_floor(sr_min, SHORT_MIN_PF_DEFAULT)}
+        # minimum PF by window size (owner, 2026-10-29): every last-N window asks the PF of its size class, Micro / Minimal / Short / Medium
+        # up to their order bounds and Long above; minPfBySize off = the one floor (setMinPf, the Short Range floor) for every window
+        self.pf_by_size = bool(ov.get("minPfBySize", True))
+        bounds = [max(1, int(num(ov, k, d))) for k, d in (("minPfMicroN", 5), ("minPfMinimalN", 10), ("minPfShortN", 20), ("minPfMediumN", 35))]
+        for i in range(1, len(bounds)):
+            bounds[i] = max(bounds[i], bounds[i - 1])
+        pfs = [pf_floor(ov.get(k), d) for k, d in (("minPfMicro", 1.05), ("minPfMinimal", 1.08), ("minPfShort", 1.12), ("minPfMedium", 1.25))]
+        self.size_floors = tuple(zip(bounds, pfs))
+        self.size_long_pf = pf_floor(ov.get("minPfLong"), 1.5)
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
         # hours. setMaxDdtHours is 2..36 in steps of 2, default 24. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
@@ -2059,9 +2169,8 @@ class SetBook:
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
                     continue
-                packed = {sid: [(r["t"], r["symbol"], r["side"], r["pnl"], r["pnl_pct"], r["hold_s"], r["reason"], r["set_id"])
-                                for r in rows] for sid, rows in per_set.items() if rows}
-                per_set = {}                          # rows are kept as tuples: about a third of the memory of dicts
+                packed = {sid: RowCols(rows) for sid, rows in per_set.items() if rows}
+                per_set = {}                          # rows are kept as columns (RowCols): about a sixth of the memory of tuples
                 with self._lock:
                     self._hist_rows[symbol] = packed
                 self.progress.bars_done += len(self.bars[symbol])
@@ -2211,20 +2320,35 @@ class SetBook:
 
         ref_pf, ref_n = judge(base)
         best = (ref_pf, 0, base, ref_n)
+        cands = [(0, base)]
         for h in holds:
             rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff)
+            cands.append((h, rows))
             pf, n = judge(rows)
             if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
                 best = (pf, h, rows, n)
+        # the choice now (on every order closed so far) is what a new position opens with
         st.hold_bars, st.hold_auto = best[1], True
         st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
-        return best[2]
+        # the tape the Set is judged on is causal: each order comes from the hold that was chosen at its entry, on the orders closed
+        # before it (as live positions opened); the hold chosen now is never applied to orders opened before the choice existed
+        return causal_hold_tape(cands, self.hold_auto_max, self.hold_auto_min, HOLD_AUTO_MARGIN, cf)
+
+    def floor_for(self, n: int, pack: str) -> float:
+        """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""
+        if self.pf_by_size:
+            for lim, pf in self.size_floors:
+                if n <= lim:
+                    return pf
+            return self.size_long_pf
+        return self.pack_min_pf.get(pack, self.min_pf)
 
     def stage_params(self, pack: str) -> StageParams:
         """The chain's rules for a pack (its own minimum PF floor)."""
         return StageParams(base_long=self.gate_window, base_short=self.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
                            gate_min=self.gate_min,
                            floor=self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s, lookback_s=self.lookback * BAR_S,
+                           size_floors=self.size_floors if self.pf_by_size else (), long_floor=self.size_long_pf,
                            consistency=self.consistency_pf, main_on=self.main_on, main_n=self.main_n, short_on=self.short_on,
                            short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
                            neg_on=self.neg_on, neg_windows=tuple(self.neg_windows), real_on=self.realst_on, real_n=self.realst_n,
@@ -2375,10 +2499,11 @@ class SetBook:
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
         # each Base window on its own (the stage verdict is their conjunction; the per-window figures count each separately)
-        floor_ = self.pack_min_pf.get(st.pack, self.min_pf)
+        floor_ = self.floor_for(self.gate_window, st.pack)                   # every window asks the minimum PF of its own size
         st.base_long_ok = (st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
                            and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
-        st.base_short_ok = bool(self.base_short) and st.base_short_n >= (self.base_short if self.stage_full else 1) and st.base_short_pf + 1e-9 >= floor_
+        st.base_short_ok = (bool(self.base_short) and st.base_short_n >= (self.base_short if self.stage_full else 1)
+                            and st.base_short_pf + 1e-9 >= self.floor_for(self.base_short, st.pack))
         st.source_n = len(tape)
         # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
         st.active = not st.locked
@@ -2399,13 +2524,13 @@ class SetBook:
             return "error"
         if st.gate_n < self.gate_min:
             return "n<min"
-        if st.gate_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf):
+        if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack):
             return "pf<min"
         if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:
             return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
-        if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf)):
+        if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(self.base_short, st.pack)):
             return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
         if self.base_min_n and not st.base_min_ok:
             return "minimal"         # the Base minimal window (setGateMinN): the newest results are not all positive / negative as asked
@@ -2538,7 +2663,7 @@ class SetBook:
            than the same PF on 350;
         3. more orders;
         4. the better recent R, then the shorter drawdown time."""
-        floor = self.pack_min_pf.get(st.pack, self.min_pf)
+        floor = self.floor_for(self.gate_window, st.pack)
         halves = min(st.gate_pf_old, st.gate_pf_new) if (st.gate_pf_old or st.gate_pf_new) else st.gate_pf
         n = max(0, int(st.n))
         shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
@@ -2730,7 +2855,7 @@ class SetBook:
             pv = [x for x in ps if not reasons[x.id]]
             by_pack[pack] = {"base": pool(pv), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv),
                              "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
-                             "minPf": self.pack_min_pf.get(pack, self.min_pf)}
+                             "minPf": self.floor_for(self.gate_window, pack)}
         rgp, rgl = sum(x.main_gp for x in valid), sum(x.main_gl for x in valid)
         main = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.main_n for x in valid), "sets": len(valid),
                 "on": self.main_on, "lastN": self.main_n}
@@ -3374,7 +3499,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
         return rows
     gb = SetBook()
-    gb.load({"positionCostPct": 0.15, "setMinPf": 1.10, "stagesEnabled": False, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    gb.load({"positionCostPct": 0.15, "setMinPf": 1.10, "minPfBySize": False, "stagesEnabled": False, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sg = next(iter(gb.by_idx))
     sg.active = True
     def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:

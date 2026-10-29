@@ -213,5 +213,15 @@
   "realGateEnabled": true,
   "realGateN": 15,
   "realStagePaper": true,
-  "ddHaltBasis": "session"
+  "ddHaltBasis": "session",
+  "minPfBySize": true,
+  "minPfMicro": 1.05,
+  "minPfMinimal": 1.08,
+  "minPfShort": 1.12,
+  "minPfMedium": 1.25,
+  "minPfLong": 1.5,
+  "minPfMicroN": 5,
+  "minPfMinimalN": 10,
+  "minPfShortN": 20,
+  "minPfMediumN": 35
 }

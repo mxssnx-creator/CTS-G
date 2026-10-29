@@ -31,6 +31,16 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("min PF by size: the Real window asks the one floor",
+     "set_engine.py", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor_for(n), pf, len(w)", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor, pf, len(w)"),
+    ("min PF by size: the Base long window asks the one floor",
+     "set_engine.py", "        if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack):", "        if st.gate_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf):"),
+    ("min PF by size: the classes ignore their bounds",
+     "set_engine.py", "        if self.pf_by_size:\n            for lim, pf in self.size_floors:\n                if n <= lim:", "        if self.pf_by_size:\n            for lim, pf in self.size_floors:\n                if True:"),
+    ("hold auto: the hold chosen now judges every order again (hindsight)",
+     "set_engine.py", "            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:", "            if hold_choice_at(cands, prefix, float(\"inf\"), max_n, min_n, margin) == c:"),
+    ("hold auto: the choice reads orders closed after the entry",
+     "set_engine.py", "        ts, g, l_ = prefix[c]\n        e = bisect.bisect_left(ts, t)", "        ts, g, l_ = prefix[c]\n        e = len(ts)"),
     ("relations: I does not invert",
      "indication_rel.py", "        return (lambda rows, d, base, d0: (True, -d)), 0", "        return (lambda rows, d, base, d0: (True, d)), 0"),
     ("relations: T keeps the counter-trend signals",
@@ -163,7 +173,7 @@ MUTATIONS = [
      "set_engine.py", "        base_only = [x for x in allsets if reasons[x.id] in (\"\",) + STAGE_REASONS]", "        base_only = [x for x in allsets if reasons[x.id] in (\"\", \"main\")]"),
     ("indication: the library memo ignores a list that changed in place",
      "indication_lib.py", "    if slot is None or slot[0] is not rows or slot[2] != key:", "    if slot is None or slot[0] is not rows:"),
-    ("min PF: the 1.1 floor is dropped",
+    ("min PF: the 1.05 floor is dropped",
      "position_cost.py", "    return max(MIN_PF_FLOOR, x)", "    return x"),
     ("min PF: Block falls under the floor at a small volume ratio",
      "block_engine.py", "    return max(MIN_PF_FLOOR, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)", "    return 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment"),

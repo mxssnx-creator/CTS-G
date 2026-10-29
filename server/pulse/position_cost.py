@@ -98,7 +98,7 @@ def snap_sl_ratio(value: Any) -> float:
 
 
 GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
-MIN_PF_FLOOR = 1.1           # no validation gate asks less than this net PF, whatever is configured (owner, 2026-10-29)
+MIN_PF_FLOOR = 1.05          # no validation gate asks less than this net PF, whatever is configured (owner, 2026-10-29: Micro windows 1.05)
 
 
 def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:

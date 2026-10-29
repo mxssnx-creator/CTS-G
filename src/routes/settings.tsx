@@ -271,7 +271,7 @@ function SettingsPage() {
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
-                  min={1.1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.minPf, overlay.positionCostPct)}
@@ -592,7 +592,7 @@ function SettingsPage() {
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
-                  min={1.1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
@@ -619,6 +619,46 @@ function SettingsPage() {
                   label="Stage windows need their full N orders (off, default: a window judges the orders it has, at least one; on: a Set with fewer never passes Main or Real)"
                   on={overlay.stageFullWindow === true}
                   onChange={(v) => patch("stageFullWindow", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Minimum PF by window size · every last-N window (Base, Main, Real) asks the PF of its size class</div>
+                <Toggle label="Minimum PF by window size (off = the one Set min PF for every window)" on={overlay.minPfBySize !== false} onChange={(v) => patch("minPfBySize", v)} />
+                {(
+                  [
+                    ["Micro", "minPfMicro", "minPfMicroN", 1.05],
+                    ["Minimal", "minPfMinimal", "minPfMinimalN", 1.08],
+                    ["Short", "minPfShort", "minPfShortN", 1.12],
+                    ["Medium · general / normal", "minPfMedium", "minPfMediumN", 1.25],
+                  ] as const
+                ).map(([name, pfKey, nKey, def]) => (
+                  <div key={pfKey} className="contents">
+                    <Slider
+                      label={`${name} · min PF`}
+                      value={overlay[pfKey]}
+                      min={1.05}
+                      max={2.5}
+                      step={0.01}
+                      hint={`default ${def.toFixed(2)} · windows of up to ${overlay[nKey]} orders`}
+                      onChange={(v) => patch(pfKey, v)}
+                    />
+                    <Slider
+                      label={`${name} · up to N orders`}
+                      value={overlay[nKey]}
+                      min={1}
+                      max={100}
+                      step={1}
+                      hint="the largest window of this class"
+                      onChange={(v) => patch(nKey, v)}
+                    />
+                  </div>
+                ))}
+                <Slider
+                  label="Long · min PF"
+                  value={overlay.minPfLong}
+                  min={1.05}
+                  max={3}
+                  step={0.01}
+                  hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders (the Base long window 50)`}
+                  onChange={(v) => patch("minPfLong", v)}
                 />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
                 <Slider
@@ -802,7 +842,7 @@ function SettingsPage() {
                 <Slider
                   label="Short Range · min PF"
                   value={overlay.shortRangeMinPf}
-                  min={1.1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint="Base PF floor of the Short Range strategy alone (default 1.10, the floor; the other Sets 1.25); the other strategies use the Set min PF above."
@@ -887,7 +927,7 @@ function SettingsPage() {
                 <Slider
                   label="Exit min PF"
                   value={overlay.exitMinPf}
-                  min={1.1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
@@ -1257,7 +1297,7 @@ function SettingsPage() {
                 <Num
                   label="Min PF"
                   value={overlay.dcaMinPf}
-                  min={1.1}
+                  min={1.05}
                   max={1.5}
                   step={0.05}
                   onChange={(v) => patch("dcaMinPf", v)}
@@ -1553,7 +1593,7 @@ function SettingsPage() {
                 <Num label="SL min %" value={overlay.indStopMinPct} min={0.1} max={1} step={0.05} onChange={(v) => patch("indStopMinPct", v)} />
                 <Num label="SL max %" value={overlay.indStopMaxPct} min={0.4} max={3} step={0.05} onChange={(v) => patch("indStopMaxPct", v)} />
                 <Num label="ATR × SL" value={overlay.indAtrMult} min={0.4} max={2} step={0.05} onChange={(v) => patch("indAtrMult", v)} />
-                <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.1} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
+                <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.05} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
                 <KV k="Outbreak ranges" v={arrJoin(cts?.activeOutbreakRanges, "3, 5, 10")} />
                 <KV k="Noise filter" v={String(num(cts?.activeNoiseFilter, 0.05))} />
               </Grid>
