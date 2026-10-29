@@ -251,6 +251,11 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - Measured so far (8 and 30 day walk-forward, 20 symbols): every single indicator has an unfiltered PF of 0.4 to 0.65; the
   effective PF after Base reads 1.3 to 1.7 in-sample and the executed PF of the walk-forward stays under 1 (best 0.87 on 459
   orders). Choose on development windows; do not read these as an edge until an executed PF above 1 holds on the sealed window.
+- Audit of all 880 names (2026-10-29, 6 symbols, development window, average signed gross move after 5 / 15 / 30 bars): 5 reach about
+  the PositionCost after 30 bars (kelt_n8_t5 0.120 %, donch_n21_t5 0.129 %, atrx_n8_t1, brk_n10_t5, brk_n6_t5). As the Breakout pack
+  alone through Base -> Main -> Real (30 days, 20 symbols, development, `trade_sim.py`): the five together executed PF 0.57 on 4,102
+  orders (`reports/edge_near_cost5_dev.txt`); donch_n21_t5 alone 0.80 on 2,547 orders, next 25 orders after a validation 0.79, 20 of 50
+  blocks of 50 orders at PF 1 or more (`reports/edge_donch_n21_t5_dev.txt`), the best single pack measured so far and still under 1.
 
 ## Venues
 
