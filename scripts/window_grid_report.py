@@ -607,14 +607,17 @@ Main long, the Main short window (5/10), the Negative lane and the Real stage ar
 
 def merge(datas: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Several grid files of the same test window in one report: the cells are added (an id twice is an error), the lists of values in the meta are united in
-    first-seen order (a heatmap panel shows n/a where a file has no cell for its combination)."""
+    first-seen order (a heatmap panel shows n/a where a file has no cell for its combination). A reference cell several runs share (Base alone, the shipped
+    setting) is kept once when the runs agree on every figure (the wall-clock `secs` of the run does not count); an id with different figures in two files is refused."""
     out = {"meta": dict(datas[0]["meta"]), "cells": []}
-    seen = set()
+    seen: Dict[str, Dict[str, Any]] = {}
     for d in datas:
         for c in d["cells"]:
             if c["id"] in seen:
-                raise SystemExit(f"cell {c['id']} is in two grid files")
-            seen.add(c["id"])
+                if {k: v for k, v in seen[c["id"]].items() if k != "secs"} != {k: v for k, v in c.items() if k != "secs"}:
+                    raise SystemExit(f"cell {c['id']} is in two grid files with different figures")
+                continue
+            seen[c["id"]] = c
             out["cells"].append(c)
     m = out["meta"]
     for key in ("longs", "shorts", "mains", "reals", "negs"):
