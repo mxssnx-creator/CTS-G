@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from itertools import accumulate, repeat
-from operator import neg
+from operator import le, neg
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from config_num import num
@@ -138,11 +138,23 @@ def step_tp_pct(step: int, cost_pct: float) -> float:
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
+    if v.__class__ is float:                 # the common case (every replayed row): a float is finite when v - v is 0 (NaN and infinity give NaN)
+        return v if v - v == 0.0 else fallback
     try:
         n = float(v)
     except Exception:
         return fallback
     return n if n == n and abs(n) != float("inf") else fallback
+
+
+def by_time(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rows (dicts with a "t") in time order, equal times keeping their order. The replay and the live closes append in time order, so the common case is one
+    pass over the keys and no sort."""
+    keys = [finite(r.get("t")) for r in rows]
+    if all(map(le, keys, keys[1:])):
+        return list(rows)
+    order = sorted(range(len(rows)), key=keys.__getitem__)
+    return [rows[i] for i in order]
 
 
 def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
@@ -216,35 +228,6 @@ def processed_flag(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[fl
     return _base_tail_ok(ts, nets, gpre, lpre, entry_t, e, s0, max_dd_s, consistency)
 
 
-def stage_lanes(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float], gate_window: int, gate_min: int, floor: float,
-                max_dd_s: float, lookback_s: float, consistency: float, stage_ns: Sequence[int]) -> List[List[int]]:
-    """The chain of a Set's lanes, as indices into its tape (exit time ascending; ents are the entry times). Lane 0: the orders it
-    opened while it passed Base, judged on its raw tape before each entry (processed_flag). Lane j (j >= 1): the orders of lane
-    j - 1 whose entry also passed stage j, which reads only lane j - 1: at least stage_ns[j - 1] of lane j - 1's orders closed
-    before the entry (within the lookback), their net PF over the newest stage_ns[j - 1] at or above floor. Each stage is its own
-    Set built from the one before; the last lane is what the Set would have executed after every gate."""
-    gpre, lpre = prefix_sums(nets)
-    lane = [k for k in range(len(ts))
-            if processed_flag(ts, nets, gpre, lpre, ents[k], gate_window, gate_min, floor, max_dd_s, lookback_s, 0, consistency)]
-    lanes = [lane]
-    for n_ in stage_ns:
-        prev = lanes[-1]
-        lt = [ts[k] for k in prev]
-        lg, ll = prefix_sums([nets[k] for k in prev])
-        nxt = []
-        for k in prev:
-            e = bisect.bisect_left(lt, ents[k])
-            lo = bisect.bisect_left(lt, ents[k] - lookback_s)
-            s0 = max(lo, e - n_)
-            if e - s0 < n_:
-                continue
-            g, l_ = lg[e] - lg[s0], ll[e] - ll[s0]
-            if (g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)) + 1e-9 >= floor:
-                nxt.append(k)
-        lanes.append(nxt)
-    return lanes
-
-
 def _alias(ov: Dict[str, Any], key: str, old: str) -> Any:
     """ov[key] when present, else the value under its earlier name `old` (a renamed overlay key still loads from files written before the rename)."""
     v = ov.get(key)
@@ -295,31 +278,8 @@ class StageParams:
     main_min_positive: bool = True  # mainMinMode
 
 
-def _window_ok(lt: Sequence[float], lg: Sequence[float], ll: Sequence[float], entry_t: float, n: int, floor: float,
-               lookback_s: float, full: bool = False) -> bool:
-    """The newest n orders of a lane that closed before entry_t (within the lookback) have a net PF at or above floor. A lane with fewer
-    than n orders is judged on the orders it has (at least one) unless full: then the window must hold its n orders. A stage that
-    demanded n prior orders at every step would be a hidden minimum order count: on sparse tapes no Set ever filled Main and Real."""
-    e = bisect.bisect_left(lt, entry_t)
-    s0 = max(bisect.bisect_left(lt, entry_t - lookback_s), e - n)
-    return e - s0 >= (n if full else 1) and pf_of(lg[e] - lg[s0], ll[e] - ll[s0]) + 1e-9 >= floor
-
-
-def _window_neg(lt: Sequence[float], lsum: Sequence[float], entry_t: float, n: int, lookback_s: float) -> bool:
-    """At least n orders of a lane closed before entry_t (within the lookback) and their net sum over the newest n below zero."""
-    e = bisect.bisect_left(lt, entry_t)
-    s0 = max(bisect.bisect_left(lt, entry_t - lookback_s), e - n)
-    return e - s0 >= n and lsum[e] - lsum[s0] < 0
-
-
-def minimal_ok(lt: Sequence[float], nets: Sequence[float], entry_t: float, n: int, positive: bool, lookback_s: float, full: bool = False) -> bool:
-    """The minimal window (Base: a Set's own tape, Main: its Main Set): the newest n results (net after PositionCost) of the lane that closed before
-    entry_t, within the lookback, are all positive (or all negative). Fewer than n results: the ones it has (at least one), or none judged unless full."""
-    e = bisect.bisect_left(lt, entry_t)
-    s0 = max(bisect.bisect_left(lt, entry_t - lookback_s), e - n)
-    if e - s0 < (n if full else 1):
-        return False
-    return all(x > 0 for x in nets[s0:e]) if positive else all(x < 0 for x in nets[s0:e])
+NEG_EPS = 1e-12                  # a Negative window's sum is below zero when it is under -NEG_EPS (a window of results that cancel exactly is not negative, whatever the float rounding of a prefix-sum difference says)
+SHORT_EPS = 1e-12                # the Main short window's choice compares PFs with this tolerance (equal included sets read equal whatever the float rounding of prefix sums)
 
 
 def _base_tail_ok(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[float], lpre: Sequence[float], entry_t: float,
@@ -363,8 +323,10 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
                last N, the Set's short window and the minimal window, all of them)
       realneg  the Real Negative Set: the Main-Set orders opened while the average of the Main Set's last N orders was negative
                for some N of the Negative windows (a lane of its own)
-      short_n  the Main short window chosen for this Set: of the candidates, the one whose passed validations were followed by the best
-               PF on the Main Set (at least short_min orders and short_margin x the long window's PF), else the long N.
+      short_by_order  the Main short window each Main order was judged with (aligned with main)
+      short_n  the Main short window chosen for this Set now: of the candidates, the one whose passed validations were followed by the best
+               PF on the Main Set (at least short_min orders and short_margin x the long window's PF), else the long N. Each Main order is
+               judged with the pick its own entry could make (only the Main orders closed before it), so the Real Set holds no hindsight.
     Each stage reads only the Set the stage before it built. Every window of a stage is judged on its own, from the same positions in the
     lane (the orders closed before the entry, within the lookback), and the stage is their conjunction: a window never reads another's verdict."""
     n = len(ts)
@@ -441,23 +403,42 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
         return v
 
     short_n = P.main_n
+    choice: Optional[List[int]] = None
     if P.main_on and P.short_on:
-        static = passes(P.main_n)
-        ref = pf_of(sum(max(mn[j], 0.0) for j in range(m) if static[j]), sum(max(-mn[j], 0.0) for j in range(m) if static[j]))
-        best = ref
-        for w in P.short_windows:
+        # The Main short window is each Set's own pick among the candidates: the one whose passed validations were followed by the best PF on the Main Set.
+        # Per Main order the pick reads only what was known at its entry: the validations of the Main orders that CLOSED before it (their results, and whether
+        # each had passed the window at its own entry), so an order's place in the Real Set never depends on a result that came after it. The pick for the verdict
+        # now reads every Main order (the same rule at the end of the tape).
+        def inc_prefix(w: int):
             pv = passes(w)
-            inc = [j for j in range(m) if pv[j]]
-            if len(inc) < P.short_min:
-                continue
-            pf = pf_of(sum(max(mn[j], 0.0) for j in inc), sum(max(-mn[j], 0.0) for j in inc))
-            if pf > best and pf >= ref * P.short_margin:
-                best, short_n = pf, int(w)
+            cg, cl, cc = [0.0], [0.0], [0]
+            for j in range(m):
+                x = mn[j]
+                inc = pv[j]
+                cg.append(cg[-1] + (x if inc and x > 0 else 0.0))
+                cl.append(cl[-1] + (-x if inc and x < 0 else 0.0))
+                cc.append(cc[-1] + (1 if inc else 0))
+            return cg, cl, cc
+        sg_, sl_, _sc = inc_prefix(P.main_n)
+        cands = [(int(w),) + inc_prefix(w) for w in P.short_windows]
+
+        def pick(e: int, lo: int) -> int:
+            ref = pf_of(sg_[e] - sg_[lo], sl_[e] - sl_[lo])
+            best, sel = ref, P.main_n
+            for w, cg, cl, cc in cands:
+                if cc[e] - cc[lo] < P.short_min:
+                    continue
+                pf = pf_of(cg[e] - cg[lo], cl[e] - cl[lo])
+                if pf > best + SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:
+                    best, sel = pf, w
+            return sel
+        short_n = pick(m, 0)
+        choice = [pick(me[j], mlo[j]) for j in range(m)]
     real = []
     if P.main_on:
-        pl, ps = passes(P.main_n), passes(short_n)
+        pl = passes(P.main_n)
         mmin = main_minimal(mn, me, mlo, P) if P.main_min_n else None
-        real = [k for j, k in enumerate(main) if pl[j] and ps[j] and (mmin is None or mmin[j])]
+        real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j]) and (mmin is None or mmin[j])]
     else:
         real = list(main)
     realneg = []
@@ -468,10 +449,10 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
                 s0 = e - w
                 if s0 < mlo[j]:
                     s0 = mlo[j]
-                if e - s0 >= w and msum[e] - msum[s0] < 0:
+                if e - s0 >= w and msum[e] - msum[s0] < -NEG_EPS:
                     realneg.append(k)
                     break
-    return {"main": main, "real": real, "realneg": realneg, "short_n": short_n}
+    return {"main": main, "real": real, "realneg": realneg, "short_n": short_n, "short_by_order": choice if choice is not None else [P.main_n] * m}
 
 
 def sign_prefix(nets: Sequence[float]) -> Tuple[List[int], List[int]]:
@@ -517,7 +498,7 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
         k_ok = k_n >= (P.main_min_n if P.full_window else 1) and (all(x > 0 for x in mw) if P.main_min_positive else all(x < 0 for x in mw))
     else:
         k_ok, k_n = True, 0
-    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < 0 for w in P.neg_windows)
+    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)
     r_ok, r_pf, r_n = last_ok(real, P.real_n)
     q_ok, q_pf, q_n = last_ok(realneg, P.real_n)
     main_pass = (m_ok and s_ok and k_ok) if P.main_on else True
@@ -2309,7 +2290,7 @@ class SetBook:
         return self._streams(st)[0]
 
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
-        tape = sorted(st.tape(), key=lambda r: finite(r.get("t")))   # last-N and drawdown read one time order
+        tape = by_time(st.tape())                                    # last-N and drawdown read one time order
         pnls = [finite(r.get("pnl")) for r in tape]
         st.wins = sum(1 for x in pnls if x > 0)
         st.gp = round(sum(x for x in pnls if x > 0), 6)
@@ -2325,12 +2306,12 @@ class SetBook:
             k = str(r.get("reason") or "x").split(":")[0]
             counts[k] = counts.get(k, 0) + 1
         st.exits = counts
-        last15 = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
+        last15 = last_n_cost_pf(tape, self.pf_n, self.cost_pct, scan_all=False)
         st.last15_ratio = float(last15["ratio"])
         st.last15_pf = float(last15["pf"])
         st.last15_n = int(last15["count"])
         st.last15_r = float(last15["avgR"])
-        gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct)
+        gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct, scan_all=False)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
         cf = cost_as_frac(self.cost_pct)
@@ -2370,7 +2351,7 @@ class SetBook:
         kw = m_[-self.main_min_n:] if self.main_min_n else []          # the Main minimal window's own results
         st.main_min_have = len(kw)
         st.main_min_gp, st.main_min_gl = round(sum(x for x in kw if x > 0), 8), round(-sum(x for x in kw if x < 0), 8)
-        nw = next((w for w in sorted(self.neg_windows) if self.neg_on and len(m_) >= w and sum(m_[-w:]) < 0), 0)    # the smallest Negative window that fires
+        nw = next((w for w in sorted(self.neg_windows) if self.neg_on and len(m_) >= w and sum(m_[-w:]) < -NEG_EPS), 0)    # the smallest Negative window that fires
         nv = m_[-nw:] if nw else []
         st.neg_win = nw
         st.neg_win_gp, st.neg_win_gl = round(sum(x for x in nv if x > 0), 8), round(-sum(x for x in nv if x < 0), 8)
@@ -3677,18 +3658,34 @@ def self_test() -> List[Tuple[str, bool, str]]:
                  and (not Q.base_short or ok(allk, en_[k], Q.base_short))
                  and (not Q.base_min_n or mok(en_[k], Q.base_min_n, Q.base_min_positive))]
 
-        def pf_inc(w):
-            inc = [nt_[k] for k in main_ if ok(main_, en_[k], w)]
-            return len(inc), pf_of(sum(x for x in inc if x > 0), -sum(x for x in inc if x < 0))
-        ref = pf_inc(Q.main_n)[1]
-        cands = [(pf, w) for w in Q.short_windows for c, pf in [pf_inc(w)] if c >= Q.short_min and pf >= ref * Q.short_margin and pf > ref]
-        an = max(cands, key=lambda x: (x[0], -Q.short_windows.index(x[1])))[1] if cands else Q.main_n
+        pas = {w: [ok(main_, en_[k], w) for k in main_] for w in (Q.main_n,) + tuple(Q.short_windows)}
+        mt_ = [ts_[k] for k in main_]
+
+        def pick(idx):                        # the Main orders in idx (closed before the entry) vote for the window of the best PF among those that passed it
+            ref = pf_of(sum(x for x in [nt_[main_[i]] for i in idx if pas[Q.main_n][i]] if x > 0), -sum(x for x in [nt_[main_[i]] for i in idx if pas[Q.main_n][i]] if x < 0))
+            best, sel = ref, Q.main_n
+            for w in Q.short_windows:
+                inc = [nt_[main_[i]] for i in idx if pas[w][i]]
+                if len(inc) < Q.short_min:
+                    continue
+                pf = pf_of(sum(x for x in inc if x > 0), -sum(x for x in inc if x < 0))
+                if pf > best + SHORT_EPS and pf >= ref * Q.short_margin - SHORT_EPS:
+                    best, sel = pf, w
+            return sel
+        an = pick(range(len(main_))) if (Q.main_on and Q.short_on) else Q.main_n
 
         def kok(k):                           # the Main minimal window: the newest main_min_n Main results before the entry all positive (negative)
             w = [nt_[j] for j in main_ if ts_[j] < en_[k]][-Q.main_min_n:] if Q.main_min_n else []
             return (not Q.main_min_n) or (len([x for x in w]) >= (Q.main_min_n if Q.full_window else 1)
                                           and (all(x > 0 for x in w) if Q.main_min_positive else all(x < 0 for x in w)))
-        real_ = [k for k in main_ if ok(main_, en_[k], Q.main_n) and ok(main_, en_[k], an) and kok(k)]
+        real_ = []
+        for j, k in enumerate(main_):
+            if Q.main_on and Q.short_on:
+                sel = pick([i for i in range(len(main_)) if en_[k] - Q.lookback_s <= mt_[i] < en_[k]])
+            else:
+                sel = Q.main_n
+            if ok(main_, en_[k], Q.main_n) and ok(main_, en_[k], sel) and kok(k):
+                real_.append(k)
         return main_, real_, an
     Pr = StageParams(base_long=30, base_short=10, gate_min=20, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=True,
                      main_n=8, short_on=True, short_windows=(5, 10, 15, 20, 25), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5, 10),
@@ -3750,6 +3747,101 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-base-minimal-window-equals-the-rules", same_m and disjoint and never_more and narrowed > 0,
                 f"chain equals the brute-force reading for N 1-3 positive and negative, both window rules={same_m}; positive and negative windows disjoint={disjoint}; "
                 f"a minimal window only removes Main orders={never_more} (narrowed {narrowed} cases)"))
+    # the Main minimal window (a third last-N on the Main Set, next to the long and the short one): the chain equals the brute-force reading for 1-3 results,
+    # positive and negative, in both window rules; positive and negative never admit the same Real order; it only removes Real orders and never touches the
+    # Main Set; the Main short window chosen is the same with and without it (each window of a stage is judged on its own)
+    same_k, disjoint_k, only_real, main_same, narrowed_k, short_same = True, True, True, True, 0, True
+    for _ in range(8):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(300)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        plain = stage_chain(ts_, en_, nt_, Pa)
+        for full_ in (False, True):
+            for n_ in (1, 2, 3):
+                kp = _dc_replace(Pa, main_min_n=n_, main_min_positive=True, full_window=full_)
+                kn = _dc_replace(Pa, main_min_n=n_, main_min_positive=False, full_window=full_)
+                cp, cn = stage_chain(ts_, en_, nt_, kp), stage_chain(ts_, en_, nt_, kn)
+                same_k = same_k and cp["real"] == _ref_chain(ts_, en_, nt_, kp)[1] and cn["real"] == _ref_chain(ts_, en_, nt_, kn)[1]
+                disjoint_k = disjoint_k and not (set(cp["real"]) & set(cn["real"]))
+                if not full_:
+                    only_real = only_real and set(cp["real"]) <= set(plain["real"]) and set(cn["real"]) <= set(plain["real"])
+                    narrowed_k += len(plain["real"]) - len(cp["real"]) > 0 and len(plain["real"]) - len(cn["real"]) > 0
+                    main_same = main_same and cp["main"] == plain["main"] == cn["main"]
+                    short_same = short_same and cp["short_n"] == plain["short_n"] == cn["short_n"]
+    out.append(("set-main-minimal-window-equals-the-rules", same_k and disjoint_k and only_real and main_same and short_same and narrowed_k > 0,
+                f"Real Set equals the brute-force reading for N 1-3 positive and negative, both rules={same_k}; positive and negative disjoint={disjoint_k}; "
+                f"only removes Real orders={only_real}; Main Set unchanged={main_same}; short window unchanged={short_same} (narrowed {narrowed_k} cases)"))
+    # the shortcuts of the chain's Base loop keep the rules: the PF rounding near the floor (a PF of 1.24996 rounds to 1.25 and passes, 1.24994 does not), the
+    # lookback on the window start and the drawdown time (a window shorter than the limit cannot reach it; a longer one is measured) against processed_flag
+    # and an independent drawdown reading
+    cases_ok, cases_bad = 0, []
+    for w_pf in (1.24996, 1.24994, 1.25004, 1.2499, 1.25, 1.2501, 1.0, 3.0):
+        nt3 = [w_pf * 0.01, -0.01, 0.0]
+        t3 = [1000.0, 1060.0, 1120.0]
+        e3 = [t - 30.0 for t in t3]
+        Q3 = StageParams(base_long=5, base_short=0, gate_min=1, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=False, main_n=8, short_on=False,
+                         short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5,), real_on=False, real_n=5)
+        gq, lq = prefix_sums(nt3)
+        want_pass = round(w_pf, 4) + 1e-9 >= 1.25
+        via_chain = 2 in stage_chain(t3, e3, nt3, Q3)["main"]
+        via_flag = processed_flag(t3, nt3, gq, lq, e3[2], 5, 1, 1.25, 1e12, 1e12, 0, 0.0)
+        if via_chain == via_flag == want_pass:
+            cases_ok += 1
+        else:
+            cases_bad.append((w_pf, via_chain, via_flag, want_pass))
+
+    def _dd_ref(tt, xs, entry):            # the longest drawdown of the window's equity (from zero), the open one measured to the entry
+        eq = pk = 0.0
+        pk_t, worst, under = tt[0], 0.0, False
+        for t_, x_ in zip(tt, xs):
+            eq += x_
+            if eq >= pk - 1e-12:
+                if under:
+                    worst, under = max(worst, t_ - pk_t), False
+                pk, pk_t = max(pk, eq), t_
+            else:
+                under = True
+        return max(worst, entry - pk_t) if under else worst
+    dd_same, lb_same = True, True
+    for _ in range(40):
+        n_ = rng_.randint(3, 60)
+        gap = rng_.choice((5.0, 60.0, 900.0, 7200.0))
+        nt_ = [rng_.choice((0.006, 0.004, -0.004, -0.006)) for _ in range(n_)]
+        ts_ = [1000.0 + gap * k * rng_.uniform(0.5, 1.5) for k in range(n_)]
+        ts_.sort()
+        en_ = [t - rng_.uniform(10.0, 300.0) for t in ts_]
+        g_, l_ = prefix_sums(nt_)
+        lim = rng_.choice((600.0, 3600.0, 20000.0, 1e12))
+        e_ = n_
+        s0_ = max(0, e_ - rng_.randint(2, 50))
+        entry = ts_[-1] + 40.0
+        want_dd = _dd_ref(ts_[s0_:e_], nt_[s0_:e_], entry) < lim
+        dd_same = dd_same and _base_tail_ok(ts_, nt_, g_, l_, entry, e_, s0_, lim, 0.0) == want_dd
+        Ql = StageParams(base_long=rng_.randint(2, 30), base_short=0, gate_min=1, floor=0.5, max_dd_s=1e12, lookback_s=rng_.choice((gap * 3, gap * 10, 1e12)), consistency=0.0,
+                         main_on=False, main_n=8, short_on=False, short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5,), real_on=False, real_n=5)
+        flags = [k for k in range(n_) if processed_flag(ts_, nt_, g_, l_, en_[k], Ql.base_long, 1, Ql.floor, 1e12, Ql.lookback_s, 0, 0.0)]
+        lb_same = lb_same and flags == stage_chain(ts_, en_, nt_, Ql)["main"]
+    out.append(("set-chain-shortcuts-keep-the-rules", not cases_bad and dd_same and lb_same,
+                f"PF rounding at the floor {cases_ok}/8 cases (bad {cases_bad}); drawdown time equals an independent reading (window shorter and longer than the limit)={dd_same}; "
+                f"lookback on the window start equals processed_flag={lb_same}"))
+    # the two helpers of the scoring pass equal their plain readings: finite (a float fast path) and by_time (no sort when the rows already are in time order)
+    def finite_plain(v, fallback=0.0):
+        try:
+            n_ = float(v)
+        except Exception:
+            return fallback
+        return n_ if n_ == n_ and abs(n_) != float("inf") else fallback
+    odd = [0.0, -0.0, 1.5, -2.25, 1e300, float("nan"), float("inf"), float("-inf"), 3, -4, True, False, "2.5", "x", None, b"1", [1], (2,), {}, 10 ** 400]
+    fin_same = all((finite(v) == finite_plain(v) or (finite(v) != finite(v) and finite_plain(v) != finite_plain(v))) and finite(v, 7.0) == finite_plain(v, 7.0) for v in odd)
+    rng_t = _rnd.Random(5)
+    ties_same = True
+    for _ in range(60):
+        rows_t = [{"t": rng_t.choice((1.0, 2.0, 2.0, 3.0, float("nan"), None, "4")), "i": i} for i in range(rng_t.randint(0, 40))]
+        if rng_t.random() < 0.4:
+            rows_t.sort(key=lambda r_: finite(r_.get("t")))
+        ties_same = ties_same and [r_["i"] for r_ in by_time(rows_t)] == [r_["i"] for r_ in sorted(rows_t, key=lambda r_: finite(r_.get("t")))]
+    out.append(("set-finite-and-by-time-equal-their-plain-readings", fin_same and ties_same,
+                f"finite on {len(odd)} odd values equals the plain reading={fin_same}; by_time equals a stable sort by finite time (ties, NaN, text, already sorted)={ties_same}"))
     sparse_t = [1000.0 + 60.0 * k for k in range(14)]
     sparse_n = [0.006] * 14
     sparse_e = [t - 300.0 for t in sparse_t]

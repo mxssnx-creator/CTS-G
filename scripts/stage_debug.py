@@ -83,7 +83,8 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
                 if not lw["judged"] or lw["pf"] + 1e-9 < P.floor:
                     stop = "main"
                 if P.short_on:
-                    sw = _window(mt, mn, entry, ch["short_n"], lb, full)
+                    o["main_short_win"] = ch["short_by_order"][main_pos[k]]          # the window this order's own entry could pick (only Main orders closed before it)
+                    sw = _window(mt, mn, entry, o["main_short_win"], lb, full)
                     o["main_short_pf"], o["main_short_n"] = sw["pf"], sw["n"]
                     if not stop and (not sw["judged"] or sw["pf"] + 1e-9 < P.floor):
                         stop = "mainshort"

@@ -193,15 +193,17 @@
   "setGateShortMaxRatio": 0.5,
   "setGateMinN": 0,
   "setGateMinMode": "positive",
-  "mainAutoMaxRatio": 0.5,
-  "mainAutoEnabled": true,
-  "mainAutoWindows": [
+  "mainShortMaxRatio": 0.5,
+  "mainShortEnabled": true,
+  "mainShortWindows": [
     5,
     10,
     15
   ],
-  "mainAutoMin": 8,
-  "mainAutoMargin": 1.02,
+  "mainShortMin": 8,
+  "mainShortMargin": 1.02,
+  "mainMinN": 0,
+  "mainMinMode": "positive",
   "mainNegEnabled": true,
   "mainNegWindows": [
     5,

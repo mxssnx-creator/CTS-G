@@ -164,11 +164,28 @@ def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
+    scan_all: bool = True,
 ) -> Dict[str, float]:
+    """The net PF and the figures of the newest n measurable closes of rows. scan_all (default): every row is read, so `skipped` counts all the rows without a finite
+    pnl_pct. scan_all False (the scoring pass, which never reads `skipped`): the rows are read from the end until n measurable ones are found, the same window
+    without touching the rest of a long tape; `skipped` then counts only the rows met on the way."""
     # a row without a finite pnl_pct is not a close we can measure: it is skipped and counted, never read as a loss
-    valid = [(r, v) for r, v in ((r, _pnl_pct_of(r)) for r in rows) if v is not None]
-    skipped = len(list(rows)) - len(valid)
-    window = valid[-max(1, int(n)) :]
+    need = max(1, int(n))
+    if scan_all:
+        valid = [(r, v) for r, v in ((r, _pnl_pct_of(r)) for r in rows) if v is not None]
+        skipped = len(list(rows)) - len(valid)
+        window = valid[-need:]
+    else:
+        window, skipped = [], 0
+        for r in reversed(rows):
+            v = _pnl_pct_of(r)
+            if v is None:
+                skipped += 1
+                continue
+            window.append((r, v))
+            if len(window) >= need:
+                break
+        window.reverse()
     rs: List[float] = []
     gp = gl = 0.0
     for _row, pnl_pct in window:

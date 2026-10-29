@@ -32,7 +32,7 @@ def main() -> int:
     if over_min:
         problems.append(f"minimal window over the short window: {over_min[:3]}")
     # a twin of a cell: the same settings with the minimal window off
-    key = lambda c: (c["long"], c["short"], c["main"], c["real"], c.get("neg"))  # noqa: E731
+    key = lambda c: (c["long"], c["short"], c["main"], c["real"], c.get("neg"), c.get("main_min_n"), c.get("main_min_mode"))  # noqa: E731
     off = {key(c): c for c in staged if not c.get("min_n")}
     worse_valid = []
     for c in staged:
@@ -51,14 +51,21 @@ def main() -> int:
         for c in staged:
             if c["exec_pf"] is not None:
                 by[get(c)].append(c)
-        print(f"\n{label}: cells, mean executed PF, mean effective PF, mean valid %, mean orders, mean orders on the Negative lane")
+        print(f"\n{label}: cells | executed PF of ALL their orders (gains over losses added over the cells) | mean of the cells' PFs | executed orders | "
+              f"effective PF of all their effective orders | effective orders | mean valid % | orders on the Negative lane")
         for k in sorted(by, key=str):
             cs = by[k]
             n = len(cs)
-            print(f"  {str(k):<14s} {n:>4d}  {sum(c['exec_pf'] for c in cs) / n:.3f}  {sum(c['eff_pf'] or 0 for c in cs) / n:.2f}  {sum(c['valid_pct'] for c in cs) / n:5.2f}  "
-                  f"{sum(c['exec_orders'] for c in cs) / n:6.0f}  {sum((c.get('neg_lane') or {}).get('orders', 0) for c in cs) / n:6.0f}")
+            gp, gl = sum(c.get("exec_gp_pct") or 0 for c in cs), sum(c.get("exec_gl_pct") or 0 for c in cs)
+            egp, egl = sum(c.get("eff_gp") or 0 for c in cs), sum(c.get("eff_gl") or 0 for c in cs)
+            pooled = f"{gp / gl:.3f}" if gl > 0 else "n/a"
+            epooled = f"{egp / egl:.2f}" if egl > 0 else "n/a"
+            print(f"  {str(k):<14s} {n:>4d}  {pooled:>6s}  {sum(c['exec_pf'] for c in cs) / n:.3f}  {sum(c['exec_orders'] for c in cs):>9d}  {epooled:>6s}  "
+                  f"{sum(c.get('eff_orders') or 0 for c in cs):>10d}  {sum(c['valid_pct'] for c in cs) / n:5.2f}  {sum((c.get('neg_lane') or {}).get('orders', 0) for c in cs):>8d}")
     lab = lambda c: "off" if not c.get("min_n") else f"{'+' if c['min_mode'] == 'positive' else '-'}{c['min_n']}"  # noqa: E731
-    marg("minimal window", lab)
+    klab = lambda c: "off" if not c.get("main_min_n") else f"{'+' if c['main_min_mode'] == 'positive' else '-'}{c['main_min_n']}"  # noqa: E731
+    marg("Base minimal window", lab)
+    marg("Main minimal window", klab)
     marg("Negative windows", lambda c: c.get("neg") or meta.get("neg_default"))
     marg("Real last N", lambda c: c["real_eff"])
     marg("Base long", lambda c: c["long"])

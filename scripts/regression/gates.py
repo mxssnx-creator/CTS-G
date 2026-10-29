@@ -184,7 +184,7 @@ def main_short_windows_are_at_most_half_of_the_long_window():
     got = {"25 default": shorts(mainGateN=25, mainShortWindows=[5, 10, 15]), "40": shorts(mainGateN=40, mainShortWindows=[5, 10, 15, 20, 25]),
            "8": shorts(mainGateN=8, mainShortWindows=[5, 10, 15]), "25 ratio 1": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=1.0),
            "25 ratio .3": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=0.3), "shipped": shorts(),
-           "legacy keys": shorts(mainGateN=25, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
+           "legacy keys": shorts(mainGateN=25, mainShortWindows=None, mainShortMaxRatio=None, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
            "new key wins": shorts(mainGateN=25, mainShortWindows=[5, 10], mainAutoWindows=[5]) }
     want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (4,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
             "legacy keys": (5,), "new key wins": (5, 10)}
@@ -193,7 +193,7 @@ def main_short_windows_are_at_most_half_of_the_long_window():
     got["engine default"] = bare.short_windows
     want["engine default"] = (5, 10)
     leg = SetBook()
-    leg.load(overlay(mainAutoEnabled=False, mainAutoMin=5, mainAutoMargin=1.1))
+    leg.load(overlay(mainShortEnabled=None, mainShortMin=None, mainShortMargin=None, mainAutoEnabled=False, mainAutoMin=5, mainAutoMargin=1.1))    # the shipped overlay carries the new keys: a file written before the rename carries only the old ones
     new = SetBook()
     new.load(overlay(mainShortEnabled=True, mainShortMin=6, mainShortMargin=1.2, mainAutoEnabled=False, mainAutoMin=5))
     got["legacy enabled/min/margin"] = (leg.short_on, leg.short_min, leg.short_margin)
