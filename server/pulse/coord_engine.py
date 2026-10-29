@@ -74,6 +74,7 @@ class Coordinator:
         self.rearrange = True
         self.rearrange_gap = 0.22
         self.last: Dict[str, Any] = {}
+        self.scopes: Dict[str, Any] = {}
 
     def load(self, cts: Dict[str, Any], ov: Dict[str, Any]) -> None:
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
@@ -159,6 +160,53 @@ class Coordinator:
         consec: int,
         intern: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[str], Dict[str, float]]:
+        """The overall verdict on one stream (the book's): judge() stored as self.last."""
+        r = self.judge(closed_rows, consec, intern)
+        self.last = r
+        return r["allow"], r["reasons"], r["metrics"]
+
+    def judge_scopes(self, streams: Dict[str, Sequence[Any]], interns: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """The Real stage's overall strategies per scope, each on its own stream and independent of the others: "overall" (every
+        Real Set), "lane:pos" / "lane:neg" (the positive and the Real Negative lane), "pack:<pack>" (one strategy's Real Sets, both
+        lanes) and "pack:<pack>:<lane>".
+        Each scope gets its own consecutive losses, verdict and figures (self.scopes); scope_allows reads them per entry."""
+        out: Dict[str, Any] = {}
+        for scope, rows in streams.items():
+            pnls = [float(r.get("pnl") or 0) if isinstance(r, dict) else float(getattr(r, "pnl", 0) or 0) for r in rows]
+            consec = 0
+            for x in reversed(pnls):
+                if x < 0:
+                    consec += 1
+                else:
+                    break
+            r = self.judge(rows, consec, (interns or {}).get(scope))
+            m = r["metrics"]
+            out[scope] = {"allow": bool(r["allow"]), "reasons": list(r["reasons"]), "orders": len(rows), "consecLoss": consec,
+                          "lastPf": m["lastPf"], "prevPf": m["prevPf"], "pf": m["last15Pf"], "n": m["last15N"],
+                          "mainPf": m["mainPf"], "mainN": m["mainN"], "realPf": m["realPf"], "realN": m["realN"],
+                          "internPf": m["internPf"], "internN": m["internN"]}
+        self.scopes = out
+        return out
+
+    def scope_allows(self, pack: str, lane: str) -> Tuple[bool, str]:
+        """An entry under a Set of `pack` on `lane` passes only when its lane's scope and its pack's scope on that lane allow; a scope
+        never blocks another's entries (a losing Real Negative lane does not stop the positive lane, one pack not another). The
+        overall and pack-wide scopes mix both lanes: figures only (the book-wide soft gate stays gate())."""
+        scopes = getattr(self, "scopes", {}) or {}
+        lane = lane or "pos"
+        for key in (f"lane:{lane}", f"pack:{pack}:{lane}"):
+            s = scopes.get(key)
+            if s is not None and not s.get("allow", True):
+                return False, key
+        return True, ""
+
+    def judge(
+        self,
+        closed_rows: Sequence[Any],
+        consec: int,
+        intern: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """One stream's verdict, pure (no state): the axes (last, prev, pause) against the minimum PF, and the stage figures."""
         reasons: List[str] = []
         pnls = []
         for row in closed_rows:
@@ -230,8 +278,7 @@ class Coordinator:
             "last": {"pf": float(last_cost["pf"]), "n": float(last_cost["count"])},
             "prev": {"pf": float(prev_cost["pf"]), "n": float(prev_cost["count"])},
         }
-        self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
-        return allow, reasons, metrics
+        return {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
 
     def slot_cap(self, max_open: int, last_pf: float) -> int:
         if max_open <= 0 or max_open >= 10**8:

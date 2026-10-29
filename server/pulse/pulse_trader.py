@@ -2846,6 +2846,15 @@ class Pulse:
                 lane = self.sets.lane_of(chosen) or "pos"     # the lane the Set passed Real on: positive, or Real Negative
             except Exception:
                 lane = "pos"
+            # the Real stage's overall strategies: this lane's scope and this pack's scope on this lane must allow (each judged on
+            # its own paper stream; with the axes off, the default, every scope allows and only its figures are kept)
+            ok_scope, blocked_by = self.coord.scope_allows(pack, lane)
+            if not ok_scope:
+                self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
+                if time.time() - self.skip_log.get("scope", 0) > 40:
+                    log(f"SKIP {sym} {pack}/{lane}: Real overall scope {blocked_by} blocks", every=40.0, key="scope", quiet=True)
+                    self.skip_log["scope"] = time.time()
+                return
             # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
             # own arm and give. The independent trailing pick never reaches a Set position.
             sl_ratio = chosen.sl_ratio
@@ -3526,9 +3535,18 @@ class Pulse:
         if getattr(rec, "ours", True) is not False:
             self._exec_count(rec.set_id, rec.pnl)
             if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
-                key = "laneNeg" if str(getattr(rec, "lane", "") or "") == "neg" else "lanePos"
+                lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
+                key = "laneNeg" if lane == "neg" else "lanePos"
                 self._exec_inc(key)
                 self._exec_inc(key + "Win" if rec.pnl > 0 else key + "Loss")
+                # executed figures per Real scope (the same keys as the overall strategies' scopes): orders, wins, net gain / loss
+                sc = self.__dict__.setdefault("exec_scope", {})
+                for k in ("overall", f"lane:{lane}", f"pack:{rec.pack or '-'}"):
+                    row = sc.setdefault(k, [0, 0, 0.0, 0.0])
+                    row[0] += 1
+                    row[1] += 1 if rec.pnl > 0 else 0
+                    row[2] += max(0.0, float(rec.pnl))
+                    row[3] += max(0.0, -float(rec.pnl))
 
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
@@ -3554,7 +3572,17 @@ class Pulse:
                 under_invalid += 1
                 row["underInvalidSet"] += 1
         n = self.__dict__.setdefault("exec_n", {})
+        # the Real stage's overall strategies per scope: the verdict and figures on each scope's own paper stream (coord.scopes),
+        # next to what was executed in that scope (exec_scope); one scope never reads another's orders
+        judged = getattr(getattr(self, "coord", None), "scopes", {}) or {}
+        executed = self.__dict__.get("exec_scope", {})
+        scopes = {}
+        for k in sorted(set(judged) | set(executed)):
+            e = executed.get(k, [0, 0, 0.0, 0.0])
+            scopes[k] = {**(judged.get(k) or {}), "executed": {"orders": int(e[0]), "wins": int(e[1]),
+                                                                 "pf": round(e[2] / e[3], 3) if e[3] > 0 else (99.0 if e[2] > 0 else None)}}
         return {
+            "overall": {"scopes": scopes, "blocked": int(n.get("scopeBlocked", 0))},
             "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0),
                      "baseValid": counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in STAGE_REASONS),
                      "invalid": counts.get("invalid", 0), "reasons": dict(reasons),
@@ -4555,11 +4583,16 @@ class Pulse:
             else:
                 break
         intern_metrics: Dict[str, Any] = {"pf": 0.0, "n": 0}
+        interns: Dict[str, Dict[str, Any]] = {}
         try:
             best_st = None
-            for pack_name in ("indications", "general"):
-                st = self.sets.pick_any(pack_name) if self.sets.enabled else None
-                if st and (best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0)):
+            # every configured pack (the additional strategies too): each its own intern evidence, the overall the best of them
+            for pack_name in (list(self.sets.packs) if self.sets.enabled else []):
+                st = self.sets.pick_any(pack_name)
+                if not st:
+                    continue
+                interns[f"pack:{pack_name}"] = {"pf": float(st.last15_pf), "n": float(st.last15_n), "pack": st.pack}
+                if best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0):
                     best_st = st
             if best_st:
                 intern_metrics = {
@@ -4574,7 +4607,10 @@ class Pulse:
         paper = []
         if self.sets.enabled and getattr(self, "real_stage_paper", True):
             try:
-                paper = self.sets.real_paper(max(50, int(getattr(self.coord, "prev_window", 25) or 25) * 4))
+                # one pass over the Sets: the overall stream and each lane's and pack's own; every scope judged on its own stream
+                streams = self.sets.real_paper_scopes(max(50, int(getattr(self.coord, "prev_window", 25) or 25) * 4))
+                paper = streams.get("overall") or []
+                self.coord.judge_scopes(streams, {**interns, "overall": intern_metrics})
             except Exception:
                 paper = []
         allow, reasons, metrics = self.coord.gate(paper or rows, consec, intern=intern_metrics)

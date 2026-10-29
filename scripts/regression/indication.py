@@ -392,6 +392,62 @@ def the_signal_memo_key_covers_every_bar_a_pack_reads():
     return ok, f"signal window {w}; memo result equals a fresh pass={got == want}; bars where the older history changes the trend signal {differ}"
 
 
+def relations_compose_any_indicator_causally_and_by_their_rules():
+    """indication_rel: <indicator>@<relation>... composes any name with conditions on the market around its signal. An unknown base
+    or relation is an unknown name (never a silent vote); I inverts; T<tf> keeps only signals with the tf trend, t<tf> only against
+    it (on the same bar their fires split the indicator's); K / F split them by whether the bar before gave the same direction;
+    window_of covers every part (a 15m relation reads 1440 rows); the composite reads nothing after the bar (bars[:i] equals the
+    full series cut at i); set_engine keeps composite names in a pack's variant list and drops unknown ones."""
+    import indication_extra as ix
+    import set_engine as se
+    bars = _regime_bars(21, 4200)
+    base = "rsirev_n8_t1"
+    names = {v: f"{base}@{v}" if v else base for v in ("", "I", "T15", "t15", "N15", "K", "F", "M30", "m30", "A", "a", "D", "C", "G", "I@T5")}
+    unknown = [n for n in ("nosuch@T15", f"{base}@Q", f"{base}@T7", f"{base}@T15n99", f"{base}@") if ix.known(n)]
+    cnt = {v: 0 for v in names}
+    bad = []
+    for i in range(2000, len(bars), 3):
+        sig = {v: ix.resolve(n)(bars[i + 1 - ix.window_of(n):i + 1]) for v, n in names.items()}
+        for v, x in sig.items():
+            cnt[v] += 1 if x else 0
+        b0 = sig[""]
+        if (sig["I"] is None) != (b0 is None) or (b0 and sig["I"][0] != -b0[0]):
+            bad.append(("I", i))
+        if b0 and (bool(sig["T15"]) and bool(sig["t15"])):
+            bad.append(("T and t both", i))
+        if b0 and bool(sig["K"]) == bool(sig["F"]):
+            bad.append(("K/F split", i))
+        if not b0 and any(sig[v] for v in names if v not in ("", "I")):
+            bad.append(("relation without the indicator", i))
+    # causality of a composite with long relations: the bar's signal from bars[:i+1] equals the one cut out of a longer series
+    comp = f"{base}@T15@M30@C"
+    w = ix.window_of(comp)
+    caus = all(ix.resolve(comp)(bars[i + 1 - w:i + 1]) == ix.resolve(comp)(list(bars[:i + 1])[-w:]) for i in range(3000, 3400, 7))
+    b = SetBook()
+    b.load(overlay(stratTrend=True, trendVariants=[comp, "nosuch@T15", "trend_x10", "adx_n14_t30"], **SMALL))
+    kept = list(b.ind_settings.get("trendVariants") or [])
+    sw = se.signal_window(b.packs, b.ind_settings)
+    ok = (not unknown and not bad and caus and cnt[""] > 0 and cnt["T15"] + cnt["t15"] <= cnt[""] and cnt["K"] + cnt["F"] == cnt[""]
+          and w >= 1440 and kept == [comp, "trend_x10", "adx_n14_t30"] and sw >= 1920)
+    return ok, f"fires {cnt}; unknown accepted {unknown}; rule breaks {bad[:4]} ({len(bad)}); causal {caus}; window {w}; kept {kept}; signal window {sw}"
+
+
+def thirty_minute_names_fire_and_read_their_history():
+    """The 30m series: <family>_n<range>_t30 for the library, AO and Trend / Break families and the combined votes over 1 / 5 / 15 / 30
+    (<family>_x<range>); each reads 64 bars of 30m (rows_for(30) = 1920 rows, the Set history's default lookback); the existing
+    _c<range> votes stay over 1 / 5 / 15."""
+    import indication_extra as ix
+    from indication_lib import rows_for
+    t30 = [k for k in ix.INDICATORS if k.endswith("_t30")]
+    x = [k for k in ix.INDICATORS if k.rsplit("_", 1)[-1][:1] == "x" and k.rsplit("_", 1)[-1][1:].isdigit()]
+    wins = {ix.window_of(k) for k in t30 + x}
+    bars = _regime_bars(5, 4500)
+    probe = ("adx_n14_t30", "trend_n20_t30", "brk_n10_t30", "ao_cfltrend_n8_t30", "macdh_x8", "trend_x10")
+    fired = {k: sum(1 for i in range(2000, len(bars), 5) if ix.resolve(k)(bars[i + 1 - ix.window_of(k):i + 1])) for k in probe}
+    ok = len(t30) >= 200 and len(x) >= 200 and wins == {rows_for(30)} and rows_for(30) == 1920 and all(fired.values()) and ix.window_of("adx_c14") == rows_for(15)
+    return ok, f"{len(t30)} _t30 and {len(x)} _x names; windows {sorted(wins)}; fired {fired}"
+
+
 CHECKS = [
     ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
     ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
@@ -401,6 +457,8 @@ CHECKS = [
     ("indication.library-memo-never-stale", library_memo_never_serves_another_state_of_the_rows),
     ("indication.every-name-gets-its-timeframe-history", every_name_gets_the_history_its_timeframe_needs),
     ("indication.signal-memo-key-covers-the-window", the_signal_memo_key_covers_every_bar_a_pack_reads),
+    ("indication.relations-compose-by-their-rules", relations_compose_any_indicator_causally_and_by_their_rules),
+    ("indication.thirty-minute-names-fire", thirty_minute_names_fire_and_read_their_history),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

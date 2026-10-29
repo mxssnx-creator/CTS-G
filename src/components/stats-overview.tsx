@@ -59,6 +59,16 @@ export function StatsOverview({
             tone="ok"
           />
         ) : null}
+        {live?.execution?.overall && Object.keys(live.execution.overall.scopes).length ? (
+          <Hero
+            k="Real · overall strategies by scope"
+            v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow !== false).length}/${Object.keys(live.execution.overall.scopes).length} open`}
+            s={Object.entries(live.execution.overall.scopes)
+              .map(([k, s]) => `${k.replace("pack:", "").replace("lane:", "lane ")} ${s.allow === false ? "blocked" : "open"} · paper PF ${s.pf != null ? s.pf.toFixed(2) : "—"} (${s.n ?? 0}) · executed ${s.executed.pf != null ? s.executed.pf.toFixed(2) : "—"} (${s.executed.orders})`)
+              .join(" | ") + (live.execution.overall.blocked ? ` · ${live.execution.overall.blocked} entries held by a scope` : "")}
+            tone={Object.values(live.execution.overall.scopes).some((s) => s.allow === false) ? "bad" : "ok"}
+          />
+        ) : null}
         {live?.execution ? (
           <Hero
             k="Executed · after all gates"

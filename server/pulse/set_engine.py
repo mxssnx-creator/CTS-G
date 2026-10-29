@@ -57,7 +57,7 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, INDICATORS as EXTRA_INDICATORS, LOOKBACK as EXTRA_LOOKBACK, extra_votes, window_of
+from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
 from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
@@ -1627,9 +1627,9 @@ class SetBook:
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
             # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
-            "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if str(x) in EXTRA_INDICATORS],
-            **{key: [str(x) for x in (ov.get(key) or default) if str(x) in EXTRA_INDICATORS] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
-            "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if str(x) in EXTRA_INDICATORS}),
+            "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if extra_known(x)],
+            **{key: [str(x) for x in (ov.get(key) or default) if extra_known(x)] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
+            "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if extra_known(x)}),
         }
         with self._lock:
             self._rebuild_sets()
@@ -2603,6 +2603,31 @@ class SetBook:
                 rows += [(t, x, "neg") for t, x in (getattr(st, "neg", None) or [])[-n:]]
         rows.sort(key=lambda r: r[0])
         return [{"t": t, "pnl_pct": x + cf, "pnl": x, "lane": lane} for t, x, lane in rows[-n:]]
+
+    def real_paper_scopes(self, n: int = 200) -> Dict[str, List[Dict[str, Any]]]:
+        """The Real paper stream split by scope in one pass: "overall" (every Real and Real Negative Set), "lane:pos", "lane:neg",
+        "pack:<pack>" (both lanes of one strategy) and "pack:<pack>:<lane>"; each the newest n orders of its scope, oldest first (the
+        rows of real_paper). The lane and pack-lane scopes gate entries; the overall and pack scopes are figures."""
+        cf = cost_as_frac(self.cost_pct)
+        by: Dict[str, List[Tuple[float, float, str]]] = {"overall": [], "lane:pos": [], "lane:neg": []}
+        for p in self.packs:
+            by[f"pack:{p}"] = []
+            by[f"pack:{p}:pos"] = []
+            by[f"pack:{p}:neg"] = []
+        with self._lock:
+            for st in self.by_idx:
+                pk = by.setdefault(f"pack:{st.pack}", [])
+                for lane, src in (("pos", st.exe or []), ("neg", getattr(st, "neg", None) or [])):
+                    part = [(t, x, lane) for t, x in src[-n:]]
+                    by["overall"] += part
+                    by[f"lane:{lane}"] += part
+                    pk += part
+                    by.setdefault(f"pack:{st.pack}:{lane}", []).extend(part)
+        out = {}
+        for k, rows in by.items():
+            rows.sort(key=lambda r: r[0])
+            out[k] = [{"t": t, "pnl_pct": x + cf, "pnl": x, "lane": lane} for t, x, lane in rows[-n:]]
+        return out
 
     def stage_counts(self) -> Dict[str, int]:
         """Sets at each stage now: passed Base, passed Main (long, short and minimal window), in a Main Negative dip, valid on Real, valid on Real Negative."""

@@ -801,7 +801,8 @@ def mean_stretch_revert(rows: Sequence[Row], n: int = 120, z: float = 2.5) -> Si
 
 FAMILY_WINDOW = 300              # 1m rows the family reads (a 40-bar range on 15m needs 600; 300 covers ranges up to 20 there)
 FAMILY_RANGES = (6, 10, 20, 40)  # bars of the timeframe series: from the lowest to the highest range
-FAMILY_TFS = (1, 5, 15)          # minutes per bar
+FAMILY_TFS = (1, 5, 15)          # minutes per bar (the combined votes _c<n>)
+FAMILY_TFS_EXT = (1, 5, 15, 30)  # with the 30m series: single _t30 names and the combined votes _x<n>
 
 
 def _rows_for_tf(tf: int) -> int:
@@ -909,9 +910,11 @@ def _combine(sigs: List[Signal], need: int = 2) -> Signal:
 def _make_family() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
     out: Dict[str, Callable[[Sequence[Row]], Signal]] = {}
     for n in FAMILY_RANGES:
-        for tf in FAMILY_TFS:
+        for tf in FAMILY_TFS_EXT:
             out[f"trend_n{n}_t{tf}"] = (lambda r, n=n, tf=tf: trend_signal(r, n, tf))
             out[f"brk_n{n}_t{tf}"] = (lambda r, n=n, tf=tf: breakout_signal(r, n, tf))
+        out[f"trend_x{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, tf) for tf in FAMILY_TFS_EXT]))
+        out[f"brk_x{n}"] = (lambda r, n=n: _combine([breakout_signal(r, n, tf) for tf in FAMILY_TFS_EXT]))
         out[f"trend_c{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, tf) for tf in FAMILY_TFS]))
         out[f"brk_c{n}"] = (lambda r, n=n: _combine([breakout_signal(r, n, tf) for tf in FAMILY_TFS]))
         out[f"tb_c{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, 5), breakout_signal(r, n, 1), breakout_signal(r, n, 5)]))
@@ -923,8 +926,24 @@ WINDOWS: Dict[str, int] = {name: FAMILY_WINDOW for name in FAMILY}
 
 
 def window_of(name: str) -> int:
-    """1m rows an indicator reads (the family reads more than the classic ones)."""
+    """1m rows an indicator reads (the family reads more than the classic ones; a composite name@relation what its parts read)."""
+    if "@" in str(name):
+        import indication_rel
+        return indication_rel.window_of(str(name)) or LOOKBACK
     return WINDOWS.get(name, LOOKBACK)
+
+
+def resolve(name: str) -> Optional[Callable[[Sequence[Row]], Signal]]:
+    """The callable of an indicator name: a registered name, or a composite name@relation (indication_rel); None when unknown."""
+    name = str(name)
+    if "@" in name:
+        import indication_rel
+        return indication_rel.resolve(name)
+    return INDICATORS.get(name)
+
+
+def known(name: str) -> bool:
+    return resolve(name) is not None
 
 
 INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
@@ -977,6 +996,8 @@ def _highest_tf(name: str) -> int:
     m = re.search(r"_t(\d+)$", name)
     if m:
         return int(m.group(1))
+    if re.search(r"_x\d+$", name):
+        return 30
     return 15 if re.search(r"_c\d+$", name) or name.startswith("g_") else 1
 
 
@@ -991,7 +1012,7 @@ def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, fl
     out: List[Tuple[int, float, str]] = []
     slices: Dict[int, Sequence[Row]] = {}          # one slice per window size: the library memoises on the rows object
     for name in names:
-        fn = INDICATORS.get(str(name))
+        fn = resolve(str(name))
         if fn is None:
             continue
         w = window_of(str(name))
