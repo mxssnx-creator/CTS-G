@@ -20,6 +20,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from config_num import num
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
+    base_min_pf,
+    pf_floor,
     MIN_VALIDATION_N,
     window_n,
     LAST_N_DEFAULT,
@@ -1157,6 +1159,7 @@ MAIN_AUTO_MIN_DEFAULT = 8        # orders a candidate needs on the Main Set
 MAIN_AUTO_MARGIN = 1.02          # a candidate must beat the static window's PF by 2 %
 MAIN_NEG_WINDOWS = (5, 10)       # Main Negative lane: the average of the last N Main orders is negative, for some N
 REAL_GATE_N_DEFAULT = 15         # Real: the last N of the lane's Real Set
+STAGE_REASONS = ("main", "mainauto", "real")   # the reasons of a Set that passed Base and stopped at a later stage
 MAIN_GATE_N_DEFAULT = 25        # owner, 2026-10-29: the Main static window reads the last 25 Main-Set orders
 REAL_SUFFIX = ":real"              # a Base Set's Real Set (the last of the chain: opened while Base and Main passed): "<id>:real"
 REALNEG_SUFFIX = ":realneg"        # a Base Set's Real Negative Set (Main orders opened in a dip): "<id>:realneg"
@@ -1311,12 +1314,12 @@ class SetBook:
         self.neg_windows = parse_windows(ov.get("mainNegWindows"), MAIN_NEG_WINDOWS)
         self.realst_on = self.stages_on and bool(ov.get("realGateEnabled", True))
         self.realst_n = max(3, min(200, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))
-        self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
+        self.min_pf = base_min_pf(ov)          # at least MIN_PF_FLOOR (1.1)
         # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
         cons = ov.get("setGateConsistencyPf")
         self.consistency_pf = float(cons) if cons is not None else 0.0     # 0 = off
         sr_min = ov.get("shortRangeMinPf")
-        self.pack_min_pf = {SHORT_PACK: float(sr_min) if sr_min is not None else SHORT_MIN_PF_DEFAULT}
+        self.pack_min_pf = {SHORT_PACK: pf_floor(sr_min, SHORT_MIN_PF_DEFAULT)}
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
         # hours. setMaxDdtHours is 2..36 in steps of 2, default 12. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
@@ -2396,7 +2399,7 @@ class SetBook:
             out = {"base": 0, "main": 0, "negative": 0, "real": 0, "realNeg": 0}
             for st in self.by_idx:
                 why = self.gate_reason(st)
-                if why not in ("", "main", "mainauto", "real"):
+                if why not in ("",) + STAGE_REASONS:
                     continue
                 v = st.stage or {}
                 out["base"] += 1
@@ -2476,7 +2479,7 @@ class SetBook:
         allsets = list(self.by_idx)
         reasons = {x.id: self.gate_reason(x) for x in allsets}
         valid = [x for x in allsets if not reasons[x.id]]
-        base_only = [x for x in allsets if reasons[x.id] in ("", "main")]          # passed the Base gate (the Main gate not applied)
+        base_only = [x for x in allsets if reasons[x.id] in ("",) + STAGE_REASONS]   # passed the Base gate (the later stages not applied)
         total = len(allsets)
         by_pack: Dict[str, Any] = {}
         for pack in self.packs:

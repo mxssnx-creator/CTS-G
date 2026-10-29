@@ -81,6 +81,8 @@ class _Venue:
 def _book(**extra):
     b = se.SetBook()
     b.load(overlay(**{**SMALL, "mainGateEnabled": False, "stagesEnabled": False, **extra}))     # lane and rank fixtures set the Base numbers directly
+    if extra.get("setMinPf") is not None:
+        b.min_pf = float(extra["setMinPf"])     # accounting fixtures on losing synthetic tapes ask a floor under 1.1, which load never allows
     return b
 
 
@@ -1208,13 +1210,14 @@ def block_stack_is_capped_at_six_groups():
 
 
 def block_threshold_rises_with_the_valid_group_count():
-    """The k-th valid group must clear the PF threshold of the stack it creates, so each valid group asks for more."""
+    """The k-th valid group must clear the PF threshold of the stack it creates, so each valid group asks at least as much as the one
+    before, never under the 1.1 floor (at a volume ratio of 0.5 the first two groups sit on the floor)."""
     b = _block()
     lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
     rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=9.0) if r["kind"] == "regular"]
     mins = [round(r["blockMinPF"], 4) for r in rows]
     inc = [round(r["cumulativeRatio"], 4) for r in rows]
-    ok = mins == sorted(mins) and len(set(mins)) == 6 and inc == [round(0.5 * k, 4) for k in range(1, 7)]
+    ok = mins == sorted(mins) and min(mins) >= 1.1 and len(set(mins)) == 5 and mins[-1] > mins[0] and inc == [round(0.5 * k, 4) for k in range(1, 7)]
     return ok, f"min PF by valid rank={mins}; cumulative ratio={inc}"
 
 

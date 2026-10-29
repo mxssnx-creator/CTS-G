@@ -903,10 +903,10 @@ def every_validation_gate_asks_the_base_minimum_pf():
         dc = DcaBook(); dc.load(ov)
         pk = sb.packs[0]
         return {"main": sb.pack_min_pf.get(pk, sb.min_pf), "coord": co.min_pf, "exit": ex.min_pf, "dca": dc.min_pf}
-    own = {"minPf": 1.1, "exitMinPf": 1.05, "dcaMinPf": 1.15}
+    own = {"minPf": 1.15, "exitMinPf": 1.12, "dcaMinPf": 1.2}
     got = {"default": gates({}), "base 1.4": gates({"setMinPf": 1.4, **own}), "unlinked": gates({"setMinPf": 1.4, "minPfLinked": False, **own})}
     want = {"default": {k: 1.25 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
-            "unlinked": {"main": 1.4, "coord": 1.1, "exit": 1.05, "dca": 1.15}}
+            "unlinked": {"main": 1.4, "coord": 1.15, "exit": 1.12, "dca": 1.2}}
     return got == want, f"{got}"
 
 
@@ -928,6 +928,66 @@ def pre_history_grows_when_too_many_sets_lack_orders():
     kept = b.lookback
     ok = l0 == 500 and grown1 == l0 + LOOKBACK_GROW_STEP and b2.lookback == 500 and b3.lookback == 1000 and kept == grown1
     return ok, f"start {l0} -> {grown1} after one pass; auto off {b2.lookback}; capped at histLookbackMax {b3.lookback}; after a reload {kept}"
+
+
+def no_gate_asks_less_than_pf_1_1():
+    """MIN_PF_FLOOR (1.1): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
+    1.0 or 0.5, Block at a small volume ratio), no validation gate asks less than a net PF of 1.1; the desk parses with the same floor."""
+    import os, re, tempfile
+    from block_engine import BlockBook, calculate_block_minimum_profit_factor
+    from coord_engine import Coordinator
+    from dca_engine import DcaBook
+    from exit_engine import ExitBook
+    from position_cost import MIN_PF_FLOOR
+    low = {"setMinPf": 1.0, "shortRangeMinPf": 0.9, "minPfLinked": False, "minPf": 1.0, "exitMinPf": 0.5, "dcaMinPf": 1.0}
+    sb = SetBook(); sb.load(overlay(stratShortRange=True, **low))
+    co = Coordinator(); co.load({}, low)
+    ex = ExitBook(); ex.load(low)
+    dc = DcaBook(); dc.load(low)
+    linked = SetBook(); linked.load(overlay(setMinPf=0.8))
+    got = {"set": sb.min_pf, "short": sb.pack_min_pf.get("shortrange"), "coord": co.min_pf, "exit": ex.min_pf, "dca": dc.min_pf,
+           "linked": linked.min_pf, "block": calculate_block_minimum_profit_factor(1.25, 0.2, 0.25)}
+    root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+    desk = open(os.path.join(root, "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    m = re.search(r"export const MIN_PF_FLOOR = ([0-9.]+);", desk)
+    ok = MIN_PF_FLOOR == 1.1 and all(v is not None and v + 1e-12 >= 1.1 for v in got.values()) and bool(m) and float(m.group(1)) == MIN_PF_FLOOR
+    return ok, f"{got}; desk floor {m and m.group(1)}"
+
+
+def stage_pools_count_every_set_that_passed_base():
+    """With the stages on, pfBase.baseOnly (and validatedBasePct, processed, stageSets.base) holds every Set that passed Base, also one
+    that stopped at the Main Auto window or at Real (reasons main, mainauto, real), recomputed here with the later stages switched off;
+    the Real pool is rebuilt from each executing Set's own Real-Set orders (its last realGateN)."""
+    from set_engine import pf_of
+    b = _book(n_syms=4, bars=1200, mainGateN=8, setGateShortN=0, realGateN=5, **SMALL)     # short windows: some Sets reach Real
+    b.min_pf = 0.3                  # the synthetic tapes lose: a fixture floor (set past load, which floors at 1.1) so the chain fills
+    b.replay_all(now=T0)
+    passed = [st for st in b.by_idx if b.gate_reason(st) in ("", "main", "mainauto", "real")]
+    for st, why in zip([x for x in passed if b.gate_reason(x)][:3], ("mainauto", "real", "main")):          # one Set stopped at each later stage
+        st.stage = {"pos": False, "negl": False, "main": why != "main", "auto": why == "real", "neg": False}
+    saved = (b.main_on, b.neg_on, b.realst_on)
+    b.main_on = b.neg_on = b.realst_on = False
+    base_ok = {st.id for st in b.by_idx if not b.gate_reason(st)}
+    b.main_on, b.neg_on, b.realst_on = saved
+    reasons = {st.id: b.gate_reason(st) for st in b.by_idx}
+    snap = b.snapshot()["pfBase"]
+    def rebuilt(lane, k):            # a lane's pool from each executing Set's own Real (k 1) or Real Negative (k 2) Set
+        sts = [st for st in b.by_idx if not reasons[st.id] and b.lane_of(st) == lane]
+        gp = gl = 0.0
+        for st in sts:
+            w = b._streams(st)[k][-b.realst_n:]
+            gp += sum(x for x in w if x > 0); gl += -sum(x for x in w if x < 0)
+        return sts, round(pf_of(gp, gl), 4)
+    pos, real_pf = rebuilt("pos", 1)
+    neg, neg_pf = rebuilt("neg", 2)
+    stopped = sorted({reasons[st.id] for st in passed if reasons[st.id]} & {"main", "mainauto", "real"})
+    ok = (len(passed) >= 3 and stopped == ["main", "mainauto", "real"] and snap["baseOnly"]["sets"] == len(base_ok)
+          and snap["stageSets"]["base"] == len(base_ok) and snap["validatedBasePct"] == round(100.0 * len(base_ok) / len(b.by_idx), 2)
+          and snap["processed"]["sets"] == len(base_ok) and snap["real"]["sets"] == len(pos) and abs(snap["real"]["pf"] - real_pf) < 1e-3 and len(pos) + len(neg) > 0
+          and snap["realneg"]["sets"] == len(neg) and abs(snap["realneg"]["pf"] - neg_pf) < 1e-3)
+    return ok, (f"Base passed {len(base_ok)} (snapshot {snap['baseOnly']['sets']}, stopped later {stopped}); validated Base {snap['validatedBasePct']}% "
+                f"end {snap['validatedPct']}%; Real pool {snap['real']['sets']} Sets PF {snap['real']['pf']} (rebuilt {real_pf}); "
+                f"Real Negative {snap['realneg']['sets']} Sets PF {snap['realneg']['pf']} (rebuilt {neg_pf})")
 
 
 CHECKS = [
@@ -965,6 +1025,8 @@ CHECKS = [
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
     ("processing.real-gate-per-set-at-the-base-minimum-pf", real_gate_is_per_set_at_the_base_minimum_pf),
+    ("processing.no-gate-asks-less-than-pf-1.1", no_gate_asks_less_than_pf_1_1),
+    ("processing.stage-pools-count-every-set-that-passed-base", stage_pools_count_every_set_that_passed_base),
     ("processing.every-validation-gate-asks-the-base-minimum-pf", every_validation_gate_asks_the_base_minimum_pf),
     ("processing.pre-history-grows-when-sets-lack-orders", pre_history_grows_when_too_many_sets_lack_orders),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),

@@ -33,14 +33,19 @@ def _conf(base: float, extra: float, cap: float = 0.93) -> float:
 
 
 def _agg(rows: Sequence[Row], tf: int) -> List[List[float]]:
-    """Causal tf-minute bars aligned to the newest row, memoised per rows object (one thread-local slot)."""
+    """Causal tf-minute bars of the newest WINDOW rows, aligned to the newest row. Memoised in one thread-local slot keyed by the rows
+    object, its length and its newest row: a list that grew (or changed its newest row) in place is aggregated again, never served
+    the bars of its earlier state; every family of one evaluation shares the slot."""
+    key = (len(rows), id(rows[-1]), tuple(rows[-1][:5])) if len(rows) else (0, 0, ())
     slot = getattr(_tls, "slot", None)
-    if slot is None or slot[0] is not rows:
-        slot = (rows, {})
+    if slot is None or slot[0] is not rows or slot[2] != key:
+        slot = (rows, {}, key)
         _tls.slot = slot
     got = slot[1].get(tf)
     if got is not None:
         return got
+    if len(rows) > WINDOW:
+        rows = rows[-WINDOW:]
     if tf == 1:
         out = [[float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])] for r in rows]
     else:
@@ -830,9 +835,7 @@ def _single(fam: str, n: int, tf: int) -> Callable[[Sequence[Row]], Signal]:
     fn = FAMILIES[fam][1]
 
     def run(rows: Sequence[Row]) -> Signal:
-        if len(rows) > WINDOW:
-            rows = rows[-WINDOW:]
-        return fn(_agg(rows, tf), n)
+        return fn(_agg(rows, tf), n)       # _agg reads the newest WINDOW rows
     return run
 
 

@@ -89,6 +89,9 @@ export function capSymbols(list: string[]): string[] {
 }
 // Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
 export const GATE_MIN_PF_DEFAULT = 1.25;
+// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.1).
+export const MIN_PF_FLOOR = 1.1;
+const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
@@ -773,7 +776,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaOnSets: bool(cts.dcaOnSets, false),
     dcaOnAxis: bool(cts.dcaOnAxis, false),
     dcaMaxExposureX: num(cts.dcaMaxExposureX, 2),
-    dcaMinPf: num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT),
+    dcaMinPf: pfFloor(num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT)),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 0.05),
@@ -785,7 +788,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
-    minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
+    minPf: pfFloor(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),
     windowsLinked: bool(cts.windowsLinked, true),
     pfWindow: Math.max(8, num(cts.pfWindow, 15)),
@@ -824,7 +827,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratMulti: bool(cts.stratMulti, false),
     shortRangeStepMin: num(cts.shortRangeStepMin, 2),
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
-    shortRangeMinPf: num(cts.shortRangeMinPf, 1.25),
+    shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.25)),
     slMinSteps: num(cts.slMinSteps, 1),
     trailMinSteps: num(cts.trailMinSteps, 2),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
@@ -849,7 +852,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histRefreshS: num(cts.histRefreshS, 90),
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
-    setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
+    setMinPf: pfFloor(num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
     setMaxDdtHours: num(cts.setMaxDdtHours, 12),
     setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
     setGateMinTrades: Math.max(8, Math.min(200, Math.round(num(cts.setGateMinTrades, 30)))),
@@ -895,7 +898,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, GATE_MIN_PF_DEFAULT),
+    exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),
