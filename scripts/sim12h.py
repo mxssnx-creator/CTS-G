@@ -71,7 +71,7 @@ def pool(book, tapes, hour):
             gp_v += gp
             gl_v += gl
             n_v += len(w)
-            ddts.append(-key[2] / 3600.0)
+            ddts.append(-key[4] / 3600.0)
     return {"total": tot, "valid": val, "validated_pct": round(100.0 * val / tot, 2) if tot else 0.0,
             "pf_pre": round(gp_a / gl_a, 3) if gl_a > 0 else None, "orders_pre": n_a,
             "pf_post": (round(gp_v / gl_v, 3) if gl_v > 0 else (99.0 if gp_v > 0 else None)) if val else None, "orders_post": n_v,
@@ -90,13 +90,17 @@ def run(a):
     shadow = sg.build(names, bars, times, a.jobs)
     book = sg.make_book()
     book.lookback = a.pre * 60                                   # Base validation reads the pre-history window
+    if getattr(a, "real", None) is not None:                     # --real N: the Main gate's last N (0 = off); default = the engine's shipped value
+        book.main_on = a.real > 0
+        book.main_n = a.real or book.main_n
     tapes = sg.Tapes(book, names, times, shadow)
     hours = [float(t_sim0 + k * 3600) for k in range(a.hours)]
     n_chk, bad = sg.self_check(book, tapes, hours)
     print(f"symbols={len(names)} sets={len(book.by_idx)} sim {time.strftime('%F %H:%M', time.gmtime(hours[0]))} -> "
           f"{time.strftime('%F %H:%M', time.gmtime(t_end))} UTC, pre-history {a.pre} h, gate check {n_chk - bad}/{n_chk}, build {time.time() - t0:.0f}s", flush=True)
     cfg = sg.lane_cfg(book)
-    axis_cfg = (6, 1.0, 0)          # the best Axis found on the 30-day development window (axis_eval): last 6 closes at or above PF 1.0
+    N = int(getattr(a, "counts", 0) or 0)       # 0 = the counts as shipped before (windows 6, Axis last 6, Block without samples); 8 / 12 = every count at N
+    axis_cfg = (N or 6, 1.0, 0)          # the best Axis found on the 30-day development window (axis_eval): last 6 closes at or above PF 1.0
     free = sg.execute(book, names, bars, times, shadow, tapes, hours)
     evidence = sorted((r["t"], r["net"]) for r in free if "net" in r)           # the Axis reads a paper stream, see axis_eval
     runs = {"axis": sg.execute(book, names, bars, times, shadow, tapes, hours, axis=axis_cfg, axis_evidence=evidence), "no axis": free}
@@ -110,7 +114,13 @@ def run(a):
     # add-on lanes on the executed positions (own results only)
     block = []
     dca = []
+    done_nets = []                                   # nets of the executed closes before each parent opened: Block's own evidence
     for r in primary:
+        seen = [x for t_, x in sorted((q["t"], q["net"]) for q in primary) if t_ <= r["t_in"]]
+        w = seen[-N:] if N else []
+        g, l_ = sum(x for x in w if x > 0), -sum(x for x in w if x < 0)
+        if N and not (len(w) >= N and (g / l_ if l_ > 0 else 99.0) >= 1.0):
+            continue                                  # Block adds only on N closes of evidence at or above PF 1.0
         for v in sg.block_legs(bars[r["symbol"]], r["tr"], (1, 6), book.cost_pct):
             block.append((r["t"], v))
         base_net, _ = dv.walk(bars[r["symbol"]], r["tr"], r["fracs"], cfg, [])
@@ -197,6 +207,7 @@ def run(a):
     out = {"total": total, "hourly": hourly, "evals15": [{k: v for k, v in e.items() if k != "by_pack"} for e in evals],
            "equity": [list(s) for s in series], "trades": trade_rows}
     json.dump(out, open(os.path.join(a.out, "sim12h.json"), "w"), indent=1)
+    total["counts"] = N
     print(f"done in {time.time() - t0:.0f}s: trades {len(primary)} PF {total['pf_exec']} equity {a.balance} -> {total['equity_end']} maxDD {total['max_dd_pct']}%")
     return out
 
@@ -213,6 +224,8 @@ def main():
     ap.add_argument("--notional", type=float, default=2.15)
     ap.add_argument("--alt-notional", dest="alt_notional", type=float, default=0.2)
     ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--real", type=int, default=None, help="the Main gate's last N (0 = off); omitted = the shipped overlay")
+    ap.add_argument("--counts", type=int, default=0, help="0 = as before; N = the Axis last-N and Block's evidence at N")
     run(ap.parse_args())
 
 

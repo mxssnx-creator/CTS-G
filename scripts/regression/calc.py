@@ -280,7 +280,83 @@ def report_window_is_chronological():
     return ok, f"report last15={got} newest15={want} export_newest_first={blob['closed'][0]['t'] == max(r['t'] for r in rows)}"
 
 
+def net_sum_mean_and_pf_share_one_basis():
+    """The window's PF, its net (summed over its positions) and its mean net per position come from the same net results: PF above 1 exactly when the net
+    is positive, the net is the PF's gross profit less its gross loss, and the mean times the count is the sum. Recomputed here from the gross fractions."""
+    rng = random.Random(4)
+    bad = []
+    for case in range(60):
+        n = rng.randint(3, 40)
+        gross = [rng.choice((0.0, 0.002, 0.004, -0.003, -0.0015, 0.0012)) + rng.uniform(-0.0004, 0.0004) for _ in range(n)]
+        rows = [{"pnl_pct": g, "pnl": 1.0} for g in gross]
+        m = last_n_cost_pf(rows, 25, COST)
+        win = gross[-25:]
+        nets = [ref_net(g, COST) for g in win]
+        gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+        net_sum = 100.0 * (gp - gl)
+        ok = (abs(m["netSumPct"] - net_sum) < 1e-3 and abs(m["netPct"] * m["count"] - net_sum) < 1e-3 * m["count"] + 1e-3
+              and abs(m["netPct"] - net_sum / len(win)) < 1e-3
+              and ((m["pf"] > 1.0) == (net_sum > 0) or abs(net_sum) < 1e-4))
+        if not ok:
+            bad.append((case, m["pf"], m["netSumPct"], round(net_sum, 4), m["netPct"]))
+    return not bad, f"60 random windows: PF, summed net and mean net per position agree; mismatches {bad[:3]}"
+
+
+def stage_summary_orders_pf_net_and_hours_share_one_basis():
+    """stage_eval.summarize reports the orders opened in the window: its PF, its net, its mean net per order and its hours positive all read those same
+    orders, and an hour is the hour a position was opened in (a position that leaves after the window end adds no hour of its own)."""
+    import stage_eval as sg
+    H = 3600.0
+    rows = [{"hour": 0.0, "valid": 1, "total": 10}]
+    nets = [0.004, -0.002, 0.003, -0.001, 0.002, -0.0025]
+    t_in = [10.0, 20.0, H + 10, H + 20, 2 * H - 5, 2 * H - 4]             # the last two open in hour 1 and leave in hour 2 (after the window end)
+    for i, (net, tin) in enumerate(zip(nets, t_in)):
+        rows.append({"t": tin + (3 * H if i >= 4 else 60.0), "t_in": tin, "net": net, "legs": []})
+    r = sg.summarize(rows, 0.0, 2 * H, False)
+    gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+    hours = {}
+    for x, tin in zip(nets, t_in):
+        hours[int(tin // H)] = hours.get(int(tin // H), 0.0) + x
+    pos = sum(1 for v in hours.values() if v > 0)
+    ok = (r["orders"] == 6 and r["pf"] == round(gp / gl, 3) and r["net_pct"] == round(100 * (gp - gl), 2)
+          and abs(r["net_per_order_pct"] - round(100 * (gp - gl) / 6, 4)) < 1e-9 and r["hours_positive"] == f"{pos}/{len(hours)}" and len(hours) == 2)
+    return ok, f"orders {r['orders']} PF {r['pf']} net {r['net_pct']}% ({r['net_per_order_pct']}% per order) hours positive {r['hours_positive']} (want {pos}/{len(hours)})"
+
+
+def last_n_window_without_a_full_scan_equals_the_full_scan():
+    """The scoring pass reads a long tape from its end (last_n_cost_pf scan_all=False) instead of every row: the window, its PF, R, net sum and count are the same
+    as the full scan's for any n, with rows that cannot be measured (no pnl_pct, NaN, text) scattered through the tape, at the end of it and all through it."""
+    rng = random.Random(9)
+    bad, cases = [], 0
+    for trial in range(60):
+        n_rows = rng.randint(1, 160)
+        rows = []
+        for i in range(n_rows):
+            kind = rng.random()
+            if kind < 0.08:
+                rows.append({"t": float(i)})                                    # no pnl_pct
+            elif kind < 0.14:
+                rows.append({"t": float(i), "pnl_pct": float("nan")})
+            elif kind < 0.18:
+                rows.append({"t": float(i), "pnl_pct": "x"})
+            else:
+                rows.append({"t": float(i), "pnl_pct": rng.uniform(-0.01, 0.012)})
+        if trial % 5 == 0:
+            rows += [{"t": 1e6}, {"t": 1e6 + 1, "pnl_pct": None}]               # unmeasurable rows at the very end
+        n = rng.choice((1, 5, 15, 25, 50, 300))
+        full = last_n_cost_pf(rows, n, COST)
+        fast = last_n_cost_pf(rows, n, COST, scan_all=False)
+        cases += 1
+        keys = [k for k in full if k != "skipped"]
+        if any(full[k] != fast[k] for k in keys) or fast["skipped"] > full["skipped"]:
+            bad.append((trial, n))
+    return not bad, f"{cases} tapes: windows that differ from the full scan {bad[:4] or 0}"
+
+
 CHECKS = [
+    ("calc.last-n-window-without-a-full-scan-equals-the-full-scan", last_n_window_without_a_full_scan_equals_the_full_scan),
+    ("calc.net-sum-mean-and-pf-share-one-basis", net_sum_mean_and_pf_share_one_basis),
+    ("calc.stage-summary-orders-pf-net-and-hours-share-one-basis", stage_summary_orders_pf_net_and_hours_share_one_basis),
     ("calc.net-is-gross-minus-one-cost", net_is_gross_minus_one_cost),
     ("calc.cost-deducted-exactly-once", cost_deducted_exactly_once),
     ("calc.r-formula-and-identity", r_units_and_identity),

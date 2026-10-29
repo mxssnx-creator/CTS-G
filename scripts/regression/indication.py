@@ -5,7 +5,7 @@ indication sweep: tf5m / tf15m / tfCombined / tfMinAgree were not in the set eng
 """
 from __future__ import annotations
 
-from common import T0, overlay, synth_bars  # noqa: F401
+from common import SMALL, T0, overlay, synth_bars  # noqa: F401
 from indication_engine import DEFAULT_SETTINGS, aggregate_bars, combine_timeframes, timeframe_evals
 from set_engine import SetBook, indication_signal, pack_signals
 
@@ -290,12 +290,175 @@ def a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca():
     return ok, f"exit lanes scored={[ (k, v.n) for k, v in e.lanes.items()]} dca active={d.active}"
 
 
+def library_memo_never_serves_another_state_of_the_rows():
+    """indication_lib memoises the 5m / 15m aggregation per rows object. A history list that grows, shrinks (a truncation would leak
+    later bars) or replaces its newest row in place must be aggregated again: every library indicator on the mutated list equals the
+    same indicator on a fresh copy; and every signal is well formed ((+1 or -1, confidence 0..1) or None)."""
+    from indication_lib import LIB
+    import random as _r
+    rng = _r.Random(5)
+    bars = [[50.0, 50.1, 49.9, 50.0, 1.0]]
+    for _ in range(460):
+        c = bars[-1][3] * (1 + rng.gauss(0.0002, 0.002))
+        o = bars[-1][3]
+        bars.append([o, max(o, c) * (1 + abs(rng.gauss(0, 0.0007))), min(o, c) * (1 - abs(rng.gauss(0, 0.0007))), c, rng.uniform(0.3, 3.0)])
+    names = sorted(LIB)
+    pick = [n for n in names if n.startswith("g_")] + names[::7]
+    live = bars[:200]                                   # inside the 300-row window (a longer list is sliced, a new object)
+    bad, wrong = [], 0
+    steps = [("grow", 260), ("shrink", 230), ("grow", 300), ("replace", None)]
+    for k in pick:
+        LIB[k](live)                                     # fill the memo with the current state
+    for what, n in steps:
+        if what == "grow":
+            live.extend(bars[len(live):n])
+        elif what == "shrink":
+            del live[n:]
+        else:
+            live[-1] = [x * 1.003 for x in live[-1][:4]] + [live[-1][4]]
+        got = {k: LIB[k](live) for k in pick}            # the mutated list first, then fresh copies
+        for k in pick:
+            a, b = got[k], LIB[k](list(live))
+            if a != b:
+                bad.append((what, k))
+            if a is not None and (a[0] not in (-1, 1) or not 0.0 <= a[1] <= 1.0):
+                wrong += 1
+    return not bad and not wrong, f"{len(pick)} indicators x {len(steps)} in-place changes; stale {len(bad)} {bad[:3]}; malformed {wrong}"
+
+
+def _regime_bars(seed, n):
+    """1m bars with trends, quiet ranges, spikes and varying volume (a constant volume would silence the volume families)."""
+    import random as _r
+    rng = _r.Random(seed)
+    out, c = [], 100.0
+    for i in range(n):
+        phase = (i // 400) % 4
+        drift = (0.0008, 0.0, -0.0008, 0.0)[phase]
+        vol = (0.0015, 0.0004, 0.0015, 0.003)[phase]
+        o = c
+        c = max(1.0, c * (1 + drift + rng.gauss(0, vol)))
+        if rng.random() < 0.01:
+            c *= 1 + rng.choice((-1, 1)) * 0.01
+        out.append([o, max(o, c) * (1 + abs(rng.gauss(0, vol / 2))), min(o, c) * (1 - abs(rng.gauss(0, vol / 2))), c, rng.uniform(0.2, 5.0)])
+    return out
+
+
+def every_name_gets_the_history_its_timeframe_needs():
+    """A name on a higher timeframe reads TF_BARS bars of it (indication_lib.rows_for: 480 rows for 5m, 1440 for 15m; combined and
+    group votes the 15m history); 124 names could never fire on the 300-row window. The band families (bbb, bbrev, vwapz) use a
+    width a close can reach in its own n-bar window (2 sd is out of reach at n = 5); a flat stretch never raises. Names that were
+    dead fire on a long series with trends, ranges and spikes."""
+    from indication_extra import INDICATORS, window_of
+    from indication_lib import _band_k, rows_for
+    import math as _m
+    bad_w = [k for k in INDICATORS if (k.endswith("_t15") or k.startswith("g_")) and window_of(k) < rows_for(15)]
+    bad_w += [k for k in INDICATORS if k.endswith("_t5") and window_of(k) < rows_for(5)]
+    reach = all(_band_k(n) < _m.sqrt(n - 1) for n in (5, 8)) and _band_k(14) == 2.0
+    flat = [[100.0, 100.0, 100.0, 100.0, 1.0]] * 1500
+    raised = []
+    for k in ("bbb_n5_t1", "bbb_n8_t1", "bbrev_n5_t1", "vwapz_n5_t1"):
+        try:
+            INDICATORS[k](flat[-window_of(k):])
+        except Exception as e:      # noqa: BLE001
+            raised.append((k, repr(e)))
+    revived = ("bbb_n5_t1", "bbrev_n5_t1", "vwapz_n5_t1", "vwapz_n8_t1", "adx_n21_t15", "ichi_n14_t15", "trend_n40_t15", "ao_htfpb_n8_t5")
+    bars = _regime_bars(3, 6000)
+    fired = {k: 0 for k in revived}
+    for i in range(1500, len(bars), 7):
+        for k in revived:
+            if INDICATORS[k](bars[i + 1 - window_of(k):i + 1]):
+                fired[k] += 1
+    dead = [k for k, v in fired.items() if not v]
+    ok = not bad_w and reach and not raised and not dead
+    return ok, f"short windows {bad_w[:4]} ({len(bad_w)}); band width reachable={reach}; raised on flat {raised}; fired {fired}"
+
+
+def the_signal_memo_key_covers_every_bar_a_pack_reads():
+    """pack_signals keys its memo on signal_window(packs, settings) bars: a pack whose names read 1440 rows (15m) must not take the
+    memo of another bar whose newest 300 rows are equal but whose older history differs."""
+    import set_engine as se
+    b = SetBook()
+    b.load(overlay(stratTrend=True, trendVariants=["trend_n20_t15", "adx_n21_t15", "ichi_n14_t15"], **SMALL))
+    A = _regime_bars(11, 3200)
+    B = _regime_bars(12, 3200)
+    B[-400:] = [list(r) for r in A[-400:]]           # the newest 400 bars equal, the older history different
+    w = se.signal_window(b.packs, b.ind_settings)
+    cache = {}
+    se.pack_signals(A, b.packs, b.ind_settings, 0.0, 2800, cache=cache, salt=3)
+    got = se.pack_signals(B, b.packs, b.ind_settings, 0.0, 2800, cache=cache, salt=3)["trend"]
+    want = se.pack_signals(B, b.packs, b.ind_settings, 0.0, 2800)["trend"]
+    differ = sum(1 for x, y in zip(se.pack_signals(A, b.packs, b.ind_settings, 0.0, 2800)["trend"][2800:], want[2800:]) if x != y)
+    ok = w >= 1440 and got == want and differ > 0
+    return ok, f"signal window {w}; memo result equals a fresh pass={got == want}; bars where the older history changes the trend signal {differ}"
+
+
+def relations_compose_any_indicator_causally_and_by_their_rules():
+    """indication_rel: <indicator>@<relation>... composes any name with conditions on the market around its signal. An unknown base
+    or relation is an unknown name (never a silent vote); I inverts; T<tf> keeps only signals with the tf trend, t<tf> only against
+    it (on the same bar their fires split the indicator's); K / F split them by whether the bar before gave the same direction;
+    window_of covers every part (a 15m relation reads 1440 rows); the composite reads nothing after the bar (bars[:i] equals the
+    full series cut at i); set_engine keeps composite names in a pack's variant list and drops unknown ones."""
+    import indication_extra as ix
+    import set_engine as se
+    bars = _regime_bars(21, 4200)
+    base = "rsirev_n8_t1"
+    names = {v: f"{base}@{v}" if v else base for v in ("", "I", "T15", "t15", "N15", "K", "F", "M30", "m30", "A", "a", "D", "C", "G", "I@T5")}
+    unknown = [n for n in ("nosuch@T15", f"{base}@Q", f"{base}@T7", f"{base}@T15n99", f"{base}@") if ix.known(n)]
+    cnt = {v: 0 for v in names}
+    bad = []
+    for i in range(2000, len(bars), 3):
+        sig = {v: ix.resolve(n)(bars[i + 1 - ix.window_of(n):i + 1]) for v, n in names.items()}
+        for v, x in sig.items():
+            cnt[v] += 1 if x else 0
+        b0 = sig[""]
+        if (sig["I"] is None) != (b0 is None) or (b0 and sig["I"][0] != -b0[0]):
+            bad.append(("I", i))
+        if b0 and (bool(sig["T15"]) and bool(sig["t15"])):
+            bad.append(("T and t both", i))
+        if b0 and bool(sig["K"]) == bool(sig["F"]):
+            bad.append(("K/F split", i))
+        if not b0 and any(sig[v] for v in names if v not in ("", "I")):
+            bad.append(("relation without the indicator", i))
+    # causality of a composite with long relations: the bar's signal from bars[:i+1] equals the one cut out of a longer series
+    comp = f"{base}@T15@M30@C"
+    w = ix.window_of(comp)
+    caus = all(ix.resolve(comp)(bars[i + 1 - w:i + 1]) == ix.resolve(comp)(list(bars[:i + 1])[-w:]) for i in range(3000, 3400, 7))
+    b = SetBook()
+    b.load(overlay(stratTrend=True, trendVariants=[comp, "nosuch@T15", "trend_x10", "adx_n14_t30"], **SMALL))
+    kept = list(b.ind_settings.get("trendVariants") or [])
+    sw = se.signal_window(b.packs, b.ind_settings)
+    ok = (not unknown and not bad and caus and cnt[""] > 0 and cnt["T15"] + cnt["t15"] <= cnt[""] and cnt["K"] + cnt["F"] == cnt[""]
+          and w >= 1440 and kept == [comp, "trend_x10", "adx_n14_t30"] and sw >= 1920)
+    return ok, f"fires {cnt}; unknown accepted {unknown}; rule breaks {bad[:4]} ({len(bad)}); causal {caus}; window {w}; kept {kept}; signal window {sw}"
+
+
+def thirty_minute_names_fire_and_read_their_history():
+    """The 30m series: <family>_n<range>_t30 for the library, AO and Trend / Break families and the combined votes over 1 / 5 / 15 / 30
+    (<family>_x<range>); each reads 64 bars of 30m (rows_for(30) = 1920 rows, the Set history's default lookback); the existing
+    _c<range> votes stay over 1 / 5 / 15."""
+    import indication_extra as ix
+    from indication_lib import rows_for
+    t30 = [k for k in ix.INDICATORS if k.endswith("_t30")]
+    x = [k for k in ix.INDICATORS if k.rsplit("_", 1)[-1][:1] == "x" and k.rsplit("_", 1)[-1][1:].isdigit()]
+    wins = {ix.window_of(k) for k in t30 + x}
+    bars = _regime_bars(5, 4500)
+    probe = ("adx_n14_t30", "trend_n20_t30", "brk_n10_t30", "ao_cfltrend_n8_t30", "macdh_x8", "trend_x10")
+    fired = {k: sum(1 for i in range(2000, len(bars), 5) if ix.resolve(k)(bars[i + 1 - ix.window_of(k):i + 1])) for k in probe}
+    ok = len(t30) >= 200 and len(x) >= 200 and wins == {rows_for(30)} and rows_for(30) == 1920 and all(fired.values()) and ix.window_of("adx_c14") == rows_for(15)
+    return ok, f"{len(t30)} _t30 and {len(x)} _x names; windows {sorted(wins)}; fired {fired}"
+
+
 CHECKS = [
     ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
     ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
     ("indication.bars-to-entry-reason-round-trip", bars_to_entry_reason_round_trip),
     ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
+    ("indication.library-memo-never-stale", library_memo_never_serves_another_state_of_the_rows),
+    ("indication.every-name-gets-its-timeframe-history", every_name_gets_the_history_its_timeframe_needs),
+    ("indication.signal-memo-key-covers-the-window", the_signal_memo_key_covers_every_bar_a_pack_reads),
+    ("indication.relations-compose-by-their-rules", relations_compose_any_indicator_causally_and_by_their_rules),
+    ("indication.thirty-minute-names-fire", thirty_minute_names_fire_and_read_their_history),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

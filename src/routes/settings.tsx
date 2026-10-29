@@ -271,16 +271,21 @@ function SettingsPage() {
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
-                  min={1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.minPf, overlay.positionCostPct)}
                   onChange={(v) => patch("minPf", v)}
                 />
+                <Toggle
+                  label="Windows follow the overall validation N (PF, Set PF, Exit PF, SL:TP and trail recalc)"
+                  on={overlay.windowsLinked !== false}
+                  onChange={(v) => patch("windowsLinked", v)}
+                />
                 <Slider
-                  label="PF window"
+                  label="PF window (own N when windows are unlinked)"
                   value={overlay.pfWindow}
-                  min={5}
+                  min={8}
                   max={50}
                   step={1}
                   hint="Last N closed trades for the average Result-R."
@@ -346,7 +351,7 @@ function SettingsPage() {
                 <Slider
                   label="Recalc min samples"
                   value={overlay.slToTpRecalcN}
-                  min={3}
+                  min={8}
                   max={20}
                   step={1}
                   hint="Last-N closes tagged with that ratio"
@@ -431,6 +436,78 @@ function SettingsPage() {
           {section === "sets" && <SetsOverview stats={stats} />}
           {section === "sets" && (
             <Card
+              title="Hold time per step"
+              hint="Hold time on: positions leave on a time exit of their own. Auto Mode picks it for every Set (pack × range × step, trailing pair) from that Set's own last orders (as many as it has, at most the limit); a step with its manual hold on keeps the manual value. Steps 1–5: 1–50 min; steps 6–12: 30–350 min. Replay and live use the same hold."
+            >
+              <Grid>
+                <Toggle label="Hold time" on={overlay.holdEnabled !== false} onChange={(v) => patch("holdEnabled", v)} />
+                <Toggle label="Auto Mode (best hold per Set)" on={overlay.holdEnabled !== false && overlay.holdAuto !== false} onChange={(v) => patch("holdAuto", v)} />
+                <Slider
+                  label="Auto: orders judged (max)"
+                  value={overlay.holdAutoMax ?? 50}
+                  min={10}
+                  max={50}
+                  step={1}
+                  hint={`last ${overlay.holdAutoMax ?? 50} orders of the Set at most`}
+                  onChange={(v) => patch("holdAutoMax", v)}
+                />
+                <Slider
+                  label="Auto: orders needed (min)"
+                  value={overlay.holdAutoMin ?? 10}
+                  min={3}
+                  max={50}
+                  step={1}
+                  hint={`below ${overlay.holdAutoMin ?? 10} orders a Set keeps the global stop`}
+                  onChange={(v) => patch("holdAutoMin", v)}
+                />
+              </Grid>
+              <div className="grid gap-2 sm:grid-cols-2" data-testid="step-hold">
+                {Array.from({ length: 12 }, (_, i) => {
+                  const step = i + 1;
+                  const [lo, hi] = step <= 5 ? [1, 50] : [30, 350];
+                  const on = overlay.stepHoldOn?.[i] === true;
+                  const raw = Number(overlay.stepHoldMin?.[i] ?? lo);
+                  const minutes = Math.max(lo, Math.min(hi, Math.round(raw)));
+                  const setAt = <T,>(arr: T[] | undefined, v: T, fill: T): T[] => {
+                    const next = Array.from({ length: 12 }, (_, j) => (arr?.[j] ?? fill));
+                    next[i] = v;
+                    return next;
+                  };
+                  return (
+                    <div key={step} className="rounded-lg border border-border bg-bg2 px-3 py-2" data-testid={`step-hold-${step}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs">Step {step}</span>
+                        <label className="flex items-center gap-2 font-mono text-xs text-muted">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            data-testid={`step-hold-on-${step}`}
+                            onChange={(e) => patch("stepHoldOn", setAt(overlay.stepHoldOn, e.target.checked, false))}
+                          />
+                          hold {on ? "on" : "off"}
+                        </label>
+                        <span className="font-mono text-xs">{on ? `${minutes} min` : "global"}</span>
+                      </div>
+                      <input
+                        type="range"
+                        className="mt-2 w-full"
+                        min={lo}
+                        max={hi}
+                        step={1}
+                        value={minutes}
+                        disabled={!on}
+                        data-testid={`step-hold-min-${step}`}
+                        aria-label={`Step ${step} hold minutes`}
+                        onChange={(e) => patch("stepHoldMin", setAt(overlay.stepHoldMin, Number(e.target.value), lo))}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
+          {section === "sets" && (
+            <Card
               title="Independent Sets · 1m historic"
               hint="Each pack × SL:TP × TP-step (2–30 × position cost) is its own book. Sets below Minimal Step Range are not calculated. Live losses raise min step to the count of positive/successful fills."
             >
@@ -474,7 +551,7 @@ function SettingsPage() {
                 <Slider
                   label="PF window"
                   value={overlay.setPfWindow}
-                  min={5}
+                  min={8}
                   max={40}
                   step={1}
                   hint="Last N historic+live fills for PositionCost PF"
@@ -515,7 +592,7 @@ function SettingsPage() {
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
-                  min={1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
@@ -528,8 +605,216 @@ function SettingsPage() {
                   max={36}
                   step={2}
                   unit="h"
-                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 12 h)."
+                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 24 h, owner 2026-10-29)."
                   onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
+                />
+                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Stages · Base → Main → Real</div>
+                <p className="col-span-full text-xs text-muted">
+                  Each stage validates only on the orders the stage before it let through, and those orders form a new Set of the Base Set:
+                  the Main Set (opened while Base passed), the Real Set (opened while Main passed) and the Real Negative Set (opened in a
+                  Main dip). Execution uses Sets that pass Real; their orders mirror to the exchange.
+                </p>
+                <Toggle label="Stages after Base (off: the Base long window alone)" on={overlay.stagesEnabled !== false} onChange={(v) => patch("stagesEnabled", v)} />
+                <Toggle
+                  label="Stage windows need their full N orders (off, default: a window judges the orders it has, at least one; on: a Set with fewer never passes Main or Real)"
+                  on={overlay.stageFullWindow === true}
+                  onChange={(v) => patch("stageFullWindow", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Minimum PF by window size · every last-N window (Base, Main, Real) asks the PF of its size class</div>
+                <Toggle label="Minimum PF by window size (off = the one Set min PF for every window)" on={overlay.minPfBySize !== false} onChange={(v) => patch("minPfBySize", v)} />
+                {(
+                  [
+                    ["Micro", "minPfMicro", "minPfMicroN", 1.05],
+                    ["Minimal", "minPfMinimal", "minPfMinimalN", 1.08],
+                    ["Short", "minPfShort", "minPfShortN", 1.12],
+                    ["Medium · general / normal", "minPfMedium", "minPfMediumN", 1.25],
+                  ] as const
+                ).map(([name, pfKey, nKey, def]) => (
+                  <div key={pfKey} className="contents">
+                    <Slider
+                      label={`${name} · min PF`}
+                      value={overlay[pfKey]}
+                      min={1.05}
+                      max={2.5}
+                      step={0.01}
+                      hint={`default ${def.toFixed(2)} · windows of up to ${overlay[nKey]} orders`}
+                      onChange={(v) => patch(pfKey, v)}
+                    />
+                    <Slider
+                      label={`${name} · up to N orders`}
+                      value={overlay[nKey]}
+                      min={1}
+                      max={100}
+                      step={1}
+                      hint="the largest window of this class"
+                      onChange={(v) => patch(nKey, v)}
+                    />
+                  </div>
+                ))}
+                <Slider
+                  label="Long · min PF"
+                  value={overlay.minPfLong}
+                  min={1.05}
+                  max={3}
+                  step={0.01}
+                  hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders (the Base long window 50)`}
+                  onChange={(v) => patch("minPfLong", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
+                <Slider
+                  label="Base · long window (last N orders)"
+                  value={overlay.setGateWindow}
+                  min={10}
+                  max={100}
+                  step={1}
+                  hint="default 50 · each Set on its own last N orders, at the minimum PF, with the drawdown time"
+                  onChange={(v) => patch("setGateWindow", v)}
+                />
+                <Slider
+                  label="Base · short window (last N orders)"
+                  value={Math.min(overlay.setGateShortN, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
+                  min={0}
+                  max={Math.max(5, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
+                  step={5}
+                  hint={`the second Base window, 0 = off · at most ${Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)} with the long window ${overlay.setGateWindow} and the ratio below · default 25: best of the 24 h grid (scripts/base_window_grid.py)`}
+                  onChange={(v) => patch("setGateShortN", v)}
+                />
+                <Slider
+                  label="Base · minimal window (newest results)"
+                  value={overlay.setGateMinN}
+                  min={0}
+                  max={3}
+                  step={1}
+                  hint="the third Base window, 0 = off · the newest 1-3 results of the Set's own orders must all be positive (or all negative, below)"
+                  onChange={(v) => patch("setGateMinN", v)}
+                />
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Base · minimal window results</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.setGateMinMode}
+                    onChange={(e) => patch("setGateMinMode", e.target.value === "negative" ? "negative" : e.target.value === "both" ? "both" : "positive")}
+                  >
+                    <option value="positive">positive (every one of the newest results above zero)</option>
+                    <option value="negative">negative (every one of the newest results below zero)</option>
+                    <option value="both">both (the newest results share one sign: all positive or all negative)</option>
+                  </select>
+                </label>
+                <Slider
+                  label="Base · short window max share of the long window"
+                  value={overlay.setGateShortMaxRatio}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  hint="default 0.5 (50 %): long 40 allows a short window of at most 20; the engine clamps the short window to this share"
+                  onChange={(v) => patch("setGateShortMaxRatio", v)}
+                />
+                <Slider
+                  label="Base · min orders"
+                  value={overlay.setGateMinTrades}
+                  min={0}
+                  max={100}
+                  step={1}
+                  hint="0 = off (default, owner 2026-10-29): a Set is judged on the orders it has. Above 0: fewer orders than this are not judged (at most the long window)."
+                  onChange={(v) => patch("setGateMinTrades", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Main · additional strategies, coordinations, processings · the last-N validation, on the Main Set</div>
+                <Toggle label="Main · stage (long, short and minimal window, each on the Main Set)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
+                <Slider
+                  label="Main · long window (last N Main orders)"
+                  value={overlay.mainGateN}
+                  min={8}
+                  max={50}
+                  step={1}
+                  hint="default 25 · the first Main window, at the Base minimum PF"
+                  onChange={(v) => patch("mainGateN", v)}
+                />
+                <Toggle label="Main · short window (each Set picks its own; the long and the short window must both pass)" on={overlay.mainShortEnabled !== false} onChange={(v) => patch("mainShortEnabled", v)} />
+                <Slider
+                  label="Main · short window max share of the long window"
+                  value={overlay.mainShortMaxRatio}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  hint="default 0.5 (50 %): long 25 allows short windows of at most 12; candidates above it are dropped by the engine"
+                  onChange={(v) => patch("mainShortMaxRatio", v)}
+                />
+                <WindowChips
+                  label="Main · short candidates"
+                  value={overlay.mainShortWindows}
+                  options={[5, 10, 15, 20, 25]}
+                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)} with the long window ${overlay.mainGateN}`}
+                  onChange={(v) => patch("mainShortWindows", v)}
+                />
+                <Slider
+                  label="Main · short window min orders"
+                  value={overlay.mainShortMin}
+                  min={3}
+                  max={50}
+                  step={1}
+                  hint="a candidate needs this many validated Main orders"
+                  onChange={(v) => patch("mainShortMin", v)}
+                />
+                <Slider
+                  label="Main · short window margin"
+                  value={overlay.mainShortMargin}
+                  min={1}
+                  max={1.5}
+                  step={0.01}
+                  hint="a candidate must beat the long window's PF by this factor (default 1.02)"
+                  onChange={(v) => patch("mainShortMargin", v)}
+                />
+                <Slider
+                  label="Main · minimal window (newest results)"
+                  value={overlay.mainMinN}
+                  min={0}
+                  max={3}
+                  step={1}
+                  hint="the third Main window, 0 = off · the newest 1-3 results of the Set's Main Set must all be positive (or all negative, below) · no share rule against the short window"
+                  onChange={(v) => patch("mainMinN", v)}
+                />
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Main · minimal window results</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.mainMinMode}
+                    onChange={(e) => patch("mainMinMode", e.target.value === "negative" ? "negative" : e.target.value === "both" ? "both" : "positive")}
+                  >
+                    <option value="positive">positive (every one of the newest results above zero)</option>
+                    <option value="negative">negative (every one of the newest results below zero)</option>
+                    <option value="both">both (the newest results share one sign: all positive or all negative)</option>
+                  </select>
+                </label>
+                <Toggle label="Main · Negative lane (a dip opens Real Negative)" on={overlay.mainNegEnabled !== false} onChange={(v) => patch("mainNegEnabled", v)} />
+                <WindowChips
+                  label="Main · Negative windows"
+                  value={overlay.mainNegWindows}
+                  options={[1, 2, 5, 10]}
+                  hint="default 5 and 10 · the average of the last N Main orders below zero, for some N, makes the Set's Real Negative Set (1 and 2: the last one or two results)"
+                  onChange={(v) => patch("mainNegWindows", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Real · evals and overall strategies · Active execution and mirroring to the exchange</div>
+                <Toggle label="Real · validation (last N of the lane's Real Set)" on={overlay.realGateEnabled !== false} onChange={(v) => patch("realGateEnabled", v)} />
+                <Slider
+                  label="Real · last N orders"
+                  value={overlay.realGateN}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="default 15 · single window, on the Real Set (positive lane) and on the Real Negative Set (Negative lane)"
+                  onChange={(v) => patch("realGateN", v)}
+                />
+                <Toggle label="Real · overall strategies read the Real Sets' paper stream" on={overlay.realStagePaper !== false} onChange={(v) => patch("realStagePaper", v)} />
+                <Toggle label="All validation gates use the Base minimum PF (Real, Exit, DCA, Block, coordinator)" on={overlay.minPfLinked !== false} onChange={(v) => patch("minPfLinked", v)} />
+                <Toggle label="Pre-history grows when too many Sets lack orders" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />
+                <Slider
+                  label="Pre-history · max bars"
+                  value={overlay.histLookbackMax}
+                  min={480}
+                  max={2880}
+                  step={240}
+                  hint="the lookback may grow up to this many 1m bars"
+                  onChange={(v) => patch("histLookbackMax", v)}
                 />
                 <Slider
                   label="Min samples"
@@ -559,10 +844,10 @@ function SettingsPage() {
                 <Slider
                   label="Short Range · min PF"
                   value={overlay.shortRangeMinPf}
-                  min={1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
-                  hint="Base PF floor of the Short Range strategy alone (default 1.10); the other strategies use the Set min PF above."
+                  hint="Base PF floor of the Short Range strategy alone (default 1.10, the floor; the other Sets 1.25); the other strategies use the Set min PF above."
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider
@@ -638,12 +923,13 @@ function SettingsPage() {
                 <Slider label="Opt SL min" value={overlay.exitOptSlMin} min={0.05} max={0.5} step={0.01} unit="%" onChange={(v) => patch("exitOptSlMin", v)} />
                 <Slider label="Opt SL max" value={overlay.exitOptSlMax} min={0.2} max={1.5} step={0.05} unit="%" onChange={(v) => patch("exitOptSlMax", v)} />
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
-                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
+                <Slider label="Exit min samples" value={overlay.exitMinSamples} min={5} max={40} step={1} hint="default 8 · closes of a lane before it is judged" onChange={(v) => patch("exitMinSamples", v)} />
+                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={8} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
                 <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
                 <Slider
                   label="Exit min PF"
                   value={overlay.exitMinPf}
-                  min={1}
+                  min={1.05}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
@@ -689,10 +975,10 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
-                <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
-                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
-                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
+                <Slider label="Prev window" value={overlay.prevPosWindow} min={5} max={100} step={1} hint="closes the coordinator's previous-positions axis reads" onChange={(v) => patch("prevPosWindow", v)} />
+                <Slider label="Prev min count" value={overlay.prevPosMinCount} min={1} max={50} step={1} hint="default 8" onChange={(v) => patch("prevPosMinCount", v)} />
+                <Slider label="Main eval pos count" value={overlay.mainEvalPosCount} min={3} max={50} step={1} hint="default 20" onChange={(v) => patch("mainEvalPosCount", v)} />
+                <Slider label="Real eval pos count" value={overlay.realEvalPosCount} min={3} max={50} step={1} hint="default 15" onChange={(v) => patch("realEvalPosCount", v)} />
                 <KV k="Min step" v={String(overlay.minStep)} />
                 <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>
@@ -717,6 +1003,24 @@ function SettingsPage() {
                   label="Active Real overlay"
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
+                />
+                <Num
+                  label="Block min samples"
+                  value={overlay.blockMinSamples}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="Block's own count (default 8) — independent of the PF windows and the coordinator's prev counts"
+                  onChange={(v) => patch("blockMinSamples", v)}
+                />
+                <Num
+                  label="Block window"
+                  value={overlay.blockWindow}
+                  min={8}
+                  max={100}
+                  step={1}
+                  hint="closes the Block evidence reads (default 25)"
+                  onChange={(v) => patch("blockWindow", v)}
                 />
                 <Num
                   label="Max stack"
@@ -877,7 +1181,7 @@ function SettingsPage() {
                   }
                 }} />
                 <Slider label="Giveback %" value={overlay.trailGivePct} min={0.05} max={0.8} step={0.05} unit="%" onChange={(v) => patch("trailGivePct", v)} />
-                <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={3} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
+                <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={8} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
                 <Slider label="Recalc every N closes" value={overlay.trailRecalcEvery} min={3} max={30} step={1} onChange={(v) => patch("trailRecalcEvery", v)} />
               </Grid>
               <p className="text-sm text-muted">
@@ -995,7 +1299,7 @@ function SettingsPage() {
                 <Num
                   label="Min PF"
                   value={overlay.dcaMinPf}
-                  min={1}
+                  min={1.05}
                   max={1.5}
                   step={0.05}
                   onChange={(v) => patch("dcaMinPf", v)}
@@ -1200,12 +1504,17 @@ function SettingsPage() {
                 />
                 <Num
                   label="Drawdown halt %"
-                  value={overlay.ddHaltPct ?? 18}
+                  value={overlay.ddHaltPct ?? 80}
                   min={0}
                   max={90}
                   step={1}
-                  hint="Entries halt when equity falls this far below the start equity. 0 = off (no drawdown protection)."
+                  hint="Entries halt when equity falls this far below the start equity of the active session (owner default 80). 0 = off (no drawdown protection)."
                   onChange={(v) => patch("ddHaltPct", v)}
+                />
+                <Toggle
+                  label="Drawdown halt measures from the active session's start (off: the stored start equity)"
+                  on={(overlay.ddHaltBasis ?? "session") === "session"}
+                  onChange={(v) => patch("ddHaltBasis", v ? "session" : "start")}
                 />
                 <Num
                   label="Size % of balance"
@@ -1286,7 +1595,7 @@ function SettingsPage() {
                 <Num label="SL min %" value={overlay.indStopMinPct} min={0.1} max={1} step={0.05} onChange={(v) => patch("indStopMinPct", v)} />
                 <Num label="SL max %" value={overlay.indStopMaxPct} min={0.4} max={3} step={0.05} onChange={(v) => patch("indStopMaxPct", v)} />
                 <Num label="ATR × SL" value={overlay.indAtrMult} min={0.4} max={2} step={0.05} onChange={(v) => patch("indAtrMult", v)} />
-                <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.1} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
+                <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.05} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
                 <KV k="Outbreak ranges" v={arrJoin(cts?.activeOutbreakRanges, "3, 5, 10")} />
                 <KV k="Noise filter" v={String(num(cts?.activeNoiseFilter, 0.05))} />
               </Grid>
@@ -1586,6 +1895,46 @@ function Num({
       ) : null}
       {hint ? <p className="mt-1 text-xs text-muted">{hint}</p> : null}
     </label>
+  );
+}
+
+function WindowChips({
+  label,
+  value,
+  options,
+  hint,
+  onChange,
+}: {
+  label: string;
+  value: number[] | undefined;
+  options: number[];
+  hint?: string;
+  onChange: (v: number[]) => void;
+}) {
+  const on = new Set(value ?? options);
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-border bg-bg2 px-3 py-2 text-sm">
+      <span>{label}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((n) => (
+          <button
+            key={n}
+            type="button"
+            aria-pressed={on.has(n)}
+            onClick={() => {
+              const next = new Set(on);
+              if (next.has(n)) next.delete(n);
+              else next.add(n);
+              if (next.size) onChange([...next].sort((a, b) => a - b));
+            }}
+            className={`min-h-9 min-w-11 rounded-md border px-2 font-mono text-xs ${on.has(n) ? "border-primary text-primary" : "border-border text-muted"}`}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+      {hint ? <span className="text-xs text-muted">{hint}</span> : null}
+    </div>
   );
 }
 

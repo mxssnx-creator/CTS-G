@@ -1,4 +1,5 @@
 import type { LiveStats } from "@/lib/live-stats";
+import { formatPf, stageFigures } from "@/lib/sets-view";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
 const TYPES = ["state", "direction", "move", "active", "common", "signals"] as const;
@@ -24,6 +25,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
     string,
     { pf?: number; n?: number; open?: boolean }
   >;
+  const stageRows = stageFigures(live.sets?.pfBase).filter((r) => r.key === "base" || r.key === "main" || r.key === "real" || r.key === "realNeg");
   const track = cov?.tracking;
   const load = cov?.load ?? live.engine?.load;
   const px = cov?.px ?? scan?.px ?? 0;
@@ -67,7 +69,11 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           block {cov?.block?.enabled ? "on" : "off"} · {cov?.block?.countN ?? 0} counts · {cov?.block?.liveLanes ?? 0} lanes
         </span>
         {sets.trailCover === false ? <span className="text-danger">trail cover gap</span> : null}
-        {stages.intern || stages.main || stages.real ? (
+        {stageRows.length ? (
+          <span title="Per stage: the Sets that pass it, their share of all Sets, and the PF of those Sets only (never the overall average)">
+            {stageRows.map((r) => `${r.label.split(" ·")[0]} ${r.sets} (${r.pct.toFixed(1)}%) PF ${formatPf(r.pf)}`).join(" · ")}
+          </span>
+        ) : stages.intern || stages.main || stages.real ? (
           <span>
             intern {Number(stages.intern?.pf ?? 0).toFixed(2)}/{stages.intern?.n ?? 0}
             {stages.intern?.open ? " open" : ""} · main {Number(stages.main?.pf ?? 0).toFixed(2)} · real{" "}
@@ -134,8 +140,11 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Set families" v={`base ${sets.families?.base ?? "—"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
         <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes`} ok={blk?.enabled !== false} />
         <KV
-          k="Stages intern/main/real"
-          v={`${Number(cov?.coord?.stages?.intern?.pf ?? 0).toFixed(2)} · ${Number(cov?.coord?.stages?.main?.pf ?? 0).toFixed(2)} · ${Number(cov?.coord?.stages?.real?.pf ?? 0).toFixed(2)}`}
+          k="Stages base/main/real · valid Sets (% of all) PF"
+          v={stageFigures(live?.sets?.pfBase)
+            .filter((r) => r.key === "base" || r.key === "main" || r.key === "real")
+            .map((r) => `${r.sets} (${r.pct.toFixed(1)}%) ${formatPf(r.pf)}`)
+            .join(" · ") || "—"}
         />
         <KV
           k="Tracking"

@@ -8,6 +8,9 @@
   python3 scripts/regression/run.py --update-golden       rewrite golden.json after an intended processing change (serial)
   CTSG_PULSE_DIR=/path/to/server/pulse                    run against another copy (used for fault injection)
 
+--fail-fast runs the checks fastest first, by the durations a full run records in check_durations.json: a fault is found
+by its cheapest failing check instead of after every slower check before it (mutate.py runs this way).
+
 Parallel layout: the memoized processing checks form one group, run in order in one process so the replay memo
 stays warm. Every other check is independent and is spread over the remaining workers. Results print in the
 original order. Checks are forked from this process, so the registry is shared and nothing is pickled.
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import multiprocessing
 import os
 import sys
@@ -23,11 +27,12 @@ import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DURATIONS_PATH = os.path.join(HERE, "check_durations.json")
 sys.path.insert(0, HERE)
 from common import Skip  # noqa: E402
 
 # logistics is static and fails in well under a second: it runs first so a broken pin or config fails fast
-SUITES = ["logistics", "exchange", "sidecar", "contract", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "golden"]
+SUITES = ["logistics", "exchange", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "golden"]
 
 
 def selftests():
@@ -161,6 +166,12 @@ def main(argv=None):
         return 0
     jobs = args.jobs or int(os.environ.get("CTSG_JOBS") or min(4, os.cpu_count() or 1))
     serial = args.update_golden or args.fail_fast or jobs <= 1 or len(checks) <= 1
+    if args.fail_fast:
+        try:
+            known = json.load(open(DURATIONS_PATH, encoding="utf-8"))
+        except (OSError, ValueError):
+            known = {}
+        checks.sort(key=lambda c: float(known.get(c[0], 1.0)))      # stable: unknown checks keep their order at 1 s
     t_all = time.time()
     if serial:
         results = _run_serial(checks, args.fail_fast)
@@ -170,6 +181,13 @@ def main(argv=None):
     for res in results:
         counts[res["status"]] += 1
         print(f"{res['status']} {res['name']:58s} {res['sec']:6.2f}s  {res['detail']}", flush=True)
+    if not args.only and not args.fail_fast and not os.environ.get("CTSG_PULSE_DIR"):
+        try:
+            with open(DURATIONS_PATH, "w", encoding="utf-8") as fh:     # a full run on the repo's own engine records the costs
+                json.dump({r["name"]: round(r["sec"], 2) for r in sorted(results, key=lambda r: r["name"])}, fh, indent=1)
+                fh.write("\n")
+        except OSError:
+            pass
     mode = "serial" if serial else f"{jobs} workers"
     print(f"\nregression: {counts['PASS']} pass, {counts['FAIL']} fail, {counts['SKIP']} skip "
           f"({len(results)} checks, {time.time() - t_all:.0f}s, {mode})", flush=True)

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { viewFromSnapshot, type LiveStats } from "./live-stats.ts";
+import { statsMatchesConn, viewFromSnapshot, type LiveStats } from "./live-stats.ts";
 
 /** An overall snapshot as the sidecar writes it: two lanes, closed rows tagged with their connection. */
 function overallSnapshot(): LiveStats {
@@ -88,4 +88,17 @@ test("a frozen lane is reported stale and not running", () => {
   assert.equal(vst?.stale, true);
   assert.equal(vst?.running, false);
   assert.equal(vst?.halted, true);
+});
+
+test("a Bybit lane's stats belong to its own connection type, never to the BingX live or demo lane", () => {
+  const by = { connType: "bybit", connection: "bybit-x01", unit: "USDT", running: true } as unknown as LiveStats;
+  const byDemo = { connType: "bybit-demo", connection: "bybit-x02", unit: "USDT", running: true } as unknown as LiveStats;
+  assert.equal(statsMatchesConn(by, "bybit"), true);
+  assert.equal(statsMatchesConn(by, "live"), false);
+  assert.equal(statsMatchesConn(by, "vst"), false);
+  assert.equal(statsMatchesConn(byDemo, "bybit-demo"), true);
+  assert.equal(statsMatchesConn(byDemo, "vst"), false);
+  assert.equal(statsMatchesConn(byDemo, "bybit"), false);
+  const bx = { connType: "live", connection: "bingx-x01", unit: "USDT" } as unknown as LiveStats;
+  assert.equal(statsMatchesConn(bx, "bybit"), false);
 });

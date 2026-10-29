@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, pf_floor, window_n
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -62,11 +62,11 @@ class Coordinator:
         self.noise = 0.05
         self.vol_weight = 0.3
         self.outbreak = [3, 5, 10]
-        self.prev_min_count = 5
+        self.prev_min_count = 8
         self.prev_window = 25
-        self.main_eval = 5
+        self.main_eval = 20
         self.min_samples = 12
-        self.real_eval = 3
+        self.real_eval = 15
         self.min_step = 6
         self.max_sl_ratio = 2.5
         self.trailing_min_step = 6
@@ -74,6 +74,7 @@ class Coordinator:
         self.rearrange = True
         self.rearrange_gap = 0.22
         self.last: Dict[str, Any] = {}
+        self.scopes: Dict[str, Any] = {}
 
     def load(self, cts: Dict[str, Any], ov: Dict[str, Any]) -> None:
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
@@ -99,7 +100,10 @@ class Coordinator:
             self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or GATE_MIN_PF_DEFAULT)
         except Exception:
             self.min_pf = float(ov.get("minPf") or GATE_MIN_PF_DEFAULT)
-        self.pf_window = int(ov.get("pfWindow") or 15)
+        self.min_pf = pf_floor(self.min_pf)
+        if ov.get("minPfLinked", True):
+            self.min_pf = base_min_pf(ov)        # every validation gate asks the Base gate's PF
+        self.pf_window = window_n(ov, "pfWindow", fallback=LAST_N_DEFAULT)
         self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
         # percent everywhere (0.12 = 0.12%), the same unit as position_cost.cost_as_frac; no magnitude guessing
@@ -111,10 +115,10 @@ class Coordinator:
         if isinstance(raw_ob, str):
             raw_ob = [int(x) for x in raw_ob.replace("[", "").replace("]", "").split(",") if x.strip().isdigit()]
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
-        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)
+        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 8)
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
-        self.main_eval = int(coord.get("mainEvalPosCount") or 5)
-        self.real_eval = int(coord.get("realEvalPosCount") or 3)
+        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 20)
+        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 15)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or 6)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 6)
@@ -156,6 +160,53 @@ class Coordinator:
         consec: int,
         intern: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[str], Dict[str, float]]:
+        """The overall verdict on one stream (the book's): judge() stored as self.last."""
+        r = self.judge(closed_rows, consec, intern)
+        self.last = r
+        return r["allow"], r["reasons"], r["metrics"]
+
+    def judge_scopes(self, streams: Dict[str, Sequence[Any]], interns: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """The Real stage's overall strategies per scope, each on its own stream and independent of the others: "overall" (every
+        Real Set), "lane:pos" / "lane:neg" (the positive and the Real Negative lane), "pack:<pack>" (one strategy's Real Sets, both
+        lanes) and "pack:<pack>:<lane>".
+        Each scope gets its own consecutive losses, verdict and figures (self.scopes); scope_allows reads them per entry."""
+        out: Dict[str, Any] = {}
+        for scope, rows in streams.items():
+            pnls = [float(r.get("pnl") or 0) if isinstance(r, dict) else float(getattr(r, "pnl", 0) or 0) for r in rows]
+            consec = 0
+            for x in reversed(pnls):
+                if x < 0:
+                    consec += 1
+                else:
+                    break
+            r = self.judge(rows, consec, (interns or {}).get(scope))
+            m = r["metrics"]
+            out[scope] = {"allow": bool(r["allow"]), "reasons": list(r["reasons"]), "orders": len(rows), "consecLoss": consec,
+                          "lastPf": m["lastPf"], "prevPf": m["prevPf"], "pf": m["last15Pf"], "n": m["last15N"],
+                          "mainPf": m["mainPf"], "mainN": m["mainN"], "realPf": m["realPf"], "realN": m["realN"],
+                          "internPf": m["internPf"], "internN": m["internN"]}
+        self.scopes = out
+        return out
+
+    def scope_allows(self, pack: str, lane: str) -> Tuple[bool, str]:
+        """An entry under a Set of `pack` on `lane` passes only when its lane's scope and its pack's scope on that lane allow; a scope
+        never blocks another's entries (a losing Real Negative lane does not stop the positive lane, one pack not another). The
+        overall and pack-wide scopes mix both lanes: figures only (the book-wide soft gate stays gate())."""
+        scopes = getattr(self, "scopes", {}) or {}
+        lane = lane or "pos"
+        for key in (f"lane:{lane}", f"pack:{pack}:{lane}"):
+            s = scopes.get(key)
+            if s is not None and not s.get("allow", True):
+                return False, key
+        return True, ""
+
+    def judge(
+        self,
+        closed_rows: Sequence[Any],
+        consec: int,
+        intern: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """One stream's verdict, pure (no state): the axes (last, prev, pause) against the minimum PF, and the stage figures."""
         reasons: List[str] = []
         pnls = []
         for row in closed_rows:
@@ -194,7 +245,7 @@ class Coordinator:
             "realN": float(real_cost["count"]),
         }
         allow = True
-        sample_ok = cost["count"] >= min(8, self.pf_window)
+        sample_ok = cost["count"] >= min(MIN_VALIDATION_N, self.pf_window)
         intern_ok = intern_n >= max(5, self.min_samples) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
@@ -227,8 +278,7 @@ class Coordinator:
             "last": {"pf": float(last_cost["pf"]), "n": float(last_cost["count"])},
             "prev": {"pf": float(prev_cost["pf"]), "n": float(prev_cost["count"])},
         }
-        self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
-        return allow, reasons, metrics
+        return {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
 
     def slot_cap(self, max_open: int, last_pf: float) -> int:
         if max_open <= 0 or max_open >= 10**8:
@@ -304,6 +354,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     c = Coordinator()
     c.load({}, {"setMinSamples": 7})
     out.append(("coord-min-samples", c.min_samples == 7, f"min_samples={c.min_samples}"))
+    lo = Coordinator()
+    lo.load({}, {"pfWindow": 4, "windowsLinked": False})
+    out.append(("coord-pf-window-floor-8", lo.pf_window == 8, f"pf_window={lo.pf_window}"))
     d = Coordinator()
     d.load({}, {})
     out.append(("coord-min-default", d.min_samples == 12, f"min_samples={d.min_samples}"))

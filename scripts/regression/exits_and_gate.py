@@ -11,7 +11,8 @@ from set_engine import SetBook, SetLane
 def _book_one(**extra):
     b = SetBook()
     b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
-            "setStepMax": 5, "setSlRatios": [1.0], "trailVariants": ["0.3:0.1"], **extra})
+            "setStepMax": 5, "setSlRatios": [1.0], "trailVariants": ["0.3:0.1"], "mainGateEnabled": False, "stagesEnabled": False,
+            "minPfBySize": False, **extra})       # the one-floor rule (the size classes have their own check)
     return b
 
 
@@ -66,11 +67,22 @@ def sl_wins_same_bar_short():
 
 
 def tp_ignored_when_honor_off():
+    """exitIgnoreTp is its own Set type: the Exit Set with the base Set's stop ignores the TP the base Set takes, with the
+    book's TP setting off or on."""
     st, close, sl, tp = _long_entry_levels()
+    b = _book_one()
+    twin = next((x for x in b.by_idx if x.kind == "exit" and x.pack == st.pack
+                 and abs(x.sl_ratio * x.step - st.sl_ratio * st.step) < 1e-9), None)
+    if twin is None:
+        return False, "no Exit Set with the base Set's stop"
+    twin.tp_pct = st.tp_pct          # the same TP level, so only the kind differs
     bars = [_bar(100, 100, 100, 100), _bar(100, tp + 0.2, 100, 100), _bar(100, 100, 100, 100)]
-    recs = _run(SetLane(st, "X"), bars, [1, 0, 0], [0.9, 0.0, 0.0], lane_cfg(honor_tp=False))
-    ok = not recs
-    return ok, f"exits={len(recs)} (no exit: TP ignored, price stayed inside)"
+    res = {}
+    for honor in (False, True):
+        res[("exit", honor)] = [r["reason"] for r in _run(SetLane(twin, "X"), bars, [1, 0, 0], [0.9, 0.0, 0.0], lane_cfg(honor_tp=honor))]
+        res[("base", honor)] = [r["reason"] for r in _run(SetLane(st, "X"), bars, [1, 0, 0], [0.9, 0.0, 0.0], lane_cfg(honor_tp=honor))]
+    ok = res[("exit", False)] == [] and res[("exit", True)] == [] and res[("base", False)] == ["tp"] and res[("base", True)] == ["tp"]
+    return ok, f"{res} (Exit Set: TP ignored; base Set: TP taken)"
 
 
 def time_exit_after_time_bars():
@@ -145,7 +157,7 @@ def explicit_trail_list_obeys_the_minimum_distance():
 
 
 def gate_boundary_and_sample():
-    b = _book_one()
+    b = _book_one(setGateMinTrades=30)      # the minimum order count is off by default (owner 2026-10-29); the boundary is checked with it on
     st = _set(b)
     st.active = True
     cases = [

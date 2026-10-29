@@ -80,7 +80,9 @@ class _Venue:
 
 def _book(**extra):
     b = se.SetBook()
-    b.load(overlay(**{**SMALL, **extra}))
+    b.load(overlay(**{**SMALL, "mainGateEnabled": False, "stagesEnabled": False, **extra}))     # lane and rank fixtures set the Base numbers directly
+    if extra.get("setMinPf") is not None:
+        b.min_pf = float(extra["setMinPf"])     # accounting fixtures on losing synthetic tapes ask a floor under 1.1, which load never allows
     return b
 
 
@@ -374,6 +376,170 @@ def dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average():
         out[name] = (len(qty), len(levels))
     ok = out["auto"] == (2, 1) and out["manual"][0] == 2 and out["manual"][1] >= 2
     return ok, f"(sizes seen, distinct (stop, TP) pairs) auto={out['auto']} manual={out['manual']}"
+
+
+def per_step_hold_time_is_the_same_in_replay_and_live():
+    """A step with its hold on leaves on its own time exit (minutes after the entry), replay and live on the same bar; the steps
+    with the hold off keep the global time stop. The desk table: stepHoldOn / stepHoldMin, indexed by step - 1."""
+    b0 = _book()
+    st0 = _pick(b0, "time")
+    step = int(st0.step)
+    out, bad = {}, []
+    for hold in (3, 12, 30):
+        on = [False] * 12
+        mins = [10] * 12
+        on[step - 1], mins[step - 1] = True, hold
+        for d in (1, -1):
+            kw = {"stepHoldOn": on, "stepHoldMin": mins}
+            b = _book(**kw)
+            st = b.sets[st0.id]
+            bars = _scenario_bars("time", d)
+            (rsl, rtp), rep = replay(b, st, bars, 5, d)
+            lv, liv, _ = live(_book(**kw), st, bars, 5, d, others=False)
+            ok = rep is not None and liv is not None and rep["reason"] == "time" and liv[0] == "time" and liv[1] == rep["exit_i"] \
+                and rep["exit_i"] - 5 == hold and st.hold_bars == hold
+            out[f"{hold}{'+' if d > 0 else '-'}"] = (rep and rep["exit_i"] - 5, liv and liv[1] - 5)
+            if not ok:
+                bad.append((hold, d, rep and (rep["reason"], rep["exit_i"]), liv and liv[:2], st.hold_bars))
+    # a step with the hold off keeps the global stop
+    off_book = _book(stepHoldOn=[False] * 12, stepHoldMin=[5] * 12)
+    off_ok = all(x.hold_bars == 0 for x in off_book.by_idx)
+    return not bad and off_ok, f"step {step}: bars held (replay, live) by hold and side {out}; hold off keeps global={off_ok}" + (f" MISMATCH {bad}" if bad else "")
+
+
+def block_samples_are_its_own_and_independent_of_the_window_calcs():
+    """Block counts its own samples: blockMinSamples (default 8) and blockWindow (default 25), set through the overlay of the live trader.
+    The coordinator's prevPosMinCount / prevPosWindow and the last-N validation windows (pfWindow, windowsLinked, the overall N) never
+    move them; the coordinator and Exit defaults are 8."""
+    import json as _json
+    import block_engine as be
+    from coord_engine import Coordinator
+    from exit_engine import ExitBook
+    own = be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-bs-"), "b.json"), {"blockMinSamples": 9, "blockWindow": 31, "prevPosMinCount": 20, "prevPosWindow": 60})
+    dflt = be.BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-bs-"), "b.json"), {"prevPosMinCount": 20, "prevPosWindow": 60, "pfWindow": 12})
+    saved = (pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    live_vals = {}
+    with tempfile.TemporaryDirectory() as td:
+        pt.TRADES_PATH, pt.BLOCK_PATH = os.path.join(td, "t.jsonl"), os.path.join(td, "block.json")
+        pt.LEV_PATH, pt.OPEN_PATH = os.path.join(td, "lev.json"), os.path.join(td, "open.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for name, ov in (("own", {"blockMinSamples": 11, "blockWindow": 30, "prevPosMinCount": 20, "pfWindow": 12, "windowsLinked": False}),
+                             ("linked", {"prevPosMinCount": 20, "prevPosWindow": 70, "setGateWindow": 40}), ("empty", {})):
+                pt.OVERLAY_PATH = os.path.join(td, f"overlay-{name}.json")
+                _json.dump(ov, open(pt.OVERLAY_PATH, "w"))
+                contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
+                p = pt.Pulse(_Venue(), contracts)
+                live_vals[name] = (p.block.min_samples, p.block.window)
+        finally:
+            pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    co = Coordinator(); co.load({}, {})
+    ex = ExitBook(); ex.load({})
+    defaults = (co.main_eval, co.real_eval, co.prev_min_count, ex.min_samples)
+    ok = ((own.min_samples, own.window) == (9, 31) and (dflt.min_samples, dflt.window) == (8, 25)
+          and live_vals == {"own": (11, 30), "linked": (8, 25), "empty": (8, 25)} and defaults == (20, 15, 8, 8))
+    return ok, f"BlockBook own {(own.min_samples, own.window)} default {(dflt.min_samples, dflt.window)}; live trader {live_vals}; (main, real, prev, exit) defaults {defaults}"
+
+
+def a_set_that_stops_passing_keeps_its_open_position_handled_and_counted():
+    """A position opened under a valid Set stays handled by that Set's own lane until it closes, even when the Set stops passing a gate (the
+    Main gate here) while the position is open: the execution figures show it under an invalid Set while it runs, the close leaves by the
+    Set's own rule on the replay's bar, and the order is counted once in the Set lane (and nowhere in the Exit lane)."""
+    seen = {}
+
+    def hook(p, pos):
+        st = p.sets.sets[pos.set_id]
+        before = p.execution_snapshot()
+        st.main_pf, st.main_n, st.main_on = 0.0, p.sets.main_n, True      # the Set now fails the Main gate
+        st.stage = {"pos": False, "negl": False, "main": False, "short": True, "neg": False}
+        p.sets.main_on = True
+        seen["before"] = before
+        seen["during"] = p.execution_snapshot()
+        seen["reason"] = p.sets.gate_reason(st)
+
+    b0 = _book()
+    st0 = _pick(b0, "time")
+    b = _book(mainGateEnabled=True, stagesEnabled=True, setGateShortN=0, mainShortEnabled=False, mainNegEnabled=False, realGateEnabled=False)
+    st = b.sets[st0.id]
+    st.gate_n, st.gate_pf, st.main_n, st.main_pf, st.active, st.max_dd_s = b.gate_min, 2.0, b.main_n, 2.0, True, 0.0
+    st.stage = {"pos": True, "negl": False, "main": True, "short": True, "neg": False}
+    bars = _scenario_bars("time", 1)
+    (rsl, rtp), rep = replay(b0, st0, bars, 5, 1)
+    lv, liv, _ = live(b, st, bars, 5, 1, others=False, after_open=hook)
+    p = live.pulse
+    after = p.execution_snapshot()
+    ok = (rep is not None and liv is not None and liv[0] == rep["reason"] and liv[1] == rep["exit_i"]
+          and seen["before"]["open"]["positions"] == 1 and seen["before"]["open"]["underInvalidSet"] == 0
+          and seen["reason"] == "main" and seen["during"]["open"]["underInvalidSet"] == 1 and seen["during"]["open"]["sets"] == 1
+          and after["open"]["positions"] == 0 and after["closed"]["setLane"] == 1 and after["closed"]["exitLane"] == 0
+          and after["closed"]["orders"] == 1 and after["closed"]["setsThatTraded"] == 1)
+    return ok, f"exit replay {rep and (rep['reason'], rep['exit_i'])} live {liv and liv[:2]}; open under invalid Set while running {seen['during']['open']['underInvalidSet']}; closed {after['closed']}"
+
+
+def drawdown_halt_settings_come_from_the_overlay():
+    """The live trader reads ddHaltPct (owner default 80) and ddHaltBasis (session by default, "start" for the stored start equity) from the overlay."""
+    import json as _json
+    saved = (pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    got = {}
+    with tempfile.TemporaryDirectory() as td:
+        pt.TRADES_PATH, pt.BLOCK_PATH = os.path.join(td, "t.jsonl"), os.path.join(td, "block.json")
+        pt.LEV_PATH, pt.OPEN_PATH = os.path.join(td, "lev.json"), os.path.join(td, "open.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for name, ov in (("empty", {}), ("session 80", {"ddHaltPct": 80, "ddHaltBasis": "session"}), ("start 50", {"ddHaltPct": 50, "ddHaltBasis": "start"}), ("off", {"ddHaltPct": 0})):
+                pt.OVERLAY_PATH = os.path.join(td, f"overlay-{name.replace(' ', '')}.json")
+                _json.dump(ov, open(pt.OVERLAY_PATH, "w"))
+                contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
+                p = pt.Pulse(_Venue(), contracts)
+                got[name] = (round(p.dd_halt, 4), p.dd_basis)
+        finally:
+            pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    want = {"empty": (0.8, "session"), "session 80": (0.8, "session"), "start 50": (0.5, "start"), "off": (0.0, "session")}
+    return got == want, f"(halt fraction, basis) by overlay {got}"
+
+
+def lane_step_leaves_on_the_sets_own_hold():
+    """SetLane.step (the streaming simulator's path) leaves on the Set's own hold, the same bar the scan does; a Set without one keeps the
+    global time stop."""
+    b = _book()
+    st = _pick(b, "time")
+    cfg = _replay_cfg(b)
+    flat = [[100.0, 100.001, 99.999, 100.0, 1.0] for _ in range(cfg["time_bars"] + 40)]
+    out = {}
+    for hold in (0, 7, 19):
+        lane = se.SetLane(st, "X-USDT")
+        lane.hold = hold
+        done = None
+        for i, bar in enumerate(flat):
+            done = lane.step(i, bar, 1, 1.0, i == 0, cfg)
+            if done:
+                break
+        out[hold] = (done and done["reason"], done and done["exit_i"])
+    ok = out[7] == ("time", 7) and out[19] == ("time", 19) and out[0][0] == "time" and out[0][1] == cfg["time_bars"]
+    return ok, f"(reason, exit bar) by hold {out}; global time stop {cfg['time_bars']}"
+
+
+def auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live():
+    """The hold the Auto Mode chose for one Set (st.hold_bars, hold_auto) is the time exit of the live position and of the replay on
+    the same bar; another Set of the same step keeps the global time stop."""
+    out, bad = {}, []
+    for hold in (4, 20):
+        for d in (1, -1):
+            b, bl = _book(), _book()
+            st, stl = _pick(b, "time"), None
+            stl = bl.sets[st.id]
+            other = next(x for x in b.by_idx if x.step == st.step and x.kind == "base" and x.id != st.id)
+            st.hold_bars, st.hold_auto = hold, True
+            stl.hold_bars, stl.hold_auto = hold, True
+            bars = _scenario_bars("time", d)
+            (rsl, rtp), rep = replay(b, st, bars, 5, d)
+            lv, liv, _ = live(bl, stl, bars, 5, d, others=False)
+            ok = rep is not None and liv is not None and rep["reason"] == "time" and liv[0] == "time" and liv[1] == rep["exit_i"] \
+                and rep["exit_i"] - 5 == hold and other.hold_bars == 0
+            out[f"{hold}{'+' if d > 0 else '-'}"] = (rep and rep["exit_i"] - 5, liv and liv[1] - 5)
+            if not ok:
+                bad.append((hold, d, rep and (rep["reason"], rep["exit_i"]), liv and liv[:2]))
+    return not bad, f"bars held (replay, live) by chosen hold and side {out}" + (f" MISMATCH {bad}" if bad else "")
 
 
 def other_strategies_never_change_a_set_position():
@@ -992,7 +1158,7 @@ def _stack(b, lane, groups_ok, max_orders=20):
     whose PF decision passes (the others carry a losing observed PF). Returns the size of each order."""
     sizes = []
     for n in range(1, int(b.max_stack) + 1):
-        lane.pf_ring[n] = [3.0] * 6 if n in groups_ok else [-1.0] * 6
+        lane.pf_ring[n] = [3.0] * 8 if n in groups_ok else [-1.0] * 8
     for _ in range(max_orders):
         row = b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.5))
         if not row:
@@ -1022,7 +1188,7 @@ def block_no_row_asks_for_more_than_one_partial():
     b = _block()
     lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
     for n in range(1, 7):
-        lane.pf_ring[n] = [3.0] * 6
+        lane.pf_ring[n] = [3.0] * 8
     rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=1.5) if r["kind"] == "regular"]
     asks = [round(r["requestedAddQty"], 9) for r in rows]
     return bool(rows) and max(asks) <= 5.0 + 1e-9, f"requested per group={asks} (a partial is 0.5 x 10 = 5)"
@@ -1066,13 +1232,14 @@ def block_stack_is_capped_at_six_groups():
 
 
 def block_threshold_rises_with_the_valid_group_count():
-    """The k-th valid group must clear the PF threshold of the stack it creates, so each valid group asks for more."""
+    """The k-th valid group must clear the PF threshold of the stack it creates, so each valid group asks at least as much as the one
+    before, never under the 1.05 floor (MIN_PF_FLOOR)."""
     b = _block()
     lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
     rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=9.0) if r["kind"] == "regular"]
     mins = [round(r["blockMinPF"], 4) for r in rows]
     inc = [round(r["cumulativeRatio"], 4) for r in rows]
-    ok = mins == sorted(mins) and len(set(mins)) == 6 and inc == [round(0.5 * k, 4) for k in range(1, 7)]
+    ok = mins == sorted(mins) and min(mins) >= 1.05 and len(set(mins)) == 6 and mins[-1] > mins[0] and inc == [round(0.5 * k, 4) for k in range(1, 7)]
     return ok, f"min PF by valid rank={mins}; cumulative ratio={inc}"
 
 
@@ -1184,6 +1351,12 @@ CHECKS = [
     ("trader.block-carried-parent-and-partial-add", a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial),
     ("block.one-partial-ratio-per-valid-group", block_adds_one_partial_ratio_per_valid_group),
     ("block.one-partial-per-order", block_no_row_asks_for_more_than_one_partial),
+    ("trader.per-step-hold-same-in-replay-and-live", per_step_hold_time_is_the_same_in_replay_and_live),
+    ("trader.block-samples-own-and-independent-of-windows", block_samples_are_its_own_and_independent_of_the_window_calcs),
+    ("trader.invalid-set-keeps-open-position-handled-and-counted", a_set_that_stops_passing_keeps_its_open_position_handled_and_counted),
+    ("trader.drawdown-halt-settings-from-the-overlay", drawdown_halt_settings_come_from_the_overlay),
+    ("trader.lane-step-leaves-on-the-sets-own-hold", lane_step_leaves_on_the_sets_own_hold),
+    ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
     ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),

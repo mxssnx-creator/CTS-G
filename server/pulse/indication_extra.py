@@ -13,6 +13,7 @@ shipped votes stay as they are until a measurement says otherwise.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 LOOKBACK = 160
@@ -800,7 +801,14 @@ def mean_stretch_revert(rows: Sequence[Row], n: int = 120, z: float = 2.5) -> Si
 
 FAMILY_WINDOW = 300              # 1m rows the family reads (a 40-bar range on 15m needs 600; 300 covers ranges up to 20 there)
 FAMILY_RANGES = (6, 10, 20, 40)  # bars of the timeframe series: from the lowest to the highest range
-FAMILY_TFS = (1, 5, 15)          # minutes per bar
+FAMILY_TFS = (1, 5, 15)          # minutes per bar (the combined votes _c<n>)
+FAMILY_TFS_EXT = (1, 5, 15, 30)  # with the 30m series: single _t30 names and the combined votes _x<n>
+
+
+def _rows_for_tf(tf: int) -> int:
+    """1m rows the family reads for a tf-minute series (indication_lib.rows_for, never under FAMILY_WINDOW)."""
+    from indication_lib import rows_for
+    return max(FAMILY_WINDOW, rows_for(tf))
 
 
 def _agg(rows: Sequence[Row], minutes: int) -> List[List[float]]:
@@ -836,7 +844,7 @@ def trend_signal(rows: Sequence[Row], n: int, tf: int, r2_min: float = 0.55, er_
     """Quality trend over the last n bars of the tf-minute series: a straight, efficient move (R^2 of the closes against
     time and Kaufman's efficiency ratio both high), the close on the trend side of EMA(n) with EMA(n/2) leading it, and not
     stretched more than 3 ATR from EMA(n). Direction is the slope's; confidence grows with the straightness."""
-    b = _agg(rows[-FAMILY_WINDOW:], tf)
+    b = _agg(rows[-_rows_for_tf(tf):], tf)     # the window, or TF_BARS bars of the timeframe (a 40-bar range on 15m)
     if len(b) < n + 3:
         return None
     c = [float(x[3]) for x in b[-n:]]
@@ -863,7 +871,7 @@ def breakout_signal(rows: Sequence[Row], n: int, tf: int, vol_mult: float = 1.1)
     """Range breakout on the tf-minute series: the close beyond the prior n-bar extreme, on a bar at least as wide as the
     ATR that closes in the outer 30 % of its own range, out of a range that was not itself a wild swing (prior range under
     4 ATR x sqrt(n)), with volume at least vol_mult x the prior average when volume is reported."""
-    b = _agg(rows[-FAMILY_WINDOW:], tf)
+    b = _agg(rows[-_rows_for_tf(tf):], tf)     # the window, or TF_BARS bars of the timeframe (a 40-bar range on 15m)
     if len(b) < n + 3:
         return None
     prior = b[-n - 1 : -1]
@@ -902,9 +910,11 @@ def _combine(sigs: List[Signal], need: int = 2) -> Signal:
 def _make_family() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
     out: Dict[str, Callable[[Sequence[Row]], Signal]] = {}
     for n in FAMILY_RANGES:
-        for tf in FAMILY_TFS:
+        for tf in FAMILY_TFS_EXT:
             out[f"trend_n{n}_t{tf}"] = (lambda r, n=n, tf=tf: trend_signal(r, n, tf))
             out[f"brk_n{n}_t{tf}"] = (lambda r, n=n, tf=tf: breakout_signal(r, n, tf))
+        out[f"trend_x{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, tf) for tf in FAMILY_TFS_EXT]))
+        out[f"brk_x{n}"] = (lambda r, n=n: _combine([breakout_signal(r, n, tf) for tf in FAMILY_TFS_EXT]))
         out[f"trend_c{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, tf) for tf in FAMILY_TFS]))
         out[f"brk_c{n}"] = (lambda r, n=n: _combine([breakout_signal(r, n, tf) for tf in FAMILY_TFS]))
         out[f"tb_c{n}"] = (lambda r, n=n: _combine([trend_signal(r, n, 5), breakout_signal(r, n, 1), breakout_signal(r, n, 5)]))
@@ -916,8 +926,24 @@ WINDOWS: Dict[str, int] = {name: FAMILY_WINDOW for name in FAMILY}
 
 
 def window_of(name: str) -> int:
-    """1m rows an indicator reads (the family reads more than the classic ones)."""
+    """1m rows an indicator reads (the family reads more than the classic ones; a composite name@relation what its parts read)."""
+    if "@" in str(name):
+        import indication_rel
+        return indication_rel.window_of(str(name)) or LOOKBACK
     return WINDOWS.get(name, LOOKBACK)
+
+
+def resolve(name: str) -> Optional[Callable[[Sequence[Row]], Signal]]:
+    """The callable of an indicator name: a registered name, or a composite name@relation (indication_rel); None when unknown."""
+    name = str(name)
+    if "@" in name:
+        import indication_rel
+        return indication_rel.resolve(name)
+    return INDICATORS.get(name)
+
+
+def known(name: str) -> bool:
+    return resolve(name) is not None
 
 
 INDICATORS: Dict[str, Callable[[Sequence[Row]], Signal]] = {
@@ -958,6 +984,26 @@ INDICATORS.update(FAMILY)
 from indication_lib import LIB as _LIB, WINDOW as _LIB_WINDOW  # noqa: E402  (the library imports nothing from this module)
 INDICATORS.update(_LIB)
 WINDOWS.update({name: _LIB_WINDOW for name in _LIB})
+from indication_lib import rows_for as _rows_for  # noqa: E402
+from indication_ao import AO as _AO  # noqa: E402  (ported from CTS-A-O; imports indication_lib only)
+INDICATORS.update(_AO)
+WINDOWS.update({name: _LIB_WINDOW for name in _AO})
+
+
+def _highest_tf(name: str) -> int:
+    """The highest timeframe a name reads: its own lane (_t5, _t15), 15 for a combined vote over the three timeframes or a group
+    vote, else 1."""
+    m = re.search(r"_t(\d+)$", name)
+    if m:
+        return int(m.group(1))
+    if re.search(r"_x\d+$", name):
+        return 30
+    return 15 if re.search(r"_c\d+$", name) or name.startswith("g_") else 1
+
+
+# a name on a higher timeframe reads TF_BARS of its bars (indication_lib.rows_for); the others keep their own window
+WINDOWS.update({name: max(WINDOWS.get(name, LOOKBACK), _rows_for(_highest_tf(name))) for name in INDICATORS if _highest_tf(name) > 1})
+HISTORY = max(WINDOWS.values())         # the most 1m rows any indicator reads
 
 
 def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, float, str]]:
@@ -966,7 +1012,7 @@ def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, fl
     out: List[Tuple[int, float, str]] = []
     slices: Dict[int, Sequence[Row]] = {}          # one slice per window size: the library memoises on the rows object
     for name in names:
-        fn = INDICATORS.get(str(name))
+        fn = resolve(str(name))
         if fn is None:
             continue
         w = window_of(str(name))

@@ -41,6 +41,7 @@ export type LanePfDetail = {
   pf?: number;
   costPct?: number;
   netPct?: number;
+  netSumPct?: number;
   grossPct?: number;
 };
 
@@ -68,8 +69,50 @@ export type LiveClosed = {
 /** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
  * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
 export type PfPool = { pf: number; n: number; sets: number };
+/** One stage's figures over the Sets that pass it (`pfBase.stages`): `n` is the window orders behind the PF, `orders` all orders of the stage's Set. */
+export type StageFigure = { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };
+/**
+ * One last-N window on its own (`pfBase.windows`): the Sets of the stage's population that pass THIS window alone (`pop` of them are judged: all Sets for Base,
+ * the Base-passing Sets for Main, the Main-passing Sets for Real), their share of that population (`pct`) and of every configured Set (`pctAll`), the pooled PF of
+ * the orders this window reads (`pf`, `orders` behind it) and the mean of the Sets' own PFs. `n` is the configured window (a list for the Main short and
+ * Negative candidates), `chosen` (Main short) how many Sets run each candidate, `mode` (minimal windows) positive / negative / both.
+ */
+export type WindowFigure = {
+  on: boolean;
+  n: number | number[] | null;
+  pop: number;
+  sets: number;
+  pct: number;
+  pctAll: number;
+  pf: number;
+  meanPf: number;
+  orders: number;
+  chosen?: Record<string, number>;
+  mode?: "positive" | "negative" | "both";
+};
+export type WindowKey = "baseLong" | "baseShort" | "baseMinimal" | "mainLong" | "mainShort" | "mainMinimal" | "negative" | "real" | "realNeg";
 export type PfBase = {
+  /** The end figure: the pool of the Sets that pass every gate (Base and Main). */
   base: PfPool;
+  /** The pool of the Sets that pass the Base gate alone. */
+  baseOnly?: PfPool;
+  /** The same window orders, one result per entry (the best-ranked Set's): a pack's Sets share entries, the pool counts each once per Set. */
+  baseEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
+  baseOnlyEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
+  /** Main stage: the end Sets over the Main gate's last N of their Main Sets (orders opened while Base passed). */
+  main?: PfPool & { on: boolean; lastN: number };
+  /** The Main Sets of every Base-passing Set. */
+  processed?: PfPool & { orders: number; lastN: number };
+  /** Real stage: the Real Sets (orders opened while Base and Main passed) of the Sets valid on the positive lane, over the Real last N. */
+  real?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
+  /** Real stage, Negative lane: the Real Negative Sets of the Sets valid on it. */
+  realneg?: { pf: number; sets: number; orders: number; lastN: number; on: boolean };
+  stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
+  /** Per stage, over the Sets that pass it (never over all Sets): how many, their share of every configured Set, the pooled PF and the mean of their own PFs. */
+  stages?: Record<"base" | "main" | "real" | "realNeg" | "valid", StageFigure> & { allSets: number };
+  /** Per last-N window (Base long / short / minimal, Main long / short / minimal, Negative, Real, Real Negative), each judged on its own. */
+  windows?: Record<WindowKey, WindowFigure>;
+  validatedBasePct?: number;
   unfiltered: PfPool;
   total?: number;
   valid?: number;
@@ -81,7 +124,42 @@ export type PfBase = {
   history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number }>;
 };
 
+/** Sets and orders as executed, after every validation gate (Pulse.execution_snapshot). */
+export type OverallScope = {
+  allow?: boolean;
+  reasons?: string[];
+  orders?: number;
+  consecLoss?: number;
+  lastPf?: number;
+  prevPf?: number;
+  pf?: number;
+  n?: number;
+  realPf?: number;
+  realN?: number;
+  executed: { orders: number; wins: number; pf: number | null };
+};
+
+export type Execution = {
+  sets: {
+    configured: number;
+    valid: number;
+    baseValid: number;
+    invalid: number;
+    reasons: Record<string, number>;
+    /** Sets at each stage now: passed Base, passed Main, in a Main dip, valid on Real, valid on Real Negative. */
+    stages?: { base: number; main: number; negative: number; real: number; realNeg: number };
+  };
+  /** Positions and closes per lane: Real (positive) and Real Negative. */
+  lanes?: { openPos: number; openNeg: number; closedPos: number; closedNeg: number; winsPos: number; lossesPos: number; winsNeg: number; lossesNeg: number };
+  /** The Real stage's overall strategies per scope ("overall", "lane:pos|neg", "pack:<pack>"), each judged on its own paper stream. */
+  overall?: { scopes: Record<string, OverallScope>; blocked: number };
+  open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
+  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number };
+};
+
 export type LiveStats = {
+  /** Sets and orders after every validation gate, as executed (open positions stay handled until closed). */
+  execution?: Execution;
   running: boolean;
   mode: string;
   connection: string;
@@ -443,6 +521,7 @@ export type LiveStats = {
     pf?: number;
     costPct?: number;
     netPct?: number;
+    netSumPct?: number;
     grossPct?: number;
     minPf?: number;
     pass?: boolean;
@@ -608,17 +687,20 @@ export function statsMatchesConn(s: LiveStats, conn: string): boolean {
   const got = String(s.connType || "").toLowerCase();
   const cid = String(s.connection || "").toLowerCase();
   const unit = String(s.unit || "").toLowerCase();
+  const bybit = cid.startsWith("bybit") || got.startsWith("bybit");
   if (conn === "live") {
-    if (got === "overall" || cid === "overall") return false;
+    if (got === "overall" || cid === "overall" || bybit) return false;
     if (got === "vst" || cid.includes("x02") || unit === "vst") return false;
     return got === "live" || cid.includes("x01") || unit === "usdt";
   }
   if (conn === "vst") {
-    if (got === "overall" || cid === "overall") return false;
+    if (got === "overall" || cid === "overall" || bybit) return false;
     if (got === "live" || cid.includes("x01") || unit === "usdt") return false;
     return got === "vst" || cid.includes("x02") || unit === "vst";
   }
   if (conn === "overall") return got === "overall" || cid === "overall";
+  // another venue's lane (Bybit): its own connection type, matched by the type or the connection id
+  if (conn.startsWith("bybit")) return got === conn || cid === (conn === "bybit" ? "bybit-x01" : "bybit-x02");
   return false;
 }
 
@@ -630,6 +712,8 @@ export function pickView(stats: LiveStats | null, conn: string): LiveStats | nul
 function cidPrefix(conn: string): string {
   if (conn === "live") return "Gx01";
   if (conn === "vst") return "Gx02";
+  if (conn === "bybit") return "Gb01";
+  if (conn === "bybit-demo") return "Gb02";
   return "";
 }
 

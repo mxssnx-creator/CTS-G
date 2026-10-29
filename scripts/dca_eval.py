@@ -33,7 +33,7 @@ import set_engine as se  # noqa: E402
 from position_cost import cost_as_frac  # noqa: E402
 
 
-def walk(bars, tr, fracs, cfg, rungs, tp_mode="orig", stop_mode="orig"):
+def walk(bars, tr, fracs, cfg, rungs, tp_mode="orig", stop_mode="orig", confirm=False):
     """rungs: [(distance as a fraction of the SL distance, size multiple)]. Returns the net of the whole position."""
     cf = cost_as_frac(cfg["cost_pct"])
     side = int(tr["dir"])
@@ -60,7 +60,19 @@ def walk(bars, tr, fracs, cfg, rungs, tp_mode="orig", stop_mode="orig"):
         while nxt < len(rungs):
             d, m = rungs[nxt]
             lvl = e0 * (1 - side * d * sl_f)
-            if (side > 0 and lo <= lvl and lvl > stop) or (side < 0 and hi >= lvl and lvl < stop):
+            touched = (side > 0 and lo <= lvl and lvl > stop) or (side < 0 and hi >= lvl and lvl < stop)
+            if touched and confirm:
+                # confirmed add: the bar must close back the other way (a bounce) and stay clear of the stop; fill at that close
+                pc = float(bars[j - 1][3])
+                if not ((side > 0 and cl > pc and cl > stop) or (side < 0 and cl < pc and cl < stop)):
+                    break
+                fills.append((cl, m))
+                nxt += 1
+                size = sum(q for _, q in fills)
+                avg = sum(p * q for p, q in fills) / size
+                target = tp if tp_mode == "orig" else avg * (1 + side * tp_f)
+                continue
+            if touched:
                 fills.append((lvl, m))
                 nxt += 1
                 size = sum(q for _, q in fills)
@@ -119,10 +131,10 @@ def main():
     dev = [r for r in rows if r["t_in"] < split]
     print(f"symbols={len(names)} hours={len(hours)} dev positions={len(dev)} (sealed {len(rows) - len(dev)} not read) build {time.time() - t0:.0f}s", flush=True)
 
-    def run(rungs, tp_mode, stop_mode, rs):
+    def run(rungs, tp_mode, stop_mode, rs, confirm=False):
         vals = []
         for r in rs:
-            net, _ = walk(bars[r["symbol"]], r["tr"], r["fracs"], cfg, rungs, tp_mode, stop_mode)
+            net, _ = walk(bars[r["symbol"]], r["tr"], r["fracs"], cfg, rungs, tp_mode, stop_mode, confirm)
             vals.append((r["t"], net))
         return summarize_net(vals)
 
@@ -147,6 +159,10 @@ def main():
         sm = run(rungs, tp_mode, stop_mode, dev)
         name = f"n={n} rungs@{[round(d, 2) for d, _ in rungs]} x{mult} tp={tp_mode} stop={stop_mode}"
         res[name] = sm
+    for n, gap, mult in ((1, 0.4, 0.5), (1, 0.4, 1.0), (1, 0.6, 1.0), (2, 0.33, 0.5), (2, 0.25, 0.5), (3, 0.2, 0.5)):
+        rungs = [((k + 1) * gap, mult) for k in range(n)]
+        for tp_mode in ("orig", "avg"):
+            res[f"CONFIRMED n={n} rungs@{[round(d, 2) for d, _ in rungs]} x{mult} tp={tp_mode}"] = run(rungs, tp_mode, "orig", dev, confirm=True)
     ranked = sorted(((k, v) for k, v in res.items() if k != "no DCA"), key=lambda kv: (kv[1]["net_per_dd"] if kv[1]["net_per_dd"] is not None else -9), reverse=True)
     for k, v in ranked[:12]:
         print(f"{k:52s} PF {v['pf']}  net {v['net_pct']}%  maxDD {v['max_dd_pct']}%  net/DD {v['net_per_dd']}")

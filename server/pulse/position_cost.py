@@ -18,6 +18,8 @@ RATIO_MIN = 1.02
 RATIO_MAX = 2.30
 RATIO_STEP = 0.02
 LAST_N_DEFAULT = 15
+MIN_VALIDATION_N = 8         # no last-N validation reads fewer orders than this
+OVERALL_N_DEFAULT = 50       # the overall validation's last N (setGateWindow, the Base gate window)
 SL_TP_MIN = 0.3
 SL_TP_MAX = 1.5
 SL_TP_STEP = 0.3
@@ -96,6 +98,7 @@ def snap_sl_ratio(value: Any) -> float:
 
 
 GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
+MIN_PF_FLOOR = 1.05          # no validation gate asks less than this net PF, whatever is configured (owner, 2026-10-29: Micro windows 1.05)
 
 
 def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:
@@ -161,11 +164,28 @@ def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
+    scan_all: bool = True,
 ) -> Dict[str, float]:
+    """The net PF and the figures of the newest n measurable closes of rows. scan_all (default): every row is read, so `skipped` counts all the rows without a finite
+    pnl_pct. scan_all False (the scoring pass, which never reads `skipped`): the rows are read from the end until n measurable ones are found, the same window
+    without touching the rest of a long tape; `skipped` then counts only the rows met on the way."""
     # a row without a finite pnl_pct is not a close we can measure: it is skipped and counted, never read as a loss
-    valid = [(r, v) for r, v in ((r, _pnl_pct_of(r)) for r in rows) if v is not None]
-    skipped = len(list(rows)) - len(valid)
-    window = valid[-max(1, int(n)) :]
+    need = max(1, int(n))
+    if scan_all:
+        valid = [(r, v) for r, v in ((r, _pnl_pct_of(r)) for r in rows) if v is not None]
+        skipped = len(list(rows)) - len(valid)
+        window = valid[-need:]
+    else:
+        window, skipped = [], 0
+        for r in reversed(rows):
+            v = _pnl_pct_of(r)
+            if v is None:
+                skipped += 1
+                continue
+            window.append((r, v))
+            if len(window) >= need:
+                break
+        window.reverse()
     rs: List[float] = []
     gp = gl = 0.0
     for _row, pnl_pct in window:
@@ -176,6 +196,7 @@ def last_n_cost_pf(
             gp += net
         elif net < 0:
             gl += abs(net)
+    net_sum_pct = 100.0 * (gp - gl)       # the window's net result, the sum over its positions (percent of one position): the same net the PF divides
     count = len(rs)
     avg_r = sum(rs) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
@@ -188,8 +209,9 @@ def last_n_cost_pf(
         "ratio": round(ratio, 4),
         "pf": round(pf, 4),
         "costPct": float(cost_pct),
-        "netPct": round(net_move_pct(ratio, cost_pct), 4),
+        "netPct": round(net_move_pct(ratio, cost_pct), 4),            # the mean net per position (percent): netSumPct / count
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+        "netSumPct": round(net_sum_pct, 4),
         "skipped": float(skipped),
     }
 
@@ -274,3 +296,60 @@ if __name__ == "__main__":
     assert abs(sl15 - 0.0075 * 1.5) < 1e-9 and sl15 > tp15
     assert abs(snap_ratio(0.64) - 0.6) < 1e-9
     print("position_cost ok", got, src, src15)
+
+
+def overall_validation_n(ov: Any) -> int:
+    """The overall validation's last N: the Base gate window every Set is judged on (setGateWindow, 10..200, default 50)."""
+    try:
+        n = int((ov or {}).get("setGateWindow") or OVERALL_N_DEFAULT)
+    except (TypeError, ValueError):
+        n = OVERALL_N_DEFAULT
+    return max(10, min(200, n))
+
+
+def window_n(ov: Any, *keys: str, fallback: Optional[int] = None) -> int:
+    """The last N a secondary validation reads (pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN, trailRecalcN).
+    windowsLinked (default on): it is the overall validation's last N, so every validation judges the same stretch of orders.
+    Off: the first of the keys that is set is its own N, never below MIN_VALIDATION_N; none set takes the fallback, then the overall N."""
+    ov = ov or {}
+    overall = overall_validation_n(ov)
+    if ov.get("windowsLinked", True):
+        return overall
+    for k in keys:
+        try:
+            v = int(ov.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            return max(MIN_VALIDATION_N, v)
+    return max(MIN_VALIDATION_N, int(fallback)) if fallback else overall
+
+
+def pf_floor(v: Any, default: float = GATE_MIN_PF_DEFAULT) -> float:
+    """A configured minimum PF, never under MIN_PF_FLOOR (a missing or broken value is the default)."""
+    try:
+        x = float(v) if v is not None else float(default)
+    except (TypeError, ValueError):
+        x = float(default)
+    return max(MIN_PF_FLOOR, x)
+
+
+def base_min_pf(ov: Any) -> float:
+    """The Base gate's minimum PF (setMinPf, default GATE_MIN_PF_DEFAULT, at least MIN_PF_FLOOR): the one value every validation gate uses."""
+    return pf_floor((ov or {}).get("setMinPf"))
+
+
+def gate_min_pf(ov: Any, *own_keys: str) -> float:
+    """The minimum PF of a validation gate (Real, Exit, DCA, Block, the coordinator). minPfLinked (default on): the Base gate's value, so
+    every gate asks the same PF. Off: the first of own_keys that is set, else the Base value."""
+    ov = ov or {}
+    if ov.get("minPfLinked", True):
+        return base_min_pf(ov)
+    for k in own_keys:
+        try:
+            v = float(ov.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return pf_floor(v)
+    return base_min_pf(ov)

@@ -22,6 +22,12 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from position_cost import GATE_MIN_PF_DEFAULT, MIN_PF_FLOOR
+
+BLOCK_MIN_SAMPLES_DEFAULT = 8      # closes a Block lane needs before its observed PF counts
+BLOCK_WINDOW_DEFAULT = 25          # closes the Block evidence (exit_lane_pf) reads
+
+
 BLOCK_COUNT_MIN = 1
 BLOCK_COUNT_PREVIEW = 12
 BLOCK_VOL_RATIO_MIN = 0.25
@@ -61,7 +67,7 @@ def calculate_block_minimum_profit_factor(
     if min(default_min_pf, block_pf_ratio, volume_increment) <= 0:
         return 0.0
     bounded = clamp(block_pf_ratio, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
-    return 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment
+    return max(MIN_PF_FLOOR, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)     # never under the floor (1.1)
 
 
 def calculate_block_effective_minimum_profit_factor(configured: float, normal: float) -> float:
@@ -128,9 +134,11 @@ class BlockBook:
         self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
-        self.default_min_pf = float(cfg.get("defaultMinPF", 1.2) or 1.2)
-        self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
-        self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25))
+        self.default_min_pf = float(cfg.get("defaultMinPF", GATE_MIN_PF_DEFAULT) or GATE_MIN_PF_DEFAULT)
+        # Block counts its own samples (blockMinSamples, blockWindow): independent of the coordinator's prevPos* counts and of the
+        # last-N validation windows (pfWindow and friends, windowsLinked)
+        self.min_samples = max(1, int(cfg.get("blockMinSamples", BLOCK_MIN_SAMPLES_DEFAULT) or BLOCK_MIN_SAMPLES_DEFAULT))
+        self.window = max(self.min_samples, int(cfg.get("blockWindow", BLOCK_WINDOW_DEFAULT) or BLOCK_WINDOW_DEFAULT))
         self.lanes: Dict[str, BlockLane] = {}
         self.load()
 

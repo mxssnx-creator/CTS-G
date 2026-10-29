@@ -8,11 +8,13 @@
  * "Trailing" together they equal `sets.pfBase`; a test pins that.
  */
 
+import type { PfBase, WindowFigure, WindowKey } from "./live-stats.ts";
+
 /** One Set of `sets.index`. The gate-window fields are what the pooled PF needs; the others fill the table. */
 export type SetIndexRow = {
   i: number;
   id: string;
-  kind: "base" | "trail";
+  kind: "base" | "exit" | "trail";
   pack: string;
   /** SL ratio. */
   sl: number;
@@ -42,12 +44,31 @@ export type SetIndexRow = {
   da?: number;
   /** Engine rank among the valid Sets (0 = first choice), -1 when not valid. */
   rk?: number;
+  /** The Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set (opened while Base and Main passed). */
+  mainId?: string;
+  mainN?: number;
+  mainPf?: number;
+  realId?: string;
+  realN?: number;
+  realPf?: number;
+  realNegId?: string;
+  realNegN?: number;
+  realNegPf?: number;
+  /** Base short window PF, the Set's own Main short window (N), the lane it is valid on ("pos" / "neg" / ""), the reason when not. */
+  shortPf?: number;
+  mainShortN?: number;
+  lane?: string;
+  why?: string;
 };
 
-export type StrategyType = "normal" | "trailing" | "axis" | "block" | "dca";
+export type StrategyType = "normal" | "exit" | "trailing" | "axis" | "block" | "dca";
+
+/** The Set kinds a view shows: Normal = base Sets (take their TP), Exit = no-TP Sets (exitIgnoreTp), Trailing = trailing Sets. */
+export const SET_VIEW_KIND: Partial<Record<StrategyType, string>> = { normal: "base", exit: "exit", trailing: "trail" };
 
 export const STRATEGY_TYPES: Array<{ id: StrategyType; label: string; hint: string }> = [
-  { id: "normal", label: "Normal", hint: "base Sets: pack x SL ratio x TP step" },
+  { id: "normal", label: "Normal", hint: "base Sets: pack x SL ratio x TP step, leave at their TP" },
+  { id: "exit", label: "Exit", hint: "Exit Sets (exitIgnoreTp): the base stop with no TP, own lanes and validation" },
   { id: "trailing", label: "Trailing", hint: "independent trailing Sets: pack x arm x give" },
   { id: "axis", label: "Axis", hint: "the coordinator's axes and stage PFs" },
   { id: "block", label: "Block", hint: "Block counts and lanes" },
@@ -106,8 +127,8 @@ export function filterSets(
   rangeId: string,
   costPct: number,
 ): SetIndexRow[] {
-  if (!index || (type !== "normal" && type !== "trailing")) return [];
-  const kind = type === "normal" ? "base" : "trail";
+  const kind = SET_VIEW_KIND[type];
+  if (!index || !kind) return [];
   const range = rangeById(rangeId);
   return index.filter((r) => r.kind === kind && inRange(stepOf(r, costPct), range));
 }
@@ -199,6 +220,77 @@ export function pfByStep(
   return [...by.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([step, rs]) => ({ step, pf: pooledPf(rs), valid: rs.length, orders: rs.reduce((a, r) => a + Number(r.gn ?? 0), 0) }));
+}
+
+export type StageRow = { key: string; label: string; sets: number; pct: number; pf: number | null; meanPf: number | null; orders: number };
+
+const STAGE_LABELS: Array<[StageRow["key"], string]> = [
+  ["base", "Base · long, short, minimal window"],
+  ["main", "Main · long, short, minimal window"],
+  ["real", "Real · positive lane"],
+  ["realNeg", "Real Negative lane"],
+  ["valid", "Valid on any lane"],
+];
+
+/**
+ * The stage figures the stats show: for each stage the Sets that pass it, their share of ALL configured Sets and the PF of those Sets only
+ * (pooled over their window orders, and the mean of their own PFs). A stage nobody passes has no PF ("—"), never the overall average.
+ */
+export function stageFigures(pb: Pick<PfBase, "stages"> | null | undefined): StageRow[] {
+  const st = pb?.stages;
+  if (!st) return [];
+  return STAGE_LABELS.map(([key, label]) => {
+    const r = st[key as "base" | "main" | "real" | "realNeg" | "valid"];
+    return { key, label, sets: r.sets, pct: r.pct, pf: r.sets > 0 ? r.pf : null, meanPf: r.sets > 0 ? r.meanPf : null, orders: r.n };
+  });
+}
+
+export type WindowRow = {
+  key: WindowKey;
+  stage: "Base" | "Main" | "Negative" | "Real";
+  label: string;
+  /** The configured window ("50", "5 · 10", "off", "newest 2 positive"). */
+  setting: string;
+  on: boolean;
+  pop: number;
+  sets: number;
+  pct: number;
+  pf: number | null;
+  meanPf: number | null;
+  orders: number;
+  chosen?: string;
+};
+
+const WINDOW_LABELS: Array<[WindowKey, WindowRow["stage"], string]> = [
+  ["baseLong", "Base", "long window"],
+  ["baseShort", "Base", "short window"],
+  ["baseMinimal", "Base", "minimal window"],
+  ["mainLong", "Main", "long window"],
+  ["mainShort", "Main", "short window"],
+  ["mainMinimal", "Main", "minimal window"],
+  ["negative", "Negative", "dip windows"],
+  ["real", "Real", "last N"],
+  ["realNeg", "Real", "Negative lane last N"],
+];
+
+function windowSetting(key: WindowKey, w: WindowFigure): string {
+  if (!w.on) return "off";
+  if (key === "baseMinimal" || key === "mainMinimal") return `newest ${w.n} ${w.mode ?? "positive"}`;
+  return Array.isArray(w.n) ? w.n.join(" · ") : String(w.n);
+}
+
+/**
+ * Every last-N window on its own: the Sets that pass THAT window alone (among the Sets its stage judges), their share, and the pooled PF of the orders
+ * that window reads with the count behind it. A window nobody passes has no PF ("—"); an off window reads "off" and counts nothing.
+ */
+export function windowFigures(pb: Pick<PfBase, "windows"> | null | undefined): WindowRow[] {
+  const ws = pb?.windows;
+  if (!ws) return [];
+  return WINDOW_LABELS.map(([key, stage, label]) => {
+    const w = ws[key];
+    const chosen = key === "mainShort" && w.on && w.chosen ? Object.entries(w.chosen).sort((a, b) => Number(a[0]) - Number(b[0])).map(([n, c]) => `${n}: ${c}`).join(" · ") : undefined;
+    return { key, stage, label, setting: windowSetting(key, w), on: w.on, pop: w.pop, sets: w.sets, pct: w.pct, pf: w.on && w.sets > 0 ? w.pf : null, meanPf: w.on && w.sets > 0 ? w.meanPf : null, orders: w.orders, chosen };
+  });
 }
 
 /** A PF for display: a window without a loss has no finite PF (the engine reports 99), so it reads "no loss" rather than 99.00. */

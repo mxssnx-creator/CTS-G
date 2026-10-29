@@ -1,0 +1,119 @@
+Stage audit · 20 symbols · test 28 Oct 01:00 - 29 Oct 01:00 UTC · pre-history 24 h · 1538 Sets
+config: Base long 50 / short 15, Main static 25 + Auto, Real 15, min PF 1.25, minimum orders 1 (1 = off), full windows False
+
+1. LANES in the test window (PF after PositionCost / orders). Base = the Set's whole tape (no stage applied); Main = opened while Base passed;
+   Real = opened while Base and Main passed; Real Neg = opened in a Main dip (own lane).
+group                                      Base         Main         Real     Real Neg   Main-Base  Real-Base
+ALL Sets                           0.855 2386312  0.892 221560    1.0  56627  0.887 131966      +0.04     +0.15
+category general                   0.911 991251  0.996 111692   1.09  35837  1.014  62525      +0.08     +0.18
+category indications               0.816 1395061  0.787 109868  0.853  20790  0.776  69441      -0.03     +0.04
+type base (TP)                     0.797 1143675  0.769  74525   0.77  13969  0.778  46272      -0.03     -0.03
+type exit (no TP)                  0.927 414138  0.921  63365  0.969  17977  0.919  37342      -0.01     +0.04
+type trailing                      0.894 828499  1.032  83670  1.254  24681  1.015  48352      +0.14     +0.36
+range 13-20                        0.885 816249  0.925  85680  1.085  22678  0.905  50841      +0.04     +0.20
+range 2-6                          0.615 462647  0.889  14555  0.997   3113  0.884   8946      +0.27     +0.38
+range 21-30                        0.906 590422  0.857  79064  0.919  20869  0.858  45632      -0.05     +0.01
+range 7-12                         0.843 516994  0.915  42261  1.043   9967  0.925  26547      +0.07     +0.20
+
+   by category x type x range:
+  general base (TP) 13-20 (104 Sets) 0.918 112085  0.797  13156  0.819   2758  0.754   8085      -0.12     -0.10
+  general base (TP) 2-6 (65 Sets)   0.56 137787   0.69    957  0.645    127  0.687    550      +0.13     +0.08
+  general base (TP) 21-30 (130 Sets) 0.927 108583  0.758  16128  0.686   3004  0.797   9980      -0.17     -0.24
+  general base (TP) 7-12 (78 Sets) 0.787 111616  0.752   5035  0.728    693   0.76   3360      -0.04     -0.06
+  general exit (no TP) 13-20 (47 Sets) 1.017  50410  1.132  10528   1.14   3829  1.162   5654      +0.11     +0.12
+  general exit (no TP) 2-6 (8 Sets) 1.008  16238  0.957   2235  1.068    516  0.896   1488      -0.05     +0.06
+  general exit (no TP) 21-30 (112 Sets) 0.989  91752  1.036  19681  1.008   6965  1.129  10589      +0.05     +0.02
+  general exit (no TP) 7-12 (15 Sets)  1.02  23420  1.095   3853  1.119   1225  1.118   2213      +0.07     +0.10
+  general trailing 13-20 (116 Sets) 0.976 184238  1.276  22504  1.387   9627  1.397  11228      +0.30     +0.41
+  general trailing 2-6 (10 Sets)   0.912  18878  0.995   2301  1.027    617  0.981   1454      +0.08     +0.11
+  general trailing 21-30 (39 Sets) 0.983  60795  1.291   7394  1.464   3331  1.106   3365      +0.31     +0.48
+  general trailing 7-12 (45 Sets)  0.933  75449  1.211   7920  1.343   3145  1.366   4559      +0.28     +0.41
+  indications base (TP) 13-20 (104 Sets) 0.812 144374  0.733  10681  0.716   1639  0.763   6804      -0.08     -0.10
+  indications base (TP) 2-6 (65 Sets) 0.515 234101  0.689   2842  0.762    423  0.745   1752      +0.17     +0.25
+  indications base (TP) 21-30 (130 Sets) 0.881 134403  0.792  16320   0.86   4100  0.781   9405      -0.09     -0.02
+  indications base (TP) 7-12 (78 Sets) 0.787 160726  0.776   9406  0.701   1225  0.805   6336      -0.01     -0.09
+  indications exit (no TP) 13-20 (47 Sets) 0.887  63495  0.778   7893  0.811   1429  0.756   5208      -0.11     -0.08
+  indications exit (no TP) 2-6 (8 Sets) 0.903  25942  0.887   2220  1.004    506  0.866   1357      -0.02     +0.10
+  indications exit (no TP) 21-30 (112 Sets) 0.856 109752  0.707  13061  0.739   2648  0.684   8286      -0.15     -0.12
+  indications exit (no TP) 7-12 (15 Sets) 0.919  33129  0.818   3894  0.888    859  0.742   2547      -0.10     -0.03
+  indications trailing 13-20 (116 Sets) 0.831 261647  0.811  20918  0.992   3396  0.765  13862      -0.02     +0.16
+  indications trailing 2-6 (10 Sets) 0.924  29701   0.99   4000  1.083    924  0.976   2345      +0.07     +0.16
+  indications trailing 21-30 (39 Sets) 0.846  85137  0.822   6480  0.878    821  0.864   4007      -0.02     +0.03
+  indications trailing 7-12 (45 Sets) 0.877 112654   0.92  12153  1.037   2820  0.902   7532      +0.04     +0.16
+
+2. SELECTION GAP hour by hour: the Sets valid at the hour start - their in-sample window PF at selection against the PF of their orders opened in the next hour.
+group                                                     after Base alone                           after all gates
+                                   valid/h in-sample next h PF  orders     valid/h in-sample next h PF  orders
+13-20                                 99.6     1.609     0.924  150060        20.8     1.822     0.992   29630
+2-6                                    9.8     1.681     0.948   24671         1.4     1.885     0.884    3568
+21-30                                123.2      1.67     0.818  126883        27.6     1.862      0.78   26495
+7-12                                  37.2     1.578      0.93   71476         5.8     1.699     1.046   10132
+ALL                                  269.8     1.638      0.88  373090        55.6     1.835     0.892   69825
+base                                 104.3     1.646     0.761  110139        17.3     1.803      0.73   17308
+exit                                  86.9      1.67     0.861  100642        20.0     1.918     0.733   19474
+trail                                 78.5      1.58     1.018  162309        18.3      1.75     1.191   33043
+general                              163.2     1.658     0.941  190689        41.7     1.857     0.951   49601
+general base 13-20                    21.4     1.605     0.847   20287         3.2     1.814     0.838    2877
+general base 2-6                       0.9     1.379     0.664    1458         0.2     1.421     0.743     237
+general base 21-30                    32.4     1.652     0.742   25152         6.0     1.769     0.722    4897
+general base 7-12                      6.8     1.523     0.798    8044         1.0     1.688     0.801     949
+general exit 13-20                    14.2     1.694     0.996   15744         3.6     2.014     0.796    3561
+general exit 2-6                       1.8     1.767     1.097    3853         0.5     2.091     0.849     980
+general exit 21-30                    33.4      1.73     0.884   28253        10.7     1.971     0.713    8549
+general exit 7-12                      4.0      1.62     1.007    6327         0.6       1.8     0.968     868
+general trail 13-20                   28.1      1.62     1.098   47104         9.9     1.789     1.204   16396
+general trail 2-6                      1.9     1.652     1.101    3627         0.2     2.052     0.827     322
+general trail 21-30                   10.5     1.595     1.134   17139         3.5     1.744     1.265    5708
+general trail 7-12                     7.7     1.647      1.16   13701         2.4      1.65     1.352    4257
+indications                          106.5     1.608     0.819  182401        13.9     1.766     0.765   20224
+indications base 13-20                11.9     1.636     0.728   15627         1.8     1.785     0.658    2247
+indications base 2-6                   1.3     1.635     0.577    3271         0.2     1.432     0.594     461
+indications base 21-30                22.8     1.712     0.735   23924         4.1     1.882      0.71    4090
+indications base 7-12                  6.9     1.597     0.814   12376         0.9     1.846      0.78    1550
+indications exit 13-20                 9.3     1.563     0.828   13827         1.1     1.599     0.771    1355
+indications exit 2-6                   1.2     1.649     0.985    3809         0.2     1.651     0.862     577
+indications exit 21-30                19.6     1.611     0.724   21273         3.0     1.733     0.643    2758
+indications exit 7-12                  3.4     1.563     0.905    7556         0.4     1.731     0.817     826
+indications trail 13-20               14.7     1.509     0.902   37471         1.3     1.697     0.991    3194
+indications trail 2-6                  2.7     1.756     1.027    8653         0.3     2.005     1.128     991
+indications trail 21-30                4.5      1.46     0.994   11142         0.2     1.416     1.105     493
+indications trail 7-12                 8.4     1.523      0.91   23472         0.6     1.598     0.956    1682
+
+3. EXITS AND HOLD TIMES by lane and type: orders, PF of the orders that left that way, average hold (minutes)
+lane    type          reason      orders      PF  wins %    net %  hold min
+base    base (TP)     scratch+    350081    99.0     100168244.69      19.7
+base    base (TP)     sl          375976     0.0       0-716518.65      13.1
+base    base (TP)     time          1794     0.0       0 -5672.76     360.0
+base    base (TP)     tp          415824    99.0     100407234.88       5.0
+base    exit (no TP)  scratch+    264367    99.0     100299123.62      17.9
+base    exit (no TP)  sl          148516     0.0       0-318301.38      16.3
+base    exit (no TP)  time          1255     0.0       0 -4365.83     360.0
+base    trailing      scratch+    276267    99.0     100151998.97      13.1
+base    trailing      sl          552232   0.569      33-201300.66       6.9
+main    base (TP)     scratch+     35506    99.0     100 19074.64      20.3
+main    base (TP)     sl           19584     0.0       0 -65491.8      24.3
+main    base (TP)     time           357     0.0       0 -1368.84     360.0
+main    base (TP)     tp           19078    99.0     100 32362.32       6.7
+main    exit (no TP)  scratch+     41125    99.0     100 49856.12      17.9
+main    exit (no TP)  sl           22015     0.0       0-53257.02      18.1
+main    exit (no TP)  time           225     0.0       0  -898.87     360.0
+main    trailing      scratch+     24327    99.0     100 13235.12      13.8
+main    trailing      sl           59343   0.751      37-11719.47       6.1
+real    base (TP)     scratch+      7162    99.0     100  3849.51      20.8
+real    base (TP)     sl            3457     0.0       0-12499.92      26.7
+real    base (TP)     time            89     0.0       0  -310.92     360.0
+real    base (TP)     tp            3261    99.0     100  6011.88       7.0
+real    exit (no TP)  scratch+     11879    99.0     100 15157.57      17.0
+real    exit (no TP)  sl            6021     0.0       0-15348.48      18.0
+real    exit (no TP)  time            77     0.0       0  -295.54     360.0
+real    trailing      scratch+      6807    99.0     100  3801.85      14.3
+real    trailing      sl           17874   0.973      40  -363.42       6.0
+realneg base (TP)     scratch+     21671    99.0     100 11564.25      20.4
+realneg base (TP)     sl           12187     0.0       0-40450.62      23.9
+realneg base (TP)     time           215     0.0       0  -828.16     360.0
+realneg base (TP)     tp           12199    99.0     100 20542.44       6.6
+realneg exit (no TP)  scratch+     24007    99.0     100 28485.38      18.2
+realneg exit (no TP)  sl           13211     0.0       0-30483.48      17.4
+realneg exit (no TP)  time           124     0.0       0  -499.95     360.0
+realneg trailing      scratch+     14029    99.0     100  7649.76      13.7
+realneg trailing      sl           34323   0.734      37  -7246.5       6.1

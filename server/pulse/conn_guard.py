@@ -13,10 +13,12 @@ from urllib.parse import urlparse
 
 LIVE_MAINNET = "LIVE_MAINNET"
 VST_DEMO = "VST_DEMO"
-HOSTS = {"open-api.bingx.com": LIVE_MAINNET, "open-api-vst.bingx.com": VST_DEMO}
+HOSTS = {"open-api.bingx.com": LIVE_MAINNET, "open-api-vst.bingx.com": VST_DEMO, "api.bybit.com": LIVE_MAINNET, "api-demo.bybit.com": VST_DEMO}
 PINNED = {
     "bingx-x01": (LIVE_MAINNET, "https://open-api.bingx.com"),
     "bingx-x02": (VST_DEMO, "https://open-api-vst.bingx.com"),
+    "bybit-x01": (LIVE_MAINNET, "https://api.bybit.com"),          # Bybit V5 mainnet
+    "bybit-x02": (VST_DEMO, "https://api-demo.bybit.com"),         # Bybit demo trading (virtual funds)
 }
 TRUE_WORDS = ("1", "true", "yes")
 FALSE_WORDS = ("0", "false", "no")
@@ -82,6 +84,13 @@ def self_test():
     expect_raise("guard.unknown-conn-refused", lambda: resolve_base("bingx-x09"))
     expect_raise("guard.unknown-host-refused", lambda: mode_of("https://example.com"))
     out.append(("guard.mode-of-vst", mode_of("https://open-api-vst.bingx.com") == VST_DEMO, ""))
+    base, mode = resolve_base("bybit-x01")
+    out.append(("guard.bybit-x01-is-mainnet", mode == LIVE_MAINNET and base == "https://api.bybit.com", f"{mode} {base}"))
+    base, mode = resolve_base("bybit-x02")
+    out.append(("guard.bybit-x02-is-demo", mode == VST_DEMO and base == "https://api-demo.bybit.com", f"{mode} {base}"))
+    expect_raise("guard.bybit-x01-demo-url-refused", lambda: resolve_base("bybit-x01", "https://api-demo.bybit.com", ""))
+    expect_raise("guard.bybit-x02-mainnet-url-refused", lambda: resolve_base("bybit-x02", "https://api.bybit.com", "0"))
+    expect_raise("guard.bybit-url-on-a-bingx-connection-refused", lambda: resolve_base("bingx-x01", "https://api.bybit.com", ""))
     out.append(("guard.mode-of-mainnet", mode_of("https://open-api.bingx.com/") == LIVE_MAINNET, ""))
     return out
 

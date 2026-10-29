@@ -22,8 +22,22 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 Row = Sequence[float]
 Signal = Optional[Tuple[int, float]]
 WINDOW = 300
+TF_BARS = 96                    # bars of a higher timeframe the library reads (the longest family, htfpb, needs 96): 480 rows for 5m, 1440 for 15m
+
+
+ROWS_CAP = 1920                 # the most 1m rows any series reads: the Set history's default lookback (32 h; 64 bars of 30m)
+
+
+def rows_for(tf: int) -> int:
+    """1m rows a tf-minute series is built from: the 300-row window, or TF_BARS bars of the timeframe when that is longer,
+    never more than the Set history holds by default (ROWS_CAP)."""
+    return min(ROWS_CAP, max(WINDOW, TF_BARS * int(tf)))
+
+
 RANGES = {"min": (5, 8), "med": (14, 21)}
-TFS = (1, 5, 15)
+TFS = (1, 5, 15)                # the timeframes of the single names and of the combined vote _c<n> (and the group votes)
+TFS_EXT = (1, 5, 15, 30)        # the extended set: single names on 30m (_t30) and the combined vote over all four (_x<n>)
+HISTORY = rows_for(max(TFS_EXT))   # the most 1m rows any library name reads (its 30m series)
 
 _tls = threading.local()
 
@@ -32,27 +46,50 @@ def _conf(base: float, extra: float, cap: float = 0.93) -> float:
     return max(0.5, min(cap, base + max(0.0, extra)))
 
 
+MEMO_CAP = 4096                 # entries of the per-thread memo before it is cleared (bars and single results; bounded memory)
+
+
+def _memo() -> Dict:
+    m = getattr(_tls, "memo", None)
+    if m is None or len(m) > MEMO_CAP:
+        m = {}
+        _tls.memo = m
+    return m
+
+
+def _key(rows: Sequence[Row], tf: int) -> Tuple:
+    """What a tf-minute series reads: the newest rows_for(tf) rows, identified by their first and newest row objects, their count
+    and the newest row's values. Slices of one history that end on the same row share the key (every window of an evaluation hits
+    the same entry); a list that grew, shrank or replaced its newest row in place gets a new one, never its earlier bars."""
+    n_used = min(len(rows), rows_for(tf))
+    if not n_used:
+        return (tf, 0, 0, 0, ())
+    last = rows[-1]
+    return (tf, n_used, id(rows[-n_used]), id(last), tuple(last[:5]))
+
+
 def _agg(rows: Sequence[Row], tf: int) -> List[List[float]]:
-    """Causal tf-minute bars aligned to the newest row, memoised per rows object (one thread-local slot)."""
-    slot = getattr(_tls, "slot", None)
-    if slot is None or slot[0] is not rows:
-        slot = (rows, {})
-        _tls.slot = slot
-    got = slot[1].get(tf)
+    """Causal tf-minute bars of the newest rows_for(tf) rows, aligned to the newest row, memoised (_key, _memo). The entry holds the
+    first and newest row objects, so their ids are not reused while it lives."""
+    k = ("agg",) + _key(rows, tf)
+    m = _memo()
+    got = m.get(k)
     if got is not None:
-        return got
+        return got[2]
+    if len(rows) > rows_for(tf):
+        rows = rows[-rows_for(tf):]
     if tf == 1:
         out = [[float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])] for r in rows]
     else:
         n = len(rows)
-        k = n // tf
+        kk = n // tf
         out = []
-        for j in range(k):
-            hi = n - (k - 1 - j) * tf
+        for j in range(kk):
+            hi = n - (kk - 1 - j) * tf
             blk = rows[hi - tf : hi]
             out.append([float(blk[0][0]), max(float(b[1]) for b in blk), min(float(b[2]) for b in blk), float(blk[-1][3]),
                         sum(float(b[4]) for b in blk)])
-    slot[1][tf] = out
+    m[k] = (rows[0] if len(rows) else None, rows[-1] if len(rows) else None, out)
     return out
 
 
@@ -123,6 +160,12 @@ def _lo(b):
 
 def _vo(b):
     return [float(x[4]) for x in b]
+
+
+def _band_k(n: int) -> float:
+    """Band width in standard deviations a close can reach inside its own n-bar window: a sample point is at most sqrt(n - 1)
+    population deviations from the mean, so 2 sd is out of reach at n = 5 (the signal could never fire). 2 from n = 10 on."""
+    return min(2.0, 0.7 * math.sqrt(max(1, n - 1)))
 
 
 def _side(x: float) -> int:
@@ -500,10 +543,11 @@ def f_bbb(b, n):
     m3, sd3 = band(len(c) - 4)
     if sd <= 0 or sd <= sd3:               # the bands must be widening
         return None
-    if c[-1] > m + 2 * sd and c[-2] <= m1 + 2 * sd1:       # the first close outside the band
-        return 1, _conf(0.6, min(0.2, (sd / sd3 - 1) * 0.3))
-    if c[-1] < m - 2 * sd and c[-2] >= m1 - 2 * sd1:
-        return -1, _conf(0.6, min(0.2, (sd / sd3 - 1) * 0.3))
+    k = _band_k(n)
+    if c[-1] > m + k * sd and c[-2] <= m1 + k * sd1:       # the first close outside the band
+        return 1, _conf(0.6, min(0.2, (sd / sd3 - 1 if sd3 > 0 else 1.0) * 0.3))
+    if c[-1] < m - k * sd and c[-2] >= m1 - k * sd1:
+        return -1, _conf(0.6, min(0.2, (sd / sd3 - 1 if sd3 > 0 else 1.0) * 0.3))
     return None
 
 
@@ -654,10 +698,11 @@ def f_bbrev(b, n):
     sd = math.sqrt(sum((v - m) ** 2 for v in w) / n)
     if sd <= 0:
         return None
-    if c[-2] < m - 2 * sd and c[-1] > c[-2]:
-        return 1, _conf(0.6, min(0.2, (m - 2 * sd - c[-2]) / sd * 0.1))
-    if c[-2] > m + 2 * sd and c[-1] < c[-2]:
-        return -1, _conf(0.6, min(0.2, (c[-2] - m - 2 * sd) / sd * 0.1))
+    k = _band_k(n)
+    if c[-2] < m - k * sd and c[-1] > c[-2]:
+        return 1, _conf(0.6, min(0.2, (m - k * sd - c[-2]) / sd * 0.1))
+    if c[-2] > m + k * sd and c[-1] < c[-2]:
+        return -1, _conf(0.6, min(0.2, (c[-2] - m - k * sd) / sd * 0.1))
     return None
 
 
@@ -697,11 +742,12 @@ def f_vwapz(b, n):
     sd = math.sqrt(sum((v - vw) ** 2 for v in c) / n)
     if sd <= 0:
         return None
-    z = (c[-1] - vw) / sd
-    if z <= -2.0 and c[-1] > c[-2]:
-        return 1, _conf(0.6, min(0.2, (-z - 2.0) * 0.08))
-    if z >= 2.0 and c[-1] < c[-2]:
-        return -1, _conf(0.6, min(0.2, (z - 2.0) * 0.08))
+    z = (c[-2] - vw) / sd                 # the stretched close, then the turn on the newest one (a turning close is never the extreme)
+    k = _band_k(n)
+    if z <= -k and c[-1] > c[-2]:
+        return 1, _conf(0.6, min(0.2, (-z - k) * 0.08))
+    if z >= k and c[-1] < c[-2]:
+        return -1, _conf(0.6, min(0.2, (z - k) * 0.08))
     return None
 
 
@@ -830,14 +876,20 @@ def _single(fam: str, n: int, tf: int) -> Callable[[Sequence[Row]], Signal]:
     fn = FAMILIES[fam][1]
 
     def run(rows: Sequence[Row]) -> Signal:
-        if len(rows) > WINDOW:
-            rows = rows[-WINDOW:]
-        return fn(_agg(rows, tf), n)
+        # memoised like _agg: a group vote and the single name share one result per bar
+        k = ("sig", fam, n) + _key(rows, tf)
+        m = _memo()
+        got = m.get(k)
+        if got is not None:
+            return got[1]
+        sig = fn(_agg(rows, tf), n)
+        m[k] = (rows[-1] if len(rows) else None, sig)
+        return sig
     return run
 
 
-def _multi(fam: str, n: int) -> Callable[[Sequence[Row]], Signal]:
-    singles = [_single(fam, n, tf) for tf in TFS]
+def _multi(fam: str, n: int, tfs: Sequence[int] = TFS) -> Callable[[Sequence[Row]], Signal]:
+    singles = [_single(fam, n, tf) for tf in tfs]
     return lambda rows: _combine([s(rows) for s in singles], 2)
 
 
@@ -863,9 +915,10 @@ def build() -> Dict[str, Callable[[Sequence[Row]], Signal]]:
     for fam in FAMILIES:
         for rng, ns in RANGES.items():
             for n in ns:
-                for tf in TFS:
+                for tf in TFS_EXT:
                     out[f"{fam}_n{n}_t{tf}"] = _single(fam, n, tf)
                 out[f"{fam}_c{n}"] = _multi(fam, n)
+                out[f"{fam}_x{n}"] = _multi(fam, n, TFS_EXT)
     for group in ("trend", "break", "revert", "volume", None):
         for rng in RANGES:
             out[f"g_{group or 'all'}_{rng}"] = _group(group, rng)

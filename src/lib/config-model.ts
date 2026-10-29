@@ -13,6 +13,13 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
+/** A list of last-N windows (2..200), sorted and unique; the fallback when empty (set_engine.parse_windows). */
+export function windows(raw: unknown, fallback: number[]): number[] {
+  const src = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[,;]/) : [];
+  const out = [...new Set(src.map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x)).map((x) => Math.max(1, Math.min(200, x))))];
+  return out.length ? out.sort((a, b) => a - b) : [...fallback];
+}
+
 export const DEFAULT_SYMBOL_COUNT = 12;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
@@ -82,6 +89,9 @@ export function capSymbols(list: string[]): string[] {
 }
 // Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
 export const GATE_MIN_PF_DEFAULT = 1.25;
+// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.05).
+export const MIN_PF_FLOOR = 1.05;
+const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
@@ -108,6 +118,7 @@ export type PulseOverlay = {
   maxEntrySlipPct: number;
   /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
   ddHaltPct: number;
+  ddHaltBasis: "session" | "start";
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -129,6 +140,13 @@ export type PulseOverlay = {
   controlOrders: boolean;
   blockEnabled: boolean;
   blockMaxStack: number;
+  blockMinSamples: number;
+  blockWindow: number;
+  mainEvalPosCount: number;
+  realEvalPosCount: number;
+  prevPosMinCount: number;
+  prevPosWindow: number;
+  exitMinSamples: number;
   blockVolumeRatio: number;
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
@@ -160,6 +178,7 @@ export type PulseOverlay = {
   axisPauseMaxWindow: number;
   minPf: number;
   positionCostPct: number;
+  windowsLinked: boolean;
   pfWindow: number;
   slMinPct: number;
   slMaxPct: number;
@@ -237,7 +256,60 @@ export type PulseOverlay = {
   setDeactN: number;
   setMinPf: number;
   setMaxDdtHours: number;
+  setGateWindow: number;
+  setGateMinTrades: number;
+  /** Stages Base -> Main -> Real (off: the Base long window alone). */
+  stagesEnabled: boolean;
+  /** true: a stage window judges only once it holds its full N orders; false (default): the orders it has, at least one. */
+  stageFullWindow: boolean;
+  /** Base: the second last N; both Base windows must pass (0 = off). */
+  setGateShortN: number;
+  /** Minimum PF by window size: every last-N window asks the PF of its class (Micro / Minimal / Short / Medium up to their bounds, Long above). */
+  minPfBySize: boolean;
+  minPfMicro: number;
+  minPfMinimal: number;
+  minPfShort: number;
+  minPfMedium: number;
+  minPfLong: number;
+  minPfMicroN: number;
+  minPfMinimalN: number;
+  minPfShortN: number;
+  minPfMediumN: number;
+  /** The short window is at most this share of the long window (default 0.5: long 40, short at most 20). */
+  setGateShortMaxRatio: number;
+  /** Base minimal window: the newest N (1-3) results of a Set must all be positive / negative (0 = off). */
+  setGateMinN: number;
+  setGateMinMode: "positive" | "negative" | "both";
+  mainGateEnabled: boolean;
+  mainGateN: number;
+  /** Main short window (earlier "Auto"): each Set picks its own window from these on its Main Set; the long window and the short one must both pass. */
+  mainShortEnabled: boolean;
+  mainShortWindows: number[];
+  /** The short windows are at most this share of the Main long window (default 0.5: long 25, short at most 12). */
+  mainShortMaxRatio: number;
+  mainShortMin: number;
+  mainShortMargin: number;
+  /** Main minimal window: the newest N (1-3) results of a Set's Main Set must all be positive / negative (0 = off). */
+  mainMinN: number;
+  mainMinMode: "positive" | "negative" | "both";
+  /** Main Negative lane: the average of the last N Main orders below zero (for some N) opens the Real Negative lane. */
+  mainNegEnabled: boolean;
+  mainNegWindows: number[];
+  /** Real: the last N of the lane's Real Set. */
+  realGateEnabled: boolean;
+  realGateN: number;
+  /** The overall strategies (coordinator stages, axes) read the Real Sets' paper stream. */
+  realStagePaper: boolean;
+  minPfLinked: boolean;
+  histLookbackAuto: boolean;
+  histLookbackMax: number;
   setUseHistoricGate: boolean;
+  holdEnabled: boolean;
+  holdAuto: boolean;
+  holdAutoMax: number;
+  holdAutoMin: number;
+  stepHoldOn: boolean[];
+  stepHoldMin: number[];
   setMinSamples: number;
   setMinStep: number;
   setStepMax: number;
@@ -269,7 +341,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   sizePctOfBalance: 0,
   sizeMaxNotional: 25,
   maxEntrySlipPct: 0.75,
-  ddHaltPct: 18,
+  ddHaltPct: 80,
+  ddHaltBasis: "session",
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,
@@ -291,6 +364,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   controlOrders: true,
   blockEnabled: true,
   blockMaxStack: 6,
+  blockMinSamples: 8,
+  blockWindow: 25,
+  mainEvalPosCount: 20,
+  realEvalPosCount: 15,
+  prevPosMinCount: 8,
+  prevPosWindow: 25,
+  exitMinSamples: 8,
   blockVolumeRatio: 1,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
@@ -308,7 +388,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaOnSets: false,
   dcaOnAxis: false,
   dcaMaxExposureX: 2,
-  dcaMinPf: 1.2,
+  dcaMinPf: 1.25,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: [
@@ -335,7 +415,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.12,
-  pfWindow: 6,
+  windowsLinked: true,
+  pfWindow: 8,
   slMinPct: 0.2,
   slMaxPct: 15.75,
   tpMinPct: 0.35,
@@ -343,10 +424,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   tpCostRatio: 5,
   slToTpRatio: 0.6,
   slToTpAuto: true,
-  slToTpRecalcN: 6,
+  slToTpRecalcN: 8,
   slToTpRecalcEvery: 8,
   trailAuto: true,
-  trailRecalcN: 6,
+  trailRecalcN: 8,
   trailRecalcEvery: 8,
   trailArmMin: 0.3,
   trailArmMax: 1.5,
@@ -371,7 +452,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratMulti: false,
   shortRangeStepMin: 2,
   shortRangeStepMax: 6,
-  shortRangeMinPf: 1.25,
+  shortRangeMinPf: 1.1,
   slMinSteps: 1,
   trailMinSteps: 2,
   stratDca: true,
@@ -404,11 +485,52 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 120,
-  setPfWindow: 6,
+  setPfWindow: 8,
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
-  setMaxDdtHours: 12,
+  setMaxDdtHours: 24,
+  setGateWindow: 50,
+  setGateMinTrades: 0,
+  stagesEnabled: true,
+  stageFullWindow: false,
+  setGateShortN: 25,
+  minPfBySize: true,
+  minPfMicro: 1.05,
+  minPfMinimal: 1.08,
+  minPfShort: 1.12,
+  minPfMedium: 1.25,
+  minPfLong: 1.5,
+  minPfMicroN: 5,
+  minPfMinimalN: 10,
+  minPfShortN: 20,
+  minPfMediumN: 35,
+  setGateShortMaxRatio: 0.5,
+  setGateMinN: 0,
+  setGateMinMode: "positive",
+  mainGateEnabled: true,
+  mainGateN: 25,
+  mainShortEnabled: true,
+  mainShortWindows: [5, 10, 15],
+  mainShortMaxRatio: 0.5,
+  mainShortMin: 8,
+  mainShortMargin: 1.02,
+  mainMinN: 0,
+  mainMinMode: "positive",
+  mainNegEnabled: true,
+  mainNegWindows: [5, 10],
+  realGateEnabled: true,
+  realGateN: 15,
+  realStagePaper: true,
+  minPfLinked: true,
+  histLookbackAuto: true,
+  histLookbackMax: 2880,
   setUseHistoricGate: true,
+  holdEnabled: true,
+  holdAuto: true,
+  holdAutoMax: 50,
+  holdAutoMin: 10,
+  stepHoldOn: [false, false, false, false, false, false, false, false, false, false, false, false],
+  stepHoldMin: [15, 15, 15, 15, 15, 120, 120, 120, 120, 120, 120, 120],
   setMinSamples: 12,
   setMinStep: 2,
   setStepMax: 30,
@@ -427,9 +549,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
-  exitPfWindow: 6,
+  exitPfWindow: 8,
   exitDeactN: 25,
-  exitMinPf: 1.2,
+  exitMinPf: 1.25,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -459,6 +581,9 @@ export type CtsSettings = {
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
   blockMaxStack?: number;
+  blockMinSamples?: number;
+  blockWindow?: number;
+  exitMinSamples?: number;
   blockVolumeRatio?: number;
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
@@ -494,6 +619,7 @@ export type CtsSettings = {
   realProfitFactor?: number;
   exchangePositionCost?: number;
   positionCost?: number;
+  windowsLinked?: boolean;
   pfWindow?: number;
   slMinPct?: number;
   slMaxPct?: number;
@@ -554,7 +680,54 @@ export type CtsSettings = {
   setDeactN?: number;
   setMinPf?: number;
   setMaxDdtHours?: number;
+  setGateWindow?: number;
+  setGateMinTrades?: number;
+  mainGateEnabled?: boolean;
+  mainGateN?: number;
+  stagesEnabled?: boolean;
+  stageFullWindow?: boolean;
+  setGateShortN?: number;
+  minPfBySize?: boolean;
+  minPfMicro?: number;
+  minPfMinimal?: number;
+  minPfShort?: number;
+  minPfMedium?: number;
+  minPfLong?: number;
+  minPfMicroN?: number;
+  minPfMinimalN?: number;
+  minPfShortN?: number;
+  minPfMediumN?: number;
+  setGateShortMaxRatio?: number;
+  setGateMinN?: number;
+  setGateMinMode?: string;
+  mainShortEnabled?: boolean;
+  mainShortWindows?: number[];
+  mainShortMaxRatio?: number;
+  mainShortMin?: number;
+  mainShortMargin?: number;
+  mainMinN?: number;
+  mainMinMode?: string;
+  /** Earlier names of the Main short window keys (overlays written before the rename still load). */
+  mainAutoEnabled?: boolean;
+  mainAutoWindows?: number[];
+  mainAutoMaxRatio?: number;
+  mainAutoMin?: number;
+  mainAutoMargin?: number;
+  mainNegEnabled?: boolean;
+  mainNegWindows?: number[];
+  realGateEnabled?: boolean;
+  realGateN?: number;
+  realStagePaper?: boolean;
+  minPfLinked?: boolean;
+  histLookbackAuto?: boolean;
+  histLookbackMax?: number;
   setUseHistoricGate?: boolean;
+  holdEnabled?: boolean;
+  holdAuto?: boolean;
+  holdAutoMax?: number;
+  holdAutoMin?: number;
+  stepHoldOn?: boolean[];
+  stepHoldMin?: number[];
   setMinSamples?: number;
   setMinStep?: number;
   minStepRange?: number;
@@ -629,6 +802,11 @@ function arr<T>(v: unknown, d: T[] = []): T[] {
   return Array.isArray(v) ? (v as T[]) : d;
 }
 
+function minMode(v: unknown): "positive" | "negative" | "both" {
+  const m = String(v ?? "positive").toLowerCase();
+  return m === "negative" ? "negative" : m === "both" ? "both" : "positive";
+}
+
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
   const coord = (cts.coordination_settings ?? cts.coordinationSettings ?? {}) as Record<string, unknown>;
   const trails = arr<string>(cts.strategyBaseTrailingVariants ?? coord.trailingVariants, [
@@ -644,6 +822,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     controlOrders: bool(cts.control_orders, true),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
+    blockMinSamples: Math.max(1, Math.round(num(cts.blockMinSamples, 8))),
+    blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
+    mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 20))),
+    realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 15))),
+    prevPosMinCount: Math.max(1, Math.round(num(cts.prevPosMinCount ?? cts.prev_pos_min_count, 8))),
+    prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
+    exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
@@ -661,7 +846,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaOnSets: bool(cts.dcaOnSets, false),
     dcaOnAxis: bool(cts.dcaOnAxis, false),
     dcaMaxExposureX: num(cts.dcaMaxExposureX, 2),
-    dcaMinPf: num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT),
+    dcaMinPf: pfFloor(num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT)),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 0.05),
@@ -673,9 +858,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
-    minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
+    minPf: pfFloor(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),
-    pfWindow: num(cts.pfWindow, 15),
+    windowsLinked: bool(cts.windowsLinked, true),
+    pfWindow: Math.max(8, num(cts.pfWindow, 15)),
     slMinPct: num(cts.slMinPct, 0.2),
     slMaxPct: num(cts.slMaxPct, 15.75),
     tpMinPct: num(cts.tpMinPct, 0.35),
@@ -683,10 +869,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     tpCostRatio: num(cts.tpCostRatio, 5),
     slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
     slToTpAuto: bool(cts.slToTpAuto, true),
-    slToTpRecalcN: num(cts.slToTpRecalcN, 6),
+    slToTpRecalcN: Math.max(8, num(cts.slToTpRecalcN, 8)),
     slToTpRecalcEvery: num(cts.slToTpRecalcEvery, 8),
     trailAuto: bool(cts.trailAuto, true),
-    trailRecalcN: num(cts.trailRecalcN, 6),
+    trailRecalcN: Math.max(8, num(cts.trailRecalcN, 8)),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
     trailArmMin: num(cts.trailArmMin, 0.3),
     trailArmMax: num(cts.trailArmMax, 1.5),
@@ -711,7 +897,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratMulti: bool(cts.stratMulti, false),
     shortRangeStepMin: num(cts.shortRangeStepMin, 2),
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
-    shortRangeMinPf: num(cts.shortRangeMinPf, 1.25),
+    shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.1)),
     slMinSteps: num(cts.slMinSteps, 1),
     trailMinSteps: num(cts.trailMinSteps, 2),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
@@ -736,9 +922,50 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histRefreshS: num(cts.histRefreshS, 90),
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
-    setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
-    setMaxDdtHours: num(cts.setMaxDdtHours, 12),
+    setMinPf: pfFloor(num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
+    setMaxDdtHours: num(cts.setMaxDdtHours, 24),
+    setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
+    setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
+    stagesEnabled: bool(cts.stagesEnabled, true),
+    stageFullWindow: bool(cts.stageFullWindow, false),
+    setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
+    minPfBySize: bool(cts.minPfBySize, true),
+    minPfMicro: pfFloor(num(cts.minPfMicro, 1.05)),
+    minPfMinimal: pfFloor(num(cts.minPfMinimal, 1.08)),
+    minPfShort: pfFloor(num(cts.minPfShort, 1.12)),
+    minPfMedium: pfFloor(num(cts.minPfMedium, 1.25)),
+    minPfLong: pfFloor(num(cts.minPfLong, 1.5)),
+    minPfMicroN: Math.max(1, Math.round(num(cts.minPfMicroN, 5))),
+    minPfMinimalN: Math.max(1, Math.round(num(cts.minPfMinimalN, 10))),
+    minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
+    minPfMediumN: Math.max(1, Math.round(num(cts.minPfMediumN, 35))),
+    setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
+    setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
+    setGateMinMode: minMode(cts.setGateMinMode),
+    mainGateEnabled: bool(cts.mainGateEnabled, true),
+    mainGateN: Math.max(8, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
+    mainShortEnabled: bool(cts.mainShortEnabled ?? cts.mainAutoEnabled, true),
+    mainShortWindows: windows(cts.mainShortWindows ?? cts.mainAutoWindows, [5, 10, 15]),
+    mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),
+    mainShortMin: Math.max(3, Math.min(200, Math.round(num(cts.mainShortMin ?? cts.mainAutoMin, 8)))),
+    mainShortMargin: Math.max(1, Math.min(2, num(cts.mainShortMargin ?? cts.mainAutoMargin, 1.02))),
+    mainMinN: Math.max(0, Math.min(3, Math.round(num(cts.mainMinN, 0)))),
+    mainMinMode: minMode(cts.mainMinMode),
+    mainNegEnabled: bool(cts.mainNegEnabled, true),
+    mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
+    realGateEnabled: bool(cts.realGateEnabled, true),
+    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 15)))),
+    realStagePaper: bool(cts.realStagePaper, true),
+    minPfLinked: bool(cts.minPfLinked, true),
+    histLookbackAuto: bool(cts.histLookbackAuto, true),
+    histLookbackMax: Math.max(120, Math.min(2880, Math.round(num(cts.histLookbackMax, 2880)))),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
+    holdEnabled: bool(cts.holdEnabled, true),
+    holdAuto: bool(cts.holdAuto, true),
+    holdAutoMax: Math.max(10, Math.min(50, Math.round(num(cts.holdAutoMax, 50)))),
+    holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
+    stepHoldOn: Array.isArray(cts.stepHoldOn) ? cts.stepHoldOn.slice(0, 12).map(Boolean) : DEFAULT_OVERLAY.stepHoldOn,
+    stepHoldMin: Array.isArray(cts.stepHoldMin) ? cts.stepHoldMin.slice(0, 12).map((x) => Math.round(Number(x) || 0)) : DEFAULT_OVERLAY.stepHoldMin,
     setMinSamples: num(cts.setMinSamples, 12),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
     setStepMax: num(cts.setStepMax, 30),
@@ -758,7 +985,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, GATE_MIN_PF_DEFAULT),
+    exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
-import { formatPf } from "@/lib/sets-view";
+import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -28,6 +28,7 @@ export function StatsOverview({
           pf: live.pfCost.pf ?? data.costPf.pf,
           costPct: live.pfCost.costPct ?? data.costPf.costPct,
           netPct: live.pfCost.netPct ?? data.costPf.netPct,
+          netSumPct: live.pfCost.netSumPct ?? data.costPf.netSumPct,
           grossPct: live.pfCost.grossPct ?? data.costPf.grossPct,
           minPf: live.pfCost.minPf ?? data.costPf.minPf,
           pass: live.pfCost.pass ?? data.costPf.pass,
@@ -39,15 +40,41 @@ export function StatsOverview({
         <Hero
           k={`Last ${cost.n || 15} PF`}
           v={cost.count ? formatPf(cost.pf) : "—"}
-          s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
+          s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
         {live?.sets?.pfBase ? (
           <Hero
             k="Effective PF · after Base"
             v={live.sets.pfBase.base.sets ? live.sets.pfBase.base.pf.toFixed(2) : "—"}
-            s={`${live.sets.pfBase.base.sets} valid Sets · n ${live.sets.pfBase.base.n} · before Base ${live.sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)`}
+            s={`${live.sets.pfBase.base.sets} valid Sets${live.sets.pfBase.validatedPct != null ? ` (${live.sets.pfBase.validatedPct.toFixed(1)}%${live.sets.pfBase.validatedBasePct != null && live.sets.pfBase.main?.on ? `, Base alone ${live.sets.pfBase.validatedBasePct.toFixed(1)}%` : ""})` : ""} · n ${live.sets.pfBase.base.n}${live.sets.pfBase.main?.on ? ` · Main last ${live.sets.pfBase.main.lastN}: PF ${live.sets.pfBase.main.pf.toFixed(2)}` : ""}${live.sets.pfBase.baseEntry && live.sets.pfBase.baseEntry.entries ? ` · per entry PF ${live.sets.pfBase.baseEntry.pf.toFixed(2)} (${live.sets.pfBase.baseEntry.entries} entries, ${live.sets.pfBase.baseEntry.setsPerEntry} Sets each)` : ""}${live.sets.pfBase.real ? ` · Real Sets PF ${live.sets.pfBase.real.pf.toFixed(2)} (${live.sets.pfBase.real.orders} orders)` : ""} · before Base ${live.sets.pfBase.unfiltered.pf.toFixed(2)} (under 1 is normal)`}
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
+          />
+        ) : null}
+        {live?.execution?.sets.stages ? (
+          <Hero
+            k="Stages · Base → Main → Real"
+            v={`${live.execution.sets.stages.real + live.execution.sets.stages.realNeg} Sets on Real`}
+            s={stageLine(live)}
+            tone="ok"
+          />
+        ) : null}
+        {live?.execution?.overall && Object.keys(live.execution.overall.scopes).length ? (
+          <Hero
+            k="Real · overall strategies by scope"
+            v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow !== false).length}/${Object.keys(live.execution.overall.scopes).length} open`}
+            s={Object.entries(live.execution.overall.scopes)
+              .map(([k, s]) => `${k.replace("pack:", "").replace("lane:", "lane ")} ${s.allow === false ? "blocked" : "open"} · paper PF ${s.pf != null ? s.pf.toFixed(2) : "—"} (${s.n ?? 0}) · executed ${s.executed.pf != null ? s.executed.pf.toFixed(2) : "—"} (${s.executed.orders})`)
+              .join(" | ") + (live.execution.overall.blocked ? ` · ${live.execution.overall.blocked} entries held by a scope` : "")}
+            tone={Object.values(live.execution.overall.scopes).some((s) => s.allow === false) ? "bad" : "ok"}
+          />
+        ) : null}
+        {live?.execution ? (
+          <Hero
+            k="Executed · after all gates"
+            v={`${live.execution.open.positions} open`}
+            s={`${live.execution.sets.valid}/${live.execution.sets.configured} Sets valid · ${live.execution.open.sets} Sets running${live.execution.open.underInvalidSet ? ` (${live.execution.open.underInvalidSet} under a Set that no longer passes, handled to close)` : ""} · ${live.execution.closed.orders} orders closed (Set ${live.execution.closed.setLane} · Exit ${live.execution.closed.exitLane}) · ${live.execution.closed.setsThatTraded} Sets traded${live.execution.closed.droppedNoRecord ? ` · ${live.execution.closed.droppedNoRecord} dropped without a record` : ""}`}
+            tone="ok"
           />
         ) : null}
         <Hero
@@ -74,6 +101,8 @@ export function StatsOverview({
     <section className="grid gap-3">
       {heroes}
 
+      <StagesCard live={live} />
+
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Profit factor · 1.00=neutral · 1.10=+1×PositionCost">
           <table className="w-full text-sm">
@@ -83,7 +112,8 @@ export function StatsOverview({
                 <th className="pb-2 text-right font-medium">n</th>
                 <th className="pb-2 text-right font-medium">R</th>
                 <th className="pb-2 text-right font-medium">PF</th>
-                <th className="pb-2 text-right font-medium">Net%</th>
+                <th className="pb-2 text-right font-medium" title="Mean net result per position (percent, after PositionCost)">Net / pos %</th>
+                <th className="pb-2 text-right font-medium" title="The window's net result summed over its positions (percent of one position): the net the PF divides">Net Σ %</th>
               </tr>
             </thead>
             <tbody>
@@ -118,6 +148,94 @@ export function StatsOverview({
   );
 }
 
+const STAGE_SHORT: Record<string, string> = { base: "Base", main: "Main", real: "Real", realNeg: "Real Neg", valid: "Valid" };
+
+/** One line for the Stages hero: per stage the Sets that pass it, their share of all Sets and their own PF (the valid ones, not the overall average). */
+function stageLine(live: LiveStats | null | undefined): string {
+  const rows = stageFigures(live?.sets?.pfBase).filter((r) => r.key !== "valid");
+  if (!rows.length) {
+    const st = live?.execution?.sets.stages;
+    return st ? `Base ${st.base} · Main ${st.main} · Real ${st.real} · Real Negative ${st.realNeg}` : "";
+  }
+  return rows.map((r) => `${STAGE_SHORT[r.key]} ${r.sets} (${r.pct.toFixed(1)}%) PF ${formatPf(r.pf)}`).join(" · ");
+}
+
+function StagesCard({ live }: { live: LiveStats | null | undefined }) {
+  const rows = stageFigures(live?.sets?.pfBase);
+  if (!rows.length) return null;
+  const all = live?.sets?.pfBase?.stages?.allSets ?? 0;
+  return (
+    <Card title={`Stages · the Sets that pass each stage (of ${all} configured)`}>
+      <table className="w-full text-sm" data-testid="stage-figures">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 text-left font-medium">Stage</th>
+            <th className="pb-2 text-right font-medium">Valid Sets</th>
+            <th className="pb-2 text-right font-medium">% of all</th>
+            <th className="pb-2 text-right font-medium" title="Gross profit over gross loss of the valid Sets' window orders">PF (valid)</th>
+            <th className="pb-2 text-right font-medium" title="Mean of the valid Sets' own PFs">Mean PF</th>
+            <th className="pb-2 text-right font-medium">Window orders</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} className="border-t border-border font-mono text-xs">
+              <td className="py-1.5">{r.label}</td>
+              <td className="py-1.5 text-right">{r.sets}</td>
+              <td className="py-1.5 text-right">{r.pct.toFixed(1)}%</td>
+              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{formatPf(r.pf)}</td>
+              <td className="py-1.5 text-right">{formatPf(r.meanPf)}</td>
+              <td className="py-1.5 text-right">{r.orders}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-2 text-xs text-muted">
+        Each row averages only the Sets that pass that stage (never every Set); the share is against all configured Sets. Base is in-sample (the Sets were selected on those orders): read it next to Main and Real.
+        Every stage PF is measured on the window the stage judged, so it is at or above the minimum PF by construction; the PF of orders opened AFTER a decision is the executed figure below.
+      </p>
+      <WindowsTable live={live} />
+    </Card>
+  );
+}
+
+/** Every last-N window on its own: the Sets passing that window alone, and the pooled PF and order count of the orders it reads. */
+function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
+  const rows = windowFigures(live?.sets?.pfBase);
+  if (!rows.length) return null;
+  return (
+    <div className="mt-4">
+      <div className="mb-1 font-mono text-[11px] text-muted">Last-N windows, each judged on its own (a stage passes when all of its windows do)</div>
+      <table className="w-full text-sm" data-testid="window-figures">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 text-left font-medium">Window</th>
+            <th className="pb-2 text-right font-medium">Setting</th>
+            <th className="pb-2 text-right font-medium" title="Sets judged by this window's stage">Judged</th>
+            <th className="pb-2 text-right font-medium">Pass</th>
+            <th className="pb-2 text-right font-medium" title="Share of the Sets its stage judges">% of judged</th>
+            <th className="pb-2 text-right font-medium" title="Gross profit over gross loss of the orders this window reads, over the Sets that pass it">PF</th>
+            <th className="pb-2 text-right font-medium" title="Orders behind that PF">Orders</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} className={`border-t border-border font-mono text-xs ${r.on ? "" : "text-muted"}`}>
+              <td className="py-1.5">{r.stage} · {r.label}{r.chosen ? <span className="ml-2 text-muted">({r.chosen})</span> : null}</td>
+              <td className="py-1.5 text-right">{r.setting}</td>
+              <td className="py-1.5 text-right">{r.on ? r.pop : "—"}</td>
+              <td className="py-1.5 text-right">{r.on ? r.sets : "—"}</td>
+              <td className="py-1.5 text-right">{r.on ? `${r.pct.toFixed(1)}%` : "—"}</td>
+              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{formatPf(r.pf)}</td>
+              <td className="py-1.5 text-right">{r.on ? r.orders : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
   const tone = m.count < 1 ? "ok" : m.pf >= 1.1 ? "good" : m.pf < 1 ? "bad" : "ok";
   return (
@@ -126,11 +244,13 @@ function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
       <td className="py-2 text-right font-mono tabular-nums">{m.count}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.avgR.toFixed(2)}</td>
       <td className={`py-2 text-right font-mono tabular-nums ${tone === "good" ? "text-primary" : tone === "bad" ? "text-danger" : ""}`}>
-        {m.count ? m.pf.toFixed(2) : "—"}
+        {m.count ? formatPf(m.pf) : "—"}
       </td>
-      <td className={`py-2 text-right font-mono tabular-nums ${m.netPct >= 0 ? "text-primary" : "text-danger"}`}>
-        {m.netPct >= 0 ? "+" : ""}
-        {m.netPct.toFixed(3)}
+      <td className={`py-2 text-right font-mono tabular-nums ${m.count < 1 ? "" : m.netPct >= 0 ? "text-primary" : "text-danger"}`}>
+        {m.count < 1 ? "—" : `${m.netPct >= 0 ? "+" : ""}${m.netPct.toFixed(3)}`}
+      </td>
+      <td className={`py-2 text-right font-mono tabular-nums ${m.count < 1 ? "" : m.netSumPct >= 0 ? "text-primary" : "text-danger"}`}>
+        {m.count < 1 ? "—" : `${m.netSumPct >= 0 ? "+" : ""}${m.netSumPct.toFixed(2)}`}
       </td>
     </tr>
   );

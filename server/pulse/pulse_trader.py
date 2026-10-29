@@ -26,10 +26,10 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
+from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test
+from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, lane_honors_tp, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -169,12 +169,38 @@ QA_EVERY = 5
 COOLDOWN_S = 9.0
 SYM_BAN_S = 1800.0       # a symbol that stops out within 30 s, or fills far from its reference price, rests this long
 STAGGER_S = 0.12
-DD_HALT = 0.18
+
+
+def set_kind_of(set_id: str) -> str:
+    """The kind of a Set from its id: "<pack>:1m:tr<arm>:<give>" trail, "...:st<n>:xt" exit, "...:st<n>" base."""
+    sid = str(set_id or "")
+    if sid.endswith(":" + EXIT_TAG):
+        return "exit"
+    if re.search(r":tr[0-9.]+:[0-9.]+$", sid):
+        return "trail"
+    return "base"
+
+
+def pack_of_reason(reason: Any) -> str:
+    """The pack an entry reason belongs to: "set:<pack>:..." (a Set entry), "ind:..." (indications), else general."""
+    r = str(reason or "")
+    if r.startswith("set:"):
+        return r.split(":", 2)[1] or "general"
+    return "indications" if r.startswith("ind:") else "general"
+
+
+CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
+CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
+ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
+ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
+DD_HALT = 0.80                  # owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (ddHaltPct)
 EQ_MIN = 0.20
 RECV = 5000
+_CONN_SUFFIX = CONN_SHORT.split("-")[-1]
+IS_BYBIT = CONN_SHORT.startswith("bybit-")
 TAG = "G" + (
-    CONN_SHORT.split("-")[-1]
-    if CONN_SHORT.split("-")[-1].startswith("x")
+    ("b" + _CONN_SUFFIX[1:] if IS_BYBIT and _CONN_SUFFIX.startswith("x") else _CONN_SUFFIX)    # Bybit: Gb01 / Gb02, never a BingX tag
+    if _CONN_SUFFIX.startswith("x")
     else "x01"
 )
 SL_TYPES = {"STOP_MARKET", "STOP", "TRIGGER_MARKET"}
@@ -616,6 +642,7 @@ class Position:
     ctrl_verified: bool = False
     dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
     dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
+    lane: str = ""                             # the Set's lane at entry: "pos" (Base -> Main -> Real) or "neg" (Real Negative)
 
 
 @dataclass
@@ -640,6 +667,7 @@ class Closed:
     client_id: str = ""
     ours: bool = True
     conn: str = ""
+    lane: str = ""
 
 
 class Pulse:
@@ -672,7 +700,9 @@ class Pulse:
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
         self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
-        self.dd_halt = DD_HALT        # drawdown from the start equity that halts entries (fraction); 0 = off (ddHaltPct)
+        self.dd_halt = DD_HALT        # drawdown from the session's start equity that halts entries (fraction); 0 = off (ddHaltPct)
+        self.dd_basis = "session"      # ddHaltBasis: "session" = the equity when this session started, "start" = the stored start equity
+        self.session_eq = 0.0         # equity at the start of the active session (engine start or explicit Start)
         self.size_max = 25.0          # ceiling for one position's notional in USDT (sizeMaxNotional)
         self.max_entry_slip = 0.0075  # fill vs reference price beyond this (fraction, maxEntrySlipPct) closes the entry
         self.regime = "neutral"
@@ -739,6 +769,7 @@ class Pulse:
         self.recon_ok = True
         self.recon_detail = "pending"
         self._load_trade_history()
+        self._exec_boot()
         self._load_open_book()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
@@ -748,9 +779,9 @@ class Pulse:
             "blockPauseCountRatio": 1,
             "blockActiveRealEnabled": True,
             "blockActiveLiveEnabled": True,
-            "defaultMinPF": 1.2,
-            "prevPosMinCount": 5,
-            "prevPosWindow": 25,
+            "defaultMinPF": GATE_MIN_PF_DEFAULT,
+            "blockMinSamples": 8,
+            "blockWindow": 25,
         })
         self.coord = Coordinator()
         self.indications = IndicationBook()
@@ -1143,11 +1174,12 @@ class Pulse:
             if pos.client_id:
                 self.seen_fill_cids.add(pos.client_id)
 
-    def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1) -> str:
+    def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1, lane: str = "") -> str:
         kind = (kind or "o")[:1]
         idx = set_idx
         if pos is not None:
             set_id = set_id or pos.set_id
+            lane = lane or str(getattr(pos, "lane", "") or "")
             pack = pack or pos.pack
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
@@ -1171,13 +1203,17 @@ class Pulse:
             st = f"{int(m.group(1)):02d}"
         elif re.search(r"tr[0-9.]+:[0-9.]+", set_id or ""):
             st = "00"                      # a trailing Set has no TP step
+        if set_kind_of(set_id) == "exit":
+            tr = CID_EXIT_TR               # an Exit Set: same pack, SL ratio and step as its base Set, told apart here
         if idx < 0:
             try:
                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
             except Exception:
                 idx = -1
         ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
-        nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+        # the nonce carries the Set's lane: CID_NEG_MARK first for the Real Negative lane, never otherwise
+        alphabet = [c for c in string.ascii_lowercase + string.digits if c != CID_NEG_MARK]
+        nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + "".join(random.choices(alphabet, k=4))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
     def cid_ours(self, cid: str) -> bool:
@@ -1209,6 +1245,7 @@ class Pulse:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
         pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
+        is_exit = rest[4:6] == CID_EXIT_TR
         try:
             sl = int(rest[2:4]) / 10.0
             arm = int(rest[4:6]) / 10.0
@@ -1228,16 +1265,20 @@ class Pulse:
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
 
+        lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and rest[8:12].isdigit() else "pos"
+
         def _row(st_obj: Any) -> Dict[str, Any]:
             return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
-                    "idx": st_obj.idx, "set_id": st_obj.id}
+                    "idx": st_obj.idx, "set_id": st_obj.id, "lane": lane}
 
         def _agrees(st_obj: Any) -> bool:
             try:
                 if str(getattr(st_obj, "pack", "")) != pack:
                     return False
                 if st_obj.kind == "trail":
-                    return step == 0 and abs(float(st_obj.trail_arm) - arm) < 0.06
+                    return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06
+                if (st_obj.kind == "exit") != is_exit:
+                    return False
                 return step == int(st_obj.step) and abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
             except Exception:
                 return False
@@ -1310,8 +1351,11 @@ class Pulse:
                 if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
                     self._pre_pause_halt = None
                 self.start_eq = 0.0
+                self.session_eq = 0.0              # an explicit Start is a new session
         except Exception:
             pass
+        if self.session_eq <= 0 and self.equity > 0:
+            self.session_eq = self.equity           # the active session starts at the first balance this process reads
         if self.start_eq <= 0 and self.equity > 0:
             self.start_eq = self.equity
             try:
@@ -1333,6 +1377,7 @@ class Pulse:
         if rescued:
             log(f"EQ re-baseline on deposit start_eq {self.start_eq:.4f} -> {self.equity:.4f}")
             self.start_eq = self.equity
+            self.session_eq = self.equity
             try:
                 tmp = START_EQ_PATH + ".tmp"
                 with open(tmp, "w") as f:
@@ -1354,7 +1399,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
+        elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
             if not self.halted:
                 self._halt_eq = self.equity
             self.halted = True
@@ -1366,12 +1411,25 @@ class Pulse:
             self.halted = True
             self.halt_reason = f"equity {self.equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.equity >= EQ_MIN and self.start_eq > 0 and (
-            self.dd_halt <= 0 or (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < self.dd_halt * 0.6
+        elif self.equity >= EQ_MIN and self.dd_base() > 0 and (
+            self.dd_halt <= 0 or self.dd_now() < self.dd_halt * 0.6
         ):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
+
+    def dd_base(self) -> float:
+        """The equity the drawdown halt measures from: the active session's start (default) or the stored start equity."""
+        if getattr(self, "dd_basis", "session") == "session" and getattr(self, "session_eq", 0.0) > 0:
+            return float(self.session_eq)
+        return float(self.start_eq or 0.0)
+
+    def dd_now(self) -> float:
+        """Drawdown of the equity from the halt's basis, as a fraction (0 when there is no basis or no equity)."""
+        base = self.dd_base()
+        if base <= 0 or not (self.equity and self.equity > 0):
+            return 0.0
+        return (base - self.equity) / base
 
     def bump(self, kind: str = "tick") -> None:
         self.last_event = kind
@@ -1628,10 +1686,24 @@ class Pulse:
                 pass
             log(f"UNIVERSE rank={self.symbol_sort} n={len(SYMBOLS)} dyn={int(self.symbols_dynamic)} cap={cap} wild={int(wild)} lead={(SYMBOLS[0] if SYMBOLS else '-')}", every=20.0, key="uni-rank")
 
+    def _closed_klines(self, data: Any, now: Optional[float] = None) -> Tuple[List[List[float]], Optional[float]]:
+        """The completed minutes of a 1m klines answer, oldest first, and the open time (s) of the last one. The venue's last
+        row is the minute still forming; the replay only ever reads completed bars, so live entries read the same ones."""
+        if not isinstance(data, list):
+            return [], None
+        minute = float(int((now or time.time()) // 60) * 60)
+        rows = [r for r in sorted(data, key=self._kline_time) if 0 < self._kline_time(r) / 1000.0 + 60.0 <= minute]
+        bars = self._parse_klines(rows)
+        if len(bars) != len(rows) or not rows:
+            return bars, None
+        return bars, self._kline_time(rows[-1]) / 1000.0
+
     def _parse_klines(self, data: Any) -> List[List[float]]:
         bars: List[List[float]] = []
         if not isinstance(data, list):
             return bars
+        if data and all(self._kline_time(b) > 0 for b in data):
+            data = sorted(data, key=self._kline_time)      # the v3 endpoint answers newest first
         for b in data:
             try:
                 if isinstance(b, dict):
@@ -1772,6 +1844,13 @@ class Pulse:
             self.klines_tf.setdefault(tf, {})[s] = bars[-KLINE_LIMIT:]
             if tf == "1m":
                 self.real_1m[s] = len(bars[-KLINE_LIMIT:])
+                sets = getattr(self, "sets", None)
+                if sets is not None and sets.enabled and isinstance(body, dict):
+                    # the newest completed minutes join the Set history (where they line up with it), so the entry signal
+                    # reads the bar that just closed, on the replay's own series
+                    closed, last_t = self._closed_klines(body.get("data"), now)
+                    if closed and last_t is not None:
+                        sets.ingest_bars(s, closed, tail=bool(sets.bars.get(s)), last_t=last_t)
             self.kline_ts_tf.setdefault(tf, {})[s] = now
             stored += 1
 
@@ -2033,7 +2112,7 @@ class Pulse:
         """Qty-matched order SL/TP from the Set's own range."""
         sl_f, tp_f, _, _ = self.opt_fracs(pos)
         set_lane = bool(pos.set_id)
-        if set_lane and not self.lane_honors_tp():
+        if set_lane and not self.lane_honors_tp(pos):
             tp_f = max(tp_f, float(self.tp_max))      # the lane that validated this Set has no TP exit: the order is only a safety
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
@@ -2679,7 +2758,8 @@ class Pulse:
         side = "LONG" if direction > 0 else "SHORT"
         if self.occupying(sym, side, pack):
             return "slot-taken"
-        if pack == "indications":
+        if pack == "indications" and str(reason).startswith("ind:"):
+            # a live indication row must still stand; a Set entry ("set:") is the replay's own signal and needs no other row
             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
                 return "ind-off"
             ind = None
@@ -2728,7 +2808,7 @@ class Pulse:
             return
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
-        pack = "indications" if str(reason).startswith("ind:") else "general"
+        pack = pack_of_reason(reason)
         skip = self.entry_sense(sym, direction, reason, conf, pack)
         if skip:
             if time.time() - self.skip_log.get("sense", 0) > 40:
@@ -2760,7 +2840,21 @@ class Pulse:
         set_idx = -1
         trail_set_id = ""
         trail_idx = -1
+        lane = ""
         if chosen:
+            try:
+                lane = self.sets.lane_of(chosen) or "pos"     # the lane the Set passed Real on: positive, or Real Negative
+            except Exception:
+                lane = "pos"
+            # the Real stage's overall strategies: this lane's scope and this pack's scope on this lane must allow (each judged on
+            # its own paper stream; with the axes off, the default, every scope allows and only its figures are kept)
+            ok_scope, blocked_by = self.coord.scope_allows(pack, lane)
+            if not ok_scope:
+                self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
+                if time.time() - self.skip_log.get("scope", 0) > 40:
+                    log(f"SKIP {sym} {pack}/{lane}: Real overall scope {blocked_by} blocks", every=40.0, key="scope", quiet=True)
+                    self.skip_log["scope"] = time.time()
+                return
             # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
             # own arm and give. The independent trailing pick never reaches a Set position.
             sl_ratio = chosen.sl_ratio
@@ -2796,7 +2890,7 @@ class Pulse:
                     qty = scaled
                     notional = qty * px
                     margin = notional / max(1, lev)
-        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
+        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
@@ -2826,7 +2920,7 @@ class Pulse:
             msg0 = str(r.get("msg") or "").lower()
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
-                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)))
+                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)))
                 self.did_io = True
         if not self.ok(r):
             msg = str(r.get("msg") or "")
@@ -2842,7 +2936,7 @@ class Pulse:
                 self._persist_lev()
                 r = self.api.post(
                     "/openApi/swap/v2/trade/order",
-                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)),
+                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
                 )
                 self.did_io = True
                 msg = str(r.get("msg") or "")
@@ -2854,7 +2948,7 @@ class Pulse:
                 if qty > 0:
                     r = self.api.post(
                         "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)),
+                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
                     )
                     self.did_io = True
                     msg = str(r.get("msg") or "")
@@ -2936,7 +3030,7 @@ class Pulse:
             sl_ratio=sl_ratio, trail_key=trail_key,
             trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
             sl_pct=sl_pct, tp_pct=tp_pct,
-            set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
+            set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True, lane=lane,
             overall=True, close_position=True, ind_kind=ind_kind,
         )
         pos.sl, pos.tp = self.security_prices(pos)
@@ -3078,6 +3172,7 @@ class Pulse:
             if (pos.symbol, pos.side) in confirmed:
                 continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
+            self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(pos.symbol)
             self.open.pop(pos.symbol, None)
             self.cooldown[pos.symbol] = time.time() + 90.0
@@ -3151,10 +3246,12 @@ class Pulse:
             time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
+            lane=str(getattr(pos, "lane", "") or ""),
         )
         if pos.client_id:
             self.seen_fill_cids.add(pos.client_id)
         if skip_eval:
+            self._exec_inc("skipped")       # closed, not scored: counted apart so no order goes missing
             self.open.pop(pos.symbol, None)
             self.ban_sym(pos.symbol)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
@@ -3162,6 +3259,7 @@ class Pulse:
             self._stats_force = True
             return
         self.closed.append(rec)
+        self._exec_note(rec)
         try:
             if not rec.set_id:                 # the default variants learn from default-variant positions only
                 self.variants.on_close(rec)
@@ -3187,15 +3285,20 @@ class Pulse:
             pass
         if pnl >= 0:
             self.wins += 1
-            self.consec_loss = 0
         else:
             self.losses += 1
-            self.consec_loss += 1
-            if self.consec_loss >= 8:
-                self.cooldown["__book__"] = time.time() + 120
-                self.consec_loss = 4
-                log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason)
+        if not pos.set_id:
+            # the cold-streak pause belongs to the Exit lane: a Set's closes never stop another Set's entries (each Set lane
+            # was validated on its own tape, where no other lane's losses pause it)
+            if pnl >= 0:
+                self.consec_loss = 0
+            else:
+                self.consec_loss += 1
+                if self.consec_loss >= 8:
+                    self.cooldown["__book__"] = time.time() + 120
+                    self.consec_loss = 4
+                    log("pause new entries 120s after cold streak")
+        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id))
         if not pos.set_id:
             # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
             self.block.on_parent_close(pos.symbol, pos.side, pnl)
@@ -3209,10 +3312,17 @@ class Pulse:
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
 
-    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str) -> float:
-        """Seconds before this symbol may be entered again. A win resets it to COOLDOWN_S. Each loss in a row on the symbol
-        multiplies it by four (9 s, 36 s, 2.4 min, 9.6 min, capped at 30 min), and a stop-out within 30 s of the entry
-        (a book that moves faster than the strategy can act on) bans the symbol for SYM_BAN_S."""
+    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False) -> float:
+        """Seconds before this symbol may be entered again. A stop-out within 30 s of the entry (a book that moves faster
+        than the strategy can act on) bans the symbol for SYM_BAN_S, whatever the lane: a venue safety. After a Set close
+        the wait is the Set lane's own cooldown (setCooldownBars, as replayed), never a backoff from other closes. After an
+        Exit-lane close a win resets it to COOLDOWN_S and each loss in a row on the symbol multiplies it by four (9 s, 36 s,
+        2.4 min, 9.6 min, capped at 30 min)."""
+        if str(reason) == "sl" and float(hold_s) < 30.0:
+            self.ignore_syms[sym] = max(self.ignore_syms.get(sym, 0.0), time.time() + SYM_BAN_S)
+            log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s")
+        if set_lane:
+            return float(getattr(self.sets, "cooldown_bars", 2)) * 60.0
         net = float(pnl_pct) - cost_as_frac(self.position_cost_pct)
         fails = getattr(self, "sym_fails", None)
         if fails is None:
@@ -3221,14 +3331,14 @@ class Pulse:
             fails.pop(sym, None)
             return COOLDOWN_S
         n = fails[sym] = int(fails.get(sym, 0)) + 1
-        if str(reason) == "sl" and float(hold_s) < 30.0:
-            self.ignore_syms[sym] = max(self.ignore_syms.get(sym, 0.0), time.time() + SYM_BAN_S)
-            log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s ({n} losses in a row)")
         return min(1800.0, COOLDOWN_S * (4 ** (n - 1)))
 
-    def lane_honors_tp(self) -> bool:
-        """Whether the Set lane exits on its TP: the setting the replay used, so live and validation agree."""
-        return bool(getattr(self.sets, "hist_honor_tp", True))
+    def lane_honors_tp(self, pos: Optional[Position] = None) -> bool:
+        """Whether this Set position's lane exits on its TP, by its Set's kind as the replay decided it (set_engine.SetLane):
+        a base Set takes its TP, an Exit Set never does, a trailing Set follows the book's setting."""
+        kind = set_kind_of(getattr(pos, "set_id", "") or "") if pos is not None else "trail"
+        honor = lane_honors_tp(kind)
+        return bool(getattr(self.sets, "hist_honor_tp", True)) if honor is None else honor
 
     def manage_set_lane(self, pos: Position, px: float, now: float, age: float, pnl_pct: float) -> None:
         """The close rules of a Set position, one for one with set_engine.SetLane: the stop at the Set's own level (raised by
@@ -3247,7 +3357,7 @@ class Pulse:
             self.close_pos(pos, px, "sl")
             return
         tp_f = float(pos.tp_pct or 0)
-        if self.lane_honors_tp() and tp_f > 0:
+        if self.lane_honors_tp(pos) and tp_f > 0:
             tp = e * (1 + side * tp_f)
             if self.software_exit(pos, "tp", tp, px):
                 self.close_pos(pos, px, "tp")
@@ -3266,7 +3376,9 @@ class Pulse:
                     pos.trail = trail      # committed only when the exchange stop moved
                     if not self.replace_sl(pos, trail):
                         pos.trail = prev
-        if age >= float(self.sets.hist_time_bars) * 60.0:
+        own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
+        hold_bars = int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
+        if age >= float(hold_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return
         # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m
@@ -3385,6 +3497,107 @@ class Pulse:
 
 
 
+    def _exec_boot(self) -> None:
+        """Execution counters from the whole trades file (streamed): orders closed by a Set lane and by the Exit lane, wins, the Sets that closed
+        orders. The in-memory closed list keeps only the last 80; these totals do not."""
+        self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
+        self.exec_sets: Dict[str, int] = {}
+        if not os.path.exists(TRADES_PATH):
+            return
+        try:
+            with open(TRADES_PATH) as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not (1.6e9 < float(rec.get("t") or 0) <= time.time() + 300.0) or rec.get("ours", True) is False:
+                        continue
+                    self._exec_count(str(rec.get("set_id") or rec.get("setId") or ""), float(rec.get("pnl") or 0))
+        except Exception:
+            pass
+
+    def _exec_inc(self, key: str, by: int = 1) -> None:
+        n = self.__dict__.setdefault("exec_n", {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0})
+        n[key] = n.get(key, 0) + by
+
+    def _exec_count(self, set_id: str, pnl: float) -> None:
+        self._exec_inc("set" if set_id else "exit")
+        if pnl > 0:
+            self._exec_inc("wins")
+        elif pnl < 0:
+            self._exec_inc("losses")
+        self.__dict__.setdefault("exec_sets", {})
+        if set_id and (set_id in self.exec_sets or len(self.exec_sets) < 20000):
+            self.exec_sets[set_id] = self.exec_sets.get(set_id, 0) + 1
+
+    def _exec_note(self, rec: "Closed") -> None:
+        if getattr(rec, "ours", True) is not False:
+            self._exec_count(rec.set_id, rec.pnl)
+            if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
+                lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
+                key = "laneNeg" if lane == "neg" else "lanePos"
+                self._exec_inc(key)
+                self._exec_inc(key + "Win" if rec.pnl > 0 else key + "Loss")
+                # executed figures per Real scope (the same keys as the overall strategies' scopes): orders, wins, net gain / loss
+                sc = self.__dict__.setdefault("exec_scope", {})
+                for k in ("overall", f"lane:{lane}", f"pack:{rec.pack or '-'}"):
+                    row = sc.setdefault(k, [0, 0, 0.0, 0.0])
+                    row[0] += 1
+                    row[1] += 1 if rec.pnl > 0 else 0
+                    row[2] += max(0.0, float(rec.pnl))
+                    row[3] += max(0.0, -float(rec.pnl))
+
+    def execution_snapshot(self) -> Dict[str, Any]:
+        """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
+        Set (a Set that stopped passing keeps its open positions until its own lane closes them), and the orders closed so far by lane."""
+        counts = self.sets.counts()
+        reasons = counts.get("reasons", {})
+        by_pack: Dict[str, Dict[str, int]] = {}
+        open_sets, under_invalid, retired, no_set = set(), 0, 0, 0
+        open_lane = {"pos": 0, "neg": 0}
+        for p in self.open.values():
+            if p.set_id:
+                open_lane["neg" if str(getattr(p, "lane", "") or "") == "neg" else "pos"] += 1
+            row = by_pack.setdefault(p.pack or "-", {"open": 0, "underInvalidSet": 0})
+            row["open"] += 1
+            if not p.set_id:
+                no_set += 1
+                continue
+            open_sets.add(p.set_id)
+            st = self.sets.sets.get(p.set_id)
+            if st is None:
+                retired += 1                      # the Set left the grid: its position still runs on the Set rules it opened with
+            elif self.sets.gate_reason(st):
+                under_invalid += 1
+                row["underInvalidSet"] += 1
+        n = self.__dict__.setdefault("exec_n", {})
+        # the Real stage's overall strategies per scope: the verdict and figures on each scope's own paper stream (coord.scopes),
+        # next to what was executed in that scope (exec_scope); one scope never reads another's orders
+        judged = getattr(getattr(self, "coord", None), "scopes", {}) or {}
+        executed = self.__dict__.get("exec_scope", {})
+        scopes = {}
+        for k in sorted(set(judged) | set(executed)):
+            e = executed.get(k, [0, 0, 0.0, 0.0])
+            scopes[k] = {**(judged.get(k) or {}), "executed": {"orders": int(e[0]), "wins": int(e[1]),
+                                                                 "pf": round(e[2] / e[3], 3) if e[3] > 0 else (99.0 if e[2] > 0 else None)}}
+        return {
+            "overall": {"scopes": scopes, "blocked": int(n.get("scopeBlocked", 0))},
+            "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0),
+                     "baseValid": counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in STAGE_REASONS),
+                     "invalid": counts.get("invalid", 0), "reasons": dict(reasons),
+                     "stages": self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}},
+            "lanes": {"openPos": open_lane["pos"], "openNeg": open_lane["neg"],
+                      "closedPos": int(n.get("lanePos", 0)), "closedNeg": int(n.get("laneNeg", 0)),
+                      "winsPos": int(n.get("lanePosWin", 0)), "lossesPos": int(n.get("lanePosLoss", 0)),
+                      "winsNeg": int(n.get("laneNegWin", 0)), "lossesNeg": int(n.get("laneNegLoss", 0))},
+            "open": {"positions": len(self.open), "setPositions": len(self.open) - no_set, "noSet": no_set, "sets": len(open_sets),
+                     "underInvalidSet": under_invalid, "setRetired": retired, "byPack": by_pack},
+            "closed": {"orders": int(n.get("set", 0) + n.get("exit", 0)), "setLane": int(n.get("set", 0)), "exitLane": int(n.get("exit", 0)),
+                       "wins": int(n.get("wins", 0)), "losses": int(n.get("losses", 0)), "skippedNotScored": int(n.get("skipped", 0)), "droppedNoRecord": int(n.get("dropped", 0)),
+                       "setsThatTraded": len(self.__dict__.get("exec_sets", {}))},
+        }
+
     def _load_trade_history(self) -> None:
         if not os.path.exists(TRADES_PATH):
             return
@@ -3415,6 +3628,7 @@ class Pulse:
                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
                     ours=bool(rec.get("ours", True)),
                     conn=str(rec.get("conn") or rec.get("connection") or ""),
+                    lane=str(rec.get("lane") or ""),
                 )
                 cid = c.client_id
                 if cid and not self.cid_ours(cid):
@@ -3466,6 +3680,7 @@ class Pulse:
         except Exception:
             self.max_entry_slip = 0.0075
         try:   # the drawdown halt in percent of the start equity; 0 switches it off (an explicit owner setting)
+            self.dd_basis = "start" if str(ov.get("ddHaltBasis") or "session").lower() == "start" else "session"
             raw_dd = ov.get("ddHaltPct")
             self.dd_halt = max(0.0, min(90.0, float(raw_dd if raw_dd is not None else DD_HALT * 100.0))) / 100.0
         except Exception:
@@ -3504,7 +3719,8 @@ class Pulse:
         if ov.get("staggerS"):
             STAGGER_S = float(ov["staggerS"])
         self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
-        self.pf_window = int(ov.get("pfWindow") or 15)
+        self.pf_window = window_n(ov, "pfWindow", fallback=15)
+        self.real_stage_paper = bool(ov.get("realStagePaper", True))      # the overall strategies read the Real Sets' paper stream
         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
         self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
         self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
@@ -3594,7 +3810,9 @@ class Pulse:
         self.block.pause_ratio = max(0, b_pause)
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
-        self.block.default_min_pf = float(real_pf)
+        self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else max(MIN_PF_FLOOR, float(real_pf))     # the Base gate's PF unless unlinked
+        self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
+        self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
         self.coord.load(cts, ov)
         self.indications.load(ov)
@@ -4319,6 +4537,41 @@ class Pulse:
         tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
         return tagged if tagged else []
 
+    def set_entry_candidates(self, now: Optional[float] = None) -> Dict[str, Tuple[float, str, int, str]]:
+        """{symbol: (conf, symbol, dir, "set:<pack>:<why>")} for the symbols whose newest completed minute signals, decided once
+        per symbol and minute (the replay decides once per bar) and offered only within ENTRY_FRESH_S of that minute's close
+        (the replay enters at its close: a later fill is a different trade)."""
+        now = float(now if now is not None else time.time())
+        minute = float(int(now // 60) * 60)
+        if now - minute > ENTRY_FRESH_S:
+            return {}
+        memo = getattr(self, "_entry_sig", None)
+        if memo is None:
+            memo = self._entry_sig = {}
+        out: Dict[str, Tuple[float, str, int, str]] = {}
+        budget = ENTRY_SIG_BUDGET
+        for s in SYMBOLS:
+            if s in self.open:
+                continue
+            bar_t = minute - 60.0
+            hit = memo.get(s)
+            if hit is None or hit[0] != bar_t:
+                if getattr(self.sets, "bar_t", {}).get(s) != bar_t:
+                    continue                          # that minute is not in the Set history yet
+                if budget <= 0:
+                    continue                          # the next cycle reads it (still inside the fresh window)
+                budget -= 1
+                try:
+                    sig = self.sets.entry_signal(s, bar_t)
+                except Exception:
+                    sig = None
+                hit = memo[s] = (bar_t, sig)
+            sig = hit[1]
+            if sig:
+                pack, d, conf, why = sig
+                out[s] = (float(conf), s, int(d), f"set:{pack}:{why}")
+        return out
+
     def maybe_entries(self) -> None:
         if self.halted:
             return
@@ -4330,11 +4583,16 @@ class Pulse:
             else:
                 break
         intern_metrics: Dict[str, Any] = {"pf": 0.0, "n": 0}
+        interns: Dict[str, Dict[str, Any]] = {}
         try:
             best_st = None
-            for pack_name in ("indications", "general"):
-                st = self.sets.pick_any(pack_name) if self.sets.enabled else None
-                if st and (best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0)):
+            # every configured pack (the additional strategies too): each its own intern evidence, the overall the best of them
+            for pack_name in (list(self.sets.packs) if self.sets.enabled else []):
+                st = self.sets.pick_any(pack_name)
+                if not st:
+                    continue
+                interns[f"pack:{pack_name}"] = {"pf": float(st.last15_pf), "n": float(st.last15_n), "pack": st.pack}
+                if best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0):
                     best_st = st
             if best_st:
                 intern_metrics = {
@@ -4344,14 +4602,31 @@ class Pulse:
                 }
         except Exception:
             intern_metrics = {"pf": 0.0, "n": 0}
-        allow, reasons, metrics = self.coord.gate(rows, consec, intern=intern_metrics)
+        # Real stage: the overall strategies read the Real Sets' paper stream (the orders opened after Base and Main), not only the few
+        # executed closes; a gate that reads only what it let through never reopens
+        paper = []
+        if self.sets.enabled and getattr(self, "real_stage_paper", True):
+            try:
+                # one pass over the Sets: the overall stream and each lane's and pack's own; every scope judged on its own stream
+                streams = self.sets.real_paper_scopes(max(50, int(getattr(self.coord, "prev_window", 25) or 25) * 4))
+                paper = streams.get("overall") or []
+                self.coord.judge_scopes(streams, {**interns, "overall": intern_metrics})
+            except Exception:
+                paper = []
+        allow, reasons, metrics = self.coord.gate(paper or rows, consec, intern=intern_metrics)
         if self.entries_blocked():
             self.priority_controls()
             return
         slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Pf", metrics.get("lastPf", 1.0)))
         ranked: List[Tuple[float, str, int, str]] = []
         best: Dict[str, Tuple[float, str, int, str]] = {}
-        if self.strat_ind and bool(self.indications.settings.get("enabled")):
+        if self.sets.enabled:
+            # Under the Base gate every entry is a Set position, so the entry is the replay's: the signal of the minute that
+            # just completed, on the Set history, by the rule that built every Set's tape (SetBook.entry_signal). The live
+            # indication and general scores (60-bar windows, a forming minute, regime and outbreak terms) never saw those
+            # tapes; entering on them traded positions no Set was validated on.
+            best = self.set_entry_candidates()
+        elif self.strat_ind and bool(self.indications.settings.get("enabled")):
             for s in SYMBOLS:
                 if s in self.open:
                     continue
@@ -4375,7 +4650,7 @@ class Pulse:
                 d = 1 if pick.direction == "long" else -1
                 why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
                 best[s] = (float(conf), s, d, why)
-        if self.strat_general:
+        if self.strat_general and not self.sets.enabled:
             for s in SYMBOLS:
                 if s in self.open:
                     continue
@@ -4443,16 +4718,7 @@ class Pulse:
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
-            pack = "indications" if str(why).startswith("ind:") else "general"
-            if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
-                if not intern.get(pack):
-                    alt = "general" if pack == "indications" else "indications"
-                    if intern.get(alt):
-                        pack = alt
-                    elif intern_any:
-                        pack = "general" if intern.get("general") else "indications"
-                    else:
-                        pack = "general"
+            # the pack is the signal's own (place() reads it from the reason): a signal never borrows another pack's Sets
             before = len(self.open)
             self.place(s, d, why, conf)
             if len(self.open) > before:
@@ -4506,6 +4772,7 @@ class Pulse:
                         self.cooldown[sym] = time.time() + 90.0
                         continue
                     log(f"DROP stale local {sym} (exchange flat)")
+                    self._exec_inc("dropped")       # left the book with no close record: counted, never lost
                     self.cancel_controls(sym)
                     self.open.pop(sym, None)
                     self.cooldown[sym] = time.time() + 90.0
@@ -4568,6 +4835,7 @@ class Pulse:
                         trk = self.parse_track(self.order_cid(tagged[0])) or {}
                         if trk.get("set_id"):
                             ours.set_id = str(trk.get("set_id"))
+                            ours.lane = str(trk.get("lane") or "pos")
                             idxv = trk.get("idx")
                             ours.set_idx = int(idxv) if idxv is not None else -1
                             ours.pack = str(trk.get("pack") or ours.pack)
@@ -4616,7 +4884,7 @@ class Pulse:
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
                 trail_set_id=rec_trail_id,
-                liq=liq, position_id=pid,
+                liq=liq, position_id=pid, lane=str(track.get("lane") or ("pos" if set_id else "")),
             )
             rec_pos = self.open[sym]
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
@@ -4640,6 +4908,7 @@ class Pulse:
                 self.cooldown[sym] = time.time() + 90.0
                 continue
             log(f"DROP stale local {sym} age={age:.0f}s")
+            self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(sym)
             self.open.pop(sym, None)
             self.cooldown[sym] = time.time() + 90.0
@@ -4888,13 +5157,13 @@ class Pulse:
     def stats(self) -> Dict[str, Any]:
         realized = sum(c.pnl for c in self.closed)
         wr = (self.wins / (self.wins + self.losses) * 100) if (self.wins + self.losses) else 0
-        dd = ((self.start_eq - self.equity) / self.start_eq * 100) if self.start_eq else 0
+        dd = self.dd_now() * 100.0
         age = time.time() - self.started
         per_min = (self.wins + self.losses) / (age / 60) if age > 1 else 0
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
         pc["minPf"] = self.coord.min_pf
-        pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= self.coord.min_pf)
+        pc["pass"] = bool(pc["count"] < MIN_VALIDATION_N or pc["pf"] + 1e-9 >= self.coord.min_pf)
         pc["neutral"] = 1.0
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
@@ -4902,14 +5171,16 @@ class Pulse:
             "running": not self.halted,
             "mode": _mode_label(),
             "connection": CONN_SHORT,
-            "connType": "vst" if "x02" in CONN_SHORT else "live",
-            "unit": "VST" if "x02" in CONN_SHORT else "USDT",
-            "exchange": "BingX VST" if "x02" in CONN_SHORT else "BingX",
+            "connType": ("bybit-demo" if "x02" in CONN_SHORT else "bybit") if IS_BYBIT else ("vst" if "x02" in CONN_SHORT else "live"),
+            "unit": "USDT" if IS_BYBIT else ("VST" if "x02" in CONN_SHORT else "USDT"),
+            "exchange": ("Bybit demo" if "x02" in CONN_SHORT else "Bybit") if IS_BYBIT else ("BingX VST" if "x02" in CONN_SHORT else "BingX"),
             "startedAt": self.started,
             "now": time.time(),
             "uptimeS": age,
             "equity": round(self.equity, 4),
             "startEquity": round(self.start_eq, 4),
+            "sessionStartEquity": round(float(getattr(self, "session_eq", 0.0) or 0.0), 4),
+            "ddBasis": getattr(self, "dd_basis", "session"),
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
             "unrealized": round(self.upnl, 4),
@@ -4960,6 +5231,7 @@ class Pulse:
             "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
             "variants": self.variants.snapshot(),
             "sets": self.sets.snapshot(),
+            "execution": self.execution_snapshot(),
             "exits": self.exits.snapshot(),
             "indications": self.indications.snapshot(),
             "dca": self.dca.snapshot(),
@@ -5443,7 +5715,7 @@ class Pulse:
         if not self.sets.enabled:
             return
         self.sets.progress.phase = "fetch"
-        lookback = int(self.sets.lookback)
+        lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
         page = HIST_PAGE
         stored = 0
         chunk = 4
@@ -5485,9 +5757,9 @@ class Pulse:
                     if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
                         pending.append(sym)
             for s in names:
-                bars = self._parse_klines(rows_by.get(s) or [])
+                bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
                 if s and bars:
-                    self.sets.ingest_bars(s, bars)
+                    self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
             time.sleep(0.12)
         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
@@ -5630,7 +5902,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:
+            elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:
@@ -5748,7 +6020,19 @@ class Pulse:
                 self._stats_force = True
 
 
+def make_api(conn: str, key: str, secret: str, base: str):
+    """The venue client of a connection: bybit-* talks to Bybit V5 (bybit_fast), everything else to BingX."""
+    if str(conn).startswith("bybit-"):
+        from bybit_fast import FastBybit
+        return FastBybit(key, secret, ErrorLog(ERR_PATH), base=base)
+    return FastBingX(key, secret, ErrorLog(ERR_PATH), base=base)
+
+
 def load_contracts(want: Optional[set] = None) -> Dict[str, Contract]:
+    if IS_BYBIT:
+        from bybit_fast import fetch_contract_rows
+        return {c["symbol"]: Contract(c["symbol"], c["min_qty"], c["step"], c["qprec"], c["pprec"], c["min_usdt"], c["max_lev"])
+                for c in fetch_contract_rows(BASE, want)}
     url = BASE + "/openApi/swap/v2/quote/contracts"
     with urllib.request.urlopen(url, timeout=15) as r:
         data = json.loads(r.read().decode()).get("data") or []
@@ -5815,7 +6099,7 @@ def main() -> None:
                                    os.environ.get("PULSE_BASE", ""))
     except ConnGuardError as exc:
         raise SystemExit(f"refusing to start: {exc}")
-    api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
+    api = make_api(CONN_SHORT, key, secret, BASE)
     Pulse(api, load_contracts()).run()
 
 

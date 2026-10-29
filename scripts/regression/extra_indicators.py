@@ -384,7 +384,9 @@ def _break_tape(sgn):
 def family_is_registered_in_every_range_and_timeframe():
     names = [f"{fam}_n{n}_t{tf}" for fam in ("trend", "brk") for n in ix.FAMILY_RANGES for tf in ix.FAMILY_TFS]
     combos = [f"{fam}_c{n}" for fam in ("trend", "brk", "tb") for n in ix.FAMILY_RANGES]
-    missing = [x for x in names + combos if x not in ix.INDICATORS or ix.window_of(x) != ix.FAMILY_WINDOW]
+    import indication_lib as lib
+    # a name reads the family window, or TF_BARS bars of its highest timeframe when that is longer
+    missing = [x for x in names + combos if x not in ix.INDICATORS or ix.window_of(x) != max(ix.FAMILY_WINDOW, lib.rows_for(ix._highest_tf(x)))]
     ok = not missing and ix.FAMILY_RANGES == (6, 10, 20, 40) and ix.FAMILY_TFS == (1, 5, 15)
     return ok, f"{len(names)} single + {len(combos)} combined; missing/other window: {missing}"
 
@@ -511,7 +513,7 @@ def lib_is_registered_for_every_family_range_and_timeframe():
         for ns in lib.RANGES.values():
             for n in ns:
                 for nm in [f"{fam}_n{n}_t{tf}" for tf in lib.TFS] + [f"{fam}_c{n}"]:
-                    if nm not in ix.INDICATORS or ix.window_of(nm) != lib.WINDOW:
+                    if nm not in ix.INDICATORS or ix.window_of(nm) != lib.rows_for(ix._highest_tf(nm)):
                         missing.append(nm)
     for g in ("trend", "break", "revert", "volume", "all"):
         for r in lib.RANGES:
@@ -596,4 +598,76 @@ CHECKS += [
     ("extra.lib-volume-both-ways", lib_volume_families_read_flow_both_ways),
     ("extra.lib-mirror-symmetric-and-flat-quiet", lib_is_mirror_symmetric_and_quiet_on_a_flat_tape),
     ("extra.lib-group-votes-need-agreement", lib_group_votes_need_agreement),
+]
+
+
+# ---- indicators ported from CTS-A-O (indication_ao) ----------------------------------------------------------------------
+
+def ao_is_registered_and_windowed():
+    import indication_ao as ao
+    from indication_lib import rows_for
+    missing = []
+    for fam in ao.AO_FAMILIES:
+        for ns in ao.RANGES.values():
+            for n in ns:
+                for nm in [f"ao_{fam}_n{n}_t{tf}" for tf in ao.TFS] + [f"ao_{fam}_c{n}"]:
+                    if nm not in ix.INDICATORS or ix.window_of(nm) != rows_for(ix._highest_tf(nm)):
+                        missing.append(nm)
+    for r in ao.RANGES:
+        if f"g_ao_{r}" not in ix.INDICATORS:
+            missing.append(f"g_ao_{r}")
+    return not missing and len(ao.AO_FAMILIES) == 13, f"{len(ao.AO_FAMILIES)} families; missing: {missing[:4]}"
+
+
+def ao_follows_a_trend_and_a_plunge_both_ways():
+    import indication_ao as ao
+    tapes = _lib_tapes()
+    trend, plunge, brk = tapes["trend"], tapes["revert"], tapes["break"]
+
+    def fires(tape, fams, ns=(8, 14), tfs=(1, 5)):
+        out = {}
+        for fam in fams:
+            ds = set()
+            for n in ns:
+                for tf in tfs:
+                    s = ao.AO[f"ao_{fam}_n{n}_t{tf}"](tape)
+                    if s:
+                        ds.add(s[0])
+            out[fam] = ds
+        return out
+    trend_f = ["cfltrend", "klinger", "frama", "stpb", "htfpb"]
+    up, dn = fires(trend, trend_f), fires(_mirror(trend), trend_f)
+    up_ok = sorted(f for f, d in up.items() if d == {1})
+    dn_ok = sorted(f for f, d in dn.items() if d == {-1})
+    rev_f = ["laguerre", "ultimate", "cmpx", "regime"]
+    brk_up, brk_dn = fires(brk, ["cflbrk", "regime", "cmpx"]), fires(_mirror(brk), ["cflbrk", "regime", "cmpx"])
+    wrong = [f for f in trend_f if -1 in up[f] or 1 in dn[f]]
+    ok = "cfltrend" in up_ok and up_ok == dn_ok and not wrong and brk_up["cflbrk"] == {1} and brk_dn["cflbrk"] == {-1}
+    return ok, f"trend long={up_ok} mirror short={dn_ok} opposite={wrong}; breakout up={brk_up['cflbrk']} mirror={brk_dn['cflbrk']}"
+
+
+def ao_is_mirror_symmetric_and_quiet_on_a_flat_tape():
+    import indication_ao as ao
+    bad, fired = [], 0
+    for seed in (4, 5, 6):
+        tape = _lib_noise(300, seed, 0.0009, drift=0.0002 * (1 if seed % 2 else -1))
+        mir = _mirror(tape)
+        for name, fn in ao.AO.items():
+            if name.startswith("g_"):
+                continue
+            a, b = fn(tape), fn(mir)
+            if a:
+                fired += 1
+                if not b or b[0] != -a[0] or abs(b[1] - a[1]) > 0.06:
+                    bad.append(name)
+    flat = [[100.0, 100.0, 100.0, 100.0, 5.0]] * 300
+    loud = [n for n, f in ao.AO.items() if not n.startswith("g_") and f(flat)]
+    rate = len(bad) / max(1, fired)
+    return rate <= 0.08 and not loud, f"fired={fired} asymmetric={len(bad)} ({rate:.1%}) e.g. {sorted(set(bad))[:5]}; flat-tape signals: {loud[:4]}"
+
+
+CHECKS += [
+    ("extra.ao-registered-and-windowed", ao_is_registered_and_windowed),
+    ("extra.ao-both-ways", ao_follows_a_trend_and_a_plunge_both_ways),
+    ("extra.ao-mirror-symmetric-and-flat-quiet", ao_is_mirror_symmetric_and_quiet_on_a_flat_tape),
 ]

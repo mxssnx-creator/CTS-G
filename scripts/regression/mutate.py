@@ -1,13 +1,23 @@
 """Fault injection: the regression suite must catch each planted fault.
 
-Each mutation edits a temporary copy of server/pulse (the repo is never touched), runs the full suite
+Each mutation edits a temporary copy of server/pulse (the repo is never touched), runs the suite
 against that copy, and reports the checks that failed. A mutation that leaves the suite green is a gap.
-  python3 scripts/regression/mutate.py
+  python3 scripts/regression/mutate.py                  every mutant
+  python3 scripts/regression/mutate.py --only "trader:"  the mutants whose name starts with the prefix
+  python3 scripts/regression/mutate.py --full           ignore the catcher map (every mutant runs the whole suite)
+
+Speed: mutant_catchers.json remembers the check that caught each mutant last time. That check runs first, alone (a
+few seconds); when it fails the mutant is caught, exactly as the full run would report it. Only a mutant it does not
+catch (or a new one) runs the whole suite, and the check that catches it is recorded. A survivor is therefore always
+decided by the whole suite, so the verdicts are those of a full run.
 """
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
+import json
 import os
+import threading
 import shutil
 import subprocess
 import sys
@@ -16,8 +26,215 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 PULSE = os.path.join(ROOT, "server", "pulse")
+CATCHERS_PATH = os.path.join(HERE, "mutant_catchers.json")
+_catchers: dict = {}
+_catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("stats: the per-entry PF counts every Set's row again",
+     "set_engine.py", "                    k = (r.get(\"symbol\"), int(round(finite(r.get(\"t\")) - finite(r.get(\"hold_s\")))), x.pack, r.get(\"side\"))", "                    k = (x.id, finite(r.get(\"t\")))"),
+    ("min PF by size: the Real window asks the one floor",
+     "set_engine.py", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor_for(n), pf, len(w)", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor, pf, len(w)"),
+    ("min PF by size: the Base long window asks the one floor",
+     "set_engine.py", "        if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack):", "        if st.gate_pf + 1e-9 < self.pack_min_pf.get(st.pack, self.min_pf):"),
+    ("min PF by size: the classes ignore their bounds",
+     "set_engine.py", "        if self.pf_by_size:\n            for lim, pf in self.size_floors:\n                if n <= lim:", "        if self.pf_by_size:\n            for lim, pf in self.size_floors:\n                if True:"),
+    ("hold auto: the hold chosen now judges every order again (hindsight)",
+     "set_engine.py", "            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:", "            if hold_choice_at(cands, prefix, float(\"inf\"), max_n, min_n, margin) == c:"),
+    ("hold auto: the choice reads orders closed after the entry",
+     "set_engine.py", "        ts, g, l_ = prefix[c]\n        e = bisect.bisect_left(ts, t)", "        ts, g, l_ = prefix[c]\n        e = len(ts)"),
+    ("relations: I does not invert",
+     "indication_rel.py", "        return (lambda rows, d, base, d0: (True, -d)), 0", "        return (lambda rows, d, base, d0: (True, d)), 0"),
+    ("relations: T keeps the counter-trend signals",
+     "indication_rel.py", "                return (td == d if kind == \"T\" else", "                return (td == -d if kind == \"T\" else"),
+    ("relations: K and F agree",
+     "indication_rel.py", "            return (same if kind == \"K\" else not same), d", "            return (not same if kind == \"K\" else not same), d"),
+    ("relations: an unknown relation is skipped instead of rejected",
+     "indication_rel.py", "        r = _relation(t)\n        if r is None:\n            return None", "        r = _relation(t)\n        if r is None:\n            continue"),
+    ("relations: the window ignores the relations",
+     "indication_rel.py", "        need = max(need, r[1] if t not in (\"K\", \"F\") else base_window(base_name) + 1)", "        need = need"),
+    ("trader: real scopes: place ignores the scope verdict",
+     "pulse_trader.py", "            if not ok_scope:\n                self.exec_n[\"scopeBlocked\"]", "            if False:\n                self.exec_n[\"scopeBlocked\"]"),
+    ("real scopes: the lane scope does not gate",
+     "coord_engine.py", "        for key in (f\"lane:{lane}\", f\"pack:{pack}:{lane}\"):", "        for key in (f\"pack:{pack}:{lane}\",):"),
+    ("real scopes: the lane streams mix both lanes",
+     "set_engine.py", "                    by[f\"lane:{lane}\"] += part", "                    by[\"lane:pos\"] += part"),
+    ("real scopes: a pack-lane stream takes both lanes",
+     "set_engine.py", "                    by.setdefault(f\"pack:{st.pack}:{lane}\", []).extend(part)", "                    by.setdefault(f\"pack:{st.pack}:pos\", []).extend(part)"),
+    ("base minimal: the window is ignored when a Set is judged",
+     "set_engine.py", "        if self.base_min_n and not st.base_min_ok:\n            return \"minimal\"", "        if False and not st.base_min_ok:\n            return \"minimal\""),
+    ("base minimal: the polarity is inverted when a Set is judged",
+     "set_engine.py", "and sign_ok(mw, self.base_min_positive, self.base_min_both))", "and sign_ok(mw, not self.base_min_positive, self.base_min_both))"),
+    ("base minimal: any result is enough instead of every one",
+     "set_engine.py", "    return all(x > 0 for x in w) if positive else all(x < 0 for x in w)", "    return any(x > 0 for x in w) if positive else any(x < 0 for x in w)"),
+    ("base minimal: the chain ignores the window",
+     "set_engine.py", "        if bm:\n            t0 = e - bm", "        if False:\n            t0 = e - bm"),
+    ("base minimal: the chain reads the wrong polarity",
+     "set_engine.py", "elif (pos_pre[e] - pos_pre[t0] if P.base_min_positive else neg_pre[e] - neg_pre[t0]) != c_:", "elif (neg_pre[e] - neg_pre[t0] if P.base_min_positive else pos_pre[e] - pos_pre[t0]) != c_:"),
+    ("base minimal: the count has no cap of 3",
+     "set_engine.py", "self.base_min_n = max(0, min(BASE_MIN_N_MAX, int(num(ov, \"setGateMinN\", 0)))) if self.stages_on else 0", "self.base_min_n = max(0, min(99, int(num(ov, \"setGateMinN\", 0)))) if self.stages_on else 0"),
+    ("base minimal: the mode is always positive",
+     "set_engine.py", "        self.base_min_positive = mode != \"negative\"", "        self.base_min_positive = True"),
+    ("main short: the cap by the long window's share is gone",
+     "set_engine.py", "self.short_windows = tuple(w for w in parse_windows(sov[\"Windows\"], MAIN_SHORT_WINDOWS) if w <= short_cap) or (short_cap,)",
+     "self.short_windows = parse_windows(sov[\"Windows\"], MAIN_SHORT_WINDOWS)"),
+    ("main short: the share setting is ignored",
+     "set_engine.py", "short_cap = max(1, int(self.main_n * self.short_ratio + 1e-9))", "short_cap = max(1, int(self.main_n * MAIN_SHORT_MAX_RATIO + 1e-9))"),
+    ("main short: the default share is 0.9",
+     "set_engine.py", "MAIN_SHORT_MAX_RATIO = 0.5       #", "MAIN_SHORT_MAX_RATIO = 0.9       #"),
+    ("main short: the earlier mainAuto keys no longer load",
+     "set_engine.py", "    return v if v is not None else ov.get(old)", "    return v"),
+    ("main short: the new key does not win over the old one",
+     "set_engine.py", "    return v if v is not None else ov.get(old)", "    o_ = ov.get(old)\n    return o_ if o_ is not None else v"),
+    ("main minimal: the count has no cap of 3",
+     "set_engine.py", "self.main_min_n = max(0, min(MAIN_MIN_N_MAX, int(num(ov, \"mainMinN\", 0)))) if self.main_on else 0", "self.main_min_n = max(0, min(99, int(num(ov, \"mainMinN\", 0)))) if self.main_on else 0"),
+    ("main minimal: the smallest short window caps it again (ratio rule)",
+     "set_engine.py", "self.main_min_n = max(0, min(MAIN_MIN_N_MAX, int(num(ov, \"mainMinN\", 0)))) if self.main_on else 0",
+     "self.main_min_n = max(0, min(MAIN_MIN_N_MAX, min(self.short_windows), int(num(ov, \"mainMinN\", 0)))) if self.main_on else 0"),
+    ("base minimal: the short window caps it again (ratio rule)",
+     "set_engine.py", "self.base_min_n = max(0, min(BASE_MIN_N_MAX, int(num(ov, \"setGateMinN\", 0)))) if self.stages_on else 0",
+     "self.base_min_n = max(0, min(BASE_MIN_N_MAX, self.base_short or 3, int(num(ov, \"setGateMinN\", 0)))) if self.stages_on else 0"),
+    ("base minimal: mode both is read as positive",
+     "set_engine.py", "        self.base_min_both = mode == \"both\"", "        self.base_min_both = False"),
+    ("main minimal: mode both is read as positive",
+     "set_engine.py", "        self.main_min_both = mmode == \"both\"", "        self.main_min_both = False"),
+    ("minimal both: only an all-positive streak counts",
+     "set_engine.py", "        return all(x > 0 for x in w) or all(x < 0 for x in w)", "        return all(x > 0 for x in w)"),
+    ("base minimal: the chain ignores mode both",
+     "set_engine.py", "            if P.base_min_both:\n                if pos_pre", "            if False:\n                if pos_pre"),
+    ("main minimal: the chain ignores mode both",
+     "set_engine.py", "or (P.main_min_both and neg_pre[e] - neg_pre[s0] == e - s0)", "or False"),
+    ("main minimal: the mode is always positive",
+     "set_engine.py", "        self.main_min_positive = mmode != \"negative\"", "        self.main_min_positive = True"),
+    ("main minimal: the window is ignored when the Main stage is judged",
+     "set_engine.py", "    main_pass = (m_ok and s_ok and k_ok) if P.main_on else True", "    main_pass = (m_ok and s_ok) if P.main_on else True"),
+    ("main minimal: the Real Set ignores it",
+     "set_engine.py", "        real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j]) and (mmin is None or mmin[j])]", "        real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j])]"),
+    ("main minimal: positive and negative swapped in the chain",
+     "set_engine.py", "    cnt = pos_pre if P.main_min_positive else neg_pre", "    cnt = neg_pre if P.main_min_positive else pos_pre"),
+    ("main minimal: one result too many is read",
+     "set_engine.py", "        s0 = e - P.main_min_n\n        if s0 < mlo[j]:", "        s0 = e - P.main_min_n - 1\n        if s0 < mlo[j]:"),
+    ("main minimal: the reason is not reported",
+     "set_engine.py", "                return \"mainminimal\"   #", "                return \"real\"   #"),
+    ("windows: a window counts the Sets that pass its stage, not itself",
+     "set_engine.py", "[x for x in allsets if x.base_short_ok], \"base_short_gp\"", "[x for x in allsets if not reasons[x.id]], \"base_short_gp\""),
+    ("windows: the share is taken against every Set, not the stage's population",
+     "set_engine.py", "\"pct\": round(100.0 * len(sts) / len(pop), 2) if pop else 0.0,", "\"pct\": round(100.0 * len(sts) / total, 2) if total else 0.0,"),
+    ("windows: the orders behind the PF are all of the population's",
+     "set_engine.py", "\"orders\": sum(nn(x) for x in sts)}", "\"orders\": sum(nn(x) for x in pop)}"),
+    ("scoring: finite() accepts a NaN float",
+     "set_engine.py", "        return v if v - v == 0.0 else fallback", "        return v"),
+    ("scoring: by_time never sorts",
+     "set_engine.py", "    if all(map(le, keys, keys[1:])):\n        return list(rows)", "    if True:\n        return list(rows)"),
+    ("scoring: by_time loses the order of equal times",
+     "set_engine.py", "    order = sorted(range(len(rows)), key=keys.__getitem__)", "    order = sorted(range(len(rows)), key=keys.__getitem__, reverse=True)"),
+    ("last-N: the scan from the end stops one result short",
+     "position_cost.py", "            if len(window) >= need:\n                break", "            if len(window) >= need - 1:\n                break"),
+    ("last-N: the scan from the end stops at an unmeasurable row",
+     "position_cost.py", "            if v is None:\n                skipped += 1\n                continue\n            window.append((r, v))", "            if v is None:\n                skipped += 1\n                break\n            window.append((r, v))"),
+    ("main short: the pick reads the whole Main Set for every order (hindsight)",
+     "set_engine.py", "        choice = [pick(me[j], mlo[j]) for j in range(m)]", "        choice = [short_n] * m"),
+    ("main short: the pick is not limited to the lookback",
+     "set_engine.py", "        choice = [pick(me[j], mlo[j]) for j in range(m)]", "        choice = [pick(me[j], 0) for j in range(m)]"),
+    ("main short: a tie between windows goes to the later candidate",
+     "set_engine.py", "                if pf > best + SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:", "                if pf > best - SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:"),
+    ("main short: the window figures read the long window's orders",
+     "set_engine.py", "        mrw = m_[-short_n:] if self.short_on else []", "        mrw = m_[-self.main_n:] if self.short_on else []"),
+    ("chain: a Negative window of results that cancel exactly counts as negative",
+     "set_engine.py", "                if e - s0 >= w and msum[e] - msum[s0] < -NEG_EPS:", "                if e - s0 >= w and msum[e] - msum[s0] < 0:"),
+    ("chain: the Negative verdict now counts a cancelling window as negative",
+     "set_engine.py", "    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)", "    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < 1e-9 for w in P.neg_windows)"),
+    ("chain: the drawdown shortcut skips the check always",
+     "set_engine.py", "    if e <= s0 or entry_t - ts[s0] < max_dd_s:\n        return True", "    if True:\n        return True"),
+    ("chain: the PF rounding shortcut cuts at the floor itself",
+     "set_engine.py", "    f_hi, f_lo = floor + 1e-4, floor - 1e-4", "    f_hi, f_lo = floor, floor"),
+    ("chain: the lookback is not applied to the window start",
+     "set_engine.py", "    lo_all = list(map(bis, repeat(ts), [x - lb for x in ents]))", "    lo_all = [0] * n"),
+    ("chain: a Main window is cached without its size",
+     "set_engine.py", "        v = vec.get(w)\n        if v is None:", "        v = next(iter(vec.values()), None)\n        if v is None:"),
+    ("short window: the cap by the long window's share is gone",
+     "set_engine.py", "self.base_short = max(0, min(short_cap, int(num(ov, \"setGateShortN\", BASE_SHORT_N_DEFAULT)))) if self.stages_on else 0",
+     "self.base_short = max(0, min(self.gate_window, int(num(ov, \"setGateShortN\", BASE_SHORT_N_DEFAULT)))) if self.stages_on else 0"),
+    ("short window: the share setting is ignored",
+     "set_engine.py", "short_cap = max(1, int(self.gate_window * self.short_max_ratio + 1e-9))", "short_cap = max(1, int(self.gate_window * BASE_SHORT_MAX_RATIO + 1e-9))"),
+    ("short window: the default share is 0.9",
+     "set_engine.py", "BASE_SHORT_MAX_RATIO = 0.5       #", "BASE_SHORT_MAX_RATIO = 0.9       #"),
+    ("stage windows: a lane window needs its full N orders again",
+     "set_engine.py", "            need = w if full else 1\n            v = []", "            need = w\n            v = []"),
+    ("stage windows: the Real verdict needs its full N orders again",
+     "set_engine.py", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor, pf, len(w)",
+     "        return len(w) >= n and pf + 1e-9 >= P.floor, pf, len(w)"),
+    ("stage windows: the Base short window needs its full N again",
+     "set_engine.py", "st.base_short_n < (self.base_short if self.stage_full else 1)", "st.base_short_n < self.base_short"),
+    ("stage windows: the chain ignores the full-window switch",
+     "set_engine.py", "full_window=self.stage_full, main_min_n=self.main_min_n", "full_window=False, main_min_n=self.main_min_n"),
+    ("stats stages: the Base stage figures average every Set",
+     "set_engine.py", '        stages = {"base": stage_row(base_only, "gate_gp", "gate_gl", "gate_n", "gate_n"),',
+     '        stages = {"base": stage_row(allsets, "gate_gp", "gate_gl", "gate_n", "gate_n"),'),
+    ("stats stages: the Main stage figures read the Base window",
+     "set_engine.py", '"main": stage_row(main_pass, "main_gp", "main_gl", "main_n", "proc_total"),',
+     '"main": stage_row(main_pass, "gate_gp", "gate_gl", "main_n", "proc_total"),'),
+    ("stats stages: the share is taken against the Sets that pass",
+     "set_engine.py", '"pct": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),',
+     '"pct": round(100.0 * len(sts) / max(1, len(sts)), 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),'),
+    ("indication: the signal memo keys on the 300-bar window again",
+     "set_engine.py", "            lo_w = max(0, i + 1 - sig_w)", "            lo_w = max(0, i + 1 - IND_WINDOW_BARS)"),
+    ("indication: a higher timeframe reads the 300-row window again",
+     "indication_lib.py", "    return max(WINDOW, TF_BARS * int(tf))", "    return WINDOW"),
+    ("indication: 2 sd bands at every n (out of reach at n = 5)",
+     "indication_lib.py", "    return min(2.0, 0.7 * math.sqrt(max(1, n - 1)))", "    return 2.0"),
+    ("indication: a 5m / 15m name keeps the 300-row slice",
+     "indication_extra.py", "WINDOWS.update({name: max(WINDOWS.get(name, LOOKBACK), _rows_for(_highest_tf(name))) for name in INDICATORS if _highest_tf(name) > 1})", "pass"),
+    ("stage: the Base pool drops Sets that stopped at Main short or Real",
+     "set_engine.py", "        base_only = [x for x in allsets if reasons[x.id] in (\"\",) + STAGE_REASONS]", "        base_only = [x for x in allsets if reasons[x.id] in (\"\", \"main\")]"),
+    ("indication: the library memo ignores a list that changed in place",
+     "indication_lib.py", "    if slot is None or slot[0] is not rows or slot[2] != key:", "    if slot is None or slot[0] is not rows:"),
+    ("min PF: the 1.05 floor is dropped",
+     "position_cost.py", "    return max(MIN_PF_FLOOR, x)", "    return x"),
+    ("min PF: Block falls under the floor at a small volume ratio",
+     "block_engine.py", "    return max(MIN_PF_FLOOR, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)", "    return 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment"),
+    ("stage: the Base short window is skipped in the chain",
+     "set_engine.py", "        if bs:\n            t0 = e - bs", "        if False:\n            t0 = e - bs"),
+    ("stage: the Base short window does not gate",
+     "set_engine.py", "            return \"short\"           # the Base short window", "            pass  # return \"short\"           # the Base short window"),
+    ("stage: the Main short window is ignored for the Real Set",
+     "set_engine.py", "        real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j]) and (mmin is None or mmin[j])]", "        real = [k for j, k in enumerate(main) if pl[j] and (mmin is None or mmin[j])]"),
+    ("stage: the Main short window picks the worst candidate",
+     "set_engine.py", "                if pf > best + SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:", "                if pf < best or pf >= ref * P.short_margin - SHORT_EPS:"),
+    ("stage: the Negative lane takes a positive average",
+     "set_engine.py", "    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)", "    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) > 0 for w in P.neg_windows)"),
+    ("stage: the Real stage does not gate the positive lane",
+     "set_engine.py", "            \"pos\": main_pass and (r_ok if P.real_on else True),", "            \"pos\": main_pass,"),
+    ("stage: the Negative lane is picked first",
+     "set_engine.py", "            for lane in (\"pos\", \"neg\"):", "            for lane in (\"neg\", \"pos\"):"),
+    ("trader: stage: the client id loses the lane",
+     "pulse_trader.py", "        nonce = (CID_NEG_MARK if lane == \"neg\" else random.choice(alphabet))", "        nonce = (random.choice(alphabet))"),
+    ("processed lane: the Main gate reads the raw tape again",
+     "set_engine.py", "        v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack))", "        v = stage_verdicts(win, r_, q_, short_n, self.stage_params(st.pack))"),
+    ("processed lane: every order counts as processed",
+     "set_engine.py", "    e = bisect.bisect_left(ts, entry_t)\n    lo = max(lo_floor,", "    return True\n    e = bisect.bisect_left(ts, entry_t)\n    lo = max(lo_floor,"),
+    ("trader: lanes: a Set close escalates the symbol backoff like the Exit lane",
+     "pulse_trader.py", "        if set_lane:\n            return float(getattr(self.sets, \"cooldown_bars\", 2)) * 60.0\n", ""),
+    ("trader: lanes: Set losses pause the whole book",
+     "pulse_trader.py", "        if not pos.set_id:\n            # the cold-streak pause belongs to the Exit lane", "        if True:\n            # the cold-streak pause belongs to the Exit lane"),
+    ("trader: live entry: the forming minute counts as a bar",
+     "pulse_trader.py", "if 0 < self._kline_time(r) / 1000.0 + 60.0 <= minute]", "if 0 < self._kline_time(r) / 1000.0 <= minute]"),
+    ("trader: live entry: a late fill on an old signal minute",
+     "pulse_trader.py", "        if now - minute > ENTRY_FRESH_S:\n            return {}", "        if False:\n            return {}"),
+    ("trader: live entry: the minute is decided before it reached the history",
+     "pulse_trader.py", "                if getattr(self.sets, \"bar_t\", {}).get(s) != bar_t:\n                    continue", "                if False:\n                    continue"),
+    ("trader: live entry: the live scores decide again under the Base gate",
+     "pulse_trader.py", "            best = self.set_entry_candidates()\n", "            best = {}\n"),
+    ("live entry: the lower confidence pack wins",
+     "set_engine.py", "            if d != 0 and c >= self.entry_conf and (best is None or c > best[2]):", "            if d != 0 and c >= self.entry_conf and (best is None or c < best[2]):"),
+    ("exit Sets take their TP",
+     "set_engine.py", "    if kind == \"exit\":\n        return False", "    if kind == \"exit\":\n        return True"),
+    ("base Sets follow exitIgnoreTp again",
+     "set_engine.py", "    if kind == \"base\":\n        return True", "    if kind == \"base\":\n        return None"),
+    ("exit Sets not built",
+     "set_engine.py", "            if self.exit_sets:\n                seen_stop", "            if False:\n                seen_stop"),
+    ("trader: client id: an Exit Set decodes to its base twin",
+     "pulse_trader.py", "                if (st_obj.kind == \"exit\") != is_exit:\n                    return False", "                if False:\n                    return False"),
     ("scan: TP wins a same-bar tie against the stop",
      "set_engine.py", "if low <= stop:", "if low <= stop and not (honor_tp and high >= tp):"),
     ("scan: time exit one bar late",
@@ -66,8 +283,8 @@ MUTATIONS = [
      "bingx_fast.py", "                    wait = self.gate.reserve_public(path)",
      "                    wait = self.gate.buckets[\"public\"].reserve()"),
     ("bars: a live refresh replaces the stored history",
-     "set_engine.py", "self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned, keep_on_gap=tail)[-self.lookback :]",
-     "self.bars[symbol] = cleaned[-self.lookback :]"),
+     "set_engine.py", "joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.lookback :]",
+     "joined = cleaned[-self.lookback :]"),
     ("indications: reason matched by kind only, mode ignored",
      "indication_engine.py", "            bool(kind and mode) and (lambda i: i.kind == kind and i.mode == mode),",
      "            bool(kind) and (lambda i: i.kind == kind),"),
@@ -103,7 +320,7 @@ MUTATIONS = [
     ("trader: the pacing gap is dropped",
      "pulse_trader.py", "    return max(0.0, cycle_started + scan_s - now)", "    return 0.0"),
     ("sets: the effective PF pools every Set, not the valid ones",
-     "set_engine.py", "        valid = [x for x in allsets if not self.gate_reason(x)]\n", "        valid = list(allsets)\n"),
+     "set_engine.py", "        valid = [x for x in allsets if not reasons[x.id]]\n", "        valid = list(allsets)\n"),
     ("trader: a refused close leaves stale stop ids on the position",
      "pulse_trader.py", "                pos.sl_oid = pos.sec_sl_oid = pos.tp_oid = pos.sec_tp_oid = \"\"\n                pos.controls_ok = False\n", "                pos.controls_ok = False\n"),
     ("trader: a partial close is recorded at the remainder",
@@ -159,9 +376,9 @@ MUTATIONS = [
     ("trader: lanes: a Set position is handed to the Exit strategies",
      "pulse_trader.py", "            if pos.set_id:\n                # a Set position is closed by its own lane only", "            if False and pos.set_id:\n                # a Set position is closed by its own lane only"),
     ("trader: lanes: the Set lane drops its time exit",
-     "pulse_trader.py", "        if age >= float(self.sets.hist_time_bars) * 60.0:", "        if False:"),
+     "pulse_trader.py", "        if age >= float(hold_bars) * 60.0:", "        if False:"),
     ("trader: lanes: the Set lane exits on TP whatever the lane's setting",
-     "pulse_trader.py", "        if self.lane_honors_tp() and tp_f > 0:", "        if tp_f > 0:"),
+     "pulse_trader.py", "        if self.lane_honors_tp(pos) and tp_f > 0:", "        if tp_f > 0:"),
     ("trader: lanes: the Exit lanes score the Set closes",
      "pulse_trader.py", "            if not rec.set_id:                 # the Exit lanes score only the closes they made themselves", "            if True:                 # the Exit lanes score only the closes they made themselves"),
     ("trader: lanes: the exit lane tightens a Set position's order stop",
@@ -221,10 +438,10 @@ MUTATIONS = [
      "set_engine.py", "    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)",
      "    return sl_base, max(2 * cost_as_frac(cost_pct), st.tp_pct)"),
     ("lanes: the live Set levels use the base ratio for a trailing Set",
-     "set_engine.py", "    sl_base = st.tp_pct * (st.sl_ratio if st.kind == \"base\" else TRAIL_SL_RATIO)",
-     "    sl_base = st.tp_pct * 1.0"),
+     "set_engine.py", "    sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == \"trail\" else st.sl_ratio)\n    return max(",
+     "    sl_base = st.tp_pct * 1.0\n    return max("),
     ("sets: the effective PF pools every Set",
-     "set_engine.py", "        return {\"base\": pool(valid), \"unfiltered\": pool(allsets)", "        return {\"base\": pool(allsets), \"unfiltered\": pool(allsets)"),
+     "set_engine.py", "        return {\"base\": pool(valid), \"baseOnly\": pool(base_only)", "        return {\"base\": pool(allsets), \"baseOnly\": pool(base_only)"),
     ("trader: lanes: a recovered Set position keeps the default variants' trailing",
      "pulse_trader.py", "                    trail_key, trail_arm, trail_give = rec_set.trail_key, rec_set.trail_arm, rec_set.trail_give\n                    rec_trail_id = rec_set.id",
      "                    rec_trail_id = \"\""),
@@ -269,10 +486,10 @@ MUTATIONS = [
     ("trader: size: the volume factor is not applied to the balance size",
      "pulse_trader.py", "            n = bal * pct / 100.0 * vf\n", "            n = bal * pct / 100.0\n"),
     ("trader: halt: ddHaltPct 0 still halts on a drawdown",
-     "pulse_trader.py", "        elif self.dd_halt > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= self.dd_halt:\n            if not self.halted:",
-     "        elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= 0.18:\n            if not self.halted:"),
+     "pulse_trader.py", "        elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:\n            if not self.halted:",
+     "        elif self.dd_now() >= 0.80:\n            if not self.halted:"),
     ("trader: halt: a latched drawdown halt never clears when the halt is off",
-     "pulse_trader.py", "            self.dd_halt <= 0 or (self.start_eq - self.equity)", "            False or (self.start_eq - self.equity)"),
+     "pulse_trader.py", "            self.dd_halt <= 0 or self.dd_now() < self.dd_halt * 0.6", "            False or self.dd_now() < self.dd_halt * 0.6"),
     ("trader: escalation: a fill far from its reference price stays open",
      "pulse_trader.py", "        if slip > slip_limit:\n", "        if False:\n"),
     ("trader: escalation: a bad fill is scored against the Set",
@@ -294,7 +511,7 @@ MUTATIONS = [
     ("sets: the symbols with the most orders are not replayed first",
      "set_engine.py", "            names.sort(key=lambda s: -sum(len(v) for v in (self._hist_rows.get(s) or {}).values()))\n", ""),
     ("sets: equal exit times order by replay order, not by symbol",
-     "set_engine.py", "for sym_ in tape_order for r in self._hist_rows[sym_].get(st.id, ())", "for per_set in self._hist_rows.values() for r in per_set.get(st.id, ())"),
+     "set_engine.py", "for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ())", "for per_set in self._hist_rows.values() for r in per_set.get(key, ())"),
     ("sets: the index drops the gate-window gross profit",
      "set_engine.py", "                \"gp\": st.gate_gp,\n", "                \"gp\": 0.0,\n"),
     ("sets: the index rank is not the engine rank",
@@ -360,8 +577,8 @@ MUTATIONS = [
      "set_engine.py", "    def snapshot(self) -> Dict[str, Any]:\n        with self._lock:\n            return self._snapshot()",
      "    def snapshot(self) -> Dict[str, Any]:\n        return self._snapshot()"),
     ("pick: the base and trail lookups take the lock separately",
-     "set_engine.py", "        with self._lock:\n            return self._pick(pack, \"base\") or self._pick(pack, \"trail\")",
-     "        return self.pick(pack, \"base\") or self.pick(pack, \"trail\")"),
+     "set_engine.py", "        with self._lock:\n            fixed = [x for x in (self._pick(pack, \"base\"), self._pick(pack, \"exit\")) if x is not None]",
+     "        if True:\n            fixed = [x for x in (self.pick(pack, \"base\"), self.pick(pack, \"exit\")) if x is not None]"),
     ("cache: a departed symbol keeps its signal memo",
      "set_engine.py", "                for s in [s for s in self._sig_cache if s not in live]:\n                    del self._sig_cache[s]          # and so do their signal memo entries\n",
      ""),
@@ -376,6 +593,196 @@ MUTATIONS = [
     ("trader: a partial close fill is reported as a full close",
      "pulse_trader.py", '                if ex is not None and "quantity" in body and ex < float(pos.qty) * 0.999:',
      '                if False:'),
+    ("hold: the Set's own hold ignored in the replay scan",
+     "set_engine.py", 'time_bars = self.hold or cfg["time_bars"]', 'time_bars = cfg["time_bars"]'),
+    ("hold: the Set's own hold ignored in the lane step",
+     "set_engine.py", 'if why is None and held >= (self.hold or cfg["time_bars"]):', 'if why is None and held >= cfg["time_bars"]:'),
+    ("trader: the live Set lane ignores the Set's own hold",
+     "pulse_trader.py", '        hold_bars = int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)', '        hold_bars = int(self.sets.hist_time_bars)'),
+    ("hold: a trailing Set reads the base step",
+     "set_engine.py", "return int(st.step) if st.kind != \"trail\" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))", "return int(st.step)"),
+    ("hold: auto candidates of steps 6 and up come from the low list",
+     "set_engine.py", "return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH", "return HOLD_AUTO_LOW"),
+    ("hold: auto candidates cut one step early (step 5 reads the high list)",
+     "set_engine.py", "return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH", "return HOLD_AUTO_LOW if self.step_of(st) <= 4 else HOLD_AUTO_HIGH"),
+    ("hold auto: the judgement reads every order, not the last 50",
+     "set_engine.py", "w = [finite(r[4]) - cf for r in rows[-self.hold_auto_max:]]", "w = [finite(r[4]) - cf for r in rows]"),
+    ("hold auto: a candidate with too few orders may win",
+     "set_engine.py", "if n >= self.hold_auto_min and pf > best[0]", "if pf > best[0]"),
+    ("hold auto: no PF margin over the global stop",
+     "set_engine.py", " and pf >= ref_pf * HOLD_AUTO_MARGIN", ""),
+    ("hold auto: a manual step hold does not override it",
+     "set_engine.py", 'if not getattr(self, "hold_auto", False) or self.hold_bars_for(st):', 'if not getattr(self, "hold_auto", False):'),
+    ("hold auto: the master switch does not switch it off",
+     "set_engine.py", "self.hold_auto = self.hold_on and bool(ov.get(\"holdAuto\", True))", "self.hold_auto = bool(ov.get(\"holdAuto\", True))"),
+    ("hold auto: the master switch keeps the manual step holds",
+     "set_engine.py", "if self.hold_on else {}", ""),
+    ("hold auto: the baseline lane is judged under the chosen hold",
+     "set_engine.py", "lane.hold = h                    #", "lane.hold = h or lane.hold      #"),
+    ("hold auto: the chosen tape is not the one the Set is scored on",
+     "set_engine.py", "        return best[2]\n", "        return base\n"),
+    ("hold auto: the choice is never stored for the live lane",
+     "set_engine.py", "st.hold_bars, st.hold_auto = best[1], True", "st.hold_auto = True"),
+    ('bybit: the signature string puts the key before the timestamp',
+     'bybit_fast.py', 'raw = f"{ts}{self.key}{RECV}{payload}"', 'raw = f"{self.key}{ts}{RECV}{payload}"'),
+    ("bybit: symbols are not mapped to the trader's form",
+     'bybit_fast.py', 'return s[: -len(SETTLE)] + "-" + SETTLE\n    return s', 'return s\n    return s'),
+    ('bybit: klines left newest first',
+     'bybit_fast.py', '        rows.sort(key=lambda r: r["time"])                      # Bybit answers newest first\n', ''),
+    ('bybit: the 24h change stays a ratio',
+     'bybit_fast.py', '"priceChangePercent": str(fnum(t.get("price24hPcnt")) * 100.0),', '"priceChangePercent": str(fnum(t.get("price24hPcnt"))),'),
+    ('bybit: a short position reports a positive amount',
+     'bybit_fast.py', '"positionAmt": fmt_dec(Decimal(str(size))) if long_ else "-" + fmt_dec(Decimal(str(size))),', '"positionAmt": fmt_dec(Decimal(str(size))),'),
+    ('bybit: every order goes to the long position index',
+     'bybit_fast.py', 'return 1 if str(position_side).upper() == "LONG" else 2', 'return 1'),
+    ('bybit: a stop and a take profit share the trigger direction',
+     'bybit_fast.py', 'req["triggerDirection"] = 2 if falls else 1', 'req["triggerDirection"] = 1'),
+    ('bybit: a conditional order may increase the position',
+     'bybit_fast.py', '            req["reduceOnly"] = True\n            req["closeOnTrigger"] = True\n            if req["orderType"] == "Limit":', '            if req["orderType"] == "Limit":'),
+    ('bybit: closePosition sends the quantity instead of 0',
+     'bybit_fast.py', '            req["qty"] = "0"                                   # qty 0 with reduceOnly + closeOnTrigger closes the position', '            req["qty"] = self._qty(symbol, qty)'),
+    ('bybit: the quantity is not put on the step',
+     'bybit_fast.py', '        return on_step(q, c["qty_step"]) if c else fmt_dec(Decimal(str(q)))', '        return fmt_dec(Decimal(str(q)))'),
+    ('bybit: the trigger price is not put on the tick',
+     'bybit_fast.py', '        return on_step(p, c["tick"]) if c else fmt_dec(Decimal(str(p)))', '        return fmt_dec(Decimal(str(p)))'),
+    ('bybit: an entry reports a zero average price',
+     'bybit_fast.py', '"avgPrice": fmt_dec(Decimal(str(val / qty))), "executedQty"', '"avgPrice": "0", "executedQty"'),
+    ('bybit: the stop amend names another order',
+     'bybit_fast.py', '"symbol": to_by(sym), "orderId": old,', '"symbol": to_by(sym), "orderId": old + "x",'),
+    ('bybit: a rate-limit reply starts no cooldown',
+     'bybit_fast.py', '        elif v.cls == "rate":\n            pause = self.limiter.trip', '        elif False:\n            pause = self.limiter.trip'),
+    ('bybit: an IP ban (403) does not stop the requests',
+     'bybit_fast.py', '        if v.cls == "ip-ban":\n            pause = self.limiter.ban_ip', '        if False:\n            pause = self.limiter.ban_ip'),
+    ('bybit: the IP ban is held for one minute',
+     'bybit_limits.py', 'IP_BAN_S = 600.0', 'IP_BAN_S = 60.0'),
+    ('bybit: the remaining quota header is ignored',
+     'bybit_limits.py', '        if rem is not None:\n            self.remaining, self.seen_at = rem, now', '        if rem is not None:\n            self.seen_at = now'),
+    ("bybit: the venue's own limit is not adopted",
+     'bybit_limits.py', '            if abs(self.bucket.rate - lim) > 1e-9:', '            if False:'),
+    ('bybit: a used-up window does not wait for its reset',
+     'bybit_limits.py', '            frees = max(self.reset_at, self.seen_at + 1.0)', '            frees = 0.0'),
+    ('bybit: batches of 25 orders',
+     'bybit_fast.py', 'BATCH_MAX = 10 ', 'BATCH_MAX = 25 '),
+    ('bybit: a failed batch item resends the whole batch',
+     'bybit_fast.py', '            pending = retry\n            if pending and rounds < max_rounds:', '            pending = list(range(len(items))) if retry else []\n            if pending and rounds < max_rounds:'),
+    ('bybit: a duplicate batch item is a failure, not the order that exists',
+     'bybit_fast.py', '                    if v.cls == "duplicate" and landed is not None:', '                    if False:'),
+    ('bybit: an unclear create is never looked up by its link id',
+     'bybit_fast.py', '        return self._find_order("landed", to_bx(req.get("symbol")), "", link)', '        return None'),
+    ('bybit: a rejected timestamp is not resynced',
+     'bybit_fast.py', '        if v.cls == "time" and retry_time:', '        if False:'),
+    ('bybit: the circuit breaker never opens',
+     'bybit_fast.py', '            if self.fail_streak >= BREAKER_FAILS and now >= self.breaker_until:', '            if False:'),
+    ('bybit: the circuit breaker also holds closing orders',
+     'bybit_fast.py', '        return any(not r.get("reduceOnly") for r in (reqs or []))', '        return any(True for r in (reqs or []))'),
+    ('bybit: a server error is not classed transient',
+     'bybit_limits.py', 'TRANSIENT = {10000, 10016,', 'TRANSIENT = {10000,'),
+    ('bybit: a 403 is not an IP ban',
+     'bybit_limits.py', '    if status == 403 or c == 10018:', '    if c == 10018:'),
+    ('bybit: the timestamp error is not recognised',
+     'bybit_limits.py', '    if c == 10002 or "recv_window" in low', '    if c == -2 or "recv_window" in low'),
+    ("bybit: insufficient balance loses the trader's word",
+     'bybit_limits.py', '    "insufficient": "insufficient margin",', '    "insufficient": "insufficient funds",'),
+    ('bybit: a leverage that is already set is a failure',
+     'bybit_fast.py', '        if self.ok(env) or env.get("_class") == "unchanged":\n            return {"code": 0, "data": {"leverage": int(lev)}}', '        if self.ok(env):\n            return {"code": 0, "data": {"leverage": int(lev)}}'),
+    ('bybit: the margin mode is set on every call',
+     'bybit_fast.py', '        if self._margin_done:\n            return {"code": 0, "data": {}}', '        if False:\n            return {"code": 0, "data": {}}'),
+    ('bybit: a rate-limited hedge switch counts as done',
+     'bybit_fast.py', '        elif not env.get("_cooled") and cls not in ("rate", "ip-ban", "transient", "time"):\n            self._mode_done = True                       # a definite refusal', '        else:\n            self._mode_done = True                       # a definite refusal'),
+    ('bybit: the quantity step is read as 10^-precision',
+     'bybit_fast.py', '"step": fnum(step) or 1.0,', '"step": 10 ** -decimals(step),'),
+    ('bybit: dated futures are traded',
+     'bybit_fast.py', '    if str(row.get("contractType") or "LinearPerpetual") != "LinearPerpetual":\n        return None', '    if False:\n        return None'),
+    ('bybit: one price connection for every symbol',
+     'bybit_fast.py', 'WS_ARGS_PER_CONN = 90 ', 'WS_ARGS_PER_CONN = 900 '),
+    ('bybit: a ticker delta replaces the snapshot',
+     'bybit_fast.py', '    if msg.get("type") == "snapshot":\n        cur.clear()', '    if True:\n        cur.clear()'),
+    ('bybit: the price stream is never pinged',
+     'bybit_fast.py', '                if now - last_ping >= WS_PING_S:', '                if False:'),
+    ('bybit: a read error is not retried',
+     'bybit_fast.py', '        while n < retries and env.get("_class") == "transient" and not env.get("_cooled"):', '        while False:'),
+    ('bybit: the ban gate lets public reads through',
+     'bybit_limits.py', '        if now < self.ip_ban_until:\n            return None, "ip-ban"', '        if now < self.ip_ban_until and not v5.startswith("/v5/market"):\n            return None, "ip-ban"'),
+    ('bybit: the trader gives a bybit connection the BingX client',
+     'pulse_trader.py', 'if str(conn).startswith("bybit-"):\n        from bybit_fast import FastBybit', 'if False:\n        from bybit_fast import FastBybit'),
+    ('bybit: the trader loads the BingX contract list for a bybit connection',
+     'pulse_trader.py', '    if IS_BYBIT:\n        from bybit_fast import fetch_contract_rows', '    if False:\n        from bybit_fast import fetch_contract_rows'),
+    ('bybit: a bybit connection keeps the BingX order tag',
+     'pulse_trader.py', '("b" + _CONN_SUFFIX[1:] if IS_BYBIT and _CONN_SUFFIX.startswith("x") else _CONN_SUFFIX)', '(_CONN_SUFFIX)'),
+    ('bybit: guard pins Bybit mainnet to the demo host',
+     'conn_guard.py', '"bybit-x01": (LIVE_MAINNET, "https://api.bybit.com")', '"bybit-x01": (LIVE_MAINNET, "https://api-demo.bybit.com")'),
+    ('bybit: guard does not know the Bybit hosts',
+     'conn_guard.py', ', "api.bybit.com": LIVE_MAINNET, "api-demo.bybit.com": VST_DEMO}', '}'),
+    ('bybit: the sidecar gives a Bybit connection with credentials no lane',
+     'pulse_http.py', '        if any(os.path.exists(os.path.join(DIR, f)) for f in (f"cred-{conn}.json", f"stats-{conn}.json")):', '        if False:'),
+    ("windows: the secondary windows ignore the link to the overall N",
+     "position_cost.py", "    if ov.get(\"windowsLinked\", True):\n        return overall", "    if False:\n        return overall"),
+    ("windows: an own window may be below 8",
+     "position_cost.py", "            return max(MIN_VALIDATION_N, v)", "            return v"),
+    ("gate min: the minimum order count has a floor of 8 again",
+     "set_engine.py", "self.gate_min = max(1, min(self.gate_window,", "self.gate_min = max(MIN_VALIDATION_N, min(self.gate_window,"),
+    ("gate min: a minimum of zero judges Sets without any order",
+     "set_engine.py", "self.gate_min = max(1, min(self.gate_window,", "self.gate_min = max(0, min(self.gate_window,"),
+    ("gate min: the engine default minimum is 30 again",
+     "set_engine.py", "GATE_MIN_DEFAULT = 0            # minimum", "GATE_MIN_DEFAULT = 30           # minimum"),
+    ("gate min: the pre-history trigger ignores the minimum setting",
+     "set_engine.py", "short = sum(1 for st in traded if st.gate_n < self.gate_min)", "short = sum(1 for st in traded if st.gate_n < 30)"),
+    ("gate min: the shipped x02 overlay asks for 25 orders",
+     "overlay-bingx-x02.json", '"setGateMinTrades": 0,', '"setGateMinTrades": 25,'),
+    ("ddt: the default drawdown time is 12 h again",
+     "set_engine.py", "GATE_MAX_DDT_HOURS_DEFAULT = 24.0 ", "GATE_MAX_DDT_HOURS_DEFAULT = 12.0 "),
+    ("ddt: the engine falls back to 12 h when the key is absent",
+     "set_engine.py", "hrs = GATE_MAX_DDT_HOURS_DEFAULT if hrs is None else float(hrs)", "hrs = 12.0 if hrs is None else float(hrs)"),
+    ("ddt: the shipped x01 overlay runs 12 h",
+     "overlay-bingx-x01.json", '"setMaxDdtHours": 24,', '"setMaxDdtHours": 12,'),
+    ("windows: a secondary window may be below 8 (coordinator pfWindow)",
+     "coord_engine.py", "self.pf_window = window_n(ov, \"pfWindow\", fallback=LAST_N_DEFAULT)", "self.pf_window = int(ov.get(\"pfWindow\") or 15)"),
+    ("windows: the hold auto sample floor may be below 8",
+     "set_engine.py", "self.hold_auto_min = int(max(MIN_VALIDATION_N, min(", "self.hold_auto_min = int(max(3, min("),
+    ("block: samples read the coordinator's prevPosMinCount",
+     "block_engine.py", 'cfg.get("blockMinSamples", BLOCK_MIN_SAMPLES_DEFAULT) or BLOCK_MIN_SAMPLES_DEFAULT', 'cfg.get("prevPosMinCount", BLOCK_MIN_SAMPLES_DEFAULT) or BLOCK_MIN_SAMPLES_DEFAULT'),
+    ("block: the window reads the coordinator's prevPosWindow",
+     "block_engine.py", 'cfg.get("blockWindow", BLOCK_WINDOW_DEFAULT) or BLOCK_WINDOW_DEFAULT', 'cfg.get("prevPosWindow", BLOCK_WINDOW_DEFAULT) or BLOCK_WINDOW_DEFAULT'),
+    ("block: the live trader ignores blockMinSamples from the overlay",
+     "pulse_trader.py", '        self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))', '        self.block.min_samples = self.block.min_samples'),
+    ("block: the live trader ignores blockWindow from the overlay",
+     "pulse_trader.py", '        self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))', '        self.block.window = self.block.window'),
+    ("coordinator: main evaluation default back to 5",
+     "coord_engine.py", '        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 20)', '        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 5)'),
+    ("coordinator: real evaluation default back to 3",
+     "coord_engine.py", '        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 15)', '        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)'),
+    ("coordinator: prev min count default back to 5",
+     "coord_engine.py", 'ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 8)', 'ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)'),
+    ("real gate: ignored by the gate reason",
+     "set_engine.py", "        if (self.main_on or self.neg_on or self.realst_on) and not (v.get(\"pos\") or v.get(\"negl\")):", "        if False and not (v.get(\"pos\") or v.get(\"negl\")):"),
+    ("real gate: reads the Base window instead of its last N",
+     "set_engine.py", "    m_ok, m_pf, m_n = last_ok(main, P.main_n)", "    m_ok, m_pf, m_n = last_ok(main, P.base_long)"),
+    ("real gate: fewer orders than N still pass",
+     "set_engine.py", "        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor, pf, len(w)", "        return pf + 1e-9 >= P.floor, pf, len(w)"),
+    ("main gate: its own minimum PF instead of the Base one",
+     "set_engine.py", "floor=self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s", "floor=1.0, max_dd_s=self.max_dd_s"),
+    ("real gate: N below the floor of 8",
+     "set_engine.py", "self.main_n = max(MIN_VALIDATION_N, min(self.gate_window,", "self.main_n = max(2, min(self.gate_window,"),
+    ("gates: Exit keeps its own minimum PF while linked",
+     "position_cost.py", "    if ov.get(\"minPfLinked\", True):\n        return base_min_pf(ov)", "    if False:\n        return base_min_pf(ov)"),
+    ("gates: the coordinator keeps its own minimum PF while linked",
+     "coord_engine.py", "        if ov.get(\"minPfLinked\", True):\n            self.min_pf = base_min_pf(ov)", "        if False:\n            self.min_pf = base_min_pf(ov)"),
+    ("gates: Block keeps 1.2 instead of the Base minimum PF",
+     "pulse_trader.py", "self.block.default_min_pf = base_min_pf(ov) if ov.get(\"minPfLinked\", True) else max(MIN_PF_FLOOR, float(real_pf))", "self.block.default_min_pf = 1.2"),
+    ("pre-history: never grows",
+     "set_engine.py", "        if short / len(traded) >= LOOKBACK_SHORT_SHARE:", "        if False:"),
+    ("pre-history: grows without the cap",
+     "set_engine.py", "self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)", "self.lookback = self.lookback + LOOKBACK_GROW_STEP"),
+    ("pre-history: a reload forgets what was grown",
+     "set_engine.py", "int(getattr(self, \"_lookback_grown\", 0) or 0)", "0"),
+    ("trader: the coordinator's advice blocks a Set entry (a last-N validation between the Set and the exchange)",
+     "pulse_trader.py", "        if not allow:\n            if ranked and (time.time() - self.skip_log.get(\"gate\", 0) > 45):\n                log(\"COORD soft \"", "        if not allow:\n            return\n        if not allow:\n            if ranked and (time.time() - self.skip_log.get(\"gate\", 0) > 45):\n                log(\"COORD soft \""),
+    ("trader: halt: the drawdown is measured from the stored start equity, not the active session",
+     "pulse_trader.py", "        if getattr(self, \"dd_basis\", \"session\") == \"session\" and getattr(self, \"session_eq\", 0.0) > 0:\n            return float(self.session_eq)\n", "        if False:\n            return float(self.session_eq)\n"),
+    ("trader: halt: the session baseline is never set from the first balance",
+     "pulse_trader.py", "        if self.session_eq <= 0 and self.equity > 0:\n            self.session_eq = self.equity           # the active session starts", "        if False:\n            self.session_eq = self.equity           # the active session starts"),
+    ("trader: halt: ddHaltBasis start is ignored",
+     "pulse_trader.py", "self.dd_basis = \"start\" if str(ov.get(\"ddHaltBasis\") or \"session\").lower() == \"start\" else \"session\"", "self.dd_basis = \"session\""),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]
@@ -385,7 +792,9 @@ def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subproce
     """One suite run against a pulse copy. A mutant run is serial and stops at its first FAIL: a caught mutant
     needs only one failing check, and a survivor never fails, so it runs to the end either way.
     only: a suite prefix. Behaviour faults in the pinned trader run the trader suite alone, so the verdict comes from
-    the behaviour checks and not from the pin check, which any edit to that file trips."""
+    the behaviour checks and not from the pin check, which any edit to that file trips. The Bybit mutants run the bybit suite
+    alone for the same reason (their faults sit in bybit_fast.py, bybit_limits.py, conn_guard.py, pulse_http.py and the venue
+    selection in the trader)."""
     env = dict(os.environ, CTSG_PULSE_DIR=pulse_dir, CTSG_JOBS="1" if fail_fast else (os.environ.get("CTSG_JOBS") or ""))
     args = [sys.executable, "-B", os.path.join(HERE, "run.py")] + (["--fail-fast"] if fail_fast else [])
     if only:
@@ -393,9 +802,10 @@ def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subproce
     return subprocess.run(args, env=env, capture_output=True, text=True, timeout=1500)
 
 
-def _mutant(item):
+def _mutant(item, use_cache: bool = True):
     """Apply one fault to a private copy of server/pulse and run the suite against it. Returns (name, verdict, info).
-    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass."""
+    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass.
+    The check that caught this mutant last time runs first, alone; the whole suite runs only when it does not catch it."""
     name, fname, old, new = item
     with tempfile.TemporaryDirectory() as td:
         copy = os.path.join(td, "pulse")
@@ -410,23 +820,42 @@ def _mutant(item):
                 return name, "anchor", f"anchor found {count} times, mutation not applied"
             text = text.replace(old, new)
         open(path, "w", encoding="utf-8").write(text)
-        out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "")
+        known = _catchers.get(name) if use_cache else None
+        if known:
+            out = run_once(copy, fail_fast=True, only=known)
+            fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
+            if out.returncode != 0 and fails:
+                return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]} (known catcher)"
+        out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "bybit." if name.startswith("bybit:") else "")
     fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
     if out.returncode == 0:
         return name, "survived", ""
+    if fails:
+        with _catchers_lock:
+            _catchers[name] = fails[0]
     return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]}"
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="", help="run the mutants whose name starts with this prefix (several prefixes separated by |)")
+    ap.add_argument("--full", action="store_true", help="ignore the catcher map: every mutant runs the whole suite")
+    args = ap.parse_args()
     base = run_once(PULSE, fail_fast=False)
     if base.returncode != 0:
         print("baseline suite is not green; fix it before injecting faults", flush=True)
         print("\n".join(l for l in base.stdout.splitlines() if l.startswith("FAIL")), flush=True)
         return 1
+    try:
+        _catchers.update(json.load(open(CATCHERS_PATH, encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    prefixes = tuple(x for x in args.only.split("|"))         # several prefixes: --only "main short|chain:|stage"
+    todo = [m for m in MUTATIONS if m[0].startswith(prefixes)]
     jobs = int(os.environ.get("CTSG_MUT_JOBS") or 4)
     survivors, anchors = [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        for name, verdict, info in pool.map(_mutant, MUTATIONS):
+        for name, verdict, info in pool.map(lambda m: _mutant(m, not args.full), todo):
             if verdict == "survived":
                 survivors.append(name)
                 print(f"SURVIVED  {name}", flush=True)
@@ -435,7 +864,11 @@ def main() -> int:
                 print(f"ANCHOR    {name}: {info}", flush=True)
             else:
                 print(f"caught    {name}: {info}", flush=True)
-    print(f"\nmutations: {len(MUTATIONS)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
+    names = {m[0] for m in MUTATIONS}
+    with open(CATCHERS_PATH, "w", encoding="utf-8") as fh:        # only mutants that still exist, in a stable order
+        json.dump({k: v for k, v in sorted(_catchers.items()) if k in names}, fh, indent=1)
+        fh.write("\n")
+    print(f"\nmutations: {len(todo)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
           f"workers: {jobs}", flush=True)
     return 1 if (survivors or anchors) else 0
 

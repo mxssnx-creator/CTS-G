@@ -55,6 +55,8 @@ def synth_bars(seed: int, count: int, start: float = 50.0, drift: float = 0.0, v
 
 def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any]:
     ov = json.load(open(os.path.join(PULSE, name)))
+    # fixtures judge every window at one floor (setMinPf) unless they ask for the size classes (minPfBySize), which have their own checks
+    ov["minPfBySize"] = False
     ov.update(extra)
     return ov
 
