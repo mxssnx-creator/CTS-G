@@ -3,8 +3,9 @@
 ## Post-Base evaluation is the standard (read this first)
 
 A Set (one grid configuration: pack x SL ratio x TP step, or pack x trailing pair) is judged on its own tape by the Base
-validation: at least `setGateMinTrades` closed orders, PF over its last `setGateWindow` orders at or above `setMinPf`,
-and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
+validation: PF over its last `setGateWindow` orders at or above `setMinPf`, a drawdown time under `setMaxDdtHours` (default 24 h), and,
+when `setGateMinTrades` is above 0, at least that many closed orders (0 = off, the default: a Set is judged on the orders it has; a
+Set without any closed order is never judged). Only Sets that pass are tradeable.
 
 - The number that counts for any strategy, indicator or setting is the **PF after Base validation** ("effective PF",
   `sets.pfBase.base`), together with **how many percent of the Sets are validated** (`validatedPct`, also per pack in
@@ -23,6 +24,18 @@ and a drawdown time under `setMaxDdtHours`. Only Sets that pass are tradeable.
   chase the effective PF.
 
 ## Defaults decided by the owner (2026-10-28)
+
+- **2026-10-29: the minimum order count is off and the maximum drawdown time is 24 h.** `setGateMinTrades` 0 (engine `GATE_MIN_DEFAULT`, the
+  four shipped overlays, the desk): no "n<min" rejection beyond a Set with no closed order, the Base gate judges a Set on the orders it
+  has. `setMaxDdtHours` 24 (`GATE_MAX_DDT_HOURS_DEFAULT`, the overlays, the desk; settable 2-36 h in steps of 2). Read the cost of this
+  next to the executed PF: a Set with a handful of orders can pass on a lucky stretch, so the effective PF is more in-sample than before
+  and the validated share is higher (checks `gates.minimum-order-count-off-...`, `gates.default-max-drawdown-time-is-24-hours`,
+  `processing.few-order-sets-judged-when-the-minimum-is-off`). Measured (2 days, 20 symbols, development window, Base 30, Main off / 8,
+  `scripts/window_eval.py --patch`, minimum 25 / off x drawdown time 12 / 24 h): the dense 2-day tapes give every Set hundreds of orders
+  and drawdowns of minutes, so neither setting binds there: recent small caps identical in all four cells (valid 28.3 % / 14.0 %, effective
+  PF 1.98 / 2.31, executed PF 0.94 on 1,829 orders / 0.95 on 1,802), majors the same except the minimum off with Main 8 (valid 9.28 -> 9.33 %,
+  executed PF 0.61 on 743 orders in both). The effect belongs to the live book (sparse orders per Set: on x02 220 of 988 Sets were
+  "n<min", 152 on drawdown time at 12 h); read it there, next to the executed PF.
 
 - The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
   (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`, Short Range floor). The volume factor default is the minimum, **0.05**.
@@ -133,8 +146,8 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   PFs, development window; `--sealed` once). Do not read a better effective PF as an edge without the executed PF.
 - Validation windows (`position_cost.window_n`, `MIN_VALIDATION_N` = 8): with `windowsLinked` (default on) `pfWindow`, `setPfWindow`,
   `exitPfWindow`, `slToTpRecalcN` and `trailRecalcN` follow the overall validation's last N (`setGateWindow`, 50); unlinked each is its
-  own value, at least 8 (shipped 8). The floor of 8 applies to these windows, the Base gate minimum (`setGateMinTrades`) and the hold Auto
-  sample floor only. Other counts keep their own ranges; the defaults of `mainEvalPosCount` (20) and `realEvalPosCount` (15, owner, 2026-10-28), and of `prevPosMinCount`,
+  own value, at least 8 (shipped 8). The floor of 8 applies to these windows and the hold Auto sample floor only (the Base gate's minimum order
+  count has no floor since 2026-10-29: 0 = off). Other counts keep their own ranges; the defaults of `mainEvalPosCount` (20) and `realEvalPosCount` (15, owner, 2026-10-28), and of `prevPosMinCount`,
   `exitMinSamples` and Block's `blockMinSamples` (8) (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
   `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
 - Measured (2 days, 20 symbols, development window = first 2/3; `scripts/window_eval.py`, extra last-N PF check on top of the Base gate; "none" =
@@ -184,13 +197,13 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 - Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
   another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
-- **Base last N** (`setGateWindow`) **50** plus the short window `setGateShortN`, minimum orders `setGateMinTrades` 30 (overlays). **Main gate**
+- **Base last N** (`setGateWindow`) **50** plus the short window `setGateShortN`, its minimum order count `setGateMinTrades` is off (0) since 2026-10-29 (was 30). **Main gate**
   (`mainGateN` 25 plus Auto 5/10/15, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
   Sets that pass every stage on a lane (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
   over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
   (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.
 - **Pre-history grows** (`histLookbackAuto`, `histLookbackMax` 2880): when a quarter of the Sets that traded have fewer orders than the gate
-  minimum, the lookback grows by 240 bars after a complete pass (the next fetch pages older minutes); it only grows and survives a reload.
+  minimum (with the minimum off: no closed order at all), the lookback grows by 240 bars after a complete pass (the next fetch pages older minutes); it only grows and survives a reload.
 - **Execution tracking** (`Pulse.execution_snapshot`, stats `execution`, desk "Executed · after all gates"): Sets valid after all gates, open
   positions and the Sets they run under (a Set that stopped passing keeps its open positions handled by its own lane until they close; counted
   as `underInvalidSet`), orders closed by lane (Set / Exit, wins, losses, Sets that traded) from the whole trades file plus live closes, closes not
@@ -242,7 +255,9 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 ## Live safety
 
 - x01 runs real money. The drawdown halt is a protection: never clear it or reset the start equity without an explicit
-  instruction. It is the overlay setting `ddHaltPct` (percent of the start equity, default 18, 0 = off). On 2026-10-28
+  instruction. **Owner decision (2026-10-28, later): the drawdown halt is 80 % (`ddHaltPct` 80, x01 and x02; the Bybit overlays keep 18) of the equity the
+  active session started with (`ddHaltBasis` "session": the first balance this engine process reads, or the one after an explicit Start;
+  "start" = the stored start equity), replacing the 18 % / off settings below.** Checks `trader.drawdown-halt-*`. It is the overlay setting `ddHaltPct` (percent of the start equity, default 18, 0 = off). On 2026-10-28
   the owner reset x01's start equity and switched its halt off (`ddHaltPct` 0) and set x01 to the minimum order size
   (`sizePctOfBalance` 0, `targetNotional` 0.2); the volume factor is the minimum, 0.05 (owner, later the same day)); the minimum-equity guard (`EQ_MIN`) stays on. The same day x01 took
   x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). The Base gate

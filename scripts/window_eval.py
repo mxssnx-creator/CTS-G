@@ -27,8 +27,10 @@ def main():
     ap.add_argument("--arms", default="none,6,8,12,15,20,25")
     ap.add_argument("--base-list", default="", help="grid: Base last N values (e.g. 10,15,20,25,30,35); with --arms the Main gate N values")
     ap.add_argument("--gate-window", type=int, default=0, help="the Base gate's last N (setGateWindow); 0 = the shipped overlay value")
+    ap.add_argument("--patch", default="", help='extra overlay keys as JSON, e.g. {"setGateMinTrades": 25, "setMaxDdtHours": 12}')
     a = ap.parse_args()
-    os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"holdEnabled": False, **({"setGateWindow": a.gate_window} if a.gate_window else {})})
+    os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"holdEnabled": False, **({"setGateWindow": a.gate_window} if a.gate_window else {}),
+                                                    **(json.loads(a.patch) if a.patch else {})})
     names, bars, times = sg.load_bars(a.data, a.symbols)
     shadow = pickle.load(open(os.path.join(a.cache, "shadow_h0.pkl"), "rb"))
     book = sg.make_book()
@@ -45,11 +47,11 @@ def main():
     res = {}
     bases = [int(x) for x in a.base_list.split(",")] if a.base_list else [book.gate_window]
     arms_all = [x if x == "none" else int(x) for x in a.arms.split(",")]
-    gate_min_cfg = max(8, min(200, int(json.loads(os.environ["STAGE_OVERLAY_PATCH"]).get("setGateMinTrades", book.gate_min))))
+    gate_min_cfg = max(1, min(200, int(json.loads(os.environ["STAGE_OVERLAY_PATCH"]).get("setGateMinTrades", book.gate_min))))   # 0 = off -> one order
     print(f"{'Base N':>6s} {'Real N':>7s} {'valid %':>8s} {'eff PF':>7s} {'eff orders/h':>12s} {'exec PF':>8s} {'orders':>7s} {'net %':>9s} {'maxDD %':>9s} {'hours+':>9s}")
     for G in bases:
         book.gate_window = max(10, G)
-        book.gate_min = max(8, min(book.gate_window, gate_min_cfg))
+        book.gate_min = max(1, min(book.gate_window, gate_min_cfg))
         for arm in arms_all:
             if arm != "none" and int(arm) >= book.gate_window:
                 continue                                  # a Real N at or over the Base window is the Base gate itself

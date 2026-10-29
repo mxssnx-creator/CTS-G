@@ -118,6 +118,7 @@ export type PulseOverlay = {
   maxEntrySlipPct: number;
   /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
   ddHaltPct: number;
+  ddHaltBasis: "session" | "start";
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -317,7 +318,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   sizePctOfBalance: 0,
   sizeMaxNotional: 25,
   maxEntrySlipPct: 0.75,
-  ddHaltPct: 18,
+  ddHaltPct: 80,
+  ddHaltBasis: "session",
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 0,
@@ -463,9 +465,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setPfWindow: 8,
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
-  setMaxDdtHours: 12,
+  setMaxDdtHours: 24,
   setGateWindow: 50,
-  setGateMinTrades: 30,
+  setGateMinTrades: 0,
   stagesEnabled: true,
   setGateShortN: 15,
   mainGateEnabled: true,
@@ -853,9 +855,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
     setMinPf: pfFloor(num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
-    setMaxDdtHours: num(cts.setMaxDdtHours, 12),
+    setMaxDdtHours: num(cts.setMaxDdtHours, 24),
     setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
-    setGateMinTrades: Math.max(8, Math.min(200, Math.round(num(cts.setGateMinTrades, 30)))),
+    setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
     stagesEnabled: bool(cts.stagesEnabled, true),
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 15)))),
     mainGateEnabled: bool(cts.mainGateEnabled, true),

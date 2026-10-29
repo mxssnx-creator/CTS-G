@@ -605,7 +605,7 @@ function SettingsPage() {
                   max={36}
                   step={2}
                   unit="h"
-                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 12 h)."
+                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 24 h, owner 2026-10-29)."
                   onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
                 />
                 <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Stages · Base → Main → Real</div>
@@ -637,10 +637,10 @@ function SettingsPage() {
                 <Slider
                   label="Base · min orders"
                   value={overlay.setGateMinTrades}
-                  min={8}
+                  min={0}
                   max={100}
                   step={1}
-                  hint="fewer orders than this: not judged (at most the long window)"
+                  hint="0 = off (default, owner 2026-10-29): a Set is judged on the orders it has. Above 0: fewer orders than this are not judged (at most the long window)."
                   onChange={(v) => patch("setGateMinTrades", v)}
                 />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Main · additional strategies, coordinations, processings · the last-N validation, on the Main Set</div>
@@ -1399,12 +1399,17 @@ function SettingsPage() {
                 />
                 <Num
                   label="Drawdown halt %"
-                  value={overlay.ddHaltPct ?? 18}
+                  value={overlay.ddHaltPct ?? 80}
                   min={0}
                   max={90}
                   step={1}
-                  hint="Entries halt when equity falls this far below the start equity. 0 = off (no drawdown protection)."
+                  hint="Entries halt when equity falls this far below the start equity of the active session (owner default 80). 0 = off (no drawdown protection)."
                   onChange={(v) => patch("ddHaltPct", v)}
+                />
+                <Toggle
+                  label="Drawdown halt measures from the active session's start (off: the stored start equity)"
+                  on={(overlay.ddHaltBasis ?? "session") === "session"}
+                  onChange={(v) => patch("ddHaltBasis", v ? "session" : "start")}
                 />
                 <Num
                   label="Size % of balance"

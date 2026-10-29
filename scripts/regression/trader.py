@@ -1148,13 +1148,13 @@ def position_size_follows_the_balance_and_the_volume_factor():
 
 
 def drawdown_halt_follows_its_setting():
-    """ddHaltPct (percent of the start equity, default 18) halts entries on a drawdown; 0 switches the halt off, and a
+    """ddHaltPct (percent of the active session's start equity, default 80) halts entries on a drawdown; 0 switches the halt off, and a
     drawdown halt already latched clears on the next balance read. The minimum-equity guard stays on either way."""
     def run():
         out = {}
-        for pct, eq in ((None, 30.0), (0.0, 30.0), (0.0, 0.1)):
+        for pct, eq in ((None, 15.0), (0.0, 30.0), (0.0, 15.0), (0.0, 0.1)):
             p, sym = _enter(_StubExchange(executed="1", requested="1"))
-            p.start_eq = 100.0
+            p.start_eq = p.session_eq = 100.0
             p.dd_halt = pt.DD_HALT if pct is None else pct / 100.0
             p.halted, p.halt_reason = (True, "drawdown halt") if pct == 0.0 else (False, None)   # latched from before
             p.api.get = lambda path, extra=None, _e=eq: {"code": 0, "data": {"balance": {"equity": str(_e), "availableMargin": str(_e)}}}
@@ -1162,9 +1162,27 @@ def drawdown_halt_follows_its_setting():
             out[f"{pct}:{eq}"] = (p.halted, p.halt_reason)
         return out
     out = _isolated(run)
-    ok = out["None:30.0"] == (True, "drawdown halt") and out["0.0:30.0"] == (False, None) and out["0.0:0.1"][0] is True \
+    ok = out["None:15.0"] == (True, "drawdown halt") and out["0.0:30.0"] == (False, None) and out["0.0:15.0"] == (False, None) and out["0.0:0.1"][0] is True \
         and "below min" in str(out["0.0:0.1"][1])
     return ok, f"(halted, reason) by (ddHaltPct, equity from start 100): {out}"
+
+
+def drawdown_halt_measures_from_the_active_session():
+    """The halt is 80 % (ddHaltPct) of the equity the active session started with, not of an older stored start equity: a stored start of 100 with a
+    session that began at 10 does not halt at equity 5 (50 % below the session), halts at 1.5 (85 % below), and the stored basis ("start") halts at
+    5. A new session (explicit Start) re-baselines."""
+    def run(basis, eq, start=100.0, session=10.0):
+        p, sym = _enter(_StubExchange(executed="1", requested="1"))
+        p.start_eq, p.session_eq, p.dd_basis, p.dd_halt = start, session, basis, 0.80
+        p.halted, p.halt_reason = False, None
+        p.api.get = lambda path, extra=None, _e=eq: {"code": 0, "data": {"balance": {"equity": str(_e), "availableMargin": str(_e)}}}
+        p.refresh_balance()
+        return (p.halted, p.halt_reason, round(p.session_eq, 4))
+    out = _isolated(lambda: {"session eq 5": run("session", 5.0), "session eq 1.5": run("session", 1.5), "stored start eq 5": run("start", 5.0),
+                             "first read sets the session": run("session", 7.0, session=0.0)})
+    ok = (out["session eq 5"][0] is False and out["session eq 1.5"] == (True, "drawdown halt", 10.0)
+          and out["stored start eq 5"] == (True, "drawdown halt", 10.0) and out["first read sets the session"] == (False, None, 7.0))
+    return ok, f"(halted, reason, session start) {out}"
 
 
 def no_entry_on_a_symbol_that_failed_the_data_check():
@@ -1464,6 +1482,7 @@ CHECKS = [
     ("trader.only-completed-minutes-reach-set-history", completed_minutes_only_reach_the_set_history),
     ("trader.exit-set-never-takes-tp-base-always", an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does),
     ("trader.drawdown-halt-follows-its-setting", drawdown_halt_follows_its_setting),
+    ("trader.drawdown-halt-measures-from-the-active-session", drawdown_halt_measures_from_the_active_session),
     ("trader.size-follows-balance-and-volume-factor", position_size_follows_the_balance_and_the_volume_factor),
     ("trader.venue-ban-pauses-flatten-and-refusal-logged", a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged),
     ("trader.lanes-no-other-lane-touches-a-set-position", no_other_lane_touches_a_set_position),

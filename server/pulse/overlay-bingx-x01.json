@@ -4,7 +4,7 @@
   "sizePctOfBalance": 0,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
-  "ddHaltPct": 0,
+  "ddHaltPct": 80,
   "leverage": 150,
   "maxOpen": 0,
   "maxPerGroup": 0,
@@ -162,7 +162,8 @@
   "setMinPf": 1.25,
   "setEntryConf": 0.58,
   "setGateWindow": 50,
-  "setGateMinTrades": 30,
+  "setGateMinTrades": 0,
+  "setMaxDdtHours": 24,
   "loadPartial": true,
   "exitMinPf": 1.25,
   "stratShortRange": false,
@@ -204,5 +205,6 @@
   ],
   "realGateEnabled": true,
   "realGateN": 15,
-  "realStagePaper": true
+  "realStagePaper": true,
+  "ddHaltBasis": "session"
 }

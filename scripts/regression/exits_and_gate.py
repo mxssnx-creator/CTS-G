@@ -156,7 +156,7 @@ def explicit_trail_list_obeys_the_minimum_distance():
 
 
 def gate_boundary_and_sample():
-    b = _book_one()
+    b = _book_one(setGateMinTrades=30)      # the minimum order count is off by default (owner 2026-10-29); the boundary is checked with it on
     st = _set(b)
     st.active = True
     cases = [

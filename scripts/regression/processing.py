@@ -544,7 +544,7 @@ def legacy_pick_prefers_judged_sets_over_a_single_lucky_order():
     base = [s for s in b.by_idx if s.kind == "base" and s.pack == b.packs[0]]
     lucky, solid = base[0], base[1]
     for st, n, pf in ((lucky, 1, 99.0), (solid, 40, 4.0)):
-        st.gate_n, st.gate_pf, st.active, st.last_error, st.locked = n, pf, True, "", False
+        st.gate_n, st.gate_pf, st.n, st.active, st.last_error, st.locked = n, pf, n, True, "", False   # with the minimum off the rank shrinks a PF by its orders
     for st in base[2:]:
         st.gate_n, st.gate_pf = 0, 0.0
     got = b.pick(b.packs[0])
@@ -766,7 +766,8 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
 def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     """pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN and trailRecalcN follow the overall validation's last N
     (setGateWindow) while windowsLinked is on (the default); unlinked each takes its own N, and no last-N validation reads fewer than
-    8 orders (the gate minimum, the samples of Exit, Block and the coordinator, the Axis windows) whatever the setting."""
+    8 orders (the hold Auto sample, the samples of Exit, Block and the coordinator, the Axis windows) whatever the setting. The Base gate's
+    minimum order count (setGateMinTrades) is no part of that floor: 0 = off, any other value is taken as it is."""
     from block_engine import BlockBook
     from coord_engine import Coordinator
     from dca_engine import DcaBook
@@ -806,8 +807,8 @@ def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
     ex = ExitBook(); ex.load({"exitMinSamples": 2})
     co = Coordinator(); co.load({}, {"setMinSamples": 7, "prevPosMinCount": 1, "axisLastMaxWindow": 1})
     bb = BlockBook(os.path.join(tempfile.mkdtemp(prefix="ctsg-win-"), "b.json"), {"prevPosMinCount": 2})
-    floors = {"gate_min": sb.gate_min, "hold_auto_min": sb.hold_auto_min}
-    floors_ok = all(v >= MIN_VALIDATION_N for v in floors.values())
+    floors = {"hold_auto_min": sb.hold_auto_min}
+    floors_ok = all(v >= MIN_VALIDATION_N for v in floors.values()) and sb.gate_min == 3     # the Base minimum order count has no floor (owner 2026-10-29)
     dc = DcaBook(); dc.load({"dcaPfWindow": 3, "windowsLinked": True})
     kept = {"dca_window": dc.pf_n, "exit_samples": ex.min_samples, "coord_samples": co.min_samples, "coord_prev_min": co.prev_min_count, "axis_last_window": co.axes["last"].max_window,
             "block_samples": bb.min_samples, "main_eval": co.main_eval, "real_eval": co.real_eval}
@@ -990,7 +991,25 @@ def stage_pools_count_every_set_that_passed_base():
                 f"Real Negative {snap['realneg']['sets']} Sets PF {snap['realneg']['pf']} (rebuilt {neg_pf})")
 
 
+def sets_with_few_orders_are_judged_when_the_minimum_is_off():
+    """Replay-level: with setGateMinTrades 0 a Set that closed fewer than 25 orders is valid when its PF, drawdown time and Main gate
+    pass; the same book under a minimum of 25 holds none of them and marks the short Sets "n<min". Every Set valid under 25 stays valid
+    with the minimum off, and "n<min" is left only to Sets with no closed order."""
+    def run(**ov):
+        bk = _book(n_syms=2, bars=500, mainGateEnabled=False, stagesEnabled=False, setGateShortN=0, setMinPf=1.0, setMaxDdtHours=36, **ov)   # the minimum alone: no short window
+        bk.replay_all(now=T0)
+        valid = {st.id for st in bk.by_idx if not bk.gate_reason(st)}
+        few = {st.id for st in bk.by_idx if not bk.gate_reason(st) and 0 < st.gate_n < 25}
+        short = [st for st in bk.by_idx if bk.gate_reason(st) == "n<min"]
+        return valid, few, short
+    v0, few0, short0 = run(setGateMinTrades=0)
+    v25, few25, short25 = run(setGateMinTrades=25)
+    ok = v25 <= v0 and len(few0) > 0 and not few25 and len(short25) > 0 and all(st.gate_n < 1 for st in short0)
+    return ok, f"valid off {len(v0)} (with under 25 orders {len(few0)}, n<min {len(short0)}); valid at minimum 25 {len(v25)} (under 25 orders {len(few25)}, n<min {len(short25)})"
+
+
 CHECKS = [
+    ("processing.few-order-sets-judged-when-the-minimum-is-off", sets_with_few_orders_are_judged_when_the_minimum_is_off),
     ("processing.broken-or-flat-series-not-replayed", broken_or_flat_series_are_not_replayed),
     ("processing.base-lane-lookup-equals-walk", base_lane_lookup_equals_the_walk),
     ("processing.scratch-lookup-keeps-exact-level", scratch_lookup_keeps_the_exact_level),

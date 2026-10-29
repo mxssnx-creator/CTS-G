@@ -476,6 +476,28 @@ def a_set_that_stops_passing_keeps_its_open_position_handled_and_counted():
     return ok, f"exit replay {rep and (rep['reason'], rep['exit_i'])} live {liv and liv[:2]}; open under invalid Set while running {seen['during']['open']['underInvalidSet']}; closed {after['closed']}"
 
 
+def drawdown_halt_settings_come_from_the_overlay():
+    """The live trader reads ddHaltPct (owner default 80) and ddHaltBasis (session by default, "start" for the stored start equity) from the overlay."""
+    import json as _json
+    saved = (pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    got = {}
+    with tempfile.TemporaryDirectory() as td:
+        pt.TRADES_PATH, pt.BLOCK_PATH = os.path.join(td, "t.jsonl"), os.path.join(td, "block.json")
+        pt.LEV_PATH, pt.OPEN_PATH = os.path.join(td, "lev.json"), os.path.join(td, "open.json")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for name, ov in (("empty", {}), ("session 80", {"ddHaltPct": 80, "ddHaltBasis": "session"}), ("start 50", {"ddHaltPct": 50, "ddHaltBasis": "start"}), ("off", {"ddHaltPct": 0})):
+                pt.OVERLAY_PATH = os.path.join(td, f"overlay-{name.replace(' ', '')}.json")
+                _json.dump(ov, open(pt.OVERLAY_PATH, "w"))
+                contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
+                p = pt.Pulse(_Venue(), contracts)
+                got[name] = (round(p.dd_halt, 4), p.dd_basis)
+        finally:
+            pt.OVERLAY_PATH, pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    want = {"empty": (0.8, "session"), "session 80": (0.8, "session"), "start 50": (0.5, "start"), "off": (0.0, "session")}
+    return got == want, f"(halt fraction, basis) by overlay {got}"
+
+
 def lane_step_leaves_on_the_sets_own_hold():
     """SetLane.step (the streaming simulator's path) leaves on the Set's own hold, the same bar the scan does; a Set without one keeps the
     global time stop."""
@@ -1332,6 +1354,7 @@ CHECKS = [
     ("trader.per-step-hold-same-in-replay-and-live", per_step_hold_time_is_the_same_in_replay_and_live),
     ("trader.block-samples-own-and-independent-of-windows", block_samples_are_its_own_and_independent_of_the_window_calcs),
     ("trader.invalid-set-keeps-open-position-handled-and-counted", a_set_that_stops_passing_keeps_its_open_position_handled_and_counted),
+    ("trader.drawdown-halt-settings-from-the-overlay", drawdown_halt_settings_come_from_the_overlay),
     ("trader.lane-step-leaves-on-the-sets-own-hold", lane_step_leaves_on_the_sets_own_hold),
     ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
