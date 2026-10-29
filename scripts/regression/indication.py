@@ -290,12 +290,49 @@ def a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca():
     return ok, f"exit lanes scored={[ (k, v.n) for k, v in e.lanes.items()]} dca active={d.active}"
 
 
+def library_memo_never_serves_another_state_of_the_rows():
+    """indication_lib memoises the 5m / 15m aggregation per rows object. A history list that grows, shrinks (a truncation would leak
+    later bars) or replaces its newest row in place must be aggregated again: every library indicator on the mutated list equals the
+    same indicator on a fresh copy; and every signal is well formed ((+1 or -1, confidence 0..1) or None)."""
+    from indication_lib import LIB
+    import random as _r
+    rng = _r.Random(5)
+    bars = [[50.0, 50.1, 49.9, 50.0, 1.0]]
+    for _ in range(460):
+        c = bars[-1][3] * (1 + rng.gauss(0.0002, 0.002))
+        o = bars[-1][3]
+        bars.append([o, max(o, c) * (1 + abs(rng.gauss(0, 0.0007))), min(o, c) * (1 - abs(rng.gauss(0, 0.0007))), c, rng.uniform(0.3, 3.0)])
+    names = sorted(LIB)
+    pick = [n for n in names if n.startswith("g_")] + names[::7]
+    live = bars[:200]                                   # inside the 300-row window (a longer list is sliced, a new object)
+    bad, wrong = [], 0
+    steps = [("grow", 260), ("shrink", 230), ("grow", 300), ("replace", None)]
+    for k in pick:
+        LIB[k](live)                                     # fill the memo with the current state
+    for what, n in steps:
+        if what == "grow":
+            live.extend(bars[len(live):n])
+        elif what == "shrink":
+            del live[n:]
+        else:
+            live[-1] = [x * 1.003 for x in live[-1][:4]] + [live[-1][4]]
+        got = {k: LIB[k](live) for k in pick}            # the mutated list first, then fresh copies
+        for k in pick:
+            a, b = got[k], LIB[k](list(live))
+            if a != b:
+                bad.append((what, k))
+            if a is not None and (a[0] not in (-1, 1) or not 0.0 <= a[1] <= 1.0):
+                wrong += 1
+    return not bad and not wrong, f"{len(pick)} indicators x {len(steps)} in-place changes; stale {len(bad)} {bad[:3]}; malformed {wrong}"
+
+
 CHECKS = [
     ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
     ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
     ("indication.bars-to-entry-reason-round-trip", bars_to_entry_reason_round_trip),
     ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
+    ("indication.library-memo-never-stale", library_memo_never_serves_another_state_of_the_rows),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

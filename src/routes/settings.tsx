@@ -271,7 +271,7 @@ function SettingsPage() {
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
-                  min={1}
+                  min={1.1}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.minPf, overlay.positionCostPct)}
@@ -592,7 +592,7 @@ function SettingsPage() {
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
-                  min={1}
+                  min={1.1}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
@@ -739,10 +739,10 @@ function SettingsPage() {
                 <Slider
                   label="Short Range · min PF"
                   value={overlay.shortRangeMinPf}
-                  min={1}
+                  min={1.1}
                   max={2.3}
                   step={0.02}
-                  hint="Base PF floor of the Short Range strategy alone (default 1.10); the other strategies use the Set min PF above."
+                  hint="Base PF floor of the Short Range strategy alone (default 1.25, at least 1.10); the other strategies use the Set min PF above."
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider
@@ -824,7 +824,7 @@ function SettingsPage() {
                 <Slider
                   label="Exit min PF"
                   value={overlay.exitMinPf}
-                  min={1}
+                  min={1.1}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
@@ -1194,7 +1194,7 @@ function SettingsPage() {
                 <Num
                   label="Min PF"
                   value={overlay.dcaMinPf}
-                  min={1}
+                  min={1.1}
                   max={1.5}
                   step={0.05}
                   onChange={(v) => patch("dcaMinPf", v)}

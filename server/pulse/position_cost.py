@@ -98,6 +98,7 @@ def snap_sl_ratio(value: Any) -> float:
 
 
 GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
+MIN_PF_FLOOR = 1.1           # no validation gate asks less than this net PF, whatever is configured (owner, 2026-10-29)
 
 
 def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:
@@ -305,13 +306,18 @@ def window_n(ov: Any, *keys: str, fallback: Optional[int] = None) -> int:
     return max(MIN_VALIDATION_N, int(fallback)) if fallback else overall
 
 
-def base_min_pf(ov: Any) -> float:
-    """The Base gate's minimum PF (setMinPf, default GATE_MIN_PF_DEFAULT): the one value every validation gate uses."""
-    v = (ov or {}).get("setMinPf")
+def pf_floor(v: Any, default: float = GATE_MIN_PF_DEFAULT) -> float:
+    """A configured minimum PF, never under MIN_PF_FLOOR (a missing or broken value is the default)."""
     try:
-        return float(v) if v is not None else GATE_MIN_PF_DEFAULT
+        x = float(v) if v is not None else float(default)
     except (TypeError, ValueError):
-        return GATE_MIN_PF_DEFAULT
+        x = float(default)
+    return max(MIN_PF_FLOOR, x)
+
+
+def base_min_pf(ov: Any) -> float:
+    """The Base gate's minimum PF (setMinPf, default GATE_MIN_PF_DEFAULT, at least MIN_PF_FLOOR): the one value every validation gate uses."""
+    return pf_floor((ov or {}).get("setMinPf"))
 
 
 def gate_min_pf(ov: Any, *own_keys: str) -> float:
@@ -326,5 +332,5 @@ def gate_min_pf(ov: Any, *own_keys: str) -> float:
         except (TypeError, ValueError):
             v = 0.0
         if v > 0:
-            return v
+            return pf_floor(v)
     return base_min_pf(ov)

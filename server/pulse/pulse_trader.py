@@ -26,10 +26,10 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
+from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import EXIT_TAG, SetBook, lane_honors_tp, self_test as sets_self_test
+from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, lane_honors_tp, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -3556,7 +3556,7 @@ class Pulse:
         n = self.__dict__.setdefault("exec_n", {})
         return {
             "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0),
-                     "baseValid": counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in ("main", "mainauto", "real")),
+                     "baseValid": counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in STAGE_REASONS),
                      "invalid": counts.get("invalid", 0), "reasons": dict(reasons),
                      "stages": self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}},
             "lanes": {"openPos": open_lane["pos"], "openNeg": open_lane["neg"],
@@ -3782,7 +3782,7 @@ class Pulse:
         self.block.pause_ratio = max(0, b_pause)
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
-        self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else float(real_pf)     # the Base gate's PF unless unlinked
+        self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else max(MIN_PF_FLOOR, float(real_pf))     # the Base gate's PF unless unlinked
         self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
         self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))

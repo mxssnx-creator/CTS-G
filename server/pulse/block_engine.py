@@ -22,7 +22,7 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-from position_cost import GATE_MIN_PF_DEFAULT
+from position_cost import GATE_MIN_PF_DEFAULT, MIN_PF_FLOOR
 
 BLOCK_MIN_SAMPLES_DEFAULT = 8      # closes a Block lane needs before its observed PF counts
 BLOCK_WINDOW_DEFAULT = 25          # closes the Block evidence (exit_lane_pf) reads
@@ -67,7 +67,7 @@ def calculate_block_minimum_profit_factor(
     if min(default_min_pf, block_pf_ratio, volume_increment) <= 0:
         return 0.0
     bounded = clamp(block_pf_ratio, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
-    return 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment
+    return max(MIN_PF_FLOOR, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)     # never under the floor (1.1)
 
 
 def calculate_block_effective_minimum_profit_factor(configured: float, normal: float) -> float:
