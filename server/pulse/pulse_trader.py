@@ -6198,7 +6198,9 @@ class Pulse:
         if not self.sets.enabled:
             return
         self.sets.progress.phase = "fetch"
-        lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
+        # Fetch earlier entry-time context as well as the current evaluation
+        # window.  The extra forming minute is discarded below.
+        lookback = int(self.sets.history_bars()) + 1
         page = HIST_PAGE
         stored = 0
         chunk = 4
@@ -6213,7 +6215,7 @@ class Pulse:
             self.sets.progress.detail = f"fetch {i}/{len(SYMBOLS)}"
             self.sets.progress.pct = (i / max(1, len(SYMBOLS))) * 8.0
             names = list(SYMBOLS[i : i + chunk])
-            short = {s: len(self.sets.bars.get(s) or []) < int(lookback * 0.9) for s in names}
+            short = {s: len(self.sets.bars.get(s) or []) < lookback - 1 for s in names}
             first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(min(page, lookback) if short[s] else 120)}) for s in names])
             rows_by: Dict[str, List[Any]] = {}
             for _p, extra, body in first:
@@ -6268,7 +6270,7 @@ class Pulse:
                 self.sets.ingest_bars(s, bars, tail=True)
         if not self.sets.due():
             return
-        full = int(self.sets.lookback * 0.9)
+        full = int(self.sets.history_bars() * 0.9)
         have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= full)
         if have < max(4, len(SYMBOLS) // 2):
             # most symbols lack their history: fetch it now. Live minutes alone take the lookback (32 h) to fill it,
