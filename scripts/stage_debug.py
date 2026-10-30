@@ -55,10 +55,10 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
         g, l_ = gpre[e] - gpre[s0], lpre[e] - lpre[s0]
         long_pf = round(se.pf_of(g, l_), 4)
         o: Dict[str, Any] = {"k": k, "entry": entry, "exit": ts[k], "net": nets[k], "closed_before": e - s0, "base_long_pf": long_pf}
-        ok_flag = se.processed_flag(ts, nets, gpre, lpre, entry, P.base_long, P.gate_min, P.floor, P.max_dd_s, lb, 0, P.consistency)
+        ok_flag = se.processed_flag(ts, nets, gpre, lpre, entry, P.base_long, P.gate_min, P.floor_for(P.base_long), P.max_dd_s, lb, 0, P.consistency)
         if e - s0 < P.gate_min:
             o["base_stop"] = "orders"
-        elif long_pf + 1e-9 < P.floor:
+        elif long_pf + 1e-9 < P.floor_for(P.base_long):
             o["base_stop"] = "long"
         elif not ok_flag:
             o["base_stop"] = "drawdown/consistency"
@@ -67,7 +67,7 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
             if P.base_short:
                 sw = _window(ts, nets, entry, P.base_short, lb, full)
                 o["base_short_pf"] = sw["pf"]
-                if not sw["judged"] or sw["pf"] + 1e-9 < P.floor:
+                if not sw["judged"] or sw["pf"] + 1e-9 < P.floor_for(P.base_short):
                     o["base_stop"] = "short"
             if not o["base_stop"] and P.base_min_n:
                 mw = _window(ts, nets, entry, P.base_min_n, lb, full)
@@ -80,13 +80,13 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
             o["main_long_pf"], o["main_long_n"] = lw["pf"], lw["n"]
             stop = ""
             if P.main_on:
-                if not lw["judged"] or lw["pf"] + 1e-9 < P.floor:
+                if not lw["judged"] or lw["pf"] + 1e-9 < P.floor_for(P.main_n):
                     stop = "main"
                 if P.short_on:
                     o["main_short_win"] = ch["short_by_order"][main_pos[k]]          # the window this order's own entry could pick (only Main orders closed before it)
                     sw = _window(mt, mn, entry, o["main_short_win"], lb, full)
                     o["main_short_pf"], o["main_short_n"] = sw["pf"], sw["n"]
-                    if not stop and (not sw["judged"] or sw["pf"] + 1e-9 < P.floor):
+                    if not stop and (not sw["judged"] or sw["pf"] + 1e-9 < P.floor_for(o["main_short_win"])):
                         stop = "mainshort"
                 if P.main_min_n:
                     kw = _window(mt, mn, entry, P.main_min_n, lb, full)
