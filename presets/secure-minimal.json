@@ -14,7 +14,7 @@
   "maxPerGroup": 1,
   "symbolsAll": true,
   "symbolsDynamic": true,
-  "symbolSort": "vol1h",
+  "symbolSort": "quoteVolume",
   "symbolCap": 50,
   "slPct": 0.48,
   "tpPct": 0.75,

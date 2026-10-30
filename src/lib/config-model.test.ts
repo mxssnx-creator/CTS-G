@@ -12,6 +12,7 @@ test("Secure, Minimal is an isolated, bounded 50-symbol preset", () => {
   assert.deepEqual(preset, saved, "saved preset and Settings must stay identical");
   assert.equal(preset.symbolCap, 50);
   assert.equal(preset.symbolsAll && preset.symbolsDynamic, true);
+  assert.equal(preset.symbolSort, "quoteVolume");
   assert.deepEqual([preset.useMaxLeverage, preset.leverage, preset.maxOpen], [false, 1, 2]);
   assert.deepEqual([preset.strictSizeCap, preset.sizePctOfBalance, preset.sizeMaxNotional], [true, 2, 5]);
   assert.deepEqual([preset.maxModeledStopLossPct, preset.ddHaltPct], [3, 3]);

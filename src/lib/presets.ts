@@ -8,6 +8,7 @@ export function secureMinimalPreset(): PulseOverlay {
     symbols: ["*"],
     symbolsAll: true,
     symbolsDynamic: true,
+    symbolSort: "quoteVolume",
     symbolCap: 50,
     useMaxLeverage: false,
     leverage: 1,
