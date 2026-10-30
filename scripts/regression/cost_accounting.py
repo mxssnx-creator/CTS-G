@@ -300,6 +300,30 @@ def stage_window_counts_are_not_total_paper_counts():
     return observed == (12, 0, 5, 2, 7, 1), f"(total, PF-window count) by stage={observed}"
 
 
+def set_execution_stats_keep_fee_and_ownership_provenance():
+    from common import SMALL, overlay
+    from set_engine import SetBook
+    b = SetBook(); b.load(overlay(**{**SMALL, "realGateN": 3}))
+    st = b.by_idx[0]
+    empty = b.execution_stats(st, "pos", now=T0 + 120)
+    records = [
+        {"set_id": st.id, "t": T0, "symbol": "A", "side": "LONG", "pnl_pct": .01,
+         "net_pnl_pct": .009, "fee_source": "reported-fee", "ours": True, "client_id": "a"},
+        {"set_id": st.id, "t": T0 + 1, "symbol": "B", "side": "LONG", "pnl_pct": .01,
+         "base_entry": 100, "base_qty": 1, "exit": 101, "base_net_pnl_pct": .009,
+         "fee_source": "reported-fee", "ours": True, "client_id": "b"},
+        {"set_id": st.id, "t": T0 + 2, "symbol": "C", "side": "LONG", "pnl_pct": -.01,
+         "fee_source": "reported-fee", "client_id": "c"},
+    ]
+    for row in records: b.on_live_close(row)
+    stats = b.execution_stats(st, "pos", now=T0 + 120)
+    ok = (empty["pfStatus"] == "empty" and empty["returnPf"] is None and not empty["feeVerified"]
+          and stats["pfStatus"] == "finite" and stats["returnPf"] is not None and stats["sampleFull"]
+          and stats["feeSources"] == {"reported-fee": 1, "base-fee-unverified": 1, "configured-estimate": 1}
+          and not stats["feeVerified"] and stats["ownershipExplicit"] == 2)
+    return ok, f"status={stats['pfStatus']}; fees={stats['feeSources']}; explicit ownership={stats['ownershipExplicit']}"
+
+
 def acknowledged_close_waits_for_the_same_order():
     import pulse_trader as pt
     from trader import _isolated, _StubExchange, _enter
@@ -420,6 +444,7 @@ CHECKS = [("cost-accounting." + fn.__name__.replace("_", "-"), fn) for fn in (
     fallback_fees_do_not_charge_slippage_twice, pulse_fill_to_stats, partial_close_retry_and_unfilled_close,
     execution_outcomes_survive_caps_and_emergency_closes, unattributed_aggregate_fee_does_not_score_base,
     execution_scope_counts_survive_restart, execution_scope_return_pf_preserves_missing_and_restart,
-    stage_window_counts_are_not_total_paper_counts, acknowledged_close_waits_for_the_same_order,
+    stage_window_counts_are_not_total_paper_counts, set_execution_stats_keep_fee_and_ownership_provenance,
+    acknowledged_close_waits_for_the_same_order,
     pending_close_survives_position_refresh_and_restart, pending_partial_is_settled_once_then_manager_closes_remainder,
     restart_does_not_seed_foreign_exit_lanes)]

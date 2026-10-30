@@ -2265,6 +2265,20 @@ class SetBook:
             # A close without a time cannot be placed in any causal last-N window.
             self.live_skipped += 1
             return
+        component_net = get("base_net_pnl_pct") if ref > 0 and qty > 0 else get("net_pnl_pct")
+        try:
+            has_component_net = component_net is not None and math.isfinite(float(component_net))
+        except (TypeError, ValueError, OverflowError):
+            has_component_net = False
+        fee_source = str(get("fee_source") or "unknown")
+        if not has_component_net:
+            fee_source = "configured-estimate"
+        elif fee_source not in ("reported-fee", "exchange-rate-estimate", "configured-estimate"):
+            fee_source = "unknown"
+        # Aggregate reported fees alone do not verify allocation to a Set's
+        # base component, especially when an add-on changed the position.
+        if has_component_net and fee_source == "reported-fee" and ref > 0 and qty > 0:
+            fee_source = "base-fee-unverified"
         row = {
             "t": closed_at,
             "symbol": str(get("symbol") or ""),
@@ -2278,8 +2292,9 @@ class SetBook:
             # Aggregate net cannot be attributed to the base when add-on fills
             # changed its cost basis. Old records without component fees use an
             # explicit configured estimate for that base only.
-            "net_pnl_pct": (get("base_net_pnl_pct") if ref > 0 and qty > 0
-                            else get("net_pnl_pct")),
+            "net_pnl_pct": component_net,
+            "fee_source": fee_source,
+            "ownership_explicit": get("ours") is True,
         }
         row["pnl"] = row_net_pnl_pct(row, self.cost_pct)
         if not sid:
@@ -2676,25 +2691,33 @@ class SetBook:
         return out[0], out[1], out[2], short_n
 
     def execution_stats(self, st: SetState, lane: str, now: Optional[float] = None) -> Dict[str, Any]:
-        """Actual fills only, one Set and execution lane, one round-trip cost.
-        Insufficient evidence is explicitly unproven, not a positive PF. After a full
-        Real window it is an additional entry gate; expiry permits fresh assessment.
-        The paper chain keeps running while this gate is closed.
+        """Recorded closes for one Set and lane, with fee/ownership provenance.
+        `proven` means the window has enough records, not that the exchange has
+        verified their costs or ownership. Insufficient evidence is unproven.
+        After a full Real window it is an additional entry gate; expiry permits
+        fresh assessment. The paper chain keeps running while this gate is closed.
         """
         anchor = finite(now) if now is not None else st.score_at
         upper = anchor if anchor > 0 else float("inf")
         cutoff = upper - self.lookback * BAR_S if anchor > 0 else float("-inf")
         rows = sorted((r for r in st.live if str(r.get("lane") or "pos") == lane
                        and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-self.realst_n:]
-        cf = cost_as_frac(self.cost_pct)
         nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
         gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
         floor = self.floor_for(self.realst_n, st.pack)
         enough = len(nets) >= self.realst_n
         pf = pf_of(gp, gl)
+        sources: Dict[str, int] = {}
+        for row in rows:
+            source = str(row.get("fee_source") or "unknown")
+            sources[source] = sources.get(source, 0) + 1
+        pf_status = "empty" if not nets else "finite" if gl > 0 else "no-loss" if gp > 0 else "flat"
         return {"source": "executed", "lane": lane, "n": len(nets), "lastN": self.realst_n,
                 "pf": round(pf, 4), "gp": gp, "gl": gl, "minPf": floor,
-                "proven": enough, "allow": not enough or pf + 1e-9 >= floor}
+                "returnPf": round(gp / gl, 4) if gl > 0 else None, "pfStatus": pf_status,
+                "feeSources": sources, "feeVerified": bool(rows) and sources.get("reported-fee", 0) == len(rows),
+                "ownershipExplicit": sum(1 for row in rows if row.get("ownership_explicit") is True),
+                "sampleFull": enough, "proven": enough, "allow": not enough or pf + 1e-9 >= floor}
 
     def _execution_lanes(self, st: SetState) -> List[str]:
         v = st.stage or {}
