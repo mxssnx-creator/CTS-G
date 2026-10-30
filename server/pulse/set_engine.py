@@ -348,16 +348,17 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
         return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
     ref_pf, ref_n = pf_n(0)
     best, best_pf = 0, ref_pf
+    if ref_n < min_n:
+        return best
     for c in range(1, len(cands)):
-        if cands[c][0] == -1 and ref_n < min_n:
-            continue
         pf, n = pf_n(c)
         if n >= min_n and pf > best_pf and pf >= ref_pf * margin:
             best, best_pf = c, pf
     return best
 
 
-def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
+def causal_hold_tape_checked(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int,
+                             margin: float, cf: float, cooldown_s: float = 0) -> Tuple[List[tuple], bool]:
     """The hold Auto Mode's tape, causal: every candidate's order whose entry fell while that candidate was the chosen hold (chosen on
     the orders closed before the entry, hold_choice_at), in exit order. cands = [(hold, rows)], the reference first; rows are the
     replay's tuples (exit t at 0, pnl_pct at 4, hold_s at 5)."""
@@ -367,13 +368,29 @@ def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, m
         nets = [finite(r[4]) - cf for r in rows]
         g, l_ = prefix_sums(nets)
         prefix.append((ts, g, l_))
-    out: List[tuple] = []
+    selected = []
     for c, (_h, rows) in enumerate(cands):
         for r in rows:
             if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:
-                out.append(r)
+                selected.append((finite(r[0]) - finite(r[5]), finite(r[0]), str(r[1]), c, r))
+    # Each fixed-hold shadow is a separate state machine. Switching between
+    # them can splice overlapping positions for the same symbol into the
+    # selected tape. Detect cross-candidate overlap before using it to gate.
+    active: Dict[str, List[Tuple[float, int]]] = {}
+    collision = False
+    for entry, end, symbol, candidate, _row in sorted(selected, key=lambda x: (x[0], x[1], x[2], x[3])):
+        prior = [(until, other) for until, other in active.get(symbol, ()) if until >= entry]
+        if any(other != candidate for _, other in prior):
+            collision = True
+        prior.append((end + max(0.0, cooldown_s), candidate))
+        active[symbol] = prior
+    out = [row for _, _, _, _, row in selected]
     out.sort(key=_row_t)
-    return out
+    return out, collision
+
+
+def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
+    return causal_hold_tape_checked(cands, max_n, min_n, margin, cf)[0]
 
 
 def _main_windows(mt: Sequence[float], mn: Sequence[float], entries: Sequence[float], P: StageParams):
@@ -945,6 +962,7 @@ class SetState:
     hold_auto: bool = False         # hold_bars was chosen by the Auto Mode from this Set's own last orders (holdAuto)
     hold_auto_pf: float = 0.0       # cost PF of the chosen hold over the orders it was judged on
     hold_auto_n: int = 0            # how many orders (at most holdAutoMax) that judgement read
+    hold_auto_blocked: str = ""     # why an automatic choice fell back to the reference
     idx: int = 0
     pack_i: int = 0
     sl_i: int = 0
@@ -2478,6 +2496,7 @@ class SetBook:
         it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
         holds = self.auto_holds(st)
         if not holds:
+            st.hold_auto_blocked = ""
             return base
         cf = cost_as_frac(self.cost_pct)
 
@@ -2493,16 +2512,26 @@ class SetBook:
             rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff, until=until)
             cands.append((h, rows))
             pf, n = judge(rows)
-            if h == -1 and ref_n < self.hold_auto_min:
+            if ref_n < self.hold_auto_min:
                 continue
             if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
                 best = (pf, h, rows, n)
         # the choice now (on every order closed so far) is what a new position opens with
-        st.hold_bars, st.hold_auto = best[1], True
-        st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
         # the tape the Set is judged on is causal: each order comes from the hold that was chosen at its entry, on the orders closed
         # before it (as live positions opened); the hold chosen now is never applied to orders opened before the choice existed
-        return causal_hold_tape(cands, self.hold_auto_max, self.hold_auto_min, HOLD_AUTO_MARGIN, cf)
+        tape, collision = causal_hold_tape_checked(cands, self.hold_auto_max, self.hold_auto_min,
+                                                   HOLD_AUTO_MARGIN, cf, self.cooldown_bars * BAR_S)
+        if collision:
+            # A mixed tape does not model a single position lifecycle. Use the
+            # reference for both the paper gates and future position entries.
+            st.hold_bars, st.hold_auto = 0, True
+            st.hold_auto_pf, st.hold_auto_n = round(ref_pf, 4), ref_n
+            st.hold_auto_blocked = "overlapping hold shadows"
+            return base
+        st.hold_bars, st.hold_auto = best[1], True
+        st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
+        st.hold_auto_blocked = ""
+        return tape
 
     def floor_for(self, n: int, pack: str) -> float:
         """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""
@@ -2578,21 +2607,19 @@ class SetBook:
         r = [x for x in r if cutoff <= x[0] <= upper]
         q = [x for x in q if cutoff <= x[0] <= upper]
         expired = bool(evidence and evidence[0] and (evidence[0][0] < cutoff or evidence[0][-1] > upper))
-        if self.main_on and self.short_on and expired:
-            if evidence is None and st.proc_replayed and st.proc_total:
-                # Without the entry-time evidence the old candidate cannot be recomputed safely.
-                short_n = self.main_n
-            else:
-                records = []
-                if evidence is not None:
-                    records.extend((t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper)
-                records.sort(key=lambda item: item[0])
-                ts = [x[0] for x in records]
-                entries = [x[1] for x in records]
-                nets = [x[2] for x in records]
-                params = self.stage_params(st.pack)
-                me, mlo, passes = _main_windows(ts, nets, entries, params)
-                short_n, _ = _main_short_choice(nets, me, mlo, params, passes, [x[3] for x in records], current_only=True)
+        if self.main_on and self.short_on and evidence is None and st.proc_replayed and st.proc_total:
+            # Without entry-time evidence the old candidate cannot be verified.
+            # This must be separate from `expired`: None cannot be expired.
+            short_n = self.main_n
+        elif self.main_on and self.short_on and expired:
+            records = [(t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper]
+            records.sort(key=lambda item: item[0])
+            ts = [x[0] for x in records]
+            entries = [x[1] for x in records]
+            nets = [x[2] for x in records]
+            params = self.stage_params(st.pack)
+            me, mlo, passes = _main_windows(ts, nets, entries, params)
+            short_n, _ = _main_short_choice(nets, me, mlo, params, passes, [x[3] for x in records], current_only=True)
         out = []
         for v in (m, r, q):
             v.sort(key=lambda x: x[0])
@@ -2968,9 +2995,12 @@ class SetBook:
         if not getattr(self, "hold_auto", False) or self.hold_bars_for(st):
             return ()
         holds = HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
-        # -1 means no time exit; a trailing Set may select it only after its
-        # own closed-trade evidence beats the time-limited reference.
-        return holds + (-1,) if st.kind == "trail" else holds
+        # A no-time-stop shadow tape excludes open positions. Comparing its
+        # closed trades with a time-limited tape can therefore reward an
+        # indefinitely open loss. Do not choose -1 from this incomplete
+        # evidence. A position already opened with -1 still keeps its own
+        # persisted exit policy; this changes only future automatic choices.
+        return holds
 
     @property
     def scratch_bars(self) -> int:
@@ -3344,6 +3374,7 @@ class SetBook:
                     "avgHoldS": st.avg_hold_s,
                     "holdMin": st.hold_bars,
                     "holdAuto": st.hold_auto,
+                    "holdAutoBlocked": st.hold_auto_blocked,
                     "pfAll": st.pf_all,
                     "gp": st.gp,
                     "gl": st.gl,
