@@ -140,7 +140,7 @@ def trail_arms_then_gives_back():
     st = next(s for s in b.by_idx if s.kind == "trail")
     lane = SetLane(st, "X")
     bars = [_bar(100, 100, 100, 100), _bar(100, 100.8, 100.0, 100.75), _bar(100.7, 100.71, 100.3, 100.4)]
-    recs = _run(lane, bars, [1, 0, 0], [0.9, 0, 0], lane_cfg(time_bars=99, scratch_bars=99))
+    recs = _run(lane, bars, [1, 0, 0], [0.9, 0, 0], lane_cfg(time_bars=99, scratch_bars=99, honor_tp=False))
     # arm 0.6%: peak 100.8 arms the stop at 100.8 * (1 - 0.36%) = 100.437, the low 100.3 gives it back
     ok = len(recs) == 1 and recs[0]["reason"] == "sl" and abs(recs[0]["exit_px"] - 100.8 * (1 - 0.0036)) < 1e-6
     return ok, f"reason={recs[0]['reason'] if recs else None} px={recs[0]['exit_px'] if recs else None}"

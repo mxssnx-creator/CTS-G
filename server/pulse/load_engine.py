@@ -397,6 +397,21 @@ class LoadGovernor:
         nxt = (start + need) % n
         return out[:take], nxt
 
+    def history_window(self, symbols: Sequence[str], chunk: int, cursor: int) -> Tuple[List[str], int]:
+        """Rotate through every history symbol, even when open positions outnumber the chunk.
+
+        History is separate from the hot scan, so prioritizing the same open positions on
+        every pass must not starve the remaining symbols or leave an expansion pending.
+        """
+        names = list(dict.fromkeys(s for s in symbols if s))
+        if not names:
+            return [], 0
+        take = max(1, int(chunk or 1))
+        if take >= len(names) or not self.partial:
+            return names, 0
+        start = int(cursor) % len(names)
+        return [names[(start + i) % len(names)] for i in range(take)], (start + take) % len(names)
+
     def free(self, force: bool = False) -> Dict[str, Any]:
         now = time.time()
         if not force and now - self.last_gc < 6.0:

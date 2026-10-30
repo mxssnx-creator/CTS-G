@@ -564,6 +564,51 @@ def history_is_fetched_in_pages_within_the_venue_limit():
     return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
 
 
+def grown_history_fetches_the_full_target_up_to_three_days():
+    """A growth step must fetch older bars even if the old history is 90% of the new target."""
+    import set_engine as se
+    saved = list(pt.SYMBOLS)
+    sleep = pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ["A-USDT"]
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        venue = _PagedKlines(n=5001)
+        p.api, p.sets = venue, se.SetBook()
+        got = []
+        for target in (1920, 2160, 2400, 4320):
+            p.sets.lookback = target
+            venue.requests.clear()
+            p._hist_fetch()
+            closes = [row[3] for row in p.sets.bars.get("A-USDT", [])]
+            expected = [float(x) for x in range(5000 - target, 5000)]
+            got.append((target, len(closes), closes == expected, max(int(r["limit"]) for r in venue.requests)))
+        venue.requests.clear()
+        p._hist_fetch()
+        refresh = [int(r["limit"]) for r in venue.requests]
+    finally:
+        pt.SYMBOLS[:] = saved
+        pt.time.sleep = sleep
+    ok = all(target == n and ordered and request_max <= 1000 for target, n, ordered, request_max in got) and refresh == [120]
+    return ok, f"growth {got}; full-history refresh limits={refresh}"
+
+
+def history_chunks_rotate_even_when_many_positions_are_open():
+    """Every history symbol must eventually refresh; live open-position priority cannot starve it."""
+    from load_engine import LoadGovernor
+    g = LoadGovernor()
+    names = [f"S{i:02d}" for i in range(50)]
+    cursor, seen, sizes = 0, set(), []
+    for _ in range(9):
+        chunk, cursor = g.history_window(names, 6, cursor)
+        seen.update(chunk)
+        sizes.append(len(set(chunk)))
+    g.partial = False
+    full, reset = g.history_window(names, 6, cursor)
+    ok = len(seen) == 50 and sizes == [6] * 9 and full == names and reset == 0
+    return ok, f"covered={len(seen)}/50 after {len(sizes)} passes; unique chunk sizes={sizes}; partial off returns all={full == names}"
+
+
 def _book_with_three_packs(**extra):
     import set_engine as se
     from common import overlay
@@ -958,7 +1003,11 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
     try:
         pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
         p = _bare_pulse()
-        p.api = types.SimpleNamespace(gather_public=lambda reqs, timeout=4.2: [(x, y, {"code": 0, "data": []}) for x, y in reqs])
+        requested = []
+        def gather(reqs, timeout=4.2):
+            requested.extend(y.get("symbol") for _, y in reqs)
+            return [(x, y, {"code": 0, "data": []}) for x, y in reqs]
+        p.api = types.SimpleNamespace(gather_public=gather)
         p.sets = se.SetBook()
         p.sets.load(overlay(**SMALL))
         for k, s_ in enumerate(("A-USDT", "B-USDT", "GONE-USDT", "HELD-USDT")):
@@ -966,6 +1015,12 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
             p.real_1m[s_] = 0
         p.sets.replay_all()
         before = sorted(p.sets._hist_rows)
+        replayed = []
+        replay_symbol = p.sets._replay_symbol
+        def observe(symbol, *args, **kwargs):
+            replayed.append(symbol)
+            return replay_symbol(symbol, *args, **kwargs)
+        p.sets._replay_symbol = observe
         p.open = {"HELD-USDT": types.SimpleNamespace(symbol="HELD-USDT")}
         p.sets.last_run = 0.0                      # a scoring pass is due
         p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
@@ -977,8 +1032,9 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
     finally:
         pt.SYMBOLS[:] = saved
     ok = "GONE-USDT" in before and "GONE-USDT" not in after_bars and "GONE-USDT" not in after_rows \
-        and "HELD-USDT" in after_bars and {"A-USDT", "B-USDT"} <= set(after_bars)
-    return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}"
+        and "HELD-USDT" in after_bars and "HELD-USDT" in replayed and "HELD-USDT" in requested \
+        and {"A-USDT", "B-USDT"} <= set(after_bars)
+    return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}; replayed={replayed}; fetched={requested}"
 
 
 def history_thread_keeps_real_history_and_tops_up_a_partial_one():
@@ -1704,6 +1760,8 @@ CHECKS = [
     ("trader.set-fill-keeps-its-sl-and-tp", a_set_fill_keeps_the_sets_own_sl_and_tp),
     ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),
     ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
+    ("trader.history-growth-fetches-three-days", grown_history_fetches_the_full_target_up_to_three_days),
+    ("trader.history-chunks-rotate-fairly", history_chunks_rotate_even_when_many_positions_are_open),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),

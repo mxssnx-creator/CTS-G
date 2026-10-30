@@ -522,7 +522,7 @@ function SettingsPage() {
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
                   min={120}
-                  max={1440}
+                  max={4320}
                   step={60}
                   hint={`${overlay.histLookbackBars} × 1m = ${(overlay.histLookbackBars / 60).toFixed(1)}h`}
                   onChange={(v) => patch("histLookbackBars", v)}
@@ -816,14 +816,23 @@ function SettingsPage() {
                 />
                 <Toggle label="Real · overall strategies read the Real Sets' paper stream" on={overlay.realStagePaper !== false} onChange={(v) => patch("realStagePaper", v)} />
                 <Toggle label="All validation gates use the Base minimum PF (Real, Exit, DCA, Block, coordinator)" on={overlay.minPfLinked !== false} onChange={(v) => patch("minPfLinked", v)} />
-                <Toggle label="Pre-history grows when too many Sets lack orders" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />
+                <Toggle label="Pre-history grows when too many Sets lack samples" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />
+                <Slider
+                  label="Pre-history · target samples per Set"
+                  value={overlay.histLookbackTargetN}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="collection target only; does not change the admission minimum or PF gates"
+                  onChange={(v) => patch("histLookbackTargetN", v)}
+                />
                 <Slider
                   label="Pre-history · max bars"
                   value={overlay.histLookbackMax}
                   min={480}
-                  max={2880}
+                  max={4320}
                   step={240}
-                  hint="the lookback may grow up to this many 1m bars"
+                  hint="the lookback may grow up to this many 1m bars (4,320 = 72 hours)"
                   onChange={(v) => patch("histLookbackMax", v)}
                 />
                 <Slider
