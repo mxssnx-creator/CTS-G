@@ -1764,6 +1764,9 @@ class SetBook:
         else:
             self.hist_time_bars = max(8, min(120, num(ov, "setHistTimeBars", 45, int)))
         self.scratch_s = num(ov, "scratchS", 600)
+        # The desk and ExitBook express this setting in percent. The Set's
+        # replay and its live lane both read a fraction from this field.
+        self.scratch_min = finite(num(ov, ("scratchMin", "scratchMinPct"), 0.16), 0.16) / 100.0
         tp = num(ov, "tpPct", 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))

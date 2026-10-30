@@ -1800,6 +1800,15 @@ class Pulse:
         bars = self._parse_klines(rows)
         if len(bars) != len(rows) or not rows:
             return [], None
+        # ingest_bars drops invalid prices. Dropping one in the middle would
+        # collapse a minute and assign the older candles the wrong timestamps;
+        # retain only the newest valid contiguous suffix instead.
+        invalid = [i for i, bar in enumerate(bars)
+                   if any(not math.isfinite(value) or value <= 0 for value in bar[:4])]
+        if invalid:
+            bars = bars[invalid[-1] + 1:]
+            if not bars:
+                return [], None
         return bars, self._kline_time(rows[-1]) / 1000.0
 
     def _parse_klines(self, data: Any) -> List[List[float]]:
@@ -6190,24 +6199,29 @@ class Pulse:
         except Exception:
             return 0
 
-    def _hist_fetch(self, symbols: Optional[Sequence[str]] = None) -> None:
+    def _hist_fetch(self, symbols: Optional[Sequence[str]] = None) -> set[str]:
         """Fill every Set history from the exchange. One klines request is capped at 1000 bars by the venue (a larger
         limit is refused with code 109400 and returns nothing), so a symbol that is short of its lookback gets the
         newest HIST_PAGE bars and then older pages through endTime; a symbol that already has its history only needs the
         newest minutes, which the join onto the stored series takes care of."""
         if not self.sets.enabled:
-            return
+            return set()
         self.sets.progress.phase = "fetch"
         lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
         page = HIST_PAGE
         stored = 0
         chunk = 4
         all_names = list(dict.fromkeys(symbols if symbols is not None else SYMBOLS))
+        refreshed: set[str] = set()
 
         def _gather(batch: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
             if hasattr(self.api, "gather_public"):
                 return self.api.gather_public(batch, timeout=6.0)
             return [(path, extra, self.api.public(path, extra)) for path, extra in batch]
+
+        def _ok_page(body: Any) -> bool:
+            return (isinstance(body, dict) and not body.get("error") and body.get("code") in (None, 0, "0")
+                    and isinstance(body.get("data"), list))
 
         path = "/openApi/swap/v2/quote/klines"
         for i in range(0, len(all_names), chunk):
@@ -6219,9 +6233,12 @@ class Pulse:
             short = {s: len(self.sets.bars.get(s) or []) < lookback - 1 for s in names}
             first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(min(page, lookback) if short[s] else 120)}) for s in names])
             rows_by: Dict[str, List[Any]] = {}
+            failed = set(names)
             for _p, extra, body in first:
-                data = (body or {}).get("data")
-                rows_by[str(extra.get("symbol"))] = sorted(data, key=self._kline_time) if isinstance(data, list) else []
+                sym = str(extra.get("symbol"))
+                if sym in failed and _ok_page(body):
+                    rows_by[sym] = sorted(body["data"], key=self._kline_time)
+                    failed.discard(sym)
             # a full page means older bars may exist: page backwards (endTime just before the oldest bar held) until the
             # lookback is filled or the venue has no more
             pending = [s for s in names if short[s] and len(rows_by.get(s) or []) >= page and lookback > page]
@@ -6235,24 +6252,39 @@ class Pulse:
                 if not reqs:
                     break
                 pending = []
+                answered = set()
                 for _p, extra, body in _gather(reqs):
                     sym = str(extra.get("symbol"))
-                    data = (body or {}).get("data")
-                    old = sorted(data, key=self._kline_time) if isinstance(data, list) else []
+                    answered.add(sym)
+                    if not _ok_page(body):
+                        failed.add(sym)
+                        continue
+                    old = sorted(body["data"], key=self._kline_time)
                     rows_by[sym] = old + rows_by[sym]
                     if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
                         pending.append(sym)
+                failed.update(str(extra.get("symbol")) for _p, extra in reqs if str(extra.get("symbol")) not in answered)
             for s in names:
                 bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
                 if s and bars:
                     self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
+                    # A valid shorter page can mean a newly listed symbol has no older
+                    # bars. A failed/missing page is different: retry it before treating
+                    # this symbol as replayed at an expanded history length.
+                    # A formerly full series can become short when its recent
+                    # refresh no longer overlaps. Fetch its missing history on the
+                    # next pass instead of certifying the short refresh as complete.
+                    refreshed_full = short[s] or len(self.sets.bars.get(s) or []) >= lookback - 1
+                    if s not in failed and len(bars) >= 16 and last_t is not None and refreshed_full:
+                        refreshed.add(s)
             time.sleep(0.12)
         self.sets.progress.detail = f"fetched {stored}/{len(all_names)}"
         sizes = sorted(len(self.sets.bars.get(s) or []) for s in all_names)
         log(f"HIST fetched {stored}/{len(all_names)} symbols; bars min/median/max "
             f"{sizes[0] if sizes else 0}/{sizes[len(sizes) // 2] if sizes else 0}/{sizes[-1] if sizes else 0} of {lookback}",
             every=30.0, key="hist-fetch")
+        return refreshed
 
     def _hist_tick(self) -> None:
         """One pass of the history thread: real minutes join the Set history, the history is fetched when most symbols
@@ -6274,18 +6306,21 @@ class Pulse:
             return
         full = int(self.sets.lookback * 0.9)
         have = sum(1 for s in hist_universe if len(self.sets.bars.get(s) or []) >= full)
-        if have < max(4, len(hist_universe) // 2):
+        fetched = None
+        if self.sets._lookback_pending or have < max(4, len(hist_universe) // 2):
             # most symbols lack their history: fetch it now. Live minutes alone take the lookback (32 h) to fill it,
             # and waiting for them first left every Set unvalidated after each start.
-            self._hist_fetch(hist_universe)
+            fetched = self._hist_fetch(hist_universe)
         elif time.time() - self.sets.last_run >= self.sets.refresh_s:
-            self._hist_fetch(hist_universe)
+            fetched = self._hist_fetch(hist_universe)
         self.hist_busy = True
         try:
             b = self._budget()
             names = hist_universe
             if b.scan_chunk and len(names) > b.hist_chunk:
                 names, self.load.cursor_hist = self.load.history_window(names, b.hist_chunk, int(self.load.cursor_hist or 0))
+            if self.sets._lookback_pending and fetched is not None:
+                names = [s for s in names if s in fetched]
             if b.hist_run:
                 self.sets.replay_all(on_step=lambda: time.sleep(0), symbols=names, expected_symbols=hist_universe,
                                      abort=lambda: self.load.last_budget.level == "critical")

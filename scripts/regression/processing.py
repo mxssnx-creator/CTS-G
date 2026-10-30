@@ -1426,6 +1426,26 @@ def history_growth_waits_for_every_symbol_at_the_current_length():
     return ok, f"lookback={got}, pending={pending}, reasons={reasons}"
 
 
+def scratch_setting_reloads_and_invalidates_prior_history():
+    """Scratch thresholds use percent and changing them invalidates old replay rows."""
+    def setting(extra):
+        book = SetBook()
+        book.load({**SMALL, **extra})
+        return book.scratch_min
+
+    defaults = [setting(x) for x in ({}, {"scratchMinPct": 0.05}, {"scratchMinPct": 0.3},
+                                      {"scratchMin": 0.2, "scratchMinPct": 0.3},
+                                      {"scratchMinPct": 0}, {"scratchMinPct": "invalid"})]
+    book = SetBook()
+    book.load({**SMALL, "scratchMinPct": 0.05})
+    book._hist_rows["A-USDT"] = {"old": []}
+    book.load({**SMALL, "scratchMinPct": 0.3})
+    invalidated = not book._hist_rows and all("replay required" in st.last_error for st in book.by_idx)
+    expected = [0.0016, 0.0005, 0.003, 0.002, 0.0, 0.0016]
+    ok = all(abs(a - b) < 1e-12 for a, b in zip(defaults, expected)) and invalidated
+    return ok, f"fractions={defaults}; changed setting invalidated history={invalidated}"
+
+
 def no_gate_asks_less_than_pf_1_1():
     """MIN_PF_FLOOR (1.05): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
     1.0 or 0.5, Block at a small volume ratio), no validation gate asks less than a net PF of 1.1; the desk parses with the same floor."""
@@ -1615,6 +1635,7 @@ CHECKS = [
     ("processing.pre-history-grows-when-sets-lack-orders", pre_history_grows_when_too_many_sets_lack_orders),
     ("processing.history-collection-target-independent-of-admission", history_collection_target_is_independent_of_admission),
     ("processing.history-growth-waits-for-every-symbol", history_growth_waits_for_every_symbol_at_the_current_length),
+    ("processing.scratch-setting-invalidates-history", scratch_setting_reloads_and_invalidates_prior_history),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
     ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized

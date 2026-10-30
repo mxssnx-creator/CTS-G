@@ -264,6 +264,25 @@ def set_lane_matches_the_replay_rule_by_rule():
     return not bad, f"{out}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def configured_scratch_threshold_reaches_replay_and_live():
+    """The percent setting changes both the simulated and live Set exit."""
+    out, bad = {}, []
+    for pct in (0.05, 0.30):
+        for side in (1, -1):
+            book = _book(exitIgnoreTp=True, scratchMinPct=pct)
+            st = _pick(book, "scratch", "exit")
+            bars = _scenario_bars("scratch", side)
+            _, historical = replay(book, st, bars, 5, side)
+            _, actual, _ = live(_book(exitIgnoreTp=True, scratchMinPct=pct), st, bars, 5, side)
+            reason = historical["reason"] if historical else None
+            ok = (_same_exit(historical, actual, bars) and reason == ("scratch+" if pct == 0.05 else None)
+                  and abs(book.scratch_min - pct / 100.0) < 1e-12)
+            out[f"{pct}:{side}"] = (reason, actual and actual[0])
+            if not ok:
+                bad.append((pct, side, reason, actual))
+    return not bad, f"settings -> (replay, live): {out}; mismatches={bad}"
+
+
 def trailing_does_not_assume_intrabar_extreme_order():
     """A new stop is not hit by a preceding extreme; a close across it proves a later crossing.
     The streaming, indexed and chunked replay paths must agree for both directions."""
@@ -1373,6 +1392,7 @@ def a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial():
 
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
+    ("trader.configured-scratch-reaches-replay-and-live", configured_scratch_threshold_reaches_replay_and_live),
     ("trader.trailing-intrabar-order-is-causal", trailing_does_not_assume_intrabar_extreme_order),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
     ("trader.lanes-own-stop-level", set_lane_stops_at_its_own_level_when_the_venue_stop_sits_farther),
