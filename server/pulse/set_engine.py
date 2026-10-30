@@ -2927,7 +2927,7 @@ class SetBook:
     def real_paper_scopes(self, n: int = 200) -> Dict[str, List[Dict[str, Any]]]:
         """The Real paper stream split by scope in one pass: "overall" (every Real and Real Negative Set), "lane:pos", "lane:neg",
         "pack:<pack>" (both lanes of one strategy) and "pack:<pack>:<lane>"; each the newest n orders of its scope, oldest first (the
-        rows of real_paper). The lane and pack-lane scopes gate entries; the overall and pack scopes are figures."""
+        rows of real_paper). Each pack-lane scope gates only that pack and lane; pooled scopes are figures."""
         return self._real_paper_scopes(n, scoped=True)
 
     def _real_paper_scopes(self, n: int, scoped: bool) -> Dict[str, List[Dict[str, Any]]]:
