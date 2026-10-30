@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "c958c1a3360e9edfb0cf157174a4e2dd55f01bb5"
+PIN_WANT = "4ee4c72c89808d3c83a7336af5ed7b5d61f43040"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -242,7 +242,18 @@ def restore_patch_reproduces_pin():
         if proc.returncode != 0:
             return False, f"patch exit {proc.returncode}: {proc.stderr.strip()[:120]}"
         got = git("hash-object", target).strip()
-    return got == PIN_WANT, f"patched blob={got[:10]}"
+        # Exercise the installer's actual git-apply path as well as GNU patch.
+        tree = os.path.join(td, "tree")
+        source = os.path.join(tree, "server", "pulse", "pulse_trader.py")
+        os.makedirs(os.path.dirname(source))
+        with open(source, "w", encoding="utf-8") as fh:
+            fh.write(base)
+        applied = subprocess.run(["git", "-C", tree, "apply", "--unidiff-zero", RESTORE_PATCH],
+                                 capture_output=True, text=True, timeout=60)
+        if applied.returncode != 0:
+            return False, f"git apply exit {applied.returncode}: {applied.stderr.strip()[:120]}"
+        deployed = git("hash-object", source).strip()
+    return got == deployed == PIN_WANT, f"patch={got[:10]} git-apply={deployed[:10]}"
 
 
 def no_leftover_zest_names():

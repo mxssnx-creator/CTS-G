@@ -860,11 +860,15 @@ class Pulse:
         self._hist_stop = False
         self.apply_live_config(initial=True)
 
+    def active_fee_contracts(self) -> Dict[str, Any]:
+        """Only selected symbols contribute to the shared paper-cost budget."""
+        return {s: self.contracts.get(s) for s in SYMBOLS}
+
     def refresh_fees(self) -> None:
         now = time.time()
         self.fee_schedule.refresh(self.api, list(SYMBOLS), now)
         budget = self.fee_schedule.paper_budget(float(self.overlay.get("configuredPositionCostPct") or .12),
-                                               self.slippage_allowance_pct, self.contracts, now)
+                                               self.slippage_allowance_pct, self.active_fee_contracts(), now)
         if abs(budget - self.position_cost_pct) > 1e-10:
             self._fee_config_dirty = True
 
@@ -872,15 +876,26 @@ class Pulse:
         maker, taker, _ = self.fee_schedule.rates(symbol, self.contracts.get(symbol), time.time())
         if pos is not None and taker is None:
             maker, taker = pos.fee_maker, pos.fee_taker
-        return fill_fee(data, qty, price, maker, taker, self.position_cost_pct)
+        configured = float(self.overlay.get("configuredPositionCostPct") or self.position_cost_pct)
+        fee_only_pct = max(0.0, configured - self.slippage_allowance_pct)
+        return fill_fee(data, qty, price, maker, taker, fee_only_pct)
+
+    @staticmethod
+    def note_fee_source(pos, source: str) -> None:
+        """Preserve the least certain component across entry, adds and exit."""
+        label = ("reported-fee" if source == "reported-fee" else
+                 "configured-estimate" if source == "configured-estimate" else "exchange-rate-estimate")
+        ranks = {"reported-fee": 0, "exchange-rate-estimate": 1, "configured-estimate": 2}
+        previous = getattr(pos, "fee_source", "configured-estimate")
+        if ranks.get(label, 2) > ranks.get(previous, 2):
+            pos.fee_source = label
 
     def record_exit_fee(self, pos, data, qty: float, price: float) -> None:
         if getattr(pos, "entry_fee_usdt", None) is not None and qty > 0:
             fee, source = self.fill_cost(data, qty, price, pos.symbol, pos)
             pos.exit_fee_usdt += fee
             pos.exit_fee_qty += qty
-            if source != "reported-fee":
-                pos.fee_source = "exchange-rate-estimate" if source != "configured-estimate" else source
+            self.note_fee_source(pos, source)
 
     def confirmed_order(self, data, symbol: str, cid: str = "") -> dict:
         """Resolve an acknowledgement with a read; requested quantity is not a fill.
@@ -3279,9 +3294,9 @@ class Pulse:
         )
         fee, source = self.fill_cost(data, filled, avg, sym)
         pos.fee_maker, pos.fee_taker, _ = self.fee_schedule.rates(sym, c, time.time())
-        if source != "configured-estimate":
-            pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
-            pos.fee_source = "reported-fee" if source == "reported-fee" else "exchange-rate-estimate"
+        pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
+        pos.fee_source = ("reported-fee" if source == "reported-fee" else
+                          "configured-estimate" if source == "configured-estimate" else "exchange-rate-estimate")
         pos.entry_slippage = adverse_slippage(px, avg, order_side)
         pos.sl, pos.tp = self.security_prices(pos)
         if attached_sl:
@@ -4098,7 +4113,7 @@ class Pulse:
         configured_cost = float(ov.get("positionCostPct") or .12)
         self.slippage_allowance_pct = max(0.0, float(ov.get("slippageAllowancePct", .02)))
         self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
-                                                              self.contracts, time.time())
+                                                              self.active_fee_contracts(), time.time())
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", .25)))
         ov["configuredPositionCostPct"] = configured_cost
         ov["positionCostPct"] = self.position_cost_pct
@@ -4634,7 +4649,9 @@ class Pulse:
                 self.block_last_emit = time.time()
                 continue
             if pos.entry_fee_usdt is not None:
-                pos.entry_fee_usdt += self.fill_cost(data, filled, avg, pos.symbol, pos)[0]
+                fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
+                pos.entry_fee_usdt += fee
+                self.note_fee_source(pos, source)
             oid = str(data.get("orderId") or "")
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
@@ -4746,6 +4763,7 @@ class Pulse:
                                     "fee_usdt": fee if source != "configured-estimate" else None})
             if pos.entry_fee_usdt is not None:
                 pos.entry_fee_usdt += fee
+                self.note_fee_source(pos, source)
             pos.entry = (pos.qty * pos.entry + filled * avg) / (pos.qty + filled)
             pos.qty += filled
             pos.notional = pos.qty * pos.entry
@@ -4874,7 +4892,9 @@ class Pulse:
                 continue
             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
             if pos.entry_fee_usdt is not None:
-                pos.entry_fee_usdt += self.fill_cost(data, filled, avg, pos.symbol, pos)[0]
+                fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
+                pos.entry_fee_usdt += fee
+                self.note_fee_source(pos, source)
             if not pos.dca_ref:
                 pos.dca_ref = pos.entry
             pos.dca_fills.append([avg, filled])
@@ -5335,7 +5355,7 @@ class Pulse:
                                                     "fee_usdt": fee if source != "configured-estimate" else None})
                             if ours.entry_fee_usdt is not None:
                                 ours.entry_fee_usdt += fee
-                                ours.fee_source = "exchange-rate-estimate"
+                                self.note_fee_source(ours, source)
                             ours.block_pending = {}
                     ours.qty = qty
                     ours.entry = px
@@ -5718,7 +5738,7 @@ class Pulse:
             "pulse": self.pulse_snapshot(),
             "coord": self.coord.snapshot(),
             "pfCost": pc,
-            "costModel": self.fee_schedule.snapshot(time.time(), {s: self.contracts[s] for s in SYMBOLS if s in self.contracts},
+            "costModel": self.fee_schedule.snapshot(time.time(), self.active_fee_contracts(),
                                                     self.position_cost_pct, self.slippage_allowance_pct),
             "blockRiskPctOfBalance": self.block_risk_pct,
             "profitFactor": pc["pf"],
