@@ -105,12 +105,13 @@ test("a mean of the Sets' own PFs is not the effective PF", () => {
   assert.ok((s.effectivePf as number) < 1.3);
 });
 
-test("empty and all-loss cases: no valid Set gives no effective PF; no loss gives 99 as the engine does", () => {
+test("empty and flat samples have no PF; all-loss and no-loss samples remain distinct", () => {
   assert.equal(summarize([]).effectivePf, null);
   assert.equal(summarize([]).validatedPct, 0);
   assert.equal(summarize([base(2, 0, 1, 2)]).effectivePf, null);
   assert.equal(summarize([base(2, 1, 1, 0)]).effectivePf, 99);
-  assert.equal(summarize([base(2, 1, 0, 0)]).effectivePf, 0);
+  assert.equal(summarize([base(2, 1, 0, 0)]).effectivePf, null);
+  assert.equal(summarize([base(2, 1, 0, 1)]).effectivePf, 0);
 });
 
 test("per-pack split sums to the whole", () => {
@@ -165,6 +166,13 @@ test("stage PF is unavailable without its own window sample", () => {
   assert.equal(formatPfWithCount(99, undefined), "—");
   assert.equal(formatPfWithCount(0, 3), "0.00");
   assert.equal(formatPfWithCount(99, 3), "no loss");
+});
+
+test("a flat or empty set window has no measured PF", () => {
+  const flat = base(2, 0, 0, 0, { gn: 3 });
+  assert.equal(summarize([flat]).unfilteredPf, null);
+  const loss = base(2, 0, 0, 1, { gn: 3 });
+  assert.equal(summarize([loss]).unfilteredPf, 0);
 });
 
 test("stage figures show the Sets that pass each stage, their share of all Sets and their own PF (never the overall average)", () => {
