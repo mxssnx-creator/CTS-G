@@ -1,0 +1,426 @@
+{
+  "risk_limited": {
+    "symbols": [
+      "ADA-USDT",
+      "AVAX-USDT",
+      "BCH-USDT",
+      "BNB-USDT",
+      "BTC-USDT",
+      "DOGE-USDT",
+      "DOT-USDT",
+      "ETH-USDT"
+    ],
+    "sets": 3036,
+    "hours": [
+      1792227600.0,
+      1792231200.0,
+      1792234800.0,
+      1792238400.0,
+      1792242000.0,
+      1792245600.0,
+      1792249200.0,
+      1792252800.0,
+      1792256400.0,
+      1792260000.0,
+      1792263600.0,
+      1792267200.0
+    ],
+    "config": {
+      "cost_pct": 0.15,
+      "history_bars": 4320,
+      "min_same_context_closes": 12,
+      "gate_refresh_seconds": 3600,
+      "max_modeled_stop_loss_pct": 3.0,
+      "extra_indicators": [
+        "donchian_break",
+        "rsi2_reversion"
+      ]
+    },
+    "stats": {
+      "rankings": 312,
+      "rankings_with_eligible": 12
+    },
+    "closed_count": 14,
+    "closed_pf": 0.3335447291793895,
+    "open_count": 0,
+    "closed_plus_marked_pf": 0.3335447291793895,
+    "rows": [
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:tr0.75:0.45",
+        "lane": "pos",
+        "t_in": 1792230720,
+        "t_out": 1792231380,
+        "reason": "scratch+",
+        "net": 0.0006165338645418759
+      },
+      {
+        "open": false,
+        "symbol": "BCH-USDT",
+        "side": 1,
+        "set": "shortrange:1m:sl2.75:st6:xt",
+        "lane": "pos",
+        "t_in": 1792231020,
+        "t_out": 1792252620,
+        "reason": "time",
+        "net": -0.011334518798083826
+      },
+      {
+        "open": false,
+        "symbol": "BTC-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl2.25:st4",
+        "lane": "pos",
+        "t_in": 1792232400,
+        "t_out": 1792241640,
+        "reason": "scratch+",
+        "net": 0.000268648950760996
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.75:st5",
+        "lane": "pos",
+        "t_in": 1792232520,
+        "t_out": 1792239180,
+        "reason": "scratch+",
+        "net": 0.0006189081390999577
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792239780,
+        "t_out": 1792241580,
+        "reason": "scratch+",
+        "net": 0.001658844765342863
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl2.50:st6",
+        "lane": "pos",
+        "t_in": 1792242360,
+        "t_out": 1792242960,
+        "reason": "scratch+",
+        "net": 0.000882445141065777
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl2.50:st6",
+        "lane": "pos",
+        "t_in": 1792243620,
+        "t_out": 1792250700,
+        "reason": "scratch+",
+        "net": 0.00013296068333130398
+      },
+      {
+        "open": false,
+        "symbol": "BTC-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl0.50:st17",
+        "lane": "pos",
+        "t_in": 1792245060,
+        "t_out": 1792252380,
+        "reason": "scratch+",
+        "net": 0.0003019013250357852
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792249740,
+        "t_out": 1792250700,
+        "reason": "scratch+",
+        "net": 0.0012088036117381012
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792252080,
+        "t_out": 1792254660,
+        "reason": "scratch+",
+        "net": 0.0012272727272726793
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792254720,
+        "t_out": 1792256160,
+        "reason": "scratch+",
+        "net": 0.00032398540811666085
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.50:st6",
+        "lane": "pos",
+        "t_in": 1792257000,
+        "t_out": 1792267800,
+        "reason": "sl",
+        "net": -0.015000000000000001
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": 1,
+        "set": "general:1m:sl3.50:st4",
+        "lane": "neg",
+        "t_in": 1792258200,
+        "t_out": 1792258800,
+        "reason": "scratch+",
+        "net": 0.0007789425706472217
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": 1,
+        "set": "general:1m:sl3.50:st4",
+        "lane": "neg",
+        "t_in": 1792260660,
+        "t_out": 1792261260,
+        "reason": "scratch+",
+        "net": 0.0007644927536231906
+      }
+    ],
+    "note": "Research model only: hourly gate per Set, symbol and side with a minimum number of same-context paper closes. The optional stop filter is a model constraint, not a guarantee against gaps, venue behavior, leverage, added positions or account drawdown. Modeled fills and one historical window do not establish profitability."
+  },
+  "risk_limited_audit": {
+    "records": 14,
+    "closed": 14,
+    "min_scoped_gate_n": 18,
+    "mismatches": [],
+    "unaudited": [],
+    "note": "Checks signals, hourly context gate and ranking, and independent bar-by-bar modeled exits. It does not validate live fills or intrabar ordering."
+  },
+  "without_stop_filter": {
+    "symbols": [
+      "ADA-USDT",
+      "AVAX-USDT",
+      "BCH-USDT",
+      "BNB-USDT",
+      "BTC-USDT",
+      "DOGE-USDT",
+      "DOT-USDT",
+      "ETH-USDT"
+    ],
+    "sets": 3036,
+    "hours": [
+      1792227600.0,
+      1792231200.0,
+      1792234800.0,
+      1792238400.0,
+      1792242000.0,
+      1792245600.0,
+      1792249200.0,
+      1792252800.0,
+      1792256400.0,
+      1792260000.0,
+      1792263600.0,
+      1792267200.0
+    ],
+    "config": {
+      "cost_pct": 0.15,
+      "history_bars": 4320,
+      "min_same_context_closes": 12,
+      "gate_refresh_seconds": 3600,
+      "max_modeled_stop_loss_pct": null,
+      "extra_indicators": [
+        "donchian_break",
+        "rsi2_reversion"
+      ]
+    },
+    "stats": {
+      "rankings": 312,
+      "rankings_with_eligible": 12
+    },
+    "closed_count": 14,
+    "closed_pf": 0.3335447291793895,
+    "open_count": 0,
+    "closed_plus_marked_pf": 0.3335447291793895,
+    "rows": [
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.00:st30",
+        "lane": "pos",
+        "t_in": 1792230720,
+        "t_out": 1792231380,
+        "reason": "scratch+",
+        "net": 0.0006165338645418759
+      },
+      {
+        "open": false,
+        "symbol": "BCH-USDT",
+        "side": 1,
+        "set": "shortrange:1m:sl2.75:st6:xt",
+        "lane": "pos",
+        "t_in": 1792231020,
+        "t_out": 1792252620,
+        "reason": "time",
+        "net": -0.011334518798083826
+      },
+      {
+        "open": false,
+        "symbol": "BTC-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl2.25:st4",
+        "lane": "pos",
+        "t_in": 1792232400,
+        "t_out": 1792241640,
+        "reason": "scratch+",
+        "net": 0.000268648950760996
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.00:st30",
+        "lane": "pos",
+        "t_in": 1792232520,
+        "t_out": 1792239180,
+        "reason": "scratch+",
+        "net": 0.0006189081390999577
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792239780,
+        "t_out": 1792241580,
+        "reason": "scratch+",
+        "net": 0.001658844765342863
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.00:st30",
+        "lane": "pos",
+        "t_in": 1792242360,
+        "t_out": 1792242960,
+        "reason": "scratch+",
+        "net": 0.000882445141065777
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.00:st30",
+        "lane": "pos",
+        "t_in": 1792243620,
+        "t_out": 1792250700,
+        "reason": "scratch+",
+        "net": 0.00013296068333130398
+      },
+      {
+        "open": false,
+        "symbol": "BTC-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl0.50:st17",
+        "lane": "pos",
+        "t_in": 1792245060,
+        "t_out": 1792252380,
+        "reason": "scratch+",
+        "net": 0.0003019013250357852
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792249740,
+        "t_out": 1792250700,
+        "reason": "scratch+",
+        "net": 0.0012088036117381012
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792252080,
+        "t_out": 1792254660,
+        "reason": "scratch+",
+        "net": 0.0012272727272726793
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": -1,
+        "set": "extra.donchian_break:1m:sl0.50:st28",
+        "lane": "pos",
+        "t_in": 1792254720,
+        "t_out": 1792256160,
+        "reason": "scratch+",
+        "net": 0.00032398540811666085
+      },
+      {
+        "open": false,
+        "symbol": "DOGE-USDT",
+        "side": -1,
+        "set": "extra.rsi2_reversion:1m:sl1.50:st6",
+        "lane": "pos",
+        "t_in": 1792257000,
+        "t_out": 1792267800,
+        "reason": "sl",
+        "net": -0.015000000000000001
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": 1,
+        "set": "general:1m:sl3.50:st4",
+        "lane": "neg",
+        "t_in": 1792258200,
+        "t_out": 1792258800,
+        "reason": "scratch+",
+        "net": 0.0007789425706472217
+      },
+      {
+        "open": false,
+        "symbol": "ADA-USDT",
+        "side": 1,
+        "set": "general:1m:sl3.50:st4",
+        "lane": "neg",
+        "t_in": 1792260660,
+        "t_out": 1792261260,
+        "reason": "scratch+",
+        "net": 0.0007644927536231906
+      }
+    ],
+    "note": "Research model only: hourly gate per Set, symbol and side with a minimum number of same-context paper closes. The optional stop filter is a model constraint, not a guarantee against gaps, venue behavior, leverage, added positions or account drawdown. Modeled fills and one historical window do not establish profitability."
+  },
+  "without_stop_filter_audit": {
+    "records": 14,
+    "closed": 14,
+    "min_scoped_gate_n": 14,
+    "mismatches": [],
+    "unaudited": [],
+    "note": "Checks signals, hourly context gate and ranking, and independent bar-by-bar modeled exits. It does not validate live fills or intrabar ordering."
+  },
+  "feed_sha256": "e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03",
+  "note": "Historical research only; cached data and modeled fills are not live exchange evidence."
+}
