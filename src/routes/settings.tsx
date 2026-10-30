@@ -27,6 +27,7 @@ import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
+import { secureMinimalPreset } from "@/lib/presets";
 import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS, minMode } from "@/lib/config-model";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
@@ -201,6 +202,28 @@ function SettingsPage() {
 
         <div className="min-w-0 flex-1 space-y-4">
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
+          {section === "overview" && (
+            <Card title="Secure, Minimal" hint="Saved run preset · load it here, review it, then save to the selected connection">
+              <p className="text-sm text-muted">
+                Scans up to 50 symbols with at most two positions, 1× leverage, strict balance-relative sizing,
+                a 3% modeled stop-plus-cost filter and a 3% session drawdown halt. Exchange minimums that exceed
+                the entry budget are skipped. Actual fills and account losses can exceed modeled limits.
+              </p>
+              <button
+                type="button"
+                data-testid="load-secure-minimal"
+                onClick={() => {
+                  dirtyRef.current = true;
+                  setOverlay(secureMinimalPreset());
+                  setDirty(true);
+                  setSaveMsg("Secure, Minimal loaded · unsaved");
+                }}
+                className="min-h-11 rounded-lg border border-primary px-4 text-sm text-fg"
+              >
+                Load Secure, Minimal
+              </button>
+            </Card>
+          )}
           {section === "overview" && (
             <Card title="Coverage · controls · live overviews" hint="Scan, packs, indication types, block counts, set families, recon and order protection — all live">
               <CoveragePanel live={stats} />
@@ -1515,6 +1538,20 @@ function SettingsPage() {
                   step={0.1}
                   hint="Position notional = balance x this % x volume factor (raised to the exchange minimum). 0 = fixed pulse notional."
                   onChange={(v) => patch("sizePctOfBalance", v)}
+                />
+                <Toggle
+                  label="Strict entry budget (skip instead of exceeding the balance-relative amount)"
+                  on={overlay.strictSizeCap}
+                  onChange={(v) => patch("strictSizeCap", v)}
+                />
+                <Num
+                  label="Max modeled stop loss + cost %"
+                  value={overlay.maxModeledStopLossPct}
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  hint="0 = off. Filters Sets by initial stop distance plus modeled cost; live losses can exceed it."
+                  onChange={(v) => patch("maxModeledStopLossPct", v)}
                 />
                 <KV
                   k="Effective notional"

@@ -1,0 +1,175 @@
+{
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "sets": 822,
+  "hours": 12,
+  "gate": {
+    "window": 50,
+    "short": 25,
+    "main_n": 25,
+    "min": 12,
+    "min_pf": 1.25,
+    "max_ddt_h": 24.0,
+    "lookback_bars": 720
+  },
+  "model_config": {
+    "honor_tp_trail": false,
+    "exit_sets": true,
+    "time_bars": 360,
+    "scratch_bars": 10,
+    "scratch_min_pct": 0.16,
+    "cost_pct": 0.12,
+    "extra_indicators": []
+  },
+  "stages": {
+    "base": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "main": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "real": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "realNeg": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    }
+  },
+  "by_pack": {
+    "indications": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "general": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "shortrange": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    }
+  },
+  "closed": 0,
+  "open_at_end": 0,
+  "execution_pf": null,
+  "feed_sha256": "e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03",
+  "note": "12h prehistory and 12h forward, eight archived symbols, assumed 0.12% cost; no exchange results. 60/60 sampled gate and rank self-checks matched."
+}

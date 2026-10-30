@@ -18,13 +18,14 @@ def main() -> None:
     ap.add_argument("--data", required=True)
     ap.add_argument("--cache", required=True, help="trusted cache made by this version")
     ap.add_argument("--result", required=True, help="trade_sim JSON; automatic holds must be off")
+    ap.add_argument("--patch-file", help="trusted JSON overlay used for this exact replay")
     args = ap.parse_args()
     with open(args.result, encoding="utf-8") as fh:
         sim = json.load(fh)
-    os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"histLookbackBars": sim["gate"]["lookback_bars"],
-                                                     "histLookbackAuto": False, "holdEnabled": False,
-                                                     "positionCostPct": sim["config"]["cost_pct"],
-                                                     "extraIndicators": sim["config"].get("extra_indicators", [])})
+    patch = json.load(open(args.patch_file, encoding="utf-8")) if args.patch_file else {
+        "histLookbackBars": sim["gate"]["lookback_bars"], "histLookbackAuto": False, "holdEnabled": False,
+        "positionCostPct": sim["config"]["cost_pct"], "extraIndicators": sim["config"].get("extra_indicators", [])}
+    os.environ["STAGE_OVERLAY_PATCH"] = json.dumps(patch)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import stage_eval as sg
     names, bars, times = sg.load_bars(args.data, len(sim["symbols"]))
@@ -34,8 +35,11 @@ def main() -> None:
     with open(args.cache, "rb") as fh:
         shadow = pickle.load(fh)
     book = sg.make_book()
-    if len(book.by_idx) != sim["sets"] or book.cost_pct != sim["config"]["cost_pct"]:
-        raise ValueError("Set grid or cost differs from the simulation")
+    if (len(book.by_idx) != sim["sets"] or book.cost_pct != sim["config"]["cost_pct"]
+            or book.lookback != sim["gate"]["lookback_bars"] or book.gate_min != sim["gate"]["min"]
+            or book.gate_window != sim["gate"]["window"] or book.base_short != sim["gate"]["short"]
+            or book.main_n != sim["gate"]["main_n"]):
+        raise ValueError("Set grid, gate, lookback or cost differs from the simulation")
     tapes = sg.Tapes(book, names, times, shadow)
     keys = ("base", "main", "real", "realNeg")
     def blank():
