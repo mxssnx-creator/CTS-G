@@ -199,6 +199,250 @@ def live_windows_preserve_owner_and_lane_history():
     return ok, f"retained {len(pos_rows)} positive / {len(neg_rows)} negative; foreign={len(foreign.live)}; skipped={b.live_skipped}; unmatched={b.live_unmatched}"
 
 
+def _plain_main_choice(records, params):
+    """A direct, quadratic reading of the candidate rule for a small test tape."""
+    def pf(values):
+        gains = sum(x for x in values if x > 0)
+        losses = -sum(x for x in values if x < 0)
+        return gains / losses if losses > 0 else (99.0 if gains > 0 else 0.0)
+    included = {w: [] for w in (params.main_n,) + params.short_windows}
+    for _end, entry, net, known in records:
+        if not known:
+            continue
+        before = [n for end, _entry, n, _known in records if entry - params.lookback_s <= end < entry]
+        for window, votes in included.items():
+            recent = before[-window:]
+            need = window if params.full_window else 1
+            if len(recent) >= need and round(pf(recent), 4) + 1e-9 >= params.floor_for(window):
+                votes.append(net)
+    reference = pf(included[params.main_n])
+    best, choice = reference, params.main_n
+    for window in params.short_windows:
+        votes = included[window]
+        value = pf(votes)
+        if len(votes) >= params.short_min and value > best + 1e-12 and value >= reference * params.short_margin - 1e-12:
+            best, choice = value, window
+    return choice
+
+
+def main_short_reselects_on_live_close():
+    """A close changes the winning candidate immediately, using each Set's own entry-time evidence."""
+    import random
+    b = _book(n_syms=1, bars=300, **{**SMALL, "setGateWindow": 30, "setGateShortN": 0,
+                                     "mainGateN": 10, "mainShortWindows": [3, 5], "mainShortMin": 3,
+                                     "mainShortMargin": 1.0, "mainNegEnabled": False,
+                                     "realGateEnabled": False, "setMinPf": 1.05})
+    st = next(x for x in b.by_idx if x.kind == "base")
+    foreign = next(x for x in b.by_idx if x.kind == "trail")
+    rng = random.Random(4)
+    nets = [rng.choice((.003, .005, .008, -.003, -.006)) for _ in range(70)]
+    cf = b.cost_pct / 100.0
+    keys = ("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id")
+    rows = [(T0 + 60 * i, "A", "LONG", v, v + cf, 60, "x", st.id) for i, v in enumerate(nets)]
+    b.set_processed(st, rows)
+    st.hist = [dict(zip(keys, row)) for row in rows[-30:]]
+    b._score_one(st, now=T0 + 60 * 70)
+    before = st.main_short_win
+    close = {"set_id": st.id, "t": T0 + 60 * 71, "symbol": "B", "side": "LONG", "pnl_pct": .015 + cf,
+             "hold_s": 30, "lane": "pos", "client_id": "candidate-change"}
+    b.on_live_close(close)
+    shadow = list(zip(*st.main_evidence))
+    records = [(t, e, n, True) for t, e, n in shadow] + [(close["t"], close["t"] - 30, .015, True)]
+    expected = _plain_main_choice(sorted(records), b.stage_params(st.pack))
+    b.on_live_close(dict(close))
+    ok = (before == 10 and st.main_short_win == expected == 5 and st.main_short_n == 5
+          and abs(st.main_short_pf - 11.0) < 1e-8 and st.live_n == 1 and not foreign.live)
+    return ok, f"short N {before}->{st.main_short_win}, independent oracle={expected}, PF={st.main_short_pf}, duplicate closes={st.live_n}"
+
+
+def main_short_matches_plain_live_oracle_over_long_tapes():
+    """Long tapes, overlapping holds, both lanes and full/available windows agree with an independent reading."""
+    import random
+    rng = random.Random(987)
+    mismatch, checked, long_tapes = [], 0, 0
+    for full_window in (False, True):
+        b = _book(n_syms=1, bars=300, **{**SMALL, "setGateWindow": 30, "setGateShortN": 0,
+                                         "mainGateN": 10, "mainShortWindows": [3, 5], "mainShortMin": 3,
+                                         "mainShortMargin": 1.0, "stageFullWindow": full_window,
+                                         "mainNegEnabled": True, "setMinPf": 1.05})
+        st = next(x for x in b.by_idx if x.kind == "base")
+        cf = b.cost_pct / 100.0
+        for sample in range(20):
+            count = 280 if sample % 5 == 0 else 90
+            rows = []
+            for i in range(count):
+                value = rng.choice((.003, .005, .008, -.003, -.006))
+                rows.append((T0 + 60 * i, "A", "LONG", value, value + cf, rng.choice((30, 60, 180)), "x", st.id))
+            b.set_processed(st, rows)
+            st.live, st.live_n, st.score_at, st.main_live_evidence = [], 0, 0.0, None
+            long_tapes += int(st.proc_total > 200)
+            for k in range(3):
+                value = rng.choice((.003, .005, .008, -.003, -.006))
+                close = {"set_id": st.id, "t": T0 + 60 * (count + k), "symbol": "B", "side": "LONG",
+                         "pnl_pct": value + cf, "hold_s": rng.choice((0, 30, 120)),
+                         "lane": "neg" if k % 2 else "pos", "client_id": f"random-{full_window}-{sample}-{k}"}
+                b.on_live_close(close)
+                shadow = [(t, e, n, True) for t, e, n in zip(*st.main_evidence)]
+                live = [(r["t"], r["t"] - r["hold_s"] if r["hold_s"] > 0 else r["t"],
+                         r["pnl_pct"] - cf, r["hold_s"] > 0) for r in st.live]
+                expected = _plain_main_choice(sorted(shadow + live), b.stage_params(st.pack))
+                checked += 1
+                if st.main_short_win != expected:
+                    mismatch.append((full_window, sample, k, st.main_short_win, expected))
+    return not mismatch and long_tapes > 0, f"{checked} live decisions, {long_tapes} tapes above 200 Main orders, mismatches={mismatch[:3]}"
+
+
+def main_short_retains_live_votes_beyond_the_lane_cap():
+    """Capping full live rows at 200 must not discard earlier candidate votes inside the lookback."""
+    import random
+    b = _book(n_syms=1, bars=300, **{**SMALL, "setGateWindow": 30, "setGateShortN": 0,
+                                     "mainGateN": 10, "mainShortWindows": [3, 5], "mainShortMin": 3,
+                                     "mainShortMargin": 1.0, "setMinPf": 1.05})
+    st = next(x for x in b.by_idx if x.kind == "base")
+    cf = b.cost_pct / 100.0
+    rng = random.Random(6)
+    nets = [rng.choice((.003, .005, .008, -.003, -.006)) for _ in range(250)]
+    records = [(T0 + i * 60, T0 + i * 60 - 30, v, True) for i, v in enumerate(nets)]
+    for i, (t, _entry, net, _known) in enumerate(records):
+        b.on_live_close({"set_id": st.id, "t": t, "symbol": "A", "side": "LONG", "pnl_pct": net + cf,
+                         "hold_s": 30, "lane": "pos", "client_id": f"retained-{i}"})
+    expected = _plain_main_choice(records, b.stage_params(st.pack))
+    truncated = _plain_main_choice(records[-200:], b.stage_params(st.pack))
+    actual = st.main_short_win
+    retained = len(st.main_live_evidence[0])
+    # A changed cost must reach candidate votes and the non-gate PF stats alike.
+    b.cost_pct = 0.2
+    b._score_one(st, now=T0 + 249 * 60)
+    changed = [(t, e, net + cf - .002, known) for t, e, net, known in records]
+    expected_cost = _plain_main_choice(changed, b.stage_params(st.pack))
+    recent = [net + cf - .002 for net in nets[-200:]]
+    gains, losses = sum(x for x in recent if x > 0), -sum(x for x in recent if x < 0)
+    expected_pf = round(gains / losses, 4)
+    cost_ok = st.main_short_win == expected_cost and abs(st.pf_all - expected_pf) < 1e-4
+    b.lookback = 5
+    b.on_live_close({"set_id": st.id, "t": T0 + 300 * 60, "symbol": "A", "side": "LONG", "pnl_pct": .01,
+                     "hold_s": 30, "lane": "pos", "client_id": "after-expiry"})
+    after_expiry = len(st.main_live_evidence[0])
+    ok = (len(st.live) == 200 and retained == 250 and actual == expected == 5 and truncated == 10
+          and cost_ok and after_expiry == 1)
+    return ok, f"evidence={retained}, choice full/truncated={actual}/{truncated}, cost change correct={cost_ok}, after expiry={after_expiry}"
+
+
+def axis_paper_scopes_are_bounded_and_time_correct():
+    """Every Axis scope sees only the newest in-lookback paper rows, including deterministic ties."""
+    b = _book(n_syms=1, bars=300, **SMALL)
+    b.lookback = 5
+    first, second = [st for st in b.by_idx if st.kind == "base"][:2]
+    for st in b.by_idx:
+        st.exe, st.neg, st.score_at = [], [], 0.0
+    first.score_at = T0 + 1200
+    first.exe = [(T0 + 899, 4.0), (T0 + 900, .01), (T0 + 1000, .02), (T0 + 1201, 5.0)]
+    first.neg = [(T0 + 950, -.01), (T0 + 1000, -.02)]
+    second.exe = [(T0 + 1000, .03), (T0 + 1100, .04)]
+    scopes = b.real_paper_scopes(3)
+    overall = [(r["t"] - T0, r["pnl"], r["lane"]) for r in scopes["overall"]]
+    pos = [(r["t"] - T0, r["pnl"]) for r in scopes["lane:pos"]]
+    neg = [(r["t"] - T0, r["pnl"]) for r in scopes["lane:neg"]]
+    ok = (overall == [(1000, -.02, "neg"), (1000, .03, "pos"), (1100, .04, "pos")]
+          and pos == [(1000, .02), (1000, .03), (1100, .04)] and neg == [(950, -.01), (1000, -.02)]
+          and b.real_paper(3) == scopes["overall"] and all(len(rows) <= 3 for rows in scopes.values()))
+    return ok, f"overall={overall}; positive={pos}; negative={neg}; scopes bounded={all(len(x) <= 3 for x in scopes.values())}"
+
+
+def axis_pause_uses_costed_results_per_scope():
+    """A gross win smaller than PositionCost is a loss for the pause Axis, just as for PF."""
+    from coord_engine import Coordinator
+    co = Coordinator()
+    co.load({}, {"axisPrevEnabled": False, "axisLastEnabled": False, "axisPauseEnabled": True,
+                 "axisPauseMaxWindow": 4, "positionCostPct": 0.12})
+    losses = [{"pnl": 1.0, "pnl_pct": .0005} for _ in range(4)]
+    winners = [{"pnl": -1.0, "pnl_pct": .002} for _ in range(4)]
+    scopes = co.judge_scopes({"lane:pos": winners, "lane:neg": losses, "pack:x:pos": winners, "pack:x:neg": losses})
+    allow_pos, allow_neg = co.scope_allows("x", "pos"), co.scope_allows("x", "neg")
+    judged = co.judge(losses, 0)
+    ok = (scopes["lane:neg"]["consecLoss"] == 4 and not scopes["lane:neg"]["allow"]
+          and scopes["lane:pos"]["consecLoss"] == 0 and scopes["lane:pos"]["allow"]
+          and allow_pos == (True, "") and allow_neg == (False, "pack:x:neg") and not judged["allow"])
+    return ok, f"loss/win streak={scopes['lane:neg']['consecLoss']}/{scopes['lane:pos']['consecLoss']}; lane decisions={allow_neg}/{allow_pos}"
+
+
+def small_results_keep_pf_precision():
+    """Rounding the displayed gains and losses must not turn a tiny loss into no loss."""
+    b = _book(n_syms=1, bars=300, **{**SMALL, "setGateWindow": 30, "setGateShortN": 2,
+                                     "mainGateN": 10, "mainShortEnabled": False})
+    st = next(x for x in b.by_idx if x.kind == "base")
+    cf = b.cost_pct / 100.0
+    values = [4e-9, -2e-9]
+    st.hist = [{"t": T0 + i * 60, "symbol": "X", "side": "LONG", "pnl": net,
+                "pnl_pct": net + cf, "hold_s": 30, "reason": "x", "set_id": st.id} for i, net in enumerate(values)]
+    st.proc, st.exe = [(r["t"], r["pnl_pct"] - cf) for r in st.hist], []
+    st.proc_replayed = True
+    b._score_one(st, now=T0 + 120)
+    ok = (st.pf_all == st.gate_pf == st.base_short_pf == st.main_pf == 2.0 and st.gate_gp > 0 and st.gate_gl > 0
+          and st.main_gp > 0 and st.main_gl > 0)
+    return ok, f"whole/Base/Base short/Main PF={st.pf_all}/{st.gate_pf}/{st.base_short_pf}/{st.main_pf}, gain/loss={st.gate_gp:.2g}/{st.gate_gl:.2g}"
+
+
+def untimed_live_closes_are_skipped():
+    """A live result with no usable close timestamp cannot enter a causal window or fill count."""
+    b = _book(n_syms=1, bars=300, **SMALL)
+    st = next(x for x in b.by_idx if x.kind == "base")
+    for i, timestamp in enumerate((None, 0, -1, "bad", float("nan"), float("inf"))):
+        b.on_live_close({"set_id": st.id, "t": timestamp, "pnl_pct": .01, "hold_s": 30, "client_id": f"missing-t-{i}"})
+    b.on_live_close({"set_id": st.id, "t": T0, "pnl_pct": .01, "hold_s": 30, "client_id": "timed"})
+    return b.live_skipped == 6 and st.live_n == st.n == 1, f"untimed skipped={b.live_skipped}; timed counted={st.live_n}"
+
+
+def live_scoring_obeys_lookback_and_event_clock():
+    """Expired and future closes cannot enter any stage; a late close cannot rewind the event clock."""
+    from array import array
+    b = _book(n_syms=1, bars=300, **{**SMALL, "setGateWindow": 30, "setGateShortN": 0,
+                                     "mainGateN": 10, "realGateN": 10, "mainShortEnabled": False})
+    b.lookback = 5
+    st = next(x for x in b.by_idx if x.kind == "base")
+    cf = b.cost_pct / 100.0
+    def row(t, net, lane="pos"):
+        return {"t": t, "symbol": "S", "side": "LONG", "pnl": net, "pnl_pct": net + cf,
+                "hold_s": 30, "reason": "x", "set_id": st.id, "lane": lane}
+    st.hist = [row(T0 + 899, -.02), row(T0 + 900, .006), row(T0 + 1199, -.003), row(T0 + 1201, -.02)]
+    st.live = [row(T0 + 899, -.02, "neg"), row(T0 + 900, -.003, "neg"),
+               row(T0 + 1200, .009), row(T0 + 1201, -.02)]
+    st.proc = [(r["t"], r["pnl"]) for r in st.hist]
+    st.exe = list(st.proc)
+    st.neg = []
+    st.proc_replayed = True
+    st.main_evidence = (array("d", [r["t"] for r in st.hist]), array("d", [r["t"] - 30 for r in st.hist]),
+                        array("d", [r["pnl"] for r in st.hist]))
+    b._score_one(st, now=T0 + 1200)
+    first = (st.gate_n, st.gate_pf, st.main_n, st.main_pf, st.exe_n, st.exe_pf, st.neg_n, st.neg_pf)
+    b.on_live_close({"set_id": st.id, "t": T0 + 950, "symbol": "L", "side": "LONG", "pnl_pct": .001 + cf,
+                     "hold_s": 30, "lane": "neg", "client_id": "late"})
+    ok = first == (4, 2.5, 4, 2.5, 3, 5.0, 1, 0.0) and st.score_at == T0 + 1200 and st.neg_n == 2
+    return ok, f"bounded Base/Main/Real/Negative={first}; clock after late close={st.score_at - T0:.0f}s"
+
+
+def replay_uses_each_symbols_last_completed_bar():
+    """A stale symbol's replay is anchored to its actual completed candle, not the wall clock."""
+    a = _book(n_syms=1, bars=600, **SMALL)
+    b = _book(n_syms=1, bars=600, **SMALL)
+    sym = "S0-USDT"
+    a.bar_t[sym] = T0 - 180
+    dated, reference = {}, {}
+    a._replay_symbol(sym, dated, T0 + 360)
+    b._replay_symbol(sym, reference, T0 - 120)
+    rows = [r for per_set in dated.values() for r in per_set]
+    a.bar_t[sym] = T0 + 60
+    rejected = False
+    try:
+        a._replay_symbol(sym, {}, T0)
+    except ValueError:
+        rejected = True
+    a._hist_rows = {sym: {"x": [(T0 - 1,), (T0,), (T0 + 1,)]}}
+    boundary = a._tape_rows("x", [sym], T0 - 1, until=T0)
+    ok = bool(rows) and dated == reference and all(r["t"] <= T0 - 120 for r in rows) and rejected and len(boundary) == 2
+    return ok, f"{len(rows)} replayed closes match the actual bar time; future bar rejected={rejected}; bounded rows={len(boundary)}"
+
+
 def hold_adapter_uses_the_selected_sets_tape():
     """Walk-forward hold adapters support the same Set-specific lookups as direct tapes, including cache hits."""
     import os, sys
@@ -1265,6 +1509,15 @@ def effective_pf_per_entry_counts_each_entry_once():
 
 
 CHECKS = [
+    ("processing.untimed-live-closes-are-skipped", untimed_live_closes_are_skipped),
+    ("processing.small-results-keep-pf-precision", small_results_keep_pf_precision),
+    ("processing.main-short-retains-live-votes-beyond-lane-cap", main_short_retains_live_votes_beyond_the_lane_cap),
+    ("processing.axis-paper-scopes-bounded-and-time-correct", axis_paper_scopes_are_bounded_and_time_correct),
+    ("processing.axis-pause-uses-costed-results-per-scope", axis_pause_uses_costed_results_per_scope),
+    ("processing.main-short-reselects-on-live-close", main_short_reselects_on_live_close),
+    ("processing.main-short-matches-plain-live-oracle", main_short_matches_plain_live_oracle_over_long_tapes),
+    ("processing.live-scoring-obeys-lookback-and-event-clock", live_scoring_obeys_lookback_and_event_clock),
+    ("processing.replay-uses-each-symbols-last-completed-bar", replay_uses_each_symbols_last_completed_bar),
     ("processing.simulator-validates-at-entry-and-refreshes-at-boundary", simulator_validates_at_entry_and_refreshes_at_the_boundary),
     ("processing.hold-adapter-uses-selected-sets-tape", hold_adapter_uses_the_selected_sets_tape),
     ("processing.live-windows-preserve-owner-and-lane-history", live_windows_preserve_owner_and_lane_history),

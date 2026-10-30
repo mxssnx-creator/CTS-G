@@ -34,7 +34,7 @@ def _key(b: SetBook, symbol: str, now: float):
     digest = hashlib.blake2b(repr(bars).encode(), digest_size=16).hexdigest()
     settings = json.dumps(b.ind_settings, sort_keys=True, default=str)
     sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, st.tp_pct, st.sl_ratio) for st in b.by_idx)
-    return (symbol, digest, float(now), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
+    return (symbol, digest, float(now), b.bar_t.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
             b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, bool(getattr(b, "hist_honor_tp", True)), sets)
 
 

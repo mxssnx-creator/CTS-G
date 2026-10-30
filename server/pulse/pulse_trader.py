@@ -1692,10 +1692,17 @@ class Pulse:
         if not isinstance(data, list):
             return [], None
         minute = float(int((now or time.time()) // 60) * 60)
-        rows = [r for r in sorted(data, key=self._kline_time) if 0 < self._kline_time(r) / 1000.0 + 60.0 <= minute]
+        # The replay stores OHLC without individual timestamps. Keep only the newest contiguous
+        # sequence, or a missing/duplicated candle would shift every older trade's entry time.
+        unique = {self._kline_time(r): r for r in data if 0 < self._kline_time(r) / 1000.0 + 60.0 <= minute}
+        times = sorted(unique)
+        start = len(times) - 1
+        while start > 0 and times[start] - times[start - 1] == 60000:
+            start -= 1
+        rows = [unique[t] for t in times[max(0, start):]]
         bars = self._parse_klines(rows)
         if len(bars) != len(rows) or not rows:
-            return bars, None
+            return [], None
         return bars, self._kline_time(rows[-1]) / 1000.0
 
     def _parse_klines(self, data: Any) -> List[List[float]]:
@@ -2792,6 +2799,32 @@ class Pulse:
             return "set-gate"
         return None
 
+    def _scope_pick(self, pack: str) -> Tuple[Any, str]:
+        """Pick within the pack's allowed lanes; another pack or a blocked positive lane cannot mask a valid alternative."""
+        try:
+            chosen = self.sets.pick_any(pack)
+        except Exception:
+            return None, ""
+        coord = getattr(self, "coord", None)
+        if chosen is None or coord is None:
+            return chosen, ""
+        try:
+            lane = self.sets.lane_of(chosen) or "pos"
+        except Exception:
+            lane = "pos"
+        ok, blocked_by = coord.scope_allows(pack, lane)
+        if ok:
+            return chosen, ""
+        allowed = [candidate for candidate in ("pos", "neg") if coord.scope_allows(pack, candidate)[0]]
+        if allowed:
+            try:
+                alternative = self.sets.pick_any(pack, allowed_lanes=allowed)
+                if alternative is not None and (self.sets.lane_of(alternative) or "pos") in allowed:
+                    return alternative, ""
+            except (TypeError, AttributeError):
+                pass
+        return None, blocked_by
+
     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
         if self.entries_blocked():
             return
@@ -2835,11 +2868,16 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
-        chosen = None
-        try:
-            chosen = self.sets.pick_any(pack)   # a signal binds to its own pack only: no cross-pack fallback
-        except Exception:
-            chosen = None
+        chosen, blocked_by = self._scope_pick(pack)   # a signal binds to its own pack and an allowed lane
+        if chosen is None and blocked_by:
+            self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
+            if time.time() - self.skip_log.get("scope", 0) > 40:
+                log(f"SKIP {sym} {pack}: Real scope {blocked_by} blocks", every=40.0, key="scope", quiet=True)
+                self.skip_log["scope"] = time.time()
+            return
+        if chosen is None and getattr(self.sets, "enabled", False) and getattr(self.sets, "use_historic_gate", False):
+            # A Set can become invalid after entry_sense(): never fall back to an unvalidated position.
+            return
         set_idx = -1
         trail_set_id = ""
         trail_idx = -1
@@ -2849,15 +2887,6 @@ class Pulse:
                 lane = self.sets.lane_of(chosen) or "pos"     # the lane the Set passed Real on: positive, or Real Negative
             except Exception:
                 lane = "pos"
-            # the Real stage's overall strategies: this lane's scope and this pack's scope on this lane must allow (each judged on
-            # its own paper stream; with the axes off, the default, every scope allows and only its figures are kept)
-            ok_scope, blocked_by = self.coord.scope_allows(pack, lane)
-            if not ok_scope:
-                self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
-                if time.time() - self.skip_log.get("scope", 0) > 40:
-                    log(f"SKIP {sym} {pack}/{lane}: Real overall scope {blocked_by} blocks", every=40.0, key="scope", quiet=True)
-                    self.skip_log["scope"] = time.time()
-                return
             # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
             # own arm and give. The independent trailing pick never reaches a Set position.
             sl_ratio = chosen.sl_ratio
@@ -4559,6 +4588,7 @@ class Pulse:
             memo = self._entry_sig = {}
         out: Dict[str, Tuple[float, str, int, str]] = {}
         budget = ENTRY_SIG_BUDGET
+        eligible = {pack for pack in self.sets.packs if self._scope_pick(pack)[0] is not None}
         for s in SYMBOLS:
             if s in self.open:
                 continue
@@ -4571,11 +4601,12 @@ class Pulse:
                     continue                          # the next cycle reads it (still inside the fresh window)
                 budget -= 1
                 try:
-                    sig = self.sets.entry_signal(s, bar_t)
+                    sig = self.sets.entry_signals(s, bar_t)
                 except Exception:
-                    sig = None
+                    sig = []
                 hit = memo[s] = (bar_t, sig)
-            sig = hit[1]
+            hits = hit[1]
+            sig = next((candidate for candidate in hits if candidate[0] in eligible), hits[0] if hits else None)
             if sig:
                 pack, d, conf, why = sig
                 out[s] = (float(conf), s, int(d), f"set:{pack}:{why}")
@@ -4585,12 +4616,6 @@ class Pulse:
         if self.halted:
             return
         rows = self.strategy_closes()
-        consec = 0
-        for c in reversed(rows):
-            if c.pnl < 0:
-                consec += 1
-            else:
-                break
         intern_metrics: Dict[str, Any] = {"pf": 0.0, "n": 0}
         interns: Dict[str, Dict[str, Any]] = {}
         try:
@@ -4622,7 +4647,8 @@ class Pulse:
                 self.coord.judge_scopes(streams, {**interns, "overall": intern_metrics})
             except Exception:
                 paper = []
-        allow, reasons, metrics = self.coord.gate(paper or rows, consec, intern=intern_metrics)
+        axis_rows = paper or rows
+        allow, reasons, metrics = self.coord.gate(axis_rows, self.coord.net_streak(axis_rows), intern=intern_metrics)
         if self.entries_blocked():
             self.priority_controls()
             return
@@ -5652,12 +5678,7 @@ class Pulse:
         self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
         try:
             rows_g = self.strategy_closes()
-            consec_g = 0
-            for c in reversed(rows_g):
-                if float(getattr(c, "pnl", 0) or 0) < 0:
-                    consec_g += 1
-                else:
-                    break
+            consec_g = self.coord.net_streak(rows_g)
             intern_m: Dict[str, Any] = {"pf": 0.0, "n": 0}
             stg = None
             try:

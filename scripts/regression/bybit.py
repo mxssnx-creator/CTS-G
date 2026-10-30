@@ -729,6 +729,7 @@ def positions_and_orders_lifecycle_through_the_live_trader():
         p.available = 50.0
         p.halted = False
         p.entry_sense = lambda *a, **k: None
+        p.sets.use_historic_gate = False  # exercise the untagged venue lifecycle in isolation
         p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
         pos = p.open.get(sym)
         entry = stub.sent("/v5/order/create")[0]

@@ -180,7 +180,7 @@ def gate_window_caps_sample():
     rows = [{"t": T, "symbol": "X", "pnl": 0.001, "pnl_pct": 0.0025, "side": "LONG", "reason": "tp", "hold_s": 60}
             for T in range(60)]
     st.hist = rows
-    b._score_one(st, now=1e9)
+    b._score_one(st, now=59.0)  # all fixture rows are closed and inside the lookback
     ok = st.gate_n == min(50, 60) and st.gate_n == b.gate_window
     return ok, f"gate_n={st.gate_n} window={b.gate_window}"
 

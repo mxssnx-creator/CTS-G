@@ -135,11 +135,11 @@ SWITCH_TOKEN = {"indTypeSignals": "tf", "indTypeState": "ta", "indTypeDirection"
 def set_switches_reach_the_set_signal():
     """The timeframe and type switches IndicationBook reads are forwarded to the Set pack's settings, unchanged."""
     off = {"tf1m": False, "indTypeState": False, "indTypeDirection": False, "indTypeMove": False,
-           "indTypeSignals": False}
+           "indTypeSignals": False, "indTypeActive": False, "indTypeCommon": False}
     b = SetBook()
     b.load(overlay(**off))
-    got = {k: b.ind_settings.get(k) for k in ("tf1m", "typeState", "typeDirection", "typeMove", "typeSignals")}
-    want = {"tf1m": False, "typeState": False, "typeDirection": False, "typeMove": False, "typeSignals": False}
+    got = {k: b.ind_settings.get(k) for k in ("tf1m", "typeState", "typeDirection", "typeMove", "typeSignals", "typeActive", "typeCommon")}
+    want = {k: False for k in got}
     return got == want, f"set signal sees {got}"
 
 
@@ -148,7 +148,7 @@ def switched_off_vote_is_absent():
     seed, drift = SWITCH_BARS
     bars = synth_bars(seed, 400, drift=drift)[-420:]
     on = SetBook()
-    on.load(overlay())
+    on.load(overlay(indTypeActive=False, indTypeCommon=False))
     _, _, why_on = indication_signal(bars, on.ind_settings, T0)
     all_votes = set(why_on.split("+"))
     if all_votes != {"tf", "ta", "dir", "move"}:
@@ -156,7 +156,7 @@ def switched_off_vote_is_absent():
     problems = []
     for switch, token in SWITCH_TOKEN.items():
         book = SetBook()
-        book.load(overlay(**{switch: False}))
+        book.load(overlay(indTypeActive=False, indTypeCommon=False, **{switch: False}))
         _, _, why = indication_signal(bars, book.ind_settings, T0)
         got = set(why.split("+")) - {""}
         if token in got or not got <= all_votes:
@@ -169,9 +169,54 @@ def all_switches_off_is_flat():
     seed, drift = SWITCH_BARS
     bars = synth_bars(seed, 400, drift=drift)[-420:]
     book = SetBook()
-    book.load(overlay(indTypeState=False, indTypeDirection=False, indTypeMove=False, indTypeSignals=False))
+    book.load(overlay(indTypeState=False, indTypeDirection=False, indTypeMove=False, indTypeSignals=False,
+                      indTypeActive=False, indTypeCommon=False))
     direction, _conf, why = indication_signal(bars, book.ind_settings, T0)
     return direction == 0 and why == "flat", f"direction={direction} why={why!r}"
+
+
+def active_and_common_reach_replay_and_live_signal():
+    """Active's own ranges and Common can each generate the same signal as the indication book in both directions."""
+    from indication_engine import IndicationBook
+    off = {"indTypeState": False, "indTypeDirection": False, "indTypeMove": False, "indTypeSignals": False,
+           "indTypeActive": False, "indTypeCommon": False, "indActiveMovePct": .3,
+           "indActiveThreshold": 1.0, "noise": .05}
+    problems, tried = [], 0
+    for typ, sizes in (("active", (3, 5, 10)), ("common", (10,))):
+        for size in sizes:
+            for direction in (1, -1):
+                prices = [100.0] * 140 + [100.0 + direction * i * .3 for i in range(1, size + 1)]
+                bars = [[p, p * 1.001, p * .999, p, 1000.0] for p in prices]
+                key = "indTypeActive" if typ == "active" else "indTypeCommon"
+                ov = overlay(**{**SMALL, **off, key: True, "activeOutbreakRanges": [size], "stratGeneral": False})
+                b = SetBook(); b.load(ov)
+                ref = IndicationBook(); ref.load(ov)
+                evaluated = [r for r in ref.process("X", bars[-60:]) if r.kind == typ]
+                signal = indication_signal(bars, b.ind_settings, T0)
+                packed = pack_signals(bars, ["indications"], b.ind_settings, T0 - (len(bars) - 1) * 60, len(bars) - 1)["indications"][-1]
+                b.ingest_bars("X", bars, last_t=T0 - 60)
+                live = b.entry_signal("X", T0 - 60)
+                muted = dict(b.ind_settings, **{"typeActive" if typ == "active" else "typeCommon": False})
+                no_signal = indication_signal(bars, muted, T0)[0] == 0
+                match = (len(evaluated) == 1 and signal[0] == direction and signal[2] == typ
+                         and evaluated[0].direction == ("long" if direction > 0 else "short")
+                         and abs(signal[1] - evaluated[0].confidence) < 1e-12 and signal == packed
+                         and live is not None and live[1:] == signal and no_signal)
+                tried += 1
+                if not match:
+                    problems.append((typ, size, direction, signal, packed, live, len(evaluated)))
+    return not problems, f"{tried} type/range/direction combinations; mismatches={problems[:2]}"
+
+
+def indication_ranges_are_forwarded_to_the_set_signal():
+    b = SetBook()
+    b.load(overlay(indDirRange=7, indMoveRange=13, activeOutbreakRanges=[3, 10], indActiveThreshold=1.4,
+                   indActiveMovePct=.8, noise=.07, volWeight=.25))
+    got = {k: b.ind_settings.get(k) for k in ("dirRange", "moveRange", "activeOutbreak", "activeThreshold",
+                                               "activeMovePct", "activeNoise", "activeVolatilityWeight")}
+    want = {"dirRange": 7, "moveRange": 13, "activeOutbreak": [3, 10], "activeThreshold": 1.4,
+            "activeMovePct": .8, "activeNoise": .07, "activeVolatilityWeight": .25}
+    return got == want, f"settings={got}"
 
 
 def timeframe_1m_switch_removes_the_lane_from_the_set_pack():
@@ -449,6 +494,8 @@ def thirty_minute_names_fire_and_read_their_history():
 
 
 CHECKS = [
+    ("indication.active-and-common-reach-replay-and-live-signal", active_and_common_reach_replay_and_live_signal),
+    ("indication.ranges-forwarded-to-set-signal", indication_ranges_are_forwarded_to_the_set_signal),
     ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
     ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
     ("indication.bars-to-entry-reason-round-trip", bars_to_entry_reason_round_trip),

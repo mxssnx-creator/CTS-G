@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, pf_floor, window_n
+from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, net_pnl_pct, pf_floor, window_n
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -165,20 +166,31 @@ class Coordinator:
         self.last = r
         return r["allow"], r["reasons"], r["metrics"]
 
+    def net_streak(self, rows: Sequence[Any]) -> int:
+        """Consecutive measurable net losses, using the same cost and rows as the Axis PF."""
+        count = 0
+        for row in reversed(rows):
+            raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
+            try:
+                gross = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(gross):
+                continue
+            if net_pnl_pct(gross, self.position_cost_pct) < 0:
+                count += 1
+            else:
+                break
+        return count
+
     def judge_scopes(self, streams: Dict[str, Sequence[Any]], interns: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         """The Real stage's overall strategies per scope, each on its own stream and independent of the others: "overall" (every
         Real Set), "lane:pos" / "lane:neg" (the positive and the Real Negative lane), "pack:<pack>" (one strategy's Real Sets, both
         lanes) and "pack:<pack>:<lane>".
-        Each scope gets its own consecutive losses, verdict and figures (self.scopes); scope_allows reads them per entry."""
+        Each scope gets its own consecutive losses, verdict and figures (self.scopes); scope_allows reads the pack's own lane per entry."""
         out: Dict[str, Any] = {}
         for scope, rows in streams.items():
-            pnls = [float(r.get("pnl") or 0) if isinstance(r, dict) else float(getattr(r, "pnl", 0) or 0) for r in rows]
-            consec = 0
-            for x in reversed(pnls):
-                if x < 0:
-                    consec += 1
-                else:
-                    break
+            consec = self.net_streak(rows)
             r = self.judge(rows, consec, (interns or {}).get(scope))
             m = r["metrics"]
             out[scope] = {"allow": bool(r["allow"]), "reasons": list(r["reasons"]), "orders": len(rows), "consecLoss": consec,
@@ -189,12 +201,10 @@ class Coordinator:
         return out
 
     def scope_allows(self, pack: str, lane: str) -> Tuple[bool, str]:
-        """An entry under a Set of `pack` on `lane` passes only when its lane's scope and its pack's scope on that lane allow; a scope
-        never blocks another's entries (a losing Real Negative lane does not stop the positive lane, one pack not another). The
-        overall and pack-wide scopes mix both lanes: figures only (the book-wide soft gate stays gate())."""
+        """A pack/lane is judged on its own evidence; pooled scopes are figures, not cross-pack gates."""
         scopes = getattr(self, "scopes", {}) or {}
         lane = lane or "pos"
-        for key in (f"lane:{lane}", f"pack:{pack}:{lane}"):
+        for key in (f"pack:{pack}:{lane}",):
             s = scopes.get(key)
             if s is not None and not s.get("allow", True):
                 return False, key
@@ -208,12 +218,7 @@ class Coordinator:
     ) -> Dict[str, Any]:
         """One stream's verdict, pure (no state): the axes (last, prev, pause) against the minimum PF, and the stage figures."""
         reasons: List[str] = []
-        pnls = []
-        for row in closed_rows:
-            if isinstance(row, dict):
-                pnls.append(float(row.get("pnl") or 0))
-            else:
-                pnls.append(float(getattr(row, "pnl", 0) or 0))
+        consec = max(int(consec), self.net_streak(closed_rows))
         last_w = self.axes["last"].max_window
         prev_w = min(self.prev_window, self.axes["prev"].max_window * 2)
         cost = last_n_cost_pf(closed_rows, self.pf_window, self.position_cost_pct)
@@ -263,7 +268,7 @@ class Coordinator:
                 reasons.append(f"prev PF {prev_cost['pf']:.2f}<{floor:.2f}")
         if self.axes["pause"].enabled:
             pause_n = self.axes["pause"].max_window
-            if consec >= pause_n or consec_loss(pnls[-pause_n:]) >= pause_n:
+            if consec >= pause_n:
                 allow = False
                 reasons.append(f"pause {consec}/{pause_n}")
         # Main / real stages are advisory intern: they do not freeze the book.

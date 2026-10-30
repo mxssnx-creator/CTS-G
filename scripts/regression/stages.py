@@ -363,8 +363,12 @@ def costs_are_applied_once_and_lanes_sit_at_their_distances():
     full = sorted((tuple(r.get(k) for k in se._ROW_KEYS) for r in st.hist if r.get("pnl_pct") is not None), key=lambda r: se.finite(r[0]))
     ch = b._chain_of(st, full)
     nets_chain = [x for _t, x in ch["main"]]
-    by_t = {round(se.finite(r[0]), 3): se.finite(r[4]) - cf for r in full}
-    chain_ok = all(abs(x - by_t[round(t, 3)]) < 1e-12 for t, x in ch["main"])
+    # Several symbols can close at the same instant with different results. Check the
+    # multiset of (time, net), rather than letting a timestamp-keyed dict overwrite them.
+    from collections import Counter
+    available = Counter((round(se.finite(r[0]), 3), round(se.finite(r[4]) - cf, 12)) for r in full)
+    used = Counter((round(t, 3), round(x, 12)) for t, x in ch["main"])
+    chain_ok = all(count <= available[key] for key, count in used.items())
     # a live close and a replay row with the same gross move
     st2 = b.by_idx[0]
     gross = 0.0031

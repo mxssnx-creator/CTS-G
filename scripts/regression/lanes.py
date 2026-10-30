@@ -749,6 +749,7 @@ class _Env:
         p.available = 900.0
         p.halted = False
         p.entry_sense = lambda *a, **k: None
+        p.sets.use_historic_gate = False  # Block exercises its independent non-Set parent
         p.control_orders = False
         p.closed = []
         p.block.enabled = True

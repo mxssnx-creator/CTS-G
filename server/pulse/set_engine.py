@@ -11,6 +11,7 @@ keeps being scored and becomes valid again on its own; only a lock is sticky.
 from __future__ import annotations
 
 import bisect
+import heapq
 import json
 import math
 from array import array
@@ -52,6 +53,8 @@ from indication_engine import (
     aggregate_bars,
     bars_to_candles,
     combine_timeframes,
+    evaluate_active,
+    evaluate_common,
     evaluate_direction,
     evaluate_move,
     evaluate_ta_pack,
@@ -370,6 +373,66 @@ def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, m
     return out
 
 
+def _main_windows(mt: Sequence[float], mn: Sequence[float], entries: Sequence[float], P: StageParams):
+    """Return the entry-time indices and cached Main-window verdicts for a chronologically ordered Main tape."""
+    mg, ml = prefix_sums(mn)
+    me = [bisect.bisect_left(mt, entry) for entry in entries]
+    mlo = [bisect.bisect_left(mt, entry - P.lookback_s) for entry in entries]
+    vec: Dict[int, List[bool]] = {}
+
+    def passes(w: int) -> List[bool]:
+        if w not in vec:
+            need = w if P.full_window else 1
+            floor_w = P.floor_for(w)
+            lo_pf, hi_pf = floor_w - 1e-4, floor_w + 1e-4
+            result = []
+            for e, lo in zip(me, mlo):
+                start = max(lo, e - w)
+                if e - start < need:
+                    result.append(False)
+                    continue
+                value = pf_of(mg[e] - mg[start], ml[e] - ml[start])
+                result.append(value >= hi_pf or (value >= lo_pf and round(value, 4) + 1e-9 >= floor_w))
+            vec[w] = result
+        return vec[w]
+    return me, mlo, passes
+
+
+def _main_short_choice(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: StageParams,
+                       passes: Callable[[int], List[bool]], known_entries: Optional[Sequence[bool]] = None,
+                       current_only: bool = False) -> Tuple[int, Optional[List[int]]]:
+    """Choose candidates from results following their own entry-time window verdicts; unknown entries do not vote."""
+    if not (P.main_on and P.short_on):
+        return P.main_n, None
+
+    def included(w: int):
+        verdict = passes(w)
+        gains, losses, counts = [0.0], [0.0], [0]
+        for i, value in enumerate(mn):
+            inc = verdict[i] and (known_entries is None or known_entries[i])
+            gains.append(gains[-1] + (value if inc and value > 0 else 0.0))
+            losses.append(losses[-1] + (-value if inc and value < 0 else 0.0))
+            counts.append(counts[-1] + int(inc))
+        return gains, losses, counts
+
+    ref_g, ref_l, _ = included(P.main_n)
+    candidates = [(int(w),) + included(int(w)) for w in P.short_windows]
+
+    def pick(end: int, lo: int) -> int:
+        ref = pf_of(ref_g[end] - ref_g[lo], ref_l[end] - ref_l[lo])
+        best, selected = ref, P.main_n
+        for w, gains, losses, counts in candidates:
+            if counts[end] - counts[lo] < P.short_min:
+                continue
+            pf = pf_of(gains[end] - gains[lo], losses[end] - losses[lo])
+            if pf > best + SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:
+                best, selected = pf, w
+        return selected
+
+    current = pick(len(mn), 0)
+    return current, None if current_only else [pick(e, lo) for e, lo in zip(me, mlo)]
+
+
 def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float], P: StageParams) -> Dict[str, Any]:
     """A Base Set's chain of Sets, as indices into its tape (exit time ascending; ents: entry times; nets: net results).
       main     the Main Set: the orders opened while Base passed on the raw tape before each entry (the long window, its minimum
@@ -445,69 +508,12 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     m = len(main)
     mt = [ts[k] for k in main]
     mn = [nets[k] for k in main]
-    mg, ml = prefix_sums(mn)
     msum = [0.0]
     for x in mn:
         msum.append(msum[-1] + x)
     # the Main Set's window positions, once per Main order: e (orders closed before the entry) and lo (the oldest inside the lookback)
-    me = [bis(mt, ents[k]) for k in main]
-    mlo = [bis(mt, ents[k] - lb) for k in main]
-    vec: Dict[int, List[bool]] = {}
-
-    def passes(w: int) -> List[bool]:
-        """Per Main order, whether the newest w Main orders before its entry hold the minimum PF (memoised: the long window and the chosen short
-        window are read twice, by the selection and by the Real Set)."""
-        v = vec.get(w)
-        if v is None:
-            need = w if full else 1
-            floor_w = P.floor_for(w)
-            lo_pf, hi_pf = floor_w - 1e-4, floor_w + 1e-4
-            v = []
-            for j in range(m):
-                e = me[j]
-                s0 = e - w
-                if s0 < mlo[j]:
-                    s0 = mlo[j]
-                if e - s0 < need:
-                    v.append(False)
-                    continue
-                result_pf = pf_of(mg[e] - mg[s0], ml[e] - ml[s0])
-                v.append(result_pf >= hi_pf or (result_pf >= lo_pf and round(result_pf, 4) + 1e-9 >= floor_w))
-            vec[w] = v
-        return v
-
-    short_n = P.main_n
-    choice: Optional[List[int]] = None
-    if P.main_on and P.short_on:
-        # The Main short window is each Set's own pick among the candidates: the one whose passed validations were followed by the best PF on the Main Set.
-        # Per Main order the pick reads only what was known at its entry: the validations of the Main orders that CLOSED before it (their results, and whether
-        # each had passed the window at its own entry), so an order's place in the Real Set never depends on a result that came after it. The pick for the verdict
-        # now reads every Main order (the same rule at the end of the tape).
-        def inc_prefix(w: int):
-            pv = passes(w)
-            cg, cl, cc = [0.0], [0.0], [0]
-            for j in range(m):
-                x = mn[j]
-                inc = pv[j]
-                cg.append(cg[-1] + (x if inc and x > 0 else 0.0))
-                cl.append(cl[-1] + (-x if inc and x < 0 else 0.0))
-                cc.append(cc[-1] + (1 if inc else 0))
-            return cg, cl, cc
-        sg_, sl_, _sc = inc_prefix(P.main_n)
-        cands = [(int(w),) + inc_prefix(w) for w in P.short_windows]
-
-        def pick(e: int, lo: int) -> int:
-            ref = pf_of(sg_[e] - sg_[lo], sl_[e] - sl_[lo])
-            best, sel = ref, P.main_n
-            for w, cg, cl, cc in cands:
-                if cc[e] - cc[lo] < P.short_min:
-                    continue
-                pf = pf_of(cg[e] - cg[lo], cl[e] - cl[lo])
-                if pf > best + SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:
-                    best, sel = pf, w
-            return sel
-        short_n = pick(m, 0)
-        choice = [pick(me[j], mlo[j]) for j in range(m)]
+    me, mlo, passes = _main_windows(mt, mn, [ents[k] for k in main], P)
+    short_n, choice = _main_short_choice(mn, me, mlo, P, passes)
     real = []
     if P.main_on:
         pl = passes(P.main_n)
@@ -683,9 +689,10 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
       tfCombined            the combined vote, which needs tfMinAgree agreeing lanes;
       typeState             the TA pack ("ta" vote);
       typeDirection         the direction evaluator ("dir" vote);
-      typeMove              the move evaluator ("move" vote).
-    typeActive and typeCommon have no evaluator in this pack, so they do not apply here.
-    A switch that is off removes its vote; with every switch on (the shipped overlays) the votes are unchanged."""
+      typeMove              the move evaluator ("move" vote);
+      typeActive            the strongest configured outbreak range ("active" vote);
+      typeCommon            the common RSI/MACD/EMA/Bollinger evaluator ("common" vote).
+    A switch that is off removes its vote."""
     rows = list(bars)
     one_m = rows[-60:]
     candles = bars_to_candles(one_m, now=now, period_s=BAR_S)
@@ -714,6 +721,14 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
             votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
     except Exception:
         pass
+    if closes and settings.get("typeActive", True):
+        active = evaluate_active("hist", closes, settings)
+        if active:
+            votes.append((1 if active.direction == "long" else -1, active.confidence, "active"))
+    if settings.get("typeCommon", True):
+        common = evaluate_common("hist", candles, settings)
+        if common:
+            votes.append((1 if common.direction == "long" else -1, common.confidence, "common"))
     extras = settings.get("extraIndicators") or []
     if extras:
         votes.extend(extra_votes(extra_rows if extra_rows is not None else rows[-EXTRA_WINDOW:], extras))     # each name its own window
@@ -948,6 +963,12 @@ class SetState:
     main_gl: float = 0.0
     proc: List[Tuple[float, float]] = field(default_factory=list)   # processed orders (exit t, net): opened while the Set passed Base
     proc_total: int = 0             # processed orders in the lookback (before the PROC_KEEP cap)
+    # Compact complete Main evidence for choosing a short candidate after a live close.
+    # The capped proc tape alone does not retain each order's entry time or earlier votes.
+    main_evidence: Optional[Tuple[array, array, array]] = None
+    # Every live Main result within the lookback can vote for a short window, even after the
+    # larger display/lane rows have been capped at PROC_KEEP per lane. Entry == exit means unknown.
+    main_live_evidence: Optional[Tuple[array, array, array]] = None
     exe: List[Tuple[float, float]] = field(default_factory=list)    # executable orders (exit t, net): opened while every gate passed
     exe_total: int = 0
     exe_pf: float = 0.0             # net PF of the executable lane over its last setGateWindow orders (listing)
@@ -1008,6 +1029,7 @@ class SetState:
     active: bool = True
     deact_reason: str = ""          # the gate reason of the last evaluation ('' when valid)
     evaluated_at: float = 0.0       # wall time of the last successful evaluation (freshness, live only)
+    score_at: float = 0.0           # event-time clock of the last scoring pass
     locked: bool = False
     source_n: int = 0
 
@@ -1763,6 +1785,9 @@ class SetBook:
             self.cooldown_bars = 2
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
         self.locks = {str(k): bool(v) for k, v in locks.items()}
+        active_ranges = ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak")
+        if not isinstance(active_ranges, (list, tuple)) or not active_ranges:
+            active_ranges = [3, 5, 10]
         self.ind_settings = {
             "candleLimit": 60,
             "minimumStrength": num(ov, "indMinStrength", 0.2),
@@ -1782,7 +1807,16 @@ class SetBook:
             "typeState": bool(ov.get("indTypeState", True)),
             "typeDirection": bool(ov.get("indTypeDirection", True)),
             "typeMove": bool(ov.get("indTypeMove", True)),
+            "typeActive": bool(ov.get("indTypeActive", True)),
+            "typeCommon": bool(ov.get("indTypeCommon", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
+            "dirRange": int(ov.get("indDirRange") or 10),
+            "moveRange": int(ov.get("indMoveRange") or 10),
+            "activeOutbreak": [int(x) for x in active_ranges],
+            "activeThreshold": float(ov.get("indActiveThreshold") or 1.0),
+            "activeNoise": float(ov.get("noise") or ov.get("indActiveNoise") or 0.0005),
+            "activeMovePct": float(ov.get("indActiveMovePct") or ov.get("activeMovePct") or 0.5),
+            "activeVolatilityWeight": float(ov.get("volWeight") or ov.get("activeVolatilityWeight") or 0.3),
             # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
             "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if extra_known(x)],
             **{key: [str(x) for x in (ov.get(key) or default) if extra_known(x)] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
@@ -2036,26 +2070,28 @@ class SetBook:
             elif not old or not joined or joined[-1] != old[-1]:
                 bar_t.pop(symbol, None)           # the series now ends on a row of unknown time
 
-    def entry_signal(self, symbol: str, bar_open_t: float) -> Optional[Tuple[str, int, float, str]]:
-        """The live entry decision on the completed minute that opened at bar_open_t: (pack, direction, confidence, why) of the
-        pack with the highest confidence at or above setEntryConf, else None. The replay's own rule on the replay's own bars
-        (bar_signal on the Set history), so a live position opens only where its Set's tape would have opened one. None when
-        the history does not end on that minute (it is not in yet, or the series ends on rows of unknown time)."""
+    def entry_signals(self, symbol: str, bar_open_t: float) -> List[Tuple[str, int, float, str]]:
+        """Every qualified replay signal for the completed minute, strongest first, with its own pack intact."""
         with self._lock:
             if self.__dict__.get("bar_t", {}).get(symbol) != float(bar_open_t) or not self.symbol_ok(symbol):
-                return None
+                return []
             bars = list(self.bars.get(symbol) or [])
             packs = list(self.packs)
             settings = dict(self.ind_settings)
         if len(bars) < max(self.min_bars, self.warmup + 1):
-            return None
+            return []
         row = bar_signal(bars, len(bars) - 1, packs, settings, float(bar_open_t) + BAR_S)
-        best: Optional[Tuple[str, int, float, str]] = None
+        hits: List[Tuple[str, int, float, str]] = []
         for p in packs:
             d, c, why = row.get(p, (0, 0.0, ""))
-            if d != 0 and c >= self.entry_conf and (best is None or c > best[2]):
-                best = (p, int(d), float(c), str(why))
-        return best
+            if d != 0 and c >= self.entry_conf:
+                hits.append((p, int(d), float(c), str(why)))
+        return sorted(hits, key=lambda hit: -hit[2])
+
+    def entry_signal(self, symbol: str, bar_open_t: float) -> Optional[Tuple[str, int, float, str]]:
+        """The strongest qualifying completed-bar signal (compatibility with single-signal callers)."""
+        hits = self.entry_signals(symbol, bar_open_t)
+        return hits[0] if hits else None
 
     def trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)
@@ -2110,8 +2146,13 @@ class SetBook:
         if not math.isfinite(pct):
             self.live_skipped += 1
             return
+        closed_at = finite(get("t"))
+        if closed_at <= 0:
+            # A close without a time cannot be placed in any causal last-N window.
+            self.live_skipped += 1
+            return
         row = {
-            "t": finite(get("t")),
+            "t": closed_at,
             "symbol": str(get("symbol") or ""),
             "side": str(get("side") or ""),
             "pnl_pct": pct,
@@ -2150,13 +2191,30 @@ class SetBook:
             pos = [r for r in ordered if str(r.get("lane") or "pos") != "neg"][-PROC_KEEP:]
             neg = [r for r in ordered if str(r.get("lane") or "pos") == "neg"][-PROC_KEEP:]
             st.live = sorted(pos + neg, key=lambda r: finite(r.get("t")))
+            if st.main_live_evidence is None:
+                live_rows = st.live
+                ts, entries, nets = array("d"), array("d"), array("d")
+            else:
+                live_rows = [row]
+                ts, entries, nets = st.main_live_evidence
+            for item in live_rows:
+                t, hold = finite(item.get("t")), finite(item.get("hold_s"))
+                ts.append(t)
+                entries.append(t - hold if t > 0 and 0 < hold <= t else t)
+                # Preserve gross moves so a subsequent PositionCost change is applied consistently.
+                nets.append(finite(item.get("pnl_pct")))
+            cutoff = max(row["t"], st.score_at) - self.lookback * BAR_S
+            if any(t < cutoff for t in ts):
+                kept = [(t, e, n) for t, e, n in zip(ts, entries, nets) if t >= cutoff]
+                ts, entries, nets = (array("d", (r[i] for r in kept)) for i in range(3))
+            st.main_live_evidence = (ts, entries, nets)
             st.n += 1
             st.live_n += 1
             if row["lane"] == "neg":
                 st.live_neg_n += 1
             else:
                 st.live_pos_n += 1
-            self._score_one(st, now=row["t"] or None)
+            self._score_one(st, now=max(row["t"], st.score_at) or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
         for rec in closed:
@@ -2187,7 +2245,7 @@ class SetBook:
         self._running = True
         t0 = time.time()
         # one origin per minute: every chunk replayed in the same minute shares it, so the rows agree
-        now = now or float((int(t0 // BAR_S) + 1) * BAR_S)
+        now = now if now is not None else float(int(t0 // BAR_S) * BAR_S)
         try:
             if symbols is None:
                 names = [s for s in self.bars if self.usable(s)]
@@ -2251,12 +2309,12 @@ class SetBook:
                 tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
                 for st in ([] if stale else self.by_idx):
                     try:
-                        full = self._tape_rows(st.id, tape_order, cutoff)
-                        full = self._choose_hold(st, full, tape_order, cutoff)
+                        full = self._tape_rows(st.id, tape_order, cutoff, until=now)
+                        full = self._choose_hold(st, full, tape_order, cutoff, until=now)
                         self.set_processed(st, full)
                         st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
-                        self._score_one(st, now=now)
+                        self._score_one(st, now=max(now, st.score_at) if st.live else now)
                         st.n = len(full) + st.live_n   # a replay pass recounts history; live closes stay counted
                     except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
                         st.last_error = f"{type(exc).__name__}: {exc}"[:160]
@@ -2303,7 +2361,11 @@ class SetBook:
         bars = self.bars[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
-        base_ts = now - (n - 1) * BAR_S
+        last_open = self.bar_t.get(symbol)
+        latest_close = float(last_open) + BAR_S if last_open is not None else now
+        if latest_close > now + 1e-6:
+            raise ValueError("completed bar ends after replay time")
+        base_ts = latest_close - (n - 1) * BAR_S
         salt = hash((json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs))))   # a memo entry holds only its packs
         cache = self._sig_cache.setdefault(symbol, {})
         signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step, cache=cache, salt=salt)
@@ -2360,10 +2422,10 @@ class SetBook:
             self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)
             self._lookback_grown = self.lookback
 
-    def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float) -> List[tuple]:
-        return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff), key=_row_t)
+    def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
+        return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
 
-    def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float) -> List[tuple]:
+    def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         """Auto Mode: the hold (minutes) whose own tape has the best cost PF over this Set's last orders, as many as it has but at most
         holdAutoMax. The global time stop is the reference; a candidate needs holdAutoMin orders and a PF margin over it to replace
         it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
@@ -2381,7 +2443,7 @@ class SetBook:
         best = (ref_pf, 0, base, ref_n)
         cands = [(0, base)]
         for h in holds:
-            rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff)
+            rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff, until=until)
             cands.append((h, rows))
             pf, n = judge(rows)
             if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
@@ -2415,7 +2477,7 @@ class SetBook:
                            base_min_both=self.base_min_both, main_min_both=self.main_min_both,
                            base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
 
-    def _chain_of(self, st: SetState, full: Sequence[tuple]) -> Dict[str, Any]:
+    def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False) -> Dict[str, Any]:
         """The Set's chain (stage_chain) over replayed rows: {"main", "real", "realneg": [(exit t, net)], "short_n"}."""
         cf = cost_as_frac(self.cost_pct)
         ts = [finite(r[0]) for r in full]
@@ -2424,6 +2486,9 @@ class SetBook:
         ch = stage_chain(ts, ents, nets, self.stage_params(st.pack))
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
         out["short_n"] = ch["short_n"]
+        if capture_evidence:
+            out["main_evidence"] = (array("d", (ts[k] for k in ch["main"])), array("d", (ents[k] for k in ch["main"])),
+                                    array("d", (nets[k] for k in ch["main"])))
         return out
 
     def _lanes_of(self, st: SetState, full: Sequence[tuple]) -> List[List[Tuple[float, float]]]:
@@ -2437,29 +2502,63 @@ class SetBook:
         """The Set's chain in every replay pass: its Main Set (orders opened while Base passed), Real Set (opened while Main passed,
         judged on the Main Set) and Real Negative Set (opened while the Main Set's recent average was negative), and its Main short window.
         Every stage after Base reads these Sets, never the raw tape."""
-        ch = self._chain_of(st, full)
+        ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on)
         st.proc, st.proc_total = ch["main"][-PROC_KEEP:], len(ch["main"])
         st.exe, st.exe_total = ch["real"][-PROC_KEEP:], len(ch["real"])
         st.neg, st.neg_total = ch["realneg"][-PROC_KEEP:], len(ch["realneg"])
         st.main_short_win = int(ch["short_n"])
+        st.main_evidence = ch.get("main_evidence")
         st.proc_replayed = True
 
-    def _streams(self, st: SetState) -> Tuple[List[float], List[float], List[float], int]:
+    def _streams(self, st: SetState, now: Optional[float] = None) -> Tuple[List[float], List[float], List[float], int]:
         """Net results (exit order) of the Set's Main, Real and Real Negative Sets with its live closes (a live close joins the Main
         Set and the lane it was executed on), and its Main short window. A Set that was not replayed applies the same chain to the tape it holds."""
         cf = cost_as_frac(self.cost_pct)
+        anchor = finite(now) if now is not None else st.score_at
+        cutoff = anchor - self.lookback * BAR_S if anchor > 0 else float("-inf")
+        upper = anchor if anchor > 0 else float("inf")
         if getattr(st, "proc_replayed", False):
             m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.main_n)
+            evidence = st.main_evidence
         else:
-            held = sorted((tuple(r_.get(k) for k in _ROW_KEYS) for r_ in st.hist if r_.get("pnl_pct") is not None), key=lambda r_: finite(r_[0]))
-            ch = self._chain_of(st, held)
+            held = sorted((tuple(r_.get(k) for k in _ROW_KEYS) for r_ in st.hist if r_.get("pnl_pct") is not None and cutoff <= finite(r_.get("t")) <= upper), key=lambda r_: finite(r_[0]))
+            ch = self._chain_of(st, held, capture_evidence=self.main_on and self.short_on)
             m, r, q, short_n = ch["main"], ch["real"], ch["realneg"], int(ch["short_n"])
-        for row in st.live:
-            if row.get("pnl_pct") is None:
-                continue
+            evidence = ch.get("main_evidence")
+        m = [x for x in m if cutoff <= x[0] <= upper]
+        r = [x for x in r if cutoff <= x[0] <= upper]
+        q = [x for x in q if cutoff <= x[0] <= upper]
+        live = [row for row in st.live if row.get("pnl_pct") is not None and cutoff <= finite(row.get("t")) <= upper]
+        for row in live:
             item = (finite(row.get("t")), finite(row.get("pnl_pct")) - cf)
             m.append(item)
             (q if str(row.get("lane") or "pos") == "neg" else r).append(item)
+        live_evidence = st.main_live_evidence
+        if live_evidence is None:
+            live_records = []
+            for row in live:
+                t, hold = finite(row.get("t")), finite(row.get("hold_s"))
+                known = t > 0 and 0 < hold <= t
+                live_records.append((t, t - hold if known else t, finite(row.get("pnl_pct")) - cf, known))
+        else:
+            live_records = [(t, e, gross - cf, e < t) for t, e, gross in zip(*live_evidence) if cutoff <= t <= upper]
+        expired = bool(evidence and evidence[0] and (evidence[0][0] < cutoff or evidence[0][-1] > upper))
+        if self.main_on and self.short_on and (live_records or expired):
+            if evidence is None and st.proc_replayed and st.proc_total:
+                # Without the entry-time evidence the old candidate cannot be recomputed safely.
+                short_n = self.main_n
+            else:
+                records = []
+                if evidence is not None:
+                    records.extend((t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper)
+                records.extend(live_records)
+                records.sort(key=lambda item: item[0])
+                ts = [x[0] for x in records]
+                entries = [x[1] for x in records]
+                nets = [x[2] for x in records]
+                params = self.stage_params(st.pack)
+                me, mlo, passes = _main_windows(ts, nets, entries, params)
+                short_n, _ = _main_short_choice(nets, me, mlo, params, passes, [x[3] for x in records], current_only=True)
         out = []
         for v in (m, r, q):
             v.sort(key=lambda x: x[0])
@@ -2474,18 +2573,39 @@ class SetBook:
         """The Set's Main Set (orders opened while Base passed) with its live closes."""
         return self._streams(st)[0]
 
+    def _tape_at(self, st: SetState, now: float) -> List[Dict[str, Any]]:
+        cutoff = now - self.lookback * BAR_S if now > 0 else float("-inf")
+        upper = now if now > 0 else float("inf")
+        return by_time([row for row in st.tape() if cutoff <= finite(row.get("t")) <= upper])
+
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
-        tape = by_time(st.tape())                                    # last-N and drawdown read one time order
+        if now is None:
+            anchor = max((finite(row.get("t")) for row in st.tape()), default=0.0)
+        else:
+            anchor = finite(now)
+        st.score_at = anchor
+        tape = self._tape_at(st, anchor)                             # only closed orders within the lookback
+        cf = cost_as_frac(self.cost_pct)
+        for i, row in enumerate(tape):
+            try:
+                gross = float(row.get("pnl_pct"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(gross) and abs(finite(row.get("pnl")) - (gross - cf)) > 1e-12:
+                # Stored net values may use an earlier cost setting; every reported statistic
+                # and drawdown must use the same current round-trip cost as the PF gates.
+                tape[i] = {**row, "pnl": gross - cf}
         pnls = [finite(r.get("pnl")) for r in tape]
         st.wins = sum(1 for x in pnls if x > 0)
-        st.gp = round(sum(x for x in pnls if x > 0), 6)
-        st.gl = round(abs(sum(x for x in pnls if x < 0)), 6)
+        gross_profit = sum(x for x in pnls if x > 0)
+        gross_loss = -sum(x for x in pnls if x < 0)
+        st.gp, st.gl = round(gross_profit, 6), round(gross_loss, 6)
         decided = sum(1 for x in pnls if x != 0)
         st.wr = round(100.0 * st.wins / decided, 1) if decided else 0.0
         st.expectancy = round(sum(pnls) / len(pnls), 6) if pnls else 0.0
         holds = [finite(r.get("hold_s")) for r in tape]
         st.avg_hold_s = round(sum(holds) / len(holds), 1) if holds else 0.0
-        st.pf_all = round(st.gp / st.gl, 4) if st.gl > 0 else (99.0 if st.gp > 0 else 0.0)
+        st.pf_all = round(pf_of(gross_profit, gross_loss), 4)
         counts: Dict[str, int] = {}
         for r in tape:
             k = str(r.get("reason") or "x").split(":")[0]
@@ -2499,7 +2619,6 @@ class SetBook:
         gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct, scan_all=False)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
-        cf = cost_as_frac(self.cost_pct)
         win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-self.gate_window:]
         half = len(win) // 2
         if half >= 1:
@@ -2509,43 +2628,43 @@ class SetBook:
             st.gate_pf_old, st.gate_pf_new = round(_pf(win[:half]), 4), round(_pf(win[half:]), 4)
         else:
             st.gate_pf_old = st.gate_pf_new = 0.0
-        st.gate_gp = round(sum(x for x in win if x > 0), 8)
-        st.gate_gl = round(-sum(x for x in win if x < 0), 8)
+        st.gate_gp = sum(x for x in win if x > 0)
+        st.gate_gl = -sum(x for x in win if x < 0)
         sw = win[-self.base_short:] if self.base_short else []
         st.base_short_n = len(sw)
-        st.base_short_gp, st.base_short_gl = round(sum(x for x in sw if x > 0), 8), round(-sum(x for x in sw if x < 0), 8)
+        st.base_short_gp, st.base_short_gl = sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)
         st.base_short_pf = round(pf_of(st.base_short_gp, st.base_short_gl), 4)
         mw = win[-self.base_min_n:] if self.base_min_n else []
         st.base_min_n = len(mw)
-        st.base_min_gp, st.base_min_gl = round(sum(x for x in mw if x > 0), 8), round(-sum(x for x in mw if x < 0), 8)
+        st.base_min_gp, st.base_min_gl = sum(x for x in mw if x > 0), -sum(x for x in mw if x < 0)
         st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
                                                     and sign_ok(mw, self.base_min_positive, self.base_min_both, self.base_min_avg))
-        m_, r_, q_, short_n = self._streams(st)      # the stages after Base read the Set's Main / Real / Real Negative Sets
+        m_, r_, q_, short_n = self._streams(st, now=anchor)      # the stages after Base read the Set's Main / Real / Real Negative Sets
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack))
         st.stage = v
         st.main_short_win = short_n
         rw = m_[-self.main_n:]
         st.main_n = len(rw)
-        st.main_gp = round(sum(x for x in rw if x > 0), 8)
-        st.main_gl = round(-sum(x for x in rw if x < 0), 8)
+        st.main_gp = sum(x for x in rw if x > 0)
+        st.main_gl = -sum(x for x in rw if x < 0)
         st.main_pf = round(pf_of(st.main_gp, st.main_gl), 4)
         mrw = m_[-short_n:] if self.short_on else []                  # the Main short window's own orders
         st.main_short_n = len(mrw)
-        st.main_short_gp, st.main_short_gl = round(sum(x for x in mrw if x > 0), 8), round(-sum(x for x in mrw if x < 0), 8)
+        st.main_short_gp, st.main_short_gl = sum(x for x in mrw if x > 0), -sum(x for x in mrw if x < 0)
         st.main_short_pf = round(pf_of(st.main_short_gp, st.main_short_gl), 4)
         kw = m_[-self.main_min_n:] if self.main_min_n else []          # the Main minimal window's own results
         st.main_min_have = len(kw)
-        st.main_min_gp, st.main_min_gl = round(sum(x for x in kw if x > 0), 8), round(-sum(x for x in kw if x < 0), 8)
+        st.main_min_gp, st.main_min_gl = sum(x for x in kw if x > 0), -sum(x for x in kw if x < 0)
         nw = next((w for w in sorted(self.neg_windows) if self.neg_on and len(m_) >= w and sum(m_[-w:]) < -NEG_EPS), 0)    # the smallest Negative window that fires
         nv = m_[-nw:] if nw else []
         st.neg_win = nw
-        st.neg_win_gp, st.neg_win_gl = round(sum(x for x in nv if x > 0), 8), round(-sum(x for x in nv if x < 0), 8)
+        st.neg_win_gp, st.neg_win_gl = sum(x for x in nv if x > 0), -sum(x for x in nv if x < 0)
         ew = r_[-self.realst_n:]
         st.exe_n, st.exe_pf = len(ew), round(pf_of(sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)), 4)
-        st.exe_gp, st.exe_gl = round(sum(x for x in ew if x > 0), 8), round(-sum(x for x in ew if x < 0), 8)
+        st.exe_gp, st.exe_gl = sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)
         qw = q_[-self.realst_n:]
         st.neg_n, st.neg_pf = len(qw), round(pf_of(sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)), 4)
-        st.neg_gp, st.neg_gl = round(sum(x for x in qw if x > 0), 8), round(-sum(x for x in qw if x < 0), 8)
+        st.neg_gp, st.neg_gl = sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)
         last25 = tape[-self.deact_n :]
         st.last25_n = len(last25)
         if last25:
@@ -2555,7 +2674,7 @@ class SetBook:
         else:
             st.last25_avg_r = 0.0
             st.last25_avg_pnl = 0.0
-        dd = drawdown_time(tape[-self.gate_window:], now=now)   # the last N positions, not the whole tape
+        dd = drawdown_time(tape[-self.gate_window:], now=anchor or None)   # the last N positions, not the whole tape
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
@@ -2803,39 +2922,48 @@ class SetBook:
         """The Real stage's paper stream: the newest n orders of every Set's Real and Real Negative Sets (the orders the Sets opened
         after Base and Main), oldest first, as {"t", "pnl_pct", "pnl", "lane"}. The overall strategies (the coordinator's stages and
         axes) read it, so their evidence keeps flowing whether or not a position was executed."""
-        cf = cost_as_frac(self.cost_pct)
-        rows: List[Tuple[float, float, str]] = []
-        with self._lock:
-            for st in self.by_idx:
-                rows += [(t, x, "pos") for t, x in (st.exe or [])[-n:]]
-                rows += [(t, x, "neg") for t, x in (getattr(st, "neg", None) or [])[-n:]]
-        rows.sort(key=lambda r: r[0])
-        return [{"t": t, "pnl_pct": x + cf, "pnl": x, "lane": lane} for t, x, lane in rows[-n:]]
+        return self._real_paper_scopes(n, scoped=False)["overall"]
 
     def real_paper_scopes(self, n: int = 200) -> Dict[str, List[Dict[str, Any]]]:
         """The Real paper stream split by scope in one pass: "overall" (every Real and Real Negative Set), "lane:pos", "lane:neg",
         "pack:<pack>" (both lanes of one strategy) and "pack:<pack>:<lane>"; each the newest n orders of its scope, oldest first (the
         rows of real_paper). The lane and pack-lane scopes gate entries; the overall and pack scopes are figures."""
+        return self._real_paper_scopes(n, scoped=True)
+
+    def _real_paper_scopes(self, n: int, scoped: bool) -> Dict[str, List[Dict[str, Any]]]:
+        """Bound each output while scanning, and never feed an expired/future replay result to an Axis."""
+        n = max(1, int(n))
         cf = cost_as_frac(self.cost_pct)
-        by: Dict[str, List[Tuple[float, float, str]]] = {"overall": [], "lane:pos": [], "lane:neg": []}
-        for p in self.packs:
-            by[f"pack:{p}"] = []
-            by[f"pack:{p}:pos"] = []
-            by[f"pack:{p}:neg"] = []
+        by: Dict[str, List[Tuple[float, int, float, str]]] = {"overall": []}
+        if scoped:
+            by.update({"lane:pos": [], "lane:neg": []})
+            for p in self.packs:
+                by.update({f"pack:{p}": [], f"pack:{p}:pos": [], f"pack:{p}:neg": []})
+        def add(key: str, item: Tuple[float, int, float, str]) -> None:
+            heap = by.setdefault(key, [])
+            if len(heap) < n:
+                heapq.heappush(heap, item)
+            elif item[:2] > heap[0][:2]:
+                heapq.heapreplace(heap, item)
         with self._lock:
+            anchor = max((st.score_at for st in self.by_idx), default=0.0)
+            cutoff = anchor - self.lookback * BAR_S if anchor > 0 else float("-inf")
+            upper = anchor if anchor > 0 else float("inf")
+            seq = 0
             for st in self.by_idx:
-                pk = by.setdefault(f"pack:{st.pack}", [])
                 for lane, src in (("pos", st.exe or []), ("neg", getattr(st, "neg", None) or [])):
-                    part = [(t, x, lane) for t, x in src[-n:]]
-                    by["overall"] += part
-                    by[f"lane:{lane}"] += part
-                    pk += part
-                    by.setdefault(f"pack:{st.pack}:{lane}", []).extend(part)
-        out = {}
-        for k, rows in by.items():
-            rows.sort(key=lambda r: r[0])
-            out[k] = [{"t": t, "pnl_pct": x + cf, "pnl": x, "lane": lane} for t, x, lane in rows[-n:]]
-        return out
+                    for t, value in src[-n:]:
+                        if not cutoff <= t <= upper:
+                            continue
+                        item = (t, seq, value, lane)
+                        seq += 1
+                        add("overall", item)
+                        if scoped:
+                            add(f"lane:{lane}", item)
+                            add(f"pack:{st.pack}", item)
+                            add(f"pack:{st.pack}:{lane}", item)
+        return {key: [{"t": t, "pnl_pct": value + cf, "pnl": value, "lane": lane}
+                      for t, _seq, value, lane in sorted(rows)] for key, rows in by.items()}
 
     def stage_counts(self) -> Dict[str, int]:
         """PF-validated stage populations; coordination readiness is counted separately."""
@@ -2888,16 +3016,19 @@ class SetBook:
         v = st.stage or {}
         return "pos" if v.get("pos") else ("neg" if v.get("negl") else "")
 
-    def pick_any(self, pack: str) -> Optional[SetState]:
+    def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None) -> Optional[SetState]:
         """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
         rank_key: the same entries, each judged on its own exits), else the best valid trailing Set."""
         # one lock acquisition: a Set cannot change between the lookups
         # the positive lane (Base -> Main -> Real) first, then the Real Negative lane; within a lane by rank_key
         with self._lock:
+            allowed = {"pos", "neg"} if allowed_lanes is None else set(allowed_lanes)
             fixed = [x for x in (self._pick(pack, "base"), self._pick(pack, "exit")) if x is not None]
             if not fixed and not (self.main_on or self.neg_on or self.realst_on):
-                return self._pick(pack, "trail")
+                return self._pick(pack, "trail") if "pos" in allowed else None
             for lane in ("pos", "neg"):
+                if lane not in allowed:
+                    continue
                 for kinds in (("base", "exit"), ("trail",)):
                     rows = [x for k in kinds for x in self._valid_for(pack, k) if self.lane_of(x) == lane]
                     if rows:
@@ -2956,7 +3087,7 @@ class SetBook:
             n_rows = 0
             for x in sts:
                 rk = self.rank_key(x)
-                for r in by_time(x.tape())[-self.gate_window:]:
+                for r in self._tape_at(x, x.score_at)[-self.gate_window:]:
                     n_rows += 1
                     k = (r.get("symbol"), int(round(finite(r.get("t")) - finite(r.get("hold_s")))), x.pack, r.get("side"))
                     cur = best.get(k)

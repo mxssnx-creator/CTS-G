@@ -317,6 +317,7 @@ def entry_lifecycle_with_a_stub_exchange():
             p.available = 50.0
             p.halted = False
             p.entry_sense = lambda *a, **k: None
+            p.sets.use_historic_gate = False  # this fixture exercises an untagged venue entry
             p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
             pos = p.open.get(sym)
             orders = [b for path, b in api.posts if path.endswith("/trade/order")]
@@ -359,6 +360,7 @@ def _enter(venue):
     p.available = 50.0
     p.halted = False
     p.entry_sense = lambda *a, **k: None
+    p.sets.use_historic_gate = False  # the isolated venue fixture opens a non-Set position
     p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
     return p, sym
 
@@ -500,6 +502,7 @@ def lost_entry_answer_is_remembered_for_adoption():
         p.available = 50.0
         p.halted = False
         p.entry_sense = lambda *a, **k: None
+        p.sets.use_historic_gate = False  # exercise venue recovery independently of Set validation
         p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
         return sym in p.open, dict(getattr(p, "unknown_entry", {}))
     opened, unk = _isolated(run)
@@ -1099,6 +1102,8 @@ def a_set_position_gets_no_add_on_lane():
             p.halted = False
             p.entry_sense = lambda *a, **k: None
             st = p.sets.by_idx[0] if (with_set and p.sets.by_idx) else None
+            if not with_set:
+                p.sets.use_historic_gate = False  # test Block's independent non-Set parent
             p.sets.pick_any = lambda pack, _st=st: _st
             p.sets.pick_trail = lambda pack: None
             parents = []
@@ -1302,6 +1307,91 @@ def completed_minutes_only_reach_the_set_history():
     ordered = p._parse_klines(list(reversed(rows))) == p._parse_klines(rows)
     ok = len(bars) == 4 and last_t == minute - 60.0 and ordered
     return ok, f"bars={len(bars)} last={last_t} (want {minute - 60.0}) v3 order fixed={ordered}"
+
+
+def completed_minutes_do_not_bridge_gaps_or_bad_rows():
+    """The timestamp-free history can represent only a contiguous series of completed minutes."""
+    p = _bare_pulse()
+    minute = 1_790_000_100.0
+    def bar(k):
+        return {"open": "2", "high": "3", "low": "1", "close": str(2 + k / 100),
+                "volume": "1", "time": int((minute - 60 * k) * 1000)}
+    rows = [bar(k) for k in (0, 1, 2, 4, 5, 6)]
+    bars, last_t = p._closed_klines(rows + [dict(rows[1])], now=minute + 20)
+    bad = [dict(r) for r in rows]
+    del bad[1]["close"]
+    rejected = p._closed_klines(bad, now=minute + 20)
+    ok = len(bars) == 2 and [b[3] for b in bars] == [2.02, 2.01] and last_t == minute - 60 and rejected == ([], None)
+    return ok, f"contiguous closes={[b[3] for b in bars]}, duplicate removed, malformed series rejected={rejected == ([], None)}"
+
+
+def entry_selection_keeps_packs_and_axis_lanes_independent():
+    """An invalid stronger pack, or a blocked positive lane, must not hide an independently valid entry."""
+    from coord_engine import Coordinator
+    sym = "X-USDT"
+    minute = 1_790_000_100.0
+    choices = {"strong": None, "valid": types.SimpleNamespace(lane="pos")}
+    class Sets:
+        packs = ["strong", "valid"]
+        bar_t = {sym: minute - 60}
+        def entry_signals(self, _sym, _t):
+            return [("strong", 1, .95, "strong-signal"), ("valid", -1, .8, "valid-signal")]
+        def pick_any(self, pack, allowed_lanes=None):
+            row = choices[pack]
+            return row if row is not None and (allowed_lanes is None or row.lane in allowed_lanes) else None
+        def lane_of(self, row):
+            return row.lane
+    p = _bare_pulse(); p.sets = Sets(); p.open = {}; p.coord = Coordinator()
+    p.coord.scopes = {"lane:pos": {"allow": False}, "pack:valid:pos": {"allow": True},
+                      "pack:strong:pos": {"allow": False}, "pack:strong:neg": {"allow": True}}
+    old = pt.SYMBOLS
+    try:
+        pt.SYMBOLS = [sym]
+        first = p.set_entry_candidates(now=minute + 5).get(sym)
+        choices["strong"] = types.SimpleNamespace(lane="pos")
+        second = p.set_entry_candidates(now=minute + 6).get(sym)  # same signal memo, newly changed validity
+        choices["valid"] = None
+        choices["strong"] = types.SimpleNamespace(lane="neg")
+        third = p.set_entry_candidates(now=minute + 7).get(sym)
+    finally:
+        pt.SYMBOLS = old
+    # One pack's losing pooled lane is advisory to another pack with its own winning evidence.
+    co = Coordinator()
+    co.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False})
+    winners = [{"pnl_pct": .01, "pnl": .01} for _ in range(4)]
+    losses = [{"pnl_pct": -.01, "pnl": -.01} for _ in range(4)]
+    co.judge_scopes({"lane:pos": losses, "pack:valid:pos": winners, "pack:strong:pos": losses})
+    scope = (co.scope_allows("valid", "pos"), co.scope_allows("strong", "pos"))
+    alternative = types.SimpleNamespace(lane="neg")
+    class TwoLanes(Sets):
+        def pick_any(self, _pack, allowed_lanes=None):
+            if allowed_lanes is None or "pos" in allowed_lanes:
+                return types.SimpleNamespace(lane="pos")
+            return alternative if "neg" in allowed_lanes else None
+    p.sets = TwoLanes()
+    picked, blocked = p._scope_pick("strong")
+    ok = (first and first[3].startswith("set:valid:") and second and second[3].startswith("set:valid:")
+          and third and third[3].startswith("set:strong:") and picked is alternative and not blocked
+          and scope == ((True, ""), (False, "pack:strong:pos")))
+    return bool(ok), f"selected={first}, {second}, {third}; scopes={scope}; negative alternative={picked is alternative}"
+
+
+def entry_does_not_open_when_the_set_disappears_after_sense():
+    """A validation change between entry_sense and placement cannot create an untagged live position."""
+    def run():
+        sym = "BTC-USDT"
+        venue = _StubExchange(executed="1", requested="1")
+        contract = pt.Contract(symbol=sym, min_qty=.001, step=.001, qprec=3, pprec=2, min_usdt=5, max_lev=50)
+        p = pt.Pulse(venue, {sym: contract})
+        p.boot_ts, p.available, p.halted = 0.0, 50.0, False
+        p.px[sym] = 100.0
+        p.entry_sense = lambda *args, **kwargs: None
+        p.sets.pick_any = lambda _pack: None
+        p.place(sym, 1, "set:indications:signal", .8)
+        orders = [body for path, body in venue.posts if path.endswith("/trade/order")]
+        return bool(p.sets.enabled and p.sets.use_historic_gate), sym in p.open, len(orders)
+    gate, opened, orders = _isolated(run)
+    return gate and not opened and orders == 0, f"gate on={gate}; opened={opened}; venue orders={orders}"
 
 
 def an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does():
@@ -1508,8 +1598,8 @@ def every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats():
 def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
     """The Real stage's overall strategies per scope: real_paper_scopes splits the Real paper stream into "overall", each lane and
     each pack (every row of a scope comes from that scope's Sets only, each scope at most n rows, oldest first); judge_scopes gives
-    each its own verdict (with the last axis on, a losing Real Negative lane blocks only that lane and that pack on that lane, never
-    the positive lane: the mixed overall and pack-wide scopes are figures, not gates); place() holds an entry whose scope blocks and counts it; the execution stats list every scope with its executed orders."""
+    each its own verdict (with the last axis on, a losing pack/lane blocks only that pack/lane; pooled scopes are figures);
+    place() holds an entry whose scope blocks and counts it; the execution stats list every scope with its executed orders."""
     from common import SMALL, overlay
     from set_engine import SetBook
     b = SetBook()
@@ -1548,7 +1638,8 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
             p.sets.pick_any = lambda pack, _st=st: _st
             p.sets.pick_trail = lambda pack: None
             p.sets.lane_of = lambda _st, _l=lane: _l
-            p.coord.scopes = {"lane:neg": {"allow": False}, "lane:pos": {"allow": True}}
+            p.coord.scopes = {"lane:neg": {"allow": False}, "lane:pos": {"allow": True},
+                              f"pack:{st.pack}:neg": {"allow": False}, f"pack:{st.pack}:pos": {"allow": True}}
             p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
             out.append((lane, sym in p.open, int(p.exec_n.get("scopeBlocked", 0))))
             p._exec_note(pt.Closed(2000.0, sym, "LONG", 1, 1, 1, 0.5, 0.01, "tp", 60, set_id=st.id, pack=st.pack, lane=lane))
@@ -1559,12 +1650,15 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
     pk_lane_ok = all(r["lane"] == "neg" for r in streams[f"pack:{packs[0]}:neg"]) and all(r["lane"] == "pos" for r in streams[f"pack:{packs[0]}:pos"])
     ok = (lane_ok and pk_lane_ok and sizes_ok and all(v > 0 for v in pack_rows.values()) and verdicts["lane:neg"] is False and verdicts["lane:pos"] is True
           and verdicts[f"pack:{packs[0]}:pos"] is True and verdicts[f"pack:{packs[0]}:neg"] is False
-          and allows[0] == (True, "") and allows[1] == (False, "lane:neg")
+          and allows[0] == (True, "") and allows[1] == (False, f"pack:{packs[0]}:neg")
           and placed[0] == ("neg", False, 1) and placed[2] == ("pos", True, 0) and "lane:neg" in placed[1] and "overall" in placed[3])
     return ok, f"rows per pack {pack_rows}; verdicts {verdicts}; scope_allows pos/neg {allows}; place {placed}"
 
 
 CHECKS = [
+    ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
+    ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),
+    ("trader.completed-minutes-do-not-bridge-gaps-or-bad-rows", completed_minutes_do_not_bridge_gaps_or_bad_rows),
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
     ("trader.lanes-every-stage-on-its-own-lane", every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats),
     ("trader.real-overall-strategies-per-scope", real_stage_overall_strategies_judge_every_scope_on_its_own_stream),

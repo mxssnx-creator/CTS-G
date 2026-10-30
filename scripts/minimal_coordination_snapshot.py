@@ -26,6 +26,8 @@ def main() -> None:
     ap.add_argument("--symbols", default="BTC-USDT,ETH-USDT")
     ap.add_argument("--mode", choices=("positive", "negative", "both", "avgpositive", "avgnegative", "avgboth"), default="negative")
     ap.add_argument("--minimal", type=int, choices=(0, 1, 2, 3), default=1)
+    ap.add_argument("--all-packs", action="store_true", help="include every implemented independent strategy pack")
+    ap.add_argument("--without-active-common", action="store_true", help="compare with the former four-vote indication pack")
     a = ap.parse_args()
     symbols = [s.strip() for s in a.symbols.split(",") if s.strip()]
     market = {s: json.loads((Path(a.data) / (s + ".json")).read_text())[-660:] for s in symbols}
@@ -38,6 +40,10 @@ def main() -> None:
     ov.update({"histLookbackBars": 360, "histLookbackAuto": False, "setSlRatios": [1.0], "setMinStep": 2,
                "setStepMax": 30, "setStepAdapt": False, "trailVariants": ["0.60:0.36", "1.20:0.60", "2.40:1.20", "3.60:1.20"],
                "exitIgnoreTp": True, "setGateMinN": a.minimal, "setGateMinMode": a.mode, "mainMinN": a.minimal, "mainMinMode": a.mode})
+    if a.all_packs:
+        ov.update({k: True for k in ("stratShortRange", "stratTrend", "stratBreakout", "stratReversion", "stratFlow", "stratMulti")})
+    if a.without_active_common:
+        ov.update({"indTypeActive": False, "indTypeCommon": False})
     book = SetBook()
     book.load(ov)
     end = min(rows[-1][0] for rows in market.values()) // 1000
@@ -53,7 +59,8 @@ def main() -> None:
             if len(chosen) != 360:
                 raise ValueError(f"{s}: incomplete six-hour snapshot")
             book.bars[s] = chosen
-        book.replay_all(now=float(ts))
+            book.bar_t[s] = float(ts)  # the source timestamp is the last candle's open
+        book.replay_all(now=float(ts + 60))  # score after that candle has completed
         if not book.progress.ready or book.progress.errors:
             raise RuntimeError((book.progress.phase, book.progress.error))
         split = book.snapshot()["pfBase"]
@@ -83,10 +90,11 @@ def main() -> None:
         for row in groups.values():
             row["base_pf"] = pf(row.pop("base_gp"), row.pop("base_gl"))
             row["main_pf"] = pf(row.pop("main_gp"), row.pop("main_gl"))
-        reports.append({"at_utc": datetime.fromtimestamp(ts, timezone.utc).isoformat(), "cost_pct": book.cost_pct,
+        reports.append({"at_utc": datetime.fromtimestamp(ts + 60, timezone.utc).isoformat(), "cost_pct": book.cost_pct,
                         "total": len(book.by_idx), "base": split["baseOnly"], "main": split["main"], "final": split["base"],
                         "eligible": split["eligible"], "groups": list(groups.values())})
-    Path(a.out).write_text(json.dumps({"symbols": symbols, "lookback_minutes": 360, "minimal": a.minimal, "mode": a.mode,
+    Path(a.out).write_text(json.dumps({"symbols": symbols, "lookback_minutes": 360, "minimal": a.minimal, "mode": a.mode, "all_packs": a.all_packs,
+                                       "active_common": not a.without_active_common,
                                        "hold_auto": book.hold_auto, "points": reports}, indent=2) + "\n")
     for p in reports:
         print(p["at_utc"], "base", p["base"], "main", p["main"], "final", p["final"], "ready", p["eligible"])
