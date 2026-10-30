@@ -345,19 +345,19 @@ def default_max_drawdown_time_is_24_hours():
 
 
 def every_window_asks_the_minimum_pf_of_its_size():
-    """Minimum PF by window size (minPfBySize, default on): up to 5 orders Micro 1.05, up to 10 Minimal 1.08, up to 20 Short 1.12, up to
+    """Minimum PF by window size (minPfBySize, default on): up to 5 orders Micro 1.05, up to 10 Minimal 1.10, up to 20 Short 1.15, up to
     35 Medium 1.25, above Long 1.5; the Base long window (50) asks 1.5, the Base short (25) and Main static (25) 1.25, the Real window (15)
-    1.12, the Main short windows 5 / 10 1.05 / 1.08. Off: setMinPf for every window. A class is never under MIN_PF_FLOOR (1.05)."""
+    1.15, the Main short windows 5 / 10 1.05 / 1.10. Off: setMinPf for every window. A class is never under MIN_PF_FLOOR (1.05)."""
     import set_engine as se
     from position_cost import MIN_PF_FLOOR
     b = SetBook(); b.load(overlay(minPfBySize=True))
     got = {n: b.floor_for(n, "indications") for n in (1, 5, 6, 10, 15, 20, 25, 35, 36, 50)}
-    want = {1: 1.05, 5: 1.05, 6: 1.08, 10: 1.08, 15: 1.12, 20: 1.12, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}
+    want = {1: 1.05, 5: 1.05, 6: 1.10, 10: 1.10, 15: 1.15, 20: 1.15, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}
     off = SetBook(); off.load(overlay(minPfBySize=False, setMinPf=1.3))
     low = SetBook(); low.load(overlay(minPfBySize=True, minPfMicro=0.9))
     P = b.stage_params("indications")
-    # stage verdicts: Real 15 at PF 1.15 passes (Short 1.12); Main static 25 at PF 1.2 fails (Medium 1.25); Main short 5 at 1.06 passes (Micro)
-    win15 = [0.0023] * 10 + [-0.004] * 5                 # PF 1.15 over 15: passes the Short class (1.12)
+    # stage verdicts: Real 15 at PF 1.15 passes (Short 1.15); Main short 5 at 1.06 passes (Micro)
+    win15 = [0.0023] * 10 + [-0.004] * 5                 # PF 1.15 over 15: passes the Short class
     win15_low = [0.0022] * 10 + [-0.004] * 5             # PF 1.10: fails it
 
     def pf(v):
@@ -377,6 +377,44 @@ def every_window_asks_the_minimum_pf_of_its_size():
     ok = (got == want and all(off.floor_for(n, "indications") == 1.3 for n in (5, 15, 50)) and low.floor_for(3, "x") == MIN_PF_FLOOR
           and abs(pf(win15) - 1.15) < 1e-9 and v["real"] is True and v_low["real"] is False and v["main"] is True and long_14 == "pf<min" and long_15 not in ("pf<min", "short"))
     return ok, f"floors {got}; off {off.floor_for(5, 'x')}; micro 0.9 -> {low.floor_for(3, 'x')}; Real 15 at 1.15 {v['real']}, at 1.10 {v_low['real']}; long 1.4 '{long_14}', 1.5 '{long_15}'"
+
+
+def signal_floor_is_separate_from_window_classes():
+    """Signal packs read their own configured floor through the complete stage parameter object."""
+    b = SetBook(); b.load(overlay(minPfBySize=True, minPfSignals=1.3))
+    values = [b.floor_for(n, "sig-example") for n in (5, 15, 25, 50)]
+    params = b.stage_params("sig-example")
+    stage = [params.floor_for(n) for n in (5, 15, 25, 50)]
+    ordinary = [b.floor_for(n, "indications") for n in (5, 15, 25, 50)]
+    b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=1.7))
+    changed = [b.floor_for(5, "signals"), b.stage_params("signal.indicator").floor_for(50)]
+    ok = values == [1.3] * 4 and stage == values and ordinary == [1.05, 1.15, 1.25, 1.5] and changed == [1.7, 1.7]
+    return ok, f"signals={values}, stage={stage}, ordinary={ordinary}, changed={changed}"
+
+
+def pf_defaults_match_every_shipped_overlay():
+    """The desk, each venue overlay and the engine agree on the six requested defaults."""
+    import json
+    import os
+    import re
+    from common import ROOT, PULSE
+    want = {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15,
+            "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 1.3}
+    src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    block = src.split("export const PF_TYPE_DEFAULTS = {", 1)[1].split("} as const;", 1)[0]
+    desk = {key: float(value) for key, value in re.findall(r"(minPf\w+):\s*([0-9.]+)", block)}
+    errors = []
+    for venue in ("bingx", "bybit"):
+        for conn in ("x01", "x02"):
+            path = os.path.join(PULSE, f"overlay-{venue}-{conn}.json")
+            ov = json.load(open(path, encoding="utf-8"))
+            if any(ov.get(k) != value for k, value in want.items()):
+                errors.append(path)
+            book = SetBook(); book.load(ov)
+            got = [book.floor_for(n, "indications") for n in (5, 10, 20, 35, 50)] + [book.floor_for(50, "signals")]
+            if got != list(want.values()):
+                errors.append(f"{venue}-{conn} engine={got}")
+    return desk == want and not errors, f"desk={desk}; overlay/engine errors={errors}"
 
 
 def minimal_coordination_is_not_pf_validation():
@@ -436,6 +474,8 @@ def minimal_coordination_is_not_pf_validation():
 
 
 CHECKS = [
+    ("gates.pf-defaults-match-shipped-overlays", pf_defaults_match_every_shipped_overlay),
+    ("gates.signal-floor-independent-of-window-class", signal_floor_is_separate_from_window_classes),
     ("gates.minimal-coordination-is-not-pf-validation", minimal_coordination_is_not_pf_validation),
     ("gates.every-window-asks-the-minimum-pf-of-its-size", every_window_asks_the_minimum_pf_of_its_size),
     ("gates.base-minimal-window-positive-and-negative", base_minimal_window_positive_and_negative),

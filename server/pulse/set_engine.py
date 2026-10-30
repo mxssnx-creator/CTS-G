@@ -68,6 +68,14 @@ from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
 EXTRA_INDICATOR_PREFIX = "extra."
+SIGNAL_PACK_PREFIXES = ("sig-", "signal.")
+
+
+def is_signal_pack(pack: str) -> bool:
+    """Recognize a Signal-source pack without treating ordinary indications as Signals."""
+    return pack in ("signal", "signals") or pack.startswith(SIGNAL_PACK_PREFIXES)
+
+
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
 SHORT_MIN_PF_DEFAULT = 1.1       # owner: the Short Range Base floor defined earlier (a770ec1), the other Sets 1.25
@@ -1562,8 +1570,9 @@ class SetBook:
         self.min_pf = GATE_MIN_PF_DEFAULT
         self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
         self.pf_by_size = True
-        self.size_floors: Tuple[Tuple[int, float], ...] = ((5, 1.05), (10, 1.08), (20, 1.12), (35, 1.25))
+        self.size_floors: Tuple[Tuple[int, float], ...] = ((5, 1.05), (10, 1.10), (20, 1.15), (35, 1.25))
         self.size_long_pf = 1.5
+        self.signal_min_pf = 1.3
         self.consistency_pf = 0.0
         self.pf_history: List[Dict[str, Any]] = []
         self._adapt_pending: Optional[List[Any]] = None
@@ -1745,9 +1754,10 @@ class SetBook:
         bounds = [max(1, int(num(ov, k, d))) for k, d in (("minPfMicroN", 5), ("minPfMinimalN", 10), ("minPfShortN", 20), ("minPfMediumN", 35))]
         for i in range(1, len(bounds)):
             bounds[i] = max(bounds[i], bounds[i - 1])
-        pfs = [pf_floor(ov.get(k), d) for k, d in (("minPfMicro", 1.05), ("minPfMinimal", 1.08), ("minPfShort", 1.12), ("minPfMedium", 1.25))]
+        pfs = [pf_floor(ov.get(k), d) for k, d in (("minPfMicro", 1.05), ("minPfMinimal", 1.10), ("minPfShort", 1.15), ("minPfMedium", 1.25))]
         self.size_floors = tuple(zip(bounds, pfs))
         self.size_long_pf = pf_floor(ov.get("minPfLong"), 1.5)
+        self.signal_min_pf = pf_floor(ov.get("minPfSignals"), 1.3)
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
         # hours. setMaxDdtHours is 2..36 in steps of 2, default 24. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
@@ -2545,6 +2555,8 @@ class SetBook:
 
     def floor_for(self, n: int, pack: str) -> float:
         """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""
+        if is_signal_pack(pack):
+            return self.signal_min_pf
         if self.pf_by_size:
             for lim, pf in self.size_floors:
                 if n <= lim:
@@ -2556,8 +2568,8 @@ class SetBook:
         """The chain's rules for a pack (its own minimum PF floor)."""
         return StageParams(base_long=self.gate_window, base_short=self.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
                            gate_min=self.gate_min,
-                           floor=self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s, lookback_s=self.lookback * BAR_S,
-                           size_floors=self.size_floors if self.pf_by_size else (), long_floor=self.size_long_pf,
+                           floor=self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s, lookback_s=self.lookback * BAR_S,
+                           size_floors=self.size_floors if self.pf_by_size and not is_signal_pack(pack) else (), long_floor=self.size_long_pf,
                            consistency=self.consistency_pf, main_on=self.main_on, main_n=self.main_n, short_on=self.short_on,
                            short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
                            neg_on=self.neg_on, neg_windows=tuple(self.neg_windows), real_on=self.realst_on, real_n=self.realst_n,
@@ -3467,6 +3479,7 @@ class SetBook:
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
             "minPf": self.min_pf,
+            "minPfSignals": self.signal_min_pf,
             "maxDdS": self.max_dd_s,
             "useHistoricGate": self.use_historic_gate,
             "freshS": self.fresh_s,
