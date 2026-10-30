@@ -869,29 +869,29 @@ def symbol_cap_applies_under_a_wildcard():
     p.symbols_dynamic = True
     p.overlay_wild = True
     p.open = {}
-    p.universe = [{"symbol": f"S{i:02d}-USDT", "vol1h": float(100 - i), "maxLeverage": 50, "quoteVolume": 1.0,
-                   "vol24h": 0.0, "changePct": 0.0} for i in range(60)]
+    p.universe = [{"symbol": f"S{i:03d}-USDT", "vol1h": float(100 - i), "maxLeverage": 50, "quoteVolume": 1.0,
+                   "vol24h": 0.0, "changePct": 0.0} for i in range(100)]
     p.last_dyn_sel = 0.0
     p.contracts = {}
     p.sets = types.SimpleNamespace(set_symbols=lambda *a, **k: None, enabled=False)
     out = {}
     try:
-        p.symbol_cap = 30
+        p.symbol_cap = 70
         p.apply_dynamic_symbols(force=True)
         out["capped"] = len(pt.SYMBOLS)
         p.symbol_cap = 0
         p.apply_dynamic_symbols(force=True)
         out["uncapped"] = len(pt.SYMBOLS)
-        p.symbol_cap = 30
-        p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
+        p.symbol_cap = 70
+        p.open = {"S099-USDT": types.SimpleNamespace(symbol="S099-USDT")}
         p.apply_dynamic_symbols(force=True)
-        out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+        out["with_open"] = (len(pt.SYMBOLS), "S099-USDT" in pt.SYMBOLS)
     except Exception as exc:  # noqa: BLE001
         return False, f"raised {type(exc).__name__}: {exc}"
     finally:
         pt.SYMBOLS[:] = saved_syms
-    ok = out.get("capped") == 30 and out.get("uncapped") == 60 and out.get("with_open") == (30, True)
-    return ok, f"wildcard cap 30 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 30 + one open -> {out.get('with_open')}"
+    ok = out.get("capped") == 70 and out.get("uncapped") == 100 and out.get("with_open") == (70, True)
+    return ok, f"wildcard cap 70 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 70 + one open -> {out.get('with_open')}"
 
 
 def symbol_rotation_respects_configured_interval():
@@ -949,14 +949,15 @@ def _isolated(fn):
 
 
 def requested_local_configuration_reaches_engine():
-    """The local 30-symbol, 0.05-volume, 100 ms settings survive the engine's configuration clamp."""
+    """The prepared x01 settings survive the engine's configuration clamp."""
     import json
     saved = (pt.OVERLAY_PATH, pt.SCAN_S, list(pt.SYMBOLS))
     with tempfile.TemporaryDirectory() as td:
         pt.OVERLAY_PATH = os.path.join(td, "overlay.json")
+        with open(os.path.join(PULSE, "overlay-bingx-x01.json")) as f:
+            config = json.load(f)
         with open(pt.OVERLAY_PATH, "w") as f:
-            json.dump({"symbolCap": 30, "symbolsAll": True, "symbolsDynamic": True,
-                       "symbols": ["*"], "volumeFactor": 0.05, "scanS": 0.1}, f)
+            json.dump(config, f)
         try:
             def run():
                 p = pt.Pulse(_StubExchange(), _offline_contracts())
@@ -965,7 +966,29 @@ def requested_local_configuration_reaches_engine():
         finally:
             pt.OVERLAY_PATH, pt.SCAN_S = saved[0], saved[1]
             pt.SYMBOLS[:] = saved[2]
-    return got == (30, 0.05, 0.1), f"symbol cap, factor, scan interval = {got}"
+    return got == (70, 0.05, 0.2), f"symbol cap, factor, scan interval = {got}"
+
+
+def background_budget_reads_do_not_repeat_a_cycle_overrun():
+    """One slow main cycle cannot be counted again by repeated warm-thread reads."""
+    import load_engine as le
+    p = _bare_pulse()
+    p.load = le.LoadGovernor()
+    p.open, p.last_scan_ms, p.warm_ms, p.hist_busy = {}, 250.0, 0.0, False
+    p.cycle_overrun = True
+    old_rss = le.rss_mb
+    try:
+        le.rss_mb = lambda: 40.0
+        p._budget(count_cycle=True)
+        for _ in range(12):
+            p._budget()
+        slow = (p.load.overrun_n, p.load.level)
+        p.cycle_overrun, p.last_scan_ms = False, 10.0
+        p._budget(count_cycle=True)
+        recovered = (p.load.overrun_n, p.load.level)
+    finally:
+        le.rss_mb = old_rss
+    return slow == (1, "overload") and recovered[0] == 0, f"slow={slow}; recovered={recovered}"
 
 
 def stale_price_cannot_trigger_a_software_exit():
@@ -2521,6 +2544,7 @@ CHECKS = [
     ("trader.uncertain-adoption-requires-matched-fill", uncertain_adoption_requires_matching_fill),
     ("trader.uncertain-entry-recovery", uncertain_entry_recovery_uses_its_own_fill),
     ("trader.automatic-memory-budget", automatic_memory_budget_responds_to_headroom),
+    ("trader.budget-counts-only-completed-cycles", background_budget_reads_do_not_repeat_a_cycle_overrun),
     ("trader.set-control-fallback-stays-outside", set_control_fallback_never_moves_inside_lane),
     ("trader.control-pair-records-accepted-price", control_pair_records_the_accepted_fallback_price),
     ("trader.positions-read-nonblocking", positions_read_is_nonblocking_and_rejects_stale_book),

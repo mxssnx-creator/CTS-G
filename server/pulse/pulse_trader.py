@@ -5389,7 +5389,7 @@ class Pulse:
             emitted += 1
             log(f"DCA ADD {pos.symbol} {pos.side} n={row['n']} +{filled} avg={pos.entry:.6f} adv={row['adversePct']*100:.2f}%")
 
-    def _budget(self):
+    def _budget(self, count_cycle: bool = False):
         try:
             return self.load.observe(
                 n_sym=len(SYMBOLS),
@@ -5398,7 +5398,7 @@ class Pulse:
                 warm_ms=float(self.warm_ms or 0),
                 hist_busy=bool(self.hist_busy),
                 kline_ban=time.time() < float(getattr(self, "kline_ban", 0) or 0),
-                cycle_overrun=bool(getattr(self, "cycle_overrun", False)),
+                cycle_overrun=bool(getattr(self, "cycle_overrun", False)) if count_cycle else None,
             )
         except Exception:
             from load_engine import Budget
@@ -7090,7 +7090,7 @@ class Pulse:
                 self.halt_reason = None
         self.cycle += 1
         self.did_io = False
-        self._budget()
+        self._budget(count_cycle=True)
         self.refresh_tickers(background=True)
         self.seed_px_bars()
         unprotected = self.priority_controls()

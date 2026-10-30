@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "5df360606d9a8f67912cdbe0425462c08ed50592"
+PIN_WANT = "43769fefd903ea4d19a344373282acfce6118568"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -104,7 +104,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     "setMinPf": "owner 2026-10-30: x01 linked Base minimum 1.2; other connections keep the desk default",
     "exitMinPf": "owner 2026-10-30: x01 Exit minimum 1.2; other connections keep the desk default",
     "dcaMinPf": "owner 2026-10-30: x01 DCA minimum 1.2; other connections keep the desk default",
-    "symbolCap": "x01 runs 30 symbols; other connections keep the desk default of 50",
+    "symbolCap": "x01 is configured for 70 symbols; other connections keep the desk default of 50",
     "blockMaxStack": "x01 permits one measured Block add; other connections retain their existing default",
 }
 

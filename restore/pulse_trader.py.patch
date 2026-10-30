@@ -2756,6 +2756,12 @@
 +                    pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
 @@ -3595,0 +5382 @@
 +                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
+@@ -3605 +5392 @@
+-    def _budget(self):
++    def _budget(self, count_cycle: bool = False):
+@@ -3614 +5401 @@
+-                cycle_overrun=bool(getattr(self, "cycle_overrun", False)),
++                cycle_overrun=bool(getattr(self, "cycle_overrun", False)) if count_cycle else None,
 @@ -3627,0 +5415 @@
 +        n += trim_map(self.price_ts, keep)
 @@ -3691,2 +5479,2 @@
@@ -3679,8 +3685,10 @@
 @@ -4930 +7085 @@
 -            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
 +            elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
-@@ -4939 +7094 @@
+@@ -4938,2 +7093,2 @@
+-        self._budget()
 -        self.refresh_tickers()
++        self._budget(count_cycle=True)
 +        self.refresh_tickers(background=True)
 @@ -4942 +7097,3 @@
 -        if self.cycle % 8 == 0:

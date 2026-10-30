@@ -138,10 +138,11 @@ def prune_ttl(store: Dict[Any, float], now: Optional[float] = None, slack: float
 
 
 def cap_list(rows: List[Any], max_n: int) -> int:
-    extra = len(rows) - max(0, int(max_n))
+    limit = max(0, int(max_n))
+    extra = len(rows) - limit
     if extra <= 0:
         return 0
-    del rows[:-max(0, int(max_n))]
+    del rows[:extra]
     return extra
 
 
@@ -216,6 +217,7 @@ class LoadGovernor:
         self.hist_busy = False
         self.kline_ban = False
         self.overrun_n = 0
+        self.last_cycle_overrun = False
         self.trimmed = 0
         self.gc_n = 0
         self.last_trim = 0.0
@@ -263,7 +265,7 @@ class LoadGovernor:
         warm_ms: float = 0.0,
         hist_busy: bool = False,
         kline_ban: bool = False,
-        cycle_overrun: bool = False,
+        cycle_overrun: Optional[bool] = False,
         rss_mb: Optional[float] = None,
     ) -> Budget:
         rss = float(rss_mb if rss_mb is not None else globals()["rss_mb"]())
@@ -284,11 +286,15 @@ class LoadGovernor:
             self.rss = rss
             if rss > self.rss_peak:
                 self.rss_peak = rss
-            if cycle_overrun:
-                self.overrun_n += 1
-            else:
-                self.overrun_n = max(0, self.overrun_n - 1)
-            b = self._compute(cycle_overrun=cycle_overrun)
+            # Background observations update resource usage but do not represent
+            # another completed trading cycle. Count each cycle exactly once.
+            if cycle_overrun is not None:
+                self.last_cycle_overrun = bool(cycle_overrun)
+                if cycle_overrun:
+                    self.overrun_n += 1
+                else:
+                    self.overrun_n = max(0, self.overrun_n - 1)
+            b = self._compute(cycle_overrun=self.last_cycle_overrun)
             self.last_budget = b
             self.level = b.level
             self.shed = list(b.shed)
@@ -560,6 +566,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rows = list(range(10))
     dropped = cap_list(rows, 4)
     out.append(("load-cap-list", dropped == 6 and rows == [6, 7, 8, 9], f"drop={dropped} {rows}"))
+    dropped = cap_list(rows, 0)
+    out.append(("load-cap-list-zero", dropped == 4 and rows == [], f"drop={dropped} {rows}"))
+    sampled = LoadGovernor()
+    sampled.observe(n_sym=70, rss_mb=50.0, cycle_overrun=True)
+    for _ in range(12):
+        sampled.observe(n_sym=70, rss_mb=50.0, cycle_overrun=None)
+    out.append(("load-overrun-once", sampled.overrun_n == 1 and sampled.level == "overload",
+                f"overruns={sampled.overrun_n} level={sampled.level}"))
+    sampled.observe(n_sym=70, rss_mb=50.0, cycle_overrun=False)
+    out.append(("load-overrun-recovery", sampled.overrun_n == 0 and sampled.level == "normal",
+                f"overruns={sampled.overrun_n} level={sampled.level}"))
     snap = g.snapshot()
     out.append(("load-snap", snap.get("level") == b2.level and "scanChunk" in snap, str(snap.get("level"))))
     freed = g.free(force=True)
