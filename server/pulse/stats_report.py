@@ -13,6 +13,7 @@ from position_cost import (
     last_n_cost_pf,
     net_pnl_pct,
     net_pnl_usdt,
+    row_net_pnl_pct,
     signed_result_r,
 )
 from set_engine import drawdown_time
@@ -37,6 +38,9 @@ def _row(c: Any) -> Dict[str, Any]:
             "exit": _f(c.get("exit") or c.get("exit_px")),
             "pnl": _f(c.get("pnl")),
             "pnl_pct": _f(c.get("pnl_pct")),
+            "net_pnl_pct": c.get("net_pnl_pct"),
+            "fees_usdt": c.get("fees_usdt"),
+            "fee_source": c.get("fee_source", "configured-estimate"),
             "hold_s": _f(c.get("hold_s") or c.get("holdS")),
             "reason": str(c.get("reason") or ""),
             "set_id": str(c.get("set_id") or c.get("setId") or ""),
@@ -54,6 +58,9 @@ def _row(c: Any) -> Dict[str, Any]:
         "exit": _f(getattr(c, "exit", 0)),
         "pnl": _f(getattr(c, "pnl", 0)),
         "pnl_pct": _f(getattr(c, "pnl_pct", 0)),
+        "net_pnl_pct": getattr(c, "net_pnl_pct", None),
+        "fees_usdt": getattr(c, "fees_usdt", None),
+        "fee_source": getattr(c, "fee_source", "configured-estimate"),
         "hold_s": _f(getattr(c, "hold_s", 0)),
         "reason": str(getattr(c, "reason", "") or ""),
         "set_id": str(getattr(c, "set_id", "") or ""),
@@ -67,16 +74,16 @@ def _row(c: Any) -> Dict[str, Any]:
 def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
     notion = max(0.0, row["qty"] * row["entry"])
     gross_pct = row["pnl_pct"]
-    net_pct = net_pnl_pct(gross_pct, cost_pct)
-    net_usdt = net_pnl_usdt(gross_pct, row["qty"], row["entry"], cost_pct) if notion else row["pnl"]
-    r = signed_result_r(gross_pct, cost_pct)
+    net_pct = row_net_pnl_pct(row, cost_pct)
+    net_usdt = net_pct * notion if notion else row["pnl"]
+    r = net_pct / max(1e-9, cost_as_frac(cost_pct))
     row["notional"] = round(notion, 6)
     row["grossPnlPct"] = round(gross_pct, 8)
     row["netPnlPct"] = round(net_pct, 8)
     row["netPnl"] = round(net_usdt, 8)
     row["resultR"] = round(r, 4)
-    row["costPct"] = cost_pct
-    row["costUsdt"] = round(notion * cost_as_frac(cost_pct), 8)
+    row["costPct"] = (gross_pct - net_pct) * 100
+    row["costUsdt"] = round(notion * (gross_pct - net_pct), 8)
     return row
 
 
@@ -121,7 +128,7 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "costRatio": cost.get("ratio"),
         "avgR": cost.get("avgR"),
         "costPct": cost_pct,
-        "scale": "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost",
+        "scale": "PF = net gains / net losses; costRatio is a separate return score",
     }
 
 
@@ -277,7 +284,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "costAccounting": {
             "positionCostPct": cost_pct,
             "costFrac": cost_as_frac(cost_pct),
-            "rule": "1.00 PF = net 0 after 1× PositionCost; 1.10 = +1× PositionCost. All intern PF/R/E deduct cost once from gross price-move.",
+            "rule": "PF = net gains / net losses. Executions use recorded net after fees; paper and legacy rows deduct one configured allowance. Fill-price slippage is never deducted again from recorded execution net.",
             "last15": pc,
             "pass": bool(pc.get("count", 0) < 8 or float(pc.get("pf") or 0.0) + 1e-9 >= float((st.get("pfCost") or {}).get("minPf") or 1.1)),
             "minPf": (st.get("pfCost") or {}).get("minPf"),

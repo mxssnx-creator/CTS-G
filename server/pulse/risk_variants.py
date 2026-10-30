@@ -20,6 +20,7 @@ from position_cost import (
     TRAIL_STEP_SETTING_MIN,
     last_n_cost_pf,
     net_pnl_pct,
+    row_net_pnl_pct,
     snap_ratio,
     SL_TP_RATIOS,
     SL_TP_STEP,
@@ -230,6 +231,8 @@ class VariantBook:
         return self.trail_arm / 100.0, self.trail_give / 100.0
 
     def on_close(self, rec: Any) -> None:
+        if (rec.get("set_id") or rec.get("setId")) if isinstance(rec, dict) else getattr(rec, "set_id", ""):
+            return   # the default SL/trailing variants never learn from a Set's exit
         if isinstance(rec, dict):
             pnl = float(rec.get("pnl") or 0)
             pnl_pct = float(rec.get("pnl_pct") or 0)
@@ -249,7 +252,8 @@ class VariantBook:
             return
         sl_key = f"{snap_ratio(sl_r):.1f}"
         # tape pnl is the NET FRACTION, the same unit as set_engine replay rows; pnl_usdt is display-only
-        row = {"pnl": net_pnl_pct(pnl_pct, self.cost_pct), "pnl_usdt": pnl, "pnl_pct": pnl_pct, "hold_s": hold}
+        row = {"pnl": row_net_pnl_pct(rec, self.cost_pct), "pnl_usdt": pnl, "pnl_pct": pnl_pct, "hold_s": hold,
+               "net_pnl_pct": rec.get("net_pnl_pct") if isinstance(rec, dict) else getattr(rec, "net_pnl_pct", None)}
         self.sl_rows.setdefault(sl_key, []).append(row)
         self.sl_rows[sl_key] = self.sl_rows[sl_key][-40:]
         self.trail_rows.setdefault(t_key, []).append(row)

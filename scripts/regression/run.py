@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 from common import Skip  # noqa: E402
 
 # logistics is static and fails in well under a second: it runs first so a broken pin or config fails fast
-SUITES = ["logistics", "exchange", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "golden"]
+SUITES = ["logistics", "exchange", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "golden", "correctness", "cost_accounting", "monitoring"]
 
 
 def selftests():

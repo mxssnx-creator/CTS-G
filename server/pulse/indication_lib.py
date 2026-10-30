@@ -137,12 +137,12 @@ def _rsi(c: Sequence[float], n: int) -> List[float]:
         l_ += max(-d, 0.0)
     g /= n
     l_ /= n
-    out[n] = 100.0 if l_ == 0 else 100.0 - 100.0 / (1 + g / l_)
+    out[n] = (50.0 if g == 0 else 100.0) if l_ == 0 else 100.0 - 100.0 / (1 + g / l_)
     for i in range(n + 1, len(c)):
         d = c[i] - c[i - 1]
         g = (g * (n - 1) + max(d, 0.0)) / n
         l_ = (l_ * (n - 1) + max(-d, 0.0)) / n
-        out[i] = 100.0 if l_ == 0 else 100.0 - 100.0 / (1 + g / l_)
+        out[i] = (50.0 if g == 0 else 100.0) if l_ == 0 else 100.0 - 100.0 / (1 + g / l_)
     return out
 
 
@@ -844,12 +844,45 @@ def f_closeloc(b, n):
     return None
 
 
+def f_ddresume(b, n):
+    """Price resumes its preceding trend after a measured, moderate pullback."""
+    from market_features import price_window
+    v = price_window(_cl(b), n, max(1, n // 4))
+    if v is None or len(b) < n + 1:
+        return None
+    atr = _atr(b, n) / float(b[-1][3])
+    if atr <= 0:
+        return None
+    if v["priorReturn"] > atr and v["lastReturn"] > 0 and v["drawdownChange"] < 0 and 0.25 * atr <= v["drawdown"] <= 2.5 * atr:
+        return 1, _conf(0.6, 0.15 * v["efficiency"])
+    if v["priorReturn"] < -atr and v["lastReturn"] < 0 and v["drawupChange"] < 0 and 0.25 * atr <= v["drawup"] <= 2.5 * atr:
+        return -1, _conf(0.6, 0.15 * v["efficiency"])
+    return None
+
+
+def f_ddpressure(b, n):
+    """Persistent price drawdown/drawup confirmed by the latest part of the window."""
+    from market_features import price_window
+    v = price_window(_cl(b), n, max(1, n // 4))
+    if v is None:
+        return None
+    atr = _atr(b, n) / float(b[-1][3])
+    if atr <= 0 or v["efficiency"] < 0.3:
+        return None
+    if v["drawdown"] > 2 * atr and v["ulcer"] > atr and v["lastReturn"] < -0.5 * atr:
+        return -1, _conf(0.6, min(0.25, v["drawdown"] / atr * 0.02))
+    if v["drawup"] > 2 * atr and v["shortUlcer"] > atr and v["lastReturn"] > 0.5 * atr:
+        return 1, _conf(0.6, min(0.25, v["drawup"] / atr * 0.02))
+    return None
+
+
 FAMILIES: Dict[str, Tuple[str, Callable]] = {
     # name: (group, function)
     "ker": ("trend", f_ker), "chop": ("trend", f_chop), "aroon": ("trend", f_aroon), "vortex": ("trend", f_vortex),
     "adx": ("trend", f_adx), "kama": ("trend", f_kama), "hull": ("trend", f_hull), "ribbon": ("trend", f_ribbon),
     "macdh": ("trend", f_macdh), "roc": ("trend", f_roc), "rsimom": ("trend", f_rsimom), "hhhl": ("trend", f_hhhl),
     "lastpart": ("trend", f_lastpart), "fibpb": ("trend", f_fibpb), "ha": ("trend", f_ha), "psar": ("trend", f_psar),
+    "ddresume": ("price", f_ddresume), "ddpressure": ("price", f_ddpressure),
     "ichi": ("trend", f_ichi), "cci": ("trend", f_cci),
     "donch": ("break", f_donch), "bbb": ("break", f_bbb), "kelt": ("break", f_kelt), "nr": ("break", f_nr),
     "inside": ("break", f_inside), "pivot": ("break", f_pivot), "atrx": ("break", f_atrx), "rvol": ("break", f_rvol),

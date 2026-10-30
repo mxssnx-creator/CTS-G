@@ -2,6 +2,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hourlyPf } from "./hourly-pf.ts";
 
+test("hourly execution PF uses recorded net without recharging the allowance", () => {
+  const now = 1793322000;
+  const rows = [
+    { t: now, pnl_pct: .001, net_pnl_pct: .0004 },
+    { t: now + 1, pnl_pct: .001, net_pnl_pct: -.0002 },
+  ] as never[];
+  assert.equal(hourlyPf(rows, .3, now, 1)[0].pf, 2);
+});
+
 const NOW = 1_800_000_000 + 1800; // half past an hour
 const H = Math.floor(NOW / 3600) * 3600;
 

@@ -51,10 +51,10 @@ def coverage_counts_sum_to_grid():
     ig = _book(exitIgnoreTp=True)
     hn = _book(exitIgnoreTp=False)
     ci, ch = ig.counts(), hn.counts()
-    # exitIgnoreTp on: base 754 + Exit 364 + trail 420; off: base 754 + the 182 trails under the mid TP, no Exit Set
-    ok = (len(ig.by_idx) == 1538 and len(hn.by_idx) == 936
-          and ci["sum"] == ci["configured"] == 1538 and ch["sum"] == ch["configured"] == 936
-          and ci["total"] == 1538 + len(ig.retired) and ch["total"] == 936 + len(hn.retired))
+    # Short Range is enabled in x01: 819 base + 405 Exit + 430 trail; honour-TP removes Exit and unreachable trails.
+    ok = (len(ig.by_idx) == 1654 and len(hn.by_idx) == 1002
+          and ci["sum"] == ci["configured"] == 1654 and ch["sum"] == ch["configured"] == 1002
+          and ci["total"] == 1654 + len(ig.retired) and ch["total"] == 1002 + len(hn.retired))
     return ok, f"ignore configured={ci['configured']} sum={ci['sum']} | honour configured={ch['configured']} sum={ch['sum']}"
 
 

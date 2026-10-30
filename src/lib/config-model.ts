@@ -148,6 +148,7 @@ export type PulseOverlay = {
   prevPosWindow: number;
   exitMinSamples: number;
   blockVolumeRatio: number;
+  blockRiskPctOfBalance: number;
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
   blockActiveLive: boolean;
@@ -178,6 +179,7 @@ export type PulseOverlay = {
   axisPauseMaxWindow: number;
   minPf: number;
   positionCostPct: number;
+  slippageAllowancePct: number;
   windowsLinked: boolean;
   pfWindow: number;
   slMinPct: number;
@@ -338,7 +340,7 @@ export type PulseOverlay = {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
   volumeFactor: 0.05,
-  sizePctOfBalance: 0,
+  sizePctOfBalance: 1,
   sizeMaxNotional: 25,
   maxEntrySlipPct: 0.75,
   ddHaltPct: 80,
@@ -372,6 +374,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   prevPosWindow: 25,
   exitMinSamples: 8,
   blockVolumeRatio: 1,
+  blockRiskPctOfBalance: 0.25,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
@@ -405,16 +408,17 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   "1000PEPE-USDT",
   "KAS-USDT",
   ],
-  axisPrevEnabled: false,
+  axisPrevEnabled: true,
   axisPrevMaxWindow: 12,
-  axisLastEnabled: false,
+  axisLastEnabled: true,
   axisLastMaxWindow: 4,
-  axisContEnabled: false,
+  axisContEnabled: true,
   axisContMaxWindow: 8,
-  axisPauseEnabled: false,
+  axisPauseEnabled: true,
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.12,
+  slippageAllowancePct: 0.02,
   windowsLinked: true,
   pfWindow: 8,
   slMinPct: 0.2,
@@ -444,7 +448,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratGeneral: true,
-  stratShortRange: false,
+  stratShortRange: true,
   stratTrend: false,
   stratBreakout: false,
   stratReversion: false,
@@ -834,6 +838,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
     exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
+    blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0.25),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
@@ -864,6 +869,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: pfFloor(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),
+    slippageAllowancePct: num(cts.slippageAllowancePct, 0.02),
     windowsLinked: bool(cts.windowsLinked, true),
     pfWindow: Math.max(8, num(cts.pfWindow, 15)),
     slMinPct: num(cts.slMinPct, 0.2),

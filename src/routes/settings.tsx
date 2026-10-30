@@ -255,19 +255,23 @@ function SettingsPage() {
           {section === "profit" && (
             <Card
               title="Profit factor · PositionCost"
-              hint="1.00 = Neutral after cost · 1.10 = +1× PositionCost net · last 15 closes"
+              hint="PF = net gains ÷ net losses over the selected window"
             >
               <Grid>
                 <Slider
-                  label="Position cost"
+                  label="Paper cost allowance"
                   value={overlay.positionCostPct}
                   min={0.02}
                   max={1}
                   step={0.01}
                   unit="%"
-                  hint="Default 0.15%. Deducted once from the gross move before R."
+                  hint="Default 0.12% round trip. Exchange fees plus the slippage allowance can raise this floor. Actual fills use their recorded fees."
                   onChange={(v) => patch("positionCostPct", v)}
                 />
+                <Num label="Slippage allowance" value={overlay.slippageAllowancePct}
+                  min={0} max={1} step={0.01} unit="%"
+                  hint="Round-trip paper allowance. Actual fill prices already include slippage."
+                  onChange={(v) => patch("slippageAllowancePct", v)} />
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
@@ -293,16 +297,16 @@ function SettingsPage() {
                 />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
-                <KV k="1.00 Neutral" v={`net 0 · gross ${overlay.positionCostPct.toFixed(2)}%`} />
-                <KV k="1.10 = +1× cost" v={`net +${overlay.positionCostPct.toFixed(2)}% · gross ${(overlay.positionCostPct * 2).toFixed(2)}%`} />
+                <KV k="PF 1.00" v="Net gains equal net losses" />
+                <KV k="PF 1.10" v="Net gains are 1.10× net losses" />
                 <KV
                   k={`Last ${overlay.pfWindow} live`}
                   v={pfLive(stats, overlay)}
                 />
               </div>
               <p className="text-sm text-muted">
-                Ratio = 1 + avg( (move% − cost%) / cost% ) × 0.10. Gate uses this scale, not classic
-                gross-profit / gross-loss. Classic PF still shows on Results.
+                Gates use profit factor after costs. Result-R and its return score are separate metrics.
+                A selected paper PF and an executed PF measure different trades.
               </p>
             </Card>
           )}
@@ -877,8 +881,8 @@ function SettingsPage() {
               </Grid>
               <SetsLiveTable stats={stats} overlay={overlay} />
               <p className="text-sm text-muted">
-                1.00 = Neutral after cost · 1.10 = +1× PositionCost. Historic walks 1-minute OHLC, SL-first on
-                same-bar, trail after arm, time/scratch stops. Live fills merge into the same Set book.
+                Historic replay uses one-minute OHLC, SL first on the same bar, trailing after arm, and time/scratch stops.
+                Paper validation and actual executions have separate samples and PFs for each Set and lane.
               </p>
             </Card>
           )}
@@ -992,7 +996,7 @@ function SettingsPage() {
           )}
 
           {section === "block" && (
-            <Card title="Block strategy" hint="Exact CTS formula · counts 1–12 independent">
+            <Card title="Block strategy" hint="Each Set, lane and group keeps its own evidence">
               <Grid>
                 <EnableSlider
                   label="Block enabled"
@@ -1001,12 +1005,12 @@ function SettingsPage() {
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
                 />
                 <Toggle
-                  label="Active Live overlay"
+                  label="Non-Set Live overlay"
                   on={overlay.blockActiveLive}
                   onChange={(v) => patch("blockActiveLive", v)}
                 />
                 <Toggle
-                  label="Active Real overlay"
+                  label="Non-Set Real overlay"
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
@@ -1045,6 +1049,10 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("blockVolumeRatio", v)}
                 />
+                <Num label="Set Block risk budget" value={overlay.blockRiskPctOfBalance}
+                  min={0} max={5} step={0.05} unit="%"
+                  hint="Maximum parent loss at its current stop, including costs, as a share of equity. Adds are reduced to fit; 0 disables this cap. Gaps can exceed it."
+                  onChange={(v) => patch("blockRiskPctOfBalance", v)} />
                 <Num
                   label="PF ratio"
                   value={overlay.blockProfitFactorRatio}
@@ -1063,8 +1071,12 @@ function SettingsPage() {
                 />
                 <KV k="Default min PF" v={String(defaultMinPf)} />
               </Grid>
+              <p className="text-sm text-muted">
+                Set parents: each qualified group adds at most the volume ratio × original base quantity.
+                Its PF requirement stays at or above the default minimum. Risk and margin limits can reduce the add.
+              </p>
               <p className="font-mono text-xs text-muted">
-                targetAdd = parentBase × (count × ratio) · requested = targetAdd − confirmedAdd ·
+                Non-Set overlays: targetAdd = parentBase × (count × ratio) · requested = targetAdd − confirmedAdd ·
                 minPF = 1 + (({defaultMinPf} − 1) × {overlay.blockProfitFactorRatio} × increment)
               </p>
               <div className="overflow-x-auto">
@@ -1827,12 +1839,8 @@ function Slider({
   );
 }
 
-function pfHint(ratio: number, cost: number) {
-  const r = (ratio - 1) / 0.1;
-  const net = cost * r;
-  const gross = cost + net;
-  if (ratio <= 1) return "Neutral — net 0 after one PositionCost";
-  return `Net +${net.toFixed(2)}% · gross ${gross.toFixed(2)}% (${r.toFixed(2)}× cost)`;
+function pfHint(pf: number, _cost: number) {
+  return `Requires net gains of at least ${pf.toFixed(2)}× net losses in this window.`;
 }
 
 function pfLive(stats: LiveStats | null, overlay: PulseOverlay) {
@@ -2213,7 +2221,7 @@ function LiveApplied({
     <div className="rounded-radius border border-border bg-surface px-4 py-3 font-mono text-xs" data-testid="live-applied">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={stats?.paused ? "text-warn" : stats?.running && !stats?.halted ? "text-primary" : "text-danger"}>
-          {stats?.paused ? "paused" : "live"} {conn} · SL:TP {Number(sl).toFixed(1)} · tr {trail} · vol ×{Number(stats?.volumeFactor ?? overlay.volumeFactor ?? 1).toFixed(1)}
+          {stats?.paused ? "paused" : stats?.running && !stats?.halted ? "live" : stats?.halted ? "halted" : "offline"} {conn} · SL:TP {Number(sl).toFixed(2)} · tr {trail} · vol ×{Number(stats?.volumeFactor ?? overlay.volumeFactor ?? 1).toFixed(2)}
         </span>
         <span className="text-muted">
           {dirty ? "unsaved overlay" : "applied"} · cycle {stats?.cycle ?? "—"} · {fmtNum(stats?.engine?.hotMs ?? stats?.scanMs, 0)}ms

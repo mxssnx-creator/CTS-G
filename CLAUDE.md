@@ -1,6 +1,35 @@
 # CTS-G: standards for every session
 
-## Post-Base evaluation is the standard (read this first)
+## Current execution contract (2026-10-30)
+
+This section supersedes older operational descriptions and historical measurements below. See
+`reports/execution-cost-and-lane-audit-20261030.md` for the current audit and its limits.
+
+- Base, Main and Real stage statistics use paper evidence only. Executed results have separate per-Set,
+  per-positive/negative-lane windows; no paper/live overlap is counted twice. A fully populated executed
+  window can block only its own lane. Sparse executed windows are explicitly unproven.
+- Minimal last N = 1–3 sign coordination, independently positive, negative or both. Only long/short
+  windows apply positive PF thresholds; negative minimal is not a positive-PF failure. Long starts at 10.
+- x01 enables Short Range and all four Axis controls. Axis evaluates the candidate's own Set/lane paper
+  stream and capacity. DCA's optional Axis gate uses that same parent's scope, not the last pooled verdict.
+- Set Block uses independent forward evidence for each (Set, lane, symbol, side, group). It keeps the
+  original parent entry, quantity, stop/target and hold. Adds are additive fractions of the original base,
+  never inherited from a different parent. The default total planned stop loss cap is 0.25% of equity;
+  minimum lots cannot exceed it. This is a risk limit, not a proof of optimal sizing or bounded gap loss.
+- Paper PositionCost is max(configured 0.12% floor, exchange taker round trip + 0.02% slippage allowance).
+  Executions use actual fill prices and each leg's commission/rate on its own notional. Fill slippage is
+  already in the prices. Explicit recorded net is immutable when a paper-cost setting changes. Missing
+  fee data remains labelled as an estimate. Funding is not yet attributed per position.
+- Verified emergency-close losses and historically large positions remain in actual statistics after a
+  size-setting change. Unverified exits never invent a scored return. Partial close quantity, value and
+  fees survive failed retries and restart. Execution lane/Set counters also restore from history.
+- `scripts/monitor_readonly.py` reads health only. The older `monitor_engines.py` automatically restarts engines; do not use it for read-only checks. A failed or stale status request is unknown health, never proof of a stable run.
+- Every new simulation/test must use no more than three days of market history. Older longer-window
+  reports below are historical records, not evidence for the current implementation.
+- Never clamp Main PF to Base PF, copy selected PF into execution PF, or remove a verified loss to make
+  PF higher. Same data and rules must agree; different populations can have different PF.
+
+## Post-Base evaluation is the standard
 
 A Set (one grid configuration: pack x SL ratio x TP step, or pack x trailing pair) is judged on its own tape by the Base
 validation: PF over its last `setGateWindow` orders at or above `setMinPf`, a drawdown time under `setMaxDdtHours` (default 24 h), and,
@@ -10,8 +39,7 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
 - The number that counts for any strategy, indicator or setting is the **PF after Base validation** ("effective PF",
   `sets.pfBase.base`), together with **how many percent of the Sets are validated** (`validatedPct`, also per pack in
   `byPack`). Quote both, always, with the order count behind them.
-- The **unfiltered PF** (every Set before Base) is under 1 by design, because Base exists to drop the losing Sets. Never
-  read it as the result, and never optimise it.
+- The **unfiltered PF** covers every Set before Base. It may be above or below 1; label its population separately from selected and executed PF.
 - A change is good when the effective PF is high and stable across windows (every hour if possible), the validated share
   is not collapsing, and the order count stays large enough to mean something. A high effective PF on a handful of
   Sets or orders is noise.
@@ -47,14 +75,11 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
   (`common.overlay` sets `minPfBySize` off unless a check asks for the classes).
 - The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
   (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`); the Short Range strategy keeps its own earlier floor **1.1** (`shortRangeMinPf`,
-  owner 2026-10-29). No gate asks less than **1.1** whatever is configured (`position_cost.MIN_PF_FLOOR`, `pf_floor`; desk the same).
+  owner 2026-10-29). No positive PF gate asks less than **1.05** whatever is configured (`position_cost.MIN_PF_FLOOR`, `pf_floor`; desk the same).
   The volume factor default is the minimum, **0.05**.
-- Block and DCA are enabled (DCA auto plan; its Set and Axis options `dcaOnSets` / `dcaOnAxis` stay off, so under the Base
-  gate, where every position is a Set position, both add-ons are idle until a position without a Set exists or an option is
-  turned on).
-- The Axis gates (prev, last, cont, pause) are disabled. Measured (30-day walk-forward, `scripts/axis_eval.py`): gating on the
-  last 6 closes of the unfiltered stream at PF 1.0 lifts the executed PF from 0.645 to 0.705 and cuts the loss by a third, still
-  under 1. A gate that reads only the positions it let through never reopens (no new closes), so the Axis must read a paper stream.
+- Block is enabled for Set parents through its separate evidence book. DCA is enabled, but its Set/Axis
+  opt-ins stay off. All four Axis controls and Short Range are enabled on x01.
+- Axis reads continuing paper evidence so a rejected lane can recover; actual executions are a separate check.
 
 ## Units and defaults
 
@@ -79,8 +104,8 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
 - With `exitIgnoreTp` on (the default) every base stop (SL ratio x TP step, one Set per distinct stop distance: 182 per
   pack) also runs as an Exit Set (`kind` exit, id `<pack>:1m:sl<r>:st<n>:xt`): no TP exit, leaves by its stop, the time
   exit or the scratch exit, with its own lanes, tape and Base validation. Base Sets always take their TP. `pick_any` ranks
-  the valid base and Exit Sets of a pack together (`rank_key`), then the trailing Sets. Default grid: 754 base + 364 Exit +
-  420 trailing = 1538 Sets. Client ids mark an Exit Set in the trail field (`CID_EXIT_TR`), so it never decodes to its twin.
+  the valid base and Exit Sets of a pack together (`rank_key`), then the trailing Sets. Default x01 grid including Short Range: 819 base + 405 Exit +
+  430 trailing = 1654 Sets. Client ids mark an Exit Set in the trail field (`CID_EXIT_TR`), so it never decodes to its twin.
   Desk: Sets overview type "Exit".
 
 ## Measured edge (30 days, 20 symbols, development window, `scripts/trade_sim.py`)
@@ -108,8 +133,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   their own closes (`exits.on_close` and `variants.on_close` get closes without a set_id).
 - **Why.** A Set is validated on its own lane; an Exit strategy closing the same position early makes the live result
   something the Base validation never measured (the PF after Base then does not carry over to live).
-- **No cross-lane actions on a Set position.** The Block add-on never adds to it, and DCA only through its opt-in switches (no parent lane is
-  attached at open), the coordinator's rearrange never swaps it out (`Pulse.rearrange_opens`), and the global 6 h hold
+- **No cross-lane exits on a Set position.** Set Block may add through its separate group proof without moving parent rules, and DCA only through its opt-in switches; the coordinator's rearrange never swaps it out (`Pulse.rearrange_opens`), and the global 6 h hold
   cap leaves it to its own time exit. Each rule has a `trader.lanes-*` check and a mutant.
 - **Live = replay for a Set position.** Its SL and TP come from `set_engine.lane_fracs` (the replay's formula, no overlay
   clamp); a base Set never trails, a trailing Set trails with its own arm and give (the independent trailing pick is for
@@ -117,16 +141,14 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   on a completed 1m close after `SetBook.scratch_bars`. The same holds for a position recovered after a restart.
   `scripts/regression/lanes.py` drives the live trader through the replay's bars and requires the same exit (reason, bar,
   price), and the same outcome with every other strategy switched on (differential check).
-- **Block stacks on its own lane.** Only positions without a Set; its evidence is the net PF of those positions' closes
-  (`Pulse.exit_lane_pf`, at least Block's minimum samples); it adds only to a parent at least one step in profit, within
-  the book cap; Set closes never reach Block's or DCA's scores. With the Base gate on (the standard) every entry is a
-  Set position, so Block has nothing to stack on and is idle; it only acts when a position has no Set. Block defaults:
-  max stack 6 groups, volume ratio 1 of the original volume (`blockMaxStack`, `blockVolumeRatio`).
+- **Block stacks on independent evidence.** Set parents use `SetBlockBook`: own Set/lane/symbol/side/group,
+  eight forward observations by default, a separate actual-add window, and additive sizing under the existing
+  parent stop and risk budget. The legacy non-Set parent book stays separate. Default: six groups, volume ratio 1.
 - **DCA is an opt-in lane** (the lane is enabled by default, `dcaEnabled`, but its Set and Axis options `dcaOnSets` / `dcaOnAxis` are off, so under the Base gate it is idle; `dca_engine.DCA_HARD_OFF` is only a build-time kill switch).
   Independent of Block. `dcaAuto` (on by default) calculates the plan from each position's own stop distance (rungs as
   fractions of it, one small rung, exposure ceiling `dcaMaxExposureX`, stop kept at the original level; the measured
   least-harmful shape, `scripts/dca_eval.py`); off = the static lists (`dcaMaxSteps`, distances, multipliers).
-  Set positions are added to only with `dcaOnSets`, or `dcaOnAxis` (an Axis is on and the coordinator allows); the Set
+  Set positions are added to only with `dcaOnSets`, or `dcaOnAxis` (an Axis is on and that parent's own Set/lane allows); the Set
   then keeps its own stop and TP at the entry it opened at (`pos.dca_ref`), is scored on its base result, and the DCA
   lane is scored on its own adds (`dca_pct`) and switches itself off when they lose. Measured walk-forward on Base-executed
   positions (8 and 30 days, 20 symbols): every DCA shape lowered or left the PF unchanged and scaled the losses, so it
@@ -134,7 +156,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **Block volume (`block_engine`).** Additive from the group's original base volume V0: each VALID group (its PF decision
   passes, not paused) adds one partial ratio (`blockVolumeRatio` x V0), so the stack is V0 x (1 + ratio x valid groups),
   at most `blockMaxStack` (6) groups, never a cumulative jump in one order and never computed on the grown volume. The
-  k-th valid group must pass the PF threshold of the stack it creates. A stack that was increased stays increased: a
+  k-th valid group must pass the PF threshold of the stack it creates. For legacy non-Set parents only, a stack that was increased stays increased: a
   parent that closes at a net loss keeps the level (`carried`, `top`) and V0, the next parent opens at V0 x (1 + carried
   x ratio) (`Pulse.place`, `BlockBook.parent_scale`), and the group's net accumulates over its parents; once that net is
   back to equal (>= 0) the next parent opens at the base volume. The lane's observed PF, pauses and parent ring persist
@@ -224,25 +246,20 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   passed. One window, the last `realGateN` (15, `realGateEnabled`, reason `real`) of the lane's Real Set at the minimum PF; the Real
   Negative Set is judged the same way on its own orders. The overall strategies (coordinator real stage) read the Real Sets' pooled
   paper stream (`SetBook.real_paper`, `realStagePaper`).
-- **Real stage overall strategies per scope** (2026-10-29): the coordinator judges the Real paper stream per scope, each on its own stream
-  with its own consecutive losses, verdict and figures (`SetBook.real_paper_scopes` in one pass, `Coordinator.judge_scopes` /
-  `judge`): `overall`, `lane:pos`, `lane:neg`, `pack:<pack>` (both lanes) and `pack:<pack>:<lane>`. An entry under a Set passes only when
-  its lane scope and its pack's scope on that lane allow (`Coordinator.scope_allows`, `Pulse.place`; held entries counted as
-  `scopeBlocked`): a losing Real Negative lane never stops the positive lane, one pack never another; the overall and pack-wide scopes
-  mix lanes and are figures (the book-wide soft gate stays `Coordinator.gate`). With the axes off (the default) every scope allows and only
-  the figures are kept. The coordinator's intern evidence covers every configured pack (it read only indications and general before).
-  Execution stats `overall.scopes` (verdict, paper PF / orders, last / prev / Real PF, consecutive losses, and the executed orders, wins
-  and PF of that scope), desk card "Real · overall strategies by scope". Check `trader.real-overall-strategies-per-scope`, `real scopes:` mutants.
+- **Real stage Axis scope:** candidate admission reads `set:<id>:<lane>` paper evidence and counts only
+  positions in that exact scope for continuation capacity. Both positive and negative alternatives are tried,
+  including both lanes of the same Set. Pooled overall/pack views remain diagnostics. Execution figures are
+  stored separately for overall, pack, lane and exact Set/lane and are restored on restart.
 - **Active execution**: `pick_any` takes only Sets valid through Real on a lane (`SetBook.lane_of`), the positive lane first, then the
   Real Negative lane; the position carries its lane (`pos.lane`, client id nonce marker `CID_NEG_MARK`), a live close joins only its own
-  lane's Real Set, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
+  lane's separate execution window, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
 - **Stage windows judge the orders their lane has** (2026-10-29, `stageFullWindow` false, the default; true = the strict rule): the Base short
   window, the Main long / short / minimal windows, Real and Real Negative each judge the newest N orders of their lane, at least one, at the minimum PF.
   The strict rule (a window must hold its full N) was a hidden minimum order count: a Set needed 25 Main orders before its first Real order and
   15 Real orders after, so on a sparse live book nothing reached Real. Measured on x02 (28 Oct, 1,234 configured Sets): 725 passed Base, 558 stopped at
   Main, 449 of those for lack of orders (median 18 Main orders in the 32 h lookback, 172 of them at PF 1.25 or more on the orders they had); of the 109 with
   25 or more, none reached 1.25 (median Main PF 0.94). On dense tapes (20 symbols, 24 h) the two rules differ by under 0.02 executed PF. Real last N and
-  the Negative windows go down to 1 (`realGateN` 1..200, `mainNegWindows` such as 1,2; the Main long window keeps its floor of 8). A Negative window is
+  the Negative windows go down to 1 (`realGateN` 1..200, `mainNegWindows` such as 1,2; the Main long window keeps its floor of 10). A Negative window is
   below zero when its sum is under -`NEG_EPS` (1e-12): results that cancel exactly are not negative whatever the float rounding of a prefix-sum difference
   says (found by the plain-reading check; the chain and the verdict read it the same way).
   Checks `set-stage-windows-judge-the-orders-available`, `gates.stage-short-window-...`, `gates.stage-windows-accept-one-and-two`, `stage windows:` mutants.
@@ -496,7 +513,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 ## Checks
 
-`python3 -B scripts/regression/run.py` (all green, about 6 min), `python3 -B scripts/regression/mutate.py` (no survivors; each
+`python3 -B scripts/regression/run.py` (record the current result and duration), `python3 -B scripts/regression/mutate.py` (historical mutation results are not a current run; each
 mutant first runs the check that caught it last time, `scripts/regression/mutant_catchers.json`, and the whole suite only
 when that one passes, so a run takes minutes, not hours; `--only PREFIX`, `--full`),
 `npm run typecheck`, `npm test`. A new check must fail on the previous code.

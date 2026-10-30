@@ -33,9 +33,9 @@ def default_grid_counts():
     kinds = {}
     for st in sb.by_idx:
         kinds[st.kind] = kinds.get(st.kind, 0) + 1
-    # base 2 packs x 13 SL ratios x 29 steps; Exit (exitIgnoreTp) one per distinct stop distance: 182 per pack; trail 210 per pack
-    ok = (len(sb.packs) == 2 and kinds.get("base") == 754 and kinds.get("exit") == 364 and kinds.get("trail") == 420
-          and len(sb.by_idx) == 1538 and sb.steps == list(range(2, 31)) and len(sb.sl_ratios) == 13)
+    # Two full-range packs plus Short Range (65 base, 41 distinct Exit stops, 10 trails).
+    ok = (len(sb.packs) == 3 and kinds.get("base") == 819 and kinds.get("exit") == 405 and kinds.get("trail") == 430
+          and len(sb.by_idx) == 1654 and sb.steps == list(range(2, 31)) and len(sb.sl_ratios) == 13)
     return ok, f"sets={len(sb.by_idx)} base={kinds.get('base')} exit={kinds.get('exit')} trail={kinds.get('trail')} packs={len(sb.packs)}"
 
 
@@ -113,7 +113,7 @@ def set_id_format():
 CHECKS = [
     ("grid.tp-steps-2-30", tp_steps),
     ("grid.sl-ratios-0.5-3.5", sl_ratios),
-    ("grid.default-1538-sets", default_grid_counts),
+    ("grid.default-1654-sets", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),
     ("grid.trail-give-le-arm-min3", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),

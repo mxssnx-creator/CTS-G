@@ -54,6 +54,9 @@ export type LiveClosed = {
   exit: number;
   pnl: number;
   pnl_pct: number;
+  net_pnl_pct?: number | null;
+  fees_usdt?: number | null;
+  fee_source?: string;
   reason: string;
   hold_s: number;
   set_id?: string;
@@ -67,7 +70,7 @@ export type LiveClosed = {
 };
 
 /** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
- * Set (under 1 by design), and the share of Sets validated, in total and per strategy pack. */
+ * Set (all configured Sets), and the share of Sets validated, in total and per strategy pack. */
 export type PfPool = { pf: number; n: number; sets: number };
 /** One stage's figures over the Sets that pass it (`pfBase.stages`): `n` is the window orders behind the PF, `orders` all orders of the stage's Set. */
 export type StageFigure = { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };

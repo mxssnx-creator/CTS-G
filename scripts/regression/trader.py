@@ -202,11 +202,11 @@ def only_the_main_loop_pings_the_watchdog():
 
 def partial_fill_is_sized_from_the_executed_quantity():
     """A partial fill reports executedQty below the request. The position is sized from what filled; the request is
-    only the fallback when the venue reports no fill yet."""
+    only the fallback for legacy replies with no execution field. Explicit zero never creates a fill."""
     cases = [
         ({"executedQty": "0.4", "quantity": "1"}, 1.0, 0.4),
         ({"quantity": "1"}, 2.0, 1.0),
-        ({"executedQty": "0", "origQty": "5"}, 9.0, 5.0),
+        ({"executedQty": "0", "origQty": "5"}, 9.0, 0.0),
         ({}, 3.0, 3.0),
     ]
     got = [pt.filled_qty(d, req) for d, req, _ in cases]
@@ -347,7 +347,7 @@ class _PartialCloseVenue(_StubExchange):
                                                       "executedQty": str(q * 0.4), "quantity": str(q)}}}
             if self.fail_rest:
                 return {"code": 100400, "msg": "temporary refusal"}
-            return {"code": 0, "data": {"order": {"orderId": "c2", "avgPrice": "102"}}}
+            return {"code": 0, "data": {"order": {"orderId": "c2", "avgPrice": "102", "executedQty": str(float(self.closes[0]["quantity"]) * .6)}}}
         return super().post(path, body)
 
 
@@ -387,6 +387,7 @@ def partial_close_fill_closes_the_remainder():
             blended = 101.0 * 0.4 * q0 + 102.0 * 0.6 * q0
             blended_px = blended / q0
             venue2 = _PartialCloseVenue(fail_rest=True)
+            os.unlink(pt.OPEN_PATH)    # independent second account, not a restart of the first partial
             p2, sym2 = _enter(venue2)
             pos2 = p2.open[sym2]
             q2 = float(pos2.qty)
@@ -695,7 +696,7 @@ def a_set_fill_keeps_the_sets_own_sl_and_tp():
         p.entry_sense = lambda *a, **k: None
         st = types.SimpleNamespace(id="indications:1m:sl0.50:st2", idx=3, pack="indications", kind="base", step=2, sl_ratio=0.5,
                                    tp_pct=2 * p.position_cost_pct / 100.0, trail_key="", trail_arm=0.0, trail_give=0.0)
-        p.sets.pick_any = lambda pack: st
+        p.sets.pick_any = lambda pack, **kw: st
         p.sets.pick_trail = lambda pack: None
         p.tp_min = 0.0035          # the shipped overlay clamp: it must not apply to a Set fill
         p.sl_min = 0.0020
@@ -723,6 +724,10 @@ def _lane_pulse(set_id="indications:1m:sl1.00:st4"):
     """A Pulse holding one open position on a stub venue, with the Exit strategies switched on and a reversal signal
     against the position, so any Exit-lane involvement shows."""
     import types
+    # Each case is a fresh account fixture, not a restart of the prior case.
+    for path in (pt.TRADES_PATH, pt.OPEN_PATH):
+        if os.path.exists(path):
+            os.unlink(path)
     venue = _StubExchange(executed="1", requested="1")
     p, sym = _enter(venue)
     pos = p.open[sym]
@@ -1104,7 +1109,7 @@ def a_set_position_gets_no_add_on_lane():
             st = p.sets.by_idx[0] if (with_set and p.sets.by_idx) else None
             if not with_set:
                 p.sets.use_historic_gate = False  # test Block's independent non-Set parent
-            p.sets.pick_any = lambda pack, _st=st: _st
+            p.sets.pick_any = lambda pack, _st=st, **kw: _st
             p.sets.pick_trail = lambda pack: None
             parents = []
             p.block.register_parent = lambda *a: parents.append(a)
@@ -1386,7 +1391,7 @@ def entry_does_not_open_when_the_set_disappears_after_sense():
         p.boot_ts, p.available, p.halted = 0.0, 50.0, False
         p.px[sym] = 100.0
         p.entry_sense = lambda *args, **kwargs: None
-        p.sets.pick_any = lambda _pack: None
+        p.sets.pick_any = lambda _pack, **kw: None
         p.place(sym, 1, "set:indications:signal", .8)
         orders = [body for path, body in venue.posts if path.endswith("/trade/order")]
         return bool(p.sets.enabled and p.sets.use_historic_gate), sym in p.open, len(orders)
@@ -1588,7 +1593,8 @@ def every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats():
     ex = p.execution_snapshot()
     paper = b.real_paper(10)
     ok = (lanes == ("pos", "neg") and first is pos_st and second is neg_st and rt == ("neg", "pos") and close_lane == "neg"
-          and joins == (1, 0, 1) and ex["lanes"]["openPos"] == 1 and ex["lanes"]["openNeg"] == 1 and ex["lanes"]["closedNeg"] == 1
+          and joins == (0, 0, 0) and b.execution_stats(neg_st, "neg")["n"] == 1
+          and ex["lanes"]["openPos"] == 1 and ex["lanes"]["openNeg"] == 1 and ex["lanes"]["closedNeg"] == 1
           and ex["lanes"]["winsNeg"] == 1 and ex["lanes"]["closedPos"] == 1 and ex["lanes"]["lossesPos"] == 1
           and set(ex["sets"]["stages"]) == {"base", "main", "negative", "real", "realNeg"} and isinstance(paper, list))
     return ok, (f"lanes {lanes}; pick {getattr(first, 'id', None) == pos_st.id}/{getattr(second, 'id', None) == neg_st.id}; cid lanes {rt} close {close_lane}; "
@@ -1635,9 +1641,15 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
             p.px[sym] = 100.0
             p.entry_sense = lambda *a, **k: None
             st = p.sets.by_idx[0]
-            p.sets.pick_any = lambda pack, _st=st: _st
+            p.sets.pick_any = lambda pack, _st=st, **kw: _st
             p.sets.pick_trail = lambda pack: None
             p.sets.lane_of = lambda _st, _l=lane: _l
+            st.score_at = time.time()
+            st.exe = [(st.score_at - 60 * j, .004) for j in range(12, 0, -1)]
+            st.neg = [(st.score_at - 60 * j, -.004) for j in range(12, 0, -1)]
+            p.sets.pick_any = lambda pack, _st=st, predicate=None, allowed_lanes=None: _st if (
+                (allowed_lanes is None or p.sets.lane_of(_st) in allowed_lanes)
+                and (predicate is None or predicate(_st))) else None
             p.coord.scopes = {"lane:neg": {"allow": False}, "lane:pos": {"allow": True},
                               f"pack:{st.pack}:neg": {"allow": False}, f"pack:{st.pack}:pos": {"allow": True}}
             p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)

@@ -1,50 +1,25 @@
-diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
-@@ -4,6 +4,7 @@
- 
- import hmac
- import hashlib
+@@ -6,0 +7 @@
 +import collections
- import json
- import math
- import os
-@@ -19,19 +20,20 @@
- import urllib.request
- from collections import deque
- from concurrent.futures import ThreadPoolExecutor, as_completed
+@@ -22 +23 @@
 -from dataclasses import dataclass, asdict
 +from dataclasses import dataclass, asdict, field, replace as dc_replace
- from typing import Any, Deque, Dict, List, Optional, Tuple
- from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
- from coord_engine import Coordinator
- from bingx_fast import FastBingX, ErrorLog
- from modules import resolve as resolve_modules
+@@ -24,0 +26,3 @@
++from set_block import SetBlockBook
++from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage
++from position_cost import row_net_pnl_pct
+@@ -28 +32 @@
 -from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
 +from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
- from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
- from risk_variants import VariantBook, self_test as variants_self_test
+@@ -31 +35 @@
 -from set_engine import SetBook, self_test as sets_self_test
 +from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, lane_honors_tp, self_test as sets_self_test
- from exit_engine import ExitBook, self_test as exit_self_test
- from dca_engine import DcaBook, self_test as dca_self_test
- from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
+@@ -34,0 +39 @@
 +from conn_guard import ConnGuardError, mode_of, resolve_base
- 
- CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
- REDIS_CONN = f"connection:{CONN_SHORT}"
-@@ -50,6 +52,7 @@
- ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
- LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
- START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
+@@ -52,0 +58 @@
 +RESET_EQ_PATH = os.path.join(DIR, f"reset-eq-{CONN_SHORT}")
- 
- UNIVERSE_PATH = os.path.join(DIR, "universe.json")
- MAX_SYMBOLS = 0  # 0 = unlimited
-@@ -131,9 +134,29 @@
- SCRATCH_S = 600
- SCRATCH_MIN = 0.0016
- SCAN_S = 0.20
+@@ -133,0 +140,19 @@
 +
 +
 +def pace_gap_s(cycle_started: float, now: float, scan_s: float) -> float:
@@ -64,19 +39,11 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +    return use_max, max(1, min(500, pulse))
 +
 +
- KLINE_EVERY = 2.4
- KLINE_WORKERS = 4
- KLINE_LIMIT = 60
+@@ -136,0 +162 @@
 +HIST_PAGE = 1000   # the venue refuses a klines limit above 1000 bars per request (109400)
- KLINE_BATCH = 12
- TF_EVERY = {"1m": 2.0, "5m": 6.0, "15m": 12.0}
- TF_BATCH = {"1m": 8, "5m": 12, "15m": 8}
-@@ -144,13 +167,40 @@
- BALANCE_EVERY = 6.0
- QA_EVERY = 5
- COOLDOWN_S = 9.0
+@@ -146,0 +173 @@
 +SYM_BAN_S = 1800.0       # a symbol that stops out within 30 s, or fills far from its reference price, rests this long
- STAGGER_S = 0.12
+@@ -148 +175,25 @@
 -DD_HALT = 0.18
 +
 +
@@ -103,28 +70,27 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
 +ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
 +DD_HALT = 0.80                  # owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (ddHaltPct)
- EQ_MIN = 0.20
- RECV = 5000
+@@ -150,0 +202,2 @@
 +_CONN_SUFFIX = CONN_SHORT.split("-")[-1]
 +IS_BYBIT = CONN_SHORT.startswith("bybit-")
- TAG = "G" + (
+@@ -152,2 +205,2 @@
 -    CONN_SHORT.split("-")[-1]
 -    if CONN_SHORT.split("-")[-1].startswith("x")
 +    ("b" + _CONN_SUFFIX[1:] if IS_BYBIT and _CONN_SUFFIX.startswith("x") else _CONN_SUFFIX)    # Bybit: Gb01 / Gb02, never a BingX tag
 +    if _CONN_SUFFIX.startswith("x")
-     else "x01"
- )
- SL_TYPES = {"STOP_MARKET", "STOP", "TRIGGER_MARKET"}
-@@ -211,6 +261,31 @@
- def is_transient_api(msg: str) -> bool:
-     low = str(msg or "").lower()
-     return any(k in low for k in _TRANSIENT_API)
+@@ -213,0 +267,32 @@
 +
 +
 +def filled_qty(data: Any, requested: float) -> float:
 +    """Quantity an order actually filled. executedQty is the filled amount; a partial fill is smaller than the request.
 +    Before any fill is reported, the order's own quantity stands in, then the requested quantity."""
 +    d = data if isinstance(data, dict) else {}
++    if d.get("executedQty") not in (None, ""):
++        try:
++            filled = float(d["executedQty"])
++            return filled if math.isfinite(filled) and filled >= 0 else 0.0
++        except (TypeError, ValueError):
++            return 0.0
 +    for key in ("executedQty", "quantity", "origQty"):
 +        try:
 +            v = float(d.get(key) or 0)
@@ -136,21 +102,16 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +
 +
 +def executed_qty(data: Any) -> Optional[float]:
-+    """The quantity a close order reports as executed, or None when the venue reports none (then the order counts
-+    as fully filled, as before)."""
++    """Reported close quantity, including zero; None only for legacy replies with no field."""
 +    d = data if isinstance(data, dict) else {}
-+    try:
-+        v = float(d.get("executedQty") or 0)
-+    except (TypeError, ValueError):
++    if d.get("executedQty") in (None, ""):
 +        return None
-+    return v if v > 0 else None
-
-
- def extract_oid(r: Any) -> str:
-@@ -347,6 +422,18 @@
- _LOG_FLUSH = 0.0
- 
- 
++    try:
++        v = float(d["executedQty"])
++    except (TypeError, ValueError):
++        return 0.0
++    return v if math.isfinite(v) and v >= 0 else 0.0
+@@ -349,0 +435,12 @@
 +def ctrl_mtimes(paths) -> Dict[str, float]:
 +    """mtime snapshot of the control files; missing files map to 0.0, so a
 +    create/delete/touch anywhere always changes the snapshot."""
@@ -163,13 +124,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +    return out
 +
 +
- def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
-     global _LOG_N, _LOG_FLUSH
-     if every > 0:
-@@ -418,6 +505,30 @@
-     return (p.stdout or "").strip()
- 
- 
+@@ -420,0 +518,24 @@
 +def cred_file_path() -> str:
 +    """A connection can be read from a JSON file instead of Redis: PULSE_CRED_FILE, or cred-<conn>.json in the state
 +    directory. The file must be private (no group or other permission bits); a readable file is ignored."""
@@ -194,17 +149,11 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        return ""
 +
 +
- def load_json_file(path: str) -> dict:
-     try:
-         with open(path) as f:
-@@ -427,8 +538,20 @@
-         return {}
- 
- 
+@@ -429,0 +551,3 @@
 +_CTS_CACHE: Dict[str, Any] = {"t": 0.0, "data": {}}
 +
 +
- def dump_cts_settings() -> dict:
+@@ -431 +555,10 @@
 -    p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True)
 +    """The connection settings hash from Redis, read at most once a minute (every overlay reload used to start a
 +    redis-cli process). Without Redis the result is an empty dict and the overlay alone configures the engine."""
@@ -216,92 +165,128 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +    except Exception:
 +        _CTS_CACHE.update(t=now, data={})
 +        return {}
-     lines = (p.stdout or "").splitlines()
-     out = {}
-     for i in range(0, len(lines) - 1, 2):
-@@ -453,6 +576,7 @@
-         os.replace(tmp, CTS_PATH)
-     except Exception:
-         pass
+@@ -455,0 +589 @@
 +    _CTS_CACHE.update(t=now, data=dict(out))
-     return out
- 
- 
-@@ -516,6 +640,9 @@
-     liq: float = 0.0
-     position_id: str = ""
-     ctrl_verified: bool = False
+@@ -473,0 +608,2 @@
++    maker_fee: Optional[float] = None
++    taker_fee: Optional[float] = None
+@@ -518,0 +655,22 @@
 +    dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
 +    dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
 +    lane: str = ""                             # the Set's lane at entry: "pos" (Base -> Main -> Real) or "neg" (Real Negative)
- 
- 
- @dataclass
-@@ -540,6 +667,7 @@
-     client_id: str = ""
-     ours: bool = True
-     conn: str = ""
++    base_entry: float = 0.0                    # immutable Set entry, apart from the exchange's averaged position entry
++    base_qty: float = 0.0
++    set_hold_bars: int = 0                    # hold selected at entry; later replay choices cannot change it
++    block_fills: list = field(default_factory=list)
++    block_pending: dict = field(default_factory=dict)
++    entry_fee_usdt: Optional[float] = None
++    base_entry_fee_usdt: Optional[float] = None
++    exit_fee_usdt: float = 0.0
++    exit_fee_qty: float = 0.0
++    fee_maker: Optional[float] = None
++    fee_taker: Optional[float] = None
++    fee_source: str = "configured-estimate"
++    entry_slippage: float = 0.0
++    exit_slippage: float = 0.0
++    close_filled_qty: float = 0.0
++    close_filled_value: float = 0.0
++    exit_price_estimated: bool = False
++    close_pending: dict = field(default_factory=dict)
++    close_reason: str = ""
+@@ -542,0 +701,10 @@
 +    lane: str = ""
- 
- 
- class Pulse:
-@@ -550,6 +678,7 @@
-         self.klines: Dict[str, List[List[float]]] = self.klines_tf["1m"]
-         self.kline_ban = 0.0
-         self.bar_min: Dict[str, List[float]] = {}
++    base_entry: float = 0.0
++    base_qty: float = 0.0
++    block_fills: list = field(default_factory=list)
++    net_pnl_pct: Optional[float] = None
++    base_net_pnl_pct: Optional[float] = None
++    fees_usdt: Optional[float] = None
++    fee_source: str = "configured-estimate"
++    entry_slippage: float = 0.0
++    exit_slippage: float = 0.0
+@@ -552,0 +721 @@
 +        self.real_1m: Dict[str, int] = {}   # real 1m bars per symbol; seed_px_bars padding is not counted
-         self.px: Dict[str, float] = {}
-         self.chg: Dict[str, float] = {}
-         self.open: Dict[str, Position] = {}
-@@ -570,6 +699,12 @@
-         self.halt_reason: Optional[str] = None
-         self._pre_pause_halt: Optional[str] = None
-         self.volume_factor = 1.0
+@@ -572,0 +742,6 @@
 +        self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
 +        self.dd_halt = DD_HALT        # drawdown from the session's start equity that halts entries (fraction); 0 = off (ddHaltPct)
 +        self.dd_basis = "session"      # ddHaltBasis: "session" = the equity when this session started, "start" = the stored start equity
 +        self.session_eq = 0.0         # equity at the start of the active session (engine start or explicit Start)
 +        self.size_max = 25.0          # ceiling for one position's notional in USDT (sizeMaxNotional)
 +        self.max_entry_slip = 0.0075  # fill vs reference price beyond this (fraction, maxEntrySlipPct) closes the entry
-         self.regime = "neutral"
-         self.consec_loss = 0
-         self.wins = 0
-@@ -625,6 +760,7 @@
-         self.track_prefix = TAG
-         self.boot_ts = time.time()
-         self.seen_fill_cids = BoundedSet(4000)
+@@ -627,0 +803 @@
 +        self.seen_fill_oids = BoundedSet(4000)
-         self.owned_syms = BoundedSet(800)
-         self.load = LoadGovernor()
-         self._scan_keep: List[str] = []
-@@ -633,18 +769,19 @@
-         self.recon_ok = True
-         self.recon_detail = "pending"
-         self._load_trade_history()
+@@ -635,0 +812 @@
 +        self._exec_boot()
-         self._load_open_book()
-         self.block = BlockBook(BLOCK_PATH, {
-             "variantBlockEnabled": True,
+@@ -639 +816 @@
 -            "blockMaxStack": 0,
 +            "blockMaxStack": 6,
-             "blockVolumeRatio": 1.0,
-             "blockProfitFactorRatio": 0.8,
-             "blockPauseCountRatio": 1,
-             "blockActiveRealEnabled": True,
-             "blockActiveLiveEnabled": True,
+@@ -645,3 +822,3 @@
 -            "defaultMinPF": 1.2,
 -            "prevPosMinCount": 5,
 -            "prevPosWindow": 25,
 +            "defaultMinPF": GATE_MIN_PF_DEFAULT,
 +            "blockMinSamples": 8,
 +            "blockWindow": 25,
-         })
-         self.coord = Coordinator()
-         self.indications = IndicationBook()
-@@ -705,12 +842,19 @@
-         need = max(float(c.min_qty or 0), (float(c.min_usdt or 0) / px) if c.min_usdt else 0.0)
-         return self.round_qty_up(c, need)
- 
+@@ -648,0 +826 @@
++        self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
+@@ -666,0 +845,3 @@
++        self.fee_schedule = FeeSchedule()
++        self.slippage_allowance_pct = .02
++        self._fee_config_dirty = False
+@@ -681,0 +863,52 @@
++    def refresh_fees(self) -> None:
++        now = time.time()
++        self.fee_schedule.refresh(self.api, list(SYMBOLS), now)
++        budget = self.fee_schedule.paper_budget(float(self.overlay.get("configuredPositionCostPct") or .12),
++                                               self.slippage_allowance_pct, self.contracts, now)
++        if abs(budget - self.position_cost_pct) > 1e-10:
++            self._fee_config_dirty = True
++
++    def fill_cost(self, data, qty: float, price: float, symbol: str, pos=None):
++        maker, taker, _ = self.fee_schedule.rates(symbol, self.contracts.get(symbol), time.time())
++        if pos is not None and taker is None:
++            maker, taker = pos.fee_maker, pos.fee_taker
++        return fill_fee(data, qty, price, maker, taker, self.position_cost_pct)
++
++    def record_exit_fee(self, pos, data, qty: float, price: float) -> None:
++        if getattr(pos, "entry_fee_usdt", None) is not None and qty > 0:
++            fee, source = self.fill_cost(data, qty, price, pos.symbol, pos)
++            pos.exit_fee_usdt += fee
++            pos.exit_fee_qty += qty
++            if source != "reported-fee":
++                pos.fee_source = "exchange-rate-estimate" if source != "configured-estimate" else source
++
++    def confirmed_order(self, data, symbol: str, cid: str = "") -> dict:
++        """Resolve an acknowledgement with a read; requested quantity is not a fill.
++        No sleep/retry or second order is sent here. Unknown fills remain pending.
++        """
++        def known(row):
++            status = str(row.get("status") or row.get("orderStatus") or "").upper()
++            if executed_qty(row) == 0 and status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
++                row["avgPrice"] = "0"   # terminal no-fill; no price enters accounting
++                return True
++            try:
++                px = float(row.get("avgPrice") or 0)
++            except (TypeError, ValueError):
++                return False
++            return executed_qty(row) is not None and math.isfinite(px) and px > 0 and status not in ("NEW", "PENDING", "TRIGGERED", "PARTIALLY_FILLED")
++        if not isinstance(data, dict):
++            data = {}
++        if known(data):
++            return data
++        oid = real_oid(data.get("orderID") or data.get("orderId"))
++        params = {"symbol": symbol, **({"orderId": oid} if oid else {"clientOrderId": cid})}
++        try:
++            reply = self.api.get("/openApi/swap/v2/trade/order", params)
++            row = reply.get("data") or {}
++            row = row.get("order") or row if isinstance(row, dict) else {}
++            if self.ok(reply) and str(row.get("symbol") or symbol) == symbol and known(row):
++                return row
++        except Exception:
++            pass
++        return {**data, "executedQty": None, "avgPrice": None, "fillUnconfirmed": True}
++
+@@ -707,0 +941,9 @@
 +    def target_leverage(self, mx: int) -> int:
 +        """The leverage a contract runs at. Max leverage on: its exchange max. Off: the pulse leverage, capped by the
 +        exchange max. With no known max, the pulse leverage."""
@@ -311,67 +296,38 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            return pulse
 +        return mx if self.use_max_leverage else max(1, min(mx, pulse))
 +
-     def leverage_for(self, c: Optional[Contract]) -> int:
-         sym = getattr(c, "symbol", "") if c is not None else ""
-         mx = int(self.lev_max.get(sym) or getattr(c, "max_lev", 0) or 0)
+@@ -711,3 +953 @@
 -        if mx <= 0:
 -            mx = int(LEVERAGE or 150)
 -        return max(1, mx)
 +        return self.target_leverage(mx)
- 
-     def _persist_lev(self) -> None:
-         try:
-@@ -750,11 +894,11 @@
- 
-     def ensure_max_leverage(self, symbol: str, force: bool = False) -> int:
-         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
+@@ -753 +992,0 @@
 -        self.use_max_leverage = True
-         c = self.contracts.get(symbol)
-         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
+@@ -755,0 +995 @@
 +        tgt = self.target_leverage(mx)
-         applied = int(self.lev_map.get(symbol) or 0)
+@@ -757 +997 @@
 -        if not force and mx > 0 and applied >= mx:
 +        if not force and mx > 0 and applied >= tgt:
-             if c is not None:
-                 c.max_lev = mx
-             return applied
-@@ -767,14 +911,15 @@
-                 self.lev_max[symbol] = mx
-                 if c is not None:
-                     c.max_lev = mx
+@@ -770,2 +1010,3 @@
 -                if cur_l == mx and cur_s == mx:
 -                    self.lev_map[symbol] = mx
 +                tgt = self.target_leverage(mx)
 +                if cur_l == tgt and cur_s == tgt:
 +                    self.lev_map[symbol] = tgt
-                     self._persist_lev()
+@@ -773 +1014 @@
 -                    return mx
 +                    return tgt
-                 # current can be 500 while pair max is 10 — must POST down
-             elif applied >= mx > 0 and not force:
-                 return applied
+@@ -777 +1018 @@
 -        want = int(mx or 150)
 +        want = tgt
-         ok_both = True
-         for side in ("LONG", "SHORT"):
-             r = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
-@@ -789,7 +934,7 @@
-                     self.lev_max[symbol] = mx
-                     if c is not None:
-                         c.max_lev = mx
+@@ -792 +1033 @@
 -                    want = mx
 +                    want = self.target_leverage(mx)
-                     r2 = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
-                     if not self.ok(r2):
-                         return applied or cur_l or want
-@@ -863,8 +1008,19 @@
-         return s
- 
-     def sized_notional(self) -> float:
+@@ -865,0 +1107,3 @@
 +        """One position's notional: the balance x sizePctOfBalance % x volumeFactor, so the size follows the account both
 +        ways. Without a balance read yet (or with sizePctOfBalance 0) the fixed targetNotional x volumeFactor applies.
 +        size_qty raises it to the venue's minimum order."""
-         vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
+@@ -867 +1111,9 @@
 -        return max(0.2, float(TARGET_NOTIONAL) * vf)
 +        pct = float(getattr(self, "size_pct", 0.0) or 0.0)
 +        bal = float(getattr(self, "equity", 0.0) or 0.0)
@@ -382,13 +338,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        # a hard ceiling whatever the balance (sizeMaxNotional): a large or demo balance must never scale one entry into
 +        # an exposure the strategy was not validated at
 +        return max(0.2, min(n, float(getattr(self, "size_max", 25.0) or 25.0)))
- 
-     def notional_cap(self) -> float:
-         return max(self.sized_notional(), 2.0)
-@@ -875,9 +1031,24 @@
-         return max(0.0, float(self.available or 0)) * lev * 0.90
- 
-     def max_book_notional(self) -> float:
+@@ -878 +1130,6 @@
 -        """Per-position cap: base size × configured Block/DCA rungs. Never the whole wallet."""
 +        """Per-position book room. Limited books cap at base × configured rungs.
 +        Unlimited Block/DCA books (0 rungs = unlimited count) still get a hard
@@ -396,7 +346,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        quarter of the remaining carry capacity — a stale balance read or a
 +        corrupt overlay must never balloon one position into an impossible
 +        notional the wallet cannot actually hold."""
-         base = self.notional_cap()
+@@ -880 +1137,11 @@
 -        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if getattr(self.dca, "enabled", False) else 0
 +        dca_on = bool(getattr(self.dca, "enabled", False))
 +        block_on = bool(getattr(self.block, "enabled", False))
@@ -409,88 +359,54 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                return max(base, min(room, sane, room * 0.25))
 +            return base
 +        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if dca_on else 0
-         dca_extra = 0.0
-         if dca_n > 0:
-             try:
-@@ -933,6 +1104,10 @@
-         if q < floor:
-             return 0.0
-         if q * px > room * 1.02:
+@@ -891 +1158 @@
+-            block_extra = sum(calculate_block_volume_increment_ratio(i, vr) for i in range(1, min(stack, 8) + 1))
++            block_extra = calculate_block_volume_increment_ratio(min(stack, 8), vr)
+@@ -935,0 +1203,4 @@
 +            return 0.0
 +        # Final sanity: an entry may never exceed 2× the configured target
 +        # (exchange min-lot floor excepted) — catches corrupt sizing upstream.
 +        if q * px > max(self.sized_notional() * 2.0, floor_n * 1.08):
-             return 0.0
-         return q
- 
-@@ -999,15 +1174,17 @@
-             if pos.client_id:
-                 self.seen_fill_cids.add(pos.client_id)
- 
+@@ -967 +1238 @@
+-    def save_open_book(self) -> None:
++    def save_open_book(self) -> bool:
+@@ -973,0 +1245 @@
++            return True
+@@ -975 +1247 @@
+-            pass
++            return False
+@@ -1002 +1274 @@
 -    def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1) -> str:
 +    def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1, lane: str = "") -> str:
-         kind = (kind or "o")[:1]
-         idx = set_idx
-         if pos is not None:
-             set_id = set_id or pos.set_id
+@@ -1006,0 +1279 @@
 +            lane = lane or str(getattr(pos, "lane", "") or "")
-             pack = pack or pos.pack
-             if idx < 0:
-                 idx = int(getattr(pos, "set_idx", -1))
+@@ -1010 +1283,2 @@
 -        p = "i" if str(pack or set_id).startswith("ind") else "g"
 +        pk = str(pack or set_id)
 +        p = "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
-         sl, tr, st = "06", "03", "08"
-         m = re.search(r"sl([0-9.]+)", set_id or "")
-         if m:
-@@ -1024,13 +1201,19 @@
-         m = re.search(r":st(\d+)", set_id or "")
-         if m:
-             st = f"{int(m.group(1)):02d}"
+@@ -1026,0 +1301,4 @@
 +        elif re.search(r"tr[0-9.]+:[0-9.]+", set_id or ""):
 +            st = "00"                      # a trailing Set has no TP step
 +        if set_kind_of(set_id) == "exit":
 +            tr = CID_EXIT_TR               # an Exit Set: same pack, SL ratio and step as its base Set, told apart here
-         if idx < 0:
-             try:
-                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
-             except Exception:
-                 idx = -1
+@@ -1032,2 +1310,4 @@
 -        ix = f"{max(0, idx):03d}"
 -        nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
 +        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
 +        # the nonce carries the Set's lane: CID_NEG_MARK first for the Real Negative lane, never otherwise
 +        alphabet = [c for c in string.ascii_lowercase + string.digits if c != CID_NEG_MARK]
 +        nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + "".join(random.choices(alphabet, k=4))
-         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
- 
-     def cid_ours(self, cid: str) -> bool:
-@@ -1047,6 +1230,11 @@
-         return str(o.get("clientOrderID") or o.get("clientOrderId") or "")
- 
-     def parse_track(self, cid: str) -> Optional[Dict[str, Any]]:
+@@ -1049,0 +1330,5 @@
 +        """Decode a client order id into the Set it belongs to. The id carries pack, SL ratio, trailing arm, TP step and
 +        the Set's grid index. The index is trusted only when the Set at that index agrees on pack, step, SL ratio (base
 +        Sets) or arm (trailing Sets): a grid that moved since the order (step-adapt, a pack toggled) shifts indices.
 +        Otherwise the Set is found by content, and when that is ambiguous the Set is left unknown (set_id ""), never
 +        guessed: a close credited to the wrong Set corrupts its validation tape."""
-         if not self.cid_ours(cid):
-             return None
-         s = str(cid)
-@@ -1056,7 +1244,8 @@
-         if len(rest) < 6:
-             return {"kind": rest[:1], "pack": "general", "set_id": ""}
-         kind = rest[:1]
+@@ -1059 +1344,2 @@
 -        pack = "indications" if rest[1:2] == "i" else "general"
 +        pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
 +        is_exit = rest[4:6] == CID_EXIT_TR
-         try:
-             sl = int(rest[2:4]) / 10.0
-             arm = int(rest[4:6]) / 10.0
-@@ -1069,32 +1258,43 @@
-                 step = int(rest[6:8])
-             except Exception:
-                 step = 0
+@@ -1072,5 +1358,4 @@
 -        if len(rest) >= 11:
 -            try:
 -                idx = int(rest[8:11])
@@ -500,8 +416,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            idx = int(rest[8:12])
 +        elif len(rest) >= 11 and rest[8:11].isdigit():
 +            idx = int(rest[8:11])          # an id written before the index had four digits
-         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
-         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
+@@ -1079,3 +1364,8 @@
 -        st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
 -        if st_obj is not None:
 -            pack_ok = str(getattr(st_obj, "pack", "")) == str(pack)
@@ -513,7 +428,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    "idx": st_obj.idx, "set_id": st_obj.id, "lane": lane}
 +
 +        def _agrees(st_obj: Any) -> bool:
-             try:
+@@ -1083 +1373,7 @@
 -                sl_ok = abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
 +                if str(getattr(st_obj, "pack", "")) != pack:
 +                    return False
@@ -522,7 +437,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                if (st_obj.kind == "exit") != is_exit:
 +                    return False
 +                return step == int(st_obj.step) and abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
-             except Exception:
+@@ -1085,13 +1381,14 @@
 -                sl_ok = False
 -            if pack_ok and sl_ok:
 -                return {
@@ -550,13 +465,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        elif len(cands) == 1:
 +            return _row(cands[0])
 +        return {"kind": kind, "pack": pack, "sl": sl, "trail": tr, "step": step, "idx": -1, "set_id": ""}
- 
-     def ok(self, r: Dict[str, Any]) -> bool:
-         return (not r.get("error")) and r.get("code") in (0, None)
-@@ -1142,6 +1342,53 @@
-             except Exception:
-                 pass
-         self.last_bal = time.time()
+@@ -1144,0 +1442,47 @@
 +        # Explicit Start (sidecar drops reset-eq) or a real deposit must always
 +        # revive the desk: re-baseline the session equity instead of latching
 +        # the drawdown / equity-min halt forever.
@@ -604,33 +513,20 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            self.halt_reason = None
 +            self._pre_pause_halt = None
 +            self._halt_eq = 0.0
-         if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
-             if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
-                 self._pre_pause_halt = self.halt_reason
-@@ -1152,18 +1399,37 @@
-                 self._pre_pause_halt = self.halt_reason
-             self.halted = True
-             self.halt_reason = "paused"
+@@ -1155 +1499,3 @@
 -        elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
 +        elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
 +            if not self.halted:
 +                self._halt_eq = self.equity
-             self.halted = True
-             self.halt_reason = "drawdown halt"
-             self._pre_pause_halt = None
-         elif self.equity < EQ_MIN:
+@@ -1159,0 +1506,2 @@
 +            if not self.halted:
 +                self._halt_eq = self.equity
-             self.halted = True
-             self.halt_reason = f"equity {self.equity:.4f} below min"
-             self._pre_pause_halt = None
+@@ -1163 +1511,3 @@
 -        elif self.equity >= EQ_MIN and self.start_eq > 0 and (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6:
 +        elif self.equity >= EQ_MIN and self.dd_base() > 0 and (
 +            self.dd_halt <= 0 or self.dd_now() < self.dd_halt * 0.6
 +        ):
-             self.halted = False
-             self.halt_reason = None
-             self._pre_pause_halt = None
+@@ -1166,0 +1517,13 @@
 +
 +    def dd_base(self) -> float:
 +        """The equity the drawdown halt measures from: the active session's start (default) or the stored start equity."""
@@ -644,25 +540,13 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        if base <= 0 or not (self.equity and self.equity > 0):
 +            return 0.0
 +        return (base - self.equity) / base
-
-     def bump(self, kind: str = "tick") -> None:
-         self.last_event = kind
-@@ -1382,8 +1648,9 @@
-             for s in SYMBOLS:
-                 if s not in set(chosen):
-                     chosen.append(s)
+@@ -1385,2 +1748,3 @@
 -        elif wild or cap <= 0:
 -            chosen = names
 +        elif cap <= 0:
 +            # every ranked name, plus any symbol that still has an open position: a position must keep being managed
 +            chosen = list(names) + [s for s in open_syms if s not in set(names)]
-         else:
-             chosen = []
-             seen = set()
-@@ -1419,10 +1686,31 @@
-                 pass
-             log(f"UNIVERSE rank={self.symbol_sort} n={len(SYMBOLS)} dyn={int(self.symbols_dynamic)} cap={cap} wild={int(wild)} lead={(SYMBOLS[0] if SYMBOLS else '-')}", every=20.0, key="uni-rank")
- 
+@@ -1421,0 +1786,19 @@
 +    def _closed_klines(self, data: Any, now: Optional[float] = None) -> Tuple[List[List[float]], Optional[float]]:
 +        """The completed minutes of a 1m klines answer, oldest first, and the open time (s) of the last one. The venue's last
 +        row is the minute still forming; the replay only ever reads completed bars, so live entries read the same ones."""
@@ -682,19 +566,10 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            return [], None
 +        return bars, self._kline_time(rows[-1]) / 1000.0
 +
-     def _parse_klines(self, data: Any) -> List[List[float]]:
-         bars: List[List[float]] = []
-         if not isinstance(data, list):
-             return bars
+@@ -1425,0 +1809,2 @@
 +        if data and all(self._kline_time(b) > 0 for b in data):
 +            data = sorted(data, key=self._kline_time)      # the v3 endpoint answers newest first
-         for b in data:
-             try:
-                 if isinstance(b, dict):
-@@ -1455,6 +1743,17 @@
-                 break
-         self.kline_ban = max(self.kline_ban, until or (time.time() + 45.0))
- 
+@@ -1457,0 +1843,11 @@
 +    def ready_1m(self, s: str) -> int:
 +        """Real 1m bars for a symbol. The padding seed_px_bars adds is not history and never counts toward readiness."""
 +        have = len(self.klines_tf.get("1m", {}).get(s) or [])
@@ -706,46 +581,20 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        bars = self.klines_tf.get("1m", {}).get(s) or []
 +        return bars[-n:] if n > 0 else []
 +
-     def seed_px_bars(self) -> None:
-         """Keep 1m OHLC from live WS/mark so all symbols can start without REST klines."""
-         minute = int(time.time() // 60)
-@@ -1464,9 +1763,13 @@
-             rec = self.bar_min.get(s)
-             if not rec or int(rec[0]) != minute:
-                 if rec:
+@@ -1466,0 +1863,3 @@
 +                    if not hasattr(self, "last_closed_1m"):
 +                        self.last_closed_1m = {}
 +                    self.last_closed_1m[s] = (int(rec[0]), float(rec[4]))   # the minute that just completed and its close
-                     bars = self.klines_tf["1m"].setdefault(s, [])
-                     bars.append([rec[1], rec[2], rec[3], rec[4], 0.0])
-                     del bars[:-KLINE_LIMIT]
+@@ -1469,0 +1869 @@
 +                    self.real_1m[s] = min(KLINE_LIMIT, self.real_1m.get(s, 0) + 1)
-                 self.bar_min[s] = [float(minute), px, px, px, px]
-             else:
-                 rec[2] = max(rec[2], px)
-@@ -1489,7 +1792,8 @@
-         src = self.klines_tf.get("1m") or {}
-         for tf, n in (("5m", 5), ("15m", 15)):
-             dest = self.klines_tf.setdefault(tf, {})
+@@ -1492 +1892,2 @@
 -            for s, bars in src.items():
 +            for s in src:
 +                bars = self.real_bars_1m(s)
-                 if s in dest and len(dest[s] or []) >= 8:
-                     continue
-                 if len(bars) < n:
-@@ -1516,7 +1820,7 @@
-         self.rollup_tf()
-         if now < self.kline_ban:
-             return
+@@ -1519 +1920 @@
 -        ready1 = sum(1 for s in SYMBOLS if len(self.klines_tf.get("1m", {}).get(s) or []) >= 20)
 +        ready1 = sum(1 for s in SYMBOLS if self.ready_1m(s) >= 20)
-         need1 = len(SYMBOLS) if len(SYMBOLS) <= 48 else max(32, len(SYMBOLS) // 2)
-         filling = ready1 < max(1, need1)
-         reqs = []
-@@ -1545,6 +1849,15 @@
-             if not s or len(bars) < 5:
-                 return
-             self.klines_tf.setdefault(tf, {})[s] = bars[-KLINE_LIMIT:]
+@@ -1547,0 +1949,9 @@
 +            if tf == "1m":
 +                self.real_1m[s] = len(bars[-KLINE_LIMIT:])
 +                sets = getattr(self, "sets", None)
@@ -755,266 +604,249 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    closed, last_t = self._closed_klines(body.get("data"), now)
 +                    if closed and last_t is not None:
 +                        sets.ingest_bars(s, closed, tail=bool(sets.bars.get(s)), last_t=last_t)
-             self.kline_ts_tf.setdefault(tf, {})[s] = now
-             stored += 1
- 
-@@ -1586,7 +1899,8 @@
-             else:
-                 losses -= d
-         if losses == 0:
+@@ -1589 +1999,2 @@
 -            return 100.0
 +            # a flat window reads neutral, as the indication and Set RSI do; 100 made every flat market look overbought
 +            return 50.0 if gains == 0 else 100.0
-         rs = (gains / n) / (losses / n)
-         return 100 - (100 / (1 + rs))
- 
-@@ -1757,6 +2071,8 @@
- 
-     def cancel_controls(self, symbol: str, keep: Optional[set] = None) -> None:
-         keep = keep or set()
+@@ -1759,0 +2171,2 @@
 +        self._oo_cache.pop("*", None)   # controls placed in the last seconds must be visible to this sweep
 +        self._oo_cache.pop(symbol, None)
-         for o in self.list_orders(symbol):
-             if not self.order_is_ours(o):
-                 continue
-@@ -1767,7 +2083,9 @@
-                     self.cancel_order(symbol, oid, self.order_cid(o))
- 
-     def opt_fracs(self, pos: Optional[Position] = None) -> Tuple[float, float, float, float]:
+@@ -1770 +2183,3 @@
 -        """(sl, tp, sl_lo, sl_hi) fractions clamped to optimal security ranges."""
 +        """(sl, tp, sl_lo, sl_hi) fractions clamped to optimal security ranges. A Set fill keeps its grid SL and TP."""
 +        if pos and pos.set_id:
 +            return float(pos.sl_pct), float(pos.tp_pct), float(self.sl_min), float(self.sl_max)
-         sl_lo = max(float(self.sl_min), float(getattr(self.exits, "opt_sl_min", 0.001) or 0.001))
-         sl_hi = min(float(self.sl_max), float(getattr(self.exits, "opt_sl_max", 0.009) or 0.009))
-         if sl_lo > sl_hi:
-@@ -1800,18 +2118,21 @@
-     def security_prices(self, pos: Position) -> Tuple[float, float]:
-         """Qty-matched order SL/TP from the Set's own range."""
-         sl_f, tp_f, _, _ = self.opt_fracs(pos)
+@@ -1803 +2218,5 @@
+-        e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
 +        set_lane = bool(pos.set_id)
 +        if set_lane and not self.lane_honors_tp(pos):
 +            tp_f = max(tp_f, float(self.tp_max))      # the lane that validated this Set has no TP exit: the order is only a safety
-         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
-         if e <= 0:
-             return pos.sl, pos.tp
-         if pos.side == "LONG":
-             sl = e * (1.0 - sl_f)
-             tp = e * (1.0 + tp_f)
++        e = (pos.base_entry or pos.dca_ref or pos.entry) if set_lane else pos.entry
++        e = e if e > 0 else (self.px.get(pos.symbol) or 0)
+@@ -1809 +2228 @@
 -            if self.exits.enabled and pos.peak > e:
 +            if self.exits.enabled and pos.peak > e and not set_lane:
-                 sl = max(sl, self.exits.optimal_sl("LONG", e, pos.peak, sl))
-         else:
-             sl = e * (1.0 + sl_f)
-             tp = e * (1.0 - tp_f)
+@@ -1814 +2233 @@
 -            if self.exits.enabled and pos.peak and pos.peak < e:
 +            if self.exits.enabled and pos.peak and pos.peak < e and not set_lane:
-                 sl = min(sl, self.exits.optimal_sl("SHORT", e, pos.peak, sl))
-         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
- 
-@@ -2055,8 +2376,6 @@
-             return True
-         if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
-             return True
+@@ -2058,2 +2476,0 @@
 -        if self._order_est_known and int(getattr(self, "_order_est", 0) or 0) >= 196:
 -            return True
-         if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
-             return True
-         return False
-@@ -2086,7 +2405,8 @@
-                 miss += 1
-                 age = time.time() - float(pos.opened_at or 0)
-                 bare = not (pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
+@@ -2089 +2506,2 @@
 -                if bare and age > 300.0 and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
 +                cooling = float(self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) or 0) > time.time()
 +                if bare and age > 300.0 and not cooling and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
-                     log(f"CTRL flatten unprotected {pos.symbol} age={age:.0f}s")
-                     self.close_pos(pos, px or pos.entry, "no-ctrl")
-                 else:
-@@ -2170,6 +2490,8 @@
-         pos.close_position = True
-         pos.ctrl_qty = pos.qty
-         pos.ctrl_verified = pos.controls_ok
+@@ -2172,0 +2591,2 @@
 +        self._oo_cache.pop("*", None)
 +        self._oo_cache.pop(pos.symbol, None)
- 
-     def ensure_controls(self, pos: Position) -> None:
-         now = time.time()
-@@ -2317,10 +2639,12 @@
-             with_qty=False,
-         )
- 
+@@ -2320 +2740,3 @@
 -    def replace_sl(self, pos: Position, new_sl: float) -> None:
 +    def replace_sl(self, pos: Position, new_sl: float) -> bool:
 +        """Move the exchange stop to new_sl. True when the protection sits at that level (already there, or placed);
 +        False when it was throttled or the replacement failed. The caller commits its trail state only on True."""
-         now = time.time()
-         if now < self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
+@@ -2323 +2745 @@
 -            return
 +            return False
-         c = self.contracts.get(pos.symbol)
-         if c:
-             new_sl = self.round_px(c, new_sl)
-@@ -2328,7 +2652,7 @@
-         if not self.sl_legal(pos, new_sl):
-             new_sl = self.desired_sl_tp(pos)[0]
-         if pos.sl_oid and abs(float(pos.sl or 0) - new_sl) / max(pos.entry, 1e-9) < 0.00035 and self.sl_legal(pos, pos.sl):
+@@ -2331 +2753 @@
 -            return
 +            return True
-         old_oid = real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))
-         replaced = False
-         if old_oid and hasattr(self.api, "cancel_replace"):
-@@ -2344,6 +2668,8 @@
-                 pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
-                 pos.sl = pos.sec_sl = new_sl
-                 replaced = True
+@@ -2346,0 +2769,2 @@
 +                self._oo_cache.pop("*", None)
 +                self._oo_cache.pop(pos.symbol, None)
-         if not replaced:
-             if pos.sl_oid:
-                 self.cancel_order(pos.symbol, pos.sl_oid)
-@@ -2360,6 +2686,7 @@
-             pos.tp = want_tp
-         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
-         self.ctrl_skip[f"sync:{pos.symbol}"] = now + 12.0
+@@ -2362,0 +2787 @@
 +        return bool(real_oid(pos.sl_oid))
- 
-     def market_close(self, pos: Position) -> Tuple[bool, float]:
-         close_side = "SELL" if pos.side == "LONG" else "BUY"
-@@ -2370,7 +2697,12 @@
-         pid = str(getattr(pos, "position_id", "") or "")
-         if pid:
-             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
+@@ -2365,0 +2791,21 @@
++        if pos.close_pending:
++            pending = pos.close_pending
++            if pending.get("client_id"):
++                self.seen_fill_cids.add(pending["client_id"])
++            data = self.confirmed_order({"orderId": pending.get("order_id")}, pos.symbol, pending.get("client_id", ""))
++            if data.get("fillUnconfirmed"):
++                self.last_error = f"close {pos.symbol} fill unconfirmed; awaiting same order"
++                return False, self.px.get(pos.symbol) or pos.entry
++            px = float(data["avgPrice"])
++            qty = min(pos.qty, float(data["executedQty"]))
++            self.record_exit_fee(pos, data, qty, px)
++            total = pos.close_filled_qty + qty
++            value = pos.close_filled_value + qty * px
++            pos.close_pending = {}
++            if qty >= pos.qty * .999:
++                return True, value / total if total else px
++            pos.qty -= qty
++            pos.close_filled_qty, pos.close_filled_value = total, value
++            self.save_open_book()
++            self.last_error = f"close {pos.symbol} partial settled; remainder retained"
++            return False, px
+@@ -2372,0 +2819,2 @@
 +        for f in forms:                       # the manager records this close itself: the fill sync must not count it again
 +            self.seen_fill_cids.add(f["clientOrderID"])
-         r: Dict[str, Any] = {}
+@@ -2373,0 +2822,3 @@
 +        first_msg = ""       # the quantity form's own rejection (the later forms only repeat it as "quantity is must")
-+        done_qty = 0.0       # closed by earlier partial fills of this close
-+        done_val = 0.0
-         for extra in forms:
-             body = {
-                 "symbol": pos.symbol,
-@@ -2386,15 +2718,29 @@
-             if self.ok(r):
-                 data = (r.get("data") or {}).get("order") or r.get("data") or {}
-                 px = float(data.get("avgPrice") or data.get("price") or 0) or (self.px.get(pos.symbol) or pos.entry)
++        done_qty = pos.close_filled_qty  # retained across failed attempts and restarts
++        done_val = pos.close_filled_value
+@@ -2384 +2835,9 @@
+-            r = self.api.post("/openApi/swap/v2/trade/order", body)
++            pos.close_pending = {"client_id": extra["clientOrderID"]}
++            if not self.save_open_book():
++                pos.close_pending = {}
++                self.last_error = f"close {pos.symbol} intent persistence failed"
++                return False, self.px.get(pos.symbol) or pos.entry
++            try:
++                r = self.api.post("/openApi/swap/v2/trade/order", body)
++            except Exception:
++                r = {"code": -1, "error": True, "msg": "close response unavailable"}
+@@ -2385,0 +2845,5 @@
++            if r.get("error") or r.get("code") == -1:
++                pos.close_pending = {"client_id": extra["clientOrderID"]}
++                self.save_open_book()
++                self.last_error = f"close {pos.symbol} response unknown; awaiting same order"
++                return False, self.px.get(pos.symbol) or pos.entry
+@@ -2388 +2852,28 @@
+-                px = float(data.get("avgPrice") or data.get("price") or 0) or (self.px.get(pos.symbol) or pos.entry)
++                data = self.confirmed_order(data, pos.symbol, extra["clientOrderID"])
++                if data.get("fillUnconfirmed"):
++                    pos.close_pending = {"order_id": real_oid(data.get("orderID") or data.get("orderId")),
++                                         "client_id": extra["clientOrderID"]}
++                    self.save_open_book()
++                    self.last_error = f"close {pos.symbol} fill unconfirmed; awaiting same order"
++                    return False, self.px.get(pos.symbol) or pos.entry
++                pos.close_pending = {}
++                px = float(data.get("avgPrice") or data.get("price") or 0)
++                if not math.isfinite(px) or px <= 0:
++                    if (executed_qty(data) or 0) > 0:
++                        pos.exit_price_estimated = True
++                    px = self.px.get(pos.symbol) or pos.entry
 +                ex = executed_qty(data)
-+                if ex is not None and "quantity" in body and ex < float(pos.qty) * 0.999:
++                self.record_exit_fee(pos, data, min(pos.qty, ex) if ex is not None else pos.qty, px)
++                if ex is not None and ex < float(pos.qty) * 0.999:
 +                    # partial close fill: the rest is still open on the venue. Keep the position at what is left and
 +                    # close the remainder with the next form instead of reporting a full close.
 +                    done_qty += ex
 +                    done_val += ex * px
 +                    pos.qty = max(0.0, float(pos.qty) - ex)
++                    pos.close_filled_qty, pos.close_filled_value = done_qty, done_val
++                    self.save_open_book()
 +                    continue
 +                if done_qty > 0:
-+                    rest = ex if ex is not None else float(pos.qty)
++                    rest = min(ex, pos.qty) if ex is not None else float(pos.qty)
 +                    total = done_qty + rest
 +                    px = (done_val + rest * px) / total if total > 0 else px
-                 return True, px
-             msg = str(r.get("msg") or "")
+@@ -2389,0 +2881,2 @@
++            pos.close_pending = {}
++            self.save_open_book()
+@@ -2390,0 +2884,2 @@
 +            if "closePosition" not in body and msg:
 +                first_msg = first_msg or msg
-             if ctrl_err_kind(msg) == "qty_close":
-                 continue
+@@ -2393,2 +2888,3 @@
 -            if "position not exist" in msg.lower():
 -                return True, self.px.get(pos.symbol) or pos.entry
 +            if "position not exist" in msg.lower() or "no position to close" in msg.lower():
++                pos.exit_price_estimated = True
 +                return True, self.px.get(pos.symbol) or pos.entry     # the venue already closed it (its stop or TP)
-         self.errors += 1
+@@ -2396,2 +2892,17 @@
 -        self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
 -        return False, self.px.get(pos.symbol) or pos.entry
 +        self.last_error = f"close {pos.symbol} {first_msg or r.get('msg')}"[:240]
 +        return False, self.px.get(pos.symbol) or pos.entry     # pos.qty already holds what a partial close left
- 
-     def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
-         """Max 1 position per symbol, and per (symbol, direction, pack, Set)."""
-@@ -2415,14 +2761,15 @@
- 
-     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
-         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
++
++    def settle_pending_close(self, pos: Position) -> bool:
++        """Read the existing close order only; retain unresolved accounting across refresh/restart."""
++        if not pos.close_pending:
++            return False
++        qty = pos.qty + pos.close_filled_qty
++        ok, price = self.market_close(pos)   # pending branch only: never sends another order
++        if not ok:
++            return False
++        pos.qty = qty
++        # market_close already combined all partial prices. Do not blend them twice.
++        pos.close_filled_qty = pos.close_filled_value = 0.0
++        self.cancel_controls(pos.symbol)
++        self.close_pos(pos, price, pos.close_reason or "pending-close", exchange=False)
++        return True
+@@ -2418 +2929 @@
 -        if conf < 0.50:
 +        if conf < self.sets.entry_conf:   # the same setEntryConf the replay uses
-             return "low-conf"
-         if (self.px.get(sym) or 0) <= 0:
-             return "no-px"
-         side = "LONG" if direction > 0 else "SHORT"
-         if self.occupying(sym, side, pack):
-             return "slot-taken"
+@@ -2425 +2936,2 @@
 -        if pack == "indications":
 +        if pack == "indications" and str(reason).startswith("ind:"):
 +            # a live indication row must still stand; a Set entry ("set:") is the replay's own signal and needs no other row
-             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
-                 return "ind-off"
-             ind = None
-@@ -2435,23 +2782,48 @@
-             want = 1 if ind.direction == "long" else -1
-             if want != direction:
-                 return "ind-mismatch"
+@@ -2437,0 +2950,2 @@
 +        if self.sets.enabled and not self.sets.symbol_ok(sym):
 +            return "data-quality"          # the symbol's history failed the data check: no Set was validated on it
-         chosen = None
-         try:
+@@ -2440,3 +2954 @@
 -            chosen = self.sets.pick_any(pack) if self.sets.enabled else None
 -            if not chosen and self.sets.enabled:
 -                chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
 +            chosen = self.sets.pick_any(pack) if self.sets.enabled else None   # a signal binds to its own pack only
-         except Exception:
-             chosen = None
-         if chosen:
-             if self.occupying(sym, side, pack, chosen.id):
-                 return "set-slot"
+@@ -2448,2 +2959,0 @@
 -            # Intern-soft: always bind a Set. Never skip on historic PF / inactive —
 -            # pick() already falls back to the best available book.
-             return None
-         elif self.sets.enabled and self.sets.use_historic_gate:
+@@ -2452,2 +2962,3 @@
 -            if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
 -                return None
 +            # Base gate on: an entry opens only under a Set that is valid on its lane (pick_any). A pack with a valid Set that is
 +            # not on a lane (pack_open true) takes no entry either: the no-Set fallback in place() must never run under the gate.
 +            return "set-gate"
-         return None
+@@ -2454,0 +2966,55 @@
 +
 +    def _scope_pick(self, pack: str) -> Tuple[Any, str]:
++        chosen, _lane, blocked = self._scope_choice(pack)
++        return chosen, blocked
++
++    def _scope_choice(self, pack: str) -> Tuple[Any, str, str]:
 +        """Pick within the pack's allowed lanes; another pack or a blocked positive lane cannot mask a valid alternative."""
++        if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
++            blocked = []
++            def allows(st, lane):
++                source = st.neg if lane == "neg" else st.exe
++                now = st.score_at
++                cutoff = now - self.sets.lookback * 60
++                cf = cost_as_frac(self.position_cost_pct)
++                rows = [{"t": t, "pnl_pct": value + cf} for t, value in source
++                        if cutoff <= t <= now]
++                result = self.coord.judge(rows, self.coord.net_streak(rows))
++                key = f"set:{st.id}:{lane}"
++                scope = {"allow": result["allow"], "reasons": result["reasons"], "orders": len(rows),
++                         "pf": result["metrics"]["last15Pf"], "source": "paper"}
++                self.coord.scopes[key] = scope
++                cap = self.coord.slot_cap(0, scope["pf"])
++                opened = sum(p.set_id == st.id and (p.lane or "pos") == lane for p in self.open.values())
++                if not result["allow"] or opened >= cap:
++                    blocked.append(key)
++                    return False
++                return True
++            for lane in ("pos", "neg"):
++                chosen = self.sets.pick_any(pack, allowed_lanes=(lane,), predicate=lambda st: allows(st, lane))
++                if chosen is not None:
++                    return chosen, lane, ""
++            return None, "", blocked[0] if blocked else ""
 +        try:
 +            chosen = self.sets.pick_any(pack)
 +        except Exception:
-+            return None, ""
++            return None, "", ""
 +        coord = getattr(self, "coord", None)
 +        if chosen is None or coord is None:
-+            return chosen, ""
++            return chosen, (self.sets.lane_of(chosen) or "pos") if chosen is not None else "", ""
 +        try:
 +            lane = self.sets.lane_of(chosen) or "pos"
 +        except Exception:
 +            lane = "pos"
 +        ok, blocked_by = coord.scope_allows(pack, lane)
 +        if ok:
-+            return chosen, ""
++            return chosen, lane, ""
 +        allowed = [candidate for candidate in ("pos", "neg") if coord.scope_allows(pack, candidate)[0]]
 +        if allowed:
 +            try:
 +                alternative = self.sets.pick_any(pack, allowed_lanes=allowed)
 +                if alternative is not None and (self.sets.lane_of(alternative) or "pos") in allowed:
-+                    return alternative, ""
++                    return alternative, self.sets.lane_of(alternative) or "pos", ""
 +            except (TypeError, AttributeError):
 +                pass
-+        return None, blocked_by
- 
-     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
-         if self.entries_blocked():
-@@ -2472,7 +2844,7 @@
-             return
-         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
-             return
++        return None, "", blocked_by
+@@ -2475 +3041 @@
 -        pack = "indications" if str(reason).startswith("ind:") else "general"
 +        pack = pack_of_reason(reason)
-         skip = self.entry_sense(sym, direction, reason, conf, pack)
-         if skip:
-             if time.time() - self.skip_log.get("sense", 0) > 40:
-@@ -2496,35 +2868,61 @@
-             return
-         side = "LONG" if direction > 0 else "SHORT"
-         order_side = "BUY" if direction > 0 else "SELL"
+@@ -2499,7 +3065,10 @@
 -        chosen = None
 -        try:
 -            chosen = self.sets.pick_any(pack)
@@ -1022,7 +854,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 -                chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
 -        except Exception:
 -            chosen = None
-+        chosen, blocked_by = self._scope_pick(pack)   # a signal binds to its own pack and an allowed lane
++        chosen, chosen_lane, blocked_by = self._scope_choice(pack)   # keep the exact lane approved by its own Axis
 +        if chosen is None and blocked_by:
 +            self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
 +            if time.time() - self.skip_log.get("scope", 0) > 40:
@@ -1032,7 +864,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        if chosen is None and getattr(self.sets, "enabled", False) and getattr(self.sets, "use_historic_gate", False):
 +            # A Set can become invalid after entry_sense(): never fall back to an unvalidated position.
 +            return
-         set_idx = -1
+@@ -2507,5 +3076,3 @@
 -        trail_st = None
 -        try:
 -            trail_st = self.sets.pick_trail(pack)
@@ -1041,16 +873,14 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        trail_set_id = ""
 +        trail_idx = -1
 +        lane = ""
-         if chosen:
+@@ -2512,0 +3080,6 @@
 +            try:
-+                lane = self.sets.lane_of(chosen) or "pos"     # the lane the Set passed Real on: positive, or Real Negative
++                lane = chosen_lane or self.sets.lane_of(chosen) or "pos"
 +            except Exception:
 +                lane = "pos"
 +            # a Set position trails exactly as its own Set was replayed: a base Set never trails, a trailing Set uses its
 +            # own arm and give. The independent trailing pick never reaches a Set position.
-             sl_ratio = chosen.sl_ratio
-             set_id = chosen.id
-             set_idx = int(getattr(chosen, "idx", -1))
+@@ -2516 +3089,6 @@
 -            trail_key, trail_arm, trail_give = chosen.trail_key or "0.3:0.1", chosen.trail_arm, chosen.trail_give
 +            if getattr(chosen, "kind", "base") == "trail":
 +                trail_key, trail_arm, trail_give = chosen.trail_key, chosen.trail_arm, chosen.trail_give
@@ -1058,10 +888,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                trail_idx = set_idx
 +            else:
 +                trail_key, trail_arm, trail_give = "", 0.0, 0.0
-         else:
-             sl_ratio = self.variants.current_sl()
-             trail_key, trail_arm, trail_give = self.variants.current_trail()
-             set_id = ""
+@@ -2521,7 +3099,21 @@
 -        trail_set_id = ""
 -        trail_idx = -1
 -        if trail_st:
@@ -1090,61 +917,33 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    notional = qty * px
 +                    margin = notional / max(1, lev)
 +        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
-         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
-             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
-             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
-@@ -2554,7 +2952,7 @@
-             msg0 = str(r.get("msg") or "").lower()
-             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
-                 attach = {}
+@@ -2557 +3149 @@
 -                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)))
 +                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)))
-                 self.did_io = True
-         if not self.ok(r):
-             msg = str(r.get("msg") or "")
-@@ -2570,7 +2968,7 @@
-                 self._persist_lev()
-                 r = self.api.post(
-                     "/openApi/swap/v2/trade/order",
+@@ -2573 +3165 @@
 -                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)),
 +                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
-                 )
-                 self.did_io = True
-                 msg = str(r.get("msg") or "")
-@@ -2582,7 +2980,7 @@
-                 if qty > 0:
-                     r = self.api.post(
-                         "/openApi/swap/v2/trade/order",
+@@ -2585 +3177 @@
 -                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)),
 +                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
-                     )
-                     self.did_io = True
-                     msg = str(r.get("msg") or "")
-@@ -2597,6 +2995,11 @@
-                 if "order size" in low or "available amount" in low:
-                     self.cooldown[sym] = time.time() + 60.0
-                     self.cooldown["__book__"] = time.time() + 20.0
+@@ -2599,0 +3192,5 @@
 +                if r.get("error") or r.get("code") == -1:
 +                    # transport failure: the order may have filled. Adopt the position if it shows up.
 +                    if not hasattr(self, "unknown_entry"):
 +                        self.unknown_entry = {}
 +                    self.unknown_entry[f"{sym}:{side}"] = time.time()
-                 if is_transient_api(msg):
-                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
-                     return
-@@ -2607,7 +3010,7 @@
-         data = (r.get("data") or {}).get("order") or r.get("data") or {}
-         self.last_error = ""
-         avg = float(data.get("avgPrice") or data.get("price") or px) or px
+@@ -2607,0 +3205 @@
++        data = self.confirmed_order(data, sym, cid)
+@@ -2610 +3208,7 @@
 -        filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
 +        filled = filled_qty(data, qty)
-         attached_sl = extract_oid(data.get("stopLoss") if isinstance(data.get("stopLoss"), dict) else {"data": {"stopLoss": data.get("stopLoss")}}) if isinstance(data, dict) else ""
-         attached_tp = extract_oid(data.get("takeProfit") if isinstance(data.get("takeProfit"), dict) else {"data": {"takeProfit": data.get("takeProfit")}}) if isinstance(data, dict) else ""
-         ind = None
-@@ -2642,13 +3045,14 @@
-             rr=float(self.indications.settings.get("takeProfitRewardRisk") or 1.8),
-             bind_sl_to_tp=True,
-         )
++        if data.get("fillUnconfirmed") or not math.isfinite(avg) or avg <= 0 or not math.isfinite(filled) or filled <= 0:
++            self.cooldown[sym] = time.time() + 60
++            self.owned_syms.add(sym)
++            self.__dict__.setdefault("unknown_entry", {})[f"{sym}:{side}"] = time.time()
++            self.last_error = "entry fill unconfirmed; awaiting venue reconciliation"
++            return
+@@ -2645,4 +3249,5 @@
 -        if chosen and getattr(chosen, "step", 0):
 -            tp_pct = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
 -            sl_pct = max(self.sl_min, min(self.sl_max, tp_pct * sl_ratio))
@@ -1154,26 +953,23 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            # base and trailing Sets alike; no overlay clamp applies
 +            sl_pct, tp_pct = self.sets.lane_fracs(chosen)
 +            src = f"step{chosen.step}xcost" if getattr(chosen, "step", 0) else "trailset"
-         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
-         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
+@@ -2651 +3256 @@
 -        if self.exits.enabled and self.exits.ignore_tp:
 +        if self.exits.enabled and self.exits.ignore_tp and not chosen:
-             tp_pct = max(tp_pct, sl_pct * 3.0, self.tp_max)
-         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
-         pos = Position(
-@@ -2658,7 +3062,7 @@
-             sl_ratio=sl_ratio, trail_key=trail_key,
-             trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
-             sl_pct=sl_pct, tp_pct=tp_pct,
+@@ -2661 +3266 @@
 -            set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
 +            set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True, lane=lane,
-             overall=True, close_position=True, ind_kind=ind_kind,
-         )
-         pos.sl, pos.tp = self.security_prices(pos)
-@@ -2671,6 +3075,14 @@
-         self.save_open_book()
-         if cid:
-             self.seen_fill_cids.add(cid)
+@@ -2662,0 +3268,2 @@
++            base_entry=avg if chosen else 0.0, base_qty=filled if chosen else 0.0,
++            set_hold_bars=(int(getattr(chosen, "hold_bars", 0) or self.sets.hist_time_bars) if chosen else 0),
+@@ -2663,0 +3271,6 @@
++        fee, source = self.fill_cost(data, filled, avg, sym)
++        pos.fee_maker, pos.fee_taker, _ = self.fee_schedule.rates(sym, c, time.time())
++        if source != "configured-estimate":
++            pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
++            pos.fee_source = "reported-fee" if source == "reported-fee" else "exchange-rate-estimate"
++        pos.entry_slippage = adverse_slippage(px, avg, order_side)
+@@ -2673,0 +3287,8 @@
 +        slip = abs(avg - px) / px if px > 0 else 0.0
 +        slip_limit = max(2.0 * cost_as_frac(self.position_cost_pct), min(self.max_entry_slip, 0.5 * float(sl_pct or 0.0)))
 +        if slip > slip_limit:
@@ -1182,13 +978,10 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            log(f"BADFILL {sym} {side} fill={avg} ref={px} slip={slip * 100:.2f}% limit={slip_limit * 100:.2f}%")
 +            self.close_pos(pos, avg, "bad-fill")      # a skip-eval close bans the symbol, closed or not
 +            return
-         self.last_entry_ts = time.time()
-         self.fees_est += filled * avg * 0.0005
-         self.available = max(0.0, self.available - margin)
-@@ -2686,11 +3098,12 @@
-                 self.close_pos(pos, avg, "no-ctrl")
-                 return
-         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
+@@ -2675 +3296 @@
+-        self.fees_est += filled * avg * 0.0005
++        self.fees_est += fee
+@@ -2689,5 +3310,6 @@
 -        self.block.register_parent(sym, side, filled, avg)
 -        try:
 -            self.dca.attach(sym, side, filled, avg)
@@ -1200,13 +993,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                self.dca.attach(sym, side, filled, avg)
 +            except Exception:
 +                pass
-         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
-         self._stats_force = True
- 
-@@ -2716,25 +3129,137 @@
-                 return False
-         return True
- 
+@@ -2718,0 +3341,104 @@
 +    def venue_exit(self, pos: Position) -> Optional[Tuple[str, float]]:
 +        """The venue fill that closed this position: ("sl" or "tp", fill price) when its own stop or TP order FILLED,
 +        else None. A position the venue closed is a real close of its lane, not a ghost."""
@@ -1231,10 +1018,14 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                if status not in ("FILLED", "FINISHED", "FILLED_FULLY"):
 +                    continue
 +                try:
-+                    px = float(o.get("avgPrice") or o.get("price") or o.get("stopPrice") or 0)
++                    px = float(o.get("avgPrice") or 0)
 +                except Exception:
 +                    px = 0.0
-+                if px > 0:
++                if math.isfinite(px) and px > 0:
++                    # Record the cumulative order fee only once before close_pos.
++                    if getattr(pos, "entry_fee_usdt", None) is not None:
++                        remaining = max(0.0, pos.qty + pos.close_filled_qty - pos.exit_fee_qty)
++                        self.record_exit_fee(pos, o, remaining, px)
 +                    return kind, px
 +        return None
 +
@@ -1266,6 +1057,9 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                held.add((str(p.get("symbol") or ""), side))
 +        confirmed = None                                    # a second read, before a position without a fill is dropped
 +        for pos in list(self.open.values()):
++            if pos.close_pending:
++                self.settle_pending_close(pos)
++                continue
 +            if (pos.symbol, pos.side) in held:
 +                continue
 +            if self.close_from_venue(pos, "restart"):
@@ -1304,113 +1098,133 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        self.close_pos(pos, hit[1], hit[0], exchange=False)
 +        return True
 +
-     def drop_ghost(self, pos: Position, why: str) -> None:
-         if self.open.get(pos.symbol) is None:
-             return
-         if not self._exchange_flat(pos):
-             log(f"GHOST skip still-live {pos.symbol} {pos.side} {why}", every=20.0, key=f"ghost:{pos.symbol}")
-             return
+@@ -2721,0 +3448,3 @@
++        if pos.close_pending:
++            self.settle_pending_close(pos)
++            return
+@@ -2724,0 +3454,2 @@
 +        if self.close_from_venue(pos, why):
 +            return
-         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
+@@ -2725,0 +3457,2 @@
 +        self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
-         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
- 
-     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
++        pos.exit_price_estimated = True
+@@ -2729 +3462,5 @@
 -        skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
-+        skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
++        quality_issue = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
++        skip_eval = False   # verified emergency closes are real cash outcomes, including their losses
 +        for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", "")):
 +            if real_oid(oid):                 # an exchange-side stop fill of this position is the close recorded below
 +                self.seen_fill_oids.add(str(oid))
-         if exchange:
-             self.cancel_controls(pos.symbol)
-             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
-+            q_full = pos.qty   # market_close shrinks pos.qty on a partial fill; the close is recorded at the full size
-             ok, exit_px = self.market_close(pos)
-             if not ok:
+@@ -2730,0 +3468,4 @@
++            if pos.close_pending or pos.close_filled_qty > 0:
++                reason = pos.close_reason or reason
++            else:
++                pos.close_reason = reason
+@@ -2732,0 +3474 @@
++            q_full = pos.qty + pos.close_filled_qty  # includes partials retained from earlier attempts
+@@ -2735,2 +3477,9 @@
+-                if skip_eval:
+-                    self.ban_sym(pos.symbol)
 +                # the stops were just cancelled and the position is still open: forget their ids so the next cycle
 +                # re-places them, and keep the position in the book (a banned symbol only blocks new entries)
 +                pos.sl_oid = pos.sec_sl_oid = pos.tp_oid = pos.sec_tp_oid = ""
 +                pos.controls_ok = False
 +                pos.ctrl_verified = False
 +                self.ctrl_skip.pop(pos.symbol, None)
-                 if skip_eval:
--                    self.ban_sym(pos.symbol)
++                if quality_issue:
 +                    self.ignore_syms[pos.symbol] = time.time() + 1800.0
 +                log(f"CLOSE FAIL {pos.symbol} {pos.side} {reason}: {self.last_error}", every=30.0, key=f"close-fail:{pos.symbol}")
-                 return
+@@ -2737,0 +3487 @@
 +            pos.qty = q_full
-         else:
-             exit_px = px if px > 0 else (self.px.get(pos.symbol) or pos.entry)
-         if pos.side == "LONG":
-@@ -2743,14 +3268,27 @@
-             pnl_pct = (pos.entry - exit_px) / pos.entry
-         pnl = net_pnl_usdt(pnl_pct, pos.qty, pos.entry, self.position_cost_pct)
-         hold = time.time() - pos.opened_at
+@@ -2738,0 +3489,2 @@
++            if not math.isfinite(px) or px <= 0:
++                pos.exit_price_estimated = True
+@@ -2739,0 +3492,7 @@
++            if pos.close_filled_qty > 0:
++                full = pos.qty + pos.close_filled_qty
++                exit_px = (pos.close_filled_value + pos.qty * exit_px) / full
++                pos.qty = full
++        if pos.exit_price_estimated:
++            skip_eval = True
++            reason = str(reason) + "-unverified-exit"
+@@ -2744,0 +3504,9 @@
++        accounted = None
++        if pos.entry_fee_usdt is not None:
++            missing_qty = max(0.0, pos.qty - pos.exit_fee_qty)
++            if missing_qty:
++                self.record_exit_fee(pos, {}, missing_qty, exit_px)
++            accounted = execution_result(pos.entry, exit_px, pos.qty, pos.side,
++                                         pos.entry_fee_usdt, pos.exit_fee_usdt)
++            pnl = accounted["net"]
++        pos.exit_slippage = adverse_slippage(px, exit_px, "SELL" if pos.side == "LONG" else "BUY")
+@@ -2745,0 +3514,19 @@
 +        dca_pct = None          # the DCA add-on's own return (on the notional it added)
 +        base_pct = None         # what the Set lane alone made: exit against the entry the Set opened at
++        base_qty = pos.base_qty or 0.0
++        base_ref = pos.base_entry or pos.dca_ref or pos.entry
 +        if pos.dca_fills:
 +            sd = 1 if pos.side == "LONG" else -1
 +            add_q = sum(float(q) for _, q in pos.dca_fills)
-+            if add_q > 0:
-+                dca_pct = sum(float(q) * ((exit_px - float(p)) / float(p) * sd) for p, q in pos.dca_fills) / add_q
++            add_notional = sum(float(p) * float(q) for p, q in pos.dca_fills)
++            if add_notional > 0:
++                dca_pct = sum(float(q) * (exit_px - float(p)) * sd for p, q in pos.dca_fills) / add_notional
 +            ref = float(pos.dca_ref or 0.0)
-+            base_qty = max(0.0, pos.qty - add_q)
++            base_qty = base_qty or max(0.0, pos.qty - add_q)
 +            if ref > 0:
 +                base_pct = (exit_px - ref) / ref * sd
-         rec = Closed(
-             time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
-             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
-             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
++        if pos.set_id and pos.base_entry > 0 and pos.base_qty > 0:
++            base_pct = (exit_px / pos.base_entry - 1) * (1 if pos.side == "LONG" else -1)
++        base_net = None
++        if accounted is not None and base_pct is not None and pos.base_entry_fee_usdt is not None and base_qty > 0:
++            base_net = base_pct - (pos.base_entry_fee_usdt + pos.exit_fee_usdt * base_qty / pos.qty) / (base_qty * base_ref)
+@@ -2749,0 +3537,5 @@
 +            lane=str(getattr(pos, "lane", "") or ""),
-         )
-         if pos.client_id:
-             self.seen_fill_cids.add(pos.client_id)
-         if skip_eval:
++            base_entry=base_ref if pos.set_id else 0.0, base_qty=base_qty if pos.set_id else 0.0, block_fills=list(pos.block_fills),
++            net_pnl_pct=accounted["net_pct"] if accounted else None, base_net_pnl_pct=base_net,
++            fees_usdt=accounted["fees"] if accounted else None, fee_source=pos.fee_source,
++            entry_slippage=pos.entry_slippage, exit_slippage=pos.exit_slippage,
+@@ -2750,0 +3543,5 @@
++        if pos.set_id and getattr(self, "set_block", None) is not None:
++            try:
++                self.set_block.close(pos, exit_px, rec.t, self.block, self.position_cost_pct, score=not skip_eval)
++            except Exception:
++                self.set_block.error = "Block result persistence failed; adds disabled"
+@@ -2753,0 +3551 @@
 +            self._exec_inc("skipped")       # closed, not scored: counted apart so no order goes missing
-             self.open.pop(pos.symbol, None)
-             self.ban_sym(pos.symbol)
-             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
-@@ -2758,39 +3296,49 @@
-             self._stats_force = True
-             return
-         self.closed.append(rec)
+@@ -2760,0 +3559,3 @@
 +        self._exec_note(rec)
-         try:
++        if quality_issue:
++            self.ban_sym(pos.symbol)
+@@ -2762 +3563,2 @@
 -            self.variants.on_close(rec)
 +            if not rec.set_id:                 # the default variants learn from default-variant positions only
 +                self.variants.on_close(rec)
-         except Exception:
-             pass
-         try:
+@@ -2766 +3568,5 @@
 -            self.sets.on_live_close(rec)
 +            # a Set is judged on its own lane: with DCA adds the Set sees the base result, the add-on its own
-+            self.sets.on_live_close(dc_replace(rec, entry=float(pos.dca_ref), pnl_pct=base_pct, qty=base_qty, pnl=net_pnl_usdt(base_pct, base_qty, float(pos.dca_ref), self.position_cost_pct)) if (pos.dca_fills and base_pct is not None) else rec)
-             self.sets.adapt_from_live(self.strategy_closes())
-         except Exception:
-             pass
-         try:
++            self.sets.on_live_close(dc_replace(rec, entry=base_ref, pnl_pct=base_pct, qty=base_qty,
++                                              net_pnl_pct=base_net,
++                                              pnl=base_net * base_qty * base_ref if base_net is not None else net_pnl_usdt(base_pct, base_qty, base_ref, self.position_cost_pct))
++                                    if base_pct is not None else rec)
+@@ -2771 +3577,2 @@
 -            self.exits.on_close(rec)
 +            if not rec.set_id:                 # the Exit lanes score only the closes they made themselves
 +                self.exits.on_close(rec)
-         except Exception:
-             pass
-         try:
+@@ -2775,4 +3582,7 @@
 -            self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
 -                "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
 -                "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
 -            })
 +            if dca_pct is not None:            # the DCA lane scores its own adds only, whatever lane the parent was
++                add_notional = sum(float(p) * float(q) for p, q in pos.dca_fills)
++                add_net = None
++                if accounted is not None and base_net is not None and add_notional > 0:
++                    add_net = (pnl - base_net * base_qty * base_ref) / add_notional
 +                self.dca.on_close({"symbol": rec.symbol, "side": rec.side, "reason": rec.reason, "client_id": rec.client_id,
-+                                   "dca_n": len(pos.dca_fills), "pnl": rec.pnl, "pnl_pct": dca_pct})
-             self.dca.drop(pos.symbol, pos.side)
-         except Exception:
-             pass
-         if pnl >= 0:
-             self.wins += 1
++                                   "dca_n": len(pos.dca_fills), "pnl": rec.pnl, "pnl_pct": dca_pct, "net_pnl_pct": add_net})
+@@ -2784 +3593,0 @@
 -            self.consec_loss = 0
-         else:
-             self.losses += 1
+@@ -2787,7 +3596,15 @@
 -            self.consec_loss += 1
 -            if self.consec_loss >= 8:
 -                self.cooldown["__book__"] = time.time() + 120
@@ -1433,13 +1247,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        if not pos.set_id:
 +            # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
 +            self.block.on_parent_close(pos.symbol, pos.side, pnl)
-         self.open.pop(pos.symbol, None)
-         self.save_open_book()
-         try:
-@@ -2801,6 +3349,90 @@
-         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
-         self._stats_force = True
- 
+@@ -2803,0 +3621,84 @@
 +    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False) -> float:
 +        """Seconds before this symbol may be entered again. A stop-out within 30 s of the entry (a book that moves faster
 +        than the strategy can act on) bans the symbol for SYM_BAN_S, whatever the lane: a venue safety. After a Set close
@@ -1474,7 +1282,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        scratch exit on a completed 1m close. The venue stop and TP stay in place as a safety; they may sit farther out
 +        (clamp_ctrl_price), so the lane checks its own levels. Nothing here reads the Exit strategies."""
 +        side = 1 if pos.side == "LONG" else -1
-+        e = float(pos.dca_ref or pos.entry or 0)      # the Set's levels stay where it opened, whatever a DCA add did to the average
++        e = float(pos.base_entry or pos.dca_ref or pos.entry or 0)
 +        if e <= 0:
 +            return
 +        sl_f = float(pos.sl_pct or 0)
@@ -1505,7 +1313,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    if not self.replace_sl(pos, trail):
 +                        pos.trail = prev
 +        own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
-+        hold_bars = int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
++        hold_bars = pos.set_hold_bars or int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
 +        if age >= float(hold_bars) * 60.0:
 +            self.close_pos(pos, px, "time")
 +            return
@@ -1524,89 +1332,63 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                if held >= float(self.sets.scratch_bars) * 60.0 and (close - e) / e * side >= float(self.sets.scratch_min):
 +                    self.close_pos(pos, px, "scratch+")
 +
-     def manage(self) -> None:
-         now = time.time()
-         self.ingest_ws_px()
-@@ -2809,7 +3441,8 @@
-             if px <= 0:
-                 continue
-             age = now - pos.opened_at
+@@ -2808,0 +3710,6 @@
++            if pos.close_pending:
++                self.settle_pending_close(pos)
++                continue
++            if pos.close_filled_qty > 0 and pos.close_reason:
++                self.close_pos(pos, px or pos.entry, pos.close_reason)
++                continue
+@@ -2812 +3719,2 @@
 -            if age >= MAX_HOLD_S:
 +            if age >= MAX_HOLD_S and not pos.set_id:
 +                # a Set position leaves on its own time exit (hist_time_bars), the one the replay validated
-                 self.close_pos(pos, px, "max-hold-6h")
-                 continue
-             if getattr(self, "control_orders", True):
-@@ -2822,17 +3455,19 @@
-             else:
-                 pnl_pct = (pos.entry - px) / pos.entry
-                 pos.peak = min(pos.peak, px) if pos.peak else px
+@@ -2825 +3733 @@
 -            if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and px <= pos.sl:
 +            if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and self.software_exit(pos, "sl", pos.sl, px):
-                 self.close_pos(pos, px, "sl")
-                 continue
+@@ -2828 +3736 @@
 -            if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and px >= pos.sl:
 +            if pos.side == "SHORT" and pos.sl > 0 and pos.sl > pos.entry * 0.9999999 and self.software_exit(pos, "sl", pos.sl, px):
-                 self.close_pos(pos, px, "sl")
-                 continue
+@@ -2830,0 +3739,5 @@
 +            if pos.set_id:
 +                # a Set position is closed by its own lane only (SL, TP, trailing, time, scratch), exactly as the replay that
 +                # validated the Set: the Exit strategies never touch it
 +                self.manage_set_lane(pos, px, now, age, pnl_pct)
 +                continue
-             if not (self.exits.enabled and self.exits.ignore_tp):
+@@ -2832,4 +3745 @@
 -                if pos.side == "LONG" and px >= pos.tp:
 -                    self.close_pos(pos, px, "tp")
 -                    continue
 -                if pos.side == "SHORT" and px <= pos.tp:
 +                if self.software_exit(pos, "tp", pos.tp, px):
-                     self.close_pos(pos, px, "tp")
-                     continue
-             sig = 0
-@@ -2866,8 +3501,10 @@
-                     moved = abs(dec.sl - pos.sl) / max(pos.entry, 1e-9)
-                     if moved >= 0.004 and time.time() >= self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
-                         pos.trail_armed = True
+@@ -2869,2 +3779,4 @@
 -                        pos.trail = dec.sl
 -                        self.replace_sl(pos, dec.sl)
 +                        prev = pos.trail
 +                        pos.trail = dec.sl   # committed only when the exchange stop moved
 +                        if not self.replace_sl(pos, dec.sl):
 +                            pos.trail = prev
-                     continue
-             if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM) and (now - pos.opened_at) >= self.coord.trailing_min_step:
-                 pos.trail_armed = True
-@@ -2875,13 +3512,17 @@
-                 if pos.side == "LONG":
-                     trail = max(pos.peak * (1 - give), pos.entry * (1 + 0.0004))
-                     if pos.trail is None or trail > pos.trail + 1e-12:
+@@ -2878,2 +3790,4 @@
 -                        pos.trail = trail
 -                        self.replace_sl(pos, trail)
 +                        prev = pos.trail
 +                        pos.trail = trail    # committed only when the exchange stop moved
 +                        if not self.replace_sl(pos, trail):
 +                            pos.trail = prev
-                 else:
-                     trail = min(pos.peak * (1 + give), pos.entry * (1 - 0.0004))
-                     if pos.trail is None or trail < pos.trail - 1e-12:
+@@ -2883,2 +3797,4 @@
 -                        pos.trail = trail
 -                        self.replace_sl(pos, trail)
 +                        prev = pos.trail
 +                        pos.trail = trail    # committed only when the exchange stop moved
 +                        if not self.replace_sl(pos, trail):
 +                            pos.trail = prev
-             if not self.exits.enabled:
-                 age = now - pos.opened_at
-                 if age >= TIME_STOP_S and (pnl_pct >= 0.0012 or pnl_pct <= -0.0025):
-@@ -2893,14 +3534,118 @@
- 
- 
- 
+@@ -2895,0 +3812,118 @@
 +    def _exec_boot(self) -> None:
 +        """Execution counters from the whole trades file (streamed): orders closed by a Set lane and by the Exit lane, wins, the Sets that closed
 +        orders. The in-memory closed list keeps only the last 80; these totals do not."""
 +        self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
 +        self.exec_sets: Dict[str, int] = {}
++        self.exec_scope: Dict[str, list] = {}
 +        if not os.path.exists(TRADES_PATH):
 +            return
 +        try:
@@ -1616,9 +1398,21 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                        rec = json.loads(line)
 +                    except Exception:
 +                        continue
-+                    if not (1.6e9 < float(rec.get("t") or 0) <= time.time() + 300.0) or rec.get("ours", True) is False:
++                    try:
++                        t, pnl = float(rec.get("t") or 0), float(rec.get("pnl") or 0)
++                        cid = str(rec.get("client_id") or rec.get("clientId") or "")
++                        conn = str(rec.get("conn") or rec.get("connection") or "")
++                        if not (1.6e9 < t <= time.time() + 300.0) or not math.isfinite(pnl) or rec.get("ours", True) is False:
++                            continue
++                        if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT) or "unverified-exit" in str(rec.get("reason") or ""):
++                            continue
++                        self._exec_note(Closed(t, str(rec.get("symbol") or ""), str(rec.get("side") or ""),
++                            0, 0, 0, pnl, 0, str(rec.get("reason") or ""), 0,
++                            set_id=str(rec.get("set_id") or rec.get("setId") or ""),
++                            pack=str(rec.get("pack") or ""), lane=str(rec.get("lane") or "pos"),
++                            block_fills=list(rec.get("block_fills") or [])))
++                    except (ValueError, TypeError, AttributeError):
 +                        continue
-+                    self._exec_count(str(rec.get("set_id") or rec.get("setId") or ""), float(rec.get("pnl") or 0))
 +        except Exception:
 +            pass
 +
@@ -1639,14 +1433,16 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +    def _exec_note(self, rec: "Closed") -> None:
 +        if getattr(rec, "ours", True) is not False:
 +            self._exec_count(rec.set_id, rec.pnl)
++            self._exec_inc("blockAddFills", len(getattr(rec, "block_fills", []) or []))
 +            if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
 +                lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
 +                key = "laneNeg" if lane == "neg" else "lanePos"
 +                self._exec_inc(key)
-+                self._exec_inc(key + "Win" if rec.pnl > 0 else key + "Loss")
++                if rec.pnl != 0:
++                    self._exec_inc(key + "Win" if rec.pnl > 0 else key + "Loss")
 +                # executed figures per Real scope (the same keys as the overall strategies' scopes): orders, wins, net gain / loss
 +                sc = self.__dict__.setdefault("exec_scope", {})
-+                for k in ("overall", f"lane:{lane}", f"pack:{rec.pack or '-'}"):
++                for k in ("overall", f"lane:{lane}", f"pack:{rec.pack or '-'}", f"set:{rec.set_id}:{lane}"):
 +                    row = sc.setdefault(k, [0, 0, 0.0, 0.0])
 +                    row[0] += 1
 +                    row[1] += 1 if rec.pnl > 0 else 0
@@ -1700,44 +1496,72 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            "open": {"positions": len(self.open), "setPositions": len(self.open) - no_set, "noSet": no_set, "sets": len(open_sets),
 +                     "underInvalidSet": under_invalid, "setRetired": retired, "byPack": by_pack},
 +            "closed": {"orders": int(n.get("set", 0) + n.get("exit", 0)), "setLane": int(n.get("set", 0)), "exitLane": int(n.get("exit", 0)),
++                       "blockAddFills": int(n.get("blockAddFills", 0)),
 +                       "wins": int(n.get("wins", 0)), "losses": int(n.get("losses", 0)), "skippedNotScored": int(n.get("skipped", 0)), "droppedNoRecord": int(n.get("dropped", 0)),
 +                       "setsThatTraded": len(self.__dict__.get("exec_sets", {}))},
 +        }
 +
-     def _load_trade_history(self) -> None:
-         if not os.path.exists(TRADES_PATH):
-             return
-         try:
-             with open(TRADES_PATH) as f:
+@@ -2901 +3935 @@
 -                lines = f.readlines()[-80:]
 +                lines = collections.deque(f, maxlen=80)   # streams the file: memory stays at 80 lines however long it grows
-             for line in lines:
-                 rec = json.loads(line)
+@@ -2903,0 +3938,2 @@
 +                if not (1.6e9 < float(rec.get("t") or 0) <= time.time() + 300.0):
 +                    continue          # a record from the future (or from before the engine existed) is not a trade
-                 c = Closed(
-                     t=float(rec.get("t") or 0),
-                     symbol=str(rec.get("symbol") or ""),
-@@ -2921,6 +3666,7 @@
-                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
-                     ours=bool(rec.get("ours", True)),
-                     conn=str(rec.get("conn") or rec.get("connection") or ""),
+@@ -2923,0 +3960,7 @@
 +                    lane=str(rec.get("lane") or ""),
-                 )
-                 cid = c.client_id
-                 if cid and not self.cid_ours(cid):
-@@ -2956,24 +3702,42 @@
-         except Exception:
-             self.overlay_mtime = 0.0
-         if ov.get("targetNotional"):
++                    base_entry=float(rec.get("base_entry") or 0),
++                    base_qty=float(rec.get("base_qty") or 0),
++                    block_fills=list(rec.get("block_fills") or []),
++                    net_pnl_pct=rec.get("net_pnl_pct"), base_net_pnl_pct=rec.get("base_net_pnl_pct"),
++                    fees_usdt=rec.get("fees_usdt"), fee_source=str(rec.get("fee_source") or "configured-estimate"),
++                    entry_slippage=float(rec.get("entry_slippage") or 0), exit_slippage=float(rec.get("exit_slippage") or 0),
+@@ -2928,3 +3971 @@
+-                if "oversized" in str(c.reason or "").lower():
+-                    continue
+-                if abs(c.qty * c.entry) > 40:
++                if "unverified-exit" in str(c.reason or "").lower():
+@@ -2946,0 +3988,35 @@
++    def seed_set_executions(self) -> None:
++        """Restore each Set/lane's full validation window, independent of the 80-row UI cap."""
++        if not os.path.exists(TRADES_PATH):
++            self.sets.seed_live(list(self.strategy_closes()))
++            return
++        now = time.time()
++        cutoff = now - self.sets.lookback * 60
++        pending = {}
++        with open(TRADES_PATH) as stream:
++            for line in stream:
++                try:
++                    row = json.loads(line)
++                    if not cutoff <= float(row.get("t") or 0) <= now or row.get("ours") is False:
++                        continue
++                    cid = str(row.get("client_id") or "")
++                    if cid and not self.cid_ours(cid):
++                        continue
++                    if row.get("conn") and row["conn"] != CONN_SHORT:
++                        continue
++                    sid = str(row.get("set_id") or "")
++                    if sid not in self.sets.sets and sid not in self.sets.retired:
++                        continue
++                    if "unverified-exit" in str(row.get("reason") or "").lower():
++                        continue
++                    key = (sid, str(row.get("lane") or "pos"))
++                    buf = pending.setdefault(key, {})
++                    identity = cid or (row["t"], row.get("symbol"), row.get("side"), row.get("pnl_pct"))
++                    buf[identity] = row
++                    if len(buf) > 200:
++                        oldest = min(buf, key=lambda k: float(buf[k]["t"]))
++                        del buf[oldest]
++                except (ValueError, TypeError, KeyError):
++                    continue
++        self.sets.seed_live(sorted((r for rows in pending.values() for r in rows.values()), key=lambda r: float(r["t"])))
++
+@@ -2959 +4035,3 @@
 -            TARGET_NOTIONAL = float(ov["targetNotional"])
 +            # Clamp desk-supplied target notional: a corrupt or absurd overlay
 +            # value must never translate into impossible order volume.
 +            TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
-         try:
-             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
-         except Exception:
-             self.volume_factor = 1.0
+@@ -2964,5 +4042,21 @@
 -        self.use_max_leverage = True
 -        USE_MAX_LEVERAGE = True
 -        if ov.get("leverage"):
@@ -1764,130 +1588,84 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            self.size_pct = 1.0
 +        self.use_max_leverage, LEVERAGE = leverage_settings(ov)
 +        USE_MAX_LEVERAGE = self.use_max_leverage
-         if ov.get("maxOpen") is not None:
-             MAX_OPEN = int(ov["maxOpen"])
-         if ov.get("maxPerGroup") is not None:
-             MAX_PER_GROUP = int(ov["maxPerGroup"])
-         if ov.get("slPct"):
+@@ -2974 +4068 @@
 -            SL_PCT = float(ov["slPct"]) / 100.0 if float(ov["slPct"]) > 0.05 else float(ov["slPct"])
 +            SL_PCT = float(ov["slPct"]) / 100.0       # percent everywhere, no magnitude guessing
-         if ov.get("tpPct"):
+@@ -2976 +4070 @@
 -            TP_PCT = float(ov["tpPct"]) / 100.0 if float(ov["tpPct"]) > 0.05 else float(ov["tpPct"])
 +            TP_PCT = float(ov["tpPct"]) / 100.0
-         if ov.get("trailArmPct") is not None:
-             TRAIL_ARM = float(ov["trailArmPct"]) / 100.0 if float(ov["trailArmPct"]) > 0.02 else float(ov["trailArmPct"])
-         if ov.get("trailGivePct") is not None:
-@@ -2992,12 +3756,13 @@
-             COOLDOWN_S = float(ov["cooldownS"])
-         if ov.get("staggerS"):
-             STAGGER_S = float(ov["staggerS"])
+@@ -2995,2 +4089,10 @@
 -        self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
 -        self.pf_window = int(ov.get("pfWindow") or 15)
-+        self.position_cost_pct = float(ov.get("positionCostPct") or 0.12)
++        configured_cost = float(ov.get("positionCostPct") or .12)
++        self.slippage_allowance_pct = max(0.0, float(ov.get("slippageAllowancePct", .02)))
++        self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
++                                                              self.contracts, time.time())
++        self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", .25)))
++        ov["configuredPositionCostPct"] = configured_cost
++        ov["positionCostPct"] = self.position_cost_pct
++        self._fee_config_dirty = False
 +        self.pf_window = window_n(ov, "pfWindow", fallback=15)
 +        self.real_stage_paper = bool(ov.get("realStagePaper", True))      # the overall strategies read the Real Sets' paper stream
-         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
+@@ -2998 +4100 @@
 -        self.sl_max = float(ov.get("slMaxPct") or 1.20) / 100.0
 +        self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
-         self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
+@@ -3000 +4102 @@
 -        self.tp_max = float(ov.get("tpMaxPct") or 2.40) / 100.0
 +        self.tp_max = float(ov.get("tpMaxPct") or 4.5) / 100.0     # covers the grid: TP up to 4.5%
-         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
-         self.variants.load(ov, cts)
-         self.sl_to_tp = self.variants.current_sl()
-@@ -3011,7 +3776,7 @@
-         self.strat_block = bool(ov.get("stratBlock", True))
-         self.strat_trail = bool(ov.get("stratTrailing", True))
-         self.strat_general = bool(ov.get("stratGeneral", True))
+@@ -3014 +4116 @@
 -        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
 +        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
-         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
-         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
-         try:
-@@ -3058,22 +3823,22 @@
-         # CTS Block defaults, overlay wins
-         b_en = ov.get("blockEnabled", cts.get("variantBlockEnabled", True))
-         try:
+@@ -3061 +4163 @@
 -            b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") or 0))
 +            b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") if cts.get("blockMaxStack") is not None else 6))
-         except Exception:
+@@ -3063 +4165 @@
 -            b_stack = 0
 +            b_stack = 6                      # default stack: 6 groups (0 in the overlay = unlimited)
-         b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
-         b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 0.8)
-         b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
+@@ -3066,2 +4168,3 @@
+-        b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
 -        real_pf = 1.2
++        pause = ov.get("blockPauseCountRatio", cts.get("blockPauseCountRatio", 1))
++        b_pause = int(pause if pause is not None else 1)
 +        real_pf = GATE_MIN_PF_DEFAULT
-         try:
-             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
+@@ -3070 +4173 @@
 -            real_pf = float(st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.2)
 +            real_pf = float(st.get("min_profit_factor") or cts.get("realProfitFactor") or GATE_MIN_PF_DEFAULT)
-         except Exception:
-             pass
-         self.block.enabled = bool(b_en) if b_en is not None else True
-         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
-             self.block.enabled = True
+@@ -3076 +4179 @@
 -        self.block.max_stack = 3 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
 +        self.block.max_stack = 0 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
-         try:
-             self.load.configure(ov)
-         except Exception:
-@@ -3083,11 +3848,15 @@
-         self.block.pause_ratio = max(0, b_pause)
-         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
-         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
+@@ -3086 +4189,3 @@
 -        self.block.default_min_pf = float(real_pf)
 +        self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else max(MIN_PF_FLOOR, float(real_pf))     # the Base gate's PF unless unlinked
 +        self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
 +        self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
-         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
-         self.coord.load(cts, ov)
-         self.indications.load(ov)
-         self.sets.load(ov, cts)
+@@ -3090,0 +4196,2 @@
 +        # live: a Set is valid only while its evaluation is at most two refresh intervals old (no sticky state)
 +        self.sets.fresh_s = 2.0 * self.sets.refresh_s
-         self.exits.load(ov, cts)
-         self.dca.load(ov, cts)
-         if initial:
-@@ -3116,7 +3885,7 @@
-         else:
-             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
-             self.strat_ind = True
+@@ -3099 +4206 @@
+-                self.sets.seed_live(list(self.strategy_closes()))
++                self.seed_set_executions()
+@@ -3119 +4226 @@
 -        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
 +        self.dca.enabled = bool(self.mods.get("strategy.dca", False)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
-         if not self.mods.get("strategy.coord", True):
-             for ax in self.coord.axes.values():
-                 ax.enabled = False
-@@ -3172,8 +3941,9 @@
-         return {
-             "targetNotional": TARGET_NOTIONAL,
-             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+@@ -3166 +4273 @@
+-        if mt and mt != self.overlay_mtime:
++        if (mt and mt != self.overlay_mtime) or self._fee_config_dirty:
+@@ -3174,0 +4282 @@
 +            "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
-             "leverage": LEVERAGE,
+@@ -3176 +4284 @@
 -            "useMaxLeverage": True,
 +            "useMaxLeverage": bool(self.use_max_leverage),
-             "leverageMap": dict(getattr(self, "lev_map", {})),
-             "leverageMax": dict(getattr(self, "lev_max", {})),
-             "maxOpen": MAX_OPEN,
-@@ -3249,12 +4019,9 @@
-             "setPfWindow": self.sets.pf_n,
-             "setDeactN": self.sets.deact_n,
-             "setMinPf": self.sets.min_pf,
+@@ -3252,2 +4360 @@
 -            "setMaxDdTimeS": self.sets.max_dd_s,
 -            "setAutoDeact": self.sets.auto_deact,
 +            "setMaxDdtHours": self.sets.max_ddt_h,
-             "setUseHistoricGate": self.sets.use_historic_gate,
+@@ -3255,3 +4362 @@
 -            "setMinSamples": self.sets.min_samples,
 -            "setReactivate": self.sets.reactivate,
 -            "setMaxActive": self.sets.max_active,
 +            "setMinSamples": self.coord.min_samples,
-             "exitEnabled": self.exits.enabled,
-             "exitIgnoreTp": self.exits.ignore_tp,
-             "exitBestOf": self.exits.best_of,
-@@ -3304,6 +4071,60 @@
-             "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
-         }
- 
+@@ -3306,0 +4412,54 @@
 +    def software_exit(self, pos: Position, kind: str, level: float, px: float) -> bool:
 +        """Whether the software check closes at market when the price reaches a stop (kind "sl") or target ("tp") level.
 +        When a live venue order of that kind sits at or inside the level, the venue fills it there: a market close as well
@@ -1942,22 +1720,14 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
 +        return opens
 +
-     def maybe_block_adds(self) -> None:
-         """CTS Block Live: add-on only against an existing same-side parent."""
-         if self.halted or not self.block.enabled or not self.strat_block:
-@@ -3340,6 +4161,8 @@
-         for pos in list(self.open.values()):
-             if emitted >= add_budget:
-                 break
+@@ -3308,0 +4468 @@
++        self.maybe_set_block_adds()
+@@ -3342,0 +4503,4 @@
++            if pos.close_filled_qty > 0:
++                continue
 +            if pos.set_id:
 +                continue           # no add-on to a Set position: it would re-anchor the entry, stop and target the Set validated
-             if self.missing_controls(pos):
-                 self.ensure_controls(pos)
-                 if self.missing_controls(pos):
-@@ -3348,18 +4171,9 @@
-             lane = self.block.lanes.get(k)
-             if not lane or lane.base_qty <= 0:
-                 continue
+@@ -3351,12 +4515,3 @@
 -            # Parent still valid only if pulse score agrees with side (continuation).
 -            intern_pf = 1.2
 -            try:
@@ -1973,119 +1743,180 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            # Block's evidence is the lane it stacks on: the net PF of the recent closes of positions without a Set (the
 +            # Exit lane). A Set's PF says nothing about these positions. Too few closes: no pass (cold start needs proof).
 +            intern_pf = self.exit_lane_pf()
-             d, why, conf = self.score(pos.symbol)
-             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
-             if not same:
-@@ -3371,11 +4185,12 @@
-                     same = True
-             if not same:
-                 continue
+@@ -3374 +4529,2 @@
 -            # Don't stack into a losing parent.
 +            # Stack only into strength: the parent is at least one step (one PositionCost) in profit, so the averaged entry
 +            # stays behind the price and the re-anchored stop does not put the whole stack at risk at once.
-             px_now = self.px.get(pos.symbol) or pos.entry
-             if px_now > 0 and pos.entry > 0:
-                 u = ((px_now - pos.entry) / pos.entry) * (1 if pos.side == "LONG" else -1)
+@@ -3378 +4534 @@
 -                if u < -0.0015:
 +                if u < cost_as_frac(self.position_cost_pct):
-                     continue
-             rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
-             row = self.block.pick_emit(rows)
-@@ -3386,13 +4201,10 @@
-             if not c or px <= 0:
-                 continue
-             raw = row["requestedAddQty"]
+@@ -3389,2 +4545 @@
 -            parent = self.size_qty(c, px)
 -            inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
 +            # (Block's evaluation already limits one order to one partial: ratio x V0)
-             room = max(0.0, self.max_book_notional() - pos.qty * px)
+@@ -3392 +4547 @@
 -            add_cap = min(self.notional_cap() * max(1.0, inc), room)
 +            add_cap = min(self.notional_cap() * max(1.0, float(self.block.volume_ratio)), room)
-             qty = self.cap_order_qty(c, px, raw, add_cap)
+@@ -3394,2 +4548,0 @@
 -            if parent > 0 and qty > parent * inc * 1.05:
 -                qty = self.cap_order_qty(c, px, parent * inc, add_cap)
-             if qty < c.min_qty or qty <= 0:
-                 bumped = self.min_order_qty(c, px)
-                 if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:
-@@ -3467,7 +4279,7 @@
-                     continue
-             data = (r.get("data") or {}).get("order") or r.get("data") or {}
-             avg = float(data.get("avgPrice") or data.get("price") or px) or px
+@@ -3470 +4623,6 @@
 -            filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
 +            filled = filled_qty(data, qty)
-             oid = str(data.get("orderId") or "")
-             row["emitted"] = 1
-             self.block.record_fill(lane, row, filled, cid, oid)
-@@ -3477,6 +4289,7 @@
-             pos.notional = pos.qty * pos.entry
-             self.available = max(0.0, self.available - margin)
-             if getattr(self, "control_orders", True):
++            if filled <= 0:
++                self.block_last_emit = time.time()
++                continue
++            if pos.entry_fee_usdt is not None:
++                pos.entry_fee_usdt += self.fill_cost(data, filled, avg, pos.symbol, pos)[0]
+@@ -3479,0 +4638 @@
 +                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
-                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
-                 pos.ctrl_verified = False
-                 self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
-@@ -3491,6 +4304,17 @@
-                 f"minPF={row['blockMinPF']:.3f} {row['setKey']}"
-             )
- 
+@@ -3493,0 +4653,121 @@
++    def maybe_set_block_adds(self) -> None:
++        """Independent, measured adds. A Set's levels, hold and base result never move."""
++        parents = [p for p in self.open.values() if p.set_id and p.base_entry > 0 and p.base_qty > 0]
++        if not parents or not self.block.enabled or not self.strat_block:
++            return
++        if getattr(self, "set_block", None) is None:
++            self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
++        now = time.time()
++        lookback = self.sets.lookback * 60.0
++        for pos in parents:
++            px = float(self.px.get(pos.symbol) or 0)
++            self.set_block.observe(pos, px, now, self.block, self.position_cost_pct, lookback)
++        # Evidence continues during an entry pause, inadequate margin or a failed gate.
++        if (self.halted or self.entries_blocked() or self.available <= 0
++                or any(os.path.exists(p) for p in (STOP_PATH, PAUSE_PATH, STOP_ALL))
++                or now < self.cooldown.get("__book__", 0)
++                or now - self.block_last_emit < max(12.0, STAGGER_S * 8)
++                or self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > now):
++            return
++        for pos in parents:
++            if pos.block_pending or pos.dca_fills or pos.close_filled_qty > 0 or pos.close_pending:
++                continue
++            px = float(self.px.get(pos.symbol) or 0)
++            c = self.contracts.get(pos.symbol)
++            if not c or px <= 0 or self.missing_controls(pos):
++                continue
++            # Adds respect that parent's own current validation and Axis, without
++            # borrowing proof from a different chosen Set.
++            st = self.sets.sets.get(pos.set_id)
++            lane = pos.lane or "pos"
++            if st is None or self.sets.gate_reason(st) or lane not in self.sets._execution_lanes(st):
++                continue
++            src = st.neg if lane == "neg" else st.exe
++            cf = cost_as_frac(self.position_cost_pct)
++            evidence = [{"pnl_pct": net + cf} for t, net in src if now - lookback <= t <= now]
++            if not self.coord.judge(evidence, self.coord.net_streak(evidence))["allow"]:
++                continue
++            row = self.set_block.candidate(pos, px, now, self.block, self.position_cost_pct, lookback)
++            if row is None:
++                continue
++            room = max(0.0, min(self.max_book_notional() - pos.qty * px, self.avail_notional(c)))
++            risk_qty = float("inf")
++            if self.block_risk_pct > 0:
++                # Total parent loss at its existing stop, fees included. Adds never
++                # move that stop, and a minimum lot cannot override this budget.
++                sign = 1 if pos.side == "LONG" else -1
++                loss_each = max(0.0, (px - pos.sl) * sign) + px * cf
++                existing_loss = max(0.0, (pos.entry - pos.sl) * sign) * pos.qty + pos.entry * pos.qty * cf
++                risk_room = max(0.0, self.equity * self.block_risk_pct / 100 - existing_loss)
++                risk_qty = risk_room / loss_each if loss_each > 0 else 0.0
++            qty = self.round_qty(c, min(row["qty"], room / px, risk_qty))
++            # No minimum-lot bump beyond the independent group's planned volume.
++            if qty < self.min_order_qty(c, px) or qty <= 0:
++                continue
++            margin = qty * px / max(1, self.leverage_for(c))
++            if margin > self.available * 0.38:
++                continue
++            cid = self.cid("b", pos=pos)
++            pos.block_pending = {"group": row["group"], "qty": qty, "client_id": cid, "t": now}
++            if not self.save_open_book():  # never send without a persisted intent
++                pos.block_pending = {}
++                return
++            try:
++                r = self.api.post("/openApi/swap/v2/trade/order", {
++                    "symbol": pos.symbol, "type": "MARKET", "side": "BUY" if pos.side == "LONG" else "SELL",
++                    "positionSide": pos.side, "quantity": qty, "clientOrderID": cid})
++            except Exception:
++                self.block_last_emit = now
++                return            # pending intent blocks retry until reconciliation
++            self.did_io = True
++            self.block_last_emit = now
++            if not self.ok(r):
++                if not r.get("error") and r.get("code") != -1:
++                    pos.block_pending = {}   # definite venue rejection, no fill
++                    self.save_open_book()
++                return
++            data = (r.get("data") or {}).get("order") or r.get("data") or {}
++            data = self.confirmed_order(data, pos.symbol, cid)
++            avg = float(data.get("avgPrice") or data.get("price") or px)
++            filled = filled_qty(data, qty)
++            if data.get("fillUnconfirmed") or not math.isfinite(avg) or not math.isfinite(filled) or avg <= 0 or filled <= 0:
++                return
++            fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
++            pos.block_fills.append({"group": row["group"], "qty": filled, "price": avg, "client_id": cid, "t": now,
++                                    "fee_usdt": fee if source != "configured-estimate" else None})
++            if pos.entry_fee_usdt is not None:
++                pos.entry_fee_usdt += fee
++            pos.entry = (pos.qty * pos.entry + filled * avg) / (pos.qty + filled)
++            pos.qty += filled
++            pos.notional = pos.qty * pos.entry
++            pos.block_pending = {}
++            self.available = max(0.0, self.available - margin)
++            self.save_open_book()
++            # Close-position controls already cover the aggregate. Reconciliation
++            # updates quantity-based controls without re-anchoring the Set's levels.
++            self.ensure_controls(pos)
++            log(f"BLOCK SET {pos.symbol} {pos.set_id} {lane} group={row['group']} +{filled} pf={row['paper']['pf']:.3f}")
++            return
++
 +    def dca_eligible(self, pos: Position) -> bool:
 +        """A position without a Set is the DCA lane's own. A Set position only when dcaOnSets is on, or when dcaOnAxis is on
 +        and an Axis is enabled and the coordinator is allowing entries right now."""
++        if pos.block_fills or pos.block_pending or pos.close_filled_qty > 0 or pos.close_pending:
++            return False
 +        if not pos.set_id:
 +            return True
 +        if getattr(self.dca, "on_sets", False):
 +            return True
 +        if getattr(self.dca, "on_axis", False) and any(ax.enabled for ax in self.coord.axes.values()):
-+            return bool((self.coord.last or {}).get("allow", True))
++            st = self.sets.sets.get(pos.set_id)
++            lane = pos.lane or "pos"
++            if st is None or self.sets.gate_reason(st) or lane not in self.sets._execution_lanes(st):
++                return False
++            now = time.time()
++            cf = cost_as_frac(self.position_cost_pct)
++            source = st.neg if lane == "neg" else st.exe
++            rows = [{"pnl_pct": value + cf} for t, value in source
++                    if now - self.sets.lookback * 60 <= t <= now]
++            return bool(self.coord.judge(rows, self.coord.net_streak(rows))["allow"])
 +        return False
 +
-     def maybe_dca_adds(self) -> None:
-         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
-         if not getattr(self.dca, "enabled", False) or self.halted:
-@@ -3504,6 +4328,8 @@
-         for pos in list(self.open.values()):
-             if emitted >= add_budget:
-                 break
+@@ -3506,0 +4787,2 @@
 +            if not self.dca_eligible(pos):
 +                continue           # a Set position is added to only when dcaOnSets / dcaOnAxis say so (both off by default)
-             if time.time() < self.dca_fail_cd.get(pos.symbol, 0):
-                 continue
-             if self.missing_controls(pos):
-@@ -3524,7 +4350,7 @@
-                 continue
-             parent = float(getattr(self.dca.lanes.get(self.dca.key(pos.symbol, pos.side), None), "parent_qty", 0) or 0)
-             seed = parent if parent > 0 else pos.qty
+@@ -3527 +4809 @@
 -            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px)
 +            row = self.dca.due(pos.symbol, pos.side, seed, float(pos.dca_ref or pos.entry), px, sl_frac=sl_pct)
-             if not row:
-                 continue
-             c = self.contracts.get(pos.symbol)
-@@ -3535,7 +4361,10 @@
-             qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
-             floor = self.min_order_qty(c, px)
-             if qty < floor:
+@@ -3538 +4820,4 @@
 -                if floor * px > add_cap * 1.08:
 +                # the exchange minimum is larger than the partial: the auto plan rounds up to it while the whole position
 +                # stays under its exposure ceiling; the static plan keeps its notional cap
 +                within_ceiling = bool(getattr(self.dca, "auto", False)) and (pos.qty + floor) <= float(self.dca.max_expo) * seed * 1.05
 +                if floor * px > add_cap * 1.08 and not within_ceiling:
-                     self.dca.skips += 1
-                     continue
-                 qty = floor
-@@ -3574,25 +4403,30 @@
-                 continue
-             data = (r.get("data") or {}).get("order") or r.get("data") or {}
-             avg = float(data.get("avgPrice") or data.get("price") or px) or px
+@@ -3577 +4862,4 @@
 -            filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
 +            filled = filled_qty(data, qty)
-             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
++            if filled <= 0:
++                self.dca_fail_cd[pos.symbol] = time.time() + 60
++                continue
+@@ -3578,0 +4867,5 @@
++            if pos.entry_fee_usdt is not None:
++                pos.entry_fee_usdt += self.fill_cost(data, filled, avg, pos.symbol, pos)[0]
 +            if not pos.dca_ref:
 +                pos.dca_ref = pos.entry
 +            pos.dca_fills.append([avg, filled])
-             pos.qty += filled
-             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
-             pos.notional = pos.qty * pos.entry
-             try:
+@@ -3583,9 +4876,10 @@
 -                mode = str(getattr(self.dca, "tp_mode", "average") or "average").lower()
 -                if mode in ("breakeven", "be"):
 -                    be = max(float(getattr(self.dca, "be_pct", 0.002) or 0.002), 0.0004)
@@ -2105,38 +1936,35 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                        pos.tp = pos.entry * (1 + tp_pct) if pos.side == "LONG" else pos.entry * (1 - tp_pct)
 +                    sl_pct = pos.sl_pct or SL_PCT
 +                    pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
-             except Exception:
-                 pass
-             self.available = max(0.0, self.available - margin)
-             if getattr(self, "control_orders", True):
+@@ -3595,0 +4890 @@
 +                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
-                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
-                 pos.ctrl_verified = False
-                 self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
-@@ -3688,8 +4522,8 @@
-             fp_map = {}
-             self._ind_fp = fp_map
-         for s in window:
+@@ -3691,2 +4986,2 @@
 -            bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
 -            if len(bars) < 20:
 +            bars = self.real_bars_1m(s)
 +            if self.ready_1m(s) < 20:
-                 continue
-             last_c = float(bars[-1][3]) if bars else 0.0
-             px = self.px.get(s) or 0
-@@ -3699,7 +4533,7 @@
-             fp_map[s] = fp
-             d, _, conf = self.score(s)
-             bars_by_tf = {
+@@ -3702 +4997 @@
 -                tf: (self.klines_tf.get(tf, {}).get(s) or [])
 +                tf: (bars if tf == "1m" else (self.klines_tf.get(tf, {}).get(s) or []))
-                 for tf in TIMEFRAMES
-                 if self.tf_on.get(tf, True)
-             }
-@@ -3741,51 +4575,107 @@
-         tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
-         return tagged if tagged else []
- 
+@@ -3719,2 +5014,3 @@
+-        """Only this system + this connection. Ignore foreign and leftover oversized."""
+-        cap = self.max_book_notional() * 2.0
++        """Verified closes of this system/connection, independent of today's size caps.
++        Execution errors and large historical positions remain real outcomes.
++        """
+@@ -3731,8 +5027,3 @@
+-            n = abs(float(c.qty) * float(c.entry or 0))
+-            if n > cap:
+-                continue
+-            if "ctrl-no-position" in str(c.reason or "").lower() or str(c.reason or "") in ("no-ctrl",):
+-                continue
+-            if "oversized" in str(c.reason or "").lower():
+-                continue
+-            if n > self.max_book_notional() * 1.05:
++            if "unverified-exit" in str(c.reason or "").lower():
++                continue
++            if not all(math.isfinite(float(v)) for v in (c.qty, c.entry, c.exit, c.pnl, c.pnl_pct)) or c.qty <= 0 or c.entry <= 0 or c.exit <= 0:
+@@ -3743,0 +5035,37 @@
 +    def set_entry_candidates(self, now: Optional[float] = None) -> Dict[str, Tuple[float, str, int, str]]:
 +        """{symbol: (conf, symbol, dir, "set:<pack>:<why>")} for the symbols whose newest completed minute signals, decided once
 +        per symbol and minute (the replay decides once per bar) and offered only within ENTRY_FRESH_S of that minute's close
@@ -2174,20 +2002,16 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                out[s] = (float(conf), s, int(d), f"set:{pack}:{why}")
 +        return out
 +
-     def maybe_entries(self) -> None:
-         if self.halted:
-             return
-         rows = self.strategy_closes()
+@@ -3748,6 +5075,0 @@
 -        consec = 0
 -        for c in reversed(rows):
 -            if c.pnl < 0:
 -                consec += 1
 -            else:
 -                break
-         intern_metrics: Dict[str, Any] = {"pf": 0.0, "n": 0}
+@@ -3754,0 +5077 @@
 +        interns: Dict[str, Dict[str, Any]] = {}
-         try:
-             best_st = None
+@@ -3757,3 +5080,7 @@
 -            for pack_name in ("indications", "general"):
 -                st = self.sets.pick_any(pack_name) if self.sets.enabled else None
 -                if st and (best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0)):
@@ -2198,16 +2022,10 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    continue
 +                interns[f"pack:{pack_name}"] = {"pf": float(st.last15_pf), "n": float(st.last15_n), "pack": st.pack}
 +                if best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0):
-                     best_st = st
-             if best_st:
-                 intern_metrics = {
+@@ -3763 +5090 @@
 -                    "pf": float(best_st.last15_ratio),
 +                    "pf": float(best_st.last15_pf),
-                     "n": float(best_st.last15_n),
-                     "pack": best_st.pack,
-                 }
-         except Exception:
-             intern_metrics = {"pf": 0.0, "n": 0}
+@@ -3769 +5096,13 @@
 -        allow, reasons, metrics = self.coord.gate(rows, consec, intern=intern_metrics)
 +        # Real stage: the overall strategies read the Real Sets' paper stream (the orders opened after Base and Main), not only the few
 +        # executed closes; a gate that reads only what it let through never reopens
@@ -2222,13 +2040,11 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                paper = []
 +        axis_rows = paper or rows
 +        allow, reasons, metrics = self.coord.gate(axis_rows, self.coord.net_streak(axis_rows), intern=intern_metrics)
-         if self.entries_blocked():
-             self.priority_controls()
-             return
+@@ -3773 +5112,2 @@
 -        slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Ratio", metrics.get("lastPf", 1.0)))
-+        slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Pf", metrics.get("lastPf", 1.0)))
-         ranked: List[Tuple[float, str, int, str]] = []
-         best: Dict[str, Tuple[float, str, int, str]] = {}
++        # Set Axis capacity is per Set/lane in _scope_pick, never a cross-Set cap.
++        slot_cap = (MAX_OPEN if MAX_OPEN > 0 else 10**9) if self.sets.enabled else self.coord.slot_cap(MAX_OPEN, metrics.get("last15Pf", 1.0))
+@@ -3776 +5116,7 @@
 -        if self.strat_ind and bool(self.indications.settings.get("enabled")):
 +        if self.sets.enabled:
 +            # Under the Base gate every entry is a Set position, so the entry is the replay's: the signal of the minute that
@@ -2237,38 +2053,32 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            # tapes; entering on them traded positions no Set was validated on.
 +            best = self.set_entry_candidates()
 +        elif self.strat_ind and bool(self.indications.settings.get("enabled")):
-             for s in SYMBOLS:
-                 if s in self.open:
-                     continue
-                 picked = None
+@@ -3780,0 +5127,2 @@
 +                # the same setEntryConf the replay and entry_sense use: one threshold, not a literal
 +                thr = float(self.sets.entry_conf)
-                 try:
+@@ -3782 +5130 @@
 -                    picked = self.indications.pick_entry(s, min_conf=0.52)
 +                    picked = self.indications.pick_entry(s, min_conf=thr)
-                 except Exception:
-                     picked = None
-                 if not picked:
-                     try:
-                         one = self.indications.best(s) or self.indications.primary(s)
+@@ -3788 +5136 @@
 -                        if one and one.confidence >= 0.52:
 +                        if one and one.confidence >= thr:
-                             picked = (one, float(one.confidence), 1)
-                     except Exception:
-                         picked = None
-@@ -3795,7 +4685,7 @@
-                 d = 1 if pick.direction == "long" else -1
-                 why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
-                 best[s] = (float(conf), s, d, why)
+@@ -3798 +5146 @@
 -        if self.strat_general:
 +        if self.strat_general and not self.sets.enabled:
-             for s in SYMBOLS:
-                 if s in self.open:
-                     continue
-@@ -3833,12 +4723,7 @@
-             if ranked and (time.time() - self.skip_log.get("gate", 0) > 45):
-                 log("COORD soft " + "; ".join(reasons)[:160] + f" intern={intern}", every=45.0, key="coord-pause", quiet=True)
-                 self.skip_log["gate"] = time.time()
+@@ -3820,12 +5167,0 @@
+-        # 0 / missing maxOpen = unlimited. Coord and intern are advisory, never a hard book cap.
+-        if MAX_OPEN <= 0:
+-            slot_cap = 10**9
+-        elif intern_any:
+-            slot_cap = MAX_OPEN
+-        elif not allow:
+-            slot_cap = max(1, min(slot_cap, MAX_OPEN))
+-            if ranked and (time.time() - self.skip_log.get("gate", 0) > 45):
+-                log("COORD intern-soft " + ("; ".join(reasons)[:160] if not allow else "no intern pick"), every=45.0, key="coord-pause", quiet=True)
+-                self.skip_log["gate"] = time.time()
+-        else:
+-            slot_cap = MAX_OPEN
+@@ -3836,6 +5172 @@
 -        opens = []
 -        for p in self.open.values():
 -            px = self.px.get(p.symbol) or p.entry
@@ -2276,13 +2086,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 -            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
 -        swap = self.coord.pick_rearrange(opens, ranked, slot_cap)
 +        swap = self.coord.pick_rearrange(self.rearrange_opens(), ranked, slot_cap)
-         if swap and swap["from"] in self.open:
-             pos = self.open[swap["from"]]
-             self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
-@@ -3868,16 +4753,7 @@
-                 break
-             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
-                 break
+@@ -3871,10 +5202 @@
 -            pack = "indications" if str(why).startswith("ind:") else "general"
 -            if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
 -                if not intern.get(pack):
@@ -2294,28 +2098,19 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 -                    else:
 -                        pack = "general"
 +            # the pack is the signal's own (place() reads it from the reason): a signal never borrows another pack's Sets
-             before = len(self.open)
-             self.place(s, d, why, conf)
-             if len(self.open) > before:
-@@ -3885,7 +4761,7 @@
-             else:
-                 skipped += 1
-             room = self.avail_notional()
+@@ -3888 +5210 @@
 -            burst = 1 if int(getattr(self, "_order_est", 0) or 0) >= 180 else (16 if MAX_OPEN <= 0 else 6)
 +            burst = 16 if MAX_OPEN <= 0 else 6  # unlimited: no order-count throttle
-             if room < 8:
-                 burst = 1
-             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -3919,8 +4795,26 @@
-             except Exception:
-                 pass
-         if live_n == 0 and self.open:
+@@ -3921,0 +5244,20 @@
 +            # an empty list can be lag or a rate limit: only the third empty pass in a row, and only a position the
 +            # direction-aware check confirms flat, leaves the book
 +            self._adopt_empty_n = int(getattr(self, "_adopt_empty_n", 0) or 0) + 1
 +            if self._adopt_empty_n >= 3:
 +                for sym in list(self.open):
 +                    pos = self.open.get(sym)
++                    if pos and pos.close_pending:
++                        self.settle_pending_close(pos)
++                        continue
 +                    if not pos or time.time() - float(pos.opened_at or 0) < 180.0 or not self._exchange_flat(pos):
 +                        continue
 +                    if self.close_from_venue(pos, "stale"):
@@ -2327,39 +2122,40 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    self.open.pop(sym, None)
 +                    self.cooldown[sym] = time.time() + 90.0
 +                self.save_open_book()
-             log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
-             return
+@@ -3923,0 +5266 @@
 +        self._adopt_empty_n = 0
-         live = set()
-         foreign = set()
-         for p in rows:
-@@ -3949,11 +4843,12 @@
-             except Exception:
-                 tagged = []
-             owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
+@@ -3952 +5295,2 @@
 -            if not tagged and not owned:
 +            unknown = time.time() - float((getattr(self, "unknown_entry", {}) or {}).get(f"{sym}:{side}", 0) or 0) < 180.0
 +            if not tagged and not owned and not unknown:
-                 foreign.add(f"{sym}:{side}")
-                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
-                 continue
+@@ -3956 +5300 @@
 -            if live_lev and live_lev < int(self.lev_max.get(sym) or self.lev_map.get(sym) or 0):
 +            if live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
-                 self.ensure_max_leverage(sym, force=True)
-             try:
-                 liq = float(p.get("liquidationPrice") or p.get("liqPrice") or p.get("avgLiquidationPrice") or 0)
-@@ -3975,6 +4870,7 @@
-                         trk = self.parse_track(self.order_cid(tagged[0])) or {}
-                         if trk.get("set_id"):
-                             ours.set_id = str(trk.get("set_id"))
+@@ -3963,0 +5308,3 @@
++                if ours.close_pending:
++                    self.settle_pending_close(ours)
++                    continue
+@@ -3968 +5315,16 @@
+-                if px > 0:
++                if px > 0 and ours.close_filled_qty == 0:
++                    # A position snapshot has no close fill price/fee attribution.
++                    # It must not undo a confirmed partial or count it a second time.
++                    if ours.block_pending and qty > ours.qty + 1e-12:
++                        add_qty = qty - ours.qty
++                        add_price = (qty * px - ours.qty * ours.entry) / add_qty
++                        intent = ours.block_pending
++                        if add_price > 0 and add_qty <= float(intent.get("qty") or 0) * 1.001:
++                            fee, source = self.fill_cost({}, add_qty, add_price, sym, ours)
++                            ours.block_fills.append({"group": int(intent["group"]), "qty": add_qty, "price": add_price,
++                                                    "client_id": intent["client_id"], "t": intent["t"],
++                                                    "fee_usdt": fee if source != "configured-estimate" else None})
++                            if ours.entry_fee_usdt is not None:
++                                ours.entry_fee_usdt += fee
++                                ours.fee_source = "exchange-rate-estimate"
++                            ours.block_pending = {}
+@@ -3977,0 +5340 @@
 +                            ours.lane = str(trk.get("lane") or "pos")
-                             idxv = trk.get("idx")
-                             ours.set_idx = int(idxv) if idxv is not None else -1
-                             ours.pack = str(trk.get("pack") or ours.pack)
-@@ -3996,6 +4892,19 @@
-                 sl_to_tp=sl_ratio, bind_sl_to_tp=True,
-                 cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
-             )
+@@ -3998,0 +5362,13 @@
 +            rec_set = (getattr(self.sets, "sets", None) or {}).get(str(track.get("set_id") or ""))
 +            rec_trail_id = ""
 +            if rec_set is not None:
@@ -2373,49 +2169,28 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                    rec_trail_id = rec_set.id
 +                else:
 +                    trail_key, trail_arm, trail_give = "", 0.0, 0.0
-             sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
-             tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
-             cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
-@@ -4009,7 +4918,8 @@
-                 sl_pct=sl_pct, tp_pct=tp_pct, client_id=cid, ours=True,
-                 overall=True, close_position=True,
-                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
+@@ -4012 +5388,2 @@
 -                liq=liq, position_id=pid,
 +                trail_set_id=rec_trail_id,
 +                liq=liq, position_id=pid, lane=str(track.get("lane") or ("pos" if set_id else "")),
-             )
-             rec_pos = self.open[sym]
-             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
-@@ -4029,7 +4939,12 @@
-             if pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""):
-                 if not self._exchange_flat(pos):
-                     continue
+@@ -4025,0 +5403,3 @@
++            if pos.close_pending:
++                self.settle_pending_close(pos)
++                continue
+@@ -4031,0 +5412,3 @@
 +            if self.close_from_venue(pos, "stale"):
 +                self.cooldown[sym] = time.time() + 90.0
 +                continue
-             log(f"DROP stale local {sym} age={age:.0f}s")
+@@ -4032,0 +5416,2 @@
 +            self._exec_inc("dropped")       # left the book with no close record: counted, never lost
 +            self.cancel_controls(sym)
-             self.open.pop(sym, None)
-             self.cooldown[sym] = time.time() + 90.0
-         self.ignored_foreign = len(foreign)
-@@ -4068,6 +4983,9 @@
-             cid = self.order_cid(o)
-             if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
-                 continue
+@@ -4070,0 +5456,3 @@
 +            if str(o.get("orderId") or o.get("orderID") or "") in self.seen_fill_oids:
 +                self.seen_fill_cids.add(cid)
 +                continue
-             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
-             if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
-                 continue
-@@ -4082,51 +5000,36 @@
-             try:
-                 qty = float(o.get("executedQty") or o.get("origQty") or o.get("quantity") or 0)
-                 px = float(o.get("avgPrice") or o.get("price") or 0)
+@@ -4085 +5472,0 @@
 -                pnl = float(o.get("profit") or o.get("realizedPnl") or o.get("pnl") or 0)
-             except Exception:
-                 continue
+@@ -4088,22 +5475,16 @@
 -            if qty <= 0 or px <= 0:
 -                continue
 -            pnl_pct = pnl / (qty * px) if qty * px else 0.0
@@ -2448,50 +2223,33 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                # stop and TP ids as seen and feeds the Set itself)
 +                self.seen_fill_cids.add(cid)
 +                self.cancel_controls(held.symbol)
++                self.record_exit_fee(held, o, min(qty, held.qty), px)
 +                self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
 +                n += 1
 +                continue
 +            # An orphan fill has no verified entry price or fee basis. Scoring an exchange-reported
 +            # profit divided by the exit notional (or a missing profit as zero) invents a Set return.
-             self.seen_fill_cids.add(cid)
+@@ -4111,4 +5492 @@
 -            try:
 -                self.sets.on_live_close(rec)
 -            except Exception:
 -                pass
 +            self._exec_inc("skipped")
-             n += 1
-         if n:
-             log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)
- 
-     def set_leverage(self) -> None:
+@@ -4120,3 +5498 @@
 -        """Actively keep every desk symbol at its own exchange max leverage."""
 -        global LEVERAGE
 -        self.use_max_leverage = True
 +        """Actively keep every desk symbol at its target leverage (exchange max, or the pulse leverage when max is off)."""
-         self._load_lev_file()
-         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
-             return
+@@ -4126 +5502 @@
 -        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max]
 +        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
-         if not need:
+@@ -4128,2 +5503,0 @@
 -            if self.lev_map:
 -                LEVERAGE = max(int(v) for v in self.lev_map.values() if v)
-             now = time.time()
-             if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
-                 self._lev_rot_ts = now
-@@ -4135,8 +5038,6 @@
-             return
-         for s in need[:12]:
-             self.ensure_max_leverage(s, force=s not in self.lev_max)
+@@ -4138,2 +5511,0 @@
 -        if self.lev_map:
 -            LEVERAGE = max(int(v) for v in self.lev_map.values() if v)
- 
-     def run_self_tests(self) -> None:
-         r = self.api.get("/openApi/swap/v3/user/balance")
-@@ -4191,9 +5092,13 @@
-         other = "Gx02oig060308000aaaaa" if TAG.lower() == "gx01" else "Gx01oig060308000aaaaa"
-         self.record_test("cid-conn-only", not self.cid_ours(other) and not self.cid_ours("ctsbingxx02secbtc") and not self.cid_ours("ctsbingxx01tp"), f"other={other}")
-         self.record_test("cid-set-bits", "g06" in sample or "g0603" in sample[4:14], sample)
+@@ -4194,3 +5566,7 @@
 -        tr = self.parse_track(sample)
 -        self.record_test("cid-parse", bool(tr and tr.get("pack") == "general" and abs(float(tr.get("sl") or 0) - 0.6) < 1e-9), str(tr))
 -        self.record_test("cid-idx", int((tr or {}).get("idx", -1)) == 0 and int((tr or {}).get("step", 0)) == 8, str(tr))
@@ -2502,154 +2260,84 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        rt = [x for x in list(getattr(self.sets, "sets", {}).values())[:: max(1, len(getattr(self.sets, "sets", {})) // 40 or 1)]]
 +        bad_rt = [x.id for x in rt if (self.parse_track(self.cid("o", set_id=x.id, pack=x.pack, set_idx=x.idx)) or {}).get("set_id") != x.id]
 +        self.record_test("cid-roundtrip", not bad_rt, f"checked={len(rt)} wrong={bad_rt[:3]}")
-         dummy = Position("BTC-USDT", "LONG", 0.001, 80000.0, time.time(), 0, 0, 80000.0, sl_pct=0.006, tp_pct=0.01)
-         dummy.peak = 80000.0
-         slp, tpp = self.security_prices(dummy)
-@@ -4236,7 +5141,8 @@
-             self.record_test(name, ok, detail)
-         dca_ms = (time.perf_counter() - t_dca) * 1000
-         self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
+@@ -4239 +5615,2 @@
 -        self.record_test("dca-enabled", bool(self.dca.enabled), f"steps={self.dca.max_steps} dist={self.dca.distances}")
 +        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
 +        self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
-         self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
-         sl, tp, src = resolve_sl_tp(
-             base_sl=0.0048, base_tp=0.0075,
-@@ -4264,28 +5170,30 @@
-     def stats(self) -> Dict[str, Any]:
-         realized = sum(c.pnl for c in self.closed)
-         wr = (self.wins / (self.wins + self.losses) * 100) if (self.wins + self.losses) else 0
+@@ -4267 +5644 @@
 -        dd = ((self.start_eq - self.equity) / self.start_eq * 100) if self.start_eq else 0
 +        dd = self.dd_now() * 100.0
-         age = time.time() - self.started
-         per_min = (self.wins + self.losses) / (age / 60) if age > 1 else 0
-         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
-         pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
-         pc["minPf"] = self.coord.min_pf
+@@ -4273 +5650 @@
 -        pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
 +        pc["pass"] = bool(pc["count"] < MIN_VALIDATION_N or pc["pf"] + 1e-9 >= self.coord.min_pf)
-         pc["neutral"] = 1.0
-         pc["plus1x"] = 1.1
-         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
-         return {
-             "running": not self.halted,
+@@ -4279 +5656 @@
 -            "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
 +            "mode": _mode_label(),
-             "connection": CONN_SHORT,
+@@ -4281,3 +5658,3 @@
 -            "connType": "vst" if "x02" in CONN_SHORT else "live",
 -            "unit": "VST" if "x02" in CONN_SHORT else "USDT",
 -            "exchange": "BingX VST" if "x02" in CONN_SHORT else "BingX",
 +            "connType": ("bybit-demo" if "x02" in CONN_SHORT else "bybit") if IS_BYBIT else ("vst" if "x02" in CONN_SHORT else "live"),
 +            "unit": "USDT" if IS_BYBIT else ("VST" if "x02" in CONN_SHORT else "USDT"),
 +            "exchange": ("Bybit demo" if "x02" in CONN_SHORT else "Bybit") if IS_BYBIT else ("BingX VST" if "x02" in CONN_SHORT else "BingX"),
-             "startedAt": self.started,
-             "now": time.time(),
-             "uptimeS": age,
-             "equity": round(self.equity, 4),
-             "startEquity": round(self.start_eq, 4),
+@@ -4288,0 +5666,2 @@
 +            "sessionStartEquity": round(float(getattr(self, "session_eq", 0.0) or 0.0), 4),
 +            "ddBasis": getattr(self, "dd_basis", "session"),
-             "available": round(self.available, 4),
-             "usedMargin": round(self.used, 4),
-             "unrealized": round(self.upnl, 4),
-@@ -4303,13 +5211,18 @@
-             "halted": self.halted,
-             "haltReason": self.halt_reason,
-             "leverage": LEVERAGE,
+@@ -4306 +5685 @@
 -            "useMaxLeverage": True,
 +            "useMaxLeverage": bool(self.use_max_leverage),
-             "leverageMap": dict(getattr(self, "lev_map", {})),
-             "leverageMax": dict(getattr(self, "lev_max", {})),
-             "slPct": SL_PCT * 100,
-             "tpPct": TP_PCT * 100,
-             "targetNotional": TARGET_NOTIONAL,
-             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+@@ -4312,0 +5692,5 @@
 +            "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
 +            "sizeMaxNotional": float(getattr(self, "size_max", 25.0) or 25.0),
 +            "maxEntrySlipPct": round(float(getattr(self, "max_entry_slip", 0.0075)) * 100.0, 4),
 +            "sizedNotional": round(self.sized_notional(), 6),
 +            "ddHaltPct": round(float(getattr(self, "dd_halt", DD_HALT)) * 100.0, 4),
-             "paused": os.path.exists(PAUSE_PATH),
-             "activityPerMin": round(per_min, 2),
-             "consecLoss": self.consec_loss,
-@@ -4324,13 +5237,14 @@
-             "pulse": self.pulse_snapshot(),
-             "coord": self.coord.snapshot(),
-             "pfCost": pc,
+@@ -4323 +5707,2 @@
+-            "block": self.block.snapshot(),
++            "block": {**self.block.snapshot(), "setLanes": self.set_block.snapshot(time.time(), self.block, self.position_cost_pct,
++                                                                                   self.sets.lookback * 60) if getattr(self, "set_block", None) else {}},
+@@ -4327,2 +5712,5 @@
 -            "profitFactor": pc["ratio"],
 -            "pf": pc["ratio"],
++            "costModel": self.fee_schedule.snapshot(time.time(), {s: self.contracts[s] for s in SYMBOLS if s in self.contracts},
++                                                    self.position_cost_pct, self.slippage_allowance_pct),
++            "blockRiskPctOfBalance": self.block_risk_pct,
 +            "profitFactor": pc["pf"],
 +            "pf": pc["pf"],
-             "pfNeutral": 1.0,
-             "pfPlus1xCost": 1.1,
-             "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
-             "variants": self.variants.snapshot(),
-             "sets": self.sets.snapshot(),
+@@ -4330,2 +5718,2 @@
+-            "pfPlus1xCost": 1.1,
+-            "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
++            "returnScorePlus1xCost": 1.1,
++            "pfScale": "net gains / net losses",
+@@ -4333,0 +5722 @@
 +            "execution": self.execution_snapshot(),
-             "exits": self.exits.snapshot(),
-             "indications": self.indications.snapshot(),
-             "dca": self.dca.snapshot(),
-@@ -4482,7 +5396,7 @@
-             "sets": {
-                 "families": scov.get("families"),
-                 "setCount": len(self.sets.sets),
+@@ -4485 +5874 @@
 -                "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
 +                "activeCount": int(self.sets.counts().get("valid", 0)),
-                 "histFills": sum(s.n for s in self.sets.sets.values()),
-                 "trailCover": scov.get("trailCover"),
-                 "slCover": scov.get("slCover"),
-@@ -4529,6 +5443,9 @@
-         self._stats_ts = now
-         self._stats_force = False
-         blob = json.dumps(self.stats(), separators=(",", ":"))
+@@ -4531,0 +5921,3 @@
 +        # State dir may be missing on a fresh box (or after a manual wipe):
 +        # recreate it instead of dropping every stats write on the floor.
 +        os.makedirs(DIR, exist_ok=True)
-         tmp = STATS_PATH + ".tmp"
-         with open(tmp, "w") as f:
-             f.write(blob)
-@@ -4560,8 +5477,8 @@
-                 "gp": round(gp, 6),
-                 "gl": round(gl, 6),
-                 "net": round(gp - gl, 6),
+@@ -4563,2 +5955,2 @@
 -                "pf": round(float(cost["ratio"]), 4),
 -                "classicPf": round(float(cost["classicPf"]), 4),
 +                "pf": round(float(cost["pf"]), 4),
 +                "ratio": round(float(cost["ratio"]), 4),
-                 "avgR": cost["avgR"],
-                 "wr": round(100.0 * wins / max(1, wins + losses), 1),
-                 "scale": "1.00=neutral 1.10=+1×cost",
-@@ -4649,7 +5566,11 @@
-             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
-             f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
-         )
+@@ -4652 +6044,5 @@
 -        self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
 +        # open positions are unlimited (maxOpen 0); the symbol cap and Block's max stack are settings (50 and 8 shipped)
 +        self.record_test("qa-unlimited", MAX_OPEN <= 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
 +        book_cap = self.max_book_notional()
 +        sane_cap = max(self.notional_cap() * 32.0, 64.0)
 +        self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
-         missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
-         cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
-         self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4731,7 +5652,7 @@
-         snap_ind = self.indications.snapshot()
-         self.record_test("qa-ind-on", bool(snap_ind.get("enabled")), f"syms={snap_ind.get('symbols')} lanes={len(snap_ind.get('primary') or [])}")
-         have = set(s for s, rows in (getattr(self.indications, "last", {}) or {}).items() if rows)
+@@ -4734 +6130 @@
 -        scored = [s for s in SYMBOLS if len((self.klines_tf.get("1m") or {}).get(s) or self.klines.get(s) or []) >= 20]
 +        scored = [s for s in SYMBOLS if self.ready_1m(s) >= 20]
-         miss = [s for s in scored if s not in have][:4]
-         warm_ind = self.cycle < max(80, len(SYMBOLS))
-         need = max(8, min(len(scored), max(8, len(scored) // 8))) if scored else 8
-@@ -4753,15 +5674,11 @@
-             self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
-         except Exception as e:
-             self.record_test("qa-ind-self", False, str(e)[:80])
+@@ -4756 +6152,2 @@
 -        self.record_test("qa-dca-on", bool(self.dca.enabled), f"en={self.dca.enabled} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
 +        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
 +        self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
-         try:
-             rows_g = self.strategy_closes()
+@@ -4759,6 +6156 @@
 -            consec_g = 0
 -            for c in reversed(rows_g):
 -                if float(getattr(c, "pnl", 0) or 0) < 0:
@@ -2657,22 +2345,10 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 -                else:
 -                    break
 +            consec_g = self.coord.net_streak(rows_g)
-             intern_m: Dict[str, Any] = {"pf": 0.0, "n": 0}
-             stg = None
-             try:
-@@ -4769,7 +5686,7 @@
-             except Exception:
-                 stg = None
-             if stg:
+@@ -4772 +6164 @@
 -                intern_m = {"pf": float(stg.last15_ratio), "n": float(stg.last15_n), "pack": stg.pack}
 +                intern_m = {"pf": float(stg.last15_pf), "n": float(stg.last15_n), "pack": stg.pack}
-             self.coord.gate(rows_g, consec_g, intern=intern_m)
-         except Exception:
-             pass
-@@ -4786,81 +5703,122 @@
-             bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
-             f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
-         )
+@@ -4789,12 +6181,11 @@
 -        sample_g = self.cid("o", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
 -        tr_g = self.parse_track(sample_g)
 -        self.record_test(
@@ -2696,21 +2372,17 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            return int(row["time"] if isinstance(row, dict) else row[0])
 +        except Exception:
 +            return 0
- 
-     def _hist_fetch(self) -> None:
+@@ -4802,0 +6194,4 @@
 +        """Fill every Set history from the exchange. One klines request is capped at 1000 bars by the venue (a larger
 +        limit is refused with code 109400 and returns nothing), so a symbol that is short of its lookback gets the
 +        newest HIST_PAGE bars and then older pages through endTime; a symbol that already has its history only needs the
 +        newest minutes, which the join onto the stored series takes care of."""
-         if not self.sets.enabled:
-             return
-         self.sets.progress.phase = "fetch"
+@@ -4806,2 +6201,2 @@
 -        limit = str(self.sets.lookback)
 -        reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
 +        lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
 +        page = HIST_PAGE
-         stored = 0
-         chunk = 4
+@@ -4810,6 +6205,2 @@
 -        for i in range(0, len(reqs), chunk):
 -            self.sets.progress.detail = f"fetch {i}/{len(reqs)}"
 -            self.sets.progress.pct = (i / max(1, len(reqs))) * 8.0
@@ -2719,7 +2391,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 -            rows = []
 +
 +        def _gather(batch: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-             if hasattr(self.api, "gather_public"):
+@@ -4817,8 +6208,36 @@
 -                rows = self.api.gather_public(batch, timeout=6.0)
 -            else:
 -                for path, extra in batch:
@@ -2764,12 +2436,10 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                        pending.append(sym)
 +            for s in names:
 +                bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
-                 if s and bars:
+@@ -4826 +6245 @@
 -                    self.sets.ingest_bars(s, bars)
 +                    self.sets.ingest_bars(s, bars, last_t=last_t)
-                     stored += 1
-             time.sleep(0.12)
-         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
+@@ -4829,0 +6249,43 @@
 +        sizes = sorted(len(self.sets.bars.get(s) or []) for s in SYMBOLS)
 +        log(f"HIST fetched {stored}/{len(SYMBOLS)} symbols; bars min/median/max "
 +            f"{sizes[0] if sizes else 0}/{sizes[len(sizes) // 2] if sizes else 0}/{sizes[-1] if sizes else 0} of {lookback}",
@@ -2813,10 +2483,7 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +                                     abort=lambda: self.load.last_budget.level == "critical")
 +        finally:
 +            self.hist_busy = False
- 
-     def _hist_loop(self) -> None:
-         while not self._hist_stop:
-             try:
+@@ -4834,30 +6296 @@
 -                for s in SYMBOLS:
 -                    bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
 -                    if bars:
@@ -2848,17 +2515,11 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 -                    finally:
 -                        self.hist_busy = False
 +                self._hist_tick()
-             except Exception:
-                 self.hist_busy = False
-                 self.sets.progress.phase = "error"
-@@ -4888,10 +5846,25 @@
-                 if hasattr(self.api, "err"):
-                     self.api.err.write("warm", msg=self.last_error[:220])
-             self.warm_ms = (time.time() - t0) * 1000
+@@ -4878,0 +6312 @@
++                self.refresh_fees()
+@@ -4891 +6324,0 @@
 -            sd_notify("WATCHDOG=1")
-             remain = float(getattr(self.load.last_budget, "warm_s", 0.32) or 0.32) - (time.time() - t0)
-             if remain > 0:
-                 time.sleep(remain)
+@@ -4894,0 +6328,16 @@
 +
 +    def _ctrl_watch_loop(self) -> None:
 +        """Event-based control coordination: any create/delete/touch of the
@@ -2875,90 +2536,51 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +            except Exception:
 +                pass
 +            time.sleep(0.15)
-
-     def _one_cycle(self) -> None:
-         sd_notify("WATCHDOG=1")
-@@ -4902,9 +5875,13 @@
-                 self._pre_pause_halt = self.halt_reason
-             self.halted = True
-             self.halt_reason = "stopped"
+@@ -4904,0 +6354,2 @@
 +            self.refresh_tickers()
 +            self.seed_px_bars()
-             self.priority_controls()
+@@ -4905,0 +6357 @@
 +            self.manage()   # open positions keep their local SL, TP, trail and time exits while stopped
-             self.write_stats(force=True)
+@@ -4907 +6359,2 @@
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
 +            self.wake_ev.wait(timeout=0.4)
-             return
-         if paused:
-             self.halted = True
-@@ -4916,18 +5893,24 @@
-             self.priority_controls()
-             self.manage()
-             self.write_stats(force=True)
+@@ -4919 +6372,2 @@
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
 +            self.wake_ev.wait(timeout=0.4)
-             return
-         if self.halt_reason in ("paused", "stopped"):
-             pre = getattr(self, "_pre_pause_halt", None)
-             self._pre_pause_halt = None
+@@ -4923,0 +6378,5 @@
 +            if os.path.exists(RESET_EQ_PATH):
 +                # Explicit Start: fresh session — the reset-eq rescue in
 +                # refresh_balance re-baselines equity; never restore the
 +                # pre-stop economic halt across an explicit start.
 +                pre = None
-             if pre:
-                 self.halted = True
-                 self.halt_reason = pre
-             elif self.equity and self.equity < EQ_MIN:
-                 self.halted = True
-                 self.halt_reason = f"equity {self.equity:.4f} below min"
+@@ -4930 +6389 @@
 -            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
 +            elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
-                 self.halted = True
-                 self.halt_reason = "drawdown halt"
-             else:
-@@ -4984,6 +5967,10 @@
-         except Exception:
-             pass
-         sd_notify("WATCHDOG=1")
+@@ -4973,0 +6433 @@
++        self.refresh_fees()
+@@ -4986,0 +6447,4 @@
 +        try:
 +            self.reconcile_restored_book()
 +        except Exception:
 +            log("reconcile_restored_book failed: " + traceback.format_exc()[-160:])
-         self.adopt_exchange_positions()
-         sd_notify("WATCHDOG=1")
-         try:
-@@ -5001,6 +5988,8 @@
-         warm.start()
-         hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
-         hist.start()
+@@ -5003,0 +6468,2 @@
 +        ctrl = threading.Thread(target=self._ctrl_watch_loop, name="ctrl-watch", daemon=True)
 +        ctrl.start()
-         self.cycle_busy = False
-         self.cycle_wait_ms = 0.0
-         self.cycle_overrun = False
-@@ -5029,17 +6018,29 @@
-                 pass
-             sd_notify("WATCHDOG=1")
-             wall = time.perf_counter() - t0
+@@ -5032,2 +6498,2 @@
 -            remain = SCAN_S - wall
 -            self.cycle_wait_ms = max(0.0, remain) * 1000.0
 +            gap = pace_gap_s(t0, time.perf_counter(), SCAN_S)
 +            self.cycle_wait_ms = gap * 1000.0
-             self.cycle_busy = False
+@@ -5035,3 +6501,3 @@
 -            if remain > 0:
 -                self.wake_ev.clear()
 -                self.wake_ev.wait(timeout=remain)
 +            # a tick never starts a cycle early: the next one starts at least SCAN_S after this one began
 +            if gap > 0:
 +                time.sleep(gap)
-             elif wall > SCAN_S:
-                 self._stats_force = True
- 
- 
+@@ -5041,0 +6508,8 @@
 +def make_api(conn: str, key: str, secret: str, base: str):
 +    """The venue client of a connection: bybit-* talks to Bybit V5 (bybit_fast), everything else to BingX."""
 +    if str(conn).startswith("bybit-"):
@@ -2967,18 +2589,14 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +    return FastBingX(key, secret, ErrorLog(ERR_PATH), base=base)
 +
 +
- def load_contracts(want: Optional[set] = None) -> Dict[str, Contract]:
+@@ -5042,0 +6517,4 @@
 +    if IS_BYBIT:
 +        from bybit_fast import fetch_contract_rows
 +        return {c["symbol"]: Contract(c["symbol"], c["min_qty"], c["step"], c["qprec"], c["pprec"], c["min_usdt"], c["max_lev"])
 +                for c in fetch_contract_rows(BASE, want)}
-     url = BASE + "/openApi/swap/v2/quote/contracts"
-     with urllib.request.urlopen(url, timeout=15) as r:
-         data = json.loads(r.read().decode()).get("data") or []
-@@ -5086,20 +6087,27 @@
-             pass
- 
- 
+@@ -5072,0 +6551 @@
++            fee_rate(c.get("makerFeeRate")), fee_rate(c.get("takerFeeRate")),
+@@ -5088,0 +6568,7 @@
 +def _mode_label() -> str:
 +    try:
 +        return mode_of(BASE)
@@ -2986,16 +2604,12 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +        return "UNPINNED"
 +
 +
- def main() -> None:
-     global BASE
-     os.makedirs(DIR, exist_ok=True)
-     seed_overlay()
+@@ -5093,2 +6579,2 @@
 -    key = redis_hget("api_key")
 -    secret = redis_hget("api_secret")
 +    key = connection_field("api_key")
 +    secret = connection_field("api_secret")
-     if not key or not secret:
-         raise SystemExit(f"missing {CONN_SHORT} credentials")
+@@ -5097,6 +6583,6 @@
 -    test = (redis_hget("is_testnet") or "").strip().lower()
 -    if test in ("1", "true", "yes") or "vst" in (redis_hget("base_url") or "").lower():
 -        BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
@@ -3008,6 +2622,3 @@ diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
 +    except ConnGuardError as exc:
 +        raise SystemExit(f"refusing to start: {exc}")
 +    api = make_api(CONN_SHORT, key, secret, BASE)
-     Pulse(api, load_contracts()).run()
- 
- 

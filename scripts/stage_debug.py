@@ -159,7 +159,7 @@ def main() -> int:
     for s in names:
         b = bars[s]
         warm = min(book.warmup, max(16, len(b) // 5))
-        sig = se.pack_signals(b, book.packs, book.ind_settings, float(times[s][0]), warm)
+        sig = se.pack_signals(b, book.packs, book.ind_settings, float(times[s][0]) + 60.0, warm)
         dirs, confs = [x[0] for x in sig[st.pack]], [float(x[1]) for x in sig[st.pack]]
         cfg = sg.lane_cfg(book)
         cand = [i for i in range(warm, len(b)) if dirs[i] != 0 and confs[i] >= cfg["entry_conf"]]

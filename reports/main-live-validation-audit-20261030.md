@@ -1,8 +1,10 @@
 # Main, indication, Axis and Block audit — 2026-10-30
 
+Operational findings below are superseded by [the execution-cost and lane audit](execution-cost-and-lane-audit-20261030.md). The bounded market sample remains a historical replay result.
+
 ## Findings and corrections
 
-- Main short-window choice previously stayed fixed after a live close. Each Set now chooses again using its own complete, entry-time Main evidence, including live results; unknown entry times do not invent votes. Compact live evidence survives the 200-row display cap and expires with the lookback.
+- Main short-window choice uses its own complete, causal paper Main evidence. Executed fills are now separate; they cannot add votes or duplicate paper orders. Compact entry-time paper evidence survives the display cap and expires with the lookback.
 - Scoring excludes expired and future results, keeps a monotonic event clock when closes arrive out of order, and applies the current round-trip cost consistently to statistics and candidate votes. Profit factors are calculated before display rounding, including when results are very small.
 - Replay now dates each symbol from its newest completed exchange bar. The kline adapter removes duplicate candles, keeps the newest continuous run, rejects malformed rows, and prevents future candles from being used. Hold candidates and chunked tapes obey the same as-of boundary.
 - Active and Common indication switches and Direction, Move, and Active range settings now reach the Set's actual replay/live signal. The Active vote evaluates its configured ranges and uses the strongest qualifying result. The other enabled indication types retain their own votes.
@@ -38,9 +40,8 @@ Representative positive-mode groups at 23:08, grouped by strategy, Set type, and
 
 Across the same last six-hour sample, the four symbols produced distinct signal streams: eligible signals per symbol ranged from 284–316 for indications, 29–44 for short range, 46–83 for trend, 3–7 for breakout, 128–152 for reversion, 238–255 for flow, and 244–258 for multi. This is a functionality check, not a comparison of profitability. Positive and negative runs took about 67 and 77 seconds respectively, with peak process memory near 60 MB.
 
-## Remaining live-execution limits
+## Current execution status
 
-- No x01 engine, credentials, or reachable exchange target were available in the development environment. No live order was sent, and the requested 50-symbol live start was not performed.
-- The x01 profile has all Axis switches off. Block is enabled, but its independent parent lane excludes Set positions; with the standard Base gate every new entry uses a Set, so Block normally has no eligible parent. The exchange-stub tests cover Block's independent parent, adds, protection, capacity and restart behavior; they do not prove an operational Block parent exists on x01.
-- Replay results and actual fills can represent the same underlying entry, but existing records do not persist an exact shared entry identity. The current merge can therefore double-count an overlap. Resolving this requires stable signal lineage through order placement, recovery, open positions and close records, plus causal replay reconciliation. Matching by nearby time, symbol, and side would risk removing a different trade. Treat live Main and Real PF as unverified until that reconciliation and real execution have been tested.
-- In-sample selected PF cannot guarantee a high future or executed PF. No adjustment was made merely to inflate the reported figure.
+The follow-up audit separates paper and actual evidence, enables per-Set/lane Axis and Set Block, and fixes fee and partial-fill accounting. It includes a read-only exchange commission check; no real-money order or engine start was performed. See the linked audit for current tests, sizing limits, and remaining execution uncertainty.
+
+Selected in-sample PF is not a guarantee of future or executed PF. No result is clamped to a profitability target.

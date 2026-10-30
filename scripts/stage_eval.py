@@ -78,7 +78,7 @@ def _symbol_job(args):
     s, bars, t0 = args
     b = make_book()
     warm = min(b.warmup, max(16, len(bars) // 5))
-    sig = se.pack_signals(bars, b.packs, b.ind_settings, float(t0), warm)
+    sig = se.pack_signals(bars, b.packs, b.ind_settings, float(t0) + 60.0, warm)
     dirs = {p: [x[0] for x in sig[p]] for p in b.packs}
     confs = {p: [float(x[1]) for x in sig[p]] for p in b.packs}
     cfg = lane_cfg(b)

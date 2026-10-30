@@ -1,0 +1,2519 @@
+{
+  "generatedAt": "2026-10-30T02:15:02.126311+00:00",
+  "branch": "Stable-02-01",
+  "python": {
+    "fullEngineChecks": 408,
+    "fullEngineSeconds": 473,
+    "workers": 4,
+    "additionalMonitorChecks": 6,
+    "failed": 0,
+    "skipped": 0
+  },
+  "typescript": {
+    "passed": 72,
+    "failed": 0
+  },
+  "node": {
+    "passed": 191,
+    "failed": 0,
+    "skipped": 4,
+    "skipReason": "optional OG-skill documentation absent"
+  },
+  "typecheck": "pass",
+  "build": "pass",
+  "newMarketHistoryLimitDays": 3,
+  "liveTradingStarted": false,
+  "sourceBlobs": {
+    "server/pulse/pulse_trader.py": "12e4567e6e6215af7b0526b0b8c54256fe449192",
+    "server/pulse/set_engine.py": "ac8757d513de9e1ff3a2bd0be46c38eafef75f46",
+    "server/pulse/execution_cost.py": "34040ebd8b7cceed8b68f3dd4b38a14eb337bd2e",
+    "server/pulse/set_block.py": "14efa10cebd38e289365a7b1d9d4788fd5beae56",
+    "scripts/monitor_readonly.py": "7b88d88f114cb8c1c855a6377510d200cc3389a1"
+  },
+  "checks": [
+    {
+      "status": "PASS",
+      "check": "logistics.node-floor-covers-vite-and-nitro",
+      "seconds": 0.0,
+      "detail": "engines.node='>=22.12'"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.zero-is-a-value-not-a-default",
+      "seconds": 0.03,
+      "detail": "zero_kept=['exitMinHoldS', 'exitLockPct', 'trailingMinStep', 'scratchMin', 'scratchS', 'indMinConfidence', 'tfMinAgree clamped to 1'] failed=[] default_ok=True"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.overlays-share-grid-contract",
+      "seconds": 0.0,
+      "detail": "overlay-bingx-x01.json:ok overlay-bingx-x02.json:ok"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.desk-defaults-match-engine",
+      "seconds": 0.0,
+      "detail": "6 defaults present; gate default equal in desk and engine"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.desk-defaults-equal-shipped-overlay",
+      "seconds": 0.0,
+      "detail": "11 shared numeric defaults equal the shipped overlay"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.desk-default-overlay-equals-shipped-x01",
+      "seconds": 0.0,
+      "detail": "176 single-line DEFAULT_OVERLAY keys equal the shipped x01 overlay (2 documented exception: targetNotional, symbolsAll)"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.shipped-overlays-run-the-base-gate",
+      "seconds": 0.0,
+      "detail": "setUseHistoricGate: {'x01': True, 'x02': True, 'desk': True}"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.desk-symbols-equal-engine-fixed-list",
+      "seconds": 0.0,
+      "detail": "desk=12 engine=12 equal=True"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.desk-cards-read-effective-overlay",
+      "seconds": 0.0,
+      "detail": "no card reads an overlay key from cts (207 keys checked)"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.engine-absent-defaults-agree",
+      "seconds": 0.0,
+      "detail": "absent defaults agree: scratchMin 0.16%, minStep 6"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.no-ratio-as-pf",
+      "seconds": 0.04,
+      "detail": "no ratio is compared with a PF threshold; no PF key holds a ratio"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.conn-pinned-per-connection",
+      "seconds": 0.0,
+      "detail": "guard checks=17 failed=[] mainnet_fallback=False wired=True"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.no-fabricated-pass-and-one-entry-conf",
+      "seconds": 0.0,
+      "detail": "fabricated_pass=False literal_0.50=False one_key=True set_fill_tp_kept=True"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.dca-on-with-set-and-axis-options-off",
+      "seconds": 0.0,
+      "detail": "kill_switch_not_thrown=True overlay-bingx-x01.json: enabled=True auto=True onSets=False onAxis=False overlay-bingx-x02.json: enabled=True auto=True onSets=False onAxis=False"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.deploy-pin-matches-engine",
+      "seconds": 0.0,
+      "detail": "pulse_trader blob=12e4567e6e pin=12e4567e6e"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.restore-patch-reproduces-pin",
+      "seconds": 0.01,
+      "detail": "patched blob=12e4567e6e"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.no-leftover-zest-names",
+      "seconds": 0.02,
+      "detail": "no 'zest' in tracked files"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.no-secret-literals",
+      "seconds": 0.26,
+      "detail": "no credential patterns"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.package-scripts-exist",
+      "seconds": 0.0,
+      "detail": "every referenced script exists"
+    },
+    {
+      "status": "PASS",
+      "check": "logistics.engine-modules-compile",
+      "seconds": 0.37,
+      "detail": "27 engine modules parse"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.gather-without-bridge-uses-threads",
+      "seconds": 0.3,
+      "detail": "rows=[['A'], ['B'], ['C'], ['D']] took 0.30s"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.batch-orders-carry-numbers",
+      "seconds": 0.0,
+      "detail": "batch rows=[{'symbol': 'BTC-USDT', 'type': 'STOP_MARKET', 'stopPrice': 60000.5, 'quantity': 0.01, 'closePosition': 'true', 'clientOrderID': 'c1'}, {'symbol': 'BTC-USDT', 'type': 'TAKE_PROFIT_MARKET', 'stopPrice': 'x', 'clientOrderID': 'c2'}]"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.signature-raw-values-encoded-query",
+      "seconds": 0.0,
+      "detail": "signature over raw values=True query encoded=True round-trips=True plain params unchanged=True"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.public-cooldown-blocks-http",
+      "seconds": 0.0,
+      "detail": "http_calls=1 second_cooled=True"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.public-ok-path-not-blocked",
+      "seconds": 0.0,
+      "detail": "http_calls=3 of 3"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.token-bucket-reserve-never-sleeps",
+      "seconds": 0.0,
+      "detail": "first=0.0 second=1.000 call_seconds=0.0000"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.async-bridge-honours-cooldown",
+      "seconds": 0.0,
+      "detail": "requests=1 cooled_reply=True"
+    },
+    {
+      "status": "PASS",
+      "check": "exchange.async-bridge-waits-on-loop",
+      "seconds": 0.05,
+      "detail": "requests=2 ticks_during_gather=3"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.default-bind-is-loopback",
+      "seconds": 0.0,
+      "detail": "bind=127.0.0.1:3015"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.control-refused-without-token",
+      "seconds": 0.03,
+      "detail": "status=403 engine_calls=0 detail=missing or wrong X-Pulse-Token"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.control-refused-with-wrong-token",
+      "seconds": 0.02,
+      "detail": "status=403 engine_calls=0"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.control-accepted-with-token",
+      "seconds": 0.02,
+      "detail": "status=200 calls=[('bingx-x02', 'stop')]"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.token-unset-refuses-every-post",
+      "seconds": 0.01,
+      "detail": "status=403 detail=PULSE_HTTP_TOKEN is not set on the sidecar"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.cors-is-not-a-wildcard",
+      "seconds": 0.02,
+      "detail": "unlisted_acao=None listed_acao=http://127.0.0.1:3102"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.config-save-atomic",
+      "seconds": 0.01,
+      "detail": "status=200 written=['overlay-bingx-x02.json'] saved={'slToTpRatio': 0.9} temp_leftovers=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.stale-engine-is-not-running",
+      "seconds": 0.0,
+      "detail": "stale: stamp=False lane=False; fresh: stamp=True lane=True"
+    },
+    {
+      "status": "PASS",
+      "check": "sidecar.overall-view-has-no-fake-zeros",
+      "seconds": 0.0,
+      "detail": "both: usedMargin=15.0 pnlPct=0.25 symbols=['BTC-USDT', 'ETH-USDT']; one-lane: usedMargin=None; empty: pnlPct=None"
+    },
+    {
+      "status": "PASS",
+      "check": "contract.overall-keys-declared",
+      "seconds": 0.0,
+      "detail": "overall keys the desk type does not declare: none"
+    },
+    {
+      "status": "PASS",
+      "check": "contract.lane-keys-declared",
+      "seconds": 0.0,
+      "detail": "lane keys the desk type does not declare: none"
+    },
+    {
+      "status": "PASS",
+      "check": "contract.nullable-overall-fields",
+      "seconds": 0.0,
+      "detail": "not declared nullable: none; non-number values: none"
+    },
+    {
+      "status": "PASS",
+      "check": "contract.closed-rows-name-their-lane",
+      "seconds": 0.0,
+      "detail": "closed rows=2 connections=['bingx-x01', 'bingx-x02']"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.requests-signed-over-exact-query-and-body",
+      "seconds": 0.0,
+      "detail": "verified requests=5 sig_failures=0 manual HMAC equal=True wrong secret -> 10004 signature error (bybit 10004) error sign"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.symbols-and-tickers-map-both-ways",
+      "seconds": 0.0,
+      "detail": "tickers=['1000PEPE-USDT', 'BTC-USDT'] change%=5.0 (USDC perp and dated future dropped)"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.contracts-follow-instrument-filters",
+      "seconds": 0.0,
+      "detail": "BTC step=0.001 qprec=3 pprec=1 minNotional=5.0 maxLev=100; PEPE step=10.0 (not 10^-qprec); paged load over 6 pages"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.klines-oldest-first-in-trader-shape",
+      "seconds": 0.0,
+      "detail": "times ascending=True parsed bar=[100.0, 101.0, 99.0, 100.5, 7.0] interval 5m->5 endTime->end"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.balance-and-positions-bingx-shape",
+      "seconds": 0.0,
+      "detail": "balance equity=101.5 available=88.25 (CONTRACT fallback ok=101.5); positions=[('BTC-USDT', 'LONG'), ('BTC-USDT', 'SHORT')] short amt=-0.2"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.entry-body-and-fill-report",
+      "seconds": 0.0,
+      "detail": "entry qty 0.3 (float noise removed) idx=1 avg=100 executed=0.3; PEPE qty 37 -> 40 on step 10; late executions retried; hedge mode set once"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.protective-batch-conditional-reduce-only",
+      "seconds": 0.0,
+      "detail": "LONG SL dir=2 trig=98.5 (tick 0.5), TP dir=1; SHORT SL dir=1 TP dir=2; reduceOnly+closeOnTrigger qty 0 idx 1/2"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.batch-per-item-result-and-single-form-fallback",
+      "seconds": 0.0,
+      "detail": "item codes=[0, 110092] ('trigger price is on the wrong side of the current price (byb' -> ctrl_err_kind px); explicit-qty single form qty=0.4"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.stop-moves-by-amend",
+      "seconds": 0.0,
+      "detail": "amend keeps order id oid0001 trigger->99.5; wrong side -> 110093 (px); unknown id -> 110001"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.open-orders-typed-by-direction-and-paged",
+      "seconds": 0.0,
+      "detail": "4 conditional orders over 2 pages typed [('LONG', 'STOP_MARKET'), ('LONG', 'TAKE_PROFIT_MARKET'), ('SHORT', 'STOP_MARKET'), ('SHORT', 'TAKE_PROFIT_MARKET')]"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.cancel-and-status-lookup",
+      "seconds": 0.0,
+      "detail": "open=NEW cancel=0 again=110008 unknown=110001 then=CANCELED; missing order -> 80016"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.errors-carry-trader-words",
+      "seconds": 0.0,
+      "detail": "10 codes mapped to trader words, mismatches=[]; rate limit -> 100410; transport -> error"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.leverage-and-modes-set-once",
+      "seconds": 0.0,
+      "detail": "max=100, both sides set in one request each (2 posts, 110043 = ok), margin mode set once (1), hedge once (1); read back (100, 100, 0)"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.rate-headers-drive-the-endpoint-gate",
+      "seconds": 0.0,
+      "detail": "after X-Bapi-Limit-Status 0 the next call on that endpoint waited 1.0s (reset in 0.8s); another endpoint waited: False; the venue's limit 20 replaced the local guess (20.0)"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.rate-limit-error-backs-off-to-the-reset",
+      "seconds": 0.0,
+      "detail": "10006 -> paused 2.20s to the reset timestamp and the order went through (0); a second refusal -> 101209, path rests 2.0s with 0 requests sent; after the reset -> 0"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.ip-ban-stops-every-request-ten-minutes",
+      "seconds": 0.0,
+      "detail": "HTTP 403 -> 100410 (True); 0 requests sent during the ban (reads, public and orders all cooled); at 599 s still cooled=True; after 602 s -> 0; pace bybit_limits.IP_RATE"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.local-pace-far-below-the-ip-limit",
+      "seconds": 0.0,
+      "detail": "IP pace 80/s = 400 per 5 s (venue 600); order endpoints 10/s, reads 40/s"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.batches-chunked-and-only-failed-items-retried",
+      "seconds": 0.0,
+      "detail": "4 orders -> calls of [4, 2]: only the rate-limited and the server-error items were sent again; the refused item stays refused (110092); codes [0, 0, 110092, 0]; 25 orders -> calls of [10, 10, 5]"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.batch-lost-reply-resolved-by-link-id",
+      "seconds": 0.0,
+      "detail": "reply lost after both orders were placed: 1 create-batch call, venue holds 2 orders (no second pair), both items resolved to their order ids by orderLinkId"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.retry-never-opens-a-second-position",
+      "seconds": 0.0,
+      "detail": "lost reply: position +0.2 (one order, 1 create request, reported executed 0.2); server error then retry: +0.3; duplicate orderLinkId resolved to the existing order, position +0.1"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.batch-item-with-a-used-link-id-resolves-to-the-existing-order",
+      "seconds": 0.0,
+      "detail": "a batch item whose orderLinkId exists -> the existing order oid0002 (no second stop); the other item placed; venue holds 2 conditional orders"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.timestamp-resync",
+      "seconds": 0.0,
+      "detail": "retCode 10002 -> clock offset 59999 ms from /v5/market/time, request repeated (3 calls), the next request needs 1 call"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.circuit-breaker-holds-entries-only",
+      "seconds": 0.0,
+      "detail": "1 breaker trip(s) after repeated server errors; entry held without a request=True; reduce-only close -> 0, cancel -> 0; entry after 15 s -> 0"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.error-classes",
+      "seconds": 0.5,
+      "detail": "42 (code, status, text) cases classified, mismatches=[]; retry flag only for rate/transient/time=True; bad JSON and HTTP 502 on a read are retried once -> 0/0"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.reads-retry-writes-do-not",
+      "seconds": 0.0,
+      "detail": "position read: server error then ok after 2 requests; leverage write gave up after its retry -> 10016 marked transient"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.hedge-mode-asked-again-after-rate-limit",
+      "seconds": 0.0,
+      "detail": "switch-mode refused by a rate limit did not mark the account set up (done=False after the first order); the next order asked again -> hedge=True"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.batch-cancel-and-amend-per-item",
+      "seconds": 0.0,
+      "detail": "amend-batch item codes [0, 110092, 110001] (one call of 3); cancel-batch [0, 0, 0] (an order already gone counts as cancelled)"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.price-stream-merges-snapshot-and-delta",
+      "seconds": 0.0,
+      "detail": "snapshot=('BTC-USDT', 66666.6, -15.831500000000002) delta without lastPrice keeps 66666.6; delta with it -> 66670.0; mark-only ticker -> 3000.0; control frames and USDC perps ignored"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.price-hub-shards-subscribes-pings",
+      "seconds": 0.0,
+      "detail": "200 symbols -> [90, 90, 20] per connection; subscribed ['tickers.BTCUSDT', 'tickers.ETHUSDT', 'tickers.SOLUSDT']; ping sent=True; tick [('BTC-USDT', 100.0, 1.0)]"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.trader-lifecycle-entry-controls-venue-tp-close",
+      "seconds": 0.02,
+      "detail": "open: qty=0.05 venue=0.05 sl/tp oids=oid0002/oid0003 (True); venue take profit -> venue_exit=('tp', 104.5) flat before/after=False/True (True); market close reduceOnly idx 1 -> venue flat (True)"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.own-closing-fills-synced-with-pnl",
+      "seconds": 0.0,
+      "detail": "closePosition market -> qty 0 reduceOnly; allOrders row profit=1.2 executed=0.4; fills=1"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.demo-reads-market-data-from-mainnet",
+      "seconds": 0.0,
+      "detail": "demo: public -> https://api.bybit.com, signed -> https://api-demo.bybit.com; live: public -> https://api.bybit.com"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.bring-up-script-private-credentials-no-secret-output",
+      "seconds": 0.1,
+      "detail": "syntax ok=True; x02 file mode 0o600 fields ['api_key', 'api_secret', 'is_testnet'] is_testnet=1; secrets in output: False; bad slot exit 2; no engine started without START=1"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.connection-name-picks-the-venue",
+      "seconds": 0.0,
+      "detail": "bybit-x01 -> FastBybit=True; bingx-x01 -> FastBingX=True"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.tag-contracts-and-pins-per-connection",
+      "seconds": 0.61,
+      "detail": "tags {'bybit-x01': 'Gb01 True make_api', 'bybit-x02': 'Gb02 True make_api', 'bingx-x02': 'Gx02 False make_api', 'bingx-x01': 'Gx01 False make_api'}; contracts ['1000PEPE-USDT', 'BTC-USDT'] BTC step=0.001 PEPE step=10.0; want filter ['BTC-USDT']; bybit-x02 pinned to https://api-demo.bybit.com"
+    },
+    {
+      "status": "PASS",
+      "check": "bybit.sidecar-lists-bybit-lanes-apart-from-overall",
+      "seconds": 0.0,
+      "detail": "a credential file adds lane ['bybit-x01']; Overall keeps ['bingx-x01', 'bingx-x02']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.no-untagged-order-when-set-disappears",
+      "seconds": 0.02,
+      "detail": "gate on=True; opened=False; venue orders=0"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.entry-selection-keeps-packs-and-axis-lanes-independent",
+      "seconds": 0.0,
+      "detail": "selected=(0.8, 'X-USDT', -1, 'set:valid:valid-signal'), (0.8, 'X-USDT', -1, 'set:valid:valid-signal'), (0.95, 'X-USDT', 1, 'set:strong:strong-signal'); scopes=((True, ''), (False, 'pack:strong:pos')); negative alternative=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.completed-minutes-do-not-bridge-gaps-or-bad-rows",
+      "seconds": 0.0,
+      "detail": "contiguous closes=[2.02, 2.01], duplicate removed, malformed series rejected=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.live-entry-is-the-replays-signal",
+      "seconds": 0.61,
+      "detail": "signal bars=36 quiet bars=4 mismatches=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-every-stage-on-its-own-lane",
+      "seconds": 0.03,
+      "detail": "lanes ('pos', 'neg'); pick True/True; cid lanes ('neg', 'pos') close neg; live close joins (Main, Real, Real Neg) (0, 0, 0); stats {'openPos': 1, 'openNeg': 1, 'closedPos': 1, 'closedNeg': 1, 'winsPos': 0, 'lossesPos': 1, 'winsNeg': 1, 'lossesNeg': 0} stages {'base': 2, 'main': 0, 'negative': 1, 'real': 0, 'realNeg': 1}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.real-overall-strategies-per-scope",
+      "seconds": 0.05,
+      "detail": "rows per pack {'indications': 24, 'general': 24, 'shortrange': 24, 'trend': 24}; verdicts {'lane:pos': True, 'lane:neg': False, 'pack:indications': False, 'pack:indications:pos': True, 'pack:indications:neg': False}; scope_allows pos/neg ((True, ''), (False, 'pack:indications:neg')); place [('neg', False, 1), ['lane:neg', 'lane:pos', 'overall', 'pack:indications', 'pack:indications:neg', 'pack:indications:pos', 'set:indications:1m:sl0.50:st2:neg'], ('pos', True, 0), ['lane:neg', 'lane:pos', 'overall', 'pack:indications', 'pack:indications:neg', 'pack:indications:pos', 'set:indications:1m:sl0.50:st2:pos']]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-set-close-waits-only-its-own-cooldown",
+      "seconds": 0.05,
+      "detail": "Set lane waits=[120.0, 120.0, 120.0, 120.0, 120.0]; Exit lane waits=[9.0, 36.0, 144.0]; fast stop-out ban=True; 8th loss pauses the book: Set close=False, Exit-lane close=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.entry-loop-places-the-set-signal",
+      "seconds": 0.06,
+      "detail": "placed=[('A-USDT', -1, 'set:indications:ta+move+common', 0.707289)] set signal=('indications', -1, 0.7072893156815322)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.entry-mirrors-set-signal-without-last-n-validation",
+      "seconds": 0.05,
+      "detail": "placed=[('A-USDT', -1, 'set:indications:ta+move+common')]; the coordinator advised allow=False reasons=['last 4 PF 0.00<1.25', 'prev PF 0.00<1.06']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.only-completed-minutes-reach-set-history",
+      "seconds": 0.0,
+      "detail": "bars=4 last=1790000040.0 (want 1790000040.0) v3 order fixed=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.exit-set-never-takes-tp-base-always",
+      "seconds": 0.02,
+      "detail": "honours TP {'base': True, 'exit': False, 'trail': False} cid round trip=True twins by content={'base': 'indications:1m:sl0.50:st2', 'exit': 'indications:1m:sl0.50:st2:xt'}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.drawdown-halt-follows-its-setting",
+      "seconds": 0.1,
+      "detail": "(halted, reason) by (ddHaltPct, equity from start 100): {'None:15.0': (True, 'drawdown halt'), '0.0:30.0': (False, None), '0.0:15.0': (False, None), '0.0:0.1': (True, 'equity 0.1000 below min')}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.drawdown-halt-measures-from-the-active-session",
+      "seconds": 0.08,
+      "detail": "(halted, reason, session start) {'session eq 5': (False, None, 10.0), 'session eq 1.5': (True, 'drawdown halt', 10.0), 'stored start eq 5': (True, 'drawdown halt', 10.0), 'first read sets the session': (False, None, 7.0)}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.size-follows-balance-and-volume-factor",
+      "seconds": 0.0,
+      "detail": "notional by balance={0.0: 3.225, 8.92: 0.2, 1000.0: 15.0, 2000.0: 30.0}; factor 3 at 1000=30.0; pct 0=6.45; 9 USDT account order=5.0 USDT (venue minimum 5)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.venue-ban-pauses-flatten-and-refusal-logged",
+      "seconds": 0.02,
+      "detail": "close calls during the ban=0 after=1 refusal logged=True position kept=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-no-other-lane-touches-a-set-position",
+      "seconds": 0.02,
+      "detail": "Set position: rearrange candidates=0 add-on checks={'block': 0, 'dca': 0} held past 6 h=True; without a Set: rearrange candidates=1 add-on checks={'block': 1, 'dca': 1}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-set-position-gets-no-add-on-lane",
+      "seconds": 0.04,
+      "detail": "Set position opened=True Block parents=0; position without a Set parents=1"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.no-entry-on-a-failed-data-check",
+      "seconds": 0.0,
+      "detail": "failed symbol -> data-quality; clean symbol -> None"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.history-thread-fetches-at-start",
+      "seconds": 15.55,
+      "detail": "bars={'A-USDT': 1920, 'B-USDT': 1920, 'C-USDT': 1920, 'D-USDT': 1920} padded rows in the Set history=0 symbols replayed=4"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.restored-book-drop-needs-two-reads",
+      "seconds": 0.0,
+      "detail": "lagging read kept=['A-USDT'], two reads agree dropped=[], listed kept=['A-USDT'], one-way short kept=['A-USDT'], two empty reads dropped=True, empty then listed kept=['A-USDT']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.history-kept-offline-and-topped-up",
+      "seconds": 0.4,
+      "detail": "bootstrap from live-built rows [40, 40, 40, 40] (no real rows [0, 0, 0, 0]); live-built tail on a full history -> [1920, 1920, 1920, 1920]; offline full history -> [1920, 1920, 1920, 1920] (padded rows 0); partial 500 -> [1920, 1920, 1920, 1920] (padded rows 0)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.departed-symbol-leaves-set-history",
+      "seconds": 17.72,
+      "detail": "rows before=['A-USDT', 'B-USDT', 'GONE-USDT', 'HELD-USDT']; bars after=['A-USDT', 'B-USDT', 'HELD-USDT']; rows after=['A-USDT', 'B-USDT', 'HELD-USDT']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.credentials-from-private-file",
+      "seconds": 0.0,
+      "detail": "private file read=True redis processes=0; world-readable file ignored=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.set-lane-does-not-read-the-exit-strategies",
+      "seconds": 0.13,
+      "detail": "manage_set_lane touches none of exits/variants/coord/dca/block; security_prices guards both exit-lane SL tightenings=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.set-position-closed-only-by-its-lane",
+      "seconds": 0.04,
+      "detail": "Set position stayed open=True; the same position without a Set closed by the Exit lane=True reasons=['exit:rev']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.set-lane-scratch-and-time-follow-replay",
+      "seconds": 0.06,
+      "detail": "{'below scratch': (True, []), 'above scratch': (False, ['scratch+']), 'tick above, close below': (True, []), 'time': (False, ['time'])}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.set-lane-honours-tp-as-the-replay-does",
+      "seconds": 0.14,
+      "detail": "{('base', True): ['tp'], ('base', True, 'order tp'): 0.0054, ('base', False): ['tp'], ('base', False, 'order tp'): 0.0054, ('exit', True): [], ('exit', True, 'order tp'): 0.045, ('exit', False): [], ('exit', False, 'order tp'): 0.045, ('trail', True): ['tp'], ('trail', True, 'order tp'): 0.0054, ('trail', False): [], ('trail', False, 'order tp'): 0.045}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.set-trails-only-with-its-trailing-set",
+      "seconds": 0.02,
+      "detail": "base Set: []; base Set with a foreign trailing Set: []; own trailing Set: [100.6364] (want 100.6364)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.exit-lane-scores-only-its-own-closes",
+      "seconds": 0.04,
+      "detail": "exit lane orders before=0 after a Set close=0 after an exit close=1; variants unchanged=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.cids-round-trip-to-their-own-set",
+      "seconds": 0.21,
+      "detail": "Sets=1654 wrong round trips=[] after the grid moved: 1224 ids, misattributed=[] letters={'indications': 'i', 'general': 'g', 'shortrange': 's'}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.signal-needs-its-own-pack",
+      "seconds": 0.0,
+      "detail": "general without its own Set: 'set-gate' (want 'set-gate'); indications with its Set: None (want None)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.venue-order-of-another-symbol-is-not-the-exit",
+      "seconds": 0.0,
+      "detail": "another symbol's fill -> None; own symbol's fill -> ('tp', 0.0422)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.manager-close-not-counted-twice",
+      "seconds": 0.02,
+      "detail": "close cids seen=True; scored orphan fills=0; skipped once each=2 (including a fill without profit)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.set-fill-keeps-its-sl-and-tp",
+      "seconds": 0.02,
+      "detail": "cost=0.12% tp=0.0024 sl=0.0024 want both 0.0024; trailing arm=0.0 give=0.0 (none for a base Set)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.slpct-tppct-are-percent",
+      "seconds": 0.0,
+      "detail": "magnitude guess removed=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.history-fetched-in-pages",
+      "seconds": 0.25,
+      "detail": "bars={'A-USDT': 1920, 'B-USDT': 1920} contiguous=True first requests=4 refresh limits=[120]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.failed-close-keeps-position-protected",
+      "seconds": 0.02,
+      "detail": "stops before=True kept in book=True stops re-armable=True banned=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.partial-close-recorded-at-full-size",
+      "seconds": 0.02,
+      "detail": "entry qty=1.0 recorded close qty=[1.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lost-entry-answer-remembered",
+      "seconds": 0.03,
+      "detail": "in book=False unknown entries=['BTC-USDT:LONG']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.symbol-cap-applies-under-a-wildcard",
+      "seconds": 0.0,
+      "detail": "wildcard cap 30 -> 30; cap 0 -> 60; cap 30 + one open -> (30, True)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.partial-close-closes-the-remainder",
+      "seconds": 0.03,
+      "detail": "full close=True remainder via closePosition=True price=101.6000 (want 101.6000); refused remainder -> closed=False qty kept=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.entry-lifecycle-stub-exchange",
+      "seconds": 0.01,
+      "detail": "entry orders=1 position qty=0.4 protective batches=1"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.partial-fill-sized-from-executed",
+      "seconds": 0.0,
+      "detail": "filled=[0.4, 1.0, 0.0, 3.0] want=[0.4, 1.0, 0.0, 3.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.indicator-sees-only-real-bars",
+      "seconds": 0.0,
+      "detail": "ready=20 indicator bars=20 1m bars=20 stored=44"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.cycles-start-at-least-scan-apart",
+      "seconds": 0.0,
+      "detail": "gaps min=0.2 max=0.2 over 49 cycles"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.slow-cycle-is-not-padded",
+      "seconds": 0.0,
+      "detail": "gap after 0.35 s cycle=0.0; gap 0.05 s into a 0.2 s period=0.150"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.main-loop-does-not-wait-on-ticks",
+      "seconds": 0.12,
+      "detail": "wake_ev waits in run()=0 paced by pace_gap_s=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.overlay-reads-leverage-settings",
+      "seconds": 0.0,
+      "detail": "mismatches=none"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.max-toggle-decides-the-target",
+      "seconds": 0.0,
+      "detail": "max on -> [150, 10, 20] (max, max, pulse fallback); max off -> [20, 10, 20] (pulse capped by max, pulse fallback)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.order-leverage-follows-the-target",
+      "seconds": 0.0,
+      "detail": "orders: max on=150 max off=25 max off with a known max of 10=10"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.padding-is-not-readiness",
+      "seconds": 0.0,
+      "detail": "after seed=0 padded len=24 after 20 real minutes=20 untouched=0"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.only-main-loop-pings-watchdog",
+      "seconds": 0.24,
+      "detail": "functions that ping the watchdog: ['_one_cycle', 'run']"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-parity-rule-by-rule",
+      "seconds": 0.29,
+      "detail": "{'tp+': ('tp', 9, ('tp', 9)), 'tp-': ('tp', 9, ('tp', 9)), 'sl+': ('sl', 9, ('sl', 9)), 'sl-': ('sl', 9, ('sl', 9)), 'time+': ('time', 365, ('time', 365)), 'time-': ('time', 365, ('time', 365)), 'scratch+': ('scratch+', 15, ('scratch+', 15)), 'scratch-': ('scratch+', 15, ('scratch+', 15)), 'scratch-short+': ('scratch+', 13, ('scratch+', 13)), 'scratch-short-': ('scratch+', 13, ('scratch+', 13)), 'trail+': ('sl', 14, ('sl', 14)), 'trail-': ('sl', 14, ('sl', 14))}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-parity-random-series",
+      "seconds": 2.74,
+      "detail": "compared=144 exits by reason={'sl': 74, 'scratch+': 30, 'tp': 40} mismatches=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-own-stop-level",
+      "seconds": 0.05,
+      "detail": "replay vs live (long, short): {1: (('sl', 6), ('sl', 6)), -1: (('sl', 6), ('sl', 6))}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-venue-order-left-to-fill",
+      "seconds": 0.09,
+      "detail": "closed by software: {'stop at level': False, 'stop backstop': True, 'stop farther out': True, 'tp at level': False, 'tp backstop': True}; 'No position to close' counts as closed=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-venue-close-recorded",
+      "seconds": 0.07,
+      "detail": "(still open, recorded closes, Set live closes): {'ghost': (False, [('tp', 101.3)], 1), 'stale': (False, [('tp', 101.3)], 1), 'stale-other-live': (False, [('tp', 101.3)], 1), 'sync': (False, [('tp', 101.3)], 1)}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-recovered-set-keeps-its-lane",
+      "seconds": 0.04,
+      "detail": "{'base': (True, True, 'indications:1m:sl0.50:st2', '', 0.0, 0.0), 'trail': (True, True, 'indications:1m:tr0.36:0.36', 'indications:1m:tr0.36:0.36', 0.0036, 0.0036)}"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.explicit-trail-variants-keep-their-arm",
+      "seconds": 0.0,
+      "detail": "trailing Sets=[('indications:1m:tr0.36:0.36', 0.36, 0.36), ('indications:1m:tr0.60:0.48', 0.6, 0.48)]"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.stable-sets-with-many-orders-first",
+      "seconds": 0.0,
+      "detail": "order=['st2', 'st2', 'st3', 'st4'] want=['st2', 'st2', 'st3', 'st4'] pick=st2"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.replay-starts-with-the-most-orders",
+      "seconds": 6.49,
+      "detail": "orders={'S0-USDT': 11476, 'S1-USDT': 13737, 'S2-USDT': 13729, 'S3-USDT': 14630}; first replayed in a cut-short pass=['S3-USDT'] want=S3-USDT; first pass started with ['S0-USDT']"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.scoring-independent-of-replay-order",
+      "seconds": 13.21,
+      "detail": "Sets compared=43; identical=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.desk-index-reproduces-pooled-pf",
+      "seconds": 12.57,
+      "detail": "effective (0.354, 840, 21) vs engine (0.354, 840, 21); unfiltered (0.3203, 1720, 43) vs (0.3203, 1720, 43); validated 48.84% vs 48.84; packs ok=True; ranks ok=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.badfill-closed-and-symbol-rests",
+      "seconds": 0.03,
+      "detail": "slip -> (still open, scored closes, Set closes, ban seconds): {0.0004: (True, 0, 0, 0), 0.11: (False, 1, 0, 1800)}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.symbol-backoff-grows-with-losses",
+      "seconds": 0.0,
+      "detail": "waits after 6 losses=[9.0, 36.0, 144.0, 576.0, 1800.0, 1800.0]; after a win=9.0, next loss=9.0; cost-eaten gain twice=36.0; fast stop-out ban=1800s"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.size-has-a-hard-ceiling",
+      "seconds": 0.0,
+      "detail": "capped=25.0; fixed target x20 capped=25.0; without the cap=4748.49"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-carried-parent-and-partial-add",
+      "seconds": 0.04,
+      "detail": "parent qty with no carry=(0.021, 0.021, 0.0), with 3 carried=(0.084, 1.0, 3.0); first add=0.021 (one partial = 0.021)"
+    },
+    {
+      "status": "PASS",
+      "check": "block.one-partial-ratio-per-valid-group",
+      "seconds": 0.0,
+      "detail": "orders and final volume by valid groups: {'all 6 valid': ([5.0, 5.0, 5.0, 5.0, 5.0, 5.0], 40.0), '1 and 3 valid': ([5.0, 5.0], 20.0), 'only 5 valid': ([5.0], 15.0), 'none valid': ([], 10.0)}"
+    },
+    {
+      "status": "PASS",
+      "check": "block.one-partial-per-order",
+      "seconds": 0.0,
+      "detail": "requested per group=[5.0, 5.0, 5.0, 5.0, 5.0, 5.0] (a partial is 0.5 x 10 = 5)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.per-step-hold-same-in-replay-and-live",
+      "seconds": 0.1,
+      "detail": "step 2: bars held (replay, live) by hold and side {'3+': (3, 3), '3-': (3, 3), '12+': (12, 12), '12-': (12, 12), '30+': (30, 30), '30-': (30, 30)}; hold off keeps global=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-samples-own-and-independent-of-windows",
+      "seconds": 0.06,
+      "detail": "BlockBook own (9, 31) default (8, 25); live trader {'own': (11, 30), 'linked': (8, 25), 'empty': (8, 25)}; (main, real, prev, exit) defaults (20, 15, 8, 8)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.invalid-set-keeps-open-position-handled-and-counted",
+      "seconds": 0.03,
+      "detail": "exit replay ('time', 365) live ('time', 365); open under invalid Set while running 1; closed {'orders': 1, 'setLane': 1, 'exitLane': 0, 'blockAddFills': 0, 'wins': 0, 'losses': 1, 'skippedNotScored': 0, 'droppedNoRecord': 0, 'setsThatTraded': 1}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.drawdown-halt-settings-from-the-overlay",
+      "seconds": 0.05,
+      "detail": "(halt fraction, basis) by overlay {'empty': (0.8, 'session'), 'session 80': (0.8, 'session'), 'start 50': (0.5, 'start'), 'off': (0.0, 'session')}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lane-step-leaves-on-the-sets-own-hold",
+      "seconds": 0.0,
+      "detail": "(reason, exit bar) by hold {0: ('time', 360), 7: ('time', 7), 19: ('time', 19)}; global time stop 360"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.auto-hold-same-in-replay-and-live",
+      "seconds": 0.08,
+      "detail": "bars held (replay, live) by chosen hold and side {'4+': (4, 4), '4-': (4, 4), '20+': (20, 20), '20-': (20, 20)}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.dca-auto-keeps-stop-manual-follows-average",
+      "seconds": 0.04,
+      "detail": "(sizes seen, distinct (stop, TP) pairs) auto=(2, 1) manual=(2, 2)"
+    },
+    {
+      "status": "PASS",
+      "check": "dca.overlay-switch-reaches-the-module",
+      "seconds": 0.0,
+      "detail": "overlay on=True default=False kill switch=False"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.dca-optin-lane-leaves-the-set-lane-alone",
+      "seconds": 0.06,
+      "detail": "replay exit=('sl', 15); {'off': {'exit': ('sl', 15), 'qty': [0.05], 'dca closes': 0, 'set n': None, 'dca pnl': []}, 'on, Sets not allowed': {'exit': ('sl', 15), 'qty': [0.05], 'dca closes': 0, 'set n': None, 'dca pnl': []}, 'on, onSets': {'exit': ('sl', 15), 'qty': [0.05, 0.101], 'dca closes': 1, 'set n': None, 'dca pnl': [-0.0014]}}"
+    },
+    {
+      "status": "PASS",
+      "check": "block.stack-capped-at-six-groups",
+      "seconds": 0.0,
+      "detail": "defaults stack=6 ratio=1.0; orders=6 groups evaluated=6 final volume=28.0 (V0 x 7 = 28); groups 2,4,6 valid -> orders [4.0, 4.0, 4.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.history-not-truncated-by-live-rows",
+      "seconds": 0.0,
+      "detail": "history after a live-built tail: 1920 (want 1920); bootstrap with no history: 40 (want 40)"
+    },
+    {
+      "status": "PASS",
+      "check": "block.threshold-rises-with-valid-groups",
+      "seconds": 0.0,
+      "detail": "min PF by valid rank=[1.05, 1.08, 1.12, 1.16, 1.2, 1.24]; cumulative ratio=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "block.stack-stays-until-net-is-back-to-equal",
+      "seconds": 0.0,
+      "detail": "{'parent 1 stacked': (25.0, 3), 'after loss -10': (3, -10.0, 2.5), 'parent 2 opens': (10.0, 15.0), 'after win +4': (3, -6.0, 2.5), 'parent 3 adds': ([5.0], 3), 'after loss -1': (4, -7.0, 3.0), 'after win +7 (net 0)': (0, 0.0, 0.0, 1.0), 'parent 5 opens': (12.0, 0.0)}"
+    },
+    {
+      "status": "PASS",
+      "check": "block.win-never-carries-memory-survives",
+      "seconds": 0.0,
+      "detail": "carried after a win=0; lane reused=True; observed PF and parent ring kept=True ([3.0])"
+    },
+    {
+      "status": "PASS",
+      "check": "block.carried-stack-survives-a-restart",
+      "seconds": 0.0,
+      "detail": "loaded carried=2 v0=8.0 net=-2.5 scale=2.0"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-stacks-only-on-its-own-proven-lane",
+      "seconds": 0.02,
+      "detail": "{'set evidence only': (0.021, 0.0), '3 exit closes': (0.021, 0.0), '8 exit closes': (0.042, 99.0)}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-adds-only-into-strength",
+      "seconds": 0.08,
+      "detail": "added by parent move: {-0.001: False, 0.0005: False, 0.0013: True, 0.004: True}"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-fill-updates-position-and-stop",
+      "seconds": 0.03,
+      "detail": "qty 0.021->0.042 entry 100.0->100.25 want 100.25 legs=1 confirmed=0.021 stop=99.798875"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-lane-resets-and-ignores-set-closes",
+      "seconds": 0.02,
+      "detail": "legs before=1 Set close left Block/DCA untouched=True parent close reset the lane=True"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-stack-inside-book-cap",
+      "seconds": 0.02,
+      "detail": "stack qty=3.98 notional=404.37 cap=400"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.block-min-order-bump-inside-book-cap",
+      "seconds": 0.02,
+      "detail": "qty=3.98 notional=399.99 cap=400 (+5 %)"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-differential-independence",
+      "seconds": 1.41,
+      "detail": "positions compared=36 exits={'scratch+': 13, 'tp': 8, 'sl': 15} differing=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-set-stats-own-closes-only",
+      "seconds": 1.9,
+      "detail": "Sets changed by an Exit-lane close=0; by a Set close=['indications:1m:sl1.00:st2']; Exit lane orders 0->1->1"
+    },
+    {
+      "status": "PASS",
+      "check": "trader.lanes-effective-pf-is-validated-pool",
+      "seconds": 12.51,
+      "detail": "effective PF=0.354 want=0.354 sets=21/21 validated%=48.84 want=48.84 packs ok=[True, True, True]"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.tp-steps-2-30",
+      "seconds": 0.0,
+      "detail": "steps=2..30 n=29"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.sl-ratios-0.5-3.5",
+      "seconds": 0.0,
+      "detail": "n=13 0.5..3.5"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.default-1654-sets",
+      "seconds": 0.02,
+      "detail": "sets=1654 base=819 exit=405 trail=430 packs=3"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.ids-unique-contiguous",
+      "seconds": 0.03,
+      "detail": "unique=1654 of 1654 indexes_contiguous=True"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.trail-give-le-arm-min3",
+      "seconds": 0.02,
+      "detail": "min_arm=0.360% max_arm=2.64% give_over_arm=0"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.trail-min-step-clamp",
+      "seconds": 0.06,
+      "detail": "clamp(1)=2 default floor=3 clamp(99)=8 default=3"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.trail-grid-pure",
+      "seconds": 0.0,
+      "detail": "n=210 unique_keys=210"
+    },
+    {
+      "status": "PASS",
+      "check": "grid.setstep-clamp",
+      "seconds": 0.04,
+      "detail": "min0->2 max99->30 min9max3->[9]"
+    },
+    {
+      "status": "PASS",
+      "check": "units.tp-equals-k-times-cost",
+      "seconds": 0.0,
+      "detail": "k=2..30 bad=[] net_at_min_tp=0.12%"
+    },
+    {
+      "status": "PASS",
+      "check": "units.cost-and-net",
+      "seconds": 0.0,
+      "detail": "cost_as_frac(0.15)=ok cost_as_frac(0.04)=ok net(+0.4%)=ok net(0)=ok"
+    },
+    {
+      "status": "PASS",
+      "check": "units.sl-snap",
+      "seconds": 0.0,
+      "detail": "5 cases"
+    },
+    {
+      "status": "PASS",
+      "check": "units.set-id-format",
+      "seconds": 0.0,
+      "detail": "general:1m:sl0.75:st2"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.sl-wins-same-bar-long",
+      "seconds": 0.0,
+      "detail": "reason=sl px=99.4000 sl=99.4000"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.tp-only-hit-long",
+      "seconds": 0.0,
+      "detail": "reason=tp"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.sl-wins-same-bar-short",
+      "seconds": 0.0,
+      "detail": "reason=sl side=SHORT"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.tp-ignored-when-honor-off",
+      "seconds": 0.0,
+      "detail": "{('exit', False): [], ('base', False): ['tp'], ('exit', True): [], ('base', True): ['tp']} (Exit Set: TP ignored; base Set: TP taken)"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.time-exit-after-time-bars",
+      "seconds": 0.0,
+      "detail": "reason=time exit_i=3"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.scratch-exit-positive-move",
+      "seconds": 0.0,
+      "detail": "reason=scratch+ hold=2"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.cooldown-blocks-reentry",
+      "seconds": 0.0,
+      "detail": "open_at=4 (expected 4: bars 2,3 spent cooldown)"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.entry-confidence-and-direction",
+      "seconds": 0.0,
+      "detail": "conf below threshold, conf exactly under, dir 0, and conf-only bars never entered"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.entry-levels-around-close",
+      "seconds": 0.0,
+      "detail": "sl=99.4000 entry=100.0000 tp=100.6000"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.trail-arms-then-gives-back",
+      "seconds": 0.0,
+      "detail": "reason=sl px=100.43712"
+    },
+    {
+      "status": "PASS",
+      "check": "lane.explicit-trail-list-obeys-minimum-distance",
+      "seconds": 0.0,
+      "detail": "trail Sets (arm, give)=[(0.36, 0.36)] floor=0.36"
+    },
+    {
+      "status": "PASS",
+      "check": "gate.boundary-pf-and-sample",
+      "seconds": 0.0,
+      "detail": "4 boundary cases"
+    },
+    {
+      "status": "PASS",
+      "check": "gate.window-caps-sample",
+      "seconds": 0.0,
+      "detail": "gate_n=50 window=50"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.minimal-coordination-is-not-pf-validation",
+      "seconds": 0.05,
+      "detail": "144 Base/Main coordination cases (N 1\u20133, six modes, positive, negative, mixed and zero); mismatches 0"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.every-window-asks-the-minimum-pf-of-its-size",
+      "seconds": 0.05,
+      "detail": "floors {1: 1.05, 5: 1.05, 6: 1.08, 10: 1.08, 15: 1.12, 20: 1.12, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}; off 1.3; micro 0.9 -> 1.05; Real 15 at 1.15 True, at 1.10 False; long 1.4 'pf<min', 1.5 'main'"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.base-minimal-window-positive-and-negative",
+      "seconds": 0.43,
+      "detail": "every case as asked; count 9 -> 3; default 0; short 2, minimal 3 -> 3 (no cap)"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.main-short-windows-are-at-most-half-of-the-long-window",
+      "seconds": 0.24,
+      "detail": "every case as asked"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.main-minimal-window-positive-and-negative",
+      "seconds": 0.44,
+      "detail": "every case as asked; count 9 -> 3; default 0; short window 2, minimal 3 -> 3 (no cap); Main off -> 0; 2 results against 3: available True, strict False"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.short-window-is-at-most-half-of-the-long-window",
+      "seconds": 0.16,
+      "detail": "{'40/25': 20, '40/20': 20, '50/default': 25, '50/40': 25, '40 ratio .3': 12, '40 ratio 1': 25, '40 ratio 9': 39, 'off': 0, '20/15': 10, 'stages off': 0, 'engine default': 20}"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.stage-short-window-judges-the-orders-it-has",
+      "seconds": 0.07,
+      "detail": "8 orders: available='' PF 1.0='short'; strict 8 orders='short', strict 15 orders=''"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.stage-windows-accept-one-and-two",
+      "seconds": 0.06,
+      "detail": "Real 1 -> 1, Negative '1,2' -> (1, 2); Real 0 -> 1, [2,1,2] -> (1, 2); Main static 1 -> 10"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.minimum-order-count-off-judges-on-available-orders",
+      "seconds": 0.15,
+      "detail": "5 orders: off='' min=25 'n<min'; no order='n<min'; absent key -> 1; explicit 5 -> 5; bare load -> 1; lookback growth off 0 / min 25 240"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.default-max-drawdown-time-is-24-hours",
+      "seconds": 0.05,
+      "detail": "engine default 24 h; 12 -> 12, 36 -> 36, 49 -> 36; overlays [24]; desk ['24', '24']"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.pf-gate-boundary",
+      "seconds": 0.02,
+      "detail": "at_1.10_n30=True below_1.0999=False at_1.10_n29=False"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.ddt-gate-strictly-lower",
+      "seconds": 0.02,
+      "detail": "dd119h=11.90 dd120h=12.00 eligible119=True eligible120=False"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.ddt-open-drawdown-to-clock",
+      "seconds": 0.0,
+      "detail": "at_6h=6.00 at_40h=40.00"
+    },
+    {
+      "status": "PASS",
+      "check": "gates.lock-blocks-at-once",
+      "seconds": 0.03,
+      "detail": "unlocked=True locked=False"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.coverage-counts-sum-to-grid",
+      "seconds": 0.03,
+      "detail": "ignore configured=1654 sum=1654 | honour configured=1002 sum=1002"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.interval-never-back-to-back",
+      "seconds": 0.01,
+      "detail": "right_after=False retry=True mid=False refresh=True"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.every-set-evaluated-valid-passes-gate",
+      "seconds": 6.79,
+      "detail": "configured=1654 unevaluated=0 valid=539 gate_violations=0"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.failing-set-isolated",
+      "seconds": 7.03,
+      "detail": "bad=('error', 'error') scored_others=1653/1653 errors=1"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.invalid-recovers-without-reset",
+      "seconds": 0.03,
+      "detail": "off=('invalid', 'pf<min') on=('valid', '')"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.lock-blocks-at-once",
+      "seconds": 0.02,
+      "detail": "was=('valid', '') locked=('locked', 'lock') back=('valid', '')"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.entries-per-set-no-global-gate",
+      "seconds": 0.02,
+      "detail": "all_valid=True excluded=True ranked=True picked_valid=True"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.stale-set-not-valid-live",
+      "seconds": 0.02,
+      "detail": "stale=('invalid', 'stale') fresh=('valid', '') after_rescore=('valid', '')"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.counts-match-states-and-reasons",
+      "seconds": 0.02,
+      "detail": "valid=1 invalid=1651 locked=1 error=1 reasons={'pf<min': 1, 'n<min': 1650}"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.snapshot-counts-match-book",
+      "seconds": 6.41,
+      "detail": "sum=1654 configured=1654 rows_have_state=True"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.retired-config-keys-gone",
+      "seconds": 0.01,
+      "detail": "overlay keys left={'overlay-bingx-x01.json': [], 'overlay-bingx-x02.json': []} book attrs=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "lifecycle.trader-reads-existing-attributes",
+      "seconds": 0.02,
+      "detail": "43 attributes read by the trader, missing=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.active-and-common-reach-replay-and-live-signal",
+      "seconds": 0.02,
+      "detail": "8 type/range/direction combinations; mismatches=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.ranges-forwarded-to-set-signal",
+      "seconds": 0.01,
+      "detail": "settings={'dirRange': 7, 'moveRange': 13, 'activeOutbreak': [3, 10], 'activeThreshold': 1.4, 'activeMovePct': 0.8, 'activeNoise': 0.07, 'activeVolatilityWeight': 0.25}"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.match-follows-timeframe-lane",
+      "seconds": 0.0,
+      "detail": "matched long ['bingx-15m']"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.missing-pnl-pct-is-not-a-loss",
+      "seconds": 0.0,
+      "detail": "exit lanes scored=[('hard', 0), ('lock', 0), ('peak', 0), ('rev', 0), ('time', 0)] dca active=True"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.bars-to-entry-reason-round-trip",
+      "seconds": 0.0,
+      "detail": "picked state/multi_source_consensus -> matched=True; all types off -> no pick=True"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.extra-book-fetches-once-in-flight",
+      "seconds": 0.2,
+      "detail": "venue requests for one in-flight key=1; both callers returned=True"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.causal-signals-ignore-future",
+      "seconds": 1.16,
+      "detail": "packs=3 bars_compared=300 mismatches=0"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.library-memo-never-stale",
+      "seconds": 0.1,
+      "detail": "146 indicators x 4 in-place changes; stale 0 []; malformed 0"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.every-name-gets-its-timeframe-history",
+      "seconds": 0.52,
+      "detail": "short windows [] (0); band width reachable=True; raised on flat []; fired {'bbb_n5_t1': 40, 'bbrev_n5_t1': 50, 'vwapz_n5_t1': 39, 'vwapz_n8_t1': 10, 'adx_n21_t15': 386, 'ichi_n14_t15': 6, 'trend_n40_t15': 17, 'ao_htfpb_n8_t5': 32}"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.signal-memo-key-covers-the-window",
+      "seconds": 4.18,
+      "detail": "signal window 1440; memo result equals a fresh pass=True; bars where the older history changes the trend signal 364"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.relations-compose-by-their-rules",
+      "seconds": 0.32,
+      "detail": "fires {'': 80, 'I': 80, 'T15': 1, 't15': 1, 'N15': 78, 'K': 29, 'F': 51, 'M30': 0, 'm30': 65, 'A': 9, 'a': 15, 'D': 1, 'C': 7, 'G': 80, 'I@T5': 2}; unknown accepted []; rule breaks [] (0); causal True; window 1440; kept ['rsirev_n8_t1@T15@M30@C', 'trend_x10', 'adx_n14_t30']; signal window 1920"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.thirty-minute-names-fire",
+      "seconds": 1.53,
+      "detail": "216 _t30 and 216 _x names; windows [1920]; fired {'adx_n14_t30': 443, 'trend_n20_t30': 41, 'brk_n10_t30': 25, 'ao_cfltrend_n8_t30': 346, 'macdh_x8': 7, 'trend_x10': 224}"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.timeframe-keys-reach-set-signal",
+      "seconds": 0.01,
+      "detail": "set signal sees {'tfMinAgree': 3, 'tf5m': False, 'tf15m': True, 'tfCombined': False} want {'tfMinAgree': 3, 'tf5m': False, 'tf15m': True, 'tfCombined': False}"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.timeframe-flag-removes-lane",
+      "seconds": 0.01,
+      "detail": "lanes seen with tf5m off: ['bingx-15m', 'bingx-1m']"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.combined-vote-needs-min-agree",
+      "seconds": 0.0,
+      "detail": "lanes=1 min_agree=2 -> None"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.match-names-kind-and-mode",
+      "seconds": 0.0,
+      "detail": "named_short=short named_long=long"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.snapshot-survives-concurrent-writes",
+      "seconds": 0.26,
+      "detail": "reads=1500 errors=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.signal-deterministic",
+      "seconds": 1.19,
+      "detail": "two runs identical"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.set-switches-reach-the-set-signal",
+      "seconds": 0.04,
+      "detail": "set signal sees {'tf1m': False, 'typeState': False, 'typeDirection': False, 'typeMove': False, 'typeSignals': False, 'typeActive': False, 'typeCommon': False}"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.switched-off-vote-is-absent",
+      "seconds": 0.09,
+      "detail": "each switch removes exactly its own vote"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.all-switches-off-is-flat",
+      "seconds": 0.01,
+      "detail": "direction=0 why='flat'"
+    },
+    {
+      "status": "PASS",
+      "check": "indication.tf1m-switch-removes-the-set-lane",
+      "seconds": 0.03,
+      "detail": "lanes on=['bingx-15m', 'bingx-1m', 'bingx-5m'] with tf1m off=['bingx-15m', 'bingx-5m']"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.hand-computed-rsi-and-atr",
+      "seconds": 0.0,
+      "detail": "rsi2=66.6667,85.7143 tr=[2.0, 2.0, 1.0] atr=1.6667"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.only-the-tail-is-read",
+      "seconds": 0.92,
+      "detail": "indicators=1344 reading beyond the window: []"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.outputs-stay-in-domain",
+      "seconds": 35.88,
+      "detail": "fired=72437 across 1029 indicators; out of domain=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.fixtures-fire-both-ways",
+      "seconds": 0.0,
+      "detail": "checked=['donchian_break', 'rsi2_reversion', 'engulfing', 'streak_exhaustion'] wrong={}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.failing-indicator-isolated",
+      "seconds": 0.0,
+      "detail": "votes=[(1, 0.7, 'yes')]"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.overlay-list-reaches-vote",
+      "seconds": 0.03,
+      "detail": "default=[] list=['donchian_break'] on=(1, 0.8177190642791023, 'tf+ta+move+active+common+donchian_break') off=(1, 0.8422628771349228, 'tf+ta+move+active+common')"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.short-range-grid-steps-2-6",
+      "seconds": 0.03,
+      "detail": "steps=[2, 3, 4, 5, 6] ratios=13 base Sets=65 explicit off=True"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.short-range-signal-cancels-opposites",
+      "seconds": 0.0,
+      "detail": "opposite=(0, 0.0, 'split') same=(1, 0.9, 'lr_fade+lr_nr7') none=(0, 0.0, 'flat')"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.minimum-stop-and-trail-follow-cost-plus-steps",
+      "seconds": 0.0,
+      "detail": "floor=0.0024 resolved sl=0.0024 (ratio 0.3 x TP 0.36% = 0.108% is under it) floor(3)=0.0048 trail(4)=5 clamp={'sl': 5, 'trail': 7}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.low-range-state-hand-values",
+      "seconds": 0.0,
+      "detail": "hi=100.22 lo=99.75 width%=0.4712 pos=0.021"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.low-range-fade-both-ways",
+      "seconds": 0.0,
+      "detail": "edge long=(1, 0.6957446808510617) edge short=(-1, 0.6957446808510617) mid=None poke through=(1, 0.827118644067797)"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.low-range-break-and-trendbreak-both-ways",
+      "seconds": 0.0,
+      "detail": "{'break up': (1, 0.62), 'break down': (-1, 0.62), 'break weak': None, 'trend up': (1, 0.6558348406997612), 'trend: down break in an uptrend': None, 'trend down': (-1, 0.6587717524424626), 'trend: up break in a downtrend': None}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.nr7-and-inside-bar-both-ways",
+      "seconds": 0.0,
+      "detail": "{'nr7 up': (1, 0.62), 'nr7 down': (-1, 0.62), 'nr7 not narrow': None, 'inside up': (1, 0.62), 'inside down': (-1, 0.62), 'not inside': None}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.low-range-levels-add-the-position-cost",
+      "seconds": 0.0,
+      "detail": "levels={'range_pct': 0.4711779448621543, 'sl_pct': 0.5911779448621544, 'tp_pct': 0.48} floor case={'range_pct': 0.00020000020000683933, 'sl_pct': 0.24, 'tp_pct': 0.36}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.relation-indicators-both-ways-and-quiet-when-flat",
+      "seconds": 0.0,
+      "detail": "checked=10 wrong={}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.prior-move-continuation-vs-reversal",
+      "seconds": 0.0,
+      "detail": "{'up/up break': (1, 0.62), 'up/up reverse': None, 'up after down break': None, 'up after down reverse': (1, 0.62)}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.family-registered-every-range-and-timeframe",
+      "seconds": 0.0,
+      "detail": "24 single + 12 combined; missing/other window: []"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.family-hand-computed-fit-and-aggregate",
+      "seconds": 0.0,
+      "detail": "slope=1.0 r2=1.0 noisy slope=0.500 r2=0.4808 agg=[[0.0, 6.0, -1.0, 5.0, 10.0], [5.0, 11.0, 4.0, 10.0, 10.0]]"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.trend-family-both-ways-quiet-on-noise",
+      "seconds": 0.01,
+      "detail": "fires={'trend_n10_t1': ((1, 0.92), (-1, 0.92)), 'trend_n6_t1': ((1, 0.92), (-1, 0.92))} wrong={} signals on noise=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.breakout-family-both-ways-needs-close-and-volume",
+      "seconds": 0.0,
+      "detail": "fires={'brk_n6_t5': ((1, 0.82), (-1, 0.82)), 'brk_n10_t15': ((1, 0.82), (-1, 0.82)), 'brk_c10': ((1, 0.86), (-1, 0.86))} wrong={} no-volume breakout quiet=True"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.combined-needs-agreement",
+      "seconds": 0.0,
+      "detail": "agree=(1, 0.8400000000000001) split=None lone=None three=(-1, 0.7799999999999999)"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.family-wires-into-the-set-vote",
+      "seconds": 0.02,
+      "detail": "names=['brk_n10_t5', 'trend_c10'] on=(1, 0.8772434097945382, 'tf+ta+move+active+common+brk_n10_t5') off=(1, 0.8886920917534458, 'tf+ta+move+active+common')"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-registered-every-family-range-timeframe",
+      "seconds": 0.0,
+      "detail": "39 families x 4 ranges x (3 timeframes + combined) + 10 group votes; missing: []"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-trend-both-ways",
+      "seconds": 0.02,
+      "detail": "long on a rising tape: ['adx', 'aroon', 'chop', 'hhhl', 'kama', 'ker', 'ribbon', 'roc', 'vortex']; short on its mirror: ['adx', 'aroon', 'chop', 'hhhl', 'kama', 'ker', 'ribbon', 'roc', 'vortex']; opposite signals: []"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-breakout-both-ways",
+      "seconds": 0.0,
+      "detail": "up={'donch': {1}, 'atrx': {1}, 'rvol': {1}, 'maru': {1}} mirror={'donch': {-1}, 'atrx': {-1}, 'rvol': {-1}, 'maru': {-1}}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-reversion-both-ways",
+      "seconds": 0.01,
+      "detail": "long after a plunge: {'rsirev': {1}, 'stoch': {1}, 'mfi': {1}, 'zrev': {1}}; short after a spike: {'rsirev': {-1}, 'stoch': {-1}, 'mfi': {-1}, 'zrev': {-1}}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-volume-both-ways",
+      "seconds": 0.0,
+      "detail": "up={'obv': {1}, 'cmf': {1}, 'udvol': {1}, 'closeloc': {1}} mirror={'obv': {-1}, 'cmf': {-1}, 'udvol': {-1}, 'closeloc': {-1}}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-mirror-symmetric-and-flat-quiet",
+      "seconds": 0.14,
+      "detail": "fired=424 asymmetric=4 (0.9%) e.g. ['mfi_n14_t15', 'mfi_n5_t5', 'udvol_n14_t1']; signals on a flat tape: []"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.lib-group-votes-need-agreement",
+      "seconds": 0.04,
+      "detail": "trend group on a rising tape=(1, 0.95), on its mirror=(-1, 0.95), on a flat tape=None"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.ao-registered-and-windowed",
+      "seconds": 0.0,
+      "detail": "13 families; missing: []"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.ao-both-ways",
+      "seconds": 0.01,
+      "detail": "trend long=['cfltrend'] mirror short=['cfltrend'] opposite=[]; breakout up={1} mirror={-1}"
+    },
+    {
+      "status": "PASS",
+      "check": "extra.ao-mirror-symmetric-and-flat-quiet",
+      "seconds": 0.11,
+      "detail": "fired=45 asymmetric=0 (0.0%) e.g. []; flat-tape signals: []"
+    },
+    {
+      "status": "PASS",
+      "check": "report.minimal-grid-reports-coordination-without-pf",
+      "seconds": 0.01,
+      "detail": "minimal windows: [('baseMinimal', 2.0, 4, None), ('mainMinimal', 2.0, 4, None)]"
+    },
+    {
+      "status": "PASS",
+      "check": "report.window-grid-html-has-heatmap-and-best-cell",
+      "seconds": 0.02,
+      "detail": "panels=36 best markers=7 (want 7) embedded=True external=[]; marginal Base long 20: 0.823 (all orders, want 0.823) against the mean of cell PFs 1.304 (want 1.304); windows tables=True"
+    },
+    {
+      "status": "PASS",
+      "check": "report.window-grid-files-merge-into-one-report",
+      "seconds": 0.05,
+      "detail": "cells 38/38 ids equal=True; Main minimal values ['off', '+1']; identical duplicate kept once=True; clashing duplicate refused=True; page equals the unsplit one=True"
+    },
+    {
+      "status": "PASS",
+      "check": "report.window-grid-negative-off-and-minimal-both",
+      "seconds": 0.05,
+      "detail": "minimals [(0, ''), (1, 'positive'), (2, 'negative'), (3, 'both'), (2, 'both')]; N 3 beside short 5=True; Negative off patch False -> engine neg_on=False; both patch -> engine mode both=True, N 3, short 5"
+    },
+    {
+      "status": "PASS",
+      "check": "report.hand-computed-pf",
+      "seconds": 0.0,
+      "detail": "pf=[5.0, 99.0, 0.0, 0.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "report.summary-pools-sets-and-picks",
+      "seconds": 0.0,
+      "detail": "step2={'validated_pct_hours': 25.0, 'set_orders': 4, 'set_pf': 2.0, 'orders': 3, 'pf': 5.0, 'net_pct': 0.48} step3 pf=0.0"
+    },
+    {
+      "status": "PASS",
+      "check": "report.page-embeds-json-and-valid-script",
+      "seconds": 0.06,
+      "detail": "embedded trades=4 script syntax ok=True bytes=20246"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.last-n-window-without-a-full-scan-equals-the-full-scan",
+      "seconds": 0.01,
+      "detail": "60 tapes: windows that differ from the full scan 0"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.net-sum-mean-and-pf-share-one-basis",
+      "seconds": 0.01,
+      "detail": "60 random windows: PF, summed net and mean net per position agree; mismatches []"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.stage-summary-orders-pf-net-and-hours-share-one-basis",
+      "seconds": 0.0,
+      "detail": "orders 6 PF 1.636 net 0.35% (0.0583% per order) hours positive 2/2 (want 2/2)"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.net-is-gross-minus-one-cost",
+      "seconds": 0.0,
+      "detail": "max_abs_err=0.00e+00 over 1200 cases"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.cost-deducted-exactly-once",
+      "seconds": 0.0,
+      "detail": "gross 0.30% -> net 0.1500% (cost deducted once)"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.r-formula-and-identity",
+      "seconds": 0.0,
+      "detail": "formula_err=0.00e+00 identity_err=2.22e-16"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.ratio-definition-and-example",
+      "seconds": 0.0,
+      "detail": "max_err=0.00e+00 example(+1R x15)=1.1"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.pf-matches-reference",
+      "seconds": 0.0,
+      "detail": "cases=9 max_err=4.88e-05 (engine rounds PF to 4 dp)"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.pf-edge-cases",
+      "seconds": 0.0,
+      "detail": "neutral.ratio=1.0 neutral.pf=0.0 even.pf=1.0"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.one-positioncost-is-neutral",
+      "seconds": 0.0,
+      "detail": "a gross move of exactly one PositionCost nets 0 and R 0"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.cost-inputs-are-percent",
+      "seconds": 0.0,
+      "detail": "7 unit cases"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.exit-and-dca-settings-percent",
+      "seconds": 0.0,
+      "detail": "4 percent settings"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.gate-default-single-constant",
+      "seconds": 0.0,
+      "detail": "all 4 modules use 1.25"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.set-floors-follow-cost",
+      "seconds": 0.0,
+      "detail": "cost=0.04 entry sl=99.92000 tp=100.08000"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.trail-stop-named-constant",
+      "seconds": 0.0,
+      "detail": "trail stop = TP_mid x 0.6 (family constant)"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.lane-records-from-prices",
+      "seconds": 0.01,
+      "detail": "trades=3125 violations=0 []"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.same-pf-in-every-module",
+      "seconds": 0.0,
+      "detail": "engine=0.5746 stats=0.5746 variants.pf=0.5746 exit=0.5746 variants.ratio=0.907"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.payload-pf-fields-are-pf-not-ratio",
+      "seconds": 7.44,
+      "detail": "rows=24 checked=24 mismatched=0 pf_differs_from_ratio_in=24"
+    },
+    {
+      "status": "PASS",
+      "check": "calc.report-window-is-chronological",
+      "seconds": 0.0,
+      "detail": "report last15=1.0292 newest15=1.0292 export_newest_first=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.untimed-live-closes-are-skipped",
+      "seconds": 0.0,
+      "detail": "untimed skipped=6; timed counted=1"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.small-results-keep-pf-precision",
+      "seconds": 0.0,
+      "detail": "whole/Base/Base short/Main PF=2.0/2.0/2.0/2.0, gain/loss=4e-09/2e-09"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.executed-window-bounded-cost-correct",
+      "seconds": 0.02,
+      "detail": "bounded execution window=True; no paper votes=True; expiry=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.axis-paper-scopes-bounded-and-time-correct",
+      "seconds": 0.0,
+      "detail": "overall=[(1000.0, -0.02, 'neg'), (1000.0, 0.03, 'pos'), (1100.0, 0.04, 'pos')]; positive=[(1000.0, 0.02), (1000.0, 0.03), (1100.0, 0.04)]; negative=[(950.0, -0.01), (1000.0, -0.02)]; scopes bounded=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.axis-pause-uses-costed-results-per-scope",
+      "seconds": 0.0,
+      "detail": "loss/win streak=4/0; lane decisions=(False, 'pack:x:neg')/(True, '')"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.main-short-isolated-from-live-close",
+      "seconds": 0.02,
+      "detail": "short N 10->10, independent oracle=10, PF=1.7778, duplicate closes=1"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.main-short-matches-paper-oracle-with-live-closes",
+      "seconds": 0.22,
+      "detail": "120 live decisions, 8 tapes above 200 Main orders, mismatches=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.live-scoring-obeys-lookback-and-event-clock",
+      "seconds": 0.0,
+      "detail": "bounded Base/Main/Real/Negative=(2, 2.0, 2, 2.0, 2, 2.0, 0, 0.0); clock after late close=1200s"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.replay-uses-each-symbols-last-completed-bar",
+      "seconds": 2.35,
+      "detail": "10825 replayed closes match the actual bar time; future bar rejected=True; bounded rows=2"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.simulator-validates-at-entry-and-refreshes-at-boundary",
+      "seconds": 0.0,
+      "detail": "entry times [1699999260.0, 1699999380.0]; gate times [1699999260.0, 1699999380.0]; expected [1699999260.0, 1699999380.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.hold-adapter-uses-selected-sets-tape",
+      "seconds": 0.0,
+      "detail": "selected hold 15; direct and adapter gates equal=True; validation lane='pos'"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.live-windows-preserve-owner-and-lane-history",
+      "seconds": 0.06,
+      "detail": "retained 200 positive / 200 negative; foreign=0; skipped=5; unmatched=1"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.sim-gate-equals-the-engine-for-every-window-configuration",
+      "seconds": 5.08,
+      "detail": "24 configurations, 864 sampled pairs, mismatches 0; valid share % shipped stages: 0.0, minimal +1: 0.0, minimal +2: 0.0, minimal +3: 0.0, minimal -1: 0.0, minimal -2: 0.0, minimal -3: 0.0, minimal -2 full windows: 0.0, Real 1, Negative 1,2: 0.0, Real 5, Negative 1,2, minimal +1: 0.0, full windows: 0.0, no short window: 0.0, Main long 12, short 5: 0.0, long 30, short 12: 0.0, Main minimal +1: 0.0, Main minimal -2: 0.0, Main minimal +3 full windows: 0.0, Main short off, minimal -1: 0.0, Base minimal -1 and Main minimal +2: 0.0, minimal both 2: 0.0, Main minimal both 3, Negative off: 0.0, minimal 3 beside short 2: 0.0, legacy mainAuto keys: 0.0, stages off: 0.6"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.stage-figures-average-the-valid-sets-and-report-the-validated-share",
+      "seconds": 5.24,
+      "detail": "sets / % of 43 / pooled PF / mean PF per stage: base 13 / 30.23% / 0.4427 / 0.4457; main 2 / 4.65% / 0.7495 / 0.7777; real 1 / 2.33% / 0.6 / 0.6; realNeg 0 / 0.0% / 0.0 / 0.0; valid 1 / 2.33% / 0.495 / 0.495; all-Sets PF 0.334; mismatches {}"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.few-order-sets-judged-when-the-minimum-is-off",
+      "seconds": 12.57,
+      "detail": "valid off 69 (with under 25 orders 1, n<min 0); valid at minimum 25 68 (under 25 orders 0, n<min 955)"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.broken-or-flat-series-not-replayed",
+      "seconds": 1.39,
+      "detail": "excluded={'S1-USDT': 'spike', 'S2-USDT': 'flat'} replayed=['S0-USDT']"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.base-lane-lookup-equals-walk",
+      "seconds": 0.33,
+      "detail": "lanes compared=396 differing=0"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.scratch-lookup-keeps-exact-level",
+      "seconds": 0.0,
+      "detail": "walk=[{'set_id': 'indications:1m:sl0.50:st2', 'symbol': 'X', 'side': 'LONG', 'dir': 1, 'entry_i': 5, 'exit_i': 50, 'entry_px': 100.0, 'exit_px': 100.15999996995201, 'reason': 'time', 'pnl_pct': 0.0015999996995201115, 'pnl': 0.0003999996995201116, 'hold_s': 2700.0, 'hold_bars': 45}] lookup=[{'set_id': 'indications:1m:sl0.50:st2', 'symbol': 'X', 'side': 'LONG', 'dir': 1, 'entry_i': 5, 'exit_i': 50, 'entry_px': 100.0, 'exit_px': 100.15999996995201, 'reason': 'time', 'pnl_pct': 0.0015999996995201115, 'pnl': 0.0003999996995201116, 'hold_s': 2700.0, 'hold_bars': 45}] reasons=['time']"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.consistency-both-halves",
+      "seconds": 0.0,
+      "detail": "off=('', 7.52, 0.5833, 53.7778) on=('unstable', 7.52, 0.5833, 53.7778) (reason, window PF, old half PF, new half PF)"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.legacy-pick-prefers-judged-sets",
+      "seconds": 0.0,
+      "detail": "picked indications:1m:sl0.50:st3 (n=40, pf=4.0) over the one-order Set"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.step-adapt-waits-for-the-pass",
+      "seconds": 2.32,
+      "detail": "during the pass: topology 1->1 min_step 2; after it: topology 2 min_step 4"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.short-range-trailing-inside-its-steps",
+      "seconds": 0.02,
+      "detail": "short range arms 0.36..0.72 cap 0.72; other packs reach 2.64"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.effective-pf-rolling-window",
+      "seconds": 2.07,
+      "detail": "gate pf=0.0 gate gp=0 gl=0.011999999999999999; whole tape gp=0.4000"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.short-range-own-pf-floor",
+      "seconds": 0.0,
+      "detail": "short range floor default=1.1 set=1.5; PF 1.2: short range='' other='pf<min'"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.base-gate-always-on",
+      "seconds": 0.0,
+      "detail": "overlay setUseHistoricGate=false -> engine gate on=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.pf-progress-history",
+      "seconds": 2.27,
+      "detail": "points after one pass=1 after two=2 bounded=720 snapshot=240"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.pack-change-keeps-memo-sound",
+      "seconds": 5.02,
+      "detail": "phase=ready packs=['indications', 'general', 'shortrange'] errors=[]"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.signal-memo-one-entry-per-bar",
+      "seconds": 6.24,
+      "detail": "memo entries=320 (scored bars 320); same keys on the second pass=True; identical signals=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.effective-pf-pooled-over-valid-sets",
+      "seconds": 5.57,
+      "detail": "base pf=0.4327 over 14 Sets; unfiltered pf=0.3339 over 43; validated 32.56% (14/43) packs=['indications', 'general', 'shortrange']"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.pick-any-no-gap-between-lookups",
+      "seconds": 2.29,
+      "detail": "gap between base and trail lookups=False a thread entered it=False"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.departed-symbols-leave-caches",
+      "seconds": 17.0,
+      "detail": "S0-USDT: rows dropped=True memo dropped=True memo keys left=2"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.snapshot-waits-for-writer",
+      "seconds": 4.41,
+      "detail": "reader got into the gate while the writer held the Set=False; snapshot finished after release=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.rebuild-mid-pass-no-partial-tape",
+      "seconds": 26.89,
+      "detail": "new Sets=156 unscored=True survivors kept=True phase=partial"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.live-close-stays-counted-through-replay",
+      "seconds": 2.6,
+      "detail": "n before=200 after live close=200 after replay=200 live_n=1"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.live-dedupe-and-history-bounded",
+      "seconds": 2.81,
+      "detail": "dedupe keys=50 (max 50) closes added=200/200 recent duplicate added=0; history rows 21908 -> 21908 after a second replay"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.all-sets-processed-full-grid",
+      "seconds": 32.93,
+      "detail": "phase=ready sets=1654 sets_done=1654 unscored=0 errors=0"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.ingest-keeps-history-on-live-refresh",
+      "seconds": 0.02,
+      "detail": "len=1920 repeat_ok=True joined=True lookback=1920"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.trades-produced",
+      "seconds": 32.18,
+      "detail": "sets_with_trades=1654 of 1654 tape_rows=82700"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.trade-invariants",
+      "seconds": 31.6,
+      "detail": "rows=82700 violations=0 []"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.deterministic-replay",
+      "seconds": 35.62,
+      "detail": "sets=1654 identical=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.continuous-across-refreshes",
+      "seconds": 6.34,
+      "detail": "cycle 1->2 phase=ready stuck=0"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.due-cadence",
+      "seconds": 2.33,
+      "detail": "just_ran=False after_cadence=True while_running=False"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.symbol-failure-isolated-and-recovers",
+      "seconds": 50.02,
+      "detail": "phase_after_failure=ready others_kept=True sets_scored=1654 recovered=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.set-failure-isolated",
+      "seconds": 18.82,
+      "detail": "others_clean=True victim_marked=True errors=1"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.chunked-refresh-equals-full",
+      "seconds": 14.49,
+      "detail": "sets=43 equal=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders",
+      "seconds": 0.08,
+      "detail": "(hold, orders judged, tape rows) {'best': (20, 50, 50), 'cap': (0, 50, 80), 'cap_good': (30, 50, 69), 'few': (0, 50, 50), 'tie': (0, 50, 50), 'better': (15, 50, 50), 'inside margin': (0, 50, 50), 'outside margin': (15, 50, 50), 'high': (120, 50, 50)}; manual step 3 -> 17 min, master off and auto off keep the global stop"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape",
+      "seconds": 40.44,
+      "detail": "sets=1654 with an own hold=941 bad=[] same_on_second_pass=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.hold-auto-tape-is-causal",
+      "seconds": 0.0,
+      "detail": "orders 30; from the 20-min hold 5 (all winners True), first entry 16000.0; choice now 1"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.validation-windows-follow-overall-n-floor-8-gates-only",
+      "seconds": 0.1,
+      "detail": "windows {'linked (shipped 50)': {'set': 50, 'coord': 50, 'exit': 50, 'sl': 50, 'trail': 50}, 'linked 30': {'set': 30, 'coord': 30, 'exit': 30, 'sl': 30, 'trail': 30}, 'linked ignores own values': {'set': 40, 'coord': 40, 'exit': 40, 'sl': 40, 'trail': 40}, 'unlinked 12': {'set': 12, 'coord': 12, 'exit': 12, 'sl': 12, 'trail': 12}, 'unlinked 8': {'set': 8, 'coord': 8, 'exit': 8, 'sl': 8, 'trail': 8}, 'unlinked 3 -> floor': {'set': 8, 'coord': 8, 'exit': 8, 'sl': 8, 'trail': 8}}; floors {'hold_auto_min': 8}; unchanged {'dca_window': 5, 'exit_samples': 5, 'coord_samples': 7, 'coord_prev_min': 1, 'axis_last_window': 1, 'block_samples': 8, 'main_eval': 20, 'real_eval': 15}"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.real-gate-per-set-at-the-base-minimum-pf",
+      "seconds": 0.3,
+      "detail": "reasons {'boundary 1.25': '', 'just under': 'main', 'bad last 12': 'main', 'bad, Real off': '', 'min PF 1.5 moves Real too': 'main', 'N=8': (10, 'main'), '20 orders, Real N 30': (20, 2, 'main'), '20 orders, Real N 30, available': (20, 2, ''), 'Real N 3': 10}; other Set left it alone=True; pool off/on holds the Set=True/False; pfBase keys ['base', 'baseEntry', 'baseOnly', 'baseOnlyEntry', 'basis', 'byPack']"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.no-gate-asks-less-than-pf-1.1",
+      "seconds": 0.03,
+      "detail": "{'set': 1.05, 'short': 1.05, 'coord': 1.05, 'exit': 1.05, 'dca': 1.05, 'linked': 1.05, 'block': 1.05}; desk floor 1.05"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.stage-pools-count-every-set-that-passed-base",
+      "seconds": 10.35,
+      "detail": "Base passed 15 (snapshot 15, stopped later ['main', 'mainshort', 'real']); validated Base 34.88% end 13.95%; Real pool 3 Sets PF 0.634 (rebuilt 0.634); Real Negative 3 Sets PF 0.6061 (rebuilt 0.6061)"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.effective-pf-per-entry-counts-each-entry-once",
+      "seconds": 0.0,
+      "detail": "pooled {'pf': 3.0, 'n': 20, 'sets': 2}; shared entries {'pf': 3.0, 'entries': 10, 'orders': 20, 'setsPerEntry': 2.0}; separate entries {'pf': 3.0, 'entries': 20, 'orders': 20, 'setsPerEntry': 1.0}"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.every-validation-gate-asks-the-base-minimum-pf",
+      "seconds": 0.05,
+      "detail": "{'default': {'main': 1.25, 'coord': 1.25, 'exit': 1.25, 'dca': 1.25}, 'base 1.4': {'main': 1.4, 'coord': 1.4, 'exit': 1.4, 'dca': 1.4}, 'unlinked': {'main': 1.4, 'coord': 1.15, 'exit': 1.12, 'dca': 1.2}}"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.pre-history-grows-when-sets-lack-orders",
+      "seconds": 37.8,
+      "detail": "start 500 -> 740 after one pass; auto off 500; capped at histLookbackMax 1000; after a reload 740"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.live-close-once-and-gate",
+      "seconds": 2.17,
+      "detail": "added=1 skipped=1 live_unit_net=0.001300"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.concurrent-replay-and-live-closes",
+      "seconds": 7.17,
+      "detail": "errors=[] alive=False all_scored=True"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.ready-carried-across-refresh",
+      "seconds": 40.47,
+      "detail": "ready_after=True during_replay=[True] steps=72"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.out-of-grid-sets-retired-and-closes-counted",
+      "seconds": 23.88,
+      "detail": "retired=True attributed=True unmatched_counted=True retired_total=28"
+    },
+    {
+      "status": "PASS",
+      "check": "processing.unmatched-pnl-pct-skipped-not-a-loss",
+      "seconds": 0.0,
+      "detail": "count=1.0 skipped=3.0 pf=99.0 clean_pf=99.0"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.replay-and-current-verdict-use-same-pf-rounding",
+      "seconds": 0.03,
+      "detail": "(current Main, replay Main, replay Base short, evaluator Base short, independent match, expected): [(True, True, True, True, True, True), (False, False, False, False, True, False)]"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.negative-lane-does-not-pollute-main-passing-pf",
+      "seconds": 0.0,
+      "detail": "Main-pass PF 2.0 on 1; all-lane PF 0.75 on 2"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.every-window-is-judged-on-its-own",
+      "seconds": 0.27,
+      "detail": "43 Sets; verdicts moved by another window's setting: 0; pass counts equal=True; own setting moves own window=True"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.window-figures-pool-exactly-the-orders-each-window-reads",
+      "seconds": 0.05,
+      "detail": "43 Sets, 19 past Base; windows (Sets / orders / PF): {'baseLong': (22, 440, 1.953), 'baseShort': (22, 176, 4.3333), 'baseMinimal': (23, 23, None), 'mainLong': (8, 80, 2.2), 'mainShort': (7, 46, 2.8333), 'mainMinimal': (9, 9, None)}; mismatches 0; populations True; shares True; chosen short windows add up True"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.the-plain-reading-equals-the-chain",
+      "seconds": 0.14,
+      "detail": "29 configurations x 4 tapes (18560 orders): chains differing from the plain reading: 0"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.the-debug-trace-equals-the-engine",
+      "seconds": 0.03,
+      "detail": "29 configurations traced; mismatches 0; stop reasons seen ['drawdown/consistency', 'in Real Set', 'long', 'main', 'mainminimal', 'mainshort', 'minimal', 'orders', 'short']"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.the-chain-is-causal",
+      "seconds": 0.02,
+      "detail": "29 configurations: orders entered before the cut moved when later results changed: 0"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.a-negative-window-of-cancelling-results-is-not-negative",
+      "seconds": 0.05,
+      "detail": "[0.2, -0.2] negative=False; [0.005, -0.005] negative=False; [0.005, -0.006] negative=True; chain orders whose window does not sum below zero: 0"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.the-chain-is-neutral-without-persistence-and-lifts-it-with",
+      "seconds": 0.38,
+      "detail": "i.i.d. tapes: whole tape PF 0.661, Main Set 0.652 (selection PF 1.480); streaky tapes: whole 0.919, Main Set 1.282 (selection 2.038)"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.a-set-verdict-ignores-every-other-set",
+      "seconds": 0.06,
+      "detail": "3 probe Sets; fields equal after 40 other Sets were replaced by noise: True"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.the-statistics-relations-hold",
+      "seconds": 0.04,
+      "detail": "43 Sets: valid 9, Main 7, Base 19; relations broken: 0"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.set-and-lane-ids-never-collide",
+      "seconds": 0.07,
+      "detail": "1654 Sets, 4962 derived Set ids, all distinct: True; 405 Exit Sets, each with a base twin: True"
+    },
+    {
+      "status": "PASS",
+      "check": "stages.costs-are-applied-once-and-lanes-sit-at-their-distances",
+      "seconds": 12.12,
+      "detail": "1720 rows: net = gross - 0.0012 (max deviation 0.0e+00); 1154 stops at -SL (max deviation 1.8e-16); 303 targets at +TP (max deviation 1.6e-16); chain nets = row nets True; live close net 0.00190 = gross 0.0031 - cost"
+    },
+    {
+      "status": "PASS",
+      "check": "golden.replay-fingerprint",
+      "seconds": 16.7,
+      "detail": "sets=1654 trades=158739 sha=29897aee5a4f"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.paper-actual-isolation",
+      "seconds": 0.01,
+      "detail": "paper unchanged=True; actual n=10 PF=0.0 allow=False"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.config-change-invalidates-old-evidence",
+      "seconds": 0.0,
+      "detail": "identical settings retain data=True; cost change invalidates=True"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.executed-restart-and-base-attribution",
+      "seconds": 0.03,
+      "detail": "{'source': 'executed', 'lane': 'pos', 'n': 200, 'lastN': 200, 'pf': 99.0, 'gp': 1.7600000000000018, 'gl': 0, 'minPf': 1.25, 'proven': True, 'allow': True}"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.axis-continuation-and-set-isolation",
+      "seconds": 0.0,
+      "detail": "independent alternative=True; same-Set capacity=True; same-Set Negative fallback=True"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.block-independent-evidence-and-restart",
+      "seconds": 0.0,
+      "detail": "first={'group': 1, 'qty': 1.0, 'minPf': 1.25, 'paper': {'pf': 99.0, 'n': 3, 'source': 'paper'}, 'executed': {'pf': 0.0, 'n': 0, 'source': 'executed'}}; group2/other blocked=True/True; samples=[3, 3]"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.block-actual-and-paper-costs",
+      "seconds": 0.0,
+      "detail": "notional-weighted gross=0.005976096 oracle=0.005976096; one sample"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.block-pause-count-and-zero-are-respected",
+      "seconds": 0.0,
+      "detail": "two-observation pause=True; resumed=True; zero disables=True"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.block-parent-unchanged-end-to-end",
+      "seconds": 0.02,
+      "detail": "added=True, lane isolated=True, parent unchanged=True, base return=0.010000, aggregate cash error=-6e-16"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.drawdown-plain-oracle",
+      "seconds": 0.0,
+      "detail": "12 windows vs quadratic oracle, max error=0; flat neutral"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.flat-rsi-and-relation-names",
+      "seconds": 0.0,
+      "detail": "RSI flat=50; 32 drawdown/last-part/inversion compositions resolve"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.fifty-symbol-processing",
+      "seconds": 278.36,
+      "detail": "50 symbols x 103 Sets = 5150 independent lanes, six hours each, 278.32s"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.balance-sizing-and-block-budget",
+      "seconds": 0.0,
+      "detail": "equity 10k/20k/100k -> notional [5.0, 10.0, 25.0]; six additive Block groups -> budget 35.0"
+    },
+    {
+      "status": "PASS",
+      "check": "correctness.frozen-hold-and-block-intent-failure",
+      "seconds": 0.01,
+      "detail": "entry hold kept=True; no order without persisted intent=True"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.fee-and-slippage-oracle",
+      "seconds": 0.0,
+      "detail": "entry and exit notionals, both sides, reported zero, maker proof, slippage counted in prices once"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.net-result-survives-consumers-and-cost-changes",
+      "seconds": 0.0,
+      "detail": "PF across costs and consumers=[2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.rate-lookup-and-bybit-translation",
+      "seconds": 0.0,
+      "detail": "one cached read; zero maker fee preserved; Bybit request=('GET', '/v5/account/fee-rate', {'category': 'linear', 'symbol': 'BTCUSDT'})"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.pulse-fill-to-stats",
+      "seconds": 0.02,
+      "detail": "cash error=0; exported and Set net match; exchange-rate-estimate"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.partial-close-retry-and-unfilled-close",
+      "seconds": 0.03,
+      "detail": "partial persisted=True; full close price=101.6; cash error=0; zero fill stays open=True"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.execution-outcomes-survive-caps-and-emergency-closes",
+      "seconds": 0.01,
+      "detail": "verified emergency loss retained=True; restart retains loss=True"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.unattributed-aggregate-fee-does-not-score-base",
+      "seconds": 0.0,
+      "detail": "old aggregate net cannot overwrite base's 1% gross less 0.12% estimate"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.execution-scope-counts-survive-restart",
+      "seconds": 0.0,
+      "detail": "restored counters={'set': 3, 'exit': 0, 'wins': 1, 'losses': 1, 'skipped': 0, 'blockAddFills': 1, 'lanePos': 2, 'lanePosWin': 1, 'laneNeg': 1, 'laneNegLoss': 1}; own negative scope=[1, 0, 0.0, 2.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.acknowledged-close-waits-for-the-same-order",
+      "seconds": 0.02,
+      "detail": "unknown held=True; POST count=1; final fills=1"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.pending-close-survives-position-refresh-and-restart",
+      "seconds": 0.02,
+      "detail": "pending quantity kept=True; flat unconfirmed retained=True; final net=1.4991999999999943; POSTs=1"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.pending-partial-is-settled-once-then-manager-closes-remainder",
+      "seconds": 0.02,
+      "detail": "partial intact after refresh=True; final exit=101.6; POSTs=2"
+    },
+    {
+      "status": "PASS",
+      "check": "cost-accounting.restart-does-not-seed-foreign-exit-lanes",
+      "seconds": 0.0,
+      "detail": "own default-lane rows only: Exit/SL/trailing=(1, 1, 1)"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.set_engine",
+      "seconds": 5.08,
+      "detail": "84 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.indication_engine",
+      "seconds": 0.0,
+      "detail": "20 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.dca_engine",
+      "seconds": 0.0,
+      "detail": "18 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.position_cost",
+      "seconds": 0.02,
+      "detail": "__main__ exit=0 position_cost ok {'n': 15.0, 'count': 15.0, 'avgR': 1.0, 'ratio': 1.1, 'pf': 99."
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.exit_engine",
+      "seconds": 0.0,
+      "detail": "11 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.risk_variants",
+      "seconds": 0.0,
+      "detail": "10 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.stats_report",
+      "seconds": 0.0,
+      "detail": "7 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "selftest.coord_engine",
+      "seconds": 0.0,
+      "detail": "5 checks"
+    },
+    {
+      "status": "PASS",
+      "check": "monitoring.exact-get-and-no-controls",
+      "seconds": 0.0,
+      "detail": "[('GET', 'https://example.test/stats.json?conn=live', None, 8)]"
+    },
+    {
+      "status": "PASS",
+      "check": "monitoring.rejects-credentials-and-control-urls",
+      "seconds": 0.0,
+      "detail": "4 invalid targets rejected without network"
+    },
+    {
+      "status": "PASS",
+      "check": "monitoring.stale-identity-symbols-and-halt",
+      "seconds": 0.0,
+      "detail": "['connection identity missing or unexpected', 'status timestamp missing, stale or ahead of clock', 'engine halted', 'symbol count differs from configured target']"
+    },
+    {
+      "status": "PASS",
+      "check": "monitoring.stalls-and-recovers-without-pf-clamping",
+      "seconds": 0.0,
+      "detail": "stalled cycle detected; warmup progress accepted; stage-specific PF is not clamped"
+    },
+    {
+      "status": "PASS",
+      "check": "monitoring.error-increases-only",
+      "seconds": 0.0,
+      "detail": "new error alert; lifetime error count alone is not an ongoing burst"
+    },
+    {
+      "status": "PASS",
+      "check": "monitoring.unavailable-and-response-limit",
+      "seconds": 0.0,
+      "detail": "HTTP 503 and oversized responses cannot report healthy"
+    }
+  ]
+}

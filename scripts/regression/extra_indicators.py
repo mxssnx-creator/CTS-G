@@ -139,12 +139,12 @@ def short_range_grid_is_steps_2_to_6():
     steps = sorted({s.step for s in base})
     ratios = sorted({s.sl_ratio for s in base})
     off = SetBook()
-    off.load(overlay())
+    off.load(overlay(stratShortRange=False))
     wide = _short_book(shortRangeStepMin=3, shortRangeStepMax=5)
     ok = (steps == [2, 3, 4, 5, 6] and ratios == [0.5 + 0.25 * i for i in range(13)] and len(base) == 65
           and SHORT_PACK not in off.packs
           and sorted({s.step for s in wide.by_idx if s.kind == "base"}) == [3, 4, 5])
-    return ok, f"steps={steps} ratios={len(ratios)} base Sets={len(base)} off by default={SHORT_PACK not in off.packs}"
+    return ok, f"steps={steps} ratios={len(ratios)} base Sets={len(base)} explicit off={SHORT_PACK not in off.packs}"
 
 
 def short_range_signal_cancels_opposite_votes():

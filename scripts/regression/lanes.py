@@ -131,7 +131,7 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
             venue.price = lambda: p.px.get(SYM) or 100.0      # market orders fill at the tick
             live.pulse = p
             p.sets = b
-            b.pick_any = lambda pack, _st=st: _st
+            b.pick_any = lambda pack, _st=st, **kw: _st
             b.pick_trail = lambda pack: None
             p.boot_ts = 0.0
             p.px[SYM] = 100.0
@@ -581,7 +581,7 @@ def exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own():
             b.replay_all(now=T_BASE)
 
             def snap():
-                return {st.id: (st.n, round(st.gp, 12), round(st.gl, 12), round(st.gate_pf, 12)) for st in b.by_idx}
+                return {st.id: (st.n, st.live_n, round(st.gp, 12), round(st.gl, 12), round(st.gate_pf, 12)) for st in b.by_idx}
             contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
             p = pt.Pulse(_Venue(), contracts)
             p.sets = b
@@ -742,7 +742,7 @@ class _Env:
         p = pt.Pulse(self.venue, contracts)
         self.venue.price = lambda: (p.px.get(SYM) or 100.0) * (1.0 + self.slip)
         p.sets = _book()
-        p.sets.pick_any = lambda pack: None            # no Set: the position belongs to the Exit lane
+        p.sets.pick_any = lambda pack, **kw: None            # no Set: the position belongs to the Exit lane
         p.sets.pick_trail = lambda pack: None
         p.boot_ts = 0.0
         p.px[SYM] = 100.0
@@ -1009,7 +1009,7 @@ def a_venue_close_is_recorded_as_its_lanes_close():
 
 def a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests():
     """A fill far from the price the decision was made at (a broken or empty book: AMEMECOIN on x02 filled 11 % away and
-    stopped out in 3 s, 18 times in an hour) is closed at once, not scored against any Set, and the symbol is kept off
+    stopped out in 3 s, 18 times in an hour) is closed at once, its verified loss is retained, and the symbol is kept off
     for 30 minutes. An ordinary fill stays open."""
     out = {}
     for slip in (0.0004, 0.11):
@@ -1019,7 +1019,7 @@ def a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests():
             out[slip] = (SYM in e.p.open, len(e.p.closed), len(seen),
                          round(e.p.ignore_syms.get(SYM, 0.0) - _real_time.time()) if SYM in e.p.ignore_syms else 0)
     ok = out[0.0004][0] is True and out[0.0004][3] == 0 \
-        and out[0.11][0] is False and out[0.11][1] == 0 and out[0.11][2] == 0 and out[0.11][3] > 1700
+        and out[0.11][0] is False and out[0.11][1] == 1 and out[0.11][2] == 0 and out[0.11][3] > 1700
     return ok, f"slip -> (still open, scored closes, Set closes, ban seconds): {out}"
 
 

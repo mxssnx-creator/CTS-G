@@ -24,6 +24,7 @@ AUTO_RUNG_MULT = 0.5
 AUTO_MAX_EXPOSURE_X = 2.0       # base size + all adds never above this multiple of the base size
 
 from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, gate_min_pf, last_n_cost_pf, normalize_cost_pct, signed_result_r
+from position_cost import row_net_pnl_pct, cost_as_frac
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
@@ -224,7 +225,7 @@ class DcaBook:
         last25 = [r for r in self.closes if r.get("pnl_pct") is not None][-self.deact_n :]   # a missing value is not a loss
         avg_r = 0.0
         if last25:
-            avg_r = sum(signed_result_r(float(r.get("pnl_pct") or 0), self.cost_pct) for r in last25) / len(last25)
+            avg_r = sum(row_net_pnl_pct(r, self.cost_pct) / max(1e-9, cost_as_frac(self.cost_pct)) for r in last25) / len(last25)
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
             self.active = False
             self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"

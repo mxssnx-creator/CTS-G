@@ -85,7 +85,7 @@ function ResultsPage() {
         <Hero
           k="PF after cost"
           v={(stats?.pfCost?.pf ?? stats?.profitFactor ?? 1).toFixed(2)}
-          s={`1.00=neutral · 1.10=+1×cost · min ${stats?.pfCost?.minPf ?? DEFAULT_OVERLAY.minPf} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
+          s={`Net gains ÷ net losses · min ${stats?.pfCost?.minPf ?? DEFAULT_OVERLAY.minPf} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
         />
       </section>
 

@@ -22,6 +22,8 @@ direction, the lower-case letter AGAINST it:
   I            tactic: invert the direction (fade the signal); the relations after it judge the inverted direction
   K            tactic: confirmation, the indicator gave the same direction on the bar before too;   F  fresh, it did not
   G            tactic: the newest 1m close moved in the direction (a go candle)
+  DD<n>        moderate price drawdown against the signal, 0.5..2.5 ATR over n closes
+  LP<n>        the last n closes move in the signal direction (n=1..60)
 
 `resolve(name)` compiles a composite once (cached); an unknown base or relation gives None, so a misspelt name is never a silent
 always-off vote but an unknown name. `window_of(name)` is the most 1m rows the composite reads.
@@ -150,6 +152,22 @@ def _contraction(rows) -> float:
 def _relation(tok: str) -> Optional[Tuple[Callable, int]]:
     """(predicate(rows, d, base, d0) -> (keep, new_d), 1m rows it reads) for one token, or None when the token is unknown."""
     from indication_lib import rows_for
+    extended = re.fullmatch(r"(DD|LP)(\d+)", tok)
+    if extended:
+        kind, n = extended.group(1), int(extended.group(2))
+        if kind == "LP" and 1 <= n <= 60:
+            return (lambda rows, d, base, d0: (len(rows) > n and (float(rows[-1][3]) - float(rows[-1-n][3])) * d > 0, d)), n + 1
+        if kind == "DD" and 3 <= n <= 240:
+            def p(rows, d, base, d0):
+                from market_features import price_window
+                v = _feat(rows, f"DD{n}", lambda: price_window([float(r[3]) for r in rows], n))
+                atr = _atr1(rows, 14, len(rows))
+                if v is None or atr <= 0:
+                    return False, d
+                pullback = v["drawdown"] * v["peak"] / atr if d > 0 else v["drawup"] * v["trough"] / atr
+                return 0.5 <= pullback <= 2.5, d
+            return p, max(2 * n - 1, 16)
+        return None
     m = _TOKEN.match(tok)
     if not m:
         return None

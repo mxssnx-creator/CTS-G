@@ -1,4 +1,5 @@
 import type { LiveStats } from "./live-stats.ts";
+import { rowNetPnlPct } from "./analytics.ts";
 
 type Closed = NonNullable<LiveStats["closed"]>[number];
 
@@ -16,8 +17,8 @@ export function hourlyPf(closed: Closed[], costPct: number, now: number, hours =
     let n = 0;
     for (const c of closed) {
       const t = c.t > 1e11 ? c.t / 1000 : c.t;
-      if (t < from || t >= to || c.pnl_pct === null || c.pnl_pct === undefined) continue;
-      const net = Number(c.pnl_pct) - costPct / 100;
+      if (!Number.isFinite(t) || t < from || t >= to || c.pnl_pct === null || c.pnl_pct === undefined || !Number.isFinite(Number(c.pnl_pct))) continue;
+      const net = rowNetPnlPct(c, costPct);
       n += 1;
       if (net > 0) gp += net;
       else if (net < 0) gl += -net;

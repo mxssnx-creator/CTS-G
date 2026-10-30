@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import type { Plugin, ProxyOptions } from "vite";
+import type { Plugin, ProxyOptions, ViteDevServer } from "vite";
 import { defineConfig } from "vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
@@ -379,123 +379,177 @@ async function tryPulse(method: string, path: string, raw?: string, ms = 1600): 
 }
 
 /** Pulse sidecar first; local overlay + CTS worker if :3015 is down. */
+function configurePulseControl(server: Pick<ViteDevServer, "middlewares">): void {
+  server.middlewares.use(async (req, res, next) => {
+    const rawUrl = req.url ?? "";
+    const pathOnly = rawUrl.split("?", 1)[0] ?? "";
+    const method = (req.method ?? "GET").toUpperCase();
+    const handled = [
+      "/control.json",
+      "/connections.json",
+      "/config.json",
+      "/universe.json",
+      "/live-stats.json",
+    ];
+    if (!handled.includes(pathOnly)) {
+      next();
+      return;
+    }
+    if (pathOnly === "/live-stats.json") {
+      // Synced snapshot wins when present; otherwise serve the halted-desk
+      // fallback so a fresh clone/dev box never 404s the desk snapshot.
+      const snap = join(process.cwd(), "public/live-stats.json");
+      if (existsSync(snap)) {
+        next();
+        return;
+      }
+      jsonRes(res as ServerResponse, 200, statsFallback("overall"));
+      return;
+    }
+    try {
+      const url = new URL(rawUrl, "http://127.0.0.1");
+      const conn = url.searchParams.get("conn") || "overall";
+      if (pathOnly === "/control.json") {
+        if (method !== "POST") {
+          jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+          return;
+        }
+        const raw = await readReqBody(req);
+        let action = "";
+        try {
+          action = String(
+            (JSON.parse(raw || "{}") as { action?: string }).action || "",
+          ).toLowerCase();
+        } catch {
+          action = "";
+        }
+        // systemctl start/stop inside the sidecar can take ~25s — the 1.6s
+        // default would fall through to the legacy-CTS fallback on every
+        // start/stop and report bogus state. Control calls get 30s.
+        const pulse = await tryPulse(
+          "POST",
+          `/control.json?conn=${encodeURIComponent(conn)}`,
+          raw || JSON.stringify({ action }),
+          30000,
+        );
+        if (pulse) {
+          // a timeout is returned as is: the CTS side must not repeat an action the sidecar may already have taken
+          jsonRes(res as ServerResponse, pulse.status, pulse.json);
+          return;
+        }
+        // the sidecar is not running at all, so the CTS side is the only writer
+        const out = await applyCtsControl(conn, action);
+        jsonRes(res as ServerResponse, out.ok ? 200 : 400, {
+          ok: out.ok,
+          detail: out.detail,
+          conn,
+          action,
+          via: "cts",
+        });
+        return;
+      }
+      if (pathOnly === "/connections.json") {
+        const pulse = await tryPulse("GET", "/connections.json");
+        jsonRes(res as ServerResponse, 200, pulse?.json ?? connectionsFallback());
+        return;
+      }
+      if (pathOnly === "/universe.json") {
+        const pulse = await tryPulse("GET", "/universe.json");
+        jsonRes(res as ServerResponse, 200, pulse?.json ?? universeFallback());
+        return;
+      }
+      if (pathOnly === "/config.json") {
+        if (method === "GET") {
+          const pulse = await tryPulse("GET", `/config.json?conn=${encodeURIComponent(conn)}`);
+          jsonRes(res as ServerResponse, 200, pulse?.json ?? configFallback(conn));
+          return;
+        }
+        if (method !== "POST") {
+          jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+          return;
+        }
+        const raw = await readReqBody(req);
+        const pulse = await tryPulse("POST", `/config.json?conn=${encodeURIComponent(conn)}`, raw);
+        if (pulse) {
+          jsonRes(res as ServerResponse, pulse.status, pulse.json);
+          return;
+        }
+        if (conn === "overall") {
+          jsonRes(res as ServerResponse, 400, { ok: false, detail: "Pick Live or VST to save" });
+          return;
+        }
+        let body: Record<string, unknown> = {};
+        try {
+          body = JSON.parse(raw || "{}") as Record<string, unknown>;
+        } catch {
+          jsonRes(res as ServerResponse, 400, { ok: false, detail: "invalid json" });
+          return;
+        }
+        const overlay =
+          body.overlay && typeof body.overlay === "object"
+            ? (body.overlay as Record<string, unknown>)
+            : body;
+        const dest = overlayFile(conn);
+        const cur = existsSync(dest)
+          ? (JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>)
+          : {};
+        const next = { ...cur, ...overlay };
+        // written beside the target and renamed into place, so a reader never sees a half-written file
+        const tmp = `${dest}.${process.pid}.tmp`;
+        writeFileSync(tmp, JSON.stringify(next, null, 2));
+        renameSync(tmp, dest);
+        jsonRes(res as ServerResponse, 200, { ok: true, overlay: next, conn, via: "local" });
+        return;
+      }
+      next();
+    } catch (err) {
+      jsonRes(res as ServerResponse, 500, {
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+}
+
 function pulseControlPlugin(): Plugin {
   return {
     name: "pulse-control-fallback",
     apply: "serve",
-    configureServer(server) {
+    configureServer: configurePulseControl,
+    configurePreviewServer(server) {
+      configurePulseControl(server);
+      // Nitro installs its built-app handler before Vite's built-in proxy.
+      // Register Pulse reads ahead of it so preview uses the same sidecar as
+      // the deployed Linux desk, rather than turning stats into app 404s.
       server.middlewares.use(async (req, res, next) => {
-        const rawUrl = req.url ?? "";
-        const pathOnly = rawUrl.split("?", 1)[0] ?? "";
-        const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/control.json", "/connections.json", "/config.json", "/universe.json", "/live-stats.json"];
-        if (!handled.includes(pathOnly)) {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (
+          !["/stats.json", "/stats", "/results-export.json", "/results-export.md"].includes(
+            url.pathname,
+          )
+        ) {
           next();
           return;
         }
-        if (pathOnly === "/live-stats.json") {
-          // Synced snapshot wins when present; otherwise serve the halted-desk
-          // fallback so a fresh clone/dev box never 404s the desk snapshot.
-          const snap = join(process.cwd(), "public/live-stats.json");
-          if (existsSync(snap)) {
-            next();
-            return;
-          }
-          jsonRes(res as ServerResponse, 200, statsFallback("overall"));
+        if (req.method !== "GET") {
+          jsonRes(res, 405, { ok: false, detail: "GET only" });
           return;
         }
         try {
-          const url = new URL(rawUrl, "http://127.0.0.1");
-          const conn = url.searchParams.get("conn") || "overall";
-          if (pathOnly === "/control.json") {
-            if (method !== "POST") {
-              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
-              return;
-            }
-            const raw = await readReqBody(req);
-            let action = "";
-            try {
-              action = String((JSON.parse(raw || "{}") as { action?: string }).action || "").toLowerCase();
-            } catch {
-              action = "";
-            }
-            // systemctl start/stop inside the sidecar can take ~25s — the 1.6s
-            // default would fall through to the legacy-CTS fallback on every
-            // start/stop and report bogus state. Control calls get 30s.
-            const pulse = await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }), 30000);
-            if (pulse) {
-              // a timeout is returned as is: the CTS side must not repeat an action the sidecar may already have taken
-              jsonRes(res as ServerResponse, pulse.status, pulse.json);
-              return;
-            }
-            // the sidecar is not running at all, so the CTS side is the only writer
-            const out = await applyCtsControl(conn, action);
-            jsonRes(res as ServerResponse, out.ok ? 200 : 400, {
-              ok: out.ok,
-              detail: out.detail,
-              conn,
-              action,
-              via: "cts",
-            });
-            return;
-          }
-          if (pathOnly === "/connections.json") {
-            const pulse = await tryPulse("GET", "/connections.json");
-            jsonRes(res as ServerResponse, 200, pulse?.json ?? connectionsFallback());
-            return;
-          }
-          if (pathOnly === "/universe.json") {
-            const pulse = await tryPulse("GET", "/universe.json");
-            jsonRes(res as ServerResponse, 200, pulse?.json ?? universeFallback());
-            return;
-          }
-          if (pathOnly === "/config.json") {
-            if (method === "GET") {
-              const pulse = await tryPulse("GET", `/config.json?conn=${encodeURIComponent(conn)}`);
-              jsonRes(res as ServerResponse, 200, pulse?.json ?? configFallback(conn));
-              return;
-            }
-            if (method !== "POST") {
-              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
-              return;
-            }
-            const raw = await readReqBody(req);
-            const pulse = await tryPulse("POST", `/config.json?conn=${encodeURIComponent(conn)}`, raw);
-            if (pulse) {
-              jsonRes(res as ServerResponse, pulse.status, pulse.json);
-              return;
-            }
-            if (conn === "overall") {
-              jsonRes(res as ServerResponse, 400, { ok: false, detail: "Pick Live or VST to save" });
-              return;
-            }
-            let body: Record<string, unknown> = {};
-            try {
-              body = JSON.parse(raw || "{}") as Record<string, unknown>;
-            } catch {
-              jsonRes(res as ServerResponse, 400, { ok: false, detail: "invalid json" });
-              return;
-            }
-            const overlay =
-              body.overlay && typeof body.overlay === "object"
-                ? (body.overlay as Record<string, unknown>)
-                : body;
-            const dest = overlayFile(conn);
-            const cur = existsSync(dest) ? (JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>) : {};
-            const next = { ...cur, ...overlay };
-            // written beside the target and renamed into place, so a reader never sees a half-written file
-            const tmp = `${dest}.${process.pid}.tmp`;
-            writeFileSync(tmp, JSON.stringify(next, null, 2));
-            renameSync(tmp, dest);
-            jsonRes(res as ServerResponse, 200, { ok: true, overlay: next, conn, via: "local" });
-            return;
-          }
-          next();
-        } catch (err) {
-          jsonRes(res as ServerResponse, 500, {
-            ok: false,
-            detail: err instanceof Error ? err.message : String(err),
+          const upstream = await fetch(`${PULSE}${url.pathname}${url.search}`, {
+            signal: AbortSignal.timeout(8000),
           });
+          const body = await upstream.text();
+          res.statusCode = upstream.status;
+          res.setHeader("Content-Type", upstream.headers.get("Content-Type") || "application/json");
+          res.setHeader("Cache-Control", "no-store");
+          res.end(body);
+        } catch {
+          if (url.pathname === "/stats.json" || url.pathname === "/stats") {
+            jsonRes(res, 200, statsFallback(url.searchParams.get("conn") || "overall"));
+          } else {
+            jsonRes(res, 503, { ok: false, detail: "Pulse sidecar unavailable" });
+          }
         }
       });
     },

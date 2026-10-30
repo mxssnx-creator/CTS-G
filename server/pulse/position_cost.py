@@ -126,6 +126,21 @@ def net_pnl_usdt(pnl_pct: float, qty: float, entry: float, cost_pct: float = POS
     return notion * net_pnl_pct(pnl_pct, cost_pct)
 
 
+def row_net_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """Recorded execution net is immutable; paper/legacy rows use one allowance.
+    Never infer net from the ambiguous USDT pnl field or deduct fees twice.
+    """
+    get = row.get if isinstance(row, dict) else lambda k: getattr(row, k, None)
+    raw = get("net_pnl_pct")
+    try:
+        net = float(raw)
+        if math.isfinite(net):
+            return net
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return net_pnl_pct(get("pnl_pct"), cost_pct)
+
+
 def signed_result_r(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """pnl_pct is a fraction (0.001 = 0.10%). Cost is a percent (0.15)."""
     cost = max(1e-9, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
@@ -189,9 +204,9 @@ def last_n_cost_pf(
     rs: List[float] = []
     gp = gl = 0.0
     for _row, pnl_pct in window:
-        rs.append(signed_result_r(pnl_pct, cost_pct))
+        net = row_net_pnl_pct(_row, cost_pct)
+        rs.append(net / max(1e-9, cost_as_frac(cost_pct)))
         # net PF from the gross fraction less one PositionCost: unit-safe, never the USDT pnl field
-        net = net_pnl_pct(pnl_pct, cost_pct)
         if net > 0:
             gp += net
         elif net < 0:
@@ -210,7 +225,8 @@ def last_n_cost_pf(
         "pf": round(pf, 4),
         "costPct": float(cost_pct),
         "netPct": round(net_move_pct(ratio, cost_pct), 4),            # the mean net per position (percent): netSumPct / count
-        "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+        "grossPct": round(100 * sum(v for _, v in window) / count, 4) if count else 0.0,
+        "averageCostPct": round(100 * sum(v - row_net_pnl_pct(r, cost_pct) for r, v in window) / count, 6) if count else 0.0,
         "netSumPct": round(net_sum_pct, 4),
         "skipped": float(skipped),
     }

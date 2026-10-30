@@ -2,6 +2,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { lastNCostPf } from "./analytics.ts";
 
+test("recorded execution net is not charged a second cost", () => {
+  const rows = [
+    { t: 1, pnl: 0.04, pnl_pct: 0.001, net_pnl_pct: 0.0004 },
+    { t: 2, pnl: -0.02, pnl_pct: 0.001, net_pnl_pct: -0.0002 },
+  ];
+  for (const cost of [0.12, 0.3]) {
+    const metrics = lastNCostPf(rows, 2, cost);
+    assert.equal(metrics.pf, 2);
+    assert.equal(metrics.grossPct, 0.1);
+    assert.equal(metrics.netSumPct, 0.02);
+  }
+});
+
 // The window's PF, its net summed over the positions and its mean net per position share one set of net results (gross fraction less one PositionCost).
 test("last-N cost PF: net sum, mean net per position and PF read the same nets", () => {
   const rows = [

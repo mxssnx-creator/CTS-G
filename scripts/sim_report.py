@@ -99,7 +99,7 @@ def run(a: argparse.Namespace) -> Dict[str, Any]:
     warm = min(sb.warmup, 30)
     sig: Dict[str, Dict[str, Tuple[List[int], List[float]]]] = {}
     for s in syms:
-        raw = se.pack_signals(bars[s], sb.packs, sb.ind_settings, base_ts, warm)
+        raw = se.pack_signals(bars[s], sb.packs, sb.ind_settings, tms[s][0] / 1000.0 + 60.0, warm)
         sig[s] = {p: ([x[0] for x in raw[p]], [x[1] for x in raw[p]]) for p in sb.packs}
     cand: Dict[Tuple[str, str], List[int]] = {}
     for s in syms:

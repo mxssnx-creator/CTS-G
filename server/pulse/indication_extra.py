@@ -56,12 +56,12 @@ def _rsi_series(closes: Sequence[float], period: int) -> List[float]:
         loss += max(-d, 0.0)
     gain /= period
     loss /= period
-    out[period] = 100.0 if loss == 0 else 100.0 - 100.0 / (1.0 + gain / loss)
+    out[period] = (50.0 if gain == 0 else 100.0) if loss == 0 else 100.0 - 100.0 / (1.0 + gain / loss)
     for i in range(period + 1, len(closes)):
         d = closes[i] - closes[i - 1]
         gain = (gain * (period - 1) + max(d, 0.0)) / period
         loss = (loss * (period - 1) + max(-d, 0.0)) / period
-        out[i] = 100.0 if loss == 0 else 100.0 - 100.0 / (1.0 + gain / loss)
+        out[i] = (50.0 if gain == 0 else 100.0) if loss == 0 else 100.0 - 100.0 / (1.0 + gain / loss)
     return out
 
 

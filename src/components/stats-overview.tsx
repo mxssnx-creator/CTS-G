@@ -40,7 +40,7 @@ export function StatsOverview({
         <Hero
           k={`Last ${cost.n || 15} PF`}
           v={cost.count ? formatPf(cost.pf) : "—"}
-          s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
+          s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
         {live?.sets?.pfBase ? (
@@ -104,7 +104,7 @@ export function StatsOverview({
       <StagesCard live={live} />
 
       <div className="grid gap-3 lg:grid-cols-2">
-        <Card title="Profit factor · 1.00=neutral · 1.10=+1×PositionCost">
+        <Card title="Profit factor after costs">
           <table className="w-full text-sm">
             <thead className="font-mono text-[11px] text-muted">
               <tr>

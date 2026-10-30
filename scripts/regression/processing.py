@@ -37,7 +37,7 @@ def every_set_processed_full_grid():
     b.replay_all(now=T0)
     p = b.progress
     unscored = [st.id for st in b.by_idx if st.last_error or st.gate_n < 0]
-    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1538 and not unscored and p.errors == 0
+    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1654 and not unscored and p.errors == 0
     return ok, f"phase={p.phase} sets={len(b.by_idx)} sets_done={p.sets_done} unscored={len(unscored)} errors={p.errors}"
 
 
@@ -190,11 +190,11 @@ def live_windows_preserve_owner_and_lane_history():
     index = next(r for r in b.snapshot()["index"] if r["id"] == owner.id)
     ok = (len(owner.live) == 400 and len(pos_rows) == len(neg_rows) == 200 and not foreign.live
           and pos_rows[0]["t"] == T0 + 5 * 60 and neg_rows[0]["t"] == T0 + 5 * 60 + 1
-          and len(main[-200:]) == len(pos[-200:]) == len(neg[-200:]) == 200
-          and all(abs(x - (0.004 - COST / 100)) < 1e-12 for x in pos[-200:])
-          and all(abs(x - (-0.002 - COST / 100)) < 1e-12 for x in neg[-200:])
+          and not main and not pos and not neg
+          and b.execution_stats(owner, "pos")["n"] == b.execution_stats(owner, "neg")["n"] == 200
+          and b.execution_stats(owner, "pos")["pf"] == 99 and b.execution_stats(owner, "neg")["pf"] == 0
           and owner.live_n == 411 and owner.live_pos_n == 206 and owner.live_neg_n == 205
-          and index["mainN"] == owner.proc_total + 411 and index["realN"] == owner.exe_total + 206 and index["realNegN"] == owner.neg_total + 205
+          and index["mainN"] == owner.proc_total and index["realN"] == owner.exe_total and index["realNegN"] == owner.neg_total
           and b.live_skipped == 5 and b.live_unmatched == 1)
     return ok, f"retained {len(pos_rows)} positive / {len(neg_rows)} negative; foreign={len(foreign.live)}; skipped={b.live_skipped}; unmatched={b.live_unmatched}"
 
@@ -247,11 +247,10 @@ def main_short_reselects_on_live_close():
              "hold_s": 30, "lane": "pos", "client_id": "candidate-change"}
     b.on_live_close(close)
     shadow = list(zip(*st.main_evidence))
-    records = [(t, e, n, True) for t, e, n in shadow] + [(close["t"], close["t"] - 30, .015, True)]
+    records = [(t, e, n, True) for t, e, n in shadow]
     expected = _plain_main_choice(sorted(records), b.stage_params(st.pack))
     b.on_live_close(dict(close))
-    ok = (before == 10 and st.main_short_win == expected == 5 and st.main_short_n == 5
-          and abs(st.main_short_pf - 11.0) < 1e-8 and st.live_n == 1 and not foreign.live)
+    ok = (before == st.main_short_win == expected == 10 and st.main_short_n == 10 and st.live_n == 1 and not foreign.live)
     return ok, f"short N {before}->{st.main_short_win}, independent oracle={expected}, PF={st.main_short_pf}, duplicate closes={st.live_n}"
 
 
@@ -274,7 +273,7 @@ def main_short_matches_plain_live_oracle_over_long_tapes():
                 value = rng.choice((.003, .005, .008, -.003, -.006))
                 rows.append((T0 + 60 * i, "A", "LONG", value, value + cf, rng.choice((30, 60, 180)), "x", st.id))
             b.set_processed(st, rows)
-            st.live, st.live_n, st.score_at, st.main_live_evidence = [], 0, 0.0, None
+            st.live, st.live_n, st.score_at = [], 0, 0.0
             long_tapes += int(st.proc_total > 200)
             for k in range(3):
                 value = rng.choice((.003, .005, .008, -.003, -.006))
@@ -285,7 +284,7 @@ def main_short_matches_plain_live_oracle_over_long_tapes():
                 shadow = [(t, e, n, True) for t, e, n in zip(*st.main_evidence)]
                 live = [(r["t"], r["t"] - r["hold_s"] if r["hold_s"] > 0 else r["t"],
                          r["pnl_pct"] - cf, r["hold_s"] > 0) for r in st.live]
-                expected = _plain_main_choice(sorted(shadow + live), b.stage_params(st.pack))
+                expected = _plain_main_choice(sorted(shadow), b.stage_params(st.pack))
                 checked += 1
                 if st.main_short_win != expected:
                     mismatch.append((full_window, sample, k, st.main_short_win, expected))
@@ -293,39 +292,27 @@ def main_short_matches_plain_live_oracle_over_long_tapes():
 
 
 def main_short_retains_live_votes_beyond_the_lane_cap():
-    """Capping full live rows at 200 must not discard earlier candidate votes inside the lookback."""
+    """More than 200 actual closes keep the exact execution window without paper votes."""
     import random
-    b = _book(n_syms=1, bars=300, **{**SMALL, "setGateWindow": 30, "setGateShortN": 0,
-                                     "mainGateN": 10, "mainShortWindows": [3, 5], "mainShortMin": 3,
-                                     "mainShortMargin": 1.0, "setMinPf": 1.05})
+    b = _book(n_syms=1, bars=300, **{**SMALL, "realGateN": 200})
     st = next(x for x in b.by_idx if x.kind == "base")
-    cf = b.cost_pct / 100.0
     rng = random.Random(6)
     nets = [rng.choice((.003, .005, .008, -.003, -.006)) for _ in range(250)]
-    records = [(T0 + i * 60, T0 + i * 60 - 30, v, True) for i, v in enumerate(nets)]
-    for i, (t, _entry, net, _known) in enumerate(records):
-        b.on_live_close({"set_id": st.id, "t": t, "symbol": "A", "side": "LONG", "pnl_pct": net + cf,
-                         "hold_s": 30, "lane": "pos", "client_id": f"retained-{i}"})
-    expected = _plain_main_choice(records, b.stage_params(st.pack))
-    truncated = _plain_main_choice(records[-200:], b.stage_params(st.pack))
-    actual = st.main_short_win
-    retained = len(st.main_live_evidence[0])
-    # A changed cost must reach candidate votes and the non-gate PF stats alike.
+    cf = b.cost_pct / 100.0
+    for i, net in enumerate(nets):
+        b.on_live_close({"set_id": st.id, "t": T0 + i * 60, "symbol": "A", "side": "LONG",
+                         "pnl_pct": net + cf, "hold_s": 30, "lane": "pos", "client_id": f"retained-{i}"})
     b.cost_pct = 0.2
     b._score_one(st, now=T0 + 249 * 60)
-    changed = [(t, e, net + cf - .002, known) for t, e, net, known in records]
-    expected_cost = _plain_main_choice(changed, b.stage_params(st.pack))
     recent = [net + cf - .002 for net in nets[-200:]]
-    gains, losses = sum(x for x in recent if x > 0), -sum(x for x in recent if x < 0)
-    expected_pf = round(gains / losses, 4)
-    cost_ok = st.main_short_win == expected_cost and abs(st.pf_all - expected_pf) < 1e-4
+    gp, gl = sum(x for x in recent if x > 0), -sum(x for x in recent if x < 0)
+    actual = b.execution_stats(st, "pos")
+    bounded = len(st.live) == 200 and actual["n"] == 200 and abs(actual["pf"] - round(gp/gl, 4)) < 1e-8
+    isolated = st.main_n == st.gate_n == 0
     b.lookback = 5
-    b.on_live_close({"set_id": st.id, "t": T0 + 300 * 60, "symbol": "A", "side": "LONG", "pnl_pct": .01,
-                     "hold_s": 30, "lane": "pos", "client_id": "after-expiry"})
-    after_expiry = len(st.main_live_evidence[0])
-    ok = (len(st.live) == 200 and retained == 250 and actual == expected == 5 and truncated == 10
-          and cost_ok and after_expiry == 1)
-    return ok, f"evidence={retained}, choice full/truncated={actual}/{truncated}, cost change correct={cost_ok}, after expiry={after_expiry}"
+    b.on_live_close({"set_id": st.id, "t": T0 + 300 * 60, "pnl_pct": .01, "client_id": "after-expiry"})
+    expired = b.execution_stats(st, "pos")["n"] == 1
+    return bounded and isolated and expired, f"bounded execution window={bounded}; no paper votes={isolated}; expiry={expired}"
 
 
 def axis_paper_scopes_are_bounded_and_time_correct():
@@ -390,7 +377,7 @@ def untimed_live_closes_are_skipped():
     for i, timestamp in enumerate((None, 0, -1, "bad", float("nan"), float("inf"))):
         b.on_live_close({"set_id": st.id, "t": timestamp, "pnl_pct": .01, "hold_s": 30, "client_id": f"missing-t-{i}"})
     b.on_live_close({"set_id": st.id, "t": T0, "pnl_pct": .01, "hold_s": 30, "client_id": "timed"})
-    return b.live_skipped == 6 and st.live_n == st.n == 1, f"untimed skipped={b.live_skipped}; timed counted={st.live_n}"
+    return b.live_skipped == 6 and st.live_n == 1 and st.n == 0, f"untimed skipped={b.live_skipped}; timed counted={st.live_n}"
 
 
 def live_scoring_obeys_lookback_and_event_clock():
@@ -417,7 +404,7 @@ def live_scoring_obeys_lookback_and_event_clock():
     first = (st.gate_n, st.gate_pf, st.main_n, st.main_pf, st.exe_n, st.exe_pf, st.neg_n, st.neg_pf)
     b.on_live_close({"set_id": st.id, "t": T0 + 950, "symbol": "L", "side": "LONG", "pnl_pct": .001 + cf,
                      "hold_s": 30, "lane": "neg", "client_id": "late"})
-    ok = first == (4, 2.5, 4, 2.5, 3, 5.0, 1, 0.0) and st.score_at == T0 + 1200 and st.neg_n == 2
+    ok = first == (2, 2.0, 2, 2.0, 2, 2.0, 0, 0.0) and st.score_at == T0 + 1200 and b.execution_stats(st, "neg")["n"] == 2
     return ok, f"bounded Base/Main/Real/Negative={first}; clock after late close={st.score_at - T0:.0f}s"
 
 
@@ -617,16 +604,16 @@ def live_dedupe_and_history_rows_stay_bounded():
     try:
         se.LIVE_SEEN_MAX = 50
         st = b.by_idx[0]
-        base = st.n                              # accepted close count, independent of bounded live history
+        base = st.live_n                         # actual close count, independent of paper history
         for k in range(200):
             b.on_live_close({"set_id": st.id, "t": T0 + 9000 + k, "symbol": "M-USDT", "side": "LONG",
                              "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": f"bound-{k}"})
         keys = len(b._live_seen)
-        added = st.n - base
+        added = st.live_n - base
         last = {"set_id": st.id, "t": T0 + 9000 + 199, "symbol": "M-USDT", "side": "LONG",
                 "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": "bound-199"}
         b.on_live_close(dict(last))              # a recent duplicate is still refused
-        dup_added = st.n - base - added
+        dup_added = st.live_n - base - added
     finally:
         se.LIVE_SEEN_MAX = saved
     ok = keys <= 50 and added == 200 and dup_added == 0 and rows_after == rows_before and rows_before > 0
@@ -646,7 +633,7 @@ def live_close_stays_counted_through_a_replay():
     after_live = st.n
     b.replay_all(now=T0)
     after_replay = st.n
-    ok = after_live == before + 1 and after_replay == before + 1 and st.live_n == 1
+    ok = after_live == before and after_replay == before and st.live_n == 1
     return ok, f"n before={before} after live close={after_live} after replay={after_replay} live_n={st.live_n}"
 
 
@@ -958,6 +945,10 @@ def short_range_has_its_own_pf_floor():
     reason_default = None
     b2 = SetBook()
     b2.load(overlay(stratShortRange=True, setMinPf=2.0, mainGateEnabled=False, stagesEnabled=False, **SMALL))
+    sr = next(s for s in b2.by_idx if s.pack == SHORT_PACK and s.kind == "base")
+    other = next(s for s in b2.by_idx if s.pack != SHORT_PACK and s.kind == "base")
+    for st in (sr, other):
+        st.gate_n, st.gate_pf, st.max_dd_s = b2.gate_min, 1.2, 0.0
     ok = (b.pack_min_pf[SHORT_PACK] == 1.5 and b2.pack_min_pf[SHORT_PACK] == 1.1
           and b2.gate_reason(sr) == "" and b2.gate_reason(other) == "pf<min")
     return ok, f"short range floor default={b2.pack_min_pf[SHORT_PACK]} set={b.pack_min_pf[SHORT_PACK]}; PF 1.2: short range='{b2.gate_reason(sr)}' other='{b2.gate_reason(other)}'"
@@ -1511,11 +1502,11 @@ def effective_pf_per_entry_counts_each_entry_once():
 CHECKS = [
     ("processing.untimed-live-closes-are-skipped", untimed_live_closes_are_skipped),
     ("processing.small-results-keep-pf-precision", small_results_keep_pf_precision),
-    ("processing.main-short-retains-live-votes-beyond-lane-cap", main_short_retains_live_votes_beyond_the_lane_cap),
+    ("processing.executed-window-bounded-cost-correct", main_short_retains_live_votes_beyond_the_lane_cap),
     ("processing.axis-paper-scopes-bounded-and-time-correct", axis_paper_scopes_are_bounded_and_time_correct),
     ("processing.axis-pause-uses-costed-results-per-scope", axis_pause_uses_costed_results_per_scope),
-    ("processing.main-short-reselects-on-live-close", main_short_reselects_on_live_close),
-    ("processing.main-short-matches-plain-live-oracle", main_short_matches_plain_live_oracle_over_long_tapes),
+    ("processing.main-short-isolated-from-live-close", main_short_reselects_on_live_close),
+    ("processing.main-short-matches-paper-oracle-with-live-closes", main_short_matches_plain_live_oracle_over_long_tapes),
     ("processing.live-scoring-obeys-lookback-and-event-clock", live_scoring_obeys_lookback_and_event_clock),
     ("processing.replay-uses-each-symbols-last-completed-bar", replay_uses_each_symbols_last_completed_bar),
     ("processing.simulator-validates-at-entry-and-refreshes-at-boundary", simulator_validates_at_entry_and_refreshes_at_the_boundary),

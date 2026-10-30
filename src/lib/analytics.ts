@@ -1,6 +1,6 @@
 /** CTS live-trading analytics: profit factor windows + drawdown-time average. */
 
-export type PfRow = { pnl: number; t: number; notional?: number; pnl_pct?: number };
+export type PfRow = { pnl: number; t: number; notional?: number; pnl_pct?: number; net_pnl_pct?: number | null };
 
 export type ProfitFactorMetric = {
   trades: number;
@@ -163,6 +163,11 @@ export function ratioFromR(signedR: number): number {
   return 1 + finite(signedR) * COST_RATIO_SCALE;
 }
 
+export function rowNetPnlPct(row: PfRow, costPct = POSITION_COST_PCT_DEFAULT): number {
+  return row.net_pnl_pct != null && Number.isFinite(Number(row.net_pnl_pct))
+    ? Number(row.net_pnl_pct) : finite(row.pnl_pct) - Math.max(0, finite(costPct)) / 100;
+}
+
 export function lastNCostPf(
   rows: PfRow[],
   n = 15,
@@ -177,9 +182,9 @@ export function lastNCostPf(
   let gp = 0;
   let gl = 0;
   for (const row of newest) {
-    rs.push(signedResultR(finite(row.pnl_pct), costPct));
-    // Net PF from the gross fraction less one PositionCost. Never the USDT pnl field.
-    const net = finite(row.pnl_pct) - Math.max(0, finite(costPct)) / 100;
+    // Recorded execution net already includes fees and fill-price slippage.
+    const net = rowNetPnlPct(row, costPct);
+    rs.push(net / Math.max(1e-9, finite(costPct) / 100));
     if (net > 0) gp += net;
     else if (net < 0) gl += Math.abs(net);
   }
@@ -196,7 +201,7 @@ export function lastNCostPf(
     pf: round(pf),
     costPct,
     netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
-    grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),
+    grossPct: count ? round(100 * newest.reduce((sum, row) => sum + finite(row.pnl_pct), 0) / count) : 0,
     netSumPct: round(100 * (gp - gl)),
     minPf,
     pass: count < 8 || pf + 1e-9 >= minPf,

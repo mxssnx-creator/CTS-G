@@ -2,8 +2,8 @@
 """Independent config Sets: 1m historic replay, base gate, max DD time, per-Set lifecycle.
 
 A Set is one (pack × SL:TP ratio × trail) book. Historic walks 1-minute OHLC,
-simulates entries/exits, then scores each Set on its own tape. Live closes
-merge into the same book. One rule decides validity (gate_reason): PF over the
+simulates entries/exits, then scores each Set on its own paper tape. Live closes
+have separate per-lane execution windows. One rule decides validity (gate_reason): PF over the
 last setGateWindow orders at or above setMinPf (at least setGateMinTrades orders when that minimum is
 on; 0 = off, the default), max drawdown time below setMaxDdtHours, and a fresh evaluation. An invalid Set
 keeps being scored and becomes valid again on its own; only a lock is sticky.
@@ -45,6 +45,7 @@ from position_cost import (
     configure_min_steps,
     cost_as_frac,
     net_pnl_pct,
+    row_net_pnl_pct,
     sl_floor_frac,
     snap_sl_ratio,
     trail_floor_steps,
@@ -963,12 +964,9 @@ class SetState:
     main_gl: float = 0.0
     proc: List[Tuple[float, float]] = field(default_factory=list)   # processed orders (exit t, net): opened while the Set passed Base
     proc_total: int = 0             # processed orders in the lookback (before the PROC_KEEP cap)
-    # Compact complete Main evidence for choosing a short candidate after a live close.
+    # Compact complete Main evidence for recomputing short candidates after rows expire.
     # The capped proc tape alone does not retain each order's entry time or earlier votes.
     main_evidence: Optional[Tuple[array, array, array]] = None
-    # Every live Main result within the lookback can vote for a short window, even after the
-    # larger display/lane rows have been capped at PROC_KEEP per lane. Entry == exit means unknown.
-    main_live_evidence: Optional[Tuple[array, array, array]] = None
     exe: List[Tuple[float, float]] = field(default_factory=list)    # executable orders (exit t, net): opened while every gate passed
     exe_total: int = 0
     exe_pf: float = 0.0             # net PF of the executable lane over its last setGateWindow orders (listing)
@@ -1015,7 +1013,7 @@ class SetState:
     dd_episodes: int = 0
     last_error: str = ""            # last replay/score failure for this Set; cleared on the next clean pass
     n: int = 0
-    live_n: int = 0                  # live closes accepted for this Set; n = replayed fills + live_n
+    live_n: int = 0                  # actual closes, counted separately from the paper sample n
     live_pos_n: int = 0              # accepted closes on the positive Real lane
     live_neg_n: int = 0              # accepted closes on the Negative Real lane
     wins: int = 0
@@ -1034,7 +1032,9 @@ class SetState:
     source_n: int = 0
 
     def tape(self) -> List[Dict[str, Any]]:
-        return list(self.hist) + list(self.live)
+        # A fill may execute the very same signal as a paper row. They are different
+        # evidence sources, never two observations of one combined strategy sample.
+        return list(self.hist)
 
 
 @dataclass
@@ -1608,6 +1608,51 @@ class SetBook:
         self._running = False
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
+        with self._lock:
+            previous = getattr(self, "_evaluation_config", None)
+            self._load(ov, cts)
+            signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
+                              self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
+                              self.sl_min_steps, self.trail_min_steps, self.hold_auto, self.lookback,
+                              self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
+                              self.hold_auto_min, self.hold_auto_max,
+                              [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
+                              [self.stage_params(pack) for pack in self.packs]))
+            self._evaluation_config = signature
+            if previous is not None and signature != previous:
+                # Until a complete pass under the new rules, no old row may validate
+                # a new signal/cost/hold configuration (including chunked refreshes).
+                self._hist_rows.clear()
+                self._sig_cache.clear()
+                self.progress.ready = False
+                self.last_run = 0.0
+                for st in self.by_idx:
+                    st.last_error = "configuration changed; replay required"
+                    st.hist, st.proc, st.exe, st.neg = [], [], [], []
+                    st.main_evidence = None
+                    st.proc_replayed = False
+                    st.n = st.proc_total = st.exe_total = st.neg_total = 0
+                    st.gate_n = st.main_n = st.exe_n = st.neg_n = 0
+                    st.gate_pf = st.main_pf = st.exe_pf = st.neg_pf = 0.0
+                    st.gate_gp = st.gate_gl = st.main_gp = st.main_gl = 0.0
+                    st.exe_gp = st.exe_gl = st.neg_gp = st.neg_gl = 0.0
+                    st.base_short_n = st.base_min_n = st.main_short_n = st.main_min_have = 0
+                    st.base_short_pf = st.main_short_pf = 0.0
+                    st.base_short_gp = st.base_short_gl = st.main_short_gp = st.main_short_gl = 0.0
+                    st.base_min_gp = st.base_min_gl = st.main_min_gp = st.main_min_gl = 0.0
+                    st.base_min_ok = st.base_long_ok = st.base_short_ok = False
+                    for key in ("gate_pf_old", "gate_pf_new", "main_short_win", "neg_win", "neg_win_gp", "neg_win_gl",
+                                "last15_pf", "last15_n", "last15_r", "last25_avg_r", "last25_n", "last25_avg_pnl",
+                                "max_dd_s", "avg_dd_s", "dd_episodes", "wins", "gp", "gl", "wr", "expectancy",
+                                "avg_hold_s", "pf_all", "source_n", "hold_auto_pf", "hold_auto_n"):
+                        setattr(st, key, 0)
+                    st.last15_ratio = 1.0
+                    st.exits = {}
+                    st.hold_bars, st.hold_auto = self.hold_bars_for(st), False
+                    st.stage = {}
+                    st.deact_reason = "error"
+
+    def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback_cfg = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
@@ -2124,7 +2169,7 @@ class SetBook:
             self._on_live_close(rec)
 
     def _on_live_close(self, rec: Any) -> None:
-        """Record one live close into the Set tapes, on the same unit as replay rows.
+        """Record one live close in its separate Set/lane execution window.
 
         Replay rows carry pnl as a NET FRACTION (gross move minus one PositionCost). Live rows carry
         pnl in USDT, so the tape pnl is recomputed from pnl_pct; the USDT figure is kept as pnl_usdt
@@ -2139,6 +2184,11 @@ class SetBook:
             return
         sid = str(get("set_id") or get("setId") or "")
         pct_raw = get("pnl_pct")
+        # Stored closes describe the aggregate exchange position. Recover the
+        # original Set component on restart when Block/DCA changed its average.
+        ref, qty, exit_price = finite(get("base_entry")), finite(get("base_qty")), finite(get("exit"))
+        if sid and ref > 0 and qty > 0 and exit_price > 0 and get("side") in ("LONG", "SHORT"):
+            pct_raw = (exit_price / ref - 1) * (1 if get("side") == "LONG" else -1)
         try:
             pct = float(pct_raw)
         except (TypeError, ValueError, OverflowError):
@@ -2160,9 +2210,14 @@ class SetBook:
             "hold_s": finite(get("hold_s")),
             "reason": str(get("reason") or ""),
             "client_id": str(get("client_id") or get("clientId") or ""),
-            "lane": str(get("lane") or "pos"),          # the lane it was executed on: its close joins that lane's Real Set
+            "lane": str(get("lane") or "pos"),
+            # Aggregate net cannot be attributed to the base when add-on fills
+            # changed its cost basis. Old records without component fees use an
+            # explicit configured estimate for that base only.
+            "net_pnl_pct": (get("base_net_pnl_pct") if ref > 0 and qty > 0
+                            else get("net_pnl_pct")),
         }
-        row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
+        row["pnl"] = row_net_pnl_pct(row, self.cost_pct)
         if not sid:
             # no Set id: the close cannot be attributed. It is counted, never guessed onto a Set.
             self.live_unmatched += 1
@@ -2191,24 +2246,6 @@ class SetBook:
             pos = [r for r in ordered if str(r.get("lane") or "pos") != "neg"][-PROC_KEEP:]
             neg = [r for r in ordered if str(r.get("lane") or "pos") == "neg"][-PROC_KEEP:]
             st.live = sorted(pos + neg, key=lambda r: finite(r.get("t")))
-            if st.main_live_evidence is None:
-                live_rows = st.live
-                ts, entries, nets = array("d"), array("d"), array("d")
-            else:
-                live_rows = [row]
-                ts, entries, nets = st.main_live_evidence
-            for item in live_rows:
-                t, hold = finite(item.get("t")), finite(item.get("hold_s"))
-                ts.append(t)
-                entries.append(t - hold if t > 0 and 0 < hold <= t else t)
-                # Preserve gross moves so a subsequent PositionCost change is applied consistently.
-                nets.append(finite(item.get("pnl_pct")))
-            cutoff = max(row["t"], st.score_at) - self.lookback * BAR_S
-            if any(t < cutoff for t in ts):
-                kept = [(t, e, n) for t, e, n in zip(ts, entries, nets) if t >= cutoff]
-                ts, entries, nets = (array("d", (r[i] for r in kept)) for i in range(3))
-            st.main_live_evidence = (ts, entries, nets)
-            st.n += 1
             st.live_n += 1
             if row["lane"] == "neg":
                 st.live_neg_n += 1
@@ -2289,6 +2326,9 @@ class SetBook:
                 packed = {sid: RowCols(rows) for sid, rows in per_set.items() if rows}
                 per_set = {}                          # rows are kept as columns (RowCols): about a sixth of the memory of tuples
                 with self._lock:
+                    if self._topo_gen != gen0:
+                        aborted = True
+                        break                       # never restore an old-rules chunk after load invalidated it
                     self._hist_rows[symbol] = packed
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
@@ -2315,7 +2355,7 @@ class SetBook:
                         st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=max(now, st.score_at) if st.live else now)
-                        st.n = len(full) + st.live_n   # a replay pass recounts history; live closes stay counted
+                        st.n = len(full)              # paper count; actual fills have their own live_n
                     except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
                         st.last_error = f"{type(exc).__name__}: {exc}"[:160]
                         st.deact_reason = "error"
@@ -2511,9 +2551,9 @@ class SetBook:
         st.proc_replayed = True
 
     def _streams(self, st: SetState, now: Optional[float] = None) -> Tuple[List[float], List[float], List[float], int]:
-        """Net results (exit order) of the Set's Main, Real and Real Negative Sets with its live closes (a live close joins the Main
-        Set and the lane it was executed on), and its Main short window. A Set that was not replayed applies the same chain to the tape it holds."""
-        cf = cost_as_frac(self.cost_pct)
+        """Paper Main, Real and Real Negative streams, each causal on the same paper history.
+        Actual fills are validated separately by execution_stats; mixing them here double-counts
+        overlapping entries and changes short-window votes without rebuilding their stage chain."""
         anchor = finite(now) if now is not None else st.score_at
         cutoff = anchor - self.lookback * BAR_S if anchor > 0 else float("-inf")
         upper = anchor if anchor > 0 else float("inf")
@@ -2528,22 +2568,8 @@ class SetBook:
         m = [x for x in m if cutoff <= x[0] <= upper]
         r = [x for x in r if cutoff <= x[0] <= upper]
         q = [x for x in q if cutoff <= x[0] <= upper]
-        live = [row for row in st.live if row.get("pnl_pct") is not None and cutoff <= finite(row.get("t")) <= upper]
-        for row in live:
-            item = (finite(row.get("t")), finite(row.get("pnl_pct")) - cf)
-            m.append(item)
-            (q if str(row.get("lane") or "pos") == "neg" else r).append(item)
-        live_evidence = st.main_live_evidence
-        if live_evidence is None:
-            live_records = []
-            for row in live:
-                t, hold = finite(row.get("t")), finite(row.get("hold_s"))
-                known = t > 0 and 0 < hold <= t
-                live_records.append((t, t - hold if known else t, finite(row.get("pnl_pct")) - cf, known))
-        else:
-            live_records = [(t, e, gross - cf, e < t) for t, e, gross in zip(*live_evidence) if cutoff <= t <= upper]
         expired = bool(evidence and evidence[0] and (evidence[0][0] < cutoff or evidence[0][-1] > upper))
-        if self.main_on and self.short_on and (live_records or expired):
+        if self.main_on and self.short_on and expired:
             if evidence is None and st.proc_replayed and st.proc_total:
                 # Without the entry-time evidence the old candidate cannot be recomputed safely.
                 short_n = self.main_n
@@ -2551,7 +2577,6 @@ class SetBook:
                 records = []
                 if evidence is not None:
                     records.extend((t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper)
-                records.extend(live_records)
                 records.sort(key=lambda item: item[0])
                 ts = [x[0] for x in records]
                 entries = [x[1] for x in records]
@@ -2565,12 +2590,39 @@ class SetBook:
             out.append([x for _, x in v])
         return out[0], out[1], out[2], short_n
 
+    def execution_stats(self, st: SetState, lane: str, now: Optional[float] = None) -> Dict[str, Any]:
+        """Actual fills only, one Set and execution lane, one round-trip cost.
+        Insufficient evidence is explicitly unproven, not a positive PF. After a full
+        Real window it is an additional entry gate; expiry permits fresh assessment.
+        The paper chain keeps running while this gate is closed.
+        """
+        anchor = finite(now) if now is not None else st.score_at
+        upper = anchor if anchor > 0 else float("inf")
+        cutoff = upper - self.lookback * BAR_S if anchor > 0 else float("-inf")
+        rows = sorted((r for r in st.live if str(r.get("lane") or "pos") == lane
+                       and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-self.realst_n:]
+        cf = cost_as_frac(self.cost_pct)
+        nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
+        gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+        floor = self.floor_for(self.realst_n, st.pack)
+        enough = len(nets) >= self.realst_n
+        pf = pf_of(gp, gl)
+        return {"source": "executed", "lane": lane, "n": len(nets), "lastN": self.realst_n,
+                "pf": round(pf, 4), "gp": gp, "gl": gl, "minPf": floor,
+                "proven": enough, "allow": not enough or pf + 1e-9 >= floor}
+
+    def _execution_lanes(self, st: SetState) -> List[str]:
+        v = st.stage or {}
+        plain = not (self.main_on or self.neg_on or self.realst_on)
+        return [lane for lane, ready in (("pos", plain or v.get("pos")), ("neg", v.get("negl")))
+                if ready and (not st.live or self.execution_stats(st, lane)["allow"])]
+
     def executable_stream(self, st: SetState) -> List[float]:
-        """The Set's Real Set (positive lane) with its live closes on that lane."""
+        """The Set's paper Real Set (positive lane)."""
         return self._streams(st)[1]
 
     def processed_stream(self, st: SetState) -> List[float]:
-        """The Set's Main Set (orders opened while Base passed) with its live closes."""
+        """The Set's paper Main Set (orders opened while Base passed)."""
         return self._streams(st)[0]
 
     def _tape_at(self, st: SetState, now: float) -> List[Dict[str, Any]]:
@@ -2744,6 +2796,8 @@ class SetBook:
             if self.main_on and self.main_min_n and not v.get("minimal"):
                 return "mainminimal"   # the Main minimal window (mainMinN): the newest Main results are not all positive / negative as asked
             return "real"            # the lane's Real Set (its last realGateN) is below the minimum PF
+        if not self._execution_lanes(st):
+            return "execution"       # actual fills fail their own window; never contaminate paper PF
         return ""
 
     def state_of(self, st: SetState) -> Tuple[str, str]:
@@ -3013,10 +3067,11 @@ class SetBook:
             return ""
         if not (self.main_on or self.neg_on or self.realst_on):
             return "pos"
-        v = st.stage or {}
-        return "pos" if v.get("pos") else ("neg" if v.get("negl") else "")
+        lanes = self._execution_lanes(st)
+        return lanes[0] if lanes else ""
 
-    def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None) -> Optional[SetState]:
+    def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None,
+                 predicate: Optional[Callable[[SetState], bool]] = None) -> Optional[SetState]:
         """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
         rank_key: the same entries, each judged on its own exits), else the best valid trailing Set."""
         # one lock acquisition: a Set cannot change between the lookups
@@ -3025,14 +3080,17 @@ class SetBook:
             allowed = {"pos", "neg"} if allowed_lanes is None else set(allowed_lanes)
             fixed = [x for x in (self._pick(pack, "base"), self._pick(pack, "exit")) if x is not None]
             if not fixed and not (self.main_on or self.neg_on or self.realst_on):
-                return self._pick(pack, "trail") if "pos" in allowed else None
+                rows = [x for x in self._valid_for(pack, "trail") if predicate is None or predicate(x)]
+                return max(rows, key=self.rank_key) if rows and "pos" in allowed else None
             for lane in ("pos", "neg"):
                 if lane not in allowed:
                     continue
                 for kinds in (("base", "exit"), ("trail",)):
-                    rows = [x for k in kinds for x in self._valid_for(pack, k) if self.lane_of(x) == lane]
-                    if rows:
-                        return max(rows, key=self.rank_key)
+                    rows = [x for k in kinds for x in self._valid_for(pack, k)
+                            if lane in self._execution_lanes(x)]
+                    for st in sorted(rows, key=self.rank_key, reverse=True):
+                        if predicate is None or predicate(st):
+                            return st
             return None
 
     def pack_open(self, pack: str) -> bool:
@@ -3068,7 +3126,7 @@ class SetBook:
         """The post-Base standard figures, on each Set's rolling gate window (its last `setGateWindow` orders), never on
         the whole tape: a Set that was good long ago and is bad now does not carry the pool. `base` is the pooled net
         PF of the Sets that pass Base validation (the effective PF, the one to judge a strategy by); `unfiltered` is
-        every Set on the same basis (under 1 by design: Base exists to drop the losing Sets). `validatedPct` is the
+        every Set on the same basis (including Sets rejected by Base). `validatedPct` is the
         share of configured Sets that pass Base validation, and `byPack` repeats base/validated per strategy pack.
         `history` is the continuous progress of the effective PF and the validated share, one point per scoring pass."""
         def pool(sts: List[SetState]) -> Dict[str, Any]:
@@ -3121,13 +3179,13 @@ class SetBook:
         main_all_lanes = {"pf": round(pf_of(agp, agl), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": self.main_n}
         pgp, pgl = sum(x.main_gp for x in base_only), sum(x.main_gl for x in base_only)
         processed = {"pf": round(pgp / pgl, 4) if pgl > 0 else (99.0 if pgp > 0 else 0.0), "n": sum(x.main_n for x in base_only),
-                     "sets": len(base_only), "orders": sum(int(x.proc_total) + x.live_n for x in base_only), "lastN": self.main_n}
+                     "sets": len(base_only), "orders": sum(int(x.proc_total) for x in base_only), "lastN": self.main_n, "source": "paper"}
         pos = [x for x in valid if self.validation_lane(x) == "pos"]
         neg = [x for x in valid if self.validation_lane(x) == "neg"]
         executable = {"pf": round(pf_of(sum(x.exe_gp for x in pos), sum(x.exe_gl for x in pos)), 4), "sets": len(pos), "n": sum(x.exe_n for x in pos),
-                      "orders": sum(int(x.exe_total) + x.live_pos_n for x in pos), "lastN": self.realst_n, "on": self.realst_on}
+                      "orders": sum(int(x.exe_total) for x in pos), "lastN": self.realst_n, "on": self.realst_on, "source": "paper"}
         realneg = {"pf": round(pf_of(sum(x.neg_gp for x in neg), sum(x.neg_gl for x in neg)), 4), "sets": len(neg), "n": sum(x.neg_n for x in neg),
-                   "orders": sum(int(x.neg_total) + x.live_neg_n for x in neg), "lastN": self.realst_n, "on": self.neg_on}
+                   "orders": sum(int(x.neg_total) for x in neg), "lastN": self.realst_n, "on": self.neg_on, "source": "paper"}
         stage_sets = {"base": len(base_only), "main": len(main_pass),
                       "negative": sum(1 for x in base_only if (x.stage or {}).get("neg")), "real": len(pos), "realNeg": len(neg)}
 
@@ -3136,10 +3194,9 @@ class SetBook:
             window orders and the plain mean of their own PFs (a window without a loss counts RANK_PF_CAP), never an average over all Sets."""
             gp, gl = sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts)
             pfs = [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
-            live_key = {"proc_total": "live_n", "exe_total": "live_pos_n", "neg_total": "live_neg_n"}.get(orders_key)
             return {"sets": len(sts), "pct": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),
                     "meanPf": round(sum(pfs) / len(pfs), 4) if pfs else 0.0, "n": sum(int(getattr(x, n_key)) for x in sts),
-                    "orders": sum(int(getattr(x, orders_key)) + (int(getattr(x, live_key)) if live_key else 0) for x in sts)}
+                    "orders": sum(int(getattr(x, orders_key)) for x in sts), "source": "paper"}
         stages = {"base": stage_row(base_only, "gate_gp", "gate_gl", "gate_n", "gate_n"),
                   "main": stage_row(main_pass, "main_gp", "main_gl", "main_n", "proc_total"),
                   "real": stage_row(pos, "exe_gp", "exe_gl", "exe_n", "exe_total"),
@@ -3240,7 +3297,9 @@ class SetBook:
                     "stepI": st.step_i,
                     "tpPct": round(st.tp_pct * 100, 4),
                     "n": st.n,
-                    "liveN": len(st.live),
+                    "liveN": st.live_n,
+                    "execution": {lane: self.execution_stats(st, lane) for lane in ("pos", "neg")},
+                    "source": "paper",
                     "wins": st.wins,
                     "pf": round(st.gate_pf, 4),
                     "gateN": st.gate_n,
@@ -3248,13 +3307,13 @@ class SetBook:
                     # the Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set
                     # (opened while Base and Main passed)
                     "mainId": st.id + MAIN_SUFFIX,
-                    "mainN": int(st.proc_total) + st.live_n,
+                    "mainN": int(st.proc_total),
                     "mainPf": round(st.main_pf, 4),
                     "mainLastN": st.main_n,
                     "realId": st.id + REAL_SUFFIX,
-                    "realN": int(st.exe_total) + st.live_pos_n,
+                    "realN": int(st.exe_total),
                     "realPf": round(st.exe_pf, 4),
-                    "realNegN": int(st.neg_total) + st.live_neg_n,
+                    "realNegN": int(st.neg_total),
                     "realNegPf": round(st.neg_pf, 4),
                     "shortPf": round(st.base_short_pf, 4),
                     "mainShortN": int(st.main_short_win or self.main_n),
@@ -3288,7 +3347,9 @@ class SetBook:
                         "E": st.expectancy,
                         "avgHoldS": st.avg_hold_s,
                         "n": st.n,
-                        "liveN": len(st.live),
+                        "liveN": st.live_n,
+                        "execution": {lane: self.execution_stats(st, lane) for lane in ("pos", "neg")},
+                        "source": "paper",
                     },
                     "active": st.active,
                     "state": state_row,
@@ -3308,6 +3369,7 @@ class SetBook:
                 "id": st.id,
                 "kind": st.kind,
                 "pack": st.pack,
+                "execution": {lane: self.execution_stats(st, lane) for lane in ("pos", "neg")} if st.live else {},
                 "sl": st.sl_ratio,
                 "tr": st.trail_key,
                 "st": st.step,
@@ -3332,13 +3394,13 @@ class SetBook:
                 # the Set's lane chain: its processed Set (orders opened while Base passed) and its executable Set (opened
                 # while every gate passed), each with its orders and PF
                 "mainId": st.id + MAIN_SUFFIX,
-                "mainN": int(st.proc_total) + st.live_n,
+                "mainN": int(st.proc_total),
                 "mainPf": round(st.main_pf, 4),
                 "realId": st.id + REAL_SUFFIX,
-                "realN": int(st.exe_total) + st.live_pos_n,
+                "realN": int(st.exe_total),
                 "realPf": round(st.exe_pf, 4),
                 "realNegId": st.id + REALNEG_SUFFIX,
-                "realNegN": int(st.neg_total) + st.live_neg_n,
+                "realNegN": int(st.neg_total),
                 "realNegPf": round(st.neg_pf, 4),
                 "shortPf": round(st.base_short_pf, 4),
                 "mainShortN": int(st.main_short_win or self.main_n),
@@ -3470,8 +3532,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-hist-neg-off", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min"), f"{st.active} {st.deact_reason}"))
     st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
-    # live closes are part of the one gate: 25 live losses are judged with the hist rows, not by a live-only rule
-    out.append(("set-live-in-one-gate", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min") and len(st.tape()) == 50, f"{st.active} {st.deact_reason} tape={len(st.tape())}"))
+    # actual closes are a separate sample; the paper tape does not grow
+    out.append(("set-live-paper-isolation", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min") and len(st.tape()) == 25, f"{st.active} {st.deact_reason} tape={len(st.tape())}"))
     st.live = [{"t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
     book._score_one(st)
     out.append(("set-live-win-on", st.active, f"{st.active} {st.deact_reason}"))

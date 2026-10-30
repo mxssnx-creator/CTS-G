@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, net_pnl_pct, pf_floor, window_n
+from position_cost import row_net_pnl_pct
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -177,7 +178,7 @@ class Coordinator:
                 continue
             if not math.isfinite(gross):
                 continue
-            if net_pnl_pct(gross, self.position_cost_pct) < 0:
+            if row_net_pnl_pct(row, self.position_cost_pct) < 0:
                 count += 1
             else:
                 break
@@ -286,15 +287,13 @@ class Coordinator:
         return {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
 
     def slot_cap(self, max_open: int, last_pf: float) -> int:
-        if max_open <= 0 or max_open >= 10**8:
-            return 10**9
-        cap = max_open
+        cap = max_open if 0 < max_open < 10**8 else 10**9
         if self.axes["cont"].enabled:
             extra = self.axes["cont"].max_window
             if last_pf >= self.min_pf:
-                cap = min(max_open, extra)
+                cap = min(cap, extra)
             else:
-                cap = min(max_open, max(2, extra // 2))
+                cap = min(cap, max(1, extra // 2))
         return max(1, cap)
 
     def pick_rearrange(

@@ -1,7 +1,7 @@
 {
   "targetNotional": 0.2,
   "volumeFactor": 0.05,
-  "sizePctOfBalance": 0,
+  "sizePctOfBalance": 1,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
   "ddHaltPct": 80,
@@ -38,13 +38,13 @@
   "symbols": [
     "*"
   ],
-  "axisPrevEnabled": false,
+  "axisPrevEnabled": true,
   "axisPrevMaxWindow": 12,
-  "axisLastEnabled": false,
+  "axisLastEnabled": true,
   "axisLastMaxWindow": 4,
-  "axisContEnabled": false,
+  "axisContEnabled": true,
   "axisContMaxWindow": 8,
-  "axisPauseEnabled": false,
+  "axisPauseEnabled": true,
   "axisPauseMaxWindow": 8,
   "minPf": 1.25,
   "noise": 0.05,
@@ -166,7 +166,7 @@
   "setMaxDdtHours": 24,
   "loadPartial": true,
   "exitMinPf": 1.25,
-  "stratShortRange": false,
+  "stratShortRange": true,
   "shortRangeStepMin": 2,
   "shortRangeStepMax": 6,
   "shortRangeMinPf": 1.1,
@@ -223,5 +223,7 @@
   "minPfMicroN": 5,
   "minPfMinimalN": 10,
   "minPfShortN": 20,
-  "minPfMediumN": 35
+  "minPfMediumN": 35,
+  "slippageAllowancePct": 0.02,
+  "blockRiskPctOfBalance": 0.25
 }

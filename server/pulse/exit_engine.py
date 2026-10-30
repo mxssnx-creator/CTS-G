@@ -27,6 +27,7 @@ from position_cost import (
     cost_as_frac,
     last_n_cost_pf,
     net_pnl_pct,
+    row_net_pnl_pct,
     normalize_cost_pct,
     signed_result_r,
 )
@@ -255,6 +256,8 @@ class ExitBook:
         return ExitDecision("hold", "hold")
 
     def on_close(self, rec: Any) -> None:
+        if (rec.get("set_id") or rec.get("setId")) if isinstance(rec, dict) else getattr(rec, "set_id", ""):
+            return   # Set exits belong to their own lane, including during restart seeding
         if (rec.get("pnl_pct") if isinstance(rec, dict) else getattr(rec, "pnl_pct", None)) is None:
             return   # no gross move recorded: not a loss, not scored (as in position_cost and the Set tapes)
         if isinstance(rec, dict):
@@ -272,7 +275,8 @@ class ExitBook:
                 "pnl_pct": finite(getattr(rec, "pnl_pct", 0)),
             }
         # tape pnl is a NET FRACTION (as in set_engine replay rows); the USDT figure is display-only
-        row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
+        row["net_pnl_pct"] = rec.get("net_pnl_pct") if isinstance(rec, dict) else getattr(rec, "net_pnl_pct", None)
+        row["pnl"] = row_net_pnl_pct(row, self.cost_pct)
         key = lane_of(reason)
         ln = self.lanes.setdefault(key, LaneScore(key=key))
         ln.rows.append(row)
@@ -292,7 +296,7 @@ class ExitBook:
         ln.last15_pf = float(pf["pf"])
         last25 = tape[-self.deact_n :]
         if last25:
-            ln.last25_avg_r = sum(signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25) / len(last25)
+            ln.last25_avg_r = sum(row_net_pnl_pct(r, self.cost_pct) / max(1e-9, cost_as_frac(self.cost_pct)) for r in last25) / len(last25)
         else:
             ln.last25_avg_r = 0.0
         ln.max_dd_s = float(drawdown_time(tape, now=now)["maxS"])

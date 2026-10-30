@@ -146,7 +146,7 @@ export type SetsSummary = {
   effectivePf: number | null;
   /** Orders behind it: the valid Sets' gate-window orders. */
   orders: number;
-  /** PF of every shown Set pooled the same way (under 1 by design: the Sets Base exists to drop are in it). */
+  /** PF of every shown Set pooled the same way (including Sets rejected by Base). */
   unfilteredPf: number | null;
 };
 

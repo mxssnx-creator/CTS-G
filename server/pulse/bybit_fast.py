@@ -724,6 +724,10 @@ class FastBybit:
         }
         if o.get("cumRealisedPnl") not in (None, ""):
             row["profit"] = str(o.get("cumRealisedPnl"))
+        if o.get("cumExecFee") not in (None, ""):
+            row["commission"] = o["cumExecFee"]
+            row["commissionAsset"] = SETTLE
+            row["feeDebitNormalized"] = True
         return row
 
     # -- BingX-shaped reads --------------------------------------------------------------------------------------------
@@ -1191,6 +1195,15 @@ class FastBybit:
 
     def _route(self, method: str, path: str, extra: Dict[str, Any]) -> Dict[str, Any]:
         if method == "GET":
+            if path == "/openApi/swap/v2/user/commissionRate":
+                env = self.call(path, "GET", "/v5/account/fee-rate", {"category": CATEGORY,
+                                "symbol": to_by(str(extra.get("symbol") or ""))}, retries=1)
+                if not self.ok(env):
+                    return self.fail(env)
+                rows = (env.get("result") or {}).get("list") or []
+                row = next((r for r in rows if r.get("symbol") == to_by(str(extra.get("symbol") or ""))), {})
+                return {"code": 0, "data": {"commission": {"takerCommissionRate": row.get("takerFeeRate"),
+                        "makerCommissionRate": row.get("makerFeeRate")}}}
             if path in (P_BAL3, P_BAL2):
                 return self._balance(path)
             if path == P_POS:
