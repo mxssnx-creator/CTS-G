@@ -24,7 +24,7 @@ from dataclasses import dataclass, asdict, field, replace as dc_replace
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
 from set_block import SetBlockBook
-from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage
+from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
@@ -3882,7 +3882,7 @@ class Pulse:
         orders. The in-memory closed list keeps only the last 80; these totals do not."""
         self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
         self.exec_sets: Dict[str, int] = {}
-        self.exec_scope: Dict[str, list] = {}
+        self.exec_scope: Dict[str, Dict[str, Any]] = {}
         if not os.path.exists(TRADES_PATH):
             return
         try:
@@ -3893,18 +3893,21 @@ class Pulse:
                     except Exception:
                         continue
                     try:
-                        t, pnl = float(rec.get("t") or 0), float(rec.get("pnl") or 0)
+                        t = float(rec.get("t") or 0)
+                        pnl = number(rec.get("pnl"))
                         cid = str(rec.get("client_id") or rec.get("clientId") or "")
                         conn = str(rec.get("conn") or rec.get("connection") or "")
-                        if not (1.6e9 < t <= time.time() + 300.0) or not math.isfinite(pnl) or rec.get("ours", True) is False:
+                        if not (1.6e9 < t <= time.time() + 300.0) or rec.get("ours", True) is False:
                             continue
                         if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT) or "unverified-exit" in str(rec.get("reason") or ""):
                             continue
                         self._exec_note(Closed(t, str(rec.get("symbol") or ""), str(rec.get("side") or ""),
-                            0, 0, 0, pnl, 0, str(rec.get("reason") or ""), 0,
+                            0, 0, 0, pnl if pnl is not None else float("nan"), 0, str(rec.get("reason") or ""), 0,
                             set_id=str(rec.get("set_id") or rec.get("setId") or ""),
                             pack=str(rec.get("pack") or ""), lane=str(rec.get("lane") or "pos"),
-                            block_fills=list(rec.get("block_fills") or [])))
+                            block_fills=list(rec.get("block_fills") or []),
+                            net_pnl_pct=number(rec.get("net_pnl_pct")),
+                            fee_source=str(rec.get("fee_source") or "unknown")))
                     except (ValueError, TypeError, AttributeError):
                         continue
         except Exception:
@@ -3926,22 +3929,37 @@ class Pulse:
 
     def _exec_note(self, rec: "Closed") -> None:
         if getattr(rec, "ours", True) is not False:
-            self._exec_count(rec.set_id, rec.pnl)
+            cash = number(rec.pnl)
+            net_return = number(getattr(rec, "net_pnl_pct", None))
+            self._exec_count(rec.set_id, cash if cash is not None else float("nan"))
             self._exec_inc("blockAddFills", len(getattr(rec, "block_fills", []) or []))
             if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
                 lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
                 key = "laneNeg" if lane == "neg" else "lanePos"
                 self._exec_inc(key)
-                if rec.pnl != 0:
-                    self._exec_inc(key + "Win" if rec.pnl > 0 else key + "Loss")
-                # executed figures per Real scope (the same keys as the overall strategies' scopes): orders, wins, net gain / loss
+                if cash is not None and cash != 0:
+                    self._exec_inc(key + "Win" if cash > 0 else key + "Loss")
+                # Position-return PF and cash PF use the same settled close cohort.
+                # Unknown returns remain in the denominator and prevent a partial
+                # sample from being reported as the entire cohort's PF.
                 sc = self.__dict__.setdefault("exec_scope", {})
                 for k in ("overall", f"lane:{lane}", f"pack:{rec.pack or '-'}", f"set:{rec.set_id}:{lane}"):
-                    row = sc.setdefault(k, [0, 0, 0.0, 0.0])
-                    row[0] += 1
-                    row[1] += 1 if rec.pnl > 0 else 0
-                    row[2] += max(0.0, float(rec.pnl))
-                    row[3] += max(0.0, -float(rec.pnl))
+                    row = sc.setdefault(k, {"orders": 0, "wins": 0, "cash_n": 0, "cash_gain": 0.0, "cash_loss": 0.0,
+                                            "return_n": 0, "return_gain": 0.0, "return_loss": 0.0, "fee_sources": {}})
+                    row["orders"] += 1
+                    if cash is not None:
+                        row["cash_n"] += 1
+                        row["wins"] += int(cash > 0)
+                        row["cash_gain"] += max(0.0, cash)
+                        row["cash_loss"] += max(0.0, -cash)
+                    if net_return is not None:
+                        row["return_n"] += 1
+                        row["return_gain"] += max(0.0, net_return)
+                        row["return_loss"] += max(0.0, -net_return)
+                    fee_source = str(getattr(rec, "fee_source", "") or "unknown")
+                    fee_source = fee_source if fee_source in ("reported-fee", "exchange-rate-estimate", "configured-estimate") else "unknown"
+                    sources = row["fee_sources"]
+                    sources[fee_source] = sources.get(fee_source, 0) + 1
 
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
@@ -3973,9 +3991,20 @@ class Pulse:
         executed = self.__dict__.get("exec_scope", {})
         scopes = {}
         for k in sorted(set(judged) | set(executed)):
-            e = executed.get(k, [0, 0, 0.0, 0.0])
-            scopes[k] = {**(judged.get(k) or {}), "executed": {"orders": int(e[0]), "wins": int(e[1]),
-                                                                 "pf": round(e[2] / e[3], 3) if e[3] > 0 else (99.0 if e[2] > 0 else None)}}
+            e = executed.get(k) or {"orders": 0, "wins": 0, "cash_n": 0, "cash_gain": 0.0, "cash_loss": 0.0,
+                                    "return_n": 0, "return_gain": 0.0, "return_loss": 0.0, "fee_sources": {}}
+            complete_return = e["orders"] > 0 and e["return_n"] == e["orders"]
+            complete_cash = e["orders"] > 0 and e["cash_n"] == e["orders"]
+            scopes[k] = {**(judged.get(k) or {}), "executed": {
+                "orders": e["orders"], "wins": e["wins"], "basis": "net-position-return",
+                "returnOrders": e["return_n"], "missingReturns": e["orders"] - e["return_n"],
+                "pf": round(e["return_gain"] / e["return_loss"], 3) if complete_return and e["return_loss"] > 0 else None,
+                "noLoss": complete_return and e["return_gain"] > 0 and e["return_loss"] == 0,
+                "cashOrders": e["cash_n"], "missingCash": e["orders"] - e["cash_n"],
+                "cashPf": round(e["cash_gain"] / e["cash_loss"], 3) if complete_cash and e["cash_loss"] > 0 else None,
+                "cashNoLoss": complete_cash and e["cash_gain"] > 0 and e["cash_loss"] == 0,
+                "feeSources": dict(e["fee_sources"]),
+            }}
         stage_counts = self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}
         return {
             "overall": {"scopes": scopes, "blocked": int(n.get("scopeBlocked", 0))},

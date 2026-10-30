@@ -30,7 +30,6 @@ import bisect
 import collections
 import json
 import os
-import pickle
 import sys
 import time
 
@@ -74,15 +73,31 @@ def main() -> int:
     if a.patch:
         os.environ["STAGE_OVERLAY_PATCH"] = a.patch
     import stage_eval as sg  # noqa: E402  (reads STAGE_OVERLAY_PATCH)
+    import replay_cache  # noqa: E402
     from position_cost import MIN_VALIDATION_N, cost_as_frac  # noqa: E402
     t0 = time.time()
-    names, bars, times = sg.load_bars(a.data, a.symbols)
+    book = sg.make_book()
+    if book.hold_auto and any(book.auto_holds(st) for st in book.by_idx):
+        print("Automatic hold selection is not modeled by this simulator; use the actual SetBook replay or explicitly disable auto holds for a separate study.")
+        return 2
+    names = sorted(f[:-5] for f in os.listdir(a.data) if f.endswith("-USDT.json"))[:a.symbols]
+    if not names:
+        print("No market data found")
+        return 2
+    overlay = json.load(open(sg.OVERLAY, encoding="utf-8"))
+    if a.patch:
+        overlay.update(json.loads(a.patch))
+    manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
+    loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
+    if loaded_names != names or replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
+        raise ValueError("replay inputs changed while reading market data")
     if os.path.exists(a.cache):
-        shadow = pickle.load(open(a.cache, "rb"))
+        shadow = replay_cache.load(a.cache, manifest)
     else:
         shadow = sg.build(names, bars, times, a.jobs)
-        pickle.dump(shadow, open(a.cache, "wb"))
-    book = sg.make_book()
+        if replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
+            raise ValueError("replay inputs changed during cache generation")
+        replay_cache.save(a.cache, shadow, manifest)
     if any(len(shadow[names[0]][3]) != len(book.by_idx) for _ in (0,)):
         print(f"cache holds {len(shadow[names[0]][3])} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")
         return 2

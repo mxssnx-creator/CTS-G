@@ -126,7 +126,8 @@ export type PfBase = {
   eligiblePct?: number;
   coordinationWaiting?: number;
   validatedPct?: number;
-  byPack?: Record<string, { base: PfPool; unfiltered: PfPool; total: number; valid: number; validatedPct: number; minPf?: number }>;
+  byPack?: Record<string, { base: PfPool; baseOnly?: PfPool; unfiltered: PfPool; total: number; valid: number;
+    validatedPct: number; validatedBasePct?: number; minPf?: number }>;
   /** "gate-window": pooled over each Set's last setGateWindow orders, never the whole tape. */
   basis?: string;
   /** Continuous progress of the effective PF and the validated share, one point per scoring pass (oldest first). */
@@ -145,7 +146,20 @@ export type OverallScope = {
   n?: number;
   realPf?: number;
   realN?: number;
-  executed: { orders: number; wins: number; pf: number | null };
+  executed: {
+    orders: number;
+    wins: number;
+    pf: number | null;
+    basis?: string;
+    returnOrders?: number;
+    missingReturns?: number;
+    noLoss?: boolean;
+    cashOrders?: number;
+    missingCash?: number;
+    cashPf?: number | null;
+    cashNoLoss?: boolean;
+    feeSources?: Record<string, number>;
+  };
 };
 
 export type Execution = {

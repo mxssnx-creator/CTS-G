@@ -3,10 +3,10 @@ import { rowNetPnlPct } from "./analytics.ts";
 
 type Closed = NonNullable<LiveStats["closed"]>[number];
 
-/** Net PF of the closes in each of the last `hours` clock hours (oldest first). Net = gross fraction less one
- * PositionCost; hours without a decided trade are null so the line breaks instead of reading as 0. */
+/** Net PF of recorded closes in each clock hour (oldest first). Missing,
+ * flat and no-loss hours have no finite PF; never count a future close. */
 export function hourlyPf(closed: Closed[], costPct: number, now: number, hours = 24) {
-  const out: { hour: string; pf: number | null; n: number }[] = [];
+  const out: { hour: string; pf: number | null; n: number; missing: number; noLoss: boolean; flat: boolean }[] = [];
   const nowS = now > 1e11 ? now / 1000 : now;
   const hourStart = Math.floor(nowS / 3600) * 3600;
   for (let h = hours - 1; h >= 0; h--) {
@@ -15,16 +15,22 @@ export function hourlyPf(closed: Closed[], costPct: number, now: number, hours =
     let gp = 0;
     let gl = 0;
     let n = 0;
+    let missing = 0;
     for (const c of closed) {
       const t = c.t > 1e11 ? c.t / 1000 : c.t;
-      if (!Number.isFinite(t) || t < from || t >= to || c.pnl_pct === null || c.pnl_pct === undefined || !Number.isFinite(Number(c.pnl_pct))) continue;
+      if (!Number.isFinite(t) || t < from || t >= to || t > nowS) continue;
+      const hasNet = c.net_pnl_pct != null && Number.isFinite(Number(c.net_pnl_pct));
+      const hasGross = c.pnl_pct != null && Number.isFinite(Number(c.pnl_pct));
+      if (!hasNet && !hasGross) { missing += 1; continue; }
       const net = rowNetPnlPct(c, costPct);
       n += 1;
       if (net > 0) gp += net;
       else if (net < 0) gl += -net;
     }
-    const pf = n === 0 ? null : gl > 0 ? Math.min(gp / gl, 9.99) : gp > 0 ? 9.99 : 0;
-    out.push({ hour: new Date(from * 1000).toISOString().slice(11, 13) + "h", pf, n });
+    const complete = n > 0 && missing === 0;
+    const pf = complete && gl > 0 ? gp / gl : null;
+    out.push({ hour: new Date(from * 1000).toISOString().slice(11, 13) + "h", pf, n, missing,
+      noLoss: complete && gp > 0 && gl === 0, flat: complete && gp === 0 && gl === 0 });
   }
   return out;
 }

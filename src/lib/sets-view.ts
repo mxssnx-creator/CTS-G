@@ -50,12 +50,15 @@ export type SetIndexRow = {
   /** The Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set (opened while Base and Main passed). */
   mainId?: string;
   mainN?: number;
+  mainWindowN?: number;
   mainPf?: number;
   realId?: string;
   realN?: number;
+  realWindowN?: number;
   realPf?: number;
   realNegId?: string;
   realNegN?: number;
+  realNegWindowN?: number;
   realNegPf?: number;
   /** Base short window PF, the Set's own Main short window (N), the lane it is valid on ("pos" / "neg" / ""), the reason when not. */
   shortPf?: number;
@@ -140,13 +143,13 @@ export type SetsSummary = {
   total: number;
   valid: number;
   eligible: number;
-  /** Share of the shown Sets that pass Base validation, percent with two decimals. */
+  /** Share that pass the later PF validation; older servers may provide readiness only. */
   validatedPct: number;
   /** Effective PF: pooled over the valid Sets' gate windows. null when no Set is valid. */
   effectivePf: number | null;
   /** Orders behind it: the valid Sets' gate-window orders. */
   orders: number;
-  /** PF of every shown Set pooled the same way (including Sets rejected by Base). */
+  /** PF of every shown Set pooled the same way (including rejected Sets). */
   unfilteredPf: number | null;
 };
 
@@ -158,7 +161,8 @@ function pooledPf(rows: readonly SetIndexRow[]): number | null {
     gp += Number(r.gp ?? 0);
     gl += Number(r.gl ?? 0);
   }
-  const pf = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
+  const pf = gl > 0 ? gp / gl : gp > 0 ? 99 : null;
+  if (pf === null) return null;
   return Math.round(pf * 1e4) / 1e4;
 }
 
@@ -188,7 +192,7 @@ export function rankRows(rows: readonly SetIndexRow[]): SetIndexRow[] {
   });
 }
 
-/** Per-pack split of a summary (the Base validation reports its share per strategy pack). */
+/** Per-pack split of the same summary. */
 export function summarizeByPack(rows: readonly SetIndexRow[]): Record<string, SetsSummary> {
   const packs = [...new Set(rows.map((r) => r.pack))].sort();
   const out: Record<string, SetsSummary> = {};
@@ -303,4 +307,9 @@ export function windowFigures(pb: Pick<PfBase, "windows"> | null | undefined): W
 export function formatPf(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return "—";
   return Number(v) >= 99 ? "no loss" : Number(v).toFixed(digits);
+}
+
+/** An empty or unknown stage has no measured PF. */
+export function formatPfWithCount(v: number | null | undefined, count: number | null | undefined): string {
+  return count != null && Number.isFinite(count) && count > 0 ? formatPf(v) : "—";
 }

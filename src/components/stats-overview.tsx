@@ -3,6 +3,7 @@ import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
 import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
+import { executionScopeText, scopeStatus } from "@/lib/execution-scope";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -40,12 +41,12 @@ export function StatsOverview({
         <Hero
           k={`Last ${cost.n || 15} PF`}
           v={cost.count ? formatPf(cost.pf) : "—"}
-          s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
+          s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.count < 8 ? "insufficient evidence" : cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
         {live?.sets?.pfBase ? (
           <Hero
-            k="Effective PF · after Base"
+            k="Base-window PF · all-stage validated"
             v={formatPf(live.sets.pfBase.base.n ? live.sets.pfBase.base.pf : null)}
             s={`${live.sets.pfBase.base.sets} PF-validated Sets${live.sets.pfBase.validatedPct != null ? ` (${live.sets.pfBase.validatedPct.toFixed(1)}%${live.sets.pfBase.validatedBasePct != null && live.sets.pfBase.main?.on ? `, Base alone ${live.sets.pfBase.validatedBasePct.toFixed(1)}%` : ""})` : ""} · n ${live.sets.pfBase.base.n}${live.sets.pfBase.main?.on ? ` · Main last ${live.sets.pfBase.main.lastN}: PF ${formatPf(live.sets.pfBase.main.n ? live.sets.pfBase.main.pf : null)} (${live.sets.pfBase.main.n} orders)` : ""}${live.sets.pfBase.baseEntry && live.sets.pfBase.baseEntry.entries ? ` · per entry PF ${formatPf(live.sets.pfBase.baseEntry.pf)} (${live.sets.pfBase.baseEntry.entries} entries, ${live.sets.pfBase.baseEntry.setsPerEntry} Sets each)` : ""}${live.sets.pfBase.real ? ` · Real Sets PF ${formatPf((live.sets.pfBase.real.n ?? live.sets.pfBase.real.orders) ? live.sets.pfBase.real.pf : null)} (${live.sets.pfBase.real.orders} orders)` : ""} · before Base ${formatPf(live.sets.pfBase.unfiltered.n ? live.sets.pfBase.unfiltered.pf : null)}`}
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
@@ -62,9 +63,9 @@ export function StatsOverview({
         {live?.execution?.overall && Object.keys(live.execution.overall.scopes).length ? (
           <Hero
             k="Real · overall strategies by scope"
-            v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow !== false).length}/${Object.keys(live.execution.overall.scopes).length} open`}
+            v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow === true).length}/${Object.values(live.execution.overall.scopes).filter((s) => typeof s.allow === "boolean").length} evaluated scopes open`}
             s={Object.entries(live.execution.overall.scopes)
-              .map(([k, s]) => `${k.replace("pack:", "").replace("lane:", "lane ")} ${s.allow === false ? "blocked" : "open"} · paper PF ${s.pf != null ? s.pf.toFixed(2) : "—"} (${s.n ?? 0}) · executed ${s.executed.pf != null ? s.executed.pf.toFixed(2) : "—"} (${s.executed.orders})`)
+              .map(([k, s]) => `${k.replace("pack:", "").replace("lane:", "lane ")} ${scopeStatus(s.allow)} · paper PF ${(s.n ?? 0) > 0 ? formatPf(s.pf) : "—"} (${s.n ?? 0}) · ${executionScopeText(s.executed)}`)
               .join(" | ") + (live.execution.overall.blocked ? ` · ${live.execution.overall.blocked} entries held by a scope` : "")}
             tone={Object.values(live.execution.overall.scopes).some((s) => s.allow === false) ? "bad" : "ok"}
           />

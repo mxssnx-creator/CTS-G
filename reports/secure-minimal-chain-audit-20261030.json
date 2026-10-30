@@ -1,0 +1,86 @@
+{
+  "presetSha256": "33ff269b84e67c779879866d578f2c9a176f5d047923afbf1e0e6242f0cb51cc",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "lookbackBars": 720,
+  "holdAuto": true,
+  "costPct": 0.12,
+  "checkpoints": [
+    {
+      "t": 1792256400,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 743,
+        "pass": 64,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 743,
+        "main": 6,
+        "real": 58,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "basePassed": 64,
+      "basePf": 8.208677189961247,
+      "baseNoLoss": false,
+      "baseOrders": 3200,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 67,
+      "baseShortPassed": 323,
+      "autoHoldSelected": 463,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {
+        "5": 7,
+        "6": 50,
+        "8": 1
+      },
+      "stageCounts": {
+        "base": 64,
+        "main": 58,
+        "negative": 1,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 64,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 26.622,
+      "independentChainAudit": {
+        "sets": 64,
+        "differences": [],
+        "scope": "same pooled Set tape; not per-symbol-side or venue parity"
+      }
+    }
+  ],
+  "maxRssKiB": 164008,
+  "scope": "historical SetBook snapshots only; not modeled execution or exchange fills"
+}

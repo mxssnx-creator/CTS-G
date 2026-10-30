@@ -10,6 +10,7 @@ import {
   STRATEGY_TYPES,
   filterSets,
   formatPf,
+  formatPfWithCount,
   pfByStep,
   rangeById,
   rankRows,
@@ -124,6 +125,7 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
   const hist = useMemo(() => stepHistogram(rows, cost), [rows, cost]);
   const pfStep = useMemo(() => pfByStep(rows, cost), [rows, cost]);
   const ranked = useMemo(() => rankRows(rows), [rows]);
+  const hasLegacyRows = rows.some((row) => row.v === undefined);
   if (!index || index.length === 0) {
     return <p className="py-6 text-center text-sm text-muted">The Set list appears after the first historic replay pass.</p>;
   }
@@ -132,16 +134,16 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
     <div className="space-y-3" data-testid="sets-overview-body">
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <Kpi k="Sets shown" v={String(sum.total)} s={`${type === "normal" ? "base" : type === "exit" ? "exit (no TP)" : "trailing"} · step ${rangeById(rangeId).label}`} />
-        <Kpi k="PF validated" v={`${num(sum.validatedPct, 1)}%`} s={`${sum.valid} of ${sum.total} · ${sum.eligible} ready`} good={sum.validatedPct >= 25} />
+        <Kpi k="All-stage validated" v={`${num(sum.validatedPct, 1)}%`} s={`${sum.valid} of ${sum.total} · ${sum.eligible} ready${hasLegacyRows ? " · legacy readiness fallback" : ""}`} />
         <Kpi
           k="Effective PF"
           v={formatPf(sum.effectivePf)}
-          s={`after Base · min ${minPf}`}
-          good={(sum.effectivePf ?? 0) >= minPf}
+          s="Base-window PF of all-stage validated Sets"
+          good={(sum.effectivePf ?? 0) > 1}
           bad={sum.effectivePf !== null && sum.effectivePf < 1}
         />
         <Kpi k="Orders" v={String(sum.orders)} s="valid Sets, gate windows" />
-        <Kpi k="Before Base" v={formatPf(sum.unfilteredPf)} s="under 1 is normal" />
+        <Kpi k="Before Base" v={formatPf(sum.unfilteredPf)} s="all shown Set windows" />
       </div>
       {packs.length > 1 ? (
         <div className="flex flex-wrap gap-3 font-mono text-xs text-muted" data-testid="sets-overview-packs">
@@ -153,7 +155,7 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
         </div>
       ) : null}
       <div className="grid gap-3 lg:grid-cols-2">
-        <Panel title="Sets per step" hint="All shown Sets and those that pass Base, by TP step (trailing: arm in PositionCost steps).">
+        <Panel title="Sets per step" hint="All shown Sets and those passing all PF stages, by TP step (trailing: arm in PositionCost steps).">
           <ClientChart height={180}>
             <BarChart data={hist} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #2a2f3a)" />
@@ -196,9 +198,9 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
               <th className="pb-2 text-right font-medium">Hold</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 text-right font-medium">Avg DDt</th>
-              <th className="pb-2 text-right font-medium" title="Main Set: orders opened while Base passed · the Main gate's PF on its last N">Main Set n · PF</th>
-              <th className="pb-2 text-right font-medium" title="Real Set: orders opened while Base and Main passed · PF on its last N">Real Set n · PF</th>
-              <th className="pb-2 text-right font-medium" title="Real Negative Set: Main orders opened in a dip · PF on its last N">Real Neg n · PF</th>
+              <th className="pb-2 text-right font-medium" title="Total paper closes / closes in the Main PF window · PF">Main total / window · PF</th>
+              <th className="pb-2 text-right font-medium" title="Total paper closes / closes in the Real PF window · PF">Real total / window · PF</th>
+              <th className="pb-2 text-right font-medium" title="Total paper closes / closes in the Real Negative PF window · PF">Real Neg total / window · PF</th>
               <th className="pb-2 text-right font-medium" title="Base short window PF · the Set's own Main short window (N)">Short PF · Main short</th>
               <th className="pb-2 font-medium" title="the lane the Set is valid on, or the stage it fails">Lane</th>
             </tr>
@@ -214,20 +216,20 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
               shown.map((r) => (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5">{setLabel(r)}</td>
-                  <td className={r.on === 1 ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.on === 1 ? "valid" : "off"}</td>
+                  <td className={r.baseV === 1 ? "py-1.5 text-primary" : "py-1.5 text-muted"}>{r.baseV === 1 ? "pass" : r.baseV === 0 ? "off" : "—"}</td>
                   <td className="py-1.5 text-right">{num(stepOf(r, cost), 0)}</td>
                   <td className="py-1.5 text-right">{r.n ?? "—"}</td>
-                  <td className={`py-1.5 text-right ${r.pf >= minPf ? "text-primary" : "text-danger"}`}>{formatPf(r.pf)}</td>
-                  <td className="py-1.5 text-right">{formatPf(r.p15)}</td>
+                  <td className="py-1.5 text-right">{formatPfWithCount(r.pf, r.gn)}</td>
+                  <td className="py-1.5 text-right">{formatPfWithCount(r.p15, r.n)}</td>
                   <td className={`py-1.5 text-right ${Number(r.r25 ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{num(r.r25)}</td>
                   <td className="py-1.5 text-right">{r.wr === undefined ? "—" : `${num(r.wr, 0)}%`}</td>
                   <td className={`py-1.5 text-right ${Number(r.e ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{num(r.e, 4)}</td>
                   <td className="py-1.5 text-right">{r.h === undefined ? "—" : formatDuration(r.h * 1000)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.dd * 1000)}</td>
                   <td className="py-1.5 text-right">{r.da === undefined ? "—" : formatDuration(r.da * 1000)}</td>
-                  <td className="py-1.5 text-right">{r.mainN === undefined ? "—" : `${r.mainN} · ${formatPf(r.mainPf ?? 0)}`}</td>
-                  <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} · ${formatPf(r.realPf ?? 0)}`}</td>
-                  <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} · ${formatPf(r.realNegPf ?? 0)}`}</td>
+                  <td className="py-1.5 text-right">{r.mainN === undefined ? "—" : `${r.mainN} / ${r.mainWindowN ?? "—"} · ${formatPfWithCount(r.mainPf, r.mainWindowN)}`}</td>
+                  <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} / ${r.realWindowN ?? "—"} · ${formatPfWithCount(r.realPf, r.realWindowN)}`}</td>
+                  <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} / ${r.realNegWindowN ?? "—"} · ${formatPfWithCount(r.realNegPf, r.realNegWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
                   <td className="py-1.5">{r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
                 </tr>

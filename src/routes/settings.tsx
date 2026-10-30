@@ -787,7 +787,7 @@ function SettingsPage() {
                   label="Main · Negative windows"
                   value={overlay.mainNegWindows}
                   options={[1, 2, 5, 10]}
-                  hint="default 5 and 10 · the average of the last N Main orders below zero, for some N, makes the Set's Real Negative Set (1 and 2: the last one or two results)"
+                  hint="Default 5 and 10 · a negative Main window opens a separate same-direction Real Negative tape. An independently simulated opposite-direction strategy is not yet connected."
                   onChange={(v) => patch("mainNegWindows", v)}
                 />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Real · evals and overall strategies · Active execution and mirroring to the exchange</div>
@@ -853,7 +853,7 @@ function SettingsPage() {
                   min={1.05}
                   max={2.3}
                   step={0.02}
-                  hint="Base PF floor of the Short Range strategy alone (default 1.10, the floor; the other Sets 1.25); the other strategies use the Set min PF above."
+                  hint={overlay.minPfBySize !== false ? "The window-size PF controls currently take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider
