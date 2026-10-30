@@ -34,7 +34,9 @@ def main() -> int:
         ap.error("--scratch-min-pct must be 0–1 percent")
     with open(args.result, encoding="utf-8") as fh:
         sim = json.load(fh)
-    patch = {"histLookbackBars": sim["gate"]["lookback_bars"], "histLookbackAuto": False, "holdEnabled": False}
+    patch = {"histLookbackBars": sim["gate"]["lookback_bars"], "histLookbackAuto": False,
+             "holdEnabled": False, "positionCostPct": sim["config"]["cost_pct"],
+             "extraIndicators": sim["config"].get("extra_indicators", [])}
     if args.time_stop_min is not None:
         patch["timeStopS"] = args.time_stop_min * 60
     if args.scratch_after_min is not None:

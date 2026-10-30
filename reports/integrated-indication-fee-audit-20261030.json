@@ -1,0 +1,280 @@
+{
+  "window": "last 12 h",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "sets": 3192,
+  "gate": {
+    "window": 50,
+    "short": 25,
+    "main_n": 25,
+    "min": 1,
+    "min_pf": 1.25,
+    "max_ddt_h": 24.0,
+    "lookback_bars": 720
+  },
+  "config": {
+    "honor_tp_trail": false,
+    "exit_sets": true,
+    "time_bars": 360,
+    "scratch_bars": 10,
+    "scratch_min_pct": 0.16,
+    "cost_pct": 0.15,
+    "extra_indicators": [
+      "donchian_break",
+      "rsi2_reversion"
+    ]
+  },
+  "all_stages": {
+    "group": "all",
+    "sets": 3192,
+    "valid_pct": 0.0,
+    "eff_pf": null,
+    "eff_orders": 0,
+    "next8_pf": null,
+    "next8_orders": 0,
+    "next50_pf": null,
+    "next50_orders": 0,
+    "exec_pf": null,
+    "orders": 0,
+    "net_pct": 0.0,
+    "win_pct": null,
+    "blocks50_pf1": "0/0",
+    "blocks50_min_pf": null,
+    "min_n": null,
+    "next": {
+      "8": {
+        "pf": null,
+        "orders": 0
+      },
+      "50": {
+        "pf": null,
+        "orders": 0
+      },
+      "15": {
+        "pf": null,
+        "orders": 0
+      },
+      "25": {
+        "pf": null,
+        "orders": 0
+      }
+    }
+  },
+  "stage_summary": {
+    "base": {
+      "sets": 4,
+      "gain": 0.20753770352910766,
+      "loss": 0.12375823626737717,
+      "orders": 200,
+      "pct_average": 0.010442773600668337,
+      "pf": 1.6769607404611573
+    },
+    "main": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "real": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "realNeg": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    }
+  },
+  "by_pack": {
+    "indications": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "general": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "shortrange": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "extra.donchian_break": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "extra.rsi2_reversion": {
+      "base": {
+        "sets": 4,
+        "gain": 0.20753770352910766,
+        "loss": 0.12375823626737717,
+        "orders": 200,
+        "pct_average": 0.043346337234503686,
+        "pf": 1.6769607404611573
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    }
+  },
+  "open_at_end": [],
+  "trades": [],
+  "note": "Frozen historical model, 0.15% assumed cost, not exchange fills; Set windows repeat and are not independent."
+}

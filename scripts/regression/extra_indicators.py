@@ -102,18 +102,23 @@ def a_failing_indicator_is_isolated():
     return out == [(1, 0.7, "yes")], f"votes={out}"
 
 
-def the_overlay_list_reaches_the_vote_and_default_is_off():
+def overlay_extras_get_independent_packs():
+    from set_engine import EXTRA_INDICATOR_PREFIX, bar_signal
     b = SetBook()
     b.load(overlay())
     off = b.ind_settings["extraIndicators"]
-    b.load(overlay(extraIndicators=["donchian_break", "nope", "donchian_break"]))
+    b.load(overlay(extraIndicators=["donchian_break", "rsi2_reversion", "nope", "donchian_break"]))
     on = b.ind_settings["extraIndicators"]
     flat = _rows([100.0] * 120)
     flat[-1] = [100.0, 100.9, 100.0, 100.85, 3.0]
-    s_on = indication_signal(flat, dict(b.ind_settings), T0)
-    s_off = indication_signal(flat, dict(b.ind_settings, extraIndicators=[]), T0)
-    ok = off == [] and on == ["donchian_break"] and "donchian_break" in s_on[2] and "donchian_break" not in s_off[2]
-    return ok, f"default={off} list={on} on={s_on} off={s_off}"
+    signals = bar_signal(flat, len(flat) - 1, b.packs, b.ind_settings, T0)
+    legacy = indication_signal(flat, dict(b.ind_settings, extraIndicators=[]), T0)
+    packs = {EXTRA_INDICATOR_PREFIX + n for n in on}
+    separate = all(any(st.pack == p for st in b.by_idx) for p in packs)
+    ok = (off == [] and on == ["donchian_break", "rsi2_reversion"]
+          and packs <= set(signals) and separate and signals["indications"] == legacy
+          and signals[EXTRA_INDICATOR_PREFIX + "donchian_break"][0] == 1)
+    return ok, f"default={off} extras={on} independent_sets={separate} legacy={signals['indications'] == legacy}"
 
 
 CHECKS = [
@@ -122,7 +127,7 @@ CHECKS = [
     ("extra.outputs-stay-in-domain", outputs_stay_in_their_domain),
     ("extra.fixtures-fire-both-ways", fixtures_fire_both_ways),
     ("extra.failing-indicator-isolated", a_failing_indicator_is_isolated),
-    ("extra.overlay-list-reaches-vote", the_overlay_list_reaches_the_vote_and_default_is_off),
+    ("extra.overlay-list-uses-independent-packs", overlay_extras_get_independent_packs),
 ]
 
 
@@ -433,14 +438,17 @@ def combined_needs_agreement_across_timeframes():
     return bool(ok), f"agree={same} split={split} lone={lone} three={three}"
 
 
-def family_wires_into_the_set_vote_by_name():
+def family_wires_into_its_own_set_pack():
+    from set_engine import bar_signal, IND_WINDOW_BARS
     b = SetBook()
     b.load(overlay(extraIndicators=["trend_c10", "brk_n10_t5", "brk_n10_t5", "trend_nope"]))
     names = b.ind_settings["extraIndicators"]
     tape = _break_tape(1)
-    on = indication_signal(tape, dict(b.ind_settings), T0)
-    off = indication_signal(tape, dict(b.ind_settings, extraIndicators=[]), T0)
-    return names == ["brk_n10_t5", "trend_c10"] and "brk_n10_t5" in on[2] and "brk_n10_t5" not in off[2], f"names={names} on={on} off={off}"
+    rows = bar_signal(tape, len(tape) - 1, b.packs, b.ind_settings, T0)
+    original = indication_signal(tape[-IND_WINDOW_BARS:], dict(b.ind_settings, extraIndicators=[]), T0)
+    independent = rows.get("extra.brk_n10_t5", (0, 0, ""))
+    ok = names == ["brk_n10_t5", "trend_c10"] and independent[0] == 1 and rows["indications"] == original
+    return ok, f"names={names} separate={independent} original unchanged={rows['indications'] == original}"
 
 
 CHECKS += [
@@ -449,7 +457,7 @@ CHECKS += [
     ("extra.trend-family-both-ways-quiet-on-noise", trend_family_fires_both_ways_and_is_quiet_on_noise),
     ("extra.breakout-family-both-ways-needs-close-and-volume", breakout_family_fires_both_ways_and_needs_the_close_and_volume),
     ("extra.combined-needs-agreement", combined_needs_agreement_across_timeframes),
-    ("extra.family-wires-into-the-set-vote", family_wires_into_the_set_vote_by_name),
+    ("extra.family-wires-into-own-set-pack", family_wires_into_its_own_set_pack),
 ]
 
 

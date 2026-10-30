@@ -860,11 +860,15 @@ class Pulse:
         self._hist_stop = False
         self.apply_live_config(initial=True)
 
+    def active_fee_contracts(self) -> Dict[str, Any]:
+        """Only selected symbols contribute to the shared paper-cost budget."""
+        return {s: self.contracts.get(s) for s in SYMBOLS}
+
     def refresh_fees(self) -> None:
         now = time.time()
         self.fee_schedule.refresh(self.api, list(SYMBOLS), now)
         budget = self.fee_schedule.paper_budget(float(self.overlay.get("configuredPositionCostPct") or .12),
-                                               self.slippage_allowance_pct, self.contracts, now)
+                                               self.slippage_allowance_pct, self.active_fee_contracts(), now)
         if abs(budget - self.position_cost_pct) > 1e-10:
             self._fee_config_dirty = True
 
@@ -872,15 +876,26 @@ class Pulse:
         maker, taker, _ = self.fee_schedule.rates(symbol, self.contracts.get(symbol), time.time())
         if pos is not None and taker is None:
             maker, taker = pos.fee_maker, pos.fee_taker
-        return fill_fee(data, qty, price, maker, taker, self.position_cost_pct)
+        configured = float(self.overlay.get("configuredPositionCostPct") or self.position_cost_pct)
+        fee_only_pct = max(0.0, configured - self.slippage_allowance_pct)
+        return fill_fee(data, qty, price, maker, taker, fee_only_pct)
+
+    @staticmethod
+    def note_fee_source(pos, source: str) -> None:
+        """Preserve the least certain component across entry, adds and exit."""
+        label = ("reported-fee" if source == "reported-fee" else
+                 "configured-estimate" if source == "configured-estimate" else "exchange-rate-estimate")
+        ranks = {"reported-fee": 0, "exchange-rate-estimate": 1, "configured-estimate": 2}
+        previous = getattr(pos, "fee_source", "configured-estimate")
+        if ranks.get(label, 2) > ranks.get(previous, 2):
+            pos.fee_source = label
 
     def record_exit_fee(self, pos, data, qty: float, price: float) -> None:
         if getattr(pos, "entry_fee_usdt", None) is not None and qty > 0:
             fee, source = self.fill_cost(data, qty, price, pos.symbol, pos)
             pos.exit_fee_usdt += fee
             pos.exit_fee_qty += qty
-            if source != "reported-fee":
-                pos.fee_source = "exchange-rate-estimate" if source != "configured-estimate" else source
+            self.note_fee_source(pos, source)
 
     def confirmed_order(self, data, symbol: str, cid: str = "") -> dict:
         """Resolve an acknowledgement with a read; requested quantity is not a fill.
@@ -1280,10 +1295,11 @@ class Pulse:
             pack = pack or pos.pack
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
-        pk = str(pack or set_id)
-        p = "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
+        pk = str(pack or (set_id or "").split(":", 1)[0])
+        extra_pack = bool(set_id) and pk not in ("indications", "general", "shortrange")
+        p = "x" if extra_pack else "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
-        m = re.search(r"sl([0-9.]+)", set_id or "")
+        m = re.search(r":sl([0-9.]+)", set_id or "")
         if m:
             try:
                 sl = f"{int(round(float(m.group(1)) * 10)):02d}"
@@ -1307,9 +1323,17 @@ class Pulse:
                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
             except Exception:
                 idx = -1
-        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
         # the nonce carries the Set's lane: CID_NEG_MARK first for the Real Negative lane, never otherwise
         alphabet = [c for c in string.ascii_lowercase + string.digits if c != CID_NEG_MARK]
+        if extra_pack:
+            if idx < 0 or idx >= 36 ** 4 or not set_id:
+                raise ValueError("extra Set requires a representable index and identity")
+            digits = string.digits + string.ascii_lowercase
+            ix = "".join(digits[(idx // (36 ** n)) % 36] for n in (3, 2, 1, 0))
+            digest = hashlib.sha256(set_id.encode("utf-8")).hexdigest()[:10]
+            nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + digest + "".join(random.choices(alphabet, k=4))
+            return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"
+        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
         nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + "".join(random.choices(alphabet, k=4))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
@@ -1341,7 +1365,8 @@ class Pulse:
         if len(rest) < 6:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
-        pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
+        extra_pack = rest[1:2] == "x"
+        pack = "" if extra_pack else {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
         is_exit = rest[4:6] == CID_EXIT_TR
         try:
             sl = int(rest[2:4]) / 10.0
@@ -1355,14 +1380,19 @@ class Pulse:
                 step = int(rest[6:8])
             except Exception:
                 step = 0
-        if len(rest) >= 12 and rest[8:12].isdigit():
+        if extra_pack and len(rest) >= 27:
+            try:
+                idx = int(rest[8:12], 36)
+            except ValueError:
+                idx = -1
+        elif len(rest) >= 12 and rest[8:12].isdigit():
             idx = int(rest[8:12])
         elif len(rest) >= 11 and rest[8:11].isdigit():
             idx = int(rest[8:11])          # an id written before the index had four digits
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
 
-        lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and rest[8:12].isdigit() else "pos"
+        lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and (extra_pack or rest[8:12].isdigit()) else "pos"
 
         def _row(st_obj: Any) -> Dict[str, Any]:
             return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
@@ -1370,7 +1400,13 @@ class Pulse:
 
         def _agrees(st_obj: Any) -> bool:
             try:
-                if str(getattr(st_obj, "pack", "")) != pack:
+                if extra_pack:
+                    signature = rest[13:23].lower() if len(rest) >= 27 else ""
+                    if str(getattr(st_obj, "pack", "")) in ("indications", "general", "shortrange") or not signature:
+                        return False
+                    if hashlib.sha256(st_obj.id.encode("utf-8")).hexdigest()[:10] != signature:
+                        return False
+                elif str(getattr(st_obj, "pack", "")) != pack:
                     return False
                 if st_obj.kind == "trail":
                     return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06
@@ -1381,6 +1417,13 @@ class Pulse:
                 return False
 
         sets_obj = getattr(self, "sets", None)
+        if extra_pack:
+            # A compact digest identifies the Set, not just the pack. If the
+            # grid changes or two candidates match, never guess an owner.
+            cands = [x for x in (getattr(sets_obj, "sets", None) or {}).values() if _agrees(x)]
+            if len(cands) == 1:
+                return _row(cands[0])
+            return {"kind": kind, "pack": "", "sl": sl, "trail": tr, "step": step, "idx": -1, "set_id": ""}
         st_obj = sets_obj.get_idx(idx) if idx >= 0 and sets_obj is not None else None
         if st_obj is not None and _agrees(st_obj):
             return _row(st_obj)
@@ -3279,9 +3322,9 @@ class Pulse:
         )
         fee, source = self.fill_cost(data, filled, avg, sym)
         pos.fee_maker, pos.fee_taker, _ = self.fee_schedule.rates(sym, c, time.time())
-        if source != "configured-estimate":
-            pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
-            pos.fee_source = "reported-fee" if source == "reported-fee" else "exchange-rate-estimate"
+        pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
+        pos.fee_source = ("reported-fee" if source == "reported-fee" else
+                          "configured-estimate" if source == "configured-estimate" else "exchange-rate-estimate")
         pos.entry_slippage = adverse_slippage(px, avg, order_side)
         pos.sl, pos.tp = self.security_prices(pos)
         if attached_sl:
@@ -4098,7 +4141,7 @@ class Pulse:
         configured_cost = float(ov.get("positionCostPct") or .12)
         self.slippage_allowance_pct = max(0.0, float(ov.get("slippageAllowancePct", .02)))
         self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
-                                                              self.contracts, time.time())
+                                                              self.active_fee_contracts(), time.time())
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", .25)))
         ov["configuredPositionCostPct"] = configured_cost
         ov["positionCostPct"] = self.position_cost_pct
@@ -4634,7 +4677,9 @@ class Pulse:
                 self.block_last_emit = time.time()
                 continue
             if pos.entry_fee_usdt is not None:
-                pos.entry_fee_usdt += self.fill_cost(data, filled, avg, pos.symbol, pos)[0]
+                fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
+                pos.entry_fee_usdt += fee
+                self.note_fee_source(pos, source)
             oid = str(data.get("orderId") or "")
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
@@ -4746,6 +4791,7 @@ class Pulse:
                                     "fee_usdt": fee if source != "configured-estimate" else None})
             if pos.entry_fee_usdt is not None:
                 pos.entry_fee_usdt += fee
+                self.note_fee_source(pos, source)
             pos.entry = (pos.qty * pos.entry + filled * avg) / (pos.qty + filled)
             pos.qty += filled
             pos.notional = pos.qty * pos.entry
@@ -4874,7 +4920,9 @@ class Pulse:
                 continue
             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
             if pos.entry_fee_usdt is not None:
-                pos.entry_fee_usdt += self.fill_cost(data, filled, avg, pos.symbol, pos)[0]
+                fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
+                pos.entry_fee_usdt += fee
+                self.note_fee_source(pos, source)
             if not pos.dca_ref:
                 pos.dca_ref = pos.entry
             pos.dca_fills.append([avg, filled])
@@ -5335,7 +5383,7 @@ class Pulse:
                                                     "fee_usdt": fee if source != "configured-estimate" else None})
                             if ours.entry_fee_usdt is not None:
                                 ours.entry_fee_usdt += fee
-                                ours.fee_source = "exchange-rate-estimate"
+                                self.note_fee_source(ours, source)
                             ours.block_pending = {}
                     ours.qty = qty
                     ours.entry = px
@@ -5718,7 +5766,7 @@ class Pulse:
             "pulse": self.pulse_snapshot(),
             "coord": self.coord.snapshot(),
             "pfCost": pc,
-            "costModel": self.fee_schedule.snapshot(time.time(), {s: self.contracts[s] for s in SYMBOLS if s in self.contracts},
+            "costModel": self.fee_schedule.snapshot(time.time(), self.active_fee_contracts(),
                                                     self.position_cost_pct, self.slippage_allowance_pct),
             "blockRiskPctOfBalance": self.block_risk_pct,
             "profitFactor": pc["pf"],

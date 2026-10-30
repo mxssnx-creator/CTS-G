@@ -22,7 +22,9 @@ def main() -> None:
     with open(args.result, encoding="utf-8") as fh:
         sim = json.load(fh)
     os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"histLookbackBars": sim["gate"]["lookback_bars"],
-                                                     "histLookbackAuto": False, "holdEnabled": False})
+                                                     "histLookbackAuto": False, "holdEnabled": False,
+                                                     "positionCostPct": sim["config"]["cost_pct"],
+                                                     "extraIndicators": sim["config"].get("extra_indicators", [])})
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import stage_eval as sg
     names, bars, times = sg.load_bars(args.data, len(sim["symbols"]))
@@ -39,14 +41,15 @@ def main() -> None:
     def blank():
         return {k: {"sets": 0, "gain": 0.0, "loss": 0.0, "orders": 0} for k in keys}
     total, hourly = blank(), []
+    pack_total = {pack: blank() for pack in book.packs}
     for checkpoint in sim["evaluations"]:
         stats = blank()
         def add(key, gain, loss, n):
-            item = stats[key]
-            item["sets"] += 1
-            item["gain"] += gain
-            item["loss"] += loss
-            item["orders"] += n
+            for item in (stats[key], pack_total[st.pack][key]):
+                item["sets"] += 1
+                item["gain"] += gain
+                item["loss"] += loss
+                item["orders"] += n
         for st in book.by_idx:
             if not sg.gate_base(book, tapes, st, checkpoint["t"])[0]:
                 continue
@@ -70,7 +73,14 @@ def main() -> None:
                      "pct_average": 100 * value["sets"] / denominator if denominator else 0,
                      "pf": value["gain"] / value["loss"] if value["loss"] else None}
                for key, value in total.items()}
-    print(json.dumps({"summary": summary, "hourly": hourly,
+    by_pack = {}
+    for pack, values in pack_total.items():
+        denom = len(hourly) * sum(1 for st in book.by_idx if st.pack == pack)
+        by_pack[pack] = {key: {**value,
+                               "pct_average": 100 * value["sets"] / denom if denom else 0,
+                               "pf": value["gain"] / value["loss"] if value["loss"] else None}
+                         for key, value in values.items()}
+    print(json.dumps({"summary": summary, "by_pack": by_pack, "hourly": hourly,
                       "note": "hourly Set observations; trades may repeat; Real and Real Negative are separate lanes"}, indent=2))
 
 

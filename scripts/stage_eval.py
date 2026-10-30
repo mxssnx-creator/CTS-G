@@ -424,13 +424,14 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
-            refresh_s: int = 3600) -> List[Dict[str, Any]]:
+            refresh_s: int = 3600, include_open: bool = False) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
     this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
     cfg = lane_cfg(book)
     accs = {s: se.BarIndex(bars[s]) for s in names}
     idx_of = {s: {t: i for i, t in enumerate(times[s])} for s in names}
+    end_of = {s: bisect.bisect_left(times[s], float(hours[-1]) + 3600) for s in names}
     busy = {s: -1 for s in names}
     executed: List[Dict[str, Any]] = []
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
@@ -518,8 +519,23 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 dd = [0] * len(bars[s])
                 cc = [0.0] * len(bars[s])
                 dd[i], cc[i] = d, conf
-                tr = lane.scan(i, len(bars[s]), bars[s], dd, cc, True, cfg, [i], accs[s])
+                end = end_of[s]
+                tr = lane.scan(i, end, bars[s], dd, cc, True, cfg, [i], accs[s])
                 if not tr:
+                    if lane.open is not None:
+                        # An unfinished position still occupies its symbol.  Do not
+                        # retrospectively try later signals as though it were flat.
+                        busy[s] = end - 1
+                        if include_open:
+                            pos = lane.open
+                            mark = float(bars[s][end - 1][3])
+                            executed.append({"open_at_end": True, "t_in": float(t + 60),
+                                             "t_mark": float(times[s][end - 1] + 60),
+                                             "symbol": s, "set": st.id, "pack": pack,
+                                             "kind": st.kind, "lane": lane_pick,
+                                             "side": "LONG" if pos["side"] > 0 else "SHORT",
+                                             "entry": pos["entry"], "mark": mark,
+                                             "mark_net": (mark / pos["entry"] - 1) * pos["side"] - cf})
                     continue
                 tr = tr[0]
                 busy[s] = tr["exit_i"]

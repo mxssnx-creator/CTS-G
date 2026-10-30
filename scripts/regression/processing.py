@@ -501,6 +501,44 @@ def simulator_validates_at_entry_and_refreshes_at_the_boundary():
     return entries == want and calls == want, f"entry times {entries}; gate times {calls}; expected {want}"
 
 
+def simulator_preserves_open_positions_at_window_end():
+    """Unclosed long and short positions occupy their symbol and use the last in-window price."""
+    import os, sys, types
+    from common import ROOT
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import stage_eval as sg
+    b = _book(n_syms=1, bars=300, stagesEnabled=False, mainGateEnabled=False, **SMALL)
+    st = next(x for x in b.by_idx if x.kind == "base")
+    b.by_idx, b.packs = [st], [st.pack]
+    b.hist_time_bars = 120
+    hour = float((int(T0) // 3600) * 3600)
+    prices = [[100.0, 100.01, 99.99, 100.0, 1.0] for _ in range(60)]
+    # A stop-reaching bar after the report window must not close an in-window position.
+    prices.append([100.0, 110.0, 90.0, 100.0, 1.0])
+    timestamps = [int(hour) + i * 60 for i in range(61)]
+    names = ["LONG-S", "SHORT-S"]
+    bars = {s: prices for s in names}
+    times = {s: timestamps for s in names}
+    shadow = {}
+    for symbol, direction in zip(names, (1, -1)):
+        dirs = [direction if i in (0, 2) else 0 for i in range(61)]
+        shadow[symbol] = (0, {st.pack: dirs}, {st.pack: [0.9] * 61}, {})
+    gate, until = sg.gate_metrics, sg.gate_until
+    try:
+        sg.gate_metrics = lambda *_args: (True, (True, 1, 1, 0, 0), 1, 2.0)
+        sg.gate_until = lambda *_args: hour + 3600.0
+        rows = sg.execute(b, names, bars, times, shadow, types.SimpleNamespace(cf=b.cost_pct / 100),
+                          [hour], refresh_s=0, include_open=True)
+    finally:
+        sg.gate_metrics, sg.gate_until = gate, until
+    opened = [r for r in rows if r.get("open_at_end")]
+    closes = [r for r in rows if "net" in r]
+    ok = (len(opened) == 2 and not closes and {r["side"] for r in opened} == {"LONG", "SHORT"}
+          and all(r["t_in"] == hour + 60 and r["t_mark"] == hour + 3600 for r in opened)
+          and all(abs(r["mark_net"] + b.cost_pct / 100) < 1e-12 for r in opened))
+    return ok, f"open={len(opened)} sides={[r['side'] for r in opened]} closes={len(closes)}"
+
+
 def concurrent_replay_and_live_closes():
     b = _book(n_syms=3, bars=900, **SMALL)
     b.replay_all(now=T0)
@@ -1588,6 +1626,7 @@ CHECKS = [
     ("processing.live-scoring-obeys-lookback-and-event-clock", live_scoring_obeys_lookback_and_event_clock),
     ("processing.replay-uses-each-symbols-last-completed-bar", replay_uses_each_symbols_last_completed_bar),
     ("processing.simulator-validates-at-entry-and-refreshes-at-boundary", simulator_validates_at_entry_and_refreshes_at_the_boundary),
+    ("processing.simulator-preserves-open-at-window-end", simulator_preserves_open_positions_at_window_end),
     ("processing.hold-adapter-uses-selected-sets-tape", hold_adapter_uses_the_selected_sets_tape),
     ("processing.live-windows-preserve-owner-and-lane-history", live_windows_preserve_owner_and_lane_history),
     ("processing.sim-gate-equals-the-engine-for-every-window-configuration", sim_gate_equals_the_engine_for_every_window_configuration),

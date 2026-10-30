@@ -387,8 +387,10 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
     scored = bool(p2.dca.closes) and expect is not None and abs(p2.dca.closes[-1]["pnl_pct"] - expect) < 1e-9 and abs(expect - c.pnl_pct) > 1e-5
     # the Set is scored on its own lane: exit against the entry it opened at, the base size, and the USDT result of that size
     sr = seen[-1] if seen else None
+    fee_rate = max(0.0, p2.overlay["configuredPositionCostPct"] - p2.slippage_allowance_pct) / 200
+    base_cash = q0 * (c.exit - 100.0) - q0 * (100.0 + c.exit) * fee_rate
     base_ok = sr is not None and abs(sr.entry - 100.0) < 1e-9 and abs(sr.qty - q0) < 1e-9 and abs(sr.pnl_pct - (c.exit - 100.0) / 100.0) < 1e-9 \
-        and abs(sr.pnl - pt.net_pnl_usdt(sr.pnl_pct, q0, 100.0, p2.position_cost_pct)) < 1e-12
+        and abs(sr.pnl - base_cash) < 1e-12
     scored = scored and base_ok
     same_exit = levels_fixed and scored and all(v["exit"] == (rep["reason"], rep["exit_i"]) for v in out.values())
     untouched = len(out["off"]["qty"]) == 1 and len(out["on, Sets not allowed"]["qty"]) == 1 and out["on, Sets not allowed"]["dca closes"] == 0

@@ -21,7 +21,9 @@ def main() -> int:
     args = ap.parse_args()
     sim = json.load(open(args.result, encoding="utf-8"))
     os.environ["STAGE_OVERLAY_PATCH"] = json.dumps({"histLookbackBars": sim["gate"]["lookback_bars"],
-                                                     "histLookbackAuto": False, "holdEnabled": False})
+                                                     "histLookbackAuto": False, "holdEnabled": False,
+                                                     "positionCostPct": sim["config"]["cost_pct"],
+                                                     "extraIndicators": sim["config"].get("extra_indicators", [])})
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import stage_eval as sg
     names, bars, times = sg.load_bars(args.data, len(sim["symbols"]))

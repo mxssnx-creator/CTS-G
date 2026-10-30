@@ -723,6 +723,31 @@ def client_order_ids_round_trip_to_their_own_set():
     return ok, f"Sets={len(sets)} wrong round trips={wrong[:3]} after the grid moved: {moved} ids, misattributed={misattributed[:3]} letters={letters}"
 
 
+def extra_set_client_ids_never_guess_the_owner():
+    """Additional packs retain identity across grid changes; a bad digest cannot become a General Set."""
+    b = _book_with_three_packs(stratTrend=True, extraIndicators=["donchian_break", "rsi2_reversion"])
+    p = _bare_pulse()
+    p.sets = b
+    extras = [s for s in b.by_idx if s.pack.startswith("extra.") or s.pack == "trend"]
+    samples = [next(s for s in extras if s.pack == pack and s.kind == kind and (kind == "trail" or s.step >= 6))
+               for pack in ("extra.donchian_break", "extra.rsi2_reversion", "trend") for kind in ("base", "exit", "trail")]
+    ids = [(s.id, p.cid("o", set_id=s.id, pack=s.pack, set_idx=s.idx, lane="neg")) for s in samples]
+    roundtrip = all(len(cid) <= 32 and (p.parse_track(cid) or {}).get("set_id") == sid
+                    and (p.parse_track(cid) or {}).get("lane") == "neg" for sid, cid in ids)
+    st = samples[0]
+    high = p.cid("o", set_id=st.id, pack=st.pack, set_idx=10025)
+    high_ok = (p.parse_track(high) or {}).get("set_id") == st.id
+    at = len(pt.TAG) + 13
+    bad = ids[0][1]
+    bad = bad[:at] + ("0" if bad[at] != "0" else "1") + bad[at + 1:]
+    rejected = (p.parse_track(bad) or {}).get("set_id") == ""
+    b.min_step = 6
+    b._rebuild_sets()
+    after = [(sid, (p.parse_track(cid) or {}).get("set_id")) for sid, cid in ids]
+    moved_ok = all(got in ("", sid) for sid, got in after)
+    return roundtrip and high_ok and rejected and moved_ok, f"roundtrip={roundtrip} high index={high_ok} bad digest rejected={rejected} grid change={moved_ok}"
+
+
 def a_signal_needs_its_own_pack_to_hold_a_valid_set():
     """Under the Base gate an entry opens only under a Set picked for its own pack (pick_any). A pack with a valid Set that is not on a
     lane must take no entry either: the gate answers "set-gate" rather than letting the no-Set fallback open the position."""
@@ -1844,6 +1869,7 @@ CHECKS = [
     ("trader.set-trails-only-with-its-trailing-set", a_set_trails_only_with_its_trailing_set_and_the_exit_lanes_stay_out),
     ("trader.exit-lane-scores-only-its-own-closes", exit_lane_scores_only_its_own_closes),
     ("trader.cids-round-trip-to-their-own-set", client_order_ids_round_trip_to_their_own_set),
+    ("trader.extra-cids-never-guess-owner", extra_set_client_ids_never_guess_the_owner),
     ("trader.signal-needs-its-own-pack", a_signal_needs_its_own_pack_to_hold_a_valid_set),
     ("trader.venue-order-of-another-symbol-is-not-the-exit", a_venue_order_of_another_symbol_is_not_this_exit),
     ("trader.manager-close-not-counted-twice", a_manager_close_is_not_counted_again_by_the_fill_sync),

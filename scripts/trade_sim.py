@@ -157,8 +157,9 @@ def main() -> int:
                       "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
 
-    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)))
+    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)), include_open=True)
     trades = [r for r in rows if "net" in r and lo <= r["t_in"] < hi]
+    open_at_end = [r for r in rows if r.get("open_at_end") and lo <= r["t_in"] < hi]
     by_id = {st.id: st for st in book.by_idx}
     trades.sort(key=lambda r: r["t_in"])
     for r in trades:
@@ -208,13 +209,16 @@ def main() -> int:
                                               "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
                       "scratch_bars": book.scratch_bars, "scratch_min_pct": round(book.scratch_min * 100, 3),
-                      "cost_pct": book.cost_pct},
+                      "cost_pct": book.cost_pct, "extra_indicators": list(book.ind_settings.get("extraIndicators") or [])},
            "all": summary(("all", "all")),
            "types": [summary(k) for k in sorted(groups) if k[0] == "type"],
            "ranges": [summary(k) for k in sorted(groups) if k[0] == "range"],
            "sl": [summary(k) for k in sorted(groups) if k[0] == "sl"],
            "evaluations": evals,
            "hourly": hourly(),
+           "open_at_end": [{**{k: r[k] for k in ("t_in", "t_mark", "symbol", "set", "pack", "kind", "lane", "side", "entry", "mark")},
+                            "mark_net_pct": round(100 * r["mark_net"], 4)} for r in open_at_end],
+           "closed_and_marked_pf": acc_pf([r["net"] for r in trades] + [r["mark_net"] for r in open_at_end]),
            "exits": dict(collections.Counter(r["reason"] for r in trades)),
            "trades": [{"t_in": r["t_in"], "t_out": r["t"], "symbol": r["symbol"], "set": r["set"], "pack": r["pack"],
                        "kind": r["kind"], "reason": r["reason"], "net_pct": round(100 * r["net"], 4)} for r in trades]}
