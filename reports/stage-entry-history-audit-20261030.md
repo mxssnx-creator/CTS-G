@@ -31,9 +31,16 @@ python scripts/stage_context_audit.py --data DATA_DIR --cache TRUSTED_SHADOW.pkl
 
 The audit records input-file checksums and rejects mismatched symbol counts and the settings recorded by the reference. It cannot verify every setting or prove that an equal-count cache belongs to the data or grid; generate it fresh from trusted inputs. Its 12h results matched the earlier independent recount.
 
+For the lane-only incremental experiment, copy `scripts/benchmark_incremental_lanes.py` into the same reference tree and run the following with the archived market data:
+
+```bash
+python scripts/benchmark_incremental_lanes.py --data DATA_DIR --symbol BCH-USDT --bars 2910 --patch '{"histLookbackBars":720,"histLookbackAuto":false,"holdEnabled":true,"holdAuto":true,"positionCostPct":0.15,"extraIndicators":["donchian_break","rsi2_reversion"],"setMinStep":2,"setStepMax":4,"setSlRatios":[0.5,1.0],"trailVariants":["0.3:0.1"]}' --out INCREMENTAL.json
+```
+
 ## Release blockers
 
 - The extra replay context increases work. On one BCH symbol, 3,192 Sets and holds off, a cold paper replay took 2.78 s before versus 8.60 s with context; memory peaks were approximately 60 MiB versus 79 MiB. A separate one-symbol, 67-Set automatic-hold trial took 2.04 s cold / 0.20 s warm before versus 8.25 s cold / 0.80 s warm with context, with approximate peaks 28 MiB / 46 MiB. These exploratory, concurrently run measurements are not 50-symbol or live-cycle benchmarks. A four-symbol synthetic paging/startup test took 66 s. The requested sub-500-ms running-cycle target is not demonstrated.
+- A prospective optimization is to retain and advance each lane's open position and cooldown rather than rebuild its entire tape. `scripts/benchmark_incremental_lanes.py` compared full scans with nine chunks and a one-bar rotation for 67 Sets / 473 hold lanes on one archived BCH stream: zero differences in closed rows or final lane state. The overlapping paper-lane records included 24,020 long and 21,901 short closes and stop, scratch, target and time exits; they are not independent funded orders. Signals were precomputed; the experiment does not implement a runtime cache or measure stage scoring, amended candles, 50-symbol memory, hold splicing, exchange execution, or restart recovery. It is not evidence that the complete running cycle meets its target.
 - Longer context can encounter older invalid candles, unavailable history or paging failures; repeated attempts for symbols without sufficient venue history need a bounded and observable policy. The context-count fields describe held bars only, not proof that the venue supplied all required earlier history.
 - A fixed context budget cannot prove unlimited-hold positions. The existing automatic-hold method splices candidate tapes; overlap, cooldown, omitted entries, candidate evidence and restart behavior are not fully proven. These need an independently validated causal lane implementation, not forced qualification.
 - Symbol, direction and source evidence is still pooled in the underlying engine; the independent CTS-A-O Signals integration and live protective-order reconciliation are incomplete in the separate drafts. This branch does not contain or claim to finish them.
