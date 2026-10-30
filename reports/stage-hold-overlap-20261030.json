@@ -1,0 +1,92 @@
+{
+  "symbol": "BCH-USDT",
+  "market_sha256": "0d0c7cbcad77b30c92bffad6bef12ce911ff24320333c7a89c6af8853f4d1628",
+  "patch": {
+    "histLookbackBars": 720,
+    "histLookbackAuto": false,
+    "holdEnabled": true,
+    "holdAuto": true,
+    "positionCostPct": 0.15,
+    "extraIndicators": [
+      "donchian_break",
+      "rsi2_reversion"
+    ],
+    "setMinStep": 2,
+    "setStepMax": 4,
+    "setSlRatios": [
+      0.5,
+      1.0
+    ],
+    "trailVariants": [
+      "0.3:0.1"
+    ]
+  },
+  "sets": 67,
+  "lanes": 473,
+  "bars": 2910,
+  "first_bar": 1792096200,
+  "last_bar": 1792270740,
+  "score_cutoff": 1792227600,
+  "affected_sets": 44,
+  "overlapping_rows": 159,
+  "affected_sets_in_score_window": 26,
+  "overlapping_rows_in_score_window": 41,
+  "examples": [
+    {
+      "set": "indications:1m:sl0.50:st2",
+      "selected": 163,
+      "overlap_count": 4,
+      "within_score_window": 0,
+      "first_example": [
+        1792167660.0,
+        1792168260,
+        1792168260
+      ]
+    },
+    {
+      "set": "indications:1m:sl0.50:st3",
+      "selected": 159,
+      "overlap_count": 7,
+      "within_score_window": 1,
+      "first_example": [
+        1792155720.0,
+        1792156380,
+        1792156980
+      ]
+    },
+    {
+      "set": "indications:1m:sl0.50:st4",
+      "selected": 165,
+      "overlap_count": 7,
+      "within_score_window": 3,
+      "first_example": [
+        1792127280.0,
+        1792128180,
+        1792127940
+      ]
+    },
+    {
+      "set": "indications:1m:sl1.00:st2",
+      "selected": 163,
+      "overlap_count": 4,
+      "within_score_window": 0,
+      "first_example": [
+        1792167660.0,
+        1792168260,
+        1792168260
+      ]
+    },
+    {
+      "set": "indications:1m:sl1.00:st3",
+      "selected": 131,
+      "overlap_count": 5,
+      "within_score_window": 0,
+      "first_example": [
+        1792105860.0,
+        1792106460,
+        1792106100
+      ]
+    }
+  ],
+  "note": "One-symbol fixed-candidate paper lanes; counts do not verify pooled multi-symbol choices, actual positions, cooldown, omitted entries, or a corrected hold implementation."
+}

@@ -337,13 +337,15 @@ def _base_tail_ok(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[flo
 
 
 def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequence[Tuple[List[float], List[float], List[float]]], t: float,
-                   max_n: int, min_n: int, margin: float) -> int:
+                   max_n: int, min_n: int, margin: float, lookback_s: Optional[float] = None) -> int:
     """Index of the hold candidate chosen at time t (the Auto Mode's rule on the orders closed before t: the reference, cands[0],
     unless a candidate with min_n orders beats it by the margin and is the best). prefix[c] = (exit times, gain prefix, loss prefix)."""
     def pf_n(c: int) -> Tuple[float, int]:
         ts, g, l_ = prefix[c]
         e = bisect.bisect_left(ts, t)
         s0 = max(0, e - max_n)
+        if lookback_s is not None:
+            s0 = max(s0, bisect.bisect_left(ts, t - lookback_s))
         gp, gl = g[e] - g[s0], l_[e] - l_[s0]
         return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
     ref_pf, _ = pf_n(0)
@@ -355,7 +357,8 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
     return best
 
 
-def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
+def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float,
+                     lookback_s: Optional[float] = None) -> List[tuple]:
     """The hold Auto Mode's tape, causal: every candidate's order whose entry fell while that candidate was the chosen hold (chosen on
     the orders closed before the entry, hold_choice_at), in exit order. cands = [(hold, rows)], the reference first; rows are the
     replay's tuples (exit t at 0, pnl_pct at 4, hold_s at 5)."""
@@ -368,7 +371,7 @@ def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, m
     out: List[tuple] = []
     for c, (_h, rows) in enumerate(cands):
         for r in rows:
-            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:
+            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin, lookback_s) == c:
                 out.append(r)
     out.sort(key=_row_t)
     return out
@@ -401,7 +404,7 @@ def _main_windows(mt: Sequence[float], mn: Sequence[float], entries: Sequence[fl
 
 def _main_short_choice(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: StageParams,
                        passes: Callable[[int], List[bool]], known_entries: Optional[Sequence[bool]] = None,
-                       current_only: bool = False) -> Tuple[int, Optional[List[int]]]:
+                       current_only: bool = False, current_start: int = 0) -> Tuple[int, Optional[List[int]]]:
     """Choose candidates from results following their own entry-time window verdicts; unknown entries do not vote."""
     if not (P.main_on and P.short_on):
         return P.main_n, None
@@ -430,11 +433,12 @@ def _main_short_choice(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int
                 best, selected = pf, w
         return selected
 
-    current = pick(len(mn), 0)
+    current = pick(len(mn), max(0, min(len(mn), current_start)))
     return current, None if current_only else [pick(e, lo) for e, lo in zip(me, mlo)]
 
 
-def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float], P: StageParams) -> Dict[str, Any]:
+def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float], P: StageParams,
+                window_start: Optional[float] = None) -> Dict[str, Any]:
     """A Base Set's chain of Sets, as indices into its tape (exit time ascending; ents: entry times; nets: net results).
       main     the Main Set: the orders opened while Base passed on the raw tape before each entry (the long window, its minimum
                orders, drawdown time and consistency: processed_flag; the short window; the minimal window)
@@ -514,7 +518,11 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
         msum.append(msum[-1] + x)
     # the Main Set's window positions, once per Main order: e (orders closed before the entry) and lo (the oldest inside the lookback)
     me, mlo, passes = _main_windows(mt, mn, [ents[k] for k in main], P)
-    short_n, choice = _main_short_choice(mn, me, mlo, P, passes)
+    # Entries in the visible window may depend on closes before it.  Score the
+    # complete context, but restrict the current short-window vote to the
+    # visible Main closes, just as the current stage PF is restricted.
+    main_start = bis(mt, window_start) if window_start is not None else 0
+    short_n, choice = _main_short_choice(mn, me, mlo, P, passes, current_start=main_start)
     real = []
     if P.main_on:
         pl = passes(P.main_n)
@@ -533,7 +541,18 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
                 if e - s0 >= w and msum[e] - msum[s0] < -NEG_EPS:
                     realneg.append(k)
                     break
-    return {"main": main, "real": real, "realneg": realneg, "short_n": short_n, "short_by_order": choice if choice is not None else [P.main_n] * m}
+    choices = choice if choice is not None else [P.main_n] * m
+    main_context = main
+    if window_start is not None:
+        keep = [j for j, k in enumerate(main) if ts[k] >= window_start]
+        choices = [choices[j] for j in keep]
+        main = [main[j] for j in keep]
+        real = [k for k in real if ts[k] >= window_start]
+        realneg = [k for k in realneg if ts[k] >= window_start]
+    out = {"main": main, "real": real, "realneg": realneg, "short_n": short_n, "short_by_order": choices}
+    if window_start is not None:
+        out["main_context"] = main_context
+    return out
 
 
 def sign_ok(w: Sequence[float], positive: bool, both: bool = False, avg: bool = False) -> bool:
@@ -2090,6 +2109,21 @@ class SetBook:
         """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
         return symbol not in self.quality
 
+    def history_bars(self) -> int:
+        """Bars needed for entry-time stage evidence, including indicator and hold warmup.
+
+        The configured lookback remains the current evaluation window.  Historical
+        Main entries need an earlier Base window, and historical Real entries may
+        also need a Main window before that.  These older bars are context, not
+        extra orders in today's PF windows.
+        """
+        upstream = bool(getattr(self, "main_on", False) or getattr(self, "neg_on", False))
+        depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
+        manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
+        automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic)
+        return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
+
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
         """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only
         where they line up with the stored series; they never replace a history they do not overlap. last_t: the open time
@@ -2107,7 +2141,7 @@ class SetBook:
             cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
             old = self.bars.get(symbol) or []
-            joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.lookback :]
+            joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.history_bars() :]
             self.bars[symbol] = joined
             bar_t = self.__dict__.setdefault("bar_t", {})
             if last_t is not None and joined and joined[-1] == cleaned[-1]:
@@ -2336,6 +2370,7 @@ class SetBook:
             self.progress.phase = "score"
             self.progress.pct = 90.0
             cutoff = now - self.lookback * BAR_S
+            context_cutoff = now - self.history_bars() * BAR_S
             with self._lock:
                 live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
@@ -2349,13 +2384,14 @@ class SetBook:
                 tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
                 for st in ([] if stale else self.by_idx):
                     try:
-                        full = self._tape_rows(st.id, tape_order, cutoff, until=now)
-                        full = self._choose_hold(st, full, tape_order, cutoff, until=now)
-                        self.set_processed(st, full)
-                        st.hist = [dict(zip(_ROW_KEYS, r)) for r in full[-max(40, self.gate_window):]]
+                        full = self._tape_rows(st.id, tape_order, context_cutoff, until=now)
+                        full = self._choose_hold(st, full, tape_order, context_cutoff, until=now, scoring_cutoff=cutoff)
+                        self.set_processed(st, full, now=now)
+                        visible = [r for r in full if r[0] >= cutoff]
+                        st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window):]]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=max(now, st.score_at) if st.live else now)
-                        st.n = len(full)              # paper count; actual fills have their own live_n
+                        st.n = len(visible)           # paper count in the evaluation window
                     except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
                         st.last_error = f"{type(exc).__name__}: {exc}"[:160]
                         st.deact_reason = "error"
@@ -2444,8 +2480,8 @@ class SetBook:
                     out.append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
                                 "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
                                 "reason": done["reason"], "set_id": st.id})
-                if h:
-                    del out[:-HOLD_AUTO_MAX_ORDERS]  # only the newest orders of a candidate can be among the last 50 overall
+                # Earlier candidate closes can be needed to reconstruct the hold
+                # chosen at a historical entry; a last-50 cap loses that evidence.
             self.progress.set_id = st.id
 
     def _adapt_lookback(self) -> None:
@@ -2465,7 +2501,8 @@ class SetBook:
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
 
-    def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
+    def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float, until: Optional[float] = None,
+                     scoring_cutoff: Optional[float] = None) -> List[tuple]:
         """Auto Mode: the hold (minutes) whose own tape has the best cost PF over this Set's last orders, as many as it has but at most
         holdAutoMax. The global time stop is the reference; a candidate needs holdAutoMin orders and a PF margin over it to replace
         it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
@@ -2475,7 +2512,8 @@ class SetBook:
         cf = cost_as_frac(self.cost_pct)
 
         def judge(rows: List[tuple]) -> Tuple[float, int]:
-            w = [finite(r[4]) - cf for r in rows[-self.hold_auto_max:]]
+            visible = [r for r in rows if scoring_cutoff is None or finite(r[0]) >= scoring_cutoff]
+            w = [finite(r[4]) - cf for r in visible[-self.hold_auto_max:]]
             gp_, gl_ = sum(x for x in w if x > 0), -sum(x for x in w if x < 0)
             return (gp_ / gl_ if gl_ > 0 else (99.0 if gp_ > 0 else 0.0)), len(w)
 
@@ -2493,7 +2531,8 @@ class SetBook:
         st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
         # the tape the Set is judged on is causal: each order comes from the hold that was chosen at its entry, on the orders closed
         # before it (as live positions opened); the hold chosen now is never applied to orders opened before the choice existed
-        return causal_hold_tape(cands, self.hold_auto_max, self.hold_auto_min, HOLD_AUTO_MARGIN, cf)
+        return causal_hold_tape(cands, self.hold_auto_max, self.hold_auto_min, HOLD_AUTO_MARGIN, cf,
+                                self.lookback * BAR_S if scoring_cutoff is not None else None)
 
     def floor_for(self, n: int, pack: str) -> float:
         """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""
@@ -2517,18 +2556,21 @@ class SetBook:
                            base_min_both=self.base_min_both, main_min_both=self.main_min_both,
                            base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
 
-    def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False) -> Dict[str, Any]:
+    def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False,
+                  now: Optional[float] = None) -> Dict[str, Any]:
         """The Set's chain (stage_chain) over replayed rows: {"main", "real", "realneg": [(exit t, net)], "short_n"}."""
         cf = cost_as_frac(self.cost_pct)
         ts = [finite(r[0]) for r in full]
         ents = [ts[k] - finite(full[k][5]) for k in range(len(full))]
         nets = [finite(r[4]) - cf for r in full]
-        ch = stage_chain(ts, ents, nets, self.stage_params(st.pack))
+        cutoff = finite(now) - self.lookback * BAR_S if now is not None else None
+        ch = stage_chain(ts, ents, nets, self.stage_params(st.pack), window_start=cutoff)
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
         out["short_n"] = ch["short_n"]
         if capture_evidence:
-            out["main_evidence"] = (array("d", (ts[k] for k in ch["main"])), array("d", (ents[k] for k in ch["main"])),
-                                    array("d", (nets[k] for k in ch["main"])))
+            evidence = ch.get("main_context", ch["main"])
+            out["main_evidence"] = (array("d", (ts[k] for k in evidence)), array("d", (ents[k] for k in evidence)),
+                                    array("d", (nets[k] for k in evidence)))
         return out
 
     def _lanes_of(self, st: SetState, full: Sequence[tuple]) -> List[List[Tuple[float, float]]]:
@@ -2538,11 +2580,11 @@ class SetBook:
     def _processed_of(self, st: SetState, full: Sequence[tuple]) -> List[Tuple[float, float]]:
         return self._chain_of(st, full)["main"]
 
-    def set_processed(self, st: SetState, full: Sequence[tuple]) -> None:
+    def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None) -> None:
         """The Set's chain in every replay pass: its Main Set (orders opened while Base passed), Real Set (opened while Main passed,
         judged on the Main Set) and Real Negative Set (opened while the Main Set's recent average was negative), and its Main short window.
         Every stage after Base reads these Sets, never the raw tape."""
-        ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on)
+        ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on, now=now)
         st.proc, st.proc_total = ch["main"][-PROC_KEEP:], len(ch["main"])
         st.exe, st.exe_total = ch["real"][-PROC_KEEP:], len(ch["real"])
         st.neg, st.neg_total = ch["realneg"][-PROC_KEEP:], len(ch["realneg"])
@@ -2561,29 +2603,29 @@ class SetBook:
             m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.main_n)
             evidence = st.main_evidence
         else:
-            held = sorted((tuple(r_.get(k) for k in _ROW_KEYS) for r_ in st.hist if r_.get("pnl_pct") is not None and cutoff <= finite(r_.get("t")) <= upper), key=lambda r_: finite(r_[0]))
-            ch = self._chain_of(st, held, capture_evidence=self.main_on and self.short_on)
+            held = sorted((tuple(r_.get(k) for k in _ROW_KEYS) for r_ in st.hist
+                           if r_.get("pnl_pct") is not None and finite(r_.get("t")) <= upper), key=lambda r_: finite(r_[0]))
+            ch = self._chain_of(st, held, capture_evidence=self.main_on and self.short_on, now=anchor if anchor > 0 else None)
             m, r, q, short_n = ch["main"], ch["real"], ch["realneg"], int(ch["short_n"])
             evidence = ch.get("main_evidence")
         m = [x for x in m if cutoff <= x[0] <= upper]
         r = [x for x in r if cutoff <= x[0] <= upper]
         q = [x for x in q if cutoff <= x[0] <= upper]
-        expired = bool(evidence and evidence[0] and (evidence[0][0] < cutoff or evidence[0][-1] > upper))
-        if self.main_on and self.short_on and expired:
+        if self.main_on and self.short_on:
             if evidence is None and st.proc_replayed and st.proc_total:
                 # Without the entry-time evidence the old candidate cannot be recomputed safely.
                 short_n = self.main_n
-            else:
-                records = []
-                if evidence is not None:
-                    records.extend((t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper)
-                records.sort(key=lambda item: item[0])
+            elif evidence is not None:
+                # Preserve older entry-time evidence when evaluating each candidate;
+                # only the final vote is limited to the current window.
+                records = sorted((t, e, value) for t, e, value in zip(*evidence) if t <= upper)
                 ts = [x[0] for x in records]
                 entries = [x[1] for x in records]
                 nets = [x[2] for x in records]
                 params = self.stage_params(st.pack)
                 me, mlo, passes = _main_windows(ts, nets, entries, params)
-                short_n, _ = _main_short_choice(nets, me, mlo, params, passes, [x[3] for x in records], current_only=True)
+                short_n, _ = _main_short_choice(nets, me, mlo, params, passes, current_only=True,
+                                               current_start=bisect.bisect_left(ts, cutoff))
         out = []
         for v in (m, r, q):
             v.sort(key=lambda x: x[0])
@@ -3413,6 +3455,9 @@ class SetBook:
             "enabled": self.enabled,
             "ready": p.ready,
             "lookback": self.lookback,
+            "stageContextBars": self.history_bars(),
+            "stageContextFullSymbols": sum(len(bars) >= self.history_bars() for bars in self.bars.values()),
+            "stageContextShortSymbols": sum(len(bars) < self.history_bars() for bars in self.bars.values()),
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
             "minPf": self.min_pf,

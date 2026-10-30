@@ -1,0 +1,260 @@
+{
+  "summary": {
+    "base": {
+      "observations": 13,
+      "gain": 0.6382172623483409,
+      "loss": 0.34809776487564476,
+      "orders": 650,
+      "percent": 0.033939014202172095,
+      "pf": 1.8334425748936913,
+      "no_loss": false
+    },
+    "main": {
+      "observations": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "percent": 0.0,
+      "pf": null,
+      "no_loss": false
+    },
+    "real": {
+      "observations": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "percent": 0.0,
+      "pf": null,
+      "no_loss": false
+    },
+    "realNeg": {
+      "observations": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "percent": 0.0,
+      "pf": null,
+      "no_loss": false
+    }
+  },
+  "checkpoints": [
+    {
+      "t": 1792227600.0,
+      "base": 4,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792231200.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792234800.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792238400.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792242000.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792245600.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792249200.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792252800.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792256400.0,
+      "base": 5,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792260000.0,
+      "base": 4,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792263600.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792267200.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    }
+  ],
+  "boundary_comparison": {
+    "set_observations": 1078,
+    "closes": 1092,
+    "different_n_or_pf": 1066,
+    "strict_pass_runtime_fail": [
+      {
+        "t": 1792256400.0,
+        "set": "indications:1m:sl0.75:st15",
+        "strict_n": 50,
+        "strict_pf": 1.5341,
+        "runtime_n": 50,
+        "runtime_pf": 0.9999,
+        "runtime_reason": "pf<min"
+      },
+      {
+        "t": 1792256400.0,
+        "set": "indications:1m:sl1.25:st9",
+        "strict_n": 50,
+        "strict_pf": 1.5341,
+        "runtime_n": 50,
+        "runtime_pf": 0.9999,
+        "runtime_reason": "pf<min"
+      },
+      {
+        "t": 1792256400.0,
+        "set": "indications:1m:sl2.25:st6",
+        "strict_n": 50,
+        "strict_pf": 2.3972,
+        "runtime_n": 50,
+        "runtime_pf": 1.3439,
+        "runtime_reason": "pf<min"
+      },
+      {
+        "t": 1792256400.0,
+        "set": "indications:1m:sl2.75:st5",
+        "strict_n": 50,
+        "strict_pf": 2.3041,
+        "runtime_n": 50,
+        "runtime_pf": 1.3003,
+        "runtime_reason": "pf<min"
+      },
+      {
+        "t": 1792256400.0,
+        "set": "indications:1m:sl0.75:st15:xt",
+        "strict_n": 50,
+        "strict_pf": 1.5341,
+        "runtime_n": 50,
+        "runtime_pf": 0.9999,
+        "runtime_reason": "pf<min"
+      }
+    ],
+    "strict_fail_runtime_pass": [],
+    "note": "Same paper rows, Base only: simulator excludes closes at the checkpoint; runtime scorer includes them. This is not a live execution test."
+  },
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "sets": 3192,
+  "lookback_bars": 720,
+  "cost_pct": 0.15,
+  "history_context_target_bars": 2910,
+  "market_rows": {
+    "ADA-USDT": 5100,
+    "AVAX-USDT": 5100,
+    "BCH-USDT": 5100,
+    "BNB-USDT": 5100,
+    "BTC-USDT": 5100,
+    "DOGE-USDT": 5100,
+    "DOT-USDT": 5100,
+    "ETH-USDT": 5100
+  },
+  "contiguous_valid_ohlcv": true,
+  "market_bars_before_first_checkpoint": {
+    "ADA-USDT": 4380,
+    "AVAX-USDT": 4380,
+    "BCH-USDT": 4380,
+    "BNB-USDT": 4380,
+    "BTC-USDT": 4380,
+    "DOGE-USDT": 4380,
+    "DOT-USDT": 4380,
+    "ETH-USDT": 4380
+  },
+  "market_bars_before_last_checkpoint": {
+    "ADA-USDT": 5040,
+    "AVAX-USDT": 5040,
+    "BCH-USDT": 5040,
+    "BNB-USDT": 5040,
+    "BTC-USDT": 5040,
+    "DOGE-USDT": 5040,
+    "DOT-USDT": 5040,
+    "ETH-USDT": 5040
+  },
+  "context_count_full_at_first_checkpoint": true,
+  "context_count_full_at_last_checkpoint": true,
+  "pf_by_window_size": true,
+  "size_floors": [
+    [
+      5,
+      1.05
+    ],
+    [
+      10,
+      1.08
+    ],
+    [
+      20,
+      1.12
+    ],
+    [
+      35,
+      1.25
+    ]
+  ],
+  "long_floor": 1.5,
+  "market_file_sha256": {
+    "ADA-USDT": "2a5bf1d0bc900886d571668e168edcc87d85cc504900cc90bea6f77fd3ad3197",
+    "AVAX-USDT": "edca75c3ddaaa56c865c1824a624fd86dd353277be9f23f6dfb718cfb56d5185",
+    "BCH-USDT": "0d0c7cbcad77b30c92bffad6bef12ce911ff24320333c7a89c6af8853f4d1628",
+    "BNB-USDT": "ef9e75954d752484b3198e477a9f7599dbaa2d390e17e5d082b49249b3a69642",
+    "BTC-USDT": "bed92d655f8f0576f28714819e7ac78e6ae945d8d9e6159f9ca1a0d3bcdefa6e",
+    "DOGE-USDT": "94a273b211b36505ae24b88a84eb886c7e2ea84e8cf039d19dc7953b7237dba2",
+    "DOT-USDT": "a13e0c8552043f971366b32b38460b7206a62bade5ca26e4e822d405db5256ee",
+    "ETH-USDT": "9f96e4a534cf897718136ec20bcd3fabd11c2bce6edadfd80c8a7301375ba7ac"
+  },
+  "cache_sha256": "3c802b25fde0016efacde15a076b3d6127f373d929b02d004871550c317d7b03",
+  "reference_sha256": "dde40b9be04337f1d344d0441084ba792888b85e9fac515b08f42060ce55abfe",
+  "note": "Fixed-hold offline replay; overlapping Set windows are not independent. Grid count and recorded settings do not authenticate cache identity or every setting. No exchange data was accessed."
+}
