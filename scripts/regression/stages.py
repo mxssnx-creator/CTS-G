@@ -436,6 +436,20 @@ def negative_lane_does_not_pollute_main_passing_pf():
     return ok, f"Main-pass PF {p['main']['pf']} on {p['main']['sets']}; all-lane PF {p['mainAllLanes']['pf']} on {p['mainAllLanes']['sets']}"
 
 
+def debug_uses_each_window_pf_floor():
+    """The trace must explain the same size-dependent gates that admit the Set."""
+    import stage_debug as dbg
+    p = replace(CFG_FULL, base_long=5, base_short=0, gate_min=1, floor=1.1,
+                size_floors=((5, 2.0),), long_floor=2.0, lookback_s=1e9,
+                max_dd_s=1e9, main_on=False, short_on=False, neg_on=False,
+                base_min_n=0, main_min_n=0)
+    tr = dbg.trace_set([10.0, 20.0, 30.0], [9.0, 19.0, 29.0], [0.03, -0.02, 0.01], p)
+    last = tr['orders'][-1]
+    ok = last['base_long_pf'] == 1.5 and last['base_stop'] == 'long' and not last['in_main'] and dbg.consistent(tr)
+    return ok, f"PF={last['base_long_pf']} floor=2.0, stop={last['base_stop']}, consistent={dbg.consistent(tr)}"
+
+
+
 def set_and_lane_ids_never_collide():
     """Every Set has one id, and the Sets its orders form (<id>:main, :real, :realneg) are distinct from it and from every other Set's: an Exit Set (<pack>:1m:sl<r>:st<n>:xt)
     never reads as its base twin, a trailing Set never as either, in the book, in the snapshot's index and in the client id the live order carries."""
@@ -455,6 +469,7 @@ def set_and_lane_ids_never_collide():
 
 
 CHECKS = [
+    ("stages.debug-uses-each-window-pf-floor", debug_uses_each_window_pf_floor),
     ("stages.replay-and-current-verdict-use-same-pf-rounding", replay_and_current_verdict_use_the_same_pf_rounding),
     ("stages.negative-lane-does-not-pollute-main-passing-pf", negative_lane_does_not_pollute_main_passing_pf),
     ("stages.every-window-is-judged-on-its-own", every_window_is_judged_on_its_own),
