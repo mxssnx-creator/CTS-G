@@ -204,7 +204,8 @@ def cycles_keep_managing_when_ticker_read_is_slow():
     p._ticker_future, p._ticker_started = None, 0
     p._ticker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     p.last_uni, p.halt_reason, p.halted, p.cycle = pt.time.time(), None, False, 0
-    p._budget = p.seed_px_bars = p.maybe_reload_config = lambda: None
+    p._budget = lambda **kw: None
+    p.seed_px_bars = p.maybe_reload_config = lambda: None
     p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"))
     p.adopt_exchange_positions = p.sync_own_fills = p.qa_tick = lambda: None
     p.maybe_entries = p.maybe_block_adds = p.maybe_dca_adds = lambda: None
@@ -951,7 +952,11 @@ def _isolated(fn):
 def requested_local_configuration_reaches_engine():
     """The prepared x01 settings survive the engine's configuration clamp."""
     import json
-    saved = (pt.OVERLAY_PATH, pt.SCAN_S, list(pt.SYMBOLS))
+    config_globals = ("TARGET_NOTIONAL", "LEVERAGE", "MAX_OPEN", "MAX_PER_GROUP", "SL_PCT", "TP_PCT",
+                      "USE_MAX_LEVERAGE", "TRAIL_ARM", "TRAIL_GIVE", "TIME_STOP_S", "SCRATCH_S", "SCRATCH_MIN",
+                      "SCAN_S", "COOLDOWN_S", "STAGGER_S")
+    saved = {key: getattr(pt, key) for key in config_globals}
+    saved_path, saved_symbols = pt.OVERLAY_PATH, list(pt.SYMBOLS)
     with tempfile.TemporaryDirectory() as td:
         pt.OVERLAY_PATH = os.path.join(td, "overlay.json")
         with open(os.path.join(PULSE, "overlay-bingx-x01.json")) as f:
@@ -964,8 +969,10 @@ def requested_local_configuration_reaches_engine():
                 return (p.symbol_cap, p.volume_factor, pt.SCAN_S)
             got = _isolated(run)
         finally:
-            pt.OVERLAY_PATH, pt.SCAN_S = saved[0], saved[1]
-            pt.SYMBOLS[:] = saved[2]
+            pt.OVERLAY_PATH = saved_path
+            for key, value in saved.items():
+                setattr(pt, key, value)
+            pt.SYMBOLS[:] = saved_symbols
     return got == (70, 0.05, 0.2), f"symbol cap, factor, scan interval = {got}"
 
 
