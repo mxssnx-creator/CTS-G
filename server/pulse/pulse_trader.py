@@ -1280,10 +1280,11 @@ class Pulse:
             pack = pack or pos.pack
             if idx < 0:
                 idx = int(getattr(pos, "set_idx", -1))
-        pk = str(pack or set_id)
-        p = "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
+        pk = str(pack or (set_id or "").split(":", 1)[0])
+        extra_pack = bool(set_id) and pk not in ("indications", "general", "shortrange")
+        p = "x" if extra_pack else "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
-        m = re.search(r"sl([0-9.]+)", set_id or "")
+        m = re.search(r":sl([0-9.]+)", set_id or "")
         if m:
             try:
                 sl = f"{int(round(float(m.group(1)) * 10)):02d}"
@@ -1307,9 +1308,17 @@ class Pulse:
                 idx = int(getattr(self.sets, "sets", {}).get(set_id).idx) if set_id else -1
             except Exception:
                 idx = -1
-        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
         # the nonce carries the Set's lane: CID_NEG_MARK first for the Real Negative lane, never otherwise
         alphabet = [c for c in string.ascii_lowercase + string.digits if c != CID_NEG_MARK]
+        if extra_pack:
+            if idx < 0 or idx >= 36 ** 4 or not set_id:
+                raise ValueError("extra Set requires a representable index and identity")
+            digits = string.digits + string.ascii_lowercase
+            ix = "".join(digits[(idx // (36 ** n)) % 36] for n in (3, 2, 1, 0))
+            digest = hashlib.sha256(set_id.encode("utf-8")).hexdigest()[:10]
+            nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + digest + "".join(random.choices(alphabet, k=4))
+            return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"
+        ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
         nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + "".join(random.choices(alphabet, k=4))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
@@ -1341,7 +1350,8 @@ class Pulse:
         if len(rest) < 6:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
-        pack = {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
+        extra_pack = rest[1:2] == "x"
+        pack = "" if extra_pack else {"i": "indications", "s": "shortrange"}.get(rest[1:2], "general")
         is_exit = rest[4:6] == CID_EXIT_TR
         try:
             sl = int(rest[2:4]) / 10.0
@@ -1355,14 +1365,19 @@ class Pulse:
                 step = int(rest[6:8])
             except Exception:
                 step = 0
-        if len(rest) >= 12 and rest[8:12].isdigit():
+        if extra_pack and len(rest) >= 27:
+            try:
+                idx = int(rest[8:12], 36)
+            except ValueError:
+                idx = -1
+        elif len(rest) >= 12 and rest[8:12].isdigit():
             idx = int(rest[8:12])
         elif len(rest) >= 11 and rest[8:11].isdigit():
             idx = int(rest[8:11])          # an id written before the index had four digits
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
 
-        lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and rest[8:12].isdigit() else "pos"
+        lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and (extra_pack or rest[8:12].isdigit()) else "pos"
 
         def _row(st_obj: Any) -> Dict[str, Any]:
             return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
@@ -1370,7 +1385,13 @@ class Pulse:
 
         def _agrees(st_obj: Any) -> bool:
             try:
-                if str(getattr(st_obj, "pack", "")) != pack:
+                if extra_pack:
+                    signature = rest[13:23].lower() if len(rest) >= 27 else ""
+                    if str(getattr(st_obj, "pack", "")) in ("indications", "general", "shortrange") or not signature:
+                        return False
+                    if hashlib.sha256(st_obj.id.encode("utf-8")).hexdigest()[:10] != signature:
+                        return False
+                elif str(getattr(st_obj, "pack", "")) != pack:
                     return False
                 if st_obj.kind == "trail":
                     return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06
@@ -1381,6 +1402,13 @@ class Pulse:
                 return False
 
         sets_obj = getattr(self, "sets", None)
+        if extra_pack:
+            # A compact digest identifies the Set, not just the pack. If the
+            # grid changes or two candidates match, never guess an owner.
+            cands = [x for x in (getattr(sets_obj, "sets", None) or {}).values() if _agrees(x)]
+            if len(cands) == 1:
+                return _row(cands[0])
+            return {"kind": kind, "pack": "", "sl": sl, "trail": tr, "step": step, "idx": -1, "set_id": ""}
         st_obj = sets_obj.get_idx(idx) if idx >= 0 and sets_obj is not None else None
         if st_obj is not None and _agrees(st_obj):
             return _row(st_obj)

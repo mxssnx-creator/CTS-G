@@ -67,6 +67,7 @@ from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LO
 from risk_variants import parse_trail, trail_grid
 
 PACKS = ("indications", "general")
+EXTRA_INDICATOR_PREFIX = "extra."
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
 SHORT_MIN_PF_DEFAULT = 1.1       # owner: the Short Range Base floor defined earlier (a770ec1), the other Sets 1.25
@@ -732,9 +733,6 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
         common = evaluate_common("hist", candles, settings)
         if common:
             votes.append((1 if common.direction == "long" else -1, common.confidence, "common"))
-    extras = settings.get("extraIndicators") or []
-    if extras:
-        votes.extend(extra_votes(extra_rows if extra_rows is not None else rows[-EXTRA_WINDOW:], extras))     # each name its own window
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -778,7 +776,7 @@ def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
     """The most closed 1m bars any pack reads for one bar's signal: the indication pack's window, or the longest window of
     the indicators named in extraIndicators and in the Short Range and extra packs' variant lists (a 15m name reads 900).
     pack_signals keys its memo on this many bars, so two bars share a signal only when everything they read is equal."""
-    names = list(ind_settings.get("extraIndicators") or []) if "indications" in packs else []
+    names = [p[len(EXTRA_INDICATOR_PREFIX):] for p in packs if p.startswith(EXTRA_INDICATOR_PREFIX)]
     if SHORT_PACK in packs:
         names += list(ind_settings.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT)
     for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
@@ -806,13 +804,15 @@ def bar_signal(
         row["general"] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
     if "indications" in packs:
         lo = i + 1 - IND_WINDOW_BARS
-        row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts,
-                                               hist if ind_settings.get("extraIndicators") else None)
+        row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
     if SHORT_PACK in packs:
         row[SHORT_PACK] = short_range_signal(hist, ind_settings)    # each name reads its own window
     for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
         if pk in packs:
             row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
+    for pk in packs:
+        if pk.startswith(EXTRA_INDICATOR_PREFIX):
+            row[pk] = _variant_signal(hist, [pk[len(EXTRA_INDICATOR_PREFIX):]])
     return row
 
 
@@ -1805,6 +1805,11 @@ class SetBook:
         for pk, (sw, _key, _default) in EXTRA_PACKS.items():
             if bool(ov.get(sw, False)):
                 packs.append(pk)
+        extra_names = ov.get("extraIndicators") or []
+        if not isinstance(extra_names, (list, tuple)):
+            extra_names = []
+        extra_names = sorted({str(x) for x in extra_names if extra_known(str(x))})
+        packs.extend(EXTRA_INDICATOR_PREFIX + name for name in extra_names)
         self.packs = packs or ["indications"]
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
@@ -1889,7 +1894,7 @@ class SetBook:
             # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
             "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if extra_known(x)],
             **{key: [str(x) for x in (ov.get(key) or default) if extra_known(x)] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
-            "extraIndicators": sorted({str(x) for x in (ov.get("extraIndicators") or []) if extra_known(x)}),
+            "extraIndicators": extra_names,
         }
         with self._lock:
             self._rebuild_sets()

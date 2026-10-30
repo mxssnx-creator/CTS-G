@@ -1,4 +1,4 @@
-"""Extra causal indicators for the Set indication pack.
+"""Extra causal indicators for independent Set packs.
 
 Every indicator is a pure function of the newest bars, 1m rows [o, h, l, c, v] (newest last), and returns
 (direction, confidence) with direction +1 long / -1 short, or None when it has nothing to say. Only the last
@@ -6,9 +6,9 @@ LOOKBACK rows are read, nothing looks ahead, and the result does not depend on a
 
 The set is deliberately wide: classic trend, momentum, reversion, volatility and volume tools next to raw
 price-action measures (streaks, range position, candle shape, the move before a pullback). Which of them earn a
-place in a vote is decided by measurement (scripts/indicator_eval.py), not here: set_engine reads the overlay key
-"extraIndicators" (a list of names) and adds the listed ones as votes. The default is the empty list, so the
-shipped votes stay as they are until a measurement says otherwise.
+place is decided by measurement (scripts/indicator_eval.py), not here: set_engine reads the overlay key
+"extraIndicators" (a list of names) and creates a separate Set pack for each listed indicator. The default
+is the empty list; the existing indication vote is unaffected.
 """
 from __future__ import annotations
 
