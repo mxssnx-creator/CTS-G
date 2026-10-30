@@ -8,7 +8,7 @@ test("hourly execution PF uses recorded net without recharging the allowance", (
     { t: now, pnl_pct: .001, net_pnl_pct: .0004 },
     { t: now + 1, pnl_pct: .001, net_pnl_pct: -.0002 },
   ] as never[];
-  assert.equal(hourlyPf(rows, .3, now, 1)[0].pf, 2);
+  assert.equal(hourlyPf(rows, .3, now + 2, 1)[0].pf, 2);
 });
 
 const NOW = 1_800_000_000 + 1800; // half past an hour
@@ -25,12 +25,13 @@ test("each close lands in its own clock hour and PF is net of PositionCost", () 
   assert.equal(rows[2].n, 2);
   assert.ok(Math.abs((rows[2].pf as number) - 2) < 1e-9);
   assert.equal(rows[1].n, 1);
-  assert.equal(rows[1].pf, 0, "a close at exactly the cost has no profit: PF 0, not null");
+  assert.equal(rows[1].pf, null, "a flat-only sample has no defined PF");
+  assert.equal(rows[1].flat, true);
   assert.equal(rows[0].n, 0);
   assert.equal(rows[0].pf, null, "an hour without trades is a gap, not a zero");
 });
 
-test("a close without pnl_pct is skipped, not counted as a loss", () => {
+test("a close without a measurable return makes its hour unavailable", () => {
   const closed = [
     { t: H + 1, pnl_pct: null },
     { t: H + 2, pnl_pct: undefined },
@@ -38,7 +39,22 @@ test("a close without pnl_pct is skipped, not counted as a loss", () => {
   ] as never[];
   const last = hourlyPf(closed, 0.12, NOW, 1)[0];
   assert.equal(last.n, 1);
-  assert.equal(last.pf, 9.99, "no loss in the hour: capped at 9.99");
+  assert.equal(last.missing, 2);
+  assert.equal(last.pf, null);
+  assert.equal(last.noLoss, false, "unknown returns cannot certify no losses");
+});
+
+test("no-loss, high finite PF, and future closes remain distinct", () => {
+  const noLoss = hourlyPf([{ t: H + 1, pnl_pct: .01 }] as never[], .12, H + 10, 1)[0];
+  assert.equal(noLoss.noLoss, true);
+  assert.equal(noLoss.pf, null);
+  const finite = hourlyPf([
+    { t: H + 1, net_pnl_pct: .01 }, { t: H + 2, net_pnl_pct: -.0001 },
+    { t: H + 20, net_pnl_pct: -.5 },
+  ] as never[], .12, H + 10, 1)[0];
+  assert.equal(finite.n, 2, "the future close cannot affect this snapshot");
+  assert.equal(finite.pf, 100, "a large finite PF is not clamped or called no loss");
+  assert.equal(finite.noLoss, false);
 });
 
 test("millisecond timestamps are read as such", () => {

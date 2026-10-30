@@ -46,7 +46,7 @@ export function StatsOverview({
         />
         {live?.sets?.pfBase ? (
           <Hero
-            k="Effective PF · after Base"
+            k="Base-window PF · all-stage validated"
             v={formatPf(live.sets.pfBase.base.n ? live.sets.pfBase.base.pf : null)}
             s={`${live.sets.pfBase.base.sets} PF-validated Sets${live.sets.pfBase.validatedPct != null ? ` (${live.sets.pfBase.validatedPct.toFixed(1)}%${live.sets.pfBase.validatedBasePct != null && live.sets.pfBase.main?.on ? `, Base alone ${live.sets.pfBase.validatedBasePct.toFixed(1)}%` : ""})` : ""} · n ${live.sets.pfBase.base.n}${live.sets.pfBase.main?.on ? ` · Main last ${live.sets.pfBase.main.lastN}: PF ${formatPf(live.sets.pfBase.main.n ? live.sets.pfBase.main.pf : null)} (${live.sets.pfBase.main.n} orders)` : ""}${live.sets.pfBase.baseEntry && live.sets.pfBase.baseEntry.entries ? ` · per entry PF ${formatPf(live.sets.pfBase.baseEntry.pf)} (${live.sets.pfBase.baseEntry.entries} entries, ${live.sets.pfBase.baseEntry.setsPerEntry} Sets each)` : ""}${live.sets.pfBase.real ? ` · Real Sets PF ${formatPf((live.sets.pfBase.real.n ?? live.sets.pfBase.real.orders) ? live.sets.pfBase.real.pf : null)} (${live.sets.pfBase.real.orders} orders)` : ""} · before Base ${formatPf(live.sets.pfBase.unfiltered.n ? live.sets.pfBase.unfiltered.pf : null)}`}
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}

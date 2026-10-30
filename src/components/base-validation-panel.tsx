@@ -16,6 +16,7 @@ import type { LiveStats } from "@/lib/live-stats";
 import { ClientChart } from "@/components/visual-stats";
 import { POSITION_COST_PCT_DEFAULT } from "@/lib/analytics";
 import { hourlyPf } from "@/lib/hourly-pf";
+import { basePackFigures, historicalPlotPf } from "@/lib/base-progress";
 
 const PACK_LABEL: Record<string, string> = {
   indications: "Indications",
@@ -33,23 +34,14 @@ function Panel({ title, hint, children }: { title: string; hint?: string; childr
   );
 }
 
-/** The post-Base standard on one card row: effective PF vs unfiltered per pack, share of Sets validated, the Set
- * state split and the PF of each of the last 24 hours. The unfiltered PF is shown for reference only: it is under 1
- * by design, because Base validation exists to drop the losing Sets. */
+/** Base-only and all-stage cohorts are displayed separately. */
 export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | null; minPf?: number }) {
   const pb = live?.sets?.pfBase;
   const counts = live?.sets?.counts;
   const cost = live?.pfCost?.costPct ?? POSITION_COST_PCT_DEFAULT;
   const packs = useMemo(
     () =>
-      Object.entries(pb?.byPack ?? {}).map(([id, v]) => ({
-        pack: PACK_LABEL[id] ?? id,
-        effective: v.base.sets ? v.base.pf : null,
-        unfiltered: v.unfiltered.pf,
-        validated: v.validatedPct,
-        valid: v.valid,
-        total: v.total,
-      })),
+      basePackFigures(pb?.byPack).map((v) => ({ ...v, pack: PACK_LABEL[v.id] ?? v.id })),
     [pb],
   );
   const hourly = useMemo(
@@ -70,19 +62,21 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     () =>
       (pb?.history ?? []).map((h) => ({
         time: new Date(h.t * 1000).toISOString().slice(11, 16),
-        pf: h.n ? Math.min(h.pf, 9.99) : null,
+        pf: historicalPlotPf(h.pf, h.n),
         validated: h.validatedPct,
       })),
     [pb],
   );
   if (!pb) return null;
-  const hoursWithTrades = hourly.filter((h) => h.n > 0);
-  const hoursPositive = hoursWithTrades.filter((h) => (h.pf ?? 0) >= 1).length;
+  const hoursWithPf = hourly.filter((h) => h.pf !== null || h.noLoss);
+  const hoursPositive = hoursWithPf.filter((h) => h.noLoss || (h.pf !== null && h.pf >= 1)).length;
+  const noLossHours = hourly.filter((h) => h.noLoss).length;
+  const missingHours = hourly.filter((h) => h.missing > 0).length;
   return (
     <div className="grid gap-3 lg:grid-cols-2" data-testid="base-validation-panel">
       <Panel
         title="Effective PF after Base"
-        hint={`${pb.base.sets} of ${pb.total ?? pb.unfiltered.sets} PF-validated (${(pb.validatedPct ?? 0).toFixed(1)}%)${pb.eligible != null ? ` · ${pb.eligible} ready for entry` : ""} · n ${pb.base.n} · before Base ${pb.unfiltered.pf.toFixed(2)}`}
+        hint={`${pb.baseOnly?.sets ?? "—"} of ${pb.total ?? pb.unfiltered.sets} Base-validated (${pb.validatedBasePct != null ? pb.validatedBasePct.toFixed(1) + "%" : "—"}) · n ${pb.baseOnly?.n ?? "—"}${pb.eligible != null ? ` · ${pb.eligible} ready for entry` : ""} · ambiguous no-loss sentinels are not plotted`}
       >
         <ClientChart height={200}>
           <BarChart data={packs} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
@@ -98,7 +92,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
           </BarChart>
         </ClientChart>
       </Panel>
-      <Panel title="Validated Sets" hint="Share of each strategy's Sets that pass the configured PF and risk validation, independent of minimal coordination.">
+      <Panel title="Base-validated Sets" hint="Share of each strategy's Sets that pass Base PF and risk validation, independently of later stages and minimal coordination.">
         <ClientChart height={200}>
           <BarChart data={packs} layout="vertical" margin={{ top: 6, right: 16, left: 12, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #2a2f3a)" />
@@ -111,7 +105,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
       </Panel>
       <Panel
         title="PF per hour"
-        hint={`Last 24 h, net of PositionCost ${cost}% · ${hoursPositive}/${hoursWithTrades.length} hours with trades at PF ≥ 1`}
+        hint={`Last 24 h of available recorded closes · ${hoursPositive}/${hoursWithPf.length} measurable hours at PF ≥ 1 · ${noLossHours} no-loss hours not plotted${missingHours ? ` · ${missingHours} hours with missing returns` : ""} · fees may be estimated`}
       >
         <ClientChart height={200}>
           <LineChart data={hourly} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
@@ -127,7 +121,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
       </Panel>
       <Panel
         title="Continuous progress"
-        hint={`Effective PF (rolling gate window of each validated Set) and the validated share over time, one point per scoring pass${pb.basis ? " · basis: " + pb.basis : ""}`}
+        hint={`Base-window PF and share of all-stage validated Sets, one point per scoring pass${pb.basis ? " · basis: " + pb.basis : ""} · ambiguous no-loss sentinels are not plotted`}
       >
         <ClientChart height={200}>
           <LineChart data={progress} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
@@ -139,7 +133,7 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
             <Legend wrapperStyle={{ fontSize: 11 }} />
             <ReferenceLine yAxisId="pf" y={minPf} stroke="#e0a030" strokeDasharray="4 2" />
             <Line yAxisId="pf" type="monotone" dataKey="pf" name="Effective PF" stroke="#1f9d5c" strokeWidth={2} dot={false} />
-            <Line yAxisId="pct" type="monotone" dataKey="validated" name="Validated %" stroke="#4c8dff" strokeWidth={1.5} dot={false} />
+            <Line yAxisId="pct" type="monotone" dataKey="validated" name="All-stage validated %" stroke="#4c8dff" strokeWidth={1.5} dot={false} />
           </LineChart>
         </ClientChart>
       </Panel>
