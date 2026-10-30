@@ -1,4 +1,5 @@
 {
+  "warning": "WITHDRAWN AS AN EXACT PRESET REPLAY: this simulator used the global hold, while the preset enables automatic hold selection. Its zero Base observations and empty execution apply only to that different modeled hold policy. See secure-minimal-engine-checkpoints-20261030.json for actual SetBook historical checkpoints; forward execution remains unavailable.",
   "symbols": [
     "ADA-USDT",
     "AVAX-USDT",

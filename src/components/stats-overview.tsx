@@ -3,6 +3,7 @@ import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
 import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
+import { executionScopeText, scopeStatus } from "@/lib/execution-scope";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -40,7 +41,7 @@ export function StatsOverview({
         <Hero
           k={`Last ${cost.n || 15} PF`}
           v={cost.count ? formatPf(cost.pf) : "—"}
-          s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
+          s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.count < 8 ? "insufficient evidence" : cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
         {live?.sets?.pfBase ? (
@@ -62,9 +63,9 @@ export function StatsOverview({
         {live?.execution?.overall && Object.keys(live.execution.overall.scopes).length ? (
           <Hero
             k="Real · overall strategies by scope"
-            v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow !== false).length}/${Object.keys(live.execution.overall.scopes).length} open`}
+            v={`${Object.values(live.execution.overall.scopes).filter((s) => s.allow === true).length}/${Object.values(live.execution.overall.scopes).filter((s) => typeof s.allow === "boolean").length} evaluated scopes open`}
             s={Object.entries(live.execution.overall.scopes)
-              .map(([k, s]) => `${k.replace("pack:", "").replace("lane:", "lane ")} ${s.allow === false ? "blocked" : "open"} · paper PF ${s.pf != null ? s.pf.toFixed(2) : "—"} (${s.n ?? 0}) · executed ${s.executed.pf != null ? s.executed.pf.toFixed(2) : "—"} (${s.executed.orders})`)
+              .map(([k, s]) => `${k.replace("pack:", "").replace("lane:", "lane ")} ${scopeStatus(s.allow)} · paper PF ${(s.n ?? 0) > 0 ? formatPf(s.pf) : "—"} (${s.n ?? 0}) · ${executionScopeText(s.executed)}`)
               .join(" | ") + (live.execution.overall.blocked ? ` · ${live.execution.overall.blocked} entries held by a scope` : "")}
             tone={Object.values(live.execution.overall.scopes).some((s) => s.allow === false) ? "bad" : "ok"}
           />

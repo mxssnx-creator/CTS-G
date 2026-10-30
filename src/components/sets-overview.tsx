@@ -10,6 +10,7 @@ import {
   STRATEGY_TYPES,
   filterSets,
   formatPf,
+  formatPfWithCount,
   pfByStep,
   rangeById,
   rankRows,
@@ -196,9 +197,9 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
               <th className="pb-2 text-right font-medium">Hold</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 text-right font-medium">Avg DDt</th>
-              <th className="pb-2 text-right font-medium" title="Main Set: orders opened while Base passed · the Main gate's PF on its last N">Main Set n · PF</th>
-              <th className="pb-2 text-right font-medium" title="Real Set: orders opened while Base and Main passed · PF on its last N">Real Set n · PF</th>
-              <th className="pb-2 text-right font-medium" title="Real Negative Set: Main orders opened in a dip · PF on its last N">Real Neg n · PF</th>
+              <th className="pb-2 text-right font-medium" title="Total paper closes / closes in the Main PF window · PF">Main total / window · PF</th>
+              <th className="pb-2 text-right font-medium" title="Total paper closes / closes in the Real PF window · PF">Real total / window · PF</th>
+              <th className="pb-2 text-right font-medium" title="Total paper closes / closes in the Real Negative PF window · PF">Real Neg total / window · PF</th>
               <th className="pb-2 text-right font-medium" title="Base short window PF · the Set's own Main short window (N)">Short PF · Main short</th>
               <th className="pb-2 font-medium" title="the lane the Set is valid on, or the stage it fails">Lane</th>
             </tr>
@@ -225,9 +226,9 @@ function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" |
                   <td className="py-1.5 text-right">{r.h === undefined ? "—" : formatDuration(r.h * 1000)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.dd * 1000)}</td>
                   <td className="py-1.5 text-right">{r.da === undefined ? "—" : formatDuration(r.da * 1000)}</td>
-                  <td className="py-1.5 text-right">{r.mainN === undefined ? "—" : `${r.mainN} · ${formatPf(r.mainPf ?? 0)}`}</td>
-                  <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} · ${formatPf(r.realPf ?? 0)}`}</td>
-                  <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} · ${formatPf(r.realNegPf ?? 0)}`}</td>
+                  <td className="py-1.5 text-right">{r.mainN === undefined ? "—" : `${r.mainN} / ${r.mainWindowN ?? "—"} · ${formatPfWithCount(r.mainPf, r.mainWindowN)}`}</td>
+                  <td className="py-1.5 text-right">{r.realN === undefined ? "—" : `${r.realN} / ${r.realWindowN ?? "—"} · ${formatPfWithCount(r.realPf, r.realWindowN)}`}</td>
+                  <td className="py-1.5 text-right">{r.realNegN === undefined ? "—" : `${r.realNegN} / ${r.realNegWindowN ?? "—"} · ${formatPfWithCount(r.realNegPf, r.realNegWindowN)}`}</td>
                   <td className="py-1.5 text-right">{r.shortPf === undefined ? "—" : `${formatPf(r.shortPf)} · ${r.mainShortN ?? "—"}`}</td>
                   <td className="py-1.5">{r.lane === "pos" ? "Real" : r.lane === "neg" ? "Real Neg" : r.why || "—"}</td>
                 </tr>

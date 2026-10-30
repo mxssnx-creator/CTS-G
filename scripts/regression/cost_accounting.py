@@ -223,8 +223,81 @@ def execution_scope_counts_survive_restart():
         p._exec_boot()
         ok = p.exec_n["set"] == 3 and p.exec_n["lanePos"] == 2 and p.exec_n.get("lanePosLoss", 0) == 0
         ok = ok and p.exec_n["laneNegLoss"] == 1 and p.exec_n["blockAddFills"] == 1
-        return ok and p.exec_scope["set:own:neg"] == [1, 0, 0.0, 2.0], f"restored counters={p.exec_n}; own negative scope={p.exec_scope['set:own:neg']}"
+        scope = p.exec_scope["set:own:neg"]
+        ok = ok and scope["orders"] == 1 and scope["cash_loss"] == 2 and scope["return_n"] == 0
+        return ok, f"restored counters={p.exec_n}; own negative scope={scope}"
     return _isolated(run)
+
+
+def execution_scope_return_pf_preserves_missing_and_restart():
+    import json
+    import time
+    from dataclasses import asdict
+    import pulse_trader as pt
+    from common import SMALL, overlay
+    from set_engine import SetBook
+    from trader import _isolated
+
+    def run():
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.track_prefix = pt.TAG
+        p.sets = SetBook(); p.sets.load(overlay(**SMALL))
+        p.open = {}
+        now = time.time()
+        rows = [
+            pt.Closed(now, "A", "LONG", 2, 1, 1, .016, .008, "tp", 60, set_id="own", pack="general",
+                      net_pnl_pct=.008, fee_source="reported-fee"),
+            pt.Closed(now + .01, "B", "LONG", 100, 1, 1, -1, -.01, "sl", 60, set_id="own", pack="general",
+                      net_pnl_pct=-.01, fee_source="exchange-rate-estimate"),
+        ]
+        for row in rows:
+            p._exec_note(row)
+        key = "set:own:pos"
+        complete = p.execution_snapshot()["overall"]["scopes"][key]["executed"]
+        if not (complete["pf"] == .8 and complete["cashPf"] == .016 and complete["returnOrders"] == 2
+                and complete["feeSources"] == {"reported-fee": 1, "exchange-rate-estimate": 1}):
+            return False, f"unequal sizes: {complete}"
+        missing = pt.Closed(now + .02, "C", "SHORT", 1, 1, 1, 0, 0, "time", 60, set_id="own", pack="general",
+                            net_pnl_pct=None, fee_source="unknown")
+        rows.append(missing); p._exec_note(missing)
+        incomplete = p.execution_snapshot()["overall"]["scopes"][key]["executed"]
+        ok = (incomplete["pf"] is None and not incomplete["noLoss"] and incomplete["missingReturns"] == 1
+              and incomplete["returnOrders"] == 2 and incomplete["cashPf"] == .016 and incomplete["orders"] == 3)
+        unknown_cash = pt.Closed(now + .03, "E", "LONG", 1, 1, 1, None, 0, "time", 60, set_id="own", pack="general",
+                                 net_pnl_pct=None, fee_source="unknown")
+        rows.append(unknown_cash); p._exec_note(unknown_cash)
+        incomplete = p.execution_snapshot()["overall"]["scopes"][key]["executed"]
+        ok = ok and incomplete["cashPf"] is None and incomplete["missingCash"] == 1 and incomplete["missingReturns"] == 2
+        with open(pt.TRADES_PATH, "w") as f:
+            for row in rows:
+                f.write(json.dumps(asdict(row)) + "\n")
+        p._exec_boot()
+        restored = p.execution_snapshot()["overall"]["scopes"][key]["executed"]
+        ok = ok and restored == incomplete
+
+        one = pt.Pulse.__new__(pt.Pulse); one.sets = p.sets; one.open = {}
+        one._exec_note(rows[0])
+        no_loss = one.execution_snapshot()["overall"]["scopes"][key]["executed"]
+        flat = pt.Pulse.__new__(pt.Pulse); flat.sets = p.sets; flat.open = {}
+        flat._exec_note(pt.Closed(now, "D", "LONG", 1, 1, 1, 0, 0, "time", 60, set_id="own", pack="general",
+                                  net_pnl_pct=0, fee_source="reported-fee"))
+        flat_stats = flat.execution_snapshot()["overall"]["scopes"][key]["executed"]
+        ok = ok and no_loss["pf"] is None and no_loss["noLoss"] and flat_stats["pf"] is None and not flat_stats["noLoss"]
+        return ok, f"return/cash PF=.8/.016; missing return/cash={incomplete['missingReturns']}/{incomplete['missingCash']}; restart identical={restored == incomplete}; no-loss/flat distinct={no_loss['noLoss'] and not flat_stats['noLoss']}"
+    return _isolated(run)
+
+
+def stage_window_counts_are_not_total_paper_counts():
+    from common import SMALL, overlay
+    from set_engine import SetBook
+    book = SetBook(); book.load(overlay(**SMALL))
+    st = book.by_idx[0]
+    st.proc_total, st.main_n, st.main_pf = 12, 0, 0
+    st.exe_total, st.exe_n, st.exe_pf = 5, 2, .8
+    st.neg_total, st.neg_n, st.neg_pf = 7, 1, 99
+    row = next(x for x in book.snapshot()["index"] if x["id"] == st.id)
+    observed = tuple(row[k] for k in ("mainN", "mainWindowN", "realN", "realWindowN", "realNegN", "realNegWindowN"))
+    return observed == (12, 0, 5, 2, 7, 1), f"(total, PF-window count) by stage={observed}"
 
 
 def acknowledged_close_waits_for_the_same_order():
@@ -346,6 +419,7 @@ CHECKS = [("cost-accounting." + fn.__name__.replace("_", "-"), fn) for fn in (
     rate_lookup_and_bybit_translation, selected_fees_exclude_inactive_symbols,
     fallback_fees_do_not_charge_slippage_twice, pulse_fill_to_stats, partial_close_retry_and_unfilled_close,
     execution_outcomes_survive_caps_and_emergency_closes, unattributed_aggregate_fee_does_not_score_base,
-    execution_scope_counts_survive_restart, acknowledged_close_waits_for_the_same_order,
+    execution_scope_counts_survive_restart, execution_scope_return_pf_preserves_missing_and_restart,
+    stage_window_counts_are_not_total_paper_counts, acknowledged_close_waits_for_the_same_order,
     pending_close_survives_position_refresh_and_restart, pending_partial_is_settled_once_then_manager_closes_remainder,
     restart_does_not_seed_foreign_exit_lanes)]

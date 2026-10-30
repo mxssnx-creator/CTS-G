@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `npm test`: the Node tests, the TypeScript desk tests and the Python regression run concurrently.
+ * `npm test`: the Node and TypeScript desk tests and both Python engine suites run concurrently.
  *
  * They share no state, so running them in parallel cuts wall time to the slowest of the three. The exit code is
  * nonzero if any of them fails, and each one's output is printed under its own label.
@@ -11,6 +11,7 @@ const jobs = [
   { label: "node", cmd: "node --test scripts/*.test.mjs" },
   { label: "ts", cmd: "node scripts/run-ts-tests.mjs" },
   { label: "python", cmd: "python3 scripts/regression/run.py" },
+  { label: "engine", cmd: "python3 scripts/engine-test.py" },
 ];
 
 function run({ label, cmd }) {

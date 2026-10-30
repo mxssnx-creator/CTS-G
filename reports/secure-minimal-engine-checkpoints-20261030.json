@@ -1,0 +1,641 @@
+{
+  "presetSha256": "33ff269b84e67c779879866d578f2c9a176f5d047923afbf1e0e6242f0cb51cc",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "lookbackBars": 720,
+  "holdAuto": true,
+  "costPct": 0.12,
+  "checkpoints": [
+    {
+      "t": 1792227600,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 791,
+        "stop-cap": 12,
+        "short": 16,
+        "pass": 3
+      },
+      "entryReasons": {
+        "pf<min": 791,
+        "stop-cap": 12,
+        "short": 16,
+        "main": 3
+      },
+      "basePassed": 3,
+      "basePf": 1.730635492164279,
+      "baseNoLoss": false,
+      "baseOrders": 150,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 19,
+      "baseShortPassed": 17,
+      "autoHoldSelected": 246,
+      "stageCounts": {
+        "base": 3,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 3,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 22.307
+    },
+    {
+      "t": 1792231200,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 14,
+      "autoHoldSelected": 519,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 21.956
+    },
+    {
+      "t": 1792234800,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 7,
+      "autoHoldSelected": 558,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 21.539
+    },
+    {
+      "t": 1792238400,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 6,
+      "autoHoldSelected": 352,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 23.91
+    },
+    {
+      "t": 1792242000,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 34,
+      "autoHoldSelected": 453,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 20.249
+    },
+    {
+      "t": 1792245600,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 34,
+      "autoHoldSelected": 673,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 19.908
+    },
+    {
+      "t": 1792249200,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 0,
+      "autoHoldSelected": 689,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 21.87
+    },
+    {
+      "t": 1792252800,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 22,
+      "autoHoldSelected": 729,
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 23.217
+    },
+    {
+      "t": 1792256400,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 743,
+        "pass": 64,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 743,
+        "main": 6,
+        "real": 58,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "basePassed": 64,
+      "basePf": 8.208677189961247,
+      "baseNoLoss": false,
+      "baseOrders": 3200,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 67,
+      "baseShortPassed": 323,
+      "autoHoldSelected": 463,
+      "stageCounts": {
+        "base": 64,
+        "main": 58,
+        "negative": 1,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 64,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 22.163
+    },
+    {
+      "t": 1792260000,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 769,
+        "pass": 27,
+        "short": 14,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 769,
+        "main": 3,
+        "real": 24,
+        "short": 14,
+        "stop-cap": 12
+      },
+      "basePassed": 27,
+      "basePf": 1.7403187963447133,
+      "baseNoLoss": false,
+      "baseOrders": 1350,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 41,
+      "baseShortPassed": 39,
+      "autoHoldSelected": 437,
+      "stageCounts": {
+        "base": 27,
+        "main": 24,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 27,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 26.94
+    },
+    {
+      "t": 1792263600,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 809,
+        "stop-cap": 12,
+        "pass": 1
+      },
+      "entryReasons": {
+        "pf<min": 809,
+        "stop-cap": 12,
+        "main": 1
+      },
+      "basePassed": 1,
+      "basePf": 1.6039747612655735,
+      "baseNoLoss": false,
+      "baseOrders": 50,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 1,
+      "baseShortPassed": 55,
+      "autoHoldSelected": 465,
+      "stageCounts": {
+        "base": 1,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 1,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 26.705
+    },
+    {
+      "t": 1792267200,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 803,
+        "pass": 4,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 803,
+        "main": 3,
+        "real": 1,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "basePassed": 4,
+      "basePf": 2.0015355155412595,
+      "baseNoLoss": false,
+      "baseOrders": 200,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 7,
+      "baseShortPassed": 41,
+      "autoHoldSelected": 696,
+      "stageCounts": {
+        "base": 4,
+        "main": 1,
+        "negative": 2,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 4,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 26.798
+    }
+  ],
+  "maxRssKiB": 177792,
+  "scope": "historical SetBook snapshots only; not modeled execution or exchange fills"
+}

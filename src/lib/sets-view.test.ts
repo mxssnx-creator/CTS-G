@@ -7,6 +7,7 @@ import {
   STRATEGY_TYPES,
   filterSets,
   formatPf,
+  formatPfWithCount,
   inRange,
   pfByStep,
   rangeById,
@@ -157,6 +158,13 @@ test("a PF for display: a window without a loss reads no loss, not 99.00; missin
   assert.equal(formatPf(undefined), "—");
   assert.equal(formatPf(Number.NaN), "—");
   assert.equal(formatPf(98.99), "98.99");
+});
+
+test("stage PF is unavailable without its own window sample", () => {
+  assert.equal(formatPfWithCount(0, 0), "—");
+  assert.equal(formatPfWithCount(99, undefined), "—");
+  assert.equal(formatPfWithCount(0, 3), "0.00");
+  assert.equal(formatPfWithCount(99, 3), "no loss");
 });
 
 test("stage figures show the Sets that pass each stage, their share of all Sets and their own PF (never the overall average)", () => {

@@ -103,14 +103,14 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-50-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
-    rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 0, str(x01.get("blockMaxStack")))
+    rec("x01-block-cap", int(x01.get("blockMaxStack") or 0) == 6, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))
     rec("x01-set-unlim", "setMaxActive" not in x01, "the set count is never limited (setMaxActive removed)")
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 80, f"cap={x02.get('symbolCap')}")
-    rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
-    rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 0 and int(x02.get("dcaMaxSteps") or 0) == 0)
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 200, f"cap={x02.get('symbolCap')}")
+    rec("unlimited-position-cap", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x02-block-cap-and-unlimited-dca", int(x02.get("blockMaxStack") or 0) == 6 and int(x02.get("dcaMaxSteps") or 0) == 0)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
 
@@ -197,6 +197,9 @@ def unlimited_test() -> None:
 def coord_test() -> None:
     from coord_engine import Coordinator
     c = Coordinator()
+    bounded = c.slot_cap(0, 1.2)
+    rec("coord-continuation-limits-slot", bounded == c.axes["cont"].max_window, str(bounded))
+    c.axes["cont"].enabled = False
     rec("coord-unlimited-slot", c.slot_cap(0, 1.2) >= 10**8, str(c.slot_cap(0, 1.2)))
     rec("coord-limited-slot", 0 < c.slot_cap(6, 1.2) <= 6, str(c.slot_cap(6, 1.2)))
 
@@ -237,6 +240,9 @@ def always_start_test() -> None:
         p.used = 0.0
         p.upnl = 0.0
         p.start_eq = start_eq
+        p.session_eq = start_eq
+        p.dd_basis = "start"
+        p.dd_halt = 0.10  # fixture policy: a 20% drawdown must halt
         p.last_bal = 0.0
         p.halted = halted
         p.halt_reason = reason
@@ -348,7 +354,7 @@ def always_start_test() -> None:
     touch(pause_f)
     oks, msgs = ph.apply_control("bingx-t01", "stop")
     rec("astart-sidecar-stop-marks", oks and os.path.exists(stop_f) and not os.path.exists(pause_f)
-        and any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
+        and not any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
 
 
 def control_coord_test() -> None:
@@ -402,6 +408,9 @@ def control_coord_test() -> None:
     p._pre_pause_halt = "drawdown halt"
     p.equity = 80.0
     p.start_eq = 0.0
+    p.session_eq = 0.0
+    p.dd_basis = "session"
+    p.dd_halt = 0.10
     p.cycle = 0
     p.did_io = False
     p.hist_busy = False

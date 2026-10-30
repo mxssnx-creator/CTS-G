@@ -145,7 +145,20 @@ export type OverallScope = {
   n?: number;
   realPf?: number;
   realN?: number;
-  executed: { orders: number; wins: number; pf: number | null };
+  executed: {
+    orders: number;
+    wins: number;
+    pf: number | null;
+    basis?: string;
+    returnOrders?: number;
+    missingReturns?: number;
+    noLoss?: boolean;
+    cashOrders?: number;
+    missingCash?: number;
+    cashPf?: number | null;
+    cashNoLoss?: boolean;
+    feeSources?: Record<string, number>;
+  };
 };
 
 export type Execution = {

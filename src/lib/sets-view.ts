@@ -50,12 +50,15 @@ export type SetIndexRow = {
   /** The Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set (opened while Base and Main passed). */
   mainId?: string;
   mainN?: number;
+  mainWindowN?: number;
   mainPf?: number;
   realId?: string;
   realN?: number;
+  realWindowN?: number;
   realPf?: number;
   realNegId?: string;
   realNegN?: number;
+  realNegWindowN?: number;
   realNegPf?: number;
   /** Base short window PF, the Set's own Main short window (N), the lane it is valid on ("pos" / "neg" / ""), the reason when not. */
   shortPf?: number;
@@ -303,4 +306,9 @@ export function windowFigures(pb: Pick<PfBase, "windows"> | null | undefined): W
 export function formatPf(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return "—";
   return Number(v) >= 99 ? "no loss" : Number(v).toFixed(digits);
+}
+
+/** An empty or unknown stage has no measured PF. */
+export function formatPfWithCount(v: number | null | undefined, count: number | null | undefined): string {
+  return count != null && Number.isFinite(count) && count > 0 ? formatPf(v) : "—";
 }
