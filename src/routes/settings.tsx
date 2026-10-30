@@ -5,10 +5,12 @@ import {
   blockTable,
   bool,
   DEFAULT_OVERLAY,
+  defaultOverlay,
   fetchCtsBundle,
   loadLocalOverlay,
   num,
   overlayFromCts,
+  PF_TYPE_DEFAULTS,
   saveOverlay,
   snapSlToTp,
   SL_SET_RATIOS,
@@ -295,6 +297,7 @@ function SettingsPage() {
                   hint="Last N closed trades for the average Result-R."
                   onChange={(v) => patch("pfWindow", v)}
                 />
+                <PfWindowControls overlay={overlay} patch={patch} />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
                 <KV k="PF 1.00" v="Net gains equal net losses" />
@@ -624,46 +627,7 @@ function SettingsPage() {
                   on={overlay.stageFullWindow === true}
                   onChange={(v) => patch("stageFullWindow", v)}
                 />
-                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Minimum PF by window size · every last-N window (Base, Main, Real) asks the PF of its size class</div>
-                <Toggle label="Minimum PF by window size (off = the one Set min PF for every window)" on={overlay.minPfBySize !== false} onChange={(v) => patch("minPfBySize", v)} />
-                {(
-                  [
-                    ["Micro", "minPfMicro", "minPfMicroN", 1.05],
-                    ["Minimal", "minPfMinimal", "minPfMinimalN", 1.08],
-                    ["Short", "minPfShort", "minPfShortN", 1.12],
-                    ["Medium · general / normal", "minPfMedium", "minPfMediumN", 1.25],
-                  ] as const
-                ).map(([name, pfKey, nKey, def]) => (
-                  <div key={pfKey} className="contents">
-                    <Slider
-                      label={`${name} · min PF`}
-                      value={overlay[pfKey]}
-                      min={1.05}
-                      max={2.5}
-                      step={0.01}
-                      hint={`default ${def.toFixed(2)} · windows of up to ${overlay[nKey]} orders`}
-                      onChange={(v) => patch(pfKey, v)}
-                    />
-                    <Slider
-                      label={`${name} · up to N orders`}
-                      value={overlay[nKey]}
-                      min={1}
-                      max={100}
-                      step={1}
-                      hint="the largest window of this class"
-                      onChange={(v) => patch(nKey, v)}
-                    />
-                  </div>
-                ))}
-                <Slider
-                  label="Long · min PF"
-                  value={overlay.minPfLong}
-                  min={1.05}
-                  max={3}
-                  step={0.01}
-                  hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders (the Base long window 50)`}
-                  onChange={(v) => patch("minPfLong", v)}
-                />
+                <PfWindowControls overlay={overlay} patch={patch} />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
                 <Slider
                   label="Base · long window (last N orders)"
@@ -1719,6 +1683,7 @@ function SettingsPage() {
             <button
               type="button"
               onClick={() => {
+                dirtyRef.current = true;
                 setOverlay(overlayFromCts(cts ?? {}));
                 setDirty(true);
                 setSaveMsg("Reset to CTS defaults");
@@ -1727,17 +1692,99 @@ function SettingsPage() {
             >
               Reset from CTS
             </button>
+            <button
+              type="button"
+              data-testid="reset-defaults"
+              title="Restore all settings as unsaved values; review before saving"
+              onClick={() => {
+                dirtyRef.current = true;
+                setOverlay(defaultOverlay());
+                setDirty(true);
+                setSaveMsg("Defaults restored · unsaved");
+              }}
+              className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
+            >
+              Reset defaults
+            </button>
             <span className="text-sm text-muted" data-testid="save-status">
               {saving
                 ? "Saving…"
                 : dirty
-                  ? "Unsaved overlay"
+                  ? saveMsg || "Unsaved overlay"
                   : saveMsg || (conn === "overall" ? "Save writes Live or VST independently" : `Live values · ${conn}`)}
             </span>
           </div>
         </div>
       </div>
     </DeskShell>
+  );
+}
+
+function PfWindowControls({
+  overlay,
+  patch,
+}: {
+  overlay: PulseOverlay;
+  patch: <K extends keyof PulseOverlay>(key: K, value: PulseOverlay[K]) => void;
+}) {
+  return (
+    <>
+      <div className="col-span-full mt-1 font-mono text-[11px] text-muted">
+        Minimum PF by last-N window size · Base, Main and Real use the same controls
+      </div>
+      <Toggle
+        label="Minimum PF by window size (off = the one Set min PF for every window)"
+        on={overlay.minPfBySize !== false}
+        onChange={(v) => patch("minPfBySize", v)}
+      />
+      {(
+        [
+          ["Micro", "minPfMicro", "minPfMicroN"],
+          ["Minimal", "minPfMinimal", "minPfMinimalN"],
+          ["Short", "minPfShort", "minPfShortN"],
+          ["Normal", "minPfMedium", "minPfMediumN"],
+        ] as const
+      ).map(([name, pfKey, nKey]) => (
+        <div key={pfKey} className="contents">
+          <Slider
+            label={`${name} · min PF`}
+            value={overlay[pfKey]}
+            min={1.05}
+            max={2.5}
+            step={0.01}
+            hint={`default ${PF_TYPE_DEFAULTS[pfKey].toFixed(2)} · windows of up to ${overlay[nKey]} orders`}
+            onChange={(v) => patch(pfKey, v)}
+          />
+          <Slider
+            label={`${name} · up to N orders`}
+            value={overlay[nKey]}
+            min={1}
+            max={100}
+            step={1}
+            hint="the largest window of this class"
+            onChange={(v) => patch(nKey, v)}
+          />
+        </div>
+      ))}
+      <Slider
+        label="Long · min PF"
+        value={overlay.minPfLong}
+        min={1.05}
+        max={3}
+        step={0.01}
+        hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders`}
+        onChange={(v) => patch("minPfLong", v)}
+      />
+      <Slider
+        label="Signals · min PF"
+        value={overlay.minPfSignals}
+        min={1.05}
+        max={3}
+        step={0.01}
+        hint="default 1.30 · the CTS-A-O Signal source is not yet connected in CTS-G"
+        onChange={(v) => patch("minPfSignals", v)}
+      />
+    </>
   );
 }
 

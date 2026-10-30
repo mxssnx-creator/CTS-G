@@ -92,6 +92,15 @@ export const GATE_MIN_PF_DEFAULT = 1.25;
 // No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.05).
 export const MIN_PF_FLOOR = 1.05;
 const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
+/** Defaults for the last-N window classes and the separate Signal source. */
+export const PF_TYPE_DEFAULTS = {
+  minPfMicro: 1.05,
+  minPfMinimal: 1.1,
+  minPfShort: 1.15,
+  minPfMedium: 1.25,
+  minPfLong: 1.5,
+  minPfSignals: 1.3,
+} as const;
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
@@ -273,6 +282,8 @@ export type PulseOverlay = {
   minPfShort: number;
   minPfMedium: number;
   minPfLong: number;
+  /** Separate Signal-source floor; source integration is not yet active in CTS-G. */
+  minPfSignals: number;
   minPfMicroN: number;
   minPfMinimalN: number;
   minPfShortN: number;
@@ -500,11 +511,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stageFullWindow: false,
   setGateShortN: 25,
   minPfBySize: true,
-  minPfMicro: 1.05,
-  minPfMinimal: 1.08,
-  minPfShort: 1.12,
-  minPfMedium: 1.25,
-  minPfLong: 1.5,
+  ...PF_TYPE_DEFAULTS,
   minPfMicroN: 5,
   minPfMinimalN: 10,
   minPfShortN: 20,
@@ -578,6 +585,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
     "exec.controls": true,
   },
 };
+
+/** Restore all desk defaults as an editable, unsaved copy. */
+export function defaultOverlay(): PulseOverlay {
+  return structuredClone(DEFAULT_OVERLAY);
+}
 
 export type CtsSettings = {
   coordination_settings?: Record<string, unknown>;
@@ -699,6 +711,7 @@ export type CtsSettings = {
   minPfShort?: number;
   minPfMedium?: number;
   minPfLong?: number;
+  minPfSignals?: number;
   minPfMicroN?: number;
   minPfMinimalN?: number;
   minPfShortN?: number;
@@ -943,11 +956,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stageFullWindow: bool(cts.stageFullWindow, false),
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
     minPfBySize: bool(cts.minPfBySize, true),
-    minPfMicro: pfFloor(num(cts.minPfMicro, 1.05)),
-    minPfMinimal: pfFloor(num(cts.minPfMinimal, 1.08)),
-    minPfShort: pfFloor(num(cts.minPfShort, 1.12)),
-    minPfMedium: pfFloor(num(cts.minPfMedium, 1.25)),
-    minPfLong: pfFloor(num(cts.minPfLong, 1.5)),
+    minPfMicro: pfFloor(num(cts.minPfMicro, PF_TYPE_DEFAULTS.minPfMicro)),
+    minPfMinimal: pfFloor(num(cts.minPfMinimal, PF_TYPE_DEFAULTS.minPfMinimal)),
+    minPfShort: pfFloor(num(cts.minPfShort, PF_TYPE_DEFAULTS.minPfShort)),
+    minPfMedium: pfFloor(num(cts.minPfMedium, PF_TYPE_DEFAULTS.minPfMedium)),
+    minPfLong: pfFloor(num(cts.minPfLong, PF_TYPE_DEFAULTS.minPfLong)),
+    minPfSignals: pfFloor(num(cts.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals)),
     minPfMicroN: Math.max(1, Math.round(num(cts.minPfMicroN, 5))),
     minPfMinimalN: Math.max(1, Math.round(num(cts.minPfMinimalN, 10))),
     minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
@@ -1006,6 +1020,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
   };
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 1920))));
+  for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
+    out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
+  }
+  out.minPfMicroN = Math.max(1, Math.round(num(out.minPfMicroN, 5)));
+  out.minPfMinimalN = Math.max(out.minPfMicroN, Math.round(num(out.minPfMinimalN, 10)));
+  out.minPfShortN = Math.max(out.minPfMinimalN, Math.round(num(out.minPfShortN, 20)));
+  out.minPfMediumN = Math.max(out.minPfShortN, Math.round(num(out.minPfMediumN, 35)));
   out.histLookbackMax = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackMax, 4320))));
   out.histLookbackTargetN = Math.max(1, Math.min(200, Math.round(num(out.histLookbackTargetN, 12))));
   out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6));

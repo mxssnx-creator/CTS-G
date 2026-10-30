@@ -1,8 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { overlayFromCts, type CtsSettings } from "./config-model.ts";
+import { defaultOverlay, overlayFromCts, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("PF defaults, saved overrides and an independent reset agree", () => {
+  const defaults = overlayFromCts(cts());
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(PF_TYPE_DEFAULTS).map((key) => [key, defaults[key as keyof typeof PF_TYPE_DEFAULTS]])),
+    PF_TYPE_DEFAULTS,
+  );
+  const saved = overlayFromCts(cts({ minPfShort: 1.4, minPfSignals: 1.6 }), { minPfMinimal: 1.2 });
+  assert.equal(saved.minPfShort, 1.4);
+  assert.equal(saved.minPfMinimal, 1.2);
+  assert.equal(saved.minPfSignals, 1.6);
+  const bounds = overlayFromCts(cts(), { minPfMicroN: 9, minPfMinimalN: 3, minPfShortN: 4, minPfMediumN: 7 });
+  assert.deepEqual([bounds.minPfMicroN, bounds.minPfMinimalN, bounds.minPfShortN, bounds.minPfMediumN], [9, 9, 9, 9]);
+  const reset = defaultOverlay();
+  reset.minPfSignals = 2;
+  reset.symbols.push("TEST-USDT");
+  assert.equal(defaultOverlay().minPfSignals, 1.3);
+  assert.equal(defaultOverlay().symbols.includes("TEST-USDT"), false);
+});
 
 test("pre-history settings retain three days and a separate collection target", () => {
   const defaults = overlayFromCts(cts());
