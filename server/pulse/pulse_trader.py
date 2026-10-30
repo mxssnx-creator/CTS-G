@@ -2625,6 +2625,8 @@ class Pulse:
             {"close_pos": False, "with_qty": True, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
             {"close_pos": True, "with_qty": False, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
         ]
+        if getattr(self, "strict_ownership", False):
+            forms = [form for form in forms if not form["close_pos"]]
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
@@ -2675,6 +2677,8 @@ class Pulse:
                         typ = str(o.get("type") or "")
                         side = str(o.get("positionSide") or "").upper()
                         if side != pos.side:
+                            continue
+                        if getattr(self, "strict_ownership", False) and not self.control_matches_position(pos, o):
                             continue
                         live = real_oid(o.get("orderId") or o.get("orderID"))
                         if not live:
@@ -2820,6 +2824,18 @@ class Pulse:
             return False
         return str(o.get("type") or "") in TP_TYPES
 
+    def control_matches_position(self, pos: Position, order: Dict[str, Any]) -> bool:
+        """A strict control must be our side and cover exactly our recorded quantity."""
+        if not self.order_is_ours(order) or str(order.get("positionSide") or "").upper() != pos.side:
+            return False
+        if str(order.get("closePosition") or "").lower() in ("true", "1"):
+            return False
+        try:
+            qty = float(order.get("origQty") or order.get("quantity") or 0)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(qty) and qty > 0 and abs(qty - pos.qty) <= max(1e-9, pos.qty * 1e-6)
+
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
         if not self.ownership_safe(pos):
@@ -2832,9 +2848,8 @@ class Pulse:
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
-            b["closePosition"] = "true"
             b["clientOrderID"] = self.cid(ch, pos=pos)
-            if "closePosition" in b:
+            if not getattr(self, "strict_ownership", False):
                 b["closePosition"] = "true"
         r = self.api.batch_place([sl_b, tp_b])
         self.did_io = True
@@ -2869,7 +2884,7 @@ class Pulse:
                 pos.tp = pos.sec_tp or want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         pos.overall = pos.controls_ok
-        pos.close_position = True
+        pos.close_position = not getattr(self, "strict_ownership", False)
         pos.ctrl_qty = pos.qty
         pos.ctrl_verified = pos.controls_ok
         self._oo_cache.pop("*", None)
@@ -2908,7 +2923,7 @@ class Pulse:
                     pos.tp = pos.sec_tp or want_tp
             pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             pos.overall = True
-            pos.close_position = True
+            pos.close_position = not getattr(self, "strict_ownership", False)
             pos.ctrl_qty = pos.qty
             self.ctrl_skip[f"sync:{pos.symbol}"] = time.time() + 12.0
             return
@@ -2916,6 +2931,13 @@ class Pulse:
         side = pos.side
         sls = [o for o in orders if self._order_is_sl(o) and str(o.get("positionSide") or "").upper() == side]
         tps = [o for o in orders if self._order_is_tp(o) and str(o.get("positionSide") or "").upper() == side]
+        if getattr(self, "strict_ownership", False) and any(not self.control_matches_position(pos, o) for o in sls + tps):
+            # Do not cancel and replace an unknown-size or whole-position control:
+            # leave the existing protection intact for manual reconciliation.
+            pos.ownership_conflict = True
+            self.__dict__.setdefault("_ownership_verified", set()).discard(pos.symbol)
+            self.save_open_book()
+            return
 
         def qty_ok(o: Dict[str, Any]) -> bool:
             try:
@@ -2965,7 +2987,7 @@ class Pulse:
         if not pos.sec_tp_oid and pos.tp_oid:
             pos.sec_tp_oid, pos.sec_tp = pos.tp_oid, pos.tp
         if sec_sls or pos.sl_oid:
-            pos.close_position = True
+            pos.close_position = not getattr(self, "strict_ownership", False)
         now = time.time()
         last_sync = float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
         can_replace = now >= last_sync
@@ -3011,7 +3033,7 @@ class Pulse:
         pos.ctrl_verified = bool(sls and tps)
         pos.ctrl_qty = pos.qty
         pos.overall = bool((real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) or (real_oid(pos.sec_sl_oid) and real_oid(pos.sec_tp_oid)))
-        pos.close_position = True
+        pos.close_position = not getattr(self, "strict_ownership", False)
 
     def _ctrl_body(self, pos: Position, kind: str, price: float) -> Dict[str, Any]:
         price = self.clamp_ctrl_price(pos, kind, price)
@@ -3023,8 +3045,8 @@ class Pulse:
             self.fmt_px(c, price),
             self.fmt_qty(c, pos.qty),
             self.cid("u" if kind == "sl" else "v", pos=pos),
-            close_pos=True,
-            with_qty=False,
+            close_pos=not getattr(self, "strict_ownership", False),
+            with_qty=bool(getattr(self, "strict_ownership", False)),
         )
 
     def replace_sl(self, pos: Position, new_sl: float) -> bool:
@@ -3048,7 +3070,8 @@ class Pulse:
         if old_oid and hasattr(self.api, "cancel_replace"):
             body = ctrl_payload(
                 pos.symbol, pos.side, "sl", self.fmt_px(c, new_sl), self.fmt_qty(c, pos.qty),
-                self.cid("u", pos=pos), close_pos=True, with_qty=False,
+                self.cid("u", pos=pos), close_pos=not getattr(self, "strict_ownership", False),
+                with_qty=bool(getattr(self, "strict_ownership", False)),
             )
             body["cancelOrderId"] = old_oid
             r = self.api.cancel_replace(body)
@@ -3061,6 +3084,8 @@ class Pulse:
                 self._oo_cache.pop("*", None)
                 self._oo_cache.pop(pos.symbol, None)
         if not replaced:
+            if old_oid and getattr(self, "strict_ownership", False):
+                return False                 # do not cancel the old stop before a replacement exists
             if pos.sl_oid:
                 self.cancel_order(pos.symbol, pos.sl_oid)
             if pos.sec_sl_oid and pos.sec_sl_oid != pos.sl_oid:
@@ -3108,7 +3133,9 @@ class Pulse:
             {"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)},
         ]
         pid = str(getattr(pos, "position_id", "") or "")
-        if pid:
+        if getattr(self, "strict_ownership", False):
+            forms = forms[:1]               # never close the exchange's whole aggregate
+        elif pid:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
         for f in forms:                       # the manager records this close itself: the fill sync must not count it again
             self.seen_fill_cids.add(f["clientOrderID"])
@@ -4713,6 +4740,7 @@ class Pulse:
             "controlOrders": getattr(self, "control_orders", True),
             "blockEnabled": self.block.enabled,
             "blockExitEnabled": self.block_exit_enabled,
+            "blockAddsHeldForControls": bool(getattr(self, "strict_ownership", False) and self.control_orders),
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
             "blockProfitFactorRatio": self.block.pf_ratio,
@@ -5090,6 +5118,9 @@ class Pulse:
                 continue
             px = float(self.px.get(pos.symbol) or 0)
             self.set_block.observe(pos, px, now, self.block, self.position_cost_pct, lookback)
+        if getattr(self, "strict_ownership", False) and getattr(self, "control_orders", True):
+            # Quantity-bound SL/TP cannot yet be resized atomically after an add.
+            return
         # Evidence continues during an entry pause, inadequate margin or a failed gate.
         if (self.halted or self.entries_blocked() or self.available <= 0
                 or any(os.path.exists(p) for p in (STOP_PATH, PAUSE_PATH, STOP_ALL))
@@ -6023,7 +6054,7 @@ class Pulse:
                 continue
             track = self.parse_track(cid) or {}
             kind = track.get("kind") or ""
-            if kind not in ("c", "s", "t"):
+            if kind not in ("c", "s", "t", "u", "v"):
                 if kind == "o":
                     self.seen_fill_cids.add(cid)
                     if o.get("symbol"):
@@ -6037,15 +6068,23 @@ class Pulse:
             if not math.isfinite(qty) or not math.isfinite(px) or qty <= 0 or px <= 0:
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
-            held = next((p for p in self.open.values() if oid and kind in ("s", "t") and str(o.get("symbol") or "") == p.symbol
+            held = next((p for p in self.open.values() if oid and kind in ("s", "t", "u", "v") and str(o.get("symbol") or "") == p.symbol
                          and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
             if held is not None:
+                side = str(o.get("positionSide") or "").upper()
+                if getattr(self, "strict_ownership", False) and (executed_qty(o) is None or side not in ("", held.side, "BOTH") or
+                        abs(qty - held.qty) > max(1e-9, held.qty * 1e-6)):
+                    held.ownership_conflict = True
+                    self.__dict__.setdefault("_ownership_verified", set()).discard(held.symbol)
+                    self.save_open_book()
+                    self._exec_inc("skipped")
+                    continue            # partial or mismatched control fill: no fabricated full close
                 # the venue closed a position we still hold: record it as that lane's close (once; close_pos marks the
                 # stop and TP ids as seen and feeds the Set itself)
                 self.seen_fill_cids.add(cid)
                 self.cancel_controls(held.symbol)
                 self.record_exit_fee(held, o, min(qty, held.qty), px)
-                self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
+                self.close_pos(held, px, "sl" if kind in ("s", "u") else "tp", exchange=False)
                 n += 1
                 continue
             # An orphan fill has no verified entry price or fee basis. Scoring an exchange-reported

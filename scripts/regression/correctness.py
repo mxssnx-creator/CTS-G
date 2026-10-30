@@ -377,6 +377,88 @@ def strict_control_cancellation_is_side_and_tag_scoped():
         return deleted == ["1"], f"canceled order IDs={deleted}"
 
 
+def strict_controls_are_quantity_bound_and_unsafe_existing_controls_are_held():
+    from lanes import _Env, SYM
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        p.strict_ownership = True
+        p._ownership_verified.add(SYM)
+        p.control_orders = True
+        pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
+        requests = []
+        def batch(orders):
+            requests.extend(dict(o) for o in orders)
+            return {"code": 0, "data": {"orders": [{"orderId": str(i+1), "type": o['type'],
+                    "clientOrderID": o['clientOrderID'], "code": 0} for i,o in enumerate(orders)]}}
+        p.api.batch_place = batch
+        p.place_ctrl_pair(pos)
+        quantity_bound = len(requests) == 2 and all("quantity" in o and "closePosition" not in o for o in requests)
+        wrong = {"symbol": SYM, "positionSide": "LONG", "type": "STOP_MARKET", "orderId": "7",
+                 "clientOrderId": p.cid("u", pos=pos), "closePosition": "true", "quantity": "0"}
+        p.list_orders = lambda symbol=None: [wrong]
+        deletes = []
+        p.api.delete = lambda path, body: deletes.append(body) or {"code": 0}
+        p.ctrl_skip = {}
+        p.ensure_controls(pos)
+        held = pos.ownership_conflict and not deletes
+        return quantity_bound and held, f"quantity-bound pair={quantity_bound}; unsafe existing control held for review={held}"
+
+
+def strict_block_add_waits_for_safe_control_resize():
+    from lanes import _Env, SYM
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        p.strict_ownership = True
+        p._ownership_verified.add(SYM)
+        p.control_orders = True
+        st = p.sets.by_idx[0]
+        pos.set_id, pos.base_entry, pos.base_qty, pos.lane = st.id, pos.entry, pos.qty, "pos"
+        p.px[SYM] = pos.entry * 1.01
+        before = len(env.venue.posts)
+        p.maybe_set_block_adds()
+        ok = len(env.venue.posts) == before and not pos.block_pending and not pos.block_fills
+        return ok, f"no add while protection cannot be resized safely={ok}"
+
+
+def strict_close_does_not_fallback_to_entire_position():
+    from lanes import _Env, SYM
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        p.strict_ownership = True
+        p._ownership_verified.add(SYM)
+        calls = []
+        def rejected(path, body):
+            calls.append(dict(body))
+            return {"code": 100400, "msg": "quantity rejected"}
+        p.api.post = rejected
+        ok, _ = p.market_close(pos)
+        safe = not ok and len(calls) == 1 and "quantity" in calls[0] and "closePosition" not in calls[0]
+        return safe, f"attempts={len(calls)}, no whole-position fallback={safe}"
+
+
+def strict_overall_control_fill_is_counted_only_when_complete():
+    from lanes import _Env, SYM
+    def run(partial):
+        with _Env() as env:
+            p, pos = env.p, env.pos
+            p.strict_ownership = True
+            p._ownership_verified.add(SYM)
+            pos.sl_oid = pos.sec_sl_oid = "owned-stop-1"
+            cid = p.cid("u", pos=pos)
+            amount = pos.qty / 2 if partial else pos.qty
+            row = {"symbol": SYM, "orderId": "owned-stop-1", "clientOrderId": cid, "positionSide": "LONG",
+                   "status": "FILLED", "executedQty": str(amount), "avgPrice": "99"}
+            p.api.get = lambda path, extra=None: {"code": 0, "data": {"orders": [row]}}
+            cancels = []
+            p.cancel_controls = lambda sym: cancels.append(sym)
+            before = len(p.closed)
+            p.sync_own_fills()
+            return (SYM in p.open, pos.ownership_conflict, len(p.closed)-before, len(cancels))
+    partial, full = run(True), run(False)
+    ok = partial == (True, True, 0, 0) and full == (False, False, 1, 1)
+    return ok, f"partial retained={partial}; complete overall-stop close={full}"
+
+
 def strict_net_uses_only_tagged_connection_records():
     from lanes import _Env
     with _Env() as env:
@@ -434,4 +516,7 @@ CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure,
     block_risk_budget_both_sides_and_invalid_stop, block_pending_recovery_requires_matching_order_and_position,
     strict_ownership_blocks_foreign_and_aggregate_changes, strict_control_cancellation_is_side_and_tag_scoped,
-    strict_net_uses_only_tagged_connection_records, manually_closed_position_is_quarantined_without_blocking_other_symbols)]
+    strict_controls_are_quantity_bound_and_unsafe_existing_controls_are_held, strict_block_add_waits_for_safe_control_resize,
+    strict_close_does_not_fallback_to_entire_position, strict_overall_control_fill_is_counted_only_when_complete,
+    strict_net_uses_only_tagged_connection_records,
+    manually_closed_position_is_quarantined_without_blocking_other_symbols)]
