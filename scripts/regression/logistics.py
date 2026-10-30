@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "12e4567e6e6215af7b0526b0b8c54256fe449192"
+PIN_WANT = "c958c1a3360e9edfb0cf157174a4e2dd55f01bb5"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -246,9 +246,10 @@ def restore_patch_reproduces_pin():
 
 
 def no_leftover_zest_names():
-    # this file names the pattern itself, and the check-name lists the runner writes carry this check's name: excluded
+    # Check-name lists and saved verification results contain this check's name themselves.
     hits = git("grep", "-l", "-i", "zest", "--", ".", ":!scripts/regression/logistics.py",
                ":!scripts/regression/check_durations.json", ":!scripts/regression/mutant_catchers.json",
+               ":!reports/regression-verification-*.json",
                no_match_ok=True).strip().splitlines()
     return not hits, f"files={hits}" if hits else "no 'zest' in tracked files"
 

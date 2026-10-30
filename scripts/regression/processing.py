@@ -1369,6 +1369,83 @@ def pre_history_grows_when_too_many_sets_lack_orders():
     return ok, f"start {l0} -> {grown1} after one pass; auto off {b2.lookback}; capped at histLookbackMax {b3.lookback}; after a reload {kept}"
 
 
+def history_collection_target_is_independent_of_admission():
+    """A disabled minimum-order gate still grows history for sparse and zero-close Sets.
+    Complete, adequate, unobserved, locked and failed cases must not cause false growth."""
+    from set_engine import LOOKBACK_GROW_STEP, SetBook
+
+    def run(counts, *, auto=True, locked=0, failed=0, maximum=4320, replayed=True):
+        b = SetBook()
+        b.load({"histLookbackBars": 2400, "histLookbackMax": maximum,
+                "histLookbackAuto": auto, "setGateMinTrades": 0})
+        for i, n in enumerate(counts):
+            # Repurpose a real Set state, keeping only the properties the growth policy reads.
+            b.by_idx[i].source_n = n
+            b.by_idx[i].gate_n = n
+            b.by_idx[i].locked = i < locked
+            b.by_idx[i].last_error = "failed" if locked <= i < locked + failed else ""
+        b.by_idx = b.by_idx[:len(counts)]
+        b._hist_rows = {"replayed": {}} if replayed else {}
+        gate, target = b.gate_min, b.lookback_sample_target
+        b._adapt_lookback()
+        return b.lookback, gate, target
+
+    sparse = run([12] * 15 + [0] * 5)
+    adequate = run([12] * 16 + [0] * 4)
+    no_observations = run([0] * 20)
+    no_replay = run([0] * 20, replayed=False)
+    excluded = run([0] * 5 + [12] * 20, locked=3, failed=2)
+    disabled = run([12] * 15 + [0] * 5, auto=False)
+    capped = run([12] * 15 + [0] * 5, maximum=2500)
+    ok = (sparse == (2400 + LOOKBACK_GROW_STEP, 1, 12) and adequate[0] == 2400
+          and no_observations[0] == 2400 + LOOKBACK_GROW_STEP and no_replay[0] == 2400 and excluded[0] == 2400
+          and disabled[0] == 2400 and capped[0] == 2500)
+    return ok, (f"sparse={sparse}, below threshold={adequate[0]}, zero-close replay={no_observations[0]}, "
+                f"no replay={no_replay[0]}, "
+                f"excluded={excluded[0]}, auto off={disabled[0]}, capped={capped[0]}")
+
+
+def history_growth_waits_for_every_symbol_at_the_current_length():
+    """Chunked replays must not repeatedly extend history using a mix of old and new lengths."""
+    b = SetBook()
+    b.load({"histLookbackBars": 240, "histLookbackMax": 720, "histLookbackAuto": True,
+            "histMinBars": 60, "histWarmup": 16, "holdEnabled": False,
+            "setMinStep": 2, "setStepMax": 8, "setSlRatios": [0.5, 1.0],
+            "trailVariants": ["0.3:0.1"], "stratGeneral": True, "stratIndications": False})
+    b.bars = {"A-USDT": synth_bars(1, 120), "B-USDT": synth_bars(2, 120)}
+    b._replay_symbol = lambda *_args, **_kwargs: None  # successful, zero-close replays
+    got, pending, reasons = [], [], []
+    for symbol in ("A-USDT", "B-USDT", "A-USDT", "B-USDT", "A-USDT", "B-USDT"):
+        b.replay_all(now=T0, symbols=[symbol])
+        got.append(b.lookback)
+        pending.append(b._lookback_pending)
+        reasons.append(b.base_validation_reason(b.by_idx[0]))
+    ok = (got == [240, 480, 480, 720, 720, 720]
+          and pending == [False, True, True, True, True, False]
+          and reasons[1:5] == ["history"] * 4 and reasons[-1] != "history")
+    return ok, f"lookback={got}, pending={pending}, reasons={reasons}"
+
+
+def scratch_setting_reloads_and_invalidates_prior_history():
+    """Scratch thresholds use percent and changing them invalidates old replay rows."""
+    def setting(extra):
+        book = SetBook()
+        book.load({**SMALL, **extra})
+        return book.scratch_min
+
+    defaults = [setting(x) for x in ({}, {"scratchMinPct": 0.05}, {"scratchMinPct": 0.3},
+                                      {"scratchMin": 0.2, "scratchMinPct": 0.3},
+                                      {"scratchMinPct": 0}, {"scratchMinPct": "invalid"})]
+    book = SetBook()
+    book.load({**SMALL, "scratchMinPct": 0.05})
+    book._hist_rows["A-USDT"] = {"old": []}
+    book.load({**SMALL, "scratchMinPct": 0.3})
+    invalidated = not book._hist_rows and all("replay required" in st.last_error for st in book.by_idx)
+    expected = [0.0016, 0.0005, 0.003, 0.002, 0.0, 0.0016]
+    ok = all(abs(a - b) < 1e-12 for a, b in zip(defaults, expected)) and invalidated
+    return ok, f"fractions={defaults}; changed setting invalidated history={invalidated}"
+
+
 def no_gate_asks_less_than_pf_1_1():
     """MIN_PF_FLOOR (1.05): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
     1.0 or 0.5, Block at a small volume ratio), no validation gate asks less than a net PF of 1.1; the desk parses with the same floor."""
@@ -1434,7 +1511,8 @@ def sets_with_few_orders_are_judged_when_the_minimum_is_off():
     pass; the same book under a minimum of 25 holds none of them and marks the short Sets "n<min". Every Set valid under 25 stays valid
     with the minimum off, and "n<min" is left only to Sets with no closed order."""
     def run(**ov):
-        bk = _book(n_syms=2, bars=500, mainGateEnabled=False, stagesEnabled=False, setGateShortN=0, setMinPf=1.0, setMaxDdtHours=36, **ov)   # the minimum alone: no short window
+        bk = _book(n_syms=2, bars=500, mainGateEnabled=False, stagesEnabled=False, setGateShortN=0, setMinPf=1.0,
+                   setMaxDdtHours=36, histLookbackAuto=False, **ov)  # isolate the admission minimum from an active history rebuild
         bk.replay_all(now=T0)
         valid = {st.id for st in bk.by_idx if not bk.gate_reason(st)}
         few = {st.id for st in bk.by_idx if not bk.gate_reason(st) and 0 < st.gate_n < 25}
@@ -1555,6 +1633,9 @@ CHECKS = [
     ("processing.effective-pf-per-entry-counts-each-entry-once", effective_pf_per_entry_counts_each_entry_once),
     ("processing.every-validation-gate-asks-the-base-minimum-pf", every_validation_gate_asks_the_base_minimum_pf),
     ("processing.pre-history-grows-when-sets-lack-orders", pre_history_grows_when_too_many_sets_lack_orders),
+    ("processing.history-collection-target-independent-of-admission", history_collection_target_is_independent_of_admission),
+    ("processing.history-growth-waits-for-every-symbol", history_growth_waits_for_every_symbol_at_the_current_length),
+    ("processing.scratch-setting-invalidates-history", scratch_setting_reloads_and_invalidates_prior_history),
     ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
     ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized

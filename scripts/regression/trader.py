@@ -564,6 +564,133 @@ def history_is_fetched_in_pages_within_the_venue_limit():
     return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
 
 
+def grown_history_fetches_the_full_target_up_to_three_days():
+    """A growth step must fetch older bars even if the old history is 90% of the new target."""
+    import set_engine as se
+    saved = list(pt.SYMBOLS)
+    sleep = pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ["A-USDT"]
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        venue = _PagedKlines(n=5001)
+        p.api, p.sets = venue, se.SetBook()
+        got = []
+        for target in (1920, 2160, 2400, 4320):
+            p.sets.lookback = target
+            venue.requests.clear()
+            p._hist_fetch()
+            closes = [row[3] for row in p.sets.bars.get("A-USDT", [])]
+            expected = [float(x) for x in range(5000 - target, 5000)]
+            got.append((target, len(closes), closes == expected, max(int(r["limit"]) for r in venue.requests)))
+        venue.requests.clear()
+        p._hist_fetch()
+        refresh = [int(r["limit"]) for r in venue.requests]
+    finally:
+        pt.SYMBOLS[:] = saved
+        pt.time.sleep = sleep
+    ok = all(target == n and ordered and request_max <= 1000 for target, n, ordered, request_max in got) and refresh == [120]
+    return ok, f"growth {got}; full-history refresh limits={refresh}"
+
+
+def history_growth_retries_failed_or_missing_pages():
+    """A failed historical page cannot certify an old window as an expanded one."""
+    import set_engine as se
+
+    class Venue(_PagedKlines):
+        def __init__(self, failure):
+            super().__init__(n=5001)
+            self.failure = failure
+
+        def gather_public(self, reqs, timeout=4.2):
+            rows = super().gather_public(reqs, timeout)
+            out = []
+            for path, extra, body in rows:
+                if self.failure and extra["symbol"] == "B-USDT" and (self.failure == "first" or "endTime" in extra):
+                    if self.failure == "missing":
+                        continue
+                    body = ({"code": 109400, "data": []} if self.failure == "coded"
+                            else {"error": True, "msg": "page failed"})
+                out.append((path, extra, body))
+            return out
+
+    def run(failure):
+        p = _bare_pulse()
+        p.api, p.sets = Venue(failure), se.SetBook()
+        p.sets.load({"histLookbackBars": 2400, "histLookbackMax": 2400,
+                     "histLookbackAuto": True, "histMinBars": 60, "holdEnabled": False,
+                     "setMinStep": 2, "setStepMax": 2, "setSlRatios": [0.5],
+                     "trailVariants": ["0.3:0.1"], "stratGeneral": True, "stratIndications": False})
+        old, last_t = p._closed_klines(p.api.rows[-1921:])
+        for sym in pt.SYMBOLS:
+            p.sets.ingest_bars(sym, old, last_t=last_t)
+            p.real_1m[sym] = 0
+        p.sets._lookback_pending = True
+        replayed = []
+        p.sets._replay_symbol = lambda sym, *_args, **_kwargs: replayed.append(sym)
+        p.open = {}
+        p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
+        p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"), cursor_hist=0)
+        p.hist_busy = False
+        p._hist_tick()
+        first = (list(replayed), p.sets._lookback_pending,
+                 dict(p.sets._hist_replay_key), len(p.sets.bars["B-USDT"]))
+        p.api.failure = None
+        p.sets.last_run = 0.0
+        replayed.clear()
+        p._hist_tick()
+        second = (list(replayed), p.sets._lookback_pending,
+                  dict(p.sets._hist_replay_key), len(p.sets.bars["B-USDT"]))
+        return first, second
+
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
+        pt.time.sleep = lambda _s: None
+        cases = [run(mode) for mode in ("first", "error", "coded", "missing")]
+        # A legitimately new listing can have fewer bars than the target without
+        # being a failed page; it should not block the rest of the universe.
+        short = _bare_pulse()
+        short.api, short.sets = _PagedKlines(n=501), se.SetBook()
+        short.sets.lookback = 2400
+        available = short._hist_fetch(["A-USDT"])
+        short_n = len(short.sets.bars["A-USDT"])
+        # A previously full history whose recent refresh no longer overlaps
+        # must fetch the missing older bars on the next pass.
+        gap = _bare_pulse()
+        gap.api, gap.sets = _PagedKlines(n=5001), se.SetBook()
+        gap.sets.lookback = 2400
+        old, old_t = gap._closed_klines(gap.api.rows[-3000:-600])
+        gap.sets.ingest_bars("A-USDT", old, last_t=old_t)
+        gap_first = gap._hist_fetch(["A-USDT"]), len(gap.sets.bars["A-USDT"])
+        gap_second = gap._hist_fetch(["A-USDT"]), len(gap.sets.bars["A-USDT"])
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+    ok = (all(first[0] == ["A-USDT"] and first[1] and "B-USDT" not in first[2] and first[3] < 2400
+              and set(second[0]) == {"A-USDT", "B-USDT"} and not second[1]
+              and set(second[2]) == {"A-USDT", "B-USDT"} and second[3] == 2400
+              for first, second in cases)
+          and available == {"A-USDT"} and short_n == 499
+          and gap_first == (set(), 119) and gap_second == ({"A-USDT"}, 2400))
+    return ok, f"failure/retry={cases}; valid short listing={available} {short_n} bars; stale gap={gap_first} -> {gap_second}"
+
+
+def history_chunks_rotate_even_when_many_positions_are_open():
+    """Every history symbol must eventually refresh; live open-position priority cannot starve it."""
+    from load_engine import LoadGovernor
+    g = LoadGovernor()
+    names = [f"S{i:02d}" for i in range(50)]
+    cursor, seen, sizes = 0, set(), []
+    for _ in range(9):
+        chunk, cursor = g.history_window(names, 6, cursor)
+        seen.update(chunk)
+        sizes.append(len(set(chunk)))
+    g.partial = False
+    full, reset = g.history_window(names, 6, cursor)
+    ok = len(seen) == 50 and sizes == [6] * 9 and full == names and reset == 0
+    return ok, f"covered={len(seen)}/50 after {len(sizes)} passes; unique chunk sizes={sizes}; partial off returns all={full == names}"
+
+
 def _book_with_three_packs(**extra):
     import set_engine as se
     from common import overlay
@@ -958,7 +1085,11 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
     try:
         pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
         p = _bare_pulse()
-        p.api = types.SimpleNamespace(gather_public=lambda reqs, timeout=4.2: [(x, y, {"code": 0, "data": []}) for x, y in reqs])
+        requested = []
+        def gather(reqs, timeout=4.2):
+            requested.extend(y.get("symbol") for _, y in reqs)
+            return [(x, y, {"code": 0, "data": []}) for x, y in reqs]
+        p.api = types.SimpleNamespace(gather_public=gather)
         p.sets = se.SetBook()
         p.sets.load(overlay(**SMALL))
         for k, s_ in enumerate(("A-USDT", "B-USDT", "GONE-USDT", "HELD-USDT")):
@@ -966,6 +1097,12 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
             p.real_1m[s_] = 0
         p.sets.replay_all()
         before = sorted(p.sets._hist_rows)
+        replayed = []
+        replay_symbol = p.sets._replay_symbol
+        def observe(symbol, *args, **kwargs):
+            replayed.append(symbol)
+            return replay_symbol(symbol, *args, **kwargs)
+        p.sets._replay_symbol = observe
         p.open = {"HELD-USDT": types.SimpleNamespace(symbol="HELD-USDT")}
         p.sets.last_run = 0.0                      # a scoring pass is due
         p._budget = lambda: types.SimpleNamespace(scan_chunk=0, hist_chunk=6, hist_run=True)
@@ -977,8 +1114,9 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
     finally:
         pt.SYMBOLS[:] = saved
     ok = "GONE-USDT" in before and "GONE-USDT" not in after_bars and "GONE-USDT" not in after_rows \
-        and "HELD-USDT" in after_bars and {"A-USDT", "B-USDT"} <= set(after_bars)
-    return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}"
+        and "HELD-USDT" in after_bars and "HELD-USDT" in replayed and "HELD-USDT" in requested \
+        and {"A-USDT", "B-USDT"} <= set(after_bars)
+    return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}; replayed={replayed}; fetched={requested}"
 
 
 def history_thread_keeps_real_history_and_tops_up_a_partial_one():
@@ -1326,8 +1464,16 @@ def completed_minutes_do_not_bridge_gaps_or_bad_rows():
     bad = [dict(r) for r in rows]
     del bad[1]["close"]
     rejected = p._closed_klines(bad, now=minute + 20)
-    ok = len(bars) == 2 and [b[3] for b in bars] == [2.02, 2.01] and last_t == minute - 60 and rejected == ([], None)
-    return ok, f"contiguous closes={[b[3] for b in bars]}, duplicate removed, malformed series rejected={rejected == ([], None)}"
+    prices = [bar(k) for k in range(7)]
+    prices[3]["close"] = "nan"
+    valid_tail, valid_t = p._closed_klines(prices, now=minute + 20)
+    prices[1]["open"] = "0"
+    invalid_latest = p._closed_klines(prices, now=minute + 20)
+    ok = (len(bars) == 2 and [b[3] for b in bars] == [2.02, 2.01] and last_t == minute - 60
+          and rejected == ([], None) and [b[3] for b in valid_tail] == [2.02, 2.01]
+          and valid_t == minute - 60 and invalid_latest == ([], None))
+    return ok, (f"contiguous closes={[b[3] for b in bars]}, duplicate removed, malformed series rejected={rejected == ([], None)}; "
+                f"invalid price retained suffix={[b[3] for b in valid_tail]}, invalid latest rejected={invalid_latest == ([], None)}")
 
 
 def entry_selection_keeps_packs_and_axis_lanes_independent():
@@ -1704,6 +1850,9 @@ CHECKS = [
     ("trader.set-fill-keeps-its-sl-and-tp", a_set_fill_keeps_the_sets_own_sl_and_tp),
     ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),
     ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
+    ("trader.history-growth-fetches-three-days", grown_history_fetches_the_full_target_up_to_three_days),
+    ("trader.history-growth-retries-failed-pages", history_growth_retries_failed_or_missing_pages),
+    ("trader.history-chunks-rotate-fairly", history_chunks_rotate_even_when_many_positions_are_open),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
