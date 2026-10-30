@@ -4,6 +4,20 @@ import { overlayFromCts, type CtsSettings } from "./config-model.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
 
+test("pre-history settings retain three days and a separate collection target", () => {
+  const defaults = overlayFromCts(cts());
+  assert.equal(defaults.histLookbackBars, 1920);
+  assert.equal(defaults.histLookbackMax, 4320);
+  assert.equal(defaults.histLookbackTargetN, 12);
+  assert.equal(defaults.setGateMinTrades, 0, "collection must not add an admission gate");
+  const saved = overlayFromCts(cts({ histLookbackBars: 4320, histLookbackMax: 4320, histLookbackTargetN: 30 }));
+  assert.equal(saved.histLookbackBars, 4320);
+  assert.equal(saved.histLookbackMax, 4320);
+  assert.equal(saved.histLookbackTargetN, 30);
+  assert.equal(overlayFromCts(cts({ histLookbackBars: 5000, histLookbackMax: 6000 })).histLookbackBars, 4320);
+  assert.equal(overlayFromCts(cts({ histLookbackMax: 6000 })).histLookbackMax, 4320);
+});
+
 test("Main long N is independently limited to 10 through 200", () => {
   assert.equal(overlayFromCts(cts({ setGateWindow: 10, mainGateN: 200 })).mainGateN, 200);
   assert.equal(overlayFromCts(cts({ mainGateN: 3 })).mainGateN, 10);

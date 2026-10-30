@@ -517,6 +517,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={p?.ready ? "text-primary" : "text-warn"}>
           sets · {p?.phase ?? "idle"} · {active}/{s?.setCount ?? 0} live
+          {s?.lookbackPending ? " · expanding history; entries waiting" : ""}
           {stats?.detailType ? ` · from ${stats.detailType}` : ""}
         </span>
         <span className="text-muted">

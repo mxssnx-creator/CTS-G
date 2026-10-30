@@ -565,6 +565,7 @@ export type LiveStats = {
     enabled?: boolean;
     ready?: boolean;
     lookback?: number;
+    lookbackPending?: boolean;
     pfWindow?: number;
     deactN?: number;
     minPf?: number;

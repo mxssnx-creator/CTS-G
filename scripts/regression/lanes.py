@@ -268,6 +268,62 @@ def set_lane_matches_the_replay_rule_by_rule():
     return not bad, f"{out}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def configured_scratch_threshold_reaches_replay_and_live():
+    """The percent setting changes both the simulated and live Set exit."""
+    out, bad = {}, []
+    for pct in (0.05, 0.30):
+        for side in (1, -1):
+            book = _book(exitIgnoreTp=True, scratchMinPct=pct)
+            st = _pick(book, "scratch", "exit")
+            bars = _scenario_bars("scratch", side)
+            _, historical = replay(book, st, bars, 5, side)
+            _, actual, _ = live(_book(exitIgnoreTp=True, scratchMinPct=pct), st, bars, 5, side)
+            reason = historical["reason"] if historical else None
+            ok = (_same_exit(historical, actual, bars) and reason == ("scratch+" if pct == 0.05 else None)
+                  and abs(book.scratch_min - pct / 100.0) < 1e-12)
+            out[f"{pct}:{side}"] = (reason, actual and actual[0])
+            if not ok:
+                bad.append((pct, side, reason, actual))
+    return not bad, f"settings -> (replay, live): {out}; mismatches={bad}"
+
+
+def trailing_does_not_assume_intrabar_extreme_order():
+    """A new stop is not hit by a preceding extreme; a close across it proves a later crossing.
+    The streaming, indexed and chunked replay paths must agree for both directions."""
+    cfg = {"entry_conf": 0.5, "time_bars": 100, "scratch_bars": 100, "scratch_min": 0.5,
+           "cooldown": 2, "cost_pct": 0.12, "honor_tp": False}
+    state = se.SetState(id="trail-test", pack="p", tf="1m", sl_ratio=0.6,
+                        trail_key="0.5:0.2", trail_arm=0.5, trail_give=0.2,
+                        step=0, tp_pct=0.02, kind="trail")
+    fixtures = {
+        (1, "next"): ([[100, 100, 100, 100, 1], [100, 101, 99.9, 100.9, 1], [100.9, 101, 100.7, 100.85, 1]], 2, 100.798),
+        (1, "close"): ([[100, 100, 100, 100, 1], [100, 101, 99.9, 100.5, 1], [100.5, 101, 100.4, 100.6, 1]], 1, 100.798),
+        (1, "hard"): ([[100, 100, 100, 100, 1], [100, 101, 98, 100.9, 1], [100, 101, 99, 100, 1]], 1, 98.8),
+        (-1, "next"): ([[100, 100, 100, 100, 1], [100, 100.1, 99, 99.1, 1], [99.1, 99.3, 98.95, 99.05, 1]], 2, 99.198),
+        (-1, "close"): ([[100, 100, 100, 100, 1], [100, 100.1, 99, 99.5, 1], [99.5, 100, 99, 99.4, 1]], 1, 99.198),
+        (-1, "hard"): ([[100, 100, 100, 100, 1], [100, 102, 99, 99.1, 1], [100, 101, 99, 100, 1]], 1, 101.2),
+    }
+    bad = []
+    for (side, label), (bars, exit_i, px) in fixtures.items():
+        dirs, confs = [side, 0, 0], [0.9, 0.0, 0.0]
+        stream = se.SetLane(state, "X")
+        steps = [x for i, bar in enumerate(bars) if (x := stream.step(i, bar, dirs[i], confs[i], True, cfg))]
+        variants = [steps]
+        for indexed, split in ((False, False), (True, False), (True, True)):
+            lane = se.SetLane(state, "X")
+            acc = se.BarIndex(bars) if indexed else None
+            if split:
+                rows = lane.scan(0, 2, bars, dirs, confs, True, cfg, [0], acc)
+                rows += lane.scan(2, len(bars), bars, dirs, confs, True, cfg, [0], acc)
+            else:
+                rows = lane.scan(0, len(bars), bars, dirs, confs, True, cfg, [0], acc)
+            variants.append(rows)
+        for rows in variants:
+            if len(rows) != 1 or rows[0]["exit_i"] != exit_i or abs(rows[0]["exit_px"] - px) > 1e-9 or rows[0]["reason"] != "sl":
+                bad.append((side, label, rows))
+    return not bad, f"cases={len(fixtures)} x four paths; mismatches={bad[:2]}"
+
+
 def set_lane_matches_the_replay_on_random_series():
     """Random series and every base Set of a pack: live and replay agree on the entry levels and on the exit (reason and
     bar, and the price for close-priced exits), TP honoured and ignored."""
@@ -1377,6 +1433,8 @@ def a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial():
 
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
+    ("trader.configured-scratch-reaches-replay-and-live", configured_scratch_threshold_reaches_replay_and_live),
+    ("trader.trailing-intrabar-order-is-causal", trailing_does_not_assume_intrabar_extreme_order),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
     ("trader.lanes-own-stop-level", set_lane_stops_at_its_own_level_when_the_venue_stop_sits_farther),
     ("trader.lanes-venue-order-left-to-fill", a_venue_order_at_the_level_is_left_to_fill),

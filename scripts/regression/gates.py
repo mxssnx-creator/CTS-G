@@ -94,8 +94,8 @@ def lock_blocks_at_once():
 def minimum_order_count_off_judges_on_available_orders():
     """setGateMinTrades 0 (the default, owner 2026-10-29) switches the minimum order count off: a Set with 5 orders at the minimum PF is
     eligible, the same Set under a minimum of 25 is "n<min", a Set with no closed order is never eligible, and the setting is taken as it
-    is (no floor of 8, no replacement of an explicit 0 by a default). The adaptive pre-history does not read a Set with a few orders as
-    short while the minimum is off."""
+    is (no floor of 8, no replacement of an explicit 0 by a default). The independent collection target can grow history even while
+    that admission minimum is off."""
     def reason(n, pf, **ov):
         b = _book(setMinPf=1.25, setGateWindow=30, **ov)
         st = _set(b)
@@ -112,17 +112,18 @@ def minimum_order_count_off_judges_on_available_orders():
     five.load(overlay(setGateMinTrades=5, setGateWindow=30))
     bare = SetBook()
     bare.load({})
-    # adaptive pre-history: 30 Sets that traded with 3 orders each are short under a minimum of 25, not while the minimum is off
+    # After a successful replay, three closes are sparse against the collection target as well as an explicit gate minimum.
     def grown(**ov):
         b = _book(histLookbackAuto=True, histLookbackBars=500, **ov)
         for st in b.by_idx[:30]:
             st.source_n, st.gate_n = 3, 3
+        b._hist_rows = {"replayed": {}}
         l0 = b.lookback
         b._adapt_lookback()
         return b.lookback - l0
     g_off, g_on = grown(setGateMinTrades=0), grown(setGateMinTrades=25)
     ok = (off == "" and off_min == 1 and on == "n<min" and on_min == 25 and none_ == "n<min" and ab.gate_min == 1 and five.gate_min == 5
-          and bare.gate_min == 1 and g_off == 0 and g_on > 0)
+          and bare.gate_min == 1 and g_off > 0 and g_on > 0)
     return ok, f"5 orders: off={off!r} min=25 {on!r}; no order={none_!r}; absent key -> {ab.gate_min}; explicit 5 -> {five.gate_min}; bare load -> {bare.gate_min}; lookback growth off {g_off} / min 25 {g_on}"
 
 

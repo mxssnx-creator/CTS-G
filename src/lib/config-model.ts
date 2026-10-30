@@ -305,6 +305,7 @@ export type PulseOverlay = {
   minPfLinked: boolean;
   histLookbackAuto: boolean;
   histLookbackMax: number;
+  histLookbackTargetN: number;
   setUseHistoricGate: boolean;
   holdEnabled: boolean;
   holdAuto: boolean;
@@ -527,7 +528,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   realStagePaper: true,
   minPfLinked: true,
   histLookbackAuto: true,
-  histLookbackMax: 2880,
+  histLookbackMax: 4320,
+  histLookbackTargetN: 12,
   setUseHistoricGate: true,
   holdEnabled: true,
   holdAuto: true,
@@ -725,6 +727,7 @@ export type CtsSettings = {
   minPfLinked?: boolean;
   histLookbackAuto?: boolean;
   histLookbackMax?: number;
+  histLookbackTargetN?: number;
   setUseHistoricGate?: boolean;
   holdEnabled?: boolean;
   holdAuto?: boolean;
@@ -926,7 +929,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),
     histEnabled: bool(cts.histEnabled, true),
-    histLookbackBars: num(cts.histLookbackBars, 1920),
+    histLookbackBars: Math.max(120, Math.min(4320, Math.round(num(cts.histLookbackBars, 1920)))),
     histMinBars: num(cts.histMinBars, 120),
     histWarmup: num(cts.histWarmup, 30),
     histRefreshS: num(cts.histRefreshS, 90),
@@ -968,7 +971,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     realStagePaper: bool(cts.realStagePaper, true),
     minPfLinked: bool(cts.minPfLinked, true),
     histLookbackAuto: bool(cts.histLookbackAuto, true),
-    histLookbackMax: Math.max(120, Math.min(2880, Math.round(num(cts.histLookbackMax, 2880)))),
+    histLookbackMax: Math.max(120, Math.min(4320, Math.round(num(cts.histLookbackMax, 4320)))),
+    histLookbackTargetN: Math.max(1, Math.min(200, Math.round(num(cts.histLookbackTargetN, 12)))),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     holdEnabled: bool(cts.holdEnabled, true),
     holdAuto: bool(cts.holdAuto, true),
@@ -1001,6 +1005,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
+  out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 1920))));
+  out.histLookbackMax = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackMax, 4320))));
+  out.histLookbackTargetN = Math.max(1, Math.min(200, Math.round(num(out.histLookbackTargetN, 12))));
   out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
