@@ -171,5 +171,14 @@
   "open_at_end": 0,
   "execution_pf": null,
   "feed_sha256": "e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03",
-  "note": "12h prehistory and 12h forward, eight archived symbols, assumed 0.12% cost; no exchange results. 60/60 sampled gate and rank self-checks matched."
+  "note": "12h prehistory and 12h forward, eight archived symbols, assumed 0.12% cost; no exchange results. 60/60 sampled gate and rank self-checks matched.",
+  "synthetic_stress_50": {
+    "synthetic_symbols": 50,
+    "sets": 822,
+    "all_sets_present": true,
+    "elapsed_s": 85.81,
+    "parent_peak_kib": 78476,
+    "largest_child_peak_kib": 30204,
+    "note": "Eight archived candle streams reused for 50 names, two workers; capacity check only, not independent markets or profitable validation."
+  }
 }
