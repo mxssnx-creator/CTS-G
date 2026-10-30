@@ -740,6 +740,7 @@ class Pulse:
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
         self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
+        self.strict_size_cap = False  # when on, never round an entry above its balance-relative budget
         self.dd_halt = DD_HALT        # drawdown from the session's start equity that halts entries (fraction); 0 = off (ddHaltPct)
         self.dd_basis = "session"      # ddHaltBasis: "session" = the equity when this session started, "start" = the stored start equity
         self.session_eq = 0.0         # equity at the start of the active session (engine start or explicit Start)
@@ -1208,13 +1209,28 @@ class Pulse:
         room = self.avail_notional(c)
         if room <= 0 or floor_n > room * 1.02:
             return 0.0
-        want_n = min(self.sized_notional(), room)
+        strict = bool(getattr(self, "strict_size_cap", False))
+        if strict:
+            # A small wallet must not be rounded up to the venue minimum or
+            # fall back to a fixed order when equity is unknown. This is an
+            # entry-notional cap, not a guarantee of execution price or loss.
+            equity = float(getattr(self, "equity", 0.0) or 0.0)
+            pct = float(getattr(self, "size_pct", 0.0) or 0.0)
+            factor = float(getattr(self, "volume_factor", 1.0) or 1.0)
+            limit = min(equity * pct / 100.0 * factor, float(getattr(self, "size_max", 0.0) or 0.0))
+            if not math.isfinite(limit) or equity <= 0 or pct <= 0 or factor <= 0 or limit <= 0 or floor_n > limit + 1e-9:
+                return 0.0
+            want_n = min(limit, room)
+        else:
+            want_n = min(self.sized_notional(), room)
         if want_n < floor_n:
             want_n = floor_n
         q = self.round_qty(c, want_n / px)
         if q < floor:
             return 0.0
         if q * px > room * 1.02:
+            return 0.0
+        if strict and q * px > limit + 1e-9:
             return 0.0
         # Final sanity: an entry may never exceed 2× the configured target
         # (exchange min-lot floor excepted) — catches corrupt sizing upstream.
@@ -4110,6 +4126,7 @@ class Pulse:
             self.size_pct = max(0.0, min(25.0, float(raw_pct if raw_pct is not None else 1.0)))
         except Exception:
             self.size_pct = 1.0
+        self.strict_size_cap = bool(ov.get("strictSizeCap", False))
         self.use_max_leverage, LEVERAGE = leverage_settings(ov)
         USE_MAX_LEVERAGE = self.use_max_leverage
         if ov.get("maxOpen") is not None:
@@ -4332,6 +4349,7 @@ class Pulse:
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
+            "strictSizeCap": bool(getattr(self, "strict_size_cap", False)),
             "leverage": LEVERAGE,
             "useMaxLeverage": bool(self.use_max_leverage),
             "leverageMap": dict(getattr(self, "lev_map", {})),
@@ -5748,6 +5766,7 @@ class Pulse:
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
             "sizeMaxNotional": float(getattr(self, "size_max", 25.0) or 25.0),
+            "strictSizeCap": bool(getattr(self, "strict_size_cap", False)),
             "maxEntrySlipPct": round(float(getattr(self, "max_entry_slip", 0.0075)) * 100.0, 4),
             "sizedNotional": round(self.sized_notional(), 6),
             "ddHaltPct": round(float(getattr(self, "dd_halt", DD_HALT)) * 100.0, 4),

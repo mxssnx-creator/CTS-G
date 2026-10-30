@@ -113,6 +113,9 @@ STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
+# A trailing Set is only built when its arm, give and initial price stop all
+# fit inside this price-distance limit. It is not a guarantee of fill price.
+TRAIL_DISTANCE_LIMIT_PCT = 3.0
 EXIT_TAG = "xt"                 # id suffix of an Exit Set (no TP: stop, time and scratch exits only)
 SET_KINDS = ("base", "exit", "trail")
 RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
@@ -1573,6 +1576,8 @@ class SetBook:
         self.size_floors: Tuple[Tuple[int, float], ...] = ((5, 1.05), (10, 1.10), (20, 1.15), (35, 1.25))
         self.size_long_pf = 1.5
         self.signal_min_pf = 1.3
+        self.max_modeled_stop_loss_pct = 0.0
+        self.stop_cap_invalid = False
         self.consistency_pf = 0.0
         self.pf_history: List[Dict[str, Any]] = []
         self._adapt_pending: Optional[List[Any]] = None
@@ -1641,6 +1646,7 @@ class SetBook:
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
                               self.sl_min_steps, self.trail_min_steps, self.hold_auto, self.lookback,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
+                              self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -1758,6 +1764,13 @@ class SetBook:
         self.size_floors = tuple(zip(bounds, pfs))
         self.size_long_pf = pf_floor(ov.get("minPfLong"), 1.5)
         self.signal_min_pf = pf_floor(ov.get("minPfSignals"), 1.3)
+        raw_stop_cap = ov.get("maxModeledStopLossPct")
+        try:
+            stop_cap = 0.0 if raw_stop_cap is None else float(raw_stop_cap)
+            self.stop_cap_invalid = not math.isfinite(stop_cap) or stop_cap < 0
+        except (TypeError, ValueError):
+            stop_cap, self.stop_cap_invalid = 0.0, True
+        self.max_modeled_stop_loss_pct = min(100.0, stop_cap) if not self.stop_cap_invalid else 0.0
         # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
         # hours. setMaxDdtHours is 2..36 in steps of 2, default 24. max_dd_s holds the threshold in seconds.
         hrs = ov.get("setMaxDdtHours")
@@ -1859,6 +1872,11 @@ class SetBook:
             self.trails = list(seen_tr.values())
         else:
             self.trails = trail_grid(self.trail_min_step, self.cost_pct)
+        # Do not synthesize a fallback when the cost-based minimum is above the
+        # limit: that would silently bring an inadmissible trailing Set back.
+        self.trails = [t for t in self.trails
+                       if math.isfinite(t[1]) and math.isfinite(t[2])
+                       and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9]
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
         except Exception:
@@ -1919,7 +1937,7 @@ class SetBook:
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
-        trails = list(self.trails) or [("0.3:0.1", 0.3, 0.1)]
+        trails = list(self.trails)
         # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
         # not built in honour-TP mode (119 of 210 per pack on the default grid). Ignore-TP keeps every trail Set.
         mid_tp_pct = (self.steps[len(self.steps) // 2] if self.steps else 8) * self.cost_pct
@@ -1942,10 +1960,15 @@ class SetBook:
             pack_trails = trails
             if pack == SHORT_PACK and self.hist_honor_tp:
                 short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
-                pack_trails = [t for t in (list(self.trails) or [("0.3:0.1", 0.3, 0.1)]) if t[1] < short_mid - 1e-9]
+                pack_trails = [t for t in self.trails if t[1] < short_mid - 1e-9]
             if pack == SHORT_PACK and pack_steps:
                 # Short Range works with TP steps 2-6: no trailing arm beyond its largest step
                 pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * self.cost_pct + 1e-9]
+            mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
+            trail_stop = max(sl_floor_frac(self.cost_pct, self.sl_min_steps),
+                             step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
+            if trail_stop > TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12:
+                pack_trails = []
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(pack_steps):
                     sid = make_set_id(pack, sl, "", step)
@@ -2025,6 +2048,8 @@ class SetBook:
                 st.tr_i = tr_i
                 st.step_i = -1
                 _put(st)
+        built_trail_keys = {st.trail_key for st in by_idx if st.kind == "trail"}
+        self.trails_built = [t for t in self.trails if t[0] in built_trail_keys]
         gone = {sid: st for sid, st in keep.items() if sid not in next_sets}
         for st in gone.values():
             st.active = False
@@ -2792,7 +2817,7 @@ class SetBook:
         st.dd_episodes = int(dd["episodes"])
         # each Base window on its own (the stage verdict is their conjunction; the per-window figures count each separately)
         floor_ = self.floor_for(self.gate_window, st.pack)                   # every window asks the minimum PF of its own size
-        st.base_long_ok = (st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
+        st.base_long_ok = (not self.stop_cap_exceeded(st) and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
                            and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
         st.base_short_ok = (bool(self.base_short) and st.base_short_n >= (self.base_short if self.stage_full else 1)
                             and st.base_short_pf + 1e-9 >= self.floor_for(self.base_short, st.pack))
@@ -2810,6 +2835,8 @@ class SetBook:
             return "inactive"
         if st.last_error:
             return "error"
+        if self.stop_cap_exceeded(st):
+            return "stop-cap"
         if self._lookback_pending:
             return "history"
         if st.gate_n < self.gate_min:
@@ -2912,7 +2939,7 @@ class SetBook:
             return self._coverage()
 
     def _coverage(self) -> Dict[str, Any]:
-        trails = [t[0] for t in (self.trails_built or self.trails or [])]
+        trails = [t[0] for t in self.trails_built]
         trail_sets = [st for st in self.by_idx if st.kind == "trail"]
         base_sets = [st for st in self.by_idx if st.kind == "base"]
         exit_sets = [st for st in self.by_idx if st.kind == "exit"]
@@ -2941,13 +2968,14 @@ class SetBook:
             "dims": {
                 "pack": len(self.packs),
                 "sl": len(self.sl_ratios),
-                "trail": len(trails) or 1,
+                "trail": len(trails),
                 "step": len(self.steps),
             },
             "families": {"base": len(base_sets), "exit": len(exit_sets), "trail": len(trail_sets)},
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
+            "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
             "indexed": True,
             "independentTrail": True,
@@ -3030,6 +3058,11 @@ class SetBook:
     def lane_fracs(self, st: SetState) -> Tuple[float, float]:
         """(sl_frac, tp_frac) of a Set's lane with this book's PositionCost and minimum stop steps (the replay's cfg)."""
         return lane_fracs(st, self.cost_pct, self.sl_min_steps)
+
+    def stop_cap_exceeded(self, st: SetState) -> bool:
+        """Limit modeled initial stop distance plus cost; zero disables this entry filter."""
+        cap = self.max_modeled_stop_loss_pct
+        return self.stop_cap_invalid or (cap > 0 and self.lane_fracs(st)[0] * 100.0 + self.cost_pct > cap + 1e-9)
 
     def pick_trail(self, pack: str) -> Optional[SetState]:
         return self.pick(pack, kind="trail")
@@ -3480,6 +3513,8 @@ class SetBook:
             "deactN": self.deact_n,
             "minPf": self.min_pf,
             "minPfSignals": self.signal_min_pf,
+            "maxModeledStopLossPct": self.max_modeled_stop_loss_pct,
+            "stopCapInvalid": self.stop_cap_invalid,
             "maxDdS": self.max_dd_s,
             "useHistoricGate": self.use_historic_gate,
             "freshS": self.fresh_s,

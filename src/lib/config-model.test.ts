@@ -1,8 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { defaultOverlay, overlayFromCts, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("Secure, Minimal is an isolated, bounded 50-symbol preset", () => {
+  const preset = secureMinimalPreset();
+  const saved = JSON.parse(readFileSync(new URL("../../presets/secure-minimal.json", import.meta.url), "utf8"));
+  assert.deepEqual(preset, saved, "saved preset and Settings must stay identical");
+  assert.equal(preset.symbolCap, 50);
+  assert.equal(preset.symbolsAll && preset.symbolsDynamic, true);
+  assert.equal(preset.symbolSort, "quoteVolume");
+  assert.deepEqual([preset.useMaxLeverage, preset.leverage, preset.maxOpen], [false, 1, 2]);
+  assert.deepEqual([preset.strictSizeCap, preset.sizePctOfBalance, preset.sizeMaxNotional], [true, 2, 5]);
+  assert.deepEqual([preset.maxModeledStopLossPct, preset.ddHaltPct], [3, 3]);
+  assert.deepEqual([preset.blockEnabled, preset.stratBlock, preset.dcaEnabled, preset.stratDca], [false, false, false, false]);
+  assert.deepEqual([preset.setMinStep, preset.setStepMax, preset.shortRangeStepMin, preset.shortRangeStepMax], [2, 8, 2, 6]);
+  assert.deepEqual([preset.histLookbackBars, preset.histLookbackAuto, preset.setGateMinTrades, preset.stageFullWindow], [720, false, 12, true]);
+  for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) assert.equal(preset[key], PF_TYPE_DEFAULTS[key]);
+  preset.symbols.push("TEST-USDT");
+  assert.equal(secureMinimalPreset().symbols.includes("TEST-USDT"), false);
+});
 
 test("PF defaults, saved overrides and an independent reset agree", () => {
   const defaults = overlayFromCts(cts());

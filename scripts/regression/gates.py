@@ -379,6 +379,36 @@ def every_window_asks_the_minimum_pf_of_its_size():
     return ok, f"floors {got}; off {off.floor_for(5, 'x')}; micro 0.9 -> {low.floor_for(3, 'x')}; Real 15 at 1.15 {v['real']}, at 1.10 {v_low['real']}; long 1.4 '{long_14}', 1.5 '{long_15}'"
 
 
+def modeled_stop_cap_rejects_unsafe_sets():
+    """The optional cap includes one modeled cost and rejects invalid configuration rather than disabling itself."""
+    import os
+    import sys
+    from array import array
+    from common import ROOT
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import stage_eval as sg
+    b = SetBook(); b.load(overlay(positionCostPct=0.15, minPfBySize=False, setMinStep=2, setStepMax=8,
+                                  setSlRatios=[0.5, 3.5], maxModeledStopLossPct=3.0))
+    low = next(st for st in b.by_idx if st.kind == "base" and st.step == 2 and st.sl_ratio == 0.5)
+    high = next(st for st in b.by_idx if st.kind == "base" and st.step == 8 and st.sl_ratio == 3.5)
+    for st in (low, high):
+        st.active, st.locked, st.last_error, st.gate_n, st.gate_pf, st.max_dd_s = True, False, "", 50, 2.0, 0.0
+    before = (b.stop_cap_exceeded(low), b.stop_cap_exceeded(high), b.base_validation_reason(high))
+    tapes = sg.Tapes.__new__(sg.Tapes)
+    tapes.cf = b.cost_pct / 100.0
+    exits = array("d", (1000.0 + 60.0 * i for i in range(50)))
+    tapes.by_set = {high.idx: (exits, array("d", (x - 30 for x in exits)), array("d", [0.01] * 50))}
+    blocked = sg.gate_base(b, tapes, high, 5000.0)[0]
+    b.max_modeled_stop_loss_pct = 0.0
+    unblocked = sg.gate_base(b, tapes, high, 5000.0)[0]
+    b.load(overlay(positionCostPct=0.15, maxModeledStopLossPct="not-a-number"))
+    invalid = b.stop_cap_invalid and all(b.stop_cap_exceeded(st) for st in b.by_idx)
+    b.load(overlay(positionCostPct=0.15, maxModeledStopLossPct=0))
+    off = not b.stop_cap_invalid and all(not b.stop_cap_exceeded(st) for st in b.by_idx)
+    ok = before == (False, True, "stop-cap") and not blocked and unblocked and invalid and off
+    return ok, f"under/over/reason={before}; replay blocked={not blocked} off={unblocked}; invalid_blocks={invalid}; zero_off={off}"
+
+
 def signal_floor_is_separate_from_window_classes():
     """Signal packs read their own configured floor through the complete stage parameter object."""
     b = SetBook(); b.load(overlay(minPfBySize=True, minPfSignals=1.3))
@@ -474,6 +504,7 @@ def minimal_coordination_is_not_pf_validation():
 
 
 CHECKS = [
+    ("gates.modeled-stop-cap", modeled_stop_cap_rejects_unsafe_sets),
     ("gates.pf-defaults-match-shipped-overlays", pf_defaults_match_every_shipped_overlay),
     ("gates.signal-floor-independent-of-window-class", signal_floor_is_separate_from_window_classes),
     ("gates.minimal-coordination-is-not-pf-validation", minimal_coordination_is_not_pf_validation),

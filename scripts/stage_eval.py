@@ -191,12 +191,13 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     h = n // 2
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
+            "risk_ok": not book.stop_cap_exceeded(st),
             "floor": book.floor_for(book.gate_window, st.pack), "floor_short": book.floor_for(book.base_short, st.pack), "cf": cf}
 
 
 def _long_ok(book, e: Dict[str, Any]) -> bool:
     """The Base long window on its own: orders, PF, drawdown time and (when asked) the consistency of both halves."""
-    ok = e["n"] >= book.gate_min and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
+    ok = e["risk_ok"] and e["n"] >= book.gate_min and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
     if ok and book.consistency_pf > 0 and e["n"] >= 2:
         ok = min(e["old"], e["new"]) + 1e-9 >= book.consistency_pf
     return ok

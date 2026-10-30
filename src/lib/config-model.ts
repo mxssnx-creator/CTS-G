@@ -121,8 +121,12 @@ export type PulseOverlay = {
   volumeFactor: number;
   /** Percent of the balance per position before the volume factor; 0 = the fixed targetNotional. */
   sizePctOfBalance: number;
+  /** Skip orders when the exchange minimum exceeds the balance-relative entry budget. */
+  strictSizeCap: boolean;
   /** Hard ceiling for one position's notional in USDT, whatever the balance. */
   sizeMaxNotional: number;
+  /** Model-only initial stop plus cost limit; 0 = off. */
+  maxModeledStopLossPct: number;
   /** A fill farther than this (percent) from the price the entry was decided at is closed at once and the symbol rests. */
   maxEntrySlipPct: number;
   /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
@@ -353,7 +357,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
   volumeFactor: 0.05,
   sizePctOfBalance: 1,
+  strictSizeCap: false,
   sizeMaxNotional: 25,
+  maxModeledStopLossPct: 0,
   maxEntrySlipPct: 0.75,
   ddHaltPct: 80,
   ddHaltBasis: "session",
@@ -608,6 +614,8 @@ export type CtsSettings = {
   blockActiveLiveEnabled?: boolean;
   blockActiveRealEnabled?: boolean;
   dcaEnabled?: boolean;
+  strictSizeCap?: boolean;
+  maxModeledStopLossPct?: number;
   variantDcaEnabled?: boolean;
   variant_dca?: boolean;
   dcaMaxSteps?: number;
@@ -841,6 +849,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   const give = Number(first[1]) || 0.1;
   const out: PulseOverlay = {
     ...DEFAULT_OVERLAY,
+    strictSizeCap: bool(cts.strictSizeCap, false),
+    maxModeledStopLossPct: Math.max(0, Math.min(100, num(cts.maxModeledStopLossPct, 0))),
     trailArmPct: arm,
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),

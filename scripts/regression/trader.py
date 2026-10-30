@@ -416,13 +416,13 @@ def symbol_cap_applies_under_a_wildcard():
     p.sets = types.SimpleNamespace(set_symbols=lambda *a, **k: None, enabled=False)
     out = {}
     try:
-        p.symbol_cap = 30
+        p.symbol_cap = 50
         p.apply_dynamic_symbols(force=True)
         out["capped"] = len(pt.SYMBOLS)
         p.symbol_cap = 0
         p.apply_dynamic_symbols(force=True)
         out["uncapped"] = len(pt.SYMBOLS)
-        p.symbol_cap = 30
+        p.symbol_cap = 50
         p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
         p.apply_dynamic_symbols(force=True)
         out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
@@ -430,8 +430,8 @@ def symbol_cap_applies_under_a_wildcard():
         return False, f"raised {type(exc).__name__}: {exc}"
     finally:
         pt.SYMBOLS[:] = saved_syms
-    ok = out.get("capped") == 30 and out.get("uncapped") == 60 and out.get("with_open") == (30, True)
-    return ok, f"wildcard cap 30 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 30 + one open -> {out.get('with_open')}"
+    ok = out.get("capped") == 50 and out.get("uncapped") == 60 and out.get("with_open") == (50, True)
+    return ok, f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 50 + one open -> {out.get('with_open')}"
 
 
 class _RefusingCloseVenue(_StubExchange):
@@ -1325,6 +1325,24 @@ def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
     return ok, f"close calls during the ban={banned} after={free} refusal logged={logged} position kept={kept}"
 
 
+def strict_size_budget_skips_oversized_venue_minimum():
+    """The opt-in small-balance budget skips an oversized minimum; legacy sizing remains unchanged."""
+    p = _bare_pulse()
+    p.available, p.equity, p.size_pct, p.volume_factor, p.size_max = 100.0, 100.0, 2.0, 1.0, 5.0
+    p.leverage_for = lambda _c: 1
+    c = pt.Contract(symbol="TEST-USDT", min_qty=0.01, step=0.01, qprec=2, pprec=2, min_usdt=5.0, max_lev=50)
+    p.strict_size_cap = True
+    small = p.size_qty(c, 100.0)               # 2 USDT budget cannot buy the 5 USDT minimum
+    p.equity = 500.0
+    capped = p.size_qty(c, 100.0)              # budget is capped at 5 USDT
+    p.equity = 0.0
+    unknown = p.size_qty(c, 100.0)             # no fixed-notional fallback
+    p.equity, p.strict_size_cap = 100.0, False
+    legacy = p.size_qty(c, 100.0)              # older overlays keep their existing behavior
+    ok = small == 0 and abs(capped * 100.0 - 5.0) < 1e-9 and unknown == 0 and legacy * 100.0 >= 5.0
+    return ok, f"small={small} capped_notional={capped * 100.0} unknown={unknown} legacy_notional={legacy * 100.0}"
+
+
 def position_size_follows_the_balance_and_the_volume_factor():
     """Position notional = balance x sizePctOfBalance % x volumeFactor: it doubles with the balance and with the factor,
     falls back to targetNotional x volumeFactor before a balance is read (or with the percentage at 0), and size_qty raises
@@ -1839,6 +1857,7 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 
 
 CHECKS = [
+    ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),
     ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
     ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),
     ("trader.completed-minutes-do-not-bridge-gaps-or-bad-rows", completed_minutes_do_not_bridge_gaps_or_bad_rows),
