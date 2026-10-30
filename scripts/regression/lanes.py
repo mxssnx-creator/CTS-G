@@ -546,6 +546,37 @@ def auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live():
     return not bad, f"bars held (replay, live) by chosen hold and side {out}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def trailing_unlimited_hold_keeps_stop_and_matches_replay():
+    outcomes = []
+    for direction in (1, -1):
+        b = _book(exitIgnoreTp=True)
+        b.hist_time_bars = 8
+        st = _pick(b, "trail", "trail")
+        st.hold_bars, st.hold_auto = -1, True
+        bars = [[100.0, 100.001, 99.999, 100.0, 1.0] for _ in range(400)]
+        bars[395] = [100.0, 105.0 if direction < 0 else 100.001,
+                    95.0 if direction > 0 else 99.999, 100.0, 1.0]
+        _, rep = replay(b, st, bars, 5, direction)
+        lane = se.SetLane(st, SYM)
+        dirs, confs = [0] * len(bars), [0.0] * len(bars)
+        dirs[5], confs[5] = direction, CONF
+        accelerated = lane.scan(0, len(bars), bars, dirs, confs, True, _replay_cfg(b), [5], se.BarIndex(bars))
+        def change_choice(_p, pos):
+            assert pos.set_hold_bars == -1
+            assert _p.save_open_book(durable=True)
+            clone = pt.Pulse.__new__(pt.Pulse)
+            clone.open, clone.owned_syms, clone.seen_fill_cids = {}, pt.BoundedSet(800), pt.BoundedSet(4000)
+            clone._load_open_book()
+            assert clone.open[SYM].set_hold_bars == -1
+            st.hold_bars = 5  # an existing position keeps its entry-time selection
+        _, actual, trace = live(b, st, bars, 5, direction, after_open=change_choice)
+        outcomes.append((rep and rep["reason"], rep and rep["exit_i"], actual and actual[:2], len(trace),
+                         [(r["reason"], r["exit_i"]) for r in accelerated]))
+    ok = all(reason == "sl" and bar == 395 and live_exit == ("sl", 395) and ticks > 1400 and fast == [("sl", 395)]
+             for reason, bar, live_exit, ticks, fast in outcomes)
+    return ok, f"long/short replay and stub-live outcomes={outcomes}"
+
+
 def other_strategies_never_change_a_set_position():
     """Differential: the same Set position on the same random series, once alone and once with the Exit lanes, Block, DCA
     and rearrange all active around it. Exit, every tick's size, entry, levels and trailing stop are identical."""
@@ -1368,6 +1399,7 @@ CHECKS = [
     ("trader.drawdown-halt-settings-from-the-overlay", drawdown_halt_settings_come_from_the_overlay),
     ("trader.lane-step-leaves-on-the-sets-own-hold", lane_step_leaves_on_the_sets_own_hold),
     ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
+    ("trader.trailing-unlimited-hold-parity", trailing_unlimited_hold_keeps_stop_and_matches_replay),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
     ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),

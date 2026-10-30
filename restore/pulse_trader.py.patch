@@ -1999,7 +1999,7 @@
 +                        pos.trail = prev
 +        own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
 +        hold_bars = pos.set_hold_bars or int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
-+        if age >= float(hold_bars) * 60.0:
++        if hold_bars > 0 and age >= float(hold_bars) * 60.0:
 +            self.close_pos(pos, px, "time")
 +            return
 +        # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m

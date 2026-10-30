@@ -346,9 +346,11 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
         s0 = max(0, e - max_n)
         gp, gl = g[e] - g[s0], l_[e] - l_[s0]
         return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
-    ref_pf, _ = pf_n(0)
+    ref_pf, ref_n = pf_n(0)
     best, best_pf = 0, ref_pf
     for c in range(1, len(cands)):
+        if cands[c][0] == -1 and ref_n < min_n:
+            continue
         pf, n = pf_n(c)
         if n >= min_n and pf > best_pf and pf >= ref_pf * margin:
             best, best_pf = c, pf
@@ -1219,7 +1221,8 @@ class SetLane:
                 o["peak"] = min(o["peak"], float(bar[2]))
             honor = cfg["honor_tp"] if self.honor is None else self.honor
             why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not honor)
-            if why is None and held >= (self.hold or cfg["time_bars"]):
+            time_bars = float("inf") if self.hold == -1 else (self.hold or cfg["time_bars"])
+            if why is None and held >= time_bars:
                 why, px = "time", float(bar[3])
             if why is None and held >= cfg["scratch_bars"]:
                 if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
@@ -1272,7 +1275,7 @@ class SetLane:
         thr = cfg["entry_conf"]
         if cand is None:
             cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
-        time_bars = self.hold or cfg["time_bars"]
+        time_bars = float("inf") if self.hold == -1 else (self.hold or cfg["time_bars"])
         scratch_bars = cfg["scratch_bars"]
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
@@ -2490,6 +2493,8 @@ class SetBook:
             rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff, until=until)
             cands.append((h, rows))
             pf, n = judge(rows)
+            if h == -1 and ref_n < self.hold_auto_min:
+                continue
             if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
                 best = (pf, h, rows, n)
         # the choice now (on every order closed so far) is what a new position opens with
@@ -2962,7 +2967,10 @@ class SetBook:
         Each Set (pack x range x step, or trailing pair) is judged alone: the candidates change only its own exit."""
         if not getattr(self, "hold_auto", False) or self.hold_bars_for(st):
             return ()
-        return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
+        holds = HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
+        # -1 means no time exit; a trailing Set may select it only after its
+        # own closed-trade evidence beats the time-limited reference.
+        return holds + (-1,) if st.kind == "trail" else holds
 
     @property
     def scratch_bars(self) -> int:

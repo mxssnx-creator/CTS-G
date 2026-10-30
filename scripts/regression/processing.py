@@ -1163,7 +1163,7 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     s5 = next(x for x in b.by_idx if x.kind == "base" and x.step == 5)
     s6 = next(x for x in b.by_idx if x.kind == "base" and x.step == 6)
     tr = next(x for x in b.by_idx if x.kind == "trail" and b.step_of(x) >= 6)
-    ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH
+    ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH + (-1,)
     ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50 and got["best"][2] == 50
           and got["cap"][0] == 0 and got["cap_good"][0] == 30 and got["cap_good"][1] == 50
           and got["few"][0] == 0 and got["tie"][0] == 0 and got["inside margin"][0] == 0 and got["outside margin"][0] == 15 and got["better"][0] == 15 and got["high"][0] == 120
@@ -1171,6 +1171,22 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
           and not off.auto_holds(off.by_idx[0]) and all(x.hold_bars == 0 for x in off.by_idx)
           and not auto_off.auto_holds(auto_off.by_idx[0]) and all(x.hold_bars == 0 for x in auto_off.by_idx))
     return ok, f"(hold, orders judged, tape rows) {got}; manual step 3 -> {m3.hold_bars} min, master off and auto off keep the global stop"
+
+
+def trailing_no_time_limit_needs_own_completed_evidence():
+    from set_engine import HOLD_KEY
+    b = _book(n_syms=1, bars=300)
+    st = next(x for x in b.by_idx if x.kind == "trail")
+    ref = _rows(st.id, 10, 30)
+    def select(candidate, base=ref):
+        b._hist_rows = {"S0-USDT": {st.id: base, f"{st.id}{HOLD_KEY}-1": candidate}}
+        b._choose_hold(st, base, ["S0-USDT"], 0.0)
+        return st.hold_bars
+    small = select(_rows(st.id, 5, 0))
+    worse = select(_rows(st.id, 5, 45))
+    no_reference = select(_rows(st.id, 45, 5), _rows(st.id, 0, 5))
+    better = select(_rows(st.id, 45, 5))
+    return (small, worse, no_reference, better) == (0, 0, 0, -1), f"insufficient / worse / missing reference / better = {small}/{worse}/{no_reference}/{better}"
 
 
 def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
@@ -1184,6 +1200,8 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
     bad, chosen = [], 0
     for st in b.by_idx:
         allowed = {0, *(HOLD_AUTO_LOW if b.step_of(st) <= 5 else HOLD_AUTO_HIGH)}
+        if st.kind == "trail":
+            allowed.add(-1)
         if st.hold_bars not in allowed or not st.hold_auto:
             bad.append((st.id, st.hold_bars))
         if st.hold_bars:
@@ -1547,6 +1565,7 @@ CHECKS = [
     ("processing.set-failure-isolated", memo.memoized(set_failure_isolated)),
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
+    ("processing.trailing-unlimited-needs-evidence", trailing_no_time_limit_needs_own_completed_evidence),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
     ("processing.hold-auto-tape-is-causal", hold_auto_tape_is_causal),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
