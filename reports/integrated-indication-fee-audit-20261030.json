@@ -1,0 +1,715 @@
+{
+  "window": "last 12 h",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "sets": 3192,
+  "gate": {
+    "window": 50,
+    "short": 25,
+    "main_n": 25,
+    "min": 1,
+    "min_pf": 1.25,
+    "max_ddt_h": 24.0,
+    "lookback_bars": 720
+  },
+  "config": {
+    "honor_tp_trail": false,
+    "exit_sets": true,
+    "time_bars": 360,
+    "scratch_bars": 10,
+    "scratch_min_pct": 0.16,
+    "cost_pct": 0.15,
+    "extra_indicators": [
+      "donchian_break",
+      "rsi2_reversion"
+    ]
+  },
+  "all_stages": {
+    "group": "all",
+    "sets": 3192,
+    "valid_pct": 0.0,
+    "eff_pf": null,
+    "eff_orders": 0,
+    "next8_pf": null,
+    "next8_orders": 0,
+    "next50_pf": null,
+    "next50_orders": 0,
+    "exec_pf": null,
+    "orders": 0,
+    "net_pct": 0.0,
+    "win_pct": null,
+    "blocks50_pf1": "0/0",
+    "blocks50_min_pf": null,
+    "min_n": null,
+    "next": {
+      "8": {
+        "pf": null,
+        "orders": 0
+      },
+      "50": {
+        "pf": null,
+        "orders": 0
+      },
+      "15": {
+        "pf": null,
+        "orders": 0
+      },
+      "25": {
+        "pf": null,
+        "orders": 0
+      }
+    }
+  },
+  "stage_summary": {
+    "base": {
+      "sets": 4,
+      "gain": 0.20753770352910766,
+      "loss": 0.12375823626737717,
+      "orders": 200,
+      "pct_average": 0.010442773600668337,
+      "pf": 1.6769607404611573
+    },
+    "main": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "real": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "realNeg": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    }
+  },
+  "by_pack": {
+    "indications": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "general": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "shortrange": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "extra.donchian_break": {
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    },
+    "extra.rsi2_reversion": {
+      "base": {
+        "sets": 4,
+        "gain": 0.20753770352910766,
+        "loss": 0.12375823626737717,
+        "orders": 200,
+        "pct_average": 0.043346337234503686,
+        "pf": 1.6769607404611573
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      }
+    }
+  },
+  "open_at_end": [],
+  "trades": [],
+  "note": "Frozen historical model, 0.15% assumed cost, not exchange fills; Set windows repeat and are not independent.",
+  "replay_72h_prehistory": {
+    "window": "last 12 h",
+    "symbols": [
+      "ADA-USDT",
+      "AVAX-USDT",
+      "BCH-USDT",
+      "BNB-USDT",
+      "BTC-USDT",
+      "DOGE-USDT",
+      "DOT-USDT",
+      "ETH-USDT"
+    ],
+    "sets": 3192,
+    "hours": 12,
+    "gate": {
+      "window": 50,
+      "short": 25,
+      "main_n": 25,
+      "min": 1,
+      "min_pf": 1.25,
+      "max_ddt_h": 24.0,
+      "lookback_bars": 4320
+    },
+    "config": {
+      "honor_tp_trail": false,
+      "exit_sets": true,
+      "time_bars": 360,
+      "scratch_bars": 10,
+      "scratch_min_pct": 0.16,
+      "cost_pct": 0.15,
+      "extra_indicators": [
+        "donchian_break",
+        "rsi2_reversion"
+      ]
+    },
+    "all": {
+      "group": "all",
+      "sets": 3192,
+      "valid_pct": 0.0,
+      "eff_pf": 2.397,
+      "eff_orders": 50,
+      "next8_pf": 0.046,
+      "next8_orders": 8,
+      "next50_pf": 0.105,
+      "next50_orders": 12,
+      "exec_pf": 0.01,
+      "orders": 2,
+      "net_pct": -2.15,
+      "win_pct": 50.0,
+      "blocks50_pf1": "0/0",
+      "blocks50_min_pf": null,
+      "min_n": 50,
+      "next": {
+        "8": {
+          "pf": 0.046,
+          "orders": 8
+        },
+        "50": {
+          "pf": 0.105,
+          "orders": 12
+        },
+        "15": {
+          "pf": 0.105,
+          "orders": 12
+        },
+        "25": {
+          "pf": 0.105,
+          "orders": 12
+        }
+      }
+    },
+    "open_at_end": [
+      {
+        "t_in": 1792256280.0,
+        "t_mark": 1792270800.0,
+        "symbol": "ADA-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "lane": "neg",
+        "side": "SHORT",
+        "entry": 0.2191,
+        "mark": 0.2224,
+        "mark_net_pct": -1.6562
+      },
+      {
+        "t_in": 1792256280.0,
+        "t_mark": 1792270800.0,
+        "symbol": "AVAX-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "lane": "neg",
+        "side": "SHORT",
+        "entry": 9.709,
+        "mark": 9.879,
+        "mark_net_pct": -1.901
+      },
+      {
+        "t_in": 1792256280.0,
+        "t_mark": 1792270800.0,
+        "symbol": "BNB-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "lane": "neg",
+        "side": "SHORT",
+        "entry": 713.24,
+        "mark": 720.0,
+        "mark_net_pct": -1.0978
+      },
+      {
+        "t_in": 1792256280.0,
+        "t_mark": 1792270800.0,
+        "symbol": "BTC-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "lane": "neg",
+        "side": "SHORT",
+        "entry": 81176.5,
+        "mark": 81612.8,
+        "mark_net_pct": -0.6875
+      },
+      {
+        "t_in": 1792256280.0,
+        "t_mark": 1792270800.0,
+        "symbol": "DOGE-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "lane": "neg",
+        "side": "SHORT",
+        "entry": 0.07894,
+        "mark": 0.08019,
+        "mark_net_pct": -1.7335
+      },
+      {
+        "t_in": 1792256280.0,
+        "t_mark": 1792270800.0,
+        "symbol": "ETH-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "lane": "neg",
+        "side": "SHORT",
+        "entry": 2400.93,
+        "mark": 2420.83,
+        "mark_net_pct": -0.9788
+      }
+    ],
+    "closed_and_marked_pf": 0.002,
+    "trades": [
+      {
+        "t_in": 1792256280.0,
+        "t_out": 1792266120.0,
+        "symbol": "BCH-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "reason": "sl",
+        "net_pct": -2.175
+      },
+      {
+        "t_in": 1792256280.0,
+        "t_out": 1792256880.0,
+        "symbol": "DOT-USDT",
+        "set": "indications:1m:sl2.25:st6",
+        "pack": "indications",
+        "kind": "base",
+        "reason": "scratch+",
+        "net_pct": 0.0219
+      }
+    ],
+    "stage_summary": {
+      "base": {
+        "sets": 13,
+        "gain": 0.6382172623483409,
+        "loss": 0.3480977648756447,
+        "orders": 650,
+        "pct_average": 0.033939014202172095,
+        "pf": 1.8334425748936916
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0,
+        "pct_average": 0.0,
+        "pf": null
+      },
+      "realNeg": {
+        "sets": 1,
+        "gain": 0.004281609937539211,
+        "loss": 0.0,
+        "orders": 3,
+        "pct_average": 0.0026106934001670842,
+        "pf": null
+      }
+    },
+    "by_pack": {
+      "indications": {
+        "base": {
+          "sets": 5,
+          "gain": 0.2528053692336587,
+          "loss": 0.14144642857142858,
+          "orders": 250,
+          "pct_average": 0.054182921543129606,
+          "pf": 1.7872870441970568
+        },
+        "main": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "real": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "realNeg": {
+          "sets": 1,
+          "gain": 0.004281609937539211,
+          "loss": 0.0,
+          "orders": 3,
+          "pct_average": 0.010836584308625921,
+          "pf": null
+        }
+      },
+      "general": {
+        "base": {
+          "sets": 4,
+          "gain": 0.17787418958557458,
+          "loss": 0.08289310003683892,
+          "orders": 200,
+          "pct_average": 0.043346337234503686,
+          "pf": 2.145826244965198
+        },
+        "main": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "real": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "realNeg": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        }
+      },
+      "shortrange": {
+        "base": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "main": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "real": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "realNeg": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        }
+      },
+      "extra.donchian_break": {
+        "base": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "main": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "real": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "realNeg": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        }
+      },
+      "extra.rsi2_reversion": {
+        "base": {
+          "sets": 4,
+          "gain": 0.20753770352910766,
+          "loss": 0.12375823626737717,
+          "orders": 200,
+          "pct_average": 0.043346337234503686,
+          "pf": 1.6769607404611573
+        },
+        "main": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "real": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        },
+        "realNeg": {
+          "sets": 0,
+          "gain": 0.0,
+          "loss": 0.0,
+          "orders": 0,
+          "pct_average": 0.0,
+          "pf": null
+        }
+      }
+    },
+    "fill_audit": {
+      "closes": 2,
+      "directions": {
+        "LONG": 0,
+        "SHORT": 2
+      },
+      "mismatches": [],
+      "unaudited_trailing": [],
+      "gain": 0.0002185238784370594,
+      "loss": 0.021750000000000026,
+      "pf": 0.010047074870669385,
+      "cost_pct": 0.15
+    },
+    "scope_audit": {
+      "summary": {
+        "executions": 2,
+        "unique_contexts": 2,
+        "below_admission_min": 0,
+        "below_collection_target": 0,
+        "context_pf_below_floor": 2,
+        "context_no_losses": 0,
+        "context_no_closes": 0
+      },
+      "details": [
+        {
+          "symbol": "BCH-USDT",
+          "side": "SHORT",
+          "set": "indications:1m:sl2.25:st6",
+          "entry": 1792256280.0,
+          "context_n": 39,
+          "context_gain": 0.05268017448003501,
+          "context_loss": 0.16945296448488475,
+          "context_pf": 0.31088375845283067,
+          "pooled_n": 50,
+          "pooled_pf": 2.3972,
+          "floor": 1.5
+        },
+        {
+          "symbol": "DOT-USDT",
+          "side": "SHORT",
+          "set": "indications:1m:sl2.25:st6",
+          "entry": 1792256280.0,
+          "context_n": 50,
+          "context_gain": 0.10204424568036402,
+          "context_loss": 0.1190651121679526,
+          "context_pf": 0.8570457275210975,
+          "pooled_n": 50,
+          "pooled_pf": 2.3972,
+          "floor": 1.5
+        }
+      ],
+      "note": "same-Set, symbol and side Base PF comparison at each recorded entry; not an isolated-gate walk-forward"
+    },
+    "note": "Hourly Set-window observations may overlap; 0.15% round-trip cost is assumed, not a measured account fee. Scope comparisons are not an isolated-gate replay."
+  }
+}

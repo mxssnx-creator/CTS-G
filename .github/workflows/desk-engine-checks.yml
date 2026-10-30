@@ -1,0 +1,31 @@
+name: Desk and engine checks
+
+on:
+  pull_request:
+    branches: [Stable-02-01]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Check types
+        run: npm run typecheck
+      - name: Run JavaScript tests
+        run: node --test scripts/*.test.mjs
+      - name: Run TypeScript tests
+        run: node scripts/run-ts-tests.mjs
+      - name: Run offline engine tests
+        run: python3 scripts/regression/run.py --jobs 4
