@@ -260,7 +260,7 @@ def no_leftover_zest_names():
     # Check-name lists and saved verification results contain this check's name themselves.
     hits = git("grep", "-l", "-i", "zest", "--", ".", ":!scripts/regression/logistics.py",
                ":!scripts/regression/check_durations.json", ":!scripts/regression/mutant_catchers.json",
-               ":!reports/regression-verification-*.json",
+               ":!reports/regression-verification-*.json", ":!reports/engine-regression-*.json",
                no_match_ok=True).strip().splitlines()
     return not hits, f"files={hits}" if hits else "no 'zest' in tracked files"
 
