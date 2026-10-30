@@ -382,6 +382,22 @@ def strict_leverage_never_changes_foreign_or_quarantined_symbols():
         return ok, f"foreign={foreign}, quarantined={quarantined}, exchange requests={calls}"
 
 
+def strict_foreign_open_orders_block_entry_and_leverage():
+    from lanes import _Env
+    with _Env() as env:
+        p = env.p
+        p.strict_ownership, p.recon_ok = True, True
+        p._oo_cache = {}
+        rows = [{"symbol": "OTHER-USDT", "clientOrderId": "another-system", "type": "LIMIT"}]
+        p.api.get = lambda path, extra=None: {"code": 0, "data": {"orders": rows}}
+        p.list_orders()
+        before = len(env.venue.posts)
+        p.place("OTHER-USDT", 1, "gen:x", 1.0)
+        lev = p.ensure_max_leverage("OTHER-USDT", force=True)
+        ok = "OTHER-USDT" in p.foreign_order_symbols and lev == 0 and len(env.venue.posts) == before
+        return ok, f"foreign symbol held={ok}, exchange posts={len(env.venue.posts)-before}"
+
+
 def strict_control_cancellation_is_side_and_tag_scoped():
     from lanes import _Env, SYM
     with _Env() as env:
@@ -538,6 +554,7 @@ CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure,
     block_risk_budget_both_sides_and_invalid_stop, block_pending_recovery_requires_matching_order_and_position,
     strict_ownership_blocks_foreign_and_aggregate_changes, strict_leverage_never_changes_foreign_or_quarantined_symbols,
+    strict_foreign_open_orders_block_entry_and_leverage,
     strict_control_cancellation_is_side_and_tag_scoped,
     strict_controls_are_quantity_bound_and_unsafe_existing_controls_are_held, strict_block_add_waits_for_safe_control_resize,
     strict_close_does_not_fallback_to_entire_position, strict_overall_control_fill_is_counted_only_when_complete,

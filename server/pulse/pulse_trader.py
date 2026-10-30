@@ -827,6 +827,7 @@ class Pulse:
         self.last_scan_io = False
         self.ignored_foreign = 0
         self.foreign_symbols: set = set()
+        self.foreign_order_symbols: set = set()
         self._ownership_verified: set = set()
         self.dca_fail_cd: Dict[str, float] = {}
         self.track_prefix = TAG
@@ -1032,7 +1033,8 @@ class Pulse:
     def leverage_symbol_safe(self, symbol: str) -> bool:
         if not getattr(self, "strict_ownership", False):
             return True
-        if not getattr(self, "recon_ok", False) or symbol in getattr(self, "foreign_symbols", set()):
+        if (not getattr(self, "recon_ok", False) or symbol in getattr(self, "foreign_symbols", set())
+                or symbol in getattr(self, "foreign_order_symbols", set())):
             return False
         if any(str(k).startswith(symbol + ":") for k in (getattr(self, "external_closes", {}) or {})):
             return False
@@ -2381,6 +2383,9 @@ class Pulse:
                     self._oo_cache["*"] = (now, rows)
                     self._order_est = len(rows)
                     self._order_est_known = True
+                    if getattr(self, "strict_ownership", False):
+                        self.foreign_order_symbols = {str(o.get("symbol")) for o in rows if isinstance(o, dict)
+                                                      and o.get("symbol") and not self.order_is_ours(o)}
                 else:
                     rows = hit[1] if hit else []
         if symbol:
@@ -3264,7 +3269,7 @@ class Pulse:
 
     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
-        if sym in getattr(self, "foreign_symbols", set()):
+        if sym in getattr(self, "foreign_symbols", set()) or sym in getattr(self, "foreign_order_symbols", set()):
             return "foreign-position"
         if conf < self.sets.entry_conf:   # the same setEntryConf the replay uses
             return "low-conf"
@@ -3364,7 +3369,7 @@ class Pulse:
     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
         if self.entries_blocked():
             return
-        if sym in getattr(self, "foreign_symbols", set()):
+        if sym in getattr(self, "foreign_symbols", set()) or sym in getattr(self, "foreign_order_symbols", set()):
             return
         side = "LONG" if direction > 0 else "SHORT"
         if f"{sym}:{side}" in getattr(self, "external_closes", {}):
