@@ -1,13 +1,13 @@
 """Functional suite: the Set grid (every combination is a Set) and the cost and price units."""
 from __future__ import annotations
 
-from common import COST, Skip, overlay, PULSE  # noqa: F401  (PULSE sets sys.path)
+from common import COST, Skip, overlay, lane_cfg, PULSE  # noqa: F401  (PULSE sets sys.path)
 from position_cost import (
     SL_RATIOS, TP_STEP_MAX, TP_STEP_MIN, TRAIL_STEP_DEFAULT, TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN, cost_as_frac, net_pnl_pct, snap_sl_ratio,
 )
 from risk_variants import trail_grid
-from set_engine import SetBook, make_set_id, step_tp_pct
+from set_engine import SetBook, SetLane, make_set_id, step_tp_pct
 
 
 def _book(**extra):
@@ -73,6 +73,50 @@ def trail_grid_pure():
     return ok, f"n={len(g)} unique_keys={len({k for k, _, _ in g})}"
 
 
+def trail_distance_limit():
+    """The built Set's arm, give and initial stop must fit the 3% price-distance limit."""
+    sb = _book(positionCostPct=0.15)
+    trails = [st for st in sb.by_idx if st.kind == "trail"]
+    raw = trail_grid(sb.trail_min_step, sb.cost_pct)
+    ok = bool(trails) and max(t[1] for t in raw) > 3.0
+    ok = ok and all(st.trail_arm <= 3.0 + 1e-9 and st.trail_give <= 3.0 + 1e-9
+                    and sb.lane_fracs(st)[0] <= 0.03 + 1e-12 for st in trails)
+    return ok, f"trails={len(trails)} max_arm={max(st.trail_arm for st in trails):.2f}% raw_max={max(t[1] for t in raw):.2f}%"
+
+
+def trail_limit_has_no_unsafe_fallback():
+    """An impossible cost floor or initial stop removes trailing Sets instead of inventing a fallback."""
+    floor = _book(positionCostPct=1.1, trailMinSteps=2)
+    stop = _book(positionCostPct=0.3, setMinStep=29, setStepMax=30,
+                 stratShortRange=False, trailVariants=["0.6:0.3"])
+    edge = _book(positionCostPct=1.0, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
+                 setMinStep=2, setStepMax=2, stratShortRange=False)
+    above = _book(positionCostPct=1.00001, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
+                  setMinStep=2, setStepMax=2, stratShortRange=False)
+    count = lambda b: sum(st.kind == "trail" for st in b.by_idx)
+    ok = count(floor) == 0 and count(stop) == 0 and count(edge) > 0 and count(above) == 0
+    ok = ok and not floor.coverage()["trails"] and floor.coverage()["dims"]["trail"] == 0
+    return ok, f"floor={count(floor)} initial_stop={count(stop)} at_limit={count(edge)} over_limit={count(above)}"
+
+
+def trail_limit_matches_replay_levels():
+    """A limit-bound trailing Set opens at the same 3% stop in the two replay paths, for both sides."""
+    b = _book(positionCostPct=1.0, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
+              setMinStep=2, setStepMax=2, stratShortRange=False)
+    st = next(s for s in b.by_idx if s.kind == "trail")
+    cfg = lane_cfg(cost_pct=1.0, sl_floor_steps=2)
+    bar = [100.0, 100.0, 100.0, 100.0, 1.0]
+    levels = []
+    for direction in (1, -1):
+        step, scan = SetLane(st, "S"), SetLane(st, "S")
+        step.step(0, bar, direction, 1.0, True, cfg)
+        scan.scan(0, 1, [bar], [direction], [1.0], True, cfg)
+        expected = 100.0 * (1 - direction * b.lane_fracs(st)[0])
+        levels.append((step.open["sl"], scan.open["sl"], expected))
+    ok = all(abs(a - e) < 1e-9 and abs(c - e) < 1e-9 for a, c, e in levels)
+    return ok, f"long/short step, scan, expected={levels}"
+
+
 def setstep_clamp():
     lo = _book(setMinStep=0)
     hi = _book(setStepMax=99)
@@ -118,6 +162,9 @@ CHECKS = [
     ("grid.trail-give-le-arm-min3", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),
     ("grid.trail-grid-pure", trail_grid_pure),
+    ("grid.trail-distance-limit", trail_distance_limit),
+    ("grid.trail-limit-no-unsafe-fallback", trail_limit_has_no_unsafe_fallback),
+    ("grid.trail-limit-replay-levels", trail_limit_matches_replay_levels),
     ("grid.setstep-clamp", setstep_clamp),
     ("units.tp-equals-k-times-cost", tp_is_k_times_cost),
     ("units.cost-and-net", cost_units),
