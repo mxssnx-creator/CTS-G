@@ -67,7 +67,10 @@ def unavailable_and_response_limit():
     unavailable = m.read_stats("https://example.test", "live", opener=open_)
     big = m.read_stats("https://example.test", "live", opener=lambda *a, **k: io.BytesIO(b"x" * (m.MAX_RESPONSE + 1)))
     got = m.HealthMonitor().sample(unavailable, 1000)
-    return not got["healthy"] and not got["reachable"] and "exceeds" in big["_error"], "HTTP 503 and oversized responses cannot report healthy"
+    malformed = m.HealthMonitor().sample({**healthy(), "openCount": float("nan"),
+                                         "sets": {"pfBase": {"main": {"pf": float("inf")}}}}, 1000)
+    json.dumps(malformed, allow_nan=False)
+    return not got["healthy"] and not got["reachable"] and "exceeds" in big["_error"] and not malformed["healthy"], "HTTP 503, oversized responses and nonfinite metrics cannot report healthy or crash JSON output"
 
 
 CHECKS = [("monitoring." + f.__name__.replace("_", "-"), f) for f in (

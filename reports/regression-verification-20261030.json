@@ -28,7 +28,7 @@
     "server/pulse/set_engine.py": "ac8757d513de9e1ff3a2bd0be46c38eafef75f46",
     "server/pulse/execution_cost.py": "34040ebd8b7cceed8b68f3dd4b38a14eb337bd2e",
     "server/pulse/set_block.py": "14efa10cebd38e289365a7b1d9d4788fd5beae56",
-    "scripts/monitor_readonly.py": "7b88d88f114cb8c1c855a6377510d200cc3389a1"
+    "scripts/monitor_readonly.py": "448a4c568df605308f035a7e8596fa3610f52dfb"
   },
   "checks": [
     {
@@ -2513,7 +2513,7 @@
       "status": "PASS",
       "check": "monitoring.unavailable-and-response-limit",
       "seconds": 0.0,
-      "detail": "HTTP 503 and oversized responses cannot report healthy"
+      "detail": "HTTP 503, oversized responses and nonfinite metrics cannot report healthy or crash JSON output"
     }
   ]
 }

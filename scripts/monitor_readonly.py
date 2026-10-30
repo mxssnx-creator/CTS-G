@@ -89,6 +89,9 @@ class HealthMonitor:
         if count != self.symbols:
             warnings.append("symbol count differs from configured target")
         errors = finite(stats.get("errors"))
+        open_count = finite(stats.get("openCount"))
+        if errors is None or open_count is None:
+            warnings.append("error or open-position count missing/invalid")
         if errors is not None and self.errors is not None and errors > self.errors:
             warnings.append("error count increased")
         if errors is not None:
@@ -100,9 +103,12 @@ class HealthMonitor:
             if not isinstance(row, dict):
                 row = pb.get("baseOnly" if key == "base" else key) or pb.get(key)
             row = row if isinstance(row, dict) else {}
-            return {"pf": row.get("pf"), "sets": row.get("sets"), "orders": row.get("n"), "source": "paper"}
+            pf = finite(row.get("pf"))
+            if row.get("pf") is not None and pf is None:
+                warnings.append("invalid " + key + " PF")
+            return {"pf": pf, "sets": finite(row.get("sets")), "orders": finite(row.get("n")), "source": "paper"}
         result.update(running=running, halted=bool(stats.get("halted")), paused=bool(stats.get("paused")),
-                      symbolCount=count, cycle=cycle, errors=errors, openCount=stats.get("openCount"),
+                      symbolCount=count, cycle=cycle, errors=errors, openCount=open_count,
                       paperBase=stage("base"), paperMain=stage("main"),
                       healthy=not warnings, warnings=warnings)
         return result
