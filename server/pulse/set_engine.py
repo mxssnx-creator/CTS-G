@@ -105,6 +105,9 @@ STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
+# A trailing Set is only built when its arm, give and initial price stop all
+# fit inside this price-distance limit. It is not a guarantee of fill price.
+TRAIL_DISTANCE_LIMIT_PCT = 3.0
 EXIT_TAG = "xt"                 # id suffix of an Exit Set (no TP: stop, time and scratch exits only)
 SET_KINDS = ("base", "exit", "trail")
 RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
@@ -1849,6 +1852,11 @@ class SetBook:
             self.trails = list(seen_tr.values())
         else:
             self.trails = trail_grid(self.trail_min_step, self.cost_pct)
+        # Do not synthesize a fallback when the cost-based minimum is above the
+        # limit: that would silently bring an inadmissible trailing Set back.
+        self.trails = [t for t in self.trails
+                       if math.isfinite(t[1]) and math.isfinite(t[2])
+                       and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9]
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
         except Exception:
@@ -1909,7 +1917,7 @@ class SetBook:
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
-        trails = list(self.trails) or [("0.3:0.1", 0.3, 0.1)]
+        trails = list(self.trails)
         # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
         # not built in honour-TP mode (119 of 210 per pack on the default grid). Ignore-TP keeps every trail Set.
         mid_tp_pct = (self.steps[len(self.steps) // 2] if self.steps else 8) * self.cost_pct
@@ -1932,10 +1940,15 @@ class SetBook:
             pack_trails = trails
             if pack == SHORT_PACK and self.hist_honor_tp:
                 short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
-                pack_trails = [t for t in (list(self.trails) or [("0.3:0.1", 0.3, 0.1)]) if t[1] < short_mid - 1e-9]
+                pack_trails = [t for t in self.trails if t[1] < short_mid - 1e-9]
             if pack == SHORT_PACK and pack_steps:
                 # Short Range works with TP steps 2-6: no trailing arm beyond its largest step
                 pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * self.cost_pct + 1e-9]
+            mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
+            trail_stop = max(sl_floor_frac(self.cost_pct, self.sl_min_steps),
+                             step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
+            if trail_stop > TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12:
+                pack_trails = []
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(pack_steps):
                     sid = make_set_id(pack, sl, "", step)
@@ -2015,6 +2028,8 @@ class SetBook:
                 st.tr_i = tr_i
                 st.step_i = -1
                 _put(st)
+        built_trail_keys = {st.trail_key for st in by_idx if st.kind == "trail"}
+        self.trails_built = [t for t in self.trails if t[0] in built_trail_keys]
         gone = {sid: st for sid, st in keep.items() if sid not in next_sets}
         for st in gone.values():
             st.active = False
@@ -2900,7 +2915,7 @@ class SetBook:
             return self._coverage()
 
     def _coverage(self) -> Dict[str, Any]:
-        trails = [t[0] for t in (self.trails_built or self.trails or [])]
+        trails = [t[0] for t in self.trails_built]
         trail_sets = [st for st in self.by_idx if st.kind == "trail"]
         base_sets = [st for st in self.by_idx if st.kind == "base"]
         exit_sets = [st for st in self.by_idx if st.kind == "exit"]
@@ -2929,13 +2944,14 @@ class SetBook:
             "dims": {
                 "pack": len(self.packs),
                 "sl": len(self.sl_ratios),
-                "trail": len(trails) or 1,
+                "trail": len(trails),
                 "step": len(self.steps),
             },
             "families": {"base": len(base_sets), "exit": len(exit_sets), "trail": len(trail_sets)},
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
+            "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
             "indexed": True,
             "independentTrail": True,
