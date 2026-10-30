@@ -560,6 +560,19 @@ def hold_selection_ignores_expired_candidate_evidence():
     return all_history == 1 and window == 0, f"unbounded candidate={all_history}; 20-second window candidate={window}"
 
 
+def context_budget_includes_configured_hold():
+    """A manual or automatic hold longer than the reference time stop contributes to historical warmup."""
+    b = SetBook()
+    b.load(overlay(**SMALL))
+    b.lookback, b.warmup, b.hist_time_bars = 100, 16, 45
+    b.main_on, b.neg_on, b.realst_on = True, False, True
+    b.hold_auto, b.step_hold = False, {1: 720}
+    manual = b.history_bars()
+    b.step_hold, b.hold_auto = {}, True
+    automatic = b.history_bars()
+    return (manual == 300 + 16 + 2 * 720 and automatic == 300 + 16 + 2 * max(se.HOLD_AUTO_HIGH)), f"manual={manual}, automatic={automatic}"
+
+
 def set_and_lane_ids_never_collide():
     """Every Set has one id, and the Sets its orders form (<id>:main, :real, :realneg) are distinct from it and from every other Set's: an Exit Set (<pack>:1m:sl<r>:st<n>:xt)
     never reads as its base twin, a trailing Set never as either, in the book, in the snapshot's index and in the client id the live order carries."""
@@ -584,6 +597,7 @@ CHECKS = [
     ("stages.debug-uses-each-window-pf-floor", debug_uses_each_window_pf_floor),
     ("stages.bounded-stage-window-matches-independent-vote", bounded_stage_window_matches_independent_vote),
     ("stages.hold-selection-ignores-expired-candidate-evidence", hold_selection_ignores_expired_candidate_evidence),
+    ("stages.context-budget-includes-configured-hold", context_budget_includes_configured_hold),
     ("stages.replay-and-current-verdict-use-same-pf-rounding", replay_and_current_verdict_use_the_same_pf_rounding),
     ("stages.negative-lane-does-not-pollute-main-passing-pf", negative_lane_does_not_pollute_main_passing_pf),
     ("stages.every-window-is-judged-on-its-own", every_window_is_judged_on_its_own),

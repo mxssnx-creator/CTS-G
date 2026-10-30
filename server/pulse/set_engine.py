@@ -2119,7 +2119,10 @@ class SetBook:
         """
         upstream = bool(getattr(self, "main_on", False) or getattr(self, "neg_on", False))
         depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
-        return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * max(0, int(getattr(self, "hist_time_bars", 0))))
+        manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
+        automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic)
+        return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
         """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only
