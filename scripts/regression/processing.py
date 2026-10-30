@@ -1191,6 +1191,22 @@ def trailing_no_time_limit_requires_open_position_evidence():
     return (small, worse, no_reference, better) == (0, 0, 0, 0), f"incomplete unlimited evidence never overrides timed reference: {small}/{worse}/{no_reference}/{better}"
 
 
+def removed_hold_candidate_is_not_reused_on_rebuild():
+    """An existing Set's removed choice cannot be copied to a new entry after a rebuild."""
+    b = _book(n_syms=1, bars=300)
+    st = next(x for x in b.by_idx if x.kind == "trail")
+    st.hold_bars, st.hold_auto = -1, True
+    sid = st.id
+    b._rebuild_sets()
+    current = b.sets[sid]
+    removed = (current.hold_bars, current.hold_auto)
+    valid = b.auto_holds(current)[0]
+    current.hold_bars, current.hold_auto = valid, True
+    b._rebuild_sets()
+    kept = (b.sets[sid].hold_bars, b.sets[sid].hold_auto)
+    return removed == (0, False) and kept == (valid, True), f"removed={removed}, retained valid hold={kept}"
+
+
 def trailing_unlimited_decision_is_causal():
     from set_engine import hold_choice_at, prefix_sums
     ref = _rows("tr", 10, 20)
@@ -1650,6 +1666,7 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.trailing-unlimited-needs-open-position-evidence", trailing_no_time_limit_requires_open_position_evidence),
+    ("processing.removed-hold-candidate-not-reused", removed_hold_candidate_is_not_reused_on_rebuild),
     ("processing.trailing-unlimited-is-causal", trailing_unlimited_decision_is_causal),
     ("processing.paired-hold-screen-marks-open-positions-once", paired_hold_screen_marks_open_positions_once),
     ("processing.missing-main-evidence-discards-stale-short-choice", missing_main_evidence_discards_stale_short_choice),

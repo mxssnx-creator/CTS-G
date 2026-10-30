@@ -38,6 +38,10 @@
         "sets": 0
       },
       "eligible": 0,
+      "validated_gate_reasons": {},
+      "hold_auto_blocked": {
+        "overlapping hold shadows": 111
+      },
       "main_sets_base_comparison": {
         "sets": 0,
         "base_n": 0,
@@ -415,6 +419,10 @@
         "sets": 0
       },
       "eligible": 0,
+      "validated_gate_reasons": {},
+      "hold_auto_blocked": {
+        "overlapping hold shadows": 133
+      },
       "main_sets_base_comparison": {
         "sets": 15,
         "base_n": 750,
@@ -792,6 +800,12 @@
         "sets": 2
       },
       "eligible": 0,
+      "validated_gate_reasons": {
+        "minimal": 2
+      },
+      "hold_auto_blocked": {
+        "overlapping hold shadows": 132
+      },
       "main_sets_base_comparison": {
         "sets": 9,
         "base_n": 450,

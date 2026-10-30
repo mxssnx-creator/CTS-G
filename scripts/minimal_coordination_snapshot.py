@@ -9,6 +9,7 @@ counts are not exchange fills. No live credentials or exchange orders are used.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,9 +110,13 @@ def main() -> None:
             row["main_pf"] = pf(row.pop("main_gp"), row.pop("main_gl"))
         paired["base_pf"] = pf(paired.pop("base_gp"), paired.pop("base_gl"))
         paired["main_pf"] = pf(paired.pop("main_gp"), paired.pop("main_gl"))
+        validated = [st for st in book.by_idx if not book.validation_reason(st)]
+        validated_gates = Counter(book.gate_reason(st) or "eligible" for st in validated)
+        hold_blocked = Counter(st.hold_auto_blocked for st in book.by_idx if st.hold_auto_blocked)
         reports.append({"at_utc": datetime.fromtimestamp(ts + 60, timezone.utc).isoformat(), "cost_pct": book.cost_pct,
                         "total": len(book.by_idx), "base": split["baseOnly"], "main": split["main"], "final": split["base"],
-                        "eligible": split["eligible"], "main_sets_base_comparison": paired, "groups": list(groups.values())})
+                        "eligible": split["eligible"], "validated_gate_reasons": dict(validated_gates),
+                        "hold_auto_blocked": dict(hold_blocked), "main_sets_base_comparison": paired, "groups": list(groups.values())})
     Path(a.out).write_text(json.dumps({"symbols": symbols, "lookback_minutes": lookback, "minimal": a.minimal, "mode": a.mode, "all_packs": a.all_packs,
                                        "active_common": not a.without_active_common,
                                        "hold_auto": book.hold_auto, "points": reports}, indent=2) + "\n")

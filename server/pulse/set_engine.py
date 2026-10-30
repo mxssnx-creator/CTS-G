@@ -2018,8 +2018,14 @@ class SetBook:
             manual = self.hold_bars_for(st_)
             if manual or not self.hold_auto:
                 st_.hold_bars, st_.hold_auto = manual, False      # a manual step hold wins; auto off clears an earlier choice
-            elif not self.auto_holds(st_):
-                st_.hold_bars, st_.hold_auto = 0, False
+            else:
+                available = self.auto_holds(st_)
+                if not available or st_.hold_bars not in (0,) + available:
+                    # A setting or upgrade may remove an old candidate, notably
+                    # -1. Existing positions keep their saved hold; new entries
+                    # must wait for a choice from the current candidate grid.
+                    st_.hold_bars, st_.hold_auto = 0, False
+                    st_.hold_auto_blocked = ""
         self.progress.sets_total = len(self.sets)
         self._topo_gen += 1
 
