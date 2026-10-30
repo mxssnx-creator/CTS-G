@@ -40,7 +40,7 @@ MUTATIONS = [
     ("min PF by size: the classes ignore their bounds",
      "set_engine.py", "        if self.pf_by_size:\n            for lim, pf in self.size_floors:\n                if n <= lim:", "        if self.pf_by_size:\n            for lim, pf in self.size_floors:\n                if True:"),
     ("hold auto: the hold chosen now judges every order again (hindsight)",
-     "set_engine.py", "            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:", "            if hold_choice_at(cands, prefix, float(\"inf\"), max_n, min_n, margin) == c:"),
+     "set_engine.py", "            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin, lookback_s) == c:", "            if hold_choice_at(cands, prefix, float(\"inf\"), max_n, min_n, margin, lookback_s) == c:"),
     ("hold auto: the choice reads orders closed after the entry",
      "set_engine.py", "        ts, g, l_ = prefix[c]\n        e = bisect.bisect_left(ts, t)", "        ts, g, l_ = prefix[c]\n        e = len(ts)"),
     ("relations: I does not invert",
