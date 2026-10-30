@@ -1189,6 +1189,25 @@ def trailing_no_time_limit_needs_own_completed_evidence():
     return (small, worse, no_reference, better) == (0, 0, 0, -1), f"insufficient / worse / missing reference / better = {small}/{worse}/{no_reference}/{better}"
 
 
+def trailing_unlimited_decision_is_causal():
+    from set_engine import hold_choice_at, prefix_sums
+    ref = _rows("tr", 10, 20)
+    good = _rows("tr", 30, 0)
+    cands = [(0, ref), (-1, good)]
+    def prefix(rows):
+        nets = [r[4] - .0012 for r in rows]
+        return ([r[0] for r in rows], *prefix_sums(nets))
+    pre = [prefix(rows) for _, rows in cands]
+    early = hold_choice_at(cands, pre, 1500.0, 30, 10, 1.02)
+    later = hold_choice_at(cands, pre, 2800.0, 30, 10, 1.02)
+    # Future outcomes cannot affect an earlier decision.
+    changed = good[:25] + [(r[0], *r[1:4], -.5, *r[5:]) for r in good[25:]]
+    altered = [(0, ref), (-1, changed)]
+    same = hold_choice_at(altered, [prefix(rows) for _, rows in altered], 2300.0, 30, 10, 1.02)
+    original = hold_choice_at(cands, pre, 2300.0, 30, 10, 1.02)
+    return early == 0 and later == 1 and same == original, f"early={early} later={later} prior decision before/after future edit={original}/{same}"
+
+
 def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
     """After a full pass each auto Set carries one of its candidate holds; its judged tape is causal (each order from the hold that was
     chosen at its entry), so every time exit on it sits at one of the Set's candidate holds or the global time stop, never elsewhere;
@@ -1566,6 +1585,7 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.trailing-unlimited-needs-evidence", trailing_no_time_limit_needs_own_completed_evidence),
+    ("processing.trailing-unlimited-is-causal", trailing_unlimited_decision_is_causal),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
     ("processing.hold-auto-tape-is-causal", hold_auto_tape_is_causal),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
