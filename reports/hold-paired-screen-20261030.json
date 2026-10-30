@@ -1,0 +1,289 @@
+{
+  "method": {
+    "type": "offline matched-entry signal screen",
+    "horizon_minutes": 180,
+    "timed_minutes": 30,
+    "entry_sample_interval_minutes": 15,
+    "prehistory_bars": 720,
+    "forward_bars": 720,
+    "warmup_bars": 100,
+    "selection": "prehistory matched n>=10, finite PFs, unlimited marked PF >= 1.2 and >= timed PF * 1.02",
+    "scope": "independent overlapping counterfactual entries, no Base/Main/Real gates or allocation; same-bar OHLC assumption; no exchange execution",
+    "cost": "configured round-trip cost applied once, including estimated close cost on marked-open positions"
+  },
+  "interval_ms": [
+    1793243220000,
+    1793329560000
+  ],
+  "cost_pct": 0.12,
+  "symbols": [
+    {
+      "symbol": "ADA-USDT",
+      "sha256": "f72521097075b046a5f0f7fdf9a43b39786af16e91d329cf82b71dff0f8592b0"
+    },
+    {
+      "symbol": "BCH-USDT",
+      "sha256": "9a3de921b4fc52eff3c24d2930a1d43883b025d6e30351881a9c7761b509b698"
+    },
+    {
+      "symbol": "BNB-USDT",
+      "sha256": "7349748cac24d3042ed80ff5ef6be5f19fbb279b4633855b6f42f05cf24094f1"
+    },
+    {
+      "symbol": "BTC-USDT",
+      "sha256": "b6db318a8b30926f59c5a6e7dc326882011659336129e76f1286fcb2cb2c3f1e"
+    },
+    {
+      "symbol": "DOGE-USDT",
+      "sha256": "5d8a3cfd5d4861c9a05ef0fd988a913ae8a7eab4891e2b74e1deab0477d36180"
+    },
+    {
+      "symbol": "ETH-USDT",
+      "sha256": "f7e4b23f9ab8cd0643555742c21cfc23b281a4994ca3ff000ffca197e29e7920"
+    },
+    {
+      "symbol": "SOL-USDT",
+      "sha256": "f7ec16d12891ae58e5b7e8e9e4bfe360b4b1e6bc5ec8c87448f2b6eb86268ff5"
+    },
+    {
+      "symbol": "XRP-USDT",
+      "sha256": "98b57fb870a9a5f30c5ed015f32dc0caf535315b0e8ee4630072e400b6af9524"
+    }
+  ],
+  "sets": {
+    "indications:1m:tr0.36:0.36": {
+      "pre": {
+        "30": {
+          "n": 202,
+          "pf": 0.2516,
+          "no_losses": false,
+          "net_return_pct_sum": -27.0135,
+          "marked_open": 0,
+          "closed": 202
+        },
+        "-1": {
+          "n": 202,
+          "pf": 0.2662,
+          "no_losses": false,
+          "net_return_pct_sum": -37.2495,
+          "marked_open": 39,
+          "closed": 163
+        }
+      },
+      "forward": {
+        "30": {
+          "n": 258,
+          "pf": 0.4118,
+          "no_losses": false,
+          "net_return_pct_sum": -35.7589,
+          "marked_open": 0,
+          "closed": 258
+        },
+        "-1": {
+          "n": 258,
+          "pf": 0.4451,
+          "no_losses": false,
+          "net_return_pct_sum": -35.2057,
+          "marked_open": 1,
+          "closed": 257
+        }
+      },
+      "research_selected": "30m"
+    },
+    "indications:1m:tr0.72:0.36": {
+      "pre": {
+        "30": {
+          "n": 202,
+          "pf": 0.2487,
+          "no_losses": false,
+          "net_return_pct_sum": -27.4467,
+          "marked_open": 0,
+          "closed": 202
+        },
+        "-1": {
+          "n": 202,
+          "pf": 0.2699,
+          "no_losses": false,
+          "net_return_pct_sum": -37.037,
+          "marked_open": 39,
+          "closed": 163
+        }
+      },
+      "forward": {
+        "30": {
+          "n": 258,
+          "pf": 0.5998,
+          "no_losses": false,
+          "net_return_pct_sum": -25.2353,
+          "marked_open": 0,
+          "closed": 258
+        },
+        "-1": {
+          "n": 258,
+          "pf": 0.6564,
+          "no_losses": false,
+          "net_return_pct_sum": -22.5608,
+          "marked_open": 1,
+          "closed": 257
+        }
+      },
+      "research_selected": "30m"
+    },
+    "general:1m:tr0.36:0.36": {
+      "pre": {
+        "30": {
+          "n": 31,
+          "pf": 0.1379,
+          "no_losses": false,
+          "net_return_pct_sum": -4.6127,
+          "marked_open": 0,
+          "closed": 31
+        },
+        "-1": {
+          "n": 31,
+          "pf": 0.7732,
+          "no_losses": false,
+          "net_return_pct_sum": -0.6842,
+          "marked_open": 2,
+          "closed": 29
+        }
+      },
+      "forward": {
+        "30": {
+          "n": 46,
+          "pf": 0.3915,
+          "no_losses": false,
+          "net_return_pct_sum": -7.65,
+          "marked_open": 0,
+          "closed": 46
+        },
+        "-1": {
+          "n": 46,
+          "pf": 0.3242,
+          "no_losses": false,
+          "net_return_pct_sum": -10.4373,
+          "marked_open": 0,
+          "closed": 46
+        }
+      },
+      "research_selected": "30m"
+    },
+    "general:1m:tr0.72:0.36": {
+      "pre": {
+        "30": {
+          "n": 31,
+          "pf": 0.1652,
+          "no_losses": false,
+          "net_return_pct_sum": -4.4035,
+          "marked_open": 0,
+          "closed": 31
+        },
+        "-1": {
+          "n": 31,
+          "pf": 0.8385,
+          "no_losses": false,
+          "net_return_pct_sum": -0.475,
+          "marked_open": 2,
+          "closed": 29
+        }
+      },
+      "forward": {
+        "30": {
+          "n": 46,
+          "pf": 0.4441,
+          "no_losses": false,
+          "net_return_pct_sum": -7.5171,
+          "marked_open": 0,
+          "closed": 46
+        },
+        "-1": {
+          "n": 46,
+          "pf": 0.4046,
+          "no_losses": false,
+          "net_return_pct_sum": -9.8447,
+          "marked_open": 0,
+          "closed": 46
+        }
+      },
+      "research_selected": "30m"
+    },
+    "shortrange:1m:tr0.36:0.36": {
+      "pre": {
+        "30": {
+          "n": 10,
+          "pf": 0.275,
+          "no_losses": false,
+          "net_return_pct_sum": -1.0611,
+          "marked_open": 0,
+          "closed": 10
+        },
+        "-1": {
+          "n": 10,
+          "pf": 0.2908,
+          "no_losses": false,
+          "net_return_pct_sum": -1.1574,
+          "marked_open": 0,
+          "closed": 10
+        }
+      },
+      "forward": {
+        "30": {
+          "n": 30,
+          "pf": 0.6294,
+          "no_losses": false,
+          "net_return_pct_sum": -2.1171,
+          "marked_open": 0,
+          "closed": 30
+        },
+        "-1": {
+          "n": 30,
+          "pf": 0.6294,
+          "no_losses": false,
+          "net_return_pct_sum": -2.1171,
+          "marked_open": 0,
+          "closed": 30
+        }
+      },
+      "research_selected": "30m"
+    },
+    "shortrange:1m:tr0.72:0.36": {
+      "pre": {
+        "30": {
+          "n": 10,
+          "pf": 0.275,
+          "no_losses": false,
+          "net_return_pct_sum": -1.0611,
+          "marked_open": 0,
+          "closed": 10
+        },
+        "-1": {
+          "n": 10,
+          "pf": 0.2908,
+          "no_losses": false,
+          "net_return_pct_sum": -1.1574,
+          "marked_open": 0,
+          "closed": 10
+        }
+      },
+      "forward": {
+        "30": {
+          "n": 30,
+          "pf": 0.8037,
+          "no_losses": false,
+          "net_return_pct_sum": -1.121,
+          "marked_open": 0,
+          "closed": 30
+        },
+        "-1": {
+          "n": 30,
+          "pf": 0.8037,
+          "no_losses": false,
+          "net_return_pct_sum": -1.121,
+          "marked_open": 0,
+          "closed": 30
+        }
+      },
+      "research_selected": "30m"
+    }
+  }
+}

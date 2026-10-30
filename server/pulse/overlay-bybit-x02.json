@@ -187,7 +187,7 @@
   "mainGateN": 25,
   "minPfLinked": true,
   "histLookbackAuto": true,
-  "histLookbackMax": 2880,
+  "histLookbackMax": 4320,
   "stagesEnabled": true,
   "setGateShortN": 25,
   "setGateShortMaxRatio": 0.5,

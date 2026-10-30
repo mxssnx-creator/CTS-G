@@ -135,7 +135,9 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
             b.pick_trail = lambda pack: None
             p.boot_ts = 0.0
             p.px[SYM] = 100.0
+            p.price_ts[SYM] = pt.time.time()
             p.available = 900.0
+            p.last_bal = pt.time.time()
             p.halted = False
             p.entry_sense = lambda *a, **k: None
             p.control_orders = False
@@ -170,9 +172,11 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
                 ticks = (o_, l_, h_, c_) if side > 0 else (o_, h_, l_, c_)
                 for k, (dt, px) in enumerate(zip((1.0, 20.0, 40.0, 60.0), ticks)):
                     clock.t = T_BASE + bi * 60.0 + dt
+                    p.last_bal = clock.t  # emulate the independently refreshed balance feed
                     if k == 3:
                         p.last_closed_1m = {SYM: (int((T_BASE + bi * 60.0) // 60), c_)}
                     p.px[SYM] = px
+                    p.price_ts[SYM] = pt.time.time()
                     p.manage()
                     if dca is not None and SYM in p.open:
                         p.maybe_dca_adds()
@@ -262,6 +266,62 @@ def set_lane_matches_the_replay_rule_by_rule():
             if not ok:
                 bad.append((kind, d, (rsl, rtp), lv, rep and (rep["reason"], rep["exit_i"], rep["exit_px"]), liv))
     return not bad, f"{out}" + (f" MISMATCH {bad}" if bad else "")
+
+
+def configured_scratch_threshold_reaches_replay_and_live():
+    """The percent setting changes both the simulated and live Set exit."""
+    out, bad = {}, []
+    for pct in (0.05, 0.30):
+        for side in (1, -1):
+            book = _book(exitIgnoreTp=True, scratchMinPct=pct)
+            st = _pick(book, "scratch", "exit")
+            bars = _scenario_bars("scratch", side)
+            _, historical = replay(book, st, bars, 5, side)
+            _, actual, _ = live(_book(exitIgnoreTp=True, scratchMinPct=pct), st, bars, 5, side)
+            reason = historical["reason"] if historical else None
+            ok = (_same_exit(historical, actual, bars) and reason == ("scratch+" if pct == 0.05 else None)
+                  and abs(book.scratch_min - pct / 100.0) < 1e-12)
+            out[f"{pct}:{side}"] = (reason, actual and actual[0])
+            if not ok:
+                bad.append((pct, side, reason, actual))
+    return not bad, f"settings -> (replay, live): {out}; mismatches={bad}"
+
+
+def trailing_does_not_assume_intrabar_extreme_order():
+    """A new stop is not hit by a preceding extreme; a close across it proves a later crossing.
+    The streaming, indexed and chunked replay paths must agree for both directions."""
+    cfg = {"entry_conf": 0.5, "time_bars": 100, "scratch_bars": 100, "scratch_min": 0.5,
+           "cooldown": 2, "cost_pct": 0.12, "honor_tp": False}
+    state = se.SetState(id="trail-test", pack="p", tf="1m", sl_ratio=0.6,
+                        trail_key="0.5:0.2", trail_arm=0.5, trail_give=0.2,
+                        step=0, tp_pct=0.02, kind="trail")
+    fixtures = {
+        (1, "next"): ([[100, 100, 100, 100, 1], [100, 101, 99.9, 100.9, 1], [100.9, 101, 100.7, 100.85, 1]], 2, 100.798),
+        (1, "close"): ([[100, 100, 100, 100, 1], [100, 101, 99.9, 100.5, 1], [100.5, 101, 100.4, 100.6, 1]], 1, 100.798),
+        (1, "hard"): ([[100, 100, 100, 100, 1], [100, 101, 98, 100.9, 1], [100, 101, 99, 100, 1]], 1, 98.8),
+        (-1, "next"): ([[100, 100, 100, 100, 1], [100, 100.1, 99, 99.1, 1], [99.1, 99.3, 98.95, 99.05, 1]], 2, 99.198),
+        (-1, "close"): ([[100, 100, 100, 100, 1], [100, 100.1, 99, 99.5, 1], [99.5, 100, 99, 99.4, 1]], 1, 99.198),
+        (-1, "hard"): ([[100, 100, 100, 100, 1], [100, 102, 99, 99.1, 1], [100, 101, 99, 100, 1]], 1, 101.2),
+    }
+    bad = []
+    for (side, label), (bars, exit_i, px) in fixtures.items():
+        dirs, confs = [side, 0, 0], [0.9, 0.0, 0.0]
+        stream = se.SetLane(state, "X")
+        steps = [x for i, bar in enumerate(bars) if (x := stream.step(i, bar, dirs[i], confs[i], True, cfg))]
+        variants = [steps]
+        for indexed, split in ((False, False), (True, False), (True, True)):
+            lane = se.SetLane(state, "X")
+            acc = se.BarIndex(bars) if indexed else None
+            if split:
+                rows = lane.scan(0, 2, bars, dirs, confs, True, cfg, [0], acc)
+                rows += lane.scan(2, len(bars), bars, dirs, confs, True, cfg, [0], acc)
+            else:
+                rows = lane.scan(0, len(bars), bars, dirs, confs, True, cfg, [0], acc)
+            variants.append(rows)
+        for rows in variants:
+            if len(rows) != 1 or rows[0]["exit_i"] != exit_i or abs(rows[0]["exit_px"] - px) > 1e-9 or rows[0]["reason"] != "sl":
+                bad.append((side, label, rows))
+    return not bad, f"cases={len(fixtures)} x four paths; mismatches={bad[:2]}"
 
 
 def set_lane_matches_the_replay_on_random_series():
@@ -542,6 +602,37 @@ def auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live():
     return not bad, f"bars held (replay, live) by chosen hold and side {out}" + (f" MISMATCH {bad}" if bad else "")
 
 
+def trailing_unlimited_hold_keeps_stop_and_matches_replay():
+    outcomes = []
+    for direction in (1, -1):
+        b = _book(exitIgnoreTp=True)
+        b.hist_time_bars = 8
+        st = _pick(b, "trail", "trail")
+        st.hold_bars, st.hold_auto = -1, True
+        bars = [[100.0, 100.001, 99.999, 100.0, 1.0] for _ in range(400)]
+        bars[395] = [100.0, 105.0 if direction < 0 else 100.001,
+                    95.0 if direction > 0 else 99.999, 100.0, 1.0]
+        _, rep = replay(b, st, bars, 5, direction)
+        lane = se.SetLane(st, SYM)
+        dirs, confs = [0] * len(bars), [0.0] * len(bars)
+        dirs[5], confs[5] = direction, CONF
+        accelerated = lane.scan(0, len(bars), bars, dirs, confs, True, _replay_cfg(b), [5], se.BarIndex(bars))
+        def change_choice(_p, pos):
+            assert pos.set_hold_bars == -1
+            assert _p.save_open_book(durable=True)
+            clone = pt.Pulse.__new__(pt.Pulse)
+            clone.open, clone.owned_syms, clone.seen_fill_cids = {}, pt.BoundedSet(800), pt.BoundedSet(4000)
+            clone._load_open_book()
+            assert clone.open[SYM].set_hold_bars == -1
+            st.hold_bars = 5  # an existing position keeps its entry-time selection
+        _, actual, trace = live(b, st, bars, 5, direction, after_open=change_choice)
+        outcomes.append((rep and rep["reason"], rep and rep["exit_i"], actual and actual[:2], len(trace),
+                         [(r["reason"], r["exit_i"]) for r in accelerated]))
+    ok = all(reason == "sl" and bar == 395 and live_exit == ("sl", 395) and ticks > 1400 and fast == [("sl", 395)]
+             for reason, bar, live_exit, ticks, fast in outcomes)
+    return ok, f"long/short replay and stub-live outcomes={outcomes}"
+
+
 def other_strategies_never_change_a_set_position():
     """Differential: the same Set position on the same random series, once alone and once with the Exit lanes, Block, DCA
     and rearrange all active around it. Exit, every tick's size, entry, levels and trailing stop are identical."""
@@ -586,6 +677,7 @@ def exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own():
             p = pt.Pulse(_Venue(), contracts)
             p.sets = b
             p.px[SYM] = 100.0
+            p.price_ts[SYM] = pt.time.time()
             exit_n0 = sum(v.n for v in p.exits.lanes.values())
             before = snap()
             free = pt.Position(symbol=SYM, side="LONG", qty=1.0, entry=100.0, opened_at=_real_time.time() - 900, sl=99.0,
@@ -684,6 +776,7 @@ def a_recovered_set_position_keeps_its_own_lane():
                 p = pt.Pulse(venue, contracts)
                 p.sets = b
                 p.px[SYM] = 100.0
+                p.price_ts[SYM] = pt.time.time()
                 p.control_orders = False
                 p.open = {}
                 cid = p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)
@@ -746,7 +839,9 @@ class _Env:
         p.sets.pick_trail = lambda pack: None
         p.boot_ts = 0.0
         p.px[SYM] = 100.0
+        p.price_ts[SYM] = pt.time.time()
         p.available = 900.0
+        p.last_bal = pt.time.time()
         p.halted = False
         p.entry_sense = lambda *a, **k: None
         p.sets.use_historic_gate = False  # Block exercises its independent non-Set parent
@@ -754,6 +849,8 @@ class _Env:
         p.closed = []
         p.block.enabled = True
         p.strat_block = True
+        p.block_exit_enabled = True  # exercise the legacy Exit-parent lane explicitly
+        p.block_risk_pct = 0.0       # individual checks set a risk budget when testing it
         p.block.max_stack = 3
         p.block_last_emit = 0.0
         p.cooldown = {}
@@ -885,21 +982,21 @@ def block_stack_stays_inside_the_book_cap():
     return ok, f"stack qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400"
 
 
-def block_min_order_bump_does_not_break_the_book_cap():
-    """Near the cap the computed add is under the venue's minimum order, so the add is bumped to the minimum. A bump that
-    would carry the position more than 5 % over the book cap is refused."""
+def block_partial_below_minimum_is_not_bumped():
+    """A planned partial below the venue minimum must not be inflated, even when there is room in the book."""
     with _Env() as e:
         e.exit_closes(10, 0.01)
         e.p.contracts[SYM].min_qty = 0.3              # a 30 USDT minimum order at 100
-        e.p.max_book_notional = lambda: 400.0
+        e.p.max_book_notional = lambda: 4000.0
         e.p.notional_cap = lambda: 150.0
-        e.pos.qty = 3.98                              # 398 USDT: the room is 2 USDT, the bump would end at about 430
-        e.p.block.lanes[e.p.block.key(SYM, "LONG")].base_qty = 3.98
+        e.p.block.volume_ratio = 0.25
+        e.pos.qty = 1.0
+        e.p.block.lanes[e.p.block.key(SYM, "LONG")].base_qty = 1.0
         e.p.px[SYM] = 100.5
+        before = len(e.venue.posts)
         e.p.maybe_block_adds()
-        notional = e.pos.qty * e.p.px[SYM]
-    ok = abs(e.pos.qty - 3.98) < 1e-9 and notional <= 400.0 * 1.05
-    return ok, f"qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400 (+5 %)"
+        ok = e.pos.qty == 1.0 and len(e.venue.posts) == before
+    return ok, f"planned partial 0.25 below minimum 0.3: no order={ok}"
 
 
 def a_venue_order_at_the_level_is_left_to_fill():
@@ -1336,6 +1433,8 @@ def a_parent_opens_at_the_carried_stack_level_and_each_add_is_one_partial():
 
 CHECKS = [
     ("trader.lanes-parity-rule-by-rule", set_lane_matches_the_replay_rule_by_rule),
+    ("trader.configured-scratch-reaches-replay-and-live", configured_scratch_threshold_reaches_replay_and_live),
+    ("trader.trailing-intrabar-order-is-causal", trailing_does_not_assume_intrabar_extreme_order),
     ("trader.lanes-parity-random-series", set_lane_matches_the_replay_on_random_series),
     ("trader.lanes-own-stop-level", set_lane_stops_at_its_own_level_when_the_venue_stop_sits_farther),
     ("trader.lanes-venue-order-left-to-fill", a_venue_order_at_the_level_is_left_to_fill),
@@ -1358,6 +1457,7 @@ CHECKS = [
     ("trader.drawdown-halt-settings-from-the-overlay", drawdown_halt_settings_come_from_the_overlay),
     ("trader.lane-step-leaves-on-the-sets-own-hold", lane_step_leaves_on_the_sets_own_hold),
     ("trader.auto-hold-same-in-replay-and-live", auto_hold_chosen_for_a_set_is_the_exit_in_replay_and_live),
+    ("trader.trailing-unlimited-hold-parity", trailing_unlimited_hold_keeps_stop_and_matches_replay),
     ("trader.dca-auto-keeps-stop-manual-follows-average", dca_auto_keeps_the_stop_of_the_entry_and_manual_follows_the_average),
     ("dca.overlay-switch-reaches-the-module", dca_switch_reaches_the_module_flag),
     ("trader.dca-optin-lane-leaves-the-set-lane-alone", dca_is_an_optin_lane_that_leaves_the_set_lane_alone),
@@ -1372,7 +1472,7 @@ CHECKS = [
     ("trader.block-fill-updates-position-and-stop", block_fill_updates_the_position_and_its_stop),
     ("trader.block-lane-resets-and-ignores-set-closes", block_lane_resets_on_its_parent_close_and_ignores_set_closes),
     ("trader.block-stack-inside-book-cap", block_stack_stays_inside_the_book_cap),
-    ("trader.block-min-order-bump-inside-book-cap", block_min_order_bump_does_not_break_the_book_cap),
+    ("trader.block-partial-below-minimum-not-bumped", block_partial_below_minimum_is_not_bumped),
     ("trader.lanes-differential-independence", other_strategies_never_change_a_set_position),
     ("trader.lanes-set-stats-own-closes-only", exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own),
     ("trader.lanes-effective-pf-is-validated-pool", effective_pf_is_the_pool_of_the_validated_sets),

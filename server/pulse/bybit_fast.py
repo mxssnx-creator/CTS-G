@@ -355,6 +355,7 @@ class FastBybit:
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.px: Dict[str, float] = {}
+        self.px_ts: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
         self.hub = BybitPriceHub(self._on_px, err, ws_url=ws_url)
         self.on_event = None
@@ -387,6 +388,7 @@ class FastBybit:
 
     def _on_px(self, symbol: str, px: float, chg: float = 0.0) -> None:
         self.px[symbol] = px
+        self.px_ts[symbol] = self.clock()
         self.chg[symbol] = chg
         self.stats["ws"] += 1
         cb = getattr(self, "on_event", None)

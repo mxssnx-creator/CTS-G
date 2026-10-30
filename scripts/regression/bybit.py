@@ -725,8 +725,10 @@ def positions_and_orders_lifecycle_through_the_live_trader():
         p = pt.Pulse(api, _contracts())
         p.boot_ts = 0.0
         p.px[sym] = 100.0
+        p.price_ts[sym] = pt.time.time()
         p.last_px[sym] = 100.0
         p.available = 50.0
+        p.last_bal = pt.time.time()
         p.halted = False
         p.entry_sense = lambda *a, **k: None
         p.sets.use_historic_gate = False  # exercise the untagged venue lifecycle in isolation

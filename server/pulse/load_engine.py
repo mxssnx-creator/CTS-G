@@ -15,6 +15,7 @@ backpressure, RSS caps, malloc_trim):
 from __future__ import annotations
 
 import gc
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -32,6 +33,57 @@ def rss_mb() -> float:
         return pages * 4096 / 1048576.0
     except Exception:
         return 0.0
+
+
+def system_memory_mb() -> Optional[Tuple[float, float]]:
+    """Return the available host/cgroup capacity and conservative headroom in MiB."""
+    try:
+        values = {}
+        with open("/proc/meminfo") as f:
+            for row in f:
+                key, _, rest = row.partition(":")
+                if key in ("MemTotal", "MemAvailable"):
+                    values[key] = float(rest.strip().split()[0]) / 1024.0
+        total, available = values["MemTotal"], values["MemAvailable"]
+        try:
+            with open("/sys/fs/cgroup/memory.max") as f:
+                limit_raw = f.read().strip()
+        except OSError:
+            limit_raw = "max"
+        if limit_raw != "max":
+            try:
+                limit = int(limit_raw) / 1048576.0
+                with open("/sys/fs/cgroup/memory.current") as f:
+                    used = int(f.read().strip()) / 1048576.0
+                inactive = 0.0
+                try:
+                    with open("/sys/fs/cgroup/memory.stat") as f:
+                        for row in f:
+                            key, _, value = row.partition(" ")
+                            if key == "inactive_file":
+                                inactive = max(0.0, int(value) / 1048576.0)
+                                break
+                except (OSError, ValueError):
+                    pass
+                if 0 < limit <= total:
+                    total = limit
+                    available = min(available, max(0.0, limit - used + min(inactive, used)))
+            except (OSError, ValueError):
+                return None
+        if not (math.isfinite(total) and math.isfinite(available) and total > 0 and available >= 0):
+            return None
+        return total, min(total, available)
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+def adaptive_memory_limits(total_mb: float, available_mb: float, current_rss_mb: float) -> Tuple[float, float]:
+    """Reserve system headroom and bound the engine to at most 40% of the memory limit."""
+    reserve = max(256.0, total_mb * 0.12)
+    budget = max(0.0, available_mb - reserve) * 0.5
+    hard = max(60.0, min(total_mb * 0.4, max(0.0, current_rss_mb) + budget))
+    soft = max(40.0, min(hard, hard * 0.65))
+    return soft, hard
 
 
 def malloc_trim() -> bool:
@@ -86,10 +138,11 @@ def prune_ttl(store: Dict[Any, float], now: Optional[float] = None, slack: float
 
 
 def cap_list(rows: List[Any], max_n: int) -> int:
-    extra = len(rows) - max(0, int(max_n))
+    limit = max(0, int(max_n))
+    extra = len(rows) - limit
     if extra <= 0:
         return 0
-    del rows[:-max(0, int(max_n))]
+    del rows[:extra]
     return extra
 
 
@@ -152,6 +205,10 @@ class LoadGovernor:
         self.partial = True
         self.soft_mb = 0.0  # 0 = scale with universe
         self.hard_mb = 0.0
+        self.auto_memory = False
+        self._auto_soft = 0.0
+        self._auto_hard = 0.0
+        self._auto_memory_at = 0.0
         self.level = "normal"
         self.rss = 0.0
         self.rss_peak = 0.0
@@ -160,6 +217,7 @@ class LoadGovernor:
         self.hist_busy = False
         self.kline_ban = False
         self.overrun_n = 0
+        self.last_cycle_overrun = False
         self.trimmed = 0
         self.gc_n = 0
         self.last_trim = 0.0
@@ -174,6 +232,8 @@ class LoadGovernor:
     def configure(self, ov: Optional[Dict[str, Any]] = None) -> None:
         ov = ov or {}
         self.partial = bool(ov.get("loadPartial", True))
+        self.auto_memory = bool(ov.get("rssAutoLimit", False))
+        self._auto_memory_at = 0.0
         try:
             if ov.get("rssSoftMb") is not None:
                 self.soft_mb = max(40.0, float(ov.get("rssSoftMb") or 0))
@@ -183,11 +243,15 @@ class LoadGovernor:
             pass
 
     def soft_limit(self, n_sym: int) -> float:
+        if self.auto_memory and self._auto_soft > 0:
+            return self._auto_soft
         if self.soft_mb > 0:
             return self.soft_mb
         return 90.0 + max(0, n_sym) * 0.35
 
     def hard_limit(self, n_sym: int) -> float:
+        if self.auto_memory and self._auto_hard > 0:
+            return self._auto_hard
         if self.hard_mb > 0:
             return self.hard_mb
         return 140.0 + max(0, n_sym) * 0.55
@@ -201,11 +265,18 @@ class LoadGovernor:
         warm_ms: float = 0.0,
         hist_busy: bool = False,
         kline_ban: bool = False,
-        cycle_overrun: bool = False,
+        cycle_overrun: Optional[bool] = False,
         rss_mb: Optional[float] = None,
     ) -> Budget:
         rss = float(rss_mb if rss_mb is not None else globals()["rss_mb"]())
         with self.lock:
+            if self.auto_memory and time.monotonic() - self._auto_memory_at >= 5.0:
+                mem = system_memory_mb()
+                if mem is not None:
+                    self._auto_soft, self._auto_hard = adaptive_memory_limits(mem[0], mem[1], rss)
+                else:
+                    self._auto_soft = self._auto_hard = 0.0
+                self._auto_memory_at = time.monotonic()
             self.n_sym = int(n_sym)
             self.n_open = int(n_open)
             self.hot_ms = float(hot_ms)
@@ -215,11 +286,15 @@ class LoadGovernor:
             self.rss = rss
             if rss > self.rss_peak:
                 self.rss_peak = rss
-            if cycle_overrun:
-                self.overrun_n += 1
-            else:
-                self.overrun_n = max(0, self.overrun_n - 1)
-            b = self._compute(cycle_overrun=cycle_overrun)
+            # Background observations update resource usage but do not represent
+            # another completed trading cycle. Count each cycle exactly once.
+            if cycle_overrun is not None:
+                self.last_cycle_overrun = bool(cycle_overrun)
+                if cycle_overrun:
+                    self.overrun_n += 1
+                else:
+                    self.overrun_n = max(0, self.overrun_n - 1)
+            b = self._compute(cycle_overrun=self.last_cycle_overrun)
             self.last_budget = b
             self.level = b.level
             self.shed = list(b.shed)
@@ -397,6 +472,21 @@ class LoadGovernor:
         nxt = (start + need) % n
         return out[:take], nxt
 
+    def history_window(self, symbols: Sequence[str], chunk: int, cursor: int) -> Tuple[List[str], int]:
+        """Rotate through every history symbol, even when open positions outnumber the chunk.
+
+        History is separate from the hot scan, so prioritizing the same open positions on
+        every pass must not starve the remaining symbols or leave an expansion pending.
+        """
+        names = list(dict.fromkeys(s for s in symbols if s))
+        if not names:
+            return [], 0
+        take = max(1, int(chunk or 1))
+        if take >= len(names) or not self.partial:
+            return names, 0
+        start = int(cursor) % len(names)
+        return [names[(start + i) % len(names)] for i in range(take)], (start + take) % len(names)
+
     def free(self, force: bool = False) -> Dict[str, Any]:
         now = time.time()
         if not force and now - self.last_gc < 6.0:
@@ -491,6 +581,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rows = list(range(10))
     dropped = cap_list(rows, 4)
     out.append(("load-cap-list", dropped == 6 and rows == [6, 7, 8, 9], f"drop={dropped} {rows}"))
+    dropped = cap_list(rows, 0)
+    out.append(("load-cap-list-zero", dropped == 4 and rows == [], f"drop={dropped} {rows}"))
+    sampled = LoadGovernor()
+    sampled.observe(n_sym=70, rss_mb=50.0, cycle_overrun=True)
+    for _ in range(12):
+        sampled.observe(n_sym=70, rss_mb=50.0, cycle_overrun=None)
+    out.append(("load-overrun-once", sampled.overrun_n == 1 and sampled.level == "overload",
+                f"overruns={sampled.overrun_n} level={sampled.level}"))
+    sampled.observe(n_sym=70, rss_mb=50.0, cycle_overrun=False)
+    out.append(("load-overrun-recovery", sampled.overrun_n == 0 and sampled.level == "normal",
+                f"overruns={sampled.overrun_n} level={sampled.level}"))
     snap = g.snapshot()
     out.append(("load-snap", snap.get("level") == b2.level and "scanChunk" in snap, str(snap.get("level"))))
     freed = g.free(force=True)

@@ -59,7 +59,8 @@ def walk(names, bars, times, shadow, overlay, axis_on, block_on):
                 add_net = sum(f["qty"] * (tr["exit_px"] - f["price"]) * (1 if pos.side == "LONG" else -1)
                               - f["qty"] * f["price"] * cf for f in pos.block_fills) / pos.base_entry
                 done.append({"set": st.id, "pack": st.pack, "type": st.kind, "step": book.step_of(st), "lane": pos.lane,
-                             "symbol": sym, "entry_t": pos.opened_at, "exit_t": item["exit_t"], "reason": tr["reason"],
+                             "symbol": sym, "side": pos.side, "entry_t": pos.opened_at, "exit_t": item["exit_t"],
+                             "entry_px": tr["entry_px"], "exit_px": tr["exit_px"], "hold_s": tr["hold_s"], "reason": tr["reason"],
                              "net": tr["pnl"], "block_net": add_net, "add_fills": len(pos.block_fills)})
                 cooldown[sym] = item["exit_t"] + book.cooldown_bars * 60
                 del active[sym]
@@ -136,21 +137,33 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--prehistory-hours", type=int, default=6,
+                    help="completed hours used before the modeled execution window (default: 6)")
+    ap.add_argument("--sl-ratio", type=float, default=1.0,
+                    help="single SL-to-TP ratio for this reduced-grid comparison")
+    ap.add_argument("--baseline-only", action="store_true",
+                    help="run Axis and Block off only")
     args = ap.parse_args()
     started = time.monotonic()
     names, bars, times = sg.load_bars(args.data, 50)
     if not names or any(len(v) > 4320 or v[-1] - v[0] > 3 * 86400 for v in times.values()):
         raise ValueError("audit requires 1..50 symbols with at most three days each")
-    if any(len(v) < 420 or any(b-a != 60 for a,b in zip(v,v[1:])) for v in times.values()):
-        raise ValueError("consecutive one-minute candles and at least seven hours required")
-    patch = {"holdEnabled": False, "histLookbackBars": 360, "histLookbackAuto": False, "setStepAdapt": False,
-             "setSlRatios": [1.0], "trailVariants": ["0.60:0.36", "1.20:0.60", "2.40:1.20", "3.60:1.20"],
+    if not 2 <= args.prehistory_hours <= 48:
+        raise ValueError("prehistory must be between 2 and 48 hours")
+    if not 0.5 <= args.sl_ratio <= 3.0:
+        raise ValueError("SL ratio must be between 0.5 and 3.0")
+    if any(len(v) < (args.prehistory_hours + 1) * 60 or any(b-a != 60 for a,b in zip(v,v[1:])) for v in times.values()):
+        raise ValueError("consecutive one-minute candles and at least one hour after prehistory required")
+    patch = {"holdEnabled": False, "histLookbackBars": args.prehistory_hours * 60, "histLookbackAuto": False, "setStepAdapt": False,
+             "setSlRatios": [args.sl_ratio], "trailVariants": ["0.60:0.36", "1.20:0.60", "2.40:1.20", "3.60:1.20"],
              **{k: True for k in ("stratShortRange", "stratTrend", "stratBreakout", "stratReversion", "stratFlow", "stratMulti")}}
     os.environ["STAGE_OVERLAY_PATCH"] = json.dumps(patch)
     overlay = {**json.load(open(sg.OVERLAY)), **patch}
     shadow = sg.build(names, bars, times, 1)
-    runs = [walk(names, bars, times, shadow, overlay, axis, block) for axis,block in ((False,False),(True,False),(True,True))]
-    result = {"symbols": names, "input_bars": {s: len(bars[s]) for s in names}, "cost_pct": .12, "runs": runs,
+    modes = ((False, False),) if args.baseline_only else ((False, False), (True, False), (True, True))
+    runs = [walk(names, bars, times, shadow, overlay, axis, block) for axis, block in modes]
+    result = {"symbols": names, "input_bars": {s: len(bars[s]) for s in names}, "prehistory_hours": args.prehistory_hours,
+              "sl_ratio": args.sl_ratio, "cost_pct": .12, "runs": runs,
               "seconds": time.monotonic()-started, "peak_rss_kb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
     Path(args.out).write_text(json.dumps(result, indent=2) + "\n")
     for run in runs:

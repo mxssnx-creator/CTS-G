@@ -1,0 +1,13 @@
+{
+  "input_symbols_loaded": 8,
+  "replayed_symbols": 1,
+  "sets": 1654,
+  "bars": 4320,
+  "holds_enabled": false,
+  "elapsed_s": 11.288,
+  "peak_rss_kib_linux": 103104,
+  "phase": "ready",
+  "errors": 0,
+  "history_rows": 133593,
+  "note": "shared host; one symbol and automatic holds off, not a full live-universe benchmark"
+}

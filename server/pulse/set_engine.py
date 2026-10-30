@@ -89,6 +89,8 @@ IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 = 16 h)
+LOOKBACK_MAX = 4320              # three days of completed 1m bars
+LOOKBACK_SAMPLE_TARGET = 12      # collection target, not an extra admission gate
 # dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
 LIVE_SEEN_MAX = 20000
 GATE_WINDOW_DEFAULT = 50        # gate PF over each Set's last N closed orders
@@ -346,8 +348,10 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
         s0 = max(0, e - max_n)
         gp, gl = g[e] - g[s0], l_[e] - l_[s0]
         return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
-    ref_pf, _ = pf_n(0)
+    ref_pf, ref_n = pf_n(0)
     best, best_pf = 0, ref_pf
+    if ref_n < min_n:
+        return best
     for c in range(1, len(cands)):
         pf, n = pf_n(c)
         if n >= min_n and pf > best_pf and pf >= ref_pf * margin:
@@ -355,7 +359,8 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
     return best
 
 
-def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
+def causal_hold_tape_checked(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int,
+                             margin: float, cf: float, cooldown_s: float = 0) -> Tuple[List[tuple], bool]:
     """The hold Auto Mode's tape, causal: every candidate's order whose entry fell while that candidate was the chosen hold (chosen on
     the orders closed before the entry, hold_choice_at), in exit order. cands = [(hold, rows)], the reference first; rows are the
     replay's tuples (exit t at 0, pnl_pct at 4, hold_s at 5)."""
@@ -365,13 +370,29 @@ def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, m
         nets = [finite(r[4]) - cf for r in rows]
         g, l_ = prefix_sums(nets)
         prefix.append((ts, g, l_))
-    out: List[tuple] = []
+    selected = []
     for c, (_h, rows) in enumerate(cands):
         for r in rows:
             if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin) == c:
-                out.append(r)
+                selected.append((finite(r[0]) - finite(r[5]), finite(r[0]), str(r[1]), c, r))
+    # Each fixed-hold shadow is a separate state machine. Switching between
+    # them can splice overlapping positions for the same symbol into the
+    # selected tape. Detect cross-candidate overlap before using it to gate.
+    active: Dict[str, List[Tuple[float, int]]] = {}
+    collision = False
+    for entry, end, symbol, candidate, _row in sorted(selected, key=lambda x: (x[0], x[1], x[2], x[3])):
+        prior = [(until, other) for until, other in active.get(symbol, ()) if until >= entry]
+        if any(other != candidate for _, other in prior):
+            collision = True
+        prior.append((end + max(0.0, cooldown_s), candidate))
+        active[symbol] = prior
+    out = [row for _, _, _, _, row in selected]
     out.sort(key=_row_t)
-    return out
+    return out, collision
+
+
+def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
+    return causal_hold_tape_checked(cands, max_n, min_n, margin, cf)[0]
 
 
 def _main_windows(mt: Sequence[float], mn: Sequence[float], entries: Sequence[float], P: StageParams):
@@ -943,6 +964,7 @@ class SetState:
     hold_auto: bool = False         # hold_bars was chosen by the Auto Mode from this Set's own last orders (holdAuto)
     hold_auto_pf: float = 0.0       # cost PF of the chosen hold over the orders it was judged on
     hold_auto_n: int = 0            # how many orders (at most holdAutoMax) that judgement read
+    hold_auto_blocked: str = ""     # why an automatic choice fell back to the reference
     idx: int = 0
     pack_i: int = 0
     sl_i: int = 0
@@ -1202,24 +1224,34 @@ class SetLane:
             side = int(o["side"])
             entry = float(o["entry"])
             held = i - int(o["i"])
-            if self.use_trail:
-                if side > 0:
+            honor = cfg["honor_tp"] if self.honor is None else self.honor
+            # OHLC does not tell us whether this candle's high came before its low.
+            # Test only the stop already active at the start of the candle.
+            why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not honor)
+            if why is None:
+                if self.use_trail:
+                    if side > 0:
+                        o["peak"] = max(o["peak"], float(bar[1]))
+                        if (o["peak"] - entry) / entry >= self.arm:
+                            o["trail"] = max(o.get("trail") or 0.0, o["peak"] * (1 - self.give))
+                    else:
+                        o["peak"] = min(o["peak"], float(bar[2]))
+                        if (entry - o["peak"]) / entry >= self.arm:
+                            t = o["peak"] * (1 + self.give)
+                            cur = o.get("trail")
+                            o["trail"] = t if cur is None else min(cur, t)
+                    # The close follows both extremes. If it crossed the new stop,
+                    # the crossing happened after the peak regardless of their order.
+                    trail = o.get("trail")
+                    close = float(bar[3])
+                    if trail is not None and (close <= trail if side > 0 else close >= trail):
+                        why, px = "sl", trail
+                elif side > 0:
                     o["peak"] = max(o["peak"], float(bar[1]))
-                    if (o["peak"] - entry) / entry >= self.arm:
-                        o["trail"] = max(o.get("trail") or 0.0, o["peak"] * (1 - self.give))
                 else:
                     o["peak"] = min(o["peak"], float(bar[2]))
-                    if (entry - o["peak"]) / entry >= self.arm:
-                        t = o["peak"] * (1 + self.give)
-                        cur = o.get("trail")
-                        o["trail"] = t if cur is None else min(cur, t)
-            elif side > 0:
-                o["peak"] = max(o["peak"], float(bar[1]))
-            else:
-                o["peak"] = min(o["peak"], float(bar[2]))
-            honor = cfg["honor_tp"] if self.honor is None else self.honor
-            why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not honor)
-            if why is None and held >= (self.hold or cfg["time_bars"]):
+            time_bars = float("inf") if self.hold == -1 else (self.hold or cfg["time_bars"])
+            if why is None and held >= time_bars:
                 why, px = "time", float(bar[3])
             if why is None and held >= cfg["scratch_bars"]:
                 if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
@@ -1272,7 +1304,7 @@ class SetLane:
         thr = cfg["entry_conf"]
         if cand is None:
             cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
-        time_bars = self.hold or cfg["time_bars"]
+        time_bars = float("inf") if self.hold == -1 else (self.hold or cfg["time_bars"])
         scratch_bars = cfg["scratch_bars"]
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
@@ -1385,21 +1417,7 @@ class SetLane:
                     high = float(bar[1])
                     low = float(bar[2])
                     close = float(bar[3])
-                    if use_trail:
-                        if side > 0:
-                            peak = max(peak, high)
-                            if (peak - entry) / entry >= arm:
-                                trail = max(trail or 0.0, peak * (1 - give))
-                        else:
-                            peak = min(peak, low)
-                            if (entry - peak) / entry >= arm:
-                                t = peak * (1 + give)
-                                trail = t if trail is None else min(trail, t)
-                    elif side > 0:
-                        peak = max(peak, high)
-                    else:
-                        peak = min(peak, low)
-                    # hit_exit: the stop (or trail) wins a same-bar tie with the target
+                    # The stop active at the bar's open wins a same-bar tie with the target.
                     held = i - oi
                     why: Optional[str] = None
                     px = close
@@ -1415,6 +1433,23 @@ class SetLane:
                             why, px = "sl", stop
                         elif honor_tp and low <= tp:
                             why, px = "tp", tp
+                    if why is None:
+                        if use_trail:
+                            if side > 0:
+                                peak = max(peak, high)
+                                if (peak - entry) / entry >= arm:
+                                    trail = max(trail or 0.0, peak * (1 - give))
+                            else:
+                                peak = min(peak, low)
+                                if (entry - peak) / entry >= arm:
+                                    t = peak * (1 + give)
+                                    trail = t if trail is None else min(trail, t)
+                            if trail is not None and (close <= trail if side > 0 else close >= trail):
+                                why, px = "sl", trail
+                        elif side > 0:
+                            peak = max(peak, high)
+                        else:
+                            peak = min(peak, low)
                     if why is None and held >= time_bars:
                         why, px = "time", close
                     if why is None and held >= scratch_bars and (close - entry) / entry * side >= scratch_min:
@@ -1512,9 +1547,11 @@ class SetBook:
         self.enabled = True
         self.lookback = LOOKBACK_DEFAULT
         self.lookback_cfg = LOOKBACK_DEFAULT
-        self.lookback_max = 2880
+        self.lookback_max = LOOKBACK_MAX
         self.lookback_auto = True
+        self.lookback_sample_target = LOOKBACK_SAMPLE_TARGET
         self._lookback_grown = 0
+        self._lookback_pending = False
         self.main_on = True
         self.main_n = MAIN_GATE_N_DEFAULT
         self.base_short = BASE_SHORT_N_DEFAULT
@@ -1593,6 +1630,7 @@ class SetBook:
         self._topo_gen = 0
         # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
         self._hist_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        self._hist_replay_key: Dict[str, Tuple[int, int]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         # open time (s) of the newest row of self.bars[symbol] when that row is a completed exchange minute; absent when the
         # series ends in rows of unknown time (live ticks). Live entries read a signal only on the bar this names.
@@ -1623,6 +1661,7 @@ class SetBook:
                 # Until a complete pass under the new rules, no old row may validate
                 # a new signal/cost/hold configuration (including chunked refreshes).
                 self._hist_rows.clear()
+                self._hist_replay_key.clear()
                 self._sig_cache.clear()
                 self.progress.ready = False
                 self.last_run = 0.0
@@ -1655,10 +1694,13 @@ class SetBook:
     def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
-        self.lookback_cfg = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
-        # pre-history grows when too many Sets have fewer orders than the gate needs (histLookbackAuto), up to histLookbackMax bars
+        self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
+        # Collection grows for sparse scored Sets independently of the admission gate.
         self.lookback_auto = bool(ov.get("histLookbackAuto", True))
-        self.lookback_max = max(self.lookback_cfg, min(2880, int(ov.get("histLookbackMax") or 2880)))
+        if not self.lookback_auto:
+            self._lookback_pending = False
+        self.lookback_max = max(self.lookback_cfg, min(LOOKBACK_MAX, int(num(ov, "histLookbackMax", LOOKBACK_MAX))))
+        self.lookback_sample_target = max(1, min(200, int(num(ov, "histLookbackTargetN", LOOKBACK_SAMPLE_TARGET))))
         self.lookback = max(self.lookback_cfg, min(self.lookback_max, int(getattr(self, "_lookback_grown", 0) or 0))) if self.lookback_auto else self.lookback_cfg
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.max_flat_share = min(1.0, max(0.0, num(ov, "histMaxFlatShare", 0.35)))
@@ -1743,6 +1785,9 @@ class SetBook:
         else:
             self.hist_time_bars = max(8, min(120, num(ov, "setHistTimeBars", 45, int)))
         self.scratch_s = num(ov, "scratchS", 600)
+        # The desk and ExitBook express this setting in percent. The Set's
+        # replay and its live lane both read a fraction from this field.
+        self.scratch_min = finite(num(ov, ("scratchMin", "scratchMinPct"), 0.16), 0.16) / 100.0
         tp = num(ov, "tpPct", 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
@@ -1997,8 +2042,14 @@ class SetBook:
             manual = self.hold_bars_for(st_)
             if manual or not self.hold_auto:
                 st_.hold_bars, st_.hold_auto = manual, False      # a manual step hold wins; auto off clears an earlier choice
-            elif not self.auto_holds(st_):
-                st_.hold_bars, st_.hold_auto = 0, False
+            else:
+                available = self.auto_holds(st_)
+                if not available or st_.hold_bars not in (0,) + available:
+                    # A setting or upgrade may remove an old candidate, notably
+                    # -1. Existing positions keep their saved hold; new entries
+                    # must wait for a choice from the current candidate grid.
+                    st_.hold_bars, st_.hold_auto = 0, False
+                    st_.hold_auto_blocked = ""
         self.progress.sets_total = len(self.sets)
         self._topo_gen += 1
 
@@ -2087,8 +2138,12 @@ class SetBook:
         return not why
 
     def symbol_ok(self, symbol: str) -> bool:
-        """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
-        return symbol not in self.quality
+        """Require enough current bars and a passing data check before using a symbol for an entry.
+
+        A short history is intentionally absent from the quality-summary map;
+        absence from that map therefore cannot establish that it is usable.
+        """
+        return self.usable(symbol)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
         """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only
@@ -2270,6 +2325,7 @@ class SetBook:
         on_step: Optional[Callable[[], None]] = None,
         symbols: Optional[Sequence[str]] = None,
         abort: Optional[Callable[[], bool]] = None,
+        expected_symbols: Optional[Sequence[str]] = None,
     ) -> None:
         """Replay the given symbols, then score every Set over the rows of all symbols replayed so far.
 
@@ -2305,6 +2361,7 @@ class SetBook:
             errors: List[str] = []
             with self._lock:
                 gen0 = self._topo_gen
+                lookback0 = self.lookback
             sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
@@ -2330,6 +2387,7 @@ class SetBook:
                         aborted = True
                         break                       # never restore an old-rules chunk after load invalidated it
                     self._hist_rows[symbol] = packed
+                    self._hist_replay_key[symbol] = (lookback0, gen0)
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
                     on_step()
@@ -2340,6 +2398,7 @@ class SetBook:
                 live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
                     del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
+                    self._hist_replay_key.pop(s, None)
                 for s in [s for s in self._sig_cache if s not in live]:
                     del self._sig_cache[s]          # and so do their signal memo entries
                 stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
@@ -2378,8 +2437,15 @@ class SetBook:
                 self.progress.pct = 100.0
                 self.progress.ready = True
                 with self._lock:
+                    # A chunk is not the whole universe. After each growth step, wait
+                    # until every usable expected symbol has been replayed at that
+                    # length and topology before deciding whether to grow again.
+                    expected = live if expected_symbols is None else live.intersection(expected_symbols)
+                    if (expected and not sym_failed and self.lookback == lookback0 and self._topo_gen == gen0
+                            and all(self._hist_replay_key.get(s) == (lookback0, gen0) for s in expected)):
+                        self._lookback_pending = False
+                        self._adapt_lookback()
                     self._record_pf_progress()
-                    self._adapt_lookback()
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
@@ -2449,18 +2515,26 @@ class SetBook:
             self.progress.set_id = st.id
 
     def _adapt_lookback(self) -> None:
-        """Pre-history for the calcs: when too many of the Sets that traded have fewer orders than the gate needs (gate_min), the
-        lookback grows by LOOKBACK_GROW_STEP bars (up to histLookbackMax), so the next fetch loads older minutes and the Sets get
-        their orders. It only grows; a reload keeps the grown value. Called with the lock held after a complete pass."""
+        """Grow collection history when too many scored Sets have sparse evidence.
+
+        The collection target is independent of the admission minimum: turning that minimum
+        off must not prevent collection from growing. Zero-close Sets count after a successful
+        replay; locked and failed Sets do not. This never relaxes or adds a PF gate.
+        Called under the lock after a completed pass; growth survives configuration reloads.
+        """
         if not self.lookback_auto or self.lookback >= self.lookback_max:
             return
-        traded = [st for st in self.by_idx if st.source_n > 0]
-        if len(traded) < 20:
+        scored = [st for st in self.by_idx if not st.locked and not st.last_error]
+        if len(scored) < 20 or not self._hist_rows:
             return
-        short = sum(1 for st in traded if st.gate_n < self.gate_min)
-        if short / len(traded) >= LOOKBACK_SHORT_SHARE:
+        target = min(self.gate_window, max(self.gate_min, self.lookback_sample_target))
+        short = sum(1 for st in scored if st.gate_n < target)
+        if short / len(scored) >= LOOKBACK_SHORT_SHARE:
             self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)
             self._lookback_grown = self.lookback
+            # Until every symbol has been rescored at the new length, the Set
+            # statistics may still mix histories from two different windows.
+            self._lookback_pending = True
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
@@ -2471,6 +2545,7 @@ class SetBook:
         it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
         holds = self.auto_holds(st)
         if not holds:
+            st.hold_auto_blocked = ""
             return base
         cf = cost_as_frac(self.cost_pct)
 
@@ -2486,14 +2561,26 @@ class SetBook:
             rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff, until=until)
             cands.append((h, rows))
             pf, n = judge(rows)
+            if ref_n < self.hold_auto_min:
+                continue
             if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
                 best = (pf, h, rows, n)
         # the choice now (on every order closed so far) is what a new position opens with
-        st.hold_bars, st.hold_auto = best[1], True
-        st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
         # the tape the Set is judged on is causal: each order comes from the hold that was chosen at its entry, on the orders closed
         # before it (as live positions opened); the hold chosen now is never applied to orders opened before the choice existed
-        return causal_hold_tape(cands, self.hold_auto_max, self.hold_auto_min, HOLD_AUTO_MARGIN, cf)
+        tape, collision = causal_hold_tape_checked(cands, self.hold_auto_max, self.hold_auto_min,
+                                                   HOLD_AUTO_MARGIN, cf, self.cooldown_bars * BAR_S)
+        if collision:
+            # A mixed tape does not model a single position lifecycle. Use the
+            # reference for both the paper gates and future position entries.
+            st.hold_bars, st.hold_auto = 0, True
+            st.hold_auto_pf, st.hold_auto_n = round(ref_pf, 4), ref_n
+            st.hold_auto_blocked = "overlapping hold shadows"
+            return base
+        st.hold_bars, st.hold_auto = best[1], True
+        st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
+        st.hold_auto_blocked = ""
+        return tape
 
     def floor_for(self, n: int, pack: str) -> float:
         """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""
@@ -2569,21 +2656,19 @@ class SetBook:
         r = [x for x in r if cutoff <= x[0] <= upper]
         q = [x for x in q if cutoff <= x[0] <= upper]
         expired = bool(evidence and evidence[0] and (evidence[0][0] < cutoff or evidence[0][-1] > upper))
-        if self.main_on and self.short_on and expired:
-            if evidence is None and st.proc_replayed and st.proc_total:
-                # Without the entry-time evidence the old candidate cannot be recomputed safely.
-                short_n = self.main_n
-            else:
-                records = []
-                if evidence is not None:
-                    records.extend((t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper)
-                records.sort(key=lambda item: item[0])
-                ts = [x[0] for x in records]
-                entries = [x[1] for x in records]
-                nets = [x[2] for x in records]
-                params = self.stage_params(st.pack)
-                me, mlo, passes = _main_windows(ts, nets, entries, params)
-                short_n, _ = _main_short_choice(nets, me, mlo, params, passes, [x[3] for x in records], current_only=True)
+        if self.main_on and self.short_on and evidence is None and st.proc_replayed and st.proc_total:
+            # Without entry-time evidence the old candidate cannot be verified.
+            # This must be separate from `expired`: None cannot be expired.
+            short_n = self.main_n
+        elif self.main_on and self.short_on and expired:
+            records = [(t, e, value, True) for t, e, value in zip(*evidence) if cutoff <= t <= upper]
+            records.sort(key=lambda item: item[0])
+            ts = [x[0] for x in records]
+            entries = [x[1] for x in records]
+            nets = [x[2] for x in records]
+            params = self.stage_params(st.pack)
+            me, mlo, passes = _main_windows(ts, nets, entries, params)
+            short_n, _ = _main_short_choice(nets, me, mlo, params, passes, [x[3] for x in records], current_only=True)
         out = []
         for v in (m, r, q):
             v.sort(key=lambda x: x[0])
@@ -2750,6 +2835,8 @@ class SetBook:
             return "inactive"
         if st.last_error:
             return "error"
+        if self._lookback_pending:
+            return "history"
         if st.gate_n < self.gate_min:
             return "n<min"
         if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack):
@@ -2958,7 +3045,13 @@ class SetBook:
         Each Set (pack x range x step, or trailing pair) is judged alone: the candidates change only its own exit."""
         if not getattr(self, "hold_auto", False) or self.hold_bars_for(st):
             return ()
-        return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
+        holds = HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
+        # A no-time-stop shadow tape excludes open positions. Comparing its
+        # closed trades with a time-limited tape can therefore reward an
+        # indefinitely open loss. Do not choose -1 from this incomplete
+        # evidence. A position already opened with -1 still keeps its own
+        # persisted exit policy; this changes only future automatic choices.
+        return holds
 
     @property
     def scratch_bars(self) -> int:
@@ -3332,6 +3425,7 @@ class SetBook:
                     "avgHoldS": st.avg_hold_s,
                     "holdMin": st.hold_bars,
                     "holdAuto": st.hold_auto,
+                    "holdAutoBlocked": st.hold_auto_blocked,
                     "pfAll": st.pf_all,
                     "gp": st.gp,
                     "gl": st.gl,
@@ -3413,6 +3507,7 @@ class SetBook:
             "enabled": self.enabled,
             "ready": p.ready,
             "lookback": self.lookback,
+            "lookbackPending": self._lookback_pending,
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
             "minPf": self.min_pf,

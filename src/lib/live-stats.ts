@@ -183,7 +183,8 @@ export type LiveStats = {
   available: number;
   usedMargin: number | null;
   unrealized: number;
-  realizedPnl: number;
+  realizedPnl: number | null;
+  realizedPnlScope?: string;
   sessionPnl: number;
   pnlPct: number | null;
   drawdownPct: number | null;
@@ -418,6 +419,8 @@ export type LiveStats = {
     equity: number;
     available: number;
     unrealized: number;
+    realizedPnl?: number | null;
+    realizedPnlScope?: string;
     openCount: number;
     wins: number;
     losses: number;
@@ -562,6 +565,7 @@ export type LiveStats = {
     enabled?: boolean;
     ready?: boolean;
     lookback?: number;
+    lookbackPending?: boolean;
     pfWindow?: number;
     deactN?: number;
     minPf?: number;
@@ -757,6 +761,8 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     equity: lane.equity,
     available: lane.available ?? s.available,
     unrealized: lane.unrealized ?? 0,
+    realizedPnl: lane.realizedPnl ?? null,
+    realizedPnlScope: lane.realizedPnlScope,
     sessionPnl: lane.sessionPnl,
     wins: lane.wins,
     losses: lane.losses,

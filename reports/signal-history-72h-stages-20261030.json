@@ -1,0 +1,363 @@
+{
+  "summary": {
+    "base": {
+      "sets": 72,
+      "gain": 4.2160897666957595,
+      "loss": 2.4888862026961065,
+      "orders": 3600,
+      "pct_average": 0.36275695284159615,
+      "pf": 1.6939664666583172
+    },
+    "main": {
+      "sets": 8,
+      "gain": 0.23061470067778236,
+      "loss": 0.0207,
+      "orders": 200,
+      "pct_average": 0.04030632809351068,
+      "pf": 11.140806796028134
+    },
+    "real": {
+      "sets": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "pct_average": 0.0,
+      "pf": null
+    },
+    "realNeg": {
+      "sets": 34,
+      "gain": 0.7210886161601734,
+      "loss": 0.008400000000000024,
+      "orders": 498,
+      "pct_average": 0.17130189439742038,
+      "pf": 85.84388287621087
+    }
+  },
+  "hourly": [
+    {
+      "t": 1792227600.0,
+      "base": {
+        "sets": 45,
+        "gain": 2.634289844330064,
+        "loss": 1.5073899705264289,
+        "orders": 2250
+      },
+      "main": {
+        "sets": 8,
+        "gain": 0.23061470067778236,
+        "loss": 0.0207,
+        "orders": 200
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 32,
+        "gain": 0.7017813084777623,
+        "loss": 0.0,
+        "orders": 480
+      }
+    },
+    {
+      "t": 1792231200.0,
+      "base": {
+        "sets": 17,
+        "gain": 0.9642921165410282,
+        "loss": 0.6267422602199355,
+        "orders": 850
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792234800.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792238400.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792242000.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792245600.0,
+      "base": {
+        "sets": 1,
+        "gain": 0.04280067985633207,
+        "loss": 0.026135274976989913,
+        "orders": 50
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 1,
+        "gain": 0.014125697744871858,
+        "loss": 0.008400000000000024,
+        "orders": 15
+      }
+    },
+    {
+      "t": 1792249200.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792252800.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792256400.0,
+      "base": {
+        "sets": 9,
+        "gain": 0.5747071259683355,
+        "loss": 0.32861869697275187,
+        "orders": 450
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 1,
+        "gain": 0.005181609937539211,
+        "loss": 0.0,
+        "orders": 3
+      }
+    },
+    {
+      "t": 1792260000.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792263600.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    },
+    {
+      "t": 1792267200.0,
+      "base": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "main": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "real": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      },
+      "realNeg": {
+        "sets": 0,
+        "gain": 0.0,
+        "loss": 0.0,
+        "orders": 0
+      }
+    }
+  ],
+  "note": "hourly Set observations; trades may repeat; Real and Real Negative are separate lanes"
+}
