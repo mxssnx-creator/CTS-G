@@ -1,0 +1,287 @@
+{
+  "method": "independent raw signal, 3 minute sampling, 60 minute time cap, 0.36% target, 0.24% stop, 0.12% round-trip; pooled across symbols; no Base/Main/Real gates, no allocation, no intrabar path, exclude boundary crossings",
+  "interval_ms": [
+    1793243220000,
+    1793329560000
+  ],
+  "symbols": [
+    "ADA-USDT.json",
+    "BCH-USDT.json",
+    "BNB-USDT.json",
+    "BTC-USDT.json",
+    "DOGE-USDT.json",
+    "ETH-USDT.json",
+    "SOL-USDT.json",
+    "XRP-USDT.json"
+  ],
+  "selection": "pre n>=10 and pf>=1.2",
+  "selected": {},
+  "all": {
+    "ao_laguerre_n5_t1": {
+      "pre": {
+        "n": 74,
+        "pf": 0.3325,
+        "net_pct": -11.3058
+      },
+      "forward": {
+        "n": 94,
+        "pf": 0.4055,
+        "net_pct": -12.4128
+      },
+      "cross_boundary": 2,
+      "still_open": 2
+    },
+    "ao_laguerre_n8_t1": {
+      "pre": {
+        "n": 55,
+        "pf": 0.4723,
+        "net_pct": -5.789
+      },
+      "forward": {
+        "n": 79,
+        "pf": 0.3792,
+        "net_pct": -11.1746
+      },
+      "cross_boundary": 0,
+      "still_open": 2
+    },
+    "ao_ultimate_n5_t1": {
+      "pre": {
+        "n": 127,
+        "pf": 0.5159,
+        "net_pct": -11.8327
+      },
+      "forward": {
+        "n": 201,
+        "pf": 0.4081,
+        "net_pct": -26.4573
+      },
+      "cross_boundary": 4,
+      "still_open": 4
+    },
+    "ao_ultimate_n8_t1": {
+      "pre": {
+        "n": 72,
+        "pf": 0.5107,
+        "net_pct": -6.6519
+      },
+      "forward": {
+        "n": 105,
+        "pf": 0.4103,
+        "net_pct": -13.8
+      },
+      "cross_boundary": 1,
+      "still_open": 3
+    },
+    "ao_cfltrend_n5_t1": {
+      "pre": {
+        "n": 147,
+        "pf": 0.3918,
+        "net_pct": -19.2679
+      },
+      "forward": {
+        "n": 266,
+        "pf": 0.6705,
+        "net_pct": -15.6893
+      },
+      "cross_boundary": 0,
+      "still_open": 3
+    },
+    "ao_cfltrend_n8_t1": {
+      "pre": {
+        "n": 150,
+        "pf": 0.3801,
+        "net_pct": -20.3078
+      },
+      "forward": {
+        "n": 276,
+        "pf": 0.6733,
+        "net_pct": -16.0672
+      },
+      "cross_boundary": 0,
+      "still_open": 3
+    },
+    "ao_cflbrk_n5_t1": {
+      "pre": {
+        "n": 65,
+        "pf": 0.5291,
+        "net_pct": -5.5703
+      },
+      "forward": {
+        "n": 109,
+        "pf": 0.5176,
+        "net_pct": -10.473
+      },
+      "cross_boundary": 1,
+      "still_open": 2
+    },
+    "ao_cflbrk_n8_t1": {
+      "pre": {
+        "n": 64,
+        "pf": 0.3593,
+        "net_pct": -8.963
+      },
+      "forward": {
+        "n": 90,
+        "pf": 0.6986,
+        "net_pct": -4.6985
+      },
+      "cross_boundary": 1,
+      "still_open": 2
+    },
+    "ao_cmpx_n5_t1": {
+      "pre": {
+        "n": 37,
+        "pf": 0.5708,
+        "net_pct": -2.9241
+      },
+      "forward": {
+        "n": 61,
+        "pf": 0.6613,
+        "net_pct": -3.6878
+      },
+      "cross_boundary": 0,
+      "still_open": 1
+    },
+    "ao_cmpx_n8_t1": {
+      "pre": {
+        "n": 37,
+        "pf": 0.5708,
+        "net_pct": -2.9241
+      },
+      "forward": {
+        "n": 61,
+        "pf": 0.6613,
+        "net_pct": -3.6878
+      },
+      "cross_boundary": 0,
+      "still_open": 1
+    },
+    "ao_regime_n5_t1": {
+      "pre": {
+        "n": 109,
+        "pf": 0.3891,
+        "net_pct": -14.5421
+      },
+      "forward": {
+        "n": 167,
+        "pf": 0.508,
+        "net_pct": -16.7331
+      },
+      "cross_boundary": 3,
+      "still_open": 0
+    },
+    "ao_regime_n8_t1": {
+      "pre": {
+        "n": 102,
+        "pf": 0.3566,
+        "net_pct": -14.8707
+      },
+      "forward": {
+        "n": 135,
+        "pf": 0.4942,
+        "net_pct": -14.0013
+      },
+      "cross_boundary": 2,
+      "still_open": 0
+    },
+    "ao_axisrev_n5_t1": {
+      "pre": {
+        "n": 27,
+        "pf": 0.6114,
+        "net_pct": -1.8403
+      },
+      "forward": {
+        "n": 16,
+        "pf": 0.8571,
+        "net_pct": -0.36
+      },
+      "cross_boundary": 0,
+      "still_open": 1
+    },
+    "ao_axisrev_n8_t1": {
+      "pre": {
+        "n": 90,
+        "pf": 0.4552,
+        "net_pct": -9.6643
+      },
+      "forward": {
+        "n": 103,
+        "pf": 0.538,
+        "net_pct": -9.48
+      },
+      "cross_boundary": 1,
+      "still_open": 1
+    },
+    "lr_fade": {
+      "pre": {
+        "n": 2,
+        "pf": 99,
+        "net_pct": 0.48
+      },
+      "forward": {
+        "n": 4,
+        "pf": 0.0,
+        "net_pct": -1.44
+      },
+      "cross_boundary": 0,
+      "still_open": 0
+    },
+    "lr_break": {
+      "pre": {
+        "n": 1,
+        "pf": 99,
+        "net_pct": 0.24
+      },
+      "forward": {
+        "n": 1,
+        "pf": 99,
+        "net_pct": 0.24
+      },
+      "cross_boundary": 0,
+      "still_open": 0
+    },
+    "lr_trendbreak": {
+      "pre": {
+        "n": 4,
+        "pf": 0.6667,
+        "net_pct": -0.24
+      },
+      "forward": {
+        "n": 9,
+        "pf": 1.3333,
+        "net_pct": 0.36
+      },
+      "cross_boundary": 0,
+      "still_open": 0
+    },
+    "lr_nr7": {
+      "pre": {
+        "n": 97,
+        "pf": 0.4306,
+        "net_pct": -11.4676
+      },
+      "forward": {
+        "n": 179,
+        "pf": 0.506,
+        "net_pct": -17.962
+      },
+      "cross_boundary": 3,
+      "still_open": 1
+    },
+    "lr_inside": {
+      "pre": {
+        "n": 3,
+        "pf": 0.5036,
+        "net_pct": -0.2366
+      },
+      "forward": {
+        "n": 5,
+        "pf": 2.6667,
+        "net_pct": 0.6
+      },
+      "cross_boundary": 0,
+      "still_open": 0
+    }
+  }
+}

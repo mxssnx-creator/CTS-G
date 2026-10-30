@@ -162,6 +162,52 @@ def signature_covers_raw_values_and_the_query_is_encoded():
     return ok, f"signature over raw values={sig == want} query encoded={'%7B' in body} round-trips={decoded.get('batchOrders') == batch} plain params unchanged={plain_ok}"
 
 
+def timestamp_retry_is_read_only_and_bounded():
+    """A timestamp rejection retries one GET with a fresh signature; orders are never replayed."""
+    import urllib.parse
+    with tempfile.TemporaryDirectory() as td:
+        c = _client(os.path.join(td, "err.log"))
+        c.secret = "unit-secret"
+        n = iter(range(1000, 1020))
+        c._next_ts = lambda: next(n)
+        calls = []
+        def answer(method, url):
+            calls.append((method, url))
+            return {"code": 109400, "msg": "timestamp is invalid"} if len(calls) == 1 else {"code": 0, "data": {}}
+        c._http = answer
+        ok_read = c.get("/openApi/swap/v3/user/balance")
+        read_calls = list(calls)
+        calls.clear()
+        denied_write = c.post("/openApi/swap/v2/trade/order")
+        post_count = len(calls)
+        windows = [urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("recvWindow", [None])[0]
+                   for _, url in read_calls]
+    ok = (ok_read.get("code") == 0 and len(read_calls) == 2 and windows == ["5000", "15000"]
+          and post_count == 1 and denied_write.get("code") == 109400)
+    return ok, f"GET calls={len(read_calls)} windows={windows}; POST calls={post_count}"
+
+
+def balance_timeout_is_retried_once_but_orders_are_not():
+    """Balance reads can recover from one timeout; an uncertain order is never repeated."""
+    with tempfile.TemporaryDirectory() as td:
+        c = _client(os.path.join(td, "err.log"))
+        c.secret = "unit-secret"
+        n = iter(range(1000, 1020))
+        c._next_ts = lambda: next(n)
+        calls = []
+        def answer(method, url):
+            calls.append((method, url))
+            return {"code": -1, "msg": "read operation timed out", "error": True} if len(calls) == 1 else {"code": 0}
+        c._http = answer
+        balance = c.get("/openApi/swap/v3/user/balance")
+        balance_count = len(calls)
+        calls.clear()
+        order = c.post("/openApi/swap/v2/trade/order")
+        order_count = len(calls)
+    ok = balance_count == 2 and balance.get("code") == 0 and order_count == 1 and order.get("code") == -1
+    return ok, f"balance GETs={balance_count}; POSTs={order_count}"
+
+
 def batch_orders_carry_numbers_not_numeric_strings():
     """batchOrders is refused when its JSON price or quantity is a string. The sync client turns the numeric fields into
     numbers and leaves the rest (closePosition "true", ids) as they were."""
@@ -195,7 +241,59 @@ def gather_without_the_async_bridge_runs_in_parallel_threads():
     return ok, f"rows={[r[2].get('data') for r in rows]} took {dt:.2f}s"
 
 
+def websocket_compressed_heartbeat_and_symbol_rotation():
+    """BingX's gzip Ping needs plain Pong; universe changes update subscriptions in the same session."""
+    import gzip
+    import json
+    import types
+    import bingx_fast as bf
+
+    class Timeout(Exception):
+        pass
+
+    class Socket:
+        def __init__(self):
+            self.sent, self.i, self.closed, self.timeout = [], 0, False, None
+        def send(self, v):
+            self.sent.append(v)
+        def settimeout(self, value):
+            self.timeout = value
+        def close(self):
+            self.closed = True
+        def recv(self):
+            self.i += 1
+            if self.i == 1:
+                return gzip.compress(b"Ping")
+            if self.i == 2:
+                hub.set_symbols(["B-USDT"])
+                return gzip.compress(json.dumps({"dataType": "A-USDT@ticker", "data": {"c": "1"}}).encode())
+            if self.i == 3:
+                raise Timeout()
+            if self.i == 4:
+                return gzip.compress(json.dumps({"dataType": "B-USDT@ticker", "data": {"c": "2"}}).encode())
+            return None
+
+    sock, prices = Socket(), []
+    hub = bf.PriceHub(lambda sym, px: prices.append((sym, px)), ErrorLog('/tmp/unused-ws-errors.jsonl'))
+    hub.set_symbols(["A-USDT"])
+    old = bf._ws
+    try:
+        bf._ws = types.SimpleNamespace(create_connection=lambda *a, **k: sock, WebSocketTimeoutException=Timeout)
+        hub._session()
+    finally:
+        bf._ws = old
+    msgs = [json.loads(v) for v in sock.sent if v != "Pong"]
+    subs = [(v['reqType'], v['dataType']) for v in msgs]
+    ok = (sock.sent.count("Pong") == 1 and subs == [("sub", "A-USDT@ticker"), ("unsub", "A-USDT@ticker"),
+          ("sub", "B-USDT@ticker")] and prices == [("A-USDT", 1.0), ("B-USDT", 2.0)]
+          and sock.timeout == 2 and sock.closed and not hub.ok)
+    return ok, f"plain Pong={sock.sent.count('Pong')} subscriptions={subs} prices={prices} socket closed={sock.closed}"
+
+
 CHECKS = [
+    ("exchange.websocket-ping-and-rotation", websocket_compressed_heartbeat_and_symbol_rotation),
+    ("exchange.timestamp-retry-read-only", timestamp_retry_is_read_only_and_bounded),
+    ("exchange.balance-timeout-retry-read-only", balance_timeout_is_retried_once_but_orders_are_not),
     ("exchange.gather-without-bridge-uses-threads", gather_without_the_async_bridge_runs_in_parallel_threads),
     ("exchange.batch-orders-carry-numbers", batch_orders_carry_numbers_not_numeric_strings),
     ("exchange.signature-raw-values-encoded-query", signature_covers_raw_values_and_the_query_is_encoded),

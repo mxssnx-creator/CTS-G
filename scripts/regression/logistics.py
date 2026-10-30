@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "12e4567e6e6215af7b0526b0b8c54256fe449192"
+PIN_WANT = "fe54c94254a6a57bb1acfa22d7e699510dba22d2"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -23,7 +23,7 @@ def overlays_share_grid_contract():
     for path in (X01, X02):
         ov = json.load(open(path))
         want = {"setMinStep": 2, "setStepMax": 30, "trailMinStep": 3, "histLookbackBars": 1920,
-                "setMinPf": 1.25, "setGateWindow": 50, "setGateMinTrades": 0,   # owner 2026-10-28: Base double last N, long window 50 (short setGateShortN); 2026-10-29: minimum order count off
+                "setMinPf": 1.2 if path == X01 else 1.25, "setGateWindow": 50, "setGateMinTrades": 0,   # x01 owner 2026-10-30: linked PF 1.2; x02 retains 1.25
                 "setMaxDdtHours": 24}   # owner 2026-10-29: drawdown time 24 h
         bad = {k: ov.get(k) for k, v in want.items() if ov.get(k) != v}
         ok_all = ok_all and not bad
@@ -100,6 +100,12 @@ DESK_DEFAULT_EXCEPTIONS = {
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
     "ddHaltPct": "owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (x01 and x02); the Bybit overlays keep 18",
+    "minPf": "owner 2026-10-30: x01 system minimum 1.2; other connections keep the desk default",
+    "setMinPf": "owner 2026-10-30: x01 linked Base minimum 1.2; other connections keep the desk default",
+    "exitMinPf": "owner 2026-10-30: x01 Exit minimum 1.2; other connections keep the desk default",
+    "dcaMinPf": "owner 2026-10-30: x01 DCA minimum 1.2; other connections keep the desk default",
+    "symbolCap": "x01 is configured for 70 symbols; other connections keep the desk default of 50",
+    "blockMaxStack": "x01 permits one measured Block add; other connections retain their existing default",
 }
 
 
@@ -234,10 +240,11 @@ def restore_patch_reproduces_pin():
         raise Skip("restore patch missing")
     base = git("show", PIN_BASE)
     with tempfile.TemporaryDirectory() as td:
-        target = os.path.join(td, "pulse_trader.py")
+        target = os.path.join(td, "server", "pulse", "pulse_trader.py")
+        os.makedirs(os.path.dirname(target))
         with open(target, "w", encoding="utf-8") as fh:
             fh.write(base)
-        proc = subprocess.run(["patch", "-p0", target], stdin=open(RESTORE_PATCH, "rb"),
+        proc = subprocess.run(["git", "-C", td, "apply", "--unidiff-zero", RESTORE_PATCH],
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             return False, f"patch exit {proc.returncode}: {proc.stderr.strip()[:120]}"
@@ -249,6 +256,7 @@ def no_leftover_zest_names():
     # this file names the pattern itself, and the check-name lists the runner writes carry this check's name: excluded
     hits = git("grep", "-l", "-i", "zest", "--", ".", ":!scripts/regression/logistics.py",
                ":!scripts/regression/check_durations.json", ":!scripts/regression/mutant_catchers.json",
+               ":!reports/regression-verification-20261030.json",
                no_match_ok=True).strip().splitlines()
     return not hits, f"files={hits}" if hits else "no 'zest' in tracked files"
 

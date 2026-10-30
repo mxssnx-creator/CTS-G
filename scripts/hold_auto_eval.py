@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Hold-time Auto Mode on the walk-forward of stage_eval: every hour each Set judges the candidate holds on its own tapes (its last
+"""LEGACY APPROXIMATION: this script applies the current hold to its entire
+historical tape and does not model the production hold-shadow collision guard,
+no-limit candidates, or open-position censoring. Its output must not be used
+as evidence of causal live parity or to enable a hold policy.
+
+Hold-time Auto Mode on the walk-forward of stage_eval: every hour each Set judges the candidate holds on its own tapes (its last
 holdAutoMax orders, at least holdAutoMin, the global time stop as the reference with the engine's PF margin), keeps the best one,
-and is gated and executed with it (the engine's choice, set_engine.SetBook._choose_hold). Compared with the global time stop on the same
+and is gated and executed with it (an approximation, not SetBook._choose_hold). Compared with the global time stop on the same
 hours: post-Base effective PF, validated share and orders, and the executed PF (one position per symbol, as stage_eval executes).
 Choose on the development window; --sealed reads the last third once.
 

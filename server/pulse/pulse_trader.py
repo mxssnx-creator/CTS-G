@@ -12,6 +12,7 @@ import random
 import re
 import string
 import subprocess
+import tempfile
 import time
 import threading
 import traceback
@@ -58,6 +59,12 @@ START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
 RESET_EQ_PATH = os.path.join(DIR, f"reset-eq-{CONN_SHORT}")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
+
+
+def entry_intent_path() -> str:
+    return os.path.join(os.path.dirname(OPEN_PATH), f"pending-entry-{CONN_SHORT}.json")
+
+
 MAX_SYMBOLS = 0  # 0 = unlimited
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
@@ -136,13 +143,18 @@ TIME_STOP_S = 21600
 MAX_HOLD_S = 21600
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
-SCAN_S = 0.20
+SCAN_S = 0.10
 
 
 def pace_gap_s(cycle_started: float, now: float, scan_s: float) -> float:
     """Seconds the trading loop waits after a cycle that began at cycle_started. The next cycle starts at least
     scan_s after the last one. Ticks do not wake the loop, so the cadence cannot follow the tick rate."""
     return max(0.0, cycle_started + scan_s - now)
+
+
+def cycle_stride(interval_s: float, scan_s: float) -> int:
+    """Keep periodic work at its intended time interval when scan cadence changes."""
+    return max(1, round(float(interval_s) / max(0.1, float(scan_s))))
 
 
 def leverage_settings(ov: Dict[str, Any]) -> Tuple[bool, int]:
@@ -168,7 +180,8 @@ VOL1H_EVERY = 8.0
 VOL1H_BATCH = 10
 SYMBOL_SORTS = ("vol1h", "vol24h", "quoteVolume", "changeAbs", "changePct", "leverage")
 BALANCE_EVERY = 6.0
-QA_EVERY = 5
+BALANCE_STALE_S = 30.0
+PRICE_STALE_S = 12.0
 COOLDOWN_S = 9.0
 SYM_BAN_S = 1800.0       # a symbol that stops out within 30 s, or fills far from its reference price, rests this long
 STAGGER_S = 0.12
@@ -660,6 +673,7 @@ class Position:
     set_hold_bars: int = 0                    # hold selected at entry; later replay choices cannot change it
     block_fills: list = field(default_factory=list)
     block_pending: dict = field(default_factory=dict)
+    ownership_conflict: bool = False
     entry_fee_usdt: Optional[float] = None
     base_entry_fee_usdt: Optional[float] = None
     exit_fee_usdt: float = 0.0
@@ -757,10 +771,28 @@ class Pulse:
         self.kline_ts_tf: Dict[str, Dict[str, float]] = {tf: {} for tf in TIMEFRAMES}
         self.kline_ts: Dict[str, float] = self.kline_ts_tf["1m"]
         self.pool = ThreadPoolExecutor(max_workers=KLINE_WORKERS)
+        self._lev_guard = threading.Lock()
+        self._lev_future = None
+        self._ticker_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ticker-read")
+        self._ticker_future = None
+        self._ticker_started = 0.0
+        self._recon_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="position-read")
+        self._recon_future = None
+        self._recon_started = 0.0
+        self._recon_book = ()
+        self._fill_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fill-read")
+        self._fill_future = None
+        self._fill_started = 0.0
+        self._order_guard_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ownership-orders")
+        self._order_guard_future = None
+        self._order_guard_started = 0.0
+        self._order_guard_next = 0.0
+        self._order_guard_snapshot = (0.0, frozenset())
         self.lev_map: Dict[str, int] = {}
         self.lev_max: Dict[str, int] = {}
         self.use_max_leverage = True
         self.last_scan_ms = 0.0
+        self.last_cycle_ms = 0.0
         self.cycle_busy = False
         self.cycle_wait_ms = 0.0
         self.cycle_overrun = False
@@ -772,6 +804,7 @@ class Pulse:
         self.symbol_sort = "vol1h"
         self.symbols_dynamic = True
         self.symbol_cap = 0
+        self.symbol_rotate_s = 18.0
         self.last_dyn_sel = 0.0
         self.overlay_wild = True
         self.skip_log: Dict[str, float] = {}
@@ -790,24 +823,38 @@ class Pulse:
         self.qa_fail = 0
         self.warm_ms = 0.0
         self._warm_stop = False
+        self._balance_stop = False
+        self._balance_next_at = 0.0
         self._stats_lock = threading.Lock()
         self.hist_busy = False
         self._stats_ts = 0.0
         self._stats_force = False
         self.last_scan_io = False
         self.ignored_foreign = 0
+        self.foreign_symbols: set = set()
+        self.foreign_order_symbols: set = set()
+        self._ownership_verified: set = set()
         self.dca_fail_cd: Dict[str, float] = {}
         self.track_prefix = TAG
         self.boot_ts = time.time()
         self.seen_fill_cids = BoundedSet(4000)
         self.seen_fill_oids = BoundedSet(4000)
         self.owned_syms = BoundedSet(800)
+        self.unknown_entry: Dict[str, float] = {}
+        self.entry_intent_ids: Dict[str, str] = {}
+        self.intent_state_bad = False
+        self._load_entry_intents()
+        self.external_closes: Dict[str, Any] = {}
+        self.external_close_state_bad = False
+        self._load_external_closes()
         self.load = LoadGovernor()
         self._scan_keep: List[str] = []
         self.ignore_syms: Dict[str, float] = {}
         self.last_px: Dict[str, float] = {}
+        self.price_ts: Dict[str, float] = {}
         self.recon_ok = True
         self.recon_detail = "pending"
+        self.strict_ownership = bool(load_json_file(OVERLAY_PATH).get("strictOwnership", False))
         self._load_trade_history()
         self._exec_boot()
         self._load_open_book()
@@ -988,8 +1035,23 @@ class Pulse:
                 self.lev_map[str(k)] = n
                 self.lev_max.setdefault(str(k), n)
 
+    def leverage_symbol_safe(self, symbol: str) -> bool:
+        if not getattr(self, "strict_ownership", False):
+            return True
+        if not self.order_guard_safe(symbol):
+            return False
+        if (not getattr(self, "recon_ok", False) or symbol in getattr(self, "foreign_symbols", set())
+                or symbol in getattr(self, "foreign_order_symbols", set())):
+            return False
+        if any(str(k).startswith(symbol + ":") for k in (getattr(self, "external_closes", {}) or {})):
+            return False
+        pos = getattr(self, "open", {}).get(symbol)
+        return pos is None or self.ownership_safe(pos)
+
     def ensure_max_leverage(self, symbol: str, force: bool = False) -> int:
         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
+        if not self.leverage_symbol_safe(symbol):
+            return 0
         c = self.contracts.get(symbol)
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
         tgt = self.target_leverage(mx)
@@ -999,7 +1061,7 @@ class Pulse:
                 c.max_lev = mx
             return applied
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
-            return applied or mx
+            return 0 if force else applied
         if mx <= 0 or force or applied < mx:
             got_mx, cur_l, cur_s = self.fetch_symbol_leverage(symbol)
             if got_mx > 0:
@@ -1016,35 +1078,25 @@ class Pulse:
             elif applied >= mx > 0 and not force:
                 return applied
         want = tgt
-        ok_both = True
         for side in ("LONG", "SHORT"):
             r = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
             if not self.ok(r):
-                ok_both = False
-                if r.get("code") in (100410, 101209, 100421):
-                    return applied or want
-                # too high — discover real max
-                got_mx, cur_l, cur_s = self.fetch_symbol_leverage(symbol)
-                if got_mx > 0:
-                    mx = got_mx
-                    self.lev_max[symbol] = mx
-                    if c is not None:
-                        c.max_lev = mx
-                    want = self.target_leverage(mx)
-                    r2 = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
-                    if not self.ok(r2):
-                        return applied or cur_l or want
-                else:
-                    return applied or want
-        if ok_both or want:
+                # Do not count a partially applied or rejected change as the
+                # account's leverage. A later attempt can discover the cap and
+                # set both sides again before an entry is allowed.
+                self.lev_map.pop(symbol, None)
+                self._persist_lev()
+                return 0
+        if want:
             self.lev_map[symbol] = want
             self.lev_max[symbol] = max(int(self.lev_max.get(symbol) or 0), want)
             if c is not None:
                 c.max_lev = self.lev_max[symbol]
-            try:
-                self.api.post("/openApi/swap/v2/trade/marginType", {"symbol": symbol, "marginType": "CROSSED"})
-            except Exception:
-                pass
+            if CONN_SHORT != "bingx-x01":
+                try:
+                    self.api.post("/openApi/swap/v2/trade/marginType", {"symbol": symbol, "marginType": "CROSSED"})
+                except Exception:
+                    pass
             log(f"LEV {symbol} x{want} max={self.lev_max.get(symbol)}", every=15.0, key=f"lev:{symbol}")
             self._persist_lev()
         return int(self.lev_map.get(symbol) or want)
@@ -1210,10 +1262,15 @@ class Pulse:
     def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
         self.ignore_syms[sym] = time.time() + sec
         self.owned_syms.discard(sym)
+        getattr(self, "_ownership_verified", set()).discard(sym)
         self.open.pop(sym, None)
 
     def flatten_untracked(self, symbol: str, side: str, qty: float, px: float) -> bool:
         # Never flatten independent / other-system positions.
+        if getattr(self, "strict_ownership", False):
+            pos = self.open.get(symbol)
+            if not pos or pos.side != side or abs(pos.qty - qty) > max(1e-9, abs(qty) * 1e-6) or not self.ownership_safe(pos):
+                return False
         tagged = []
         try:
             tagged = self.our_orders(symbol)
@@ -1235,16 +1292,172 @@ class Pulse:
         log(f"FLATTEN untracked {symbol} {side} q={qty} n={(qty*(px or 0)):.1f} ok={ok}")
         return ok
 
-    def save_open_book(self) -> bool:
+    def save_open_book(self, durable: bool = False) -> bool:
         try:
             blob = {s: asdict(p) for s, p in self.open.items()}
             tmp = OPEN_PATH + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(blob, f)
+                if durable:
+                    f.flush()
+                    os.fsync(f.fileno())
             os.replace(tmp, OPEN_PATH)
+            if durable:
+                fd = os.open(os.path.dirname(OPEN_PATH) or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
             return True
         except Exception:
             return False
+
+    def _save_entry_intents(self) -> bool:
+        """Persist pending order identities before an entry can leave this process."""
+        tmp = ""
+        try:
+            rows = {key: {"t": float(ts), "cid": self.entry_intent_ids[key]}
+                    for key, ts in self.unknown_entry.items() if key in self.entry_intent_ids}
+            path = entry_intent_path()
+            directory = os.path.dirname(path) or "."
+            fd, tmp = tempfile.mkstemp(prefix=".pending-entry-", dir=directory, text=True)
+            with os.fdopen(fd, "w") as f:
+                json.dump(rows, f, separators=(",", ":"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return True
+        except Exception:
+            self.intent_state_bad = True
+            return False
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def _external_close_path(self) -> str:
+        return os.path.join(os.path.dirname(OPEN_PATH), f"external-closes-{CONN_SHORT}.json")
+
+    def _load_external_closes(self) -> None:
+        path = self._external_close_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("invalid external-close state")
+            for key, value in data.items():
+                if not isinstance(key, str) or not key.endswith((":LONG", ":SHORT")) or not isinstance(value, dict):
+                    raise ValueError("invalid external-close record")
+                if not self.cid_ours(str(value.get("client_id") or "")):
+                    raise ValueError("unowned external-close record")
+            self.external_closes = data
+        except Exception:
+            self.external_close_state_bad = True
+
+    def record_external_close(self, pos: Position) -> bool:
+        """Persist a quarantine before forgetting a flat position with no verified exit."""
+        if not getattr(self, "strict_ownership", False):
+            return True
+        if not pos.client_id or not self.cid_ours(pos.client_id):
+            return False
+        key = f"{pos.symbol}:{pos.side}"
+        previous = self.external_closes.get(key)
+        self.external_closes[key] = {"client_id": pos.client_id, "observed_at": time.time()}
+        tmp = ""
+        try:
+            path = self._external_close_path()
+            directory = os.path.dirname(path) or "."
+            fd, tmp = tempfile.mkstemp(prefix=".external-closes-", dir=directory, text=True)
+            with os.fdopen(fd, "w") as f:
+                json.dump(self.external_closes, f, separators=(",", ":"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return True
+        except Exception:
+            if previous is None:
+                self.external_closes.pop(key, None)
+            else:
+                self.external_closes[key] = previous
+            self.external_close_state_bad = True
+            return False
+        finally:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def _load_entry_intents(self) -> None:
+        path = entry_intent_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                rows = json.load(f)
+            if not isinstance(rows, dict):
+                raise ValueError("invalid pending entries")
+            for key, row in rows.items():
+                stamp, cid = float(row["t"]), str(row["cid"])
+                if not isinstance(key, str) or not key.endswith((":LONG", ":SHORT")) or not math.isfinite(stamp) or stamp <= 0 or not self.cid_ours(cid):
+                    raise ValueError("invalid pending entry")
+                self.unknown_entry[key], self.entry_intent_ids[key] = stamp, cid
+        except Exception:
+            self.intent_state_bad = True
+
+    def _record_entry_intent(self, key: str, cid: str) -> bool:
+        self.unknown_entry[key] = time.time()
+        self.entry_intent_ids[key] = cid
+        return self._save_entry_intents()
+
+    def _clear_entry_intent(self, key: str) -> bool:
+        stamp = self.unknown_entry.pop(key, None)
+        cid = self.entry_intent_ids.pop(key, None)
+        if self._save_entry_intents():
+            return True
+        if stamp is not None:
+            self.unknown_entry[key] = stamp
+        if cid is not None:
+            self.entry_intent_ids[key] = cid
+        return False
+
+    def _verified_entry_intent(self, key: str, symbol: str, side: str, qty: float) -> Optional[Dict[str, Any]]:
+        """Adopt an uncertain entry only after its own client ID and fill match the venue position."""
+        cid = (getattr(self, "entry_intent_ids", {}) or {}).get(key, "")
+        if not cid or not self.cid_ours(cid):
+            return None
+        row = self.confirmed_order({}, symbol, cid)
+        if row.get("fillUnconfirmed"):
+            return None
+        filled = executed_qty(row)
+        if filled is None or not math.isfinite(float(filled)) or float(filled) <= 0:
+            return None
+        if abs(float(filled) - qty) > max(1e-9, qty * 1e-6):
+            return None
+        order_side = str(row.get("side") or "").upper()
+        position_side = str(row.get("positionSide") or "").upper()
+        echoed = str(row.get("clientOrderID") or row.get("clientOrderId") or "")
+        if order_side and order_side != ("BUY" if side == "LONG" else "SELL"):
+            return None
+        if position_side and position_side not in (side, "BOTH"):
+            return None
+        if echoed and echoed.lower() != cid.lower():
+            return None
+        return row
 
     def _load_open_book(self) -> None:
         if not os.path.exists(OPEN_PATH):
@@ -1322,6 +1535,12 @@ class Pulse:
 
     def order_is_ours(self, o: Dict[str, Any]) -> bool:
         return self.cid_ours(self.order_cid(o))
+
+    def ownership_safe(self, pos: Position) -> bool:
+        if not getattr(self, "strict_ownership", False):
+            return True
+        return (bool(pos.client_id) and self.cid_ours(pos.client_id)
+                and not pos.ownership_conflict and pos.symbol in self._ownership_verified)
 
     def order_cid(self, o: Dict[str, Any]) -> str:
         return str(o.get("clientOrderID") or o.get("clientOrderId") or "")
@@ -1421,14 +1640,31 @@ class Pulse:
             row = data.get("balance") if isinstance(data.get("balance"), dict) else data
         elif isinstance(data, list) and data:
             row = next((x for x in data if str(x.get("asset") or x.get("currency") or "USDT").upper() in ("USDT", "VST")), data[0])
-        if not isinstance(row, dict):
+        if not self.ok(r) or not isinstance(row, dict):
             self.errors += 1
             self.last_error = f"balance {r.get('msg')}"
+            # Never size a new order using the last successful balance after a
+            # refresh fails. Existing positions and their protection stay managed.
+            self.available = 0.0
             return
-        self.equity = float(row.get("equity") or row.get("balance") or 0)
-        self.available = float(row.get("availableMargin") or row.get("available") or row.get("availableBalance") or 0)
-        self.used = float(row.get("usedMargin") or row.get("used") or 0)
-        self.upnl = float(row.get("unrealizedProfit") or row.get("unrealized") or 0)
+        def first_number(keys, default=0.0):
+            for key in keys:
+                if row.get(key) is not None:
+                    return float(row[key])
+            return default
+        try:
+            equity = first_number(("equity", "balance"))
+            available = first_number(("availableMargin", "available", "availableBalance"))
+            used = first_number(("usedMargin", "used"))
+            upnl = first_number(("unrealizedProfit", "unrealized"))
+            if not all(math.isfinite(x) for x in (equity, available, used, upnl)) or available < 0:
+                raise ValueError("invalid balance")
+        except (TypeError, ValueError, OverflowError):
+            self.errors += 1
+            self.last_error = "balance invalid numeric values"
+            self.available = 0.0
+            return
+        self.equity, self.available, self.used, self.upnl = equity, available, used, upnl
         if self.start_eq <= 0:
             self.start_eq = self.equity
             try:
@@ -1539,24 +1775,57 @@ class Pulse:
     def ingest_ws_px(self) -> int:
         n = 0
         want = set(SYMBOLS)
+        timestamps = getattr(self.api, "px_ts", {})
         for s, px in list(getattr(self.api, "px", {}).items()):
-            if px and s in want:
-                self.px[s] = px
-                self.last_px[s] = max(float(self.last_px.get(s) or 0), float(px))
+            try:
+                ts = float(timestamps.get(s, 0) or 0)
+                value = float(px or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (s in want and math.isfinite(value) and value > 0 and math.isfinite(ts)
+                    and ts > 0 and ts >= self.price_ts.get(s, 0)):
+                self.px[s] = value
+                # This is the latest trade price, not the all-time high. Stop
+                # legality compares current last and mark prices in px_band().
+                self.last_px[s] = value
+                self.price_ts[s] = ts
                 n += 1
         return n
 
-    def refresh_tickers(self) -> None:
+    def market_price_fresh(self, symbol: str) -> bool:
+        ts = float(getattr(self, "price_ts", {}).get(symbol, 0) or 0)
+        age = time.time() - ts
+        return ts > 0 and -5.0 <= age <= PRICE_STALE_S
+
+    def refresh_tickers(self, background: bool = False) -> None:
         want = set(SYMBOLS)
         copied = self.ingest_ws_px()
         hub = getattr(self.api, "hub", None)
         ws_age = (time.time() - getattr(hub, "last_msg", 0)) if hub and getattr(hub, "last_msg", 0) else 99
         ws_ok = bool(getattr(hub, "ok", False) and ws_age < 4.0)
-        covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0)
+        covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0 and self.market_price_fresh(s))
         if ws_ok and covered >= max(8, len(SYMBOLS) - 2):
             return
-        self.did_io = True
-        r = self.api.public("/openApi/swap/v2/quote/ticker")
+        if background:
+            future = self._ticker_future
+            if future is None:
+                self._ticker_started = time.time()
+                self._ticker_future = self._ticker_pool.submit(self.api.public, "/openApi/swap/v2/quote/ticker")
+                return
+            if not future.done():
+                return
+            self._ticker_future = None
+            started = self._ticker_started
+            try:
+                r = future.result()
+            except Exception:
+                return
+        else:
+            self.did_io = True
+            started = time.time()
+            r = self.api.public("/openApi/swap/v2/quote/ticker")
+        if not isinstance(r, dict) or r.get("code") not in (0, None) or time.time() - started > PRICE_STALE_S:
+            return
         rows = r.get("data") or []
         if not isinstance(rows, list):
             return
@@ -1570,11 +1839,14 @@ class Pulse:
             try:
                 last = float(tck.get("lastPrice") or tck.get("close") or 0)
                 ch = float(tck.get("priceChangePercent") or 0)
+                if not math.isfinite(last) or not math.isfinite(ch):
+                    continue
             except Exception:
                 continue
-            if last > 0 and s in want:
+            if last > 0 and s in want and started >= self.price_ts.get(s, 0):
                 self.px[s] = last
                 self.last_px[s] = last
+                self.price_ts[s] = started
                 self.chg[s] = ch
             if write_uni:
                 try:
@@ -1620,7 +1892,7 @@ class Pulse:
             except Exception:
                 pass
             self.apply_dynamic_symbols()
-        self.last_rest_tick = time.time()
+        self.last_rest_tick = started
 
     def _vol1h_from_bars(self, symbol: str) -> float:
         bars = (self.klines_tf.get("1m", {}) or {}).get(symbol) or self.klines.get(symbol) or []
@@ -1717,7 +1989,7 @@ class Pulse:
         """Reorder (and optionally rotate) the scan book: max leverage, then selected criterion."""
         global SYMBOLS
         now = time.time()
-        if not force and now - float(getattr(self, "last_dyn_sel", 0) or 0) < 18.0:
+        if not force and now - float(getattr(self, "last_dyn_sel", 0) or 0) < float(getattr(self, "symbol_rotate_s", 18.0) or 18.0):
             return
         rows = list(self.universe or [])
         if not rows:
@@ -2118,6 +2390,9 @@ class Pulse:
                     self._oo_cache["*"] = (now, rows)
                     self._order_est = len(rows)
                     self._order_est_known = True
+                    if getattr(self, "strict_ownership", False):
+                        self.foreign_order_symbols = {str(o.get("symbol")) for o in rows if isinstance(o, dict)
+                                                      and o.get("symbol") and not self.order_is_ours(o)}
                 else:
                     rows = hit[1] if hit else []
         if symbol:
@@ -2128,11 +2403,15 @@ class Pulse:
         rows = self.list_orders(symbol)
         return [o for o in rows if self.cid_ours(self.order_cid(o))]
 
-    def _oid_in_book(self, order_id: str) -> bool:
+    def _oid_in_book(self, order_id: str, symbol: str = "") -> bool:
         oid = str(order_id or "")
         if not oid:
             return False
         for p in self.open.values():
+            if symbol and p.symbol != symbol:
+                continue
+            if getattr(self, "strict_ownership", False) and not self.ownership_safe(p):
+                continue
             if oid in (
                 str(p.sl_oid or ""),
                 str(p.tp_oid or ""),
@@ -2155,7 +2434,7 @@ class Pulse:
         if cid and not self.cid_ours(cid):
             log(f"SKIP cancel foreign {symbol} cid={cid[:24]}", every=20.0, key=f"skipc:{symbol}")
             return False
-        if not cid and not self._oid_in_book(order_id):
+        if not cid and not self._oid_in_book(order_id, symbol):
             log(f"SKIP cancel unknown {symbol} oid={order_id}", every=20.0, key=f"skipu:{symbol}")
             return False
         r = self.api.delete("/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": order_id})
@@ -2166,12 +2445,19 @@ class Pulse:
         self.last_error = f"cancel {symbol} {r.get('msg')}"[:200]
         return False
 
-    def cancel_controls(self, symbol: str, keep: Optional[set] = None) -> None:
+    def cancel_controls(self, symbol: str, keep: Optional[set] = None, side: str = "") -> None:
+        if getattr(self, "strict_ownership", False):
+            pos = self.open.get(symbol)
+            if not pos or not self.ownership_safe(pos):
+                return
+            side = side or pos.side
         keep = keep or set()
         self._oo_cache.pop("*", None)   # controls placed in the last seconds must be visible to this sweep
         self._oo_cache.pop(symbol, None)
         for o in self.list_orders(symbol):
             if not self.order_is_ours(o):
+                continue
+            if side and str(o.get("positionSide") or "").upper() != side:
                 continue
             oid = str(o.get("orderId") or "")
             typ = str(o.get("type") or "")
@@ -2342,6 +2628,8 @@ class Pulse:
         return price
 
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
+        if not self.ownership_safe(pos):
+            return ""
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
@@ -2366,9 +2654,12 @@ class Pulse:
             {"close_pos": False, "with_qty": True, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
             {"close_pos": True, "with_qty": False, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
         ]
+        if getattr(self, "strict_ownership", False):
+            forms = [form for form in forms if not form["close_pos"]]
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
+        tried_prices = set()
         for extra in (0.0, 0.006, 0.012):
             px_try = price
             if extra:
@@ -2378,7 +2669,17 @@ class Pulse:
                 else:
                     px_try = m * (1.0 - extra) if pos.side == "SHORT" else m * (1.0 + extra)
                 px_try = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", px_try)
+            if pos.set_id:
+                # A fallback control is a venue safety, not a new exit rule.
+                # Never move it inside the Set's intended stop or target.
+                if pos.side == "LONG":
+                    px_try = min(px_try, price) if is_sl else max(px_try, price)
+                else:
+                    px_try = max(px_try, price) if is_sl else min(px_try, price)
             px_s = self.fmt_px(c, px_try)
+            if px_s in tried_prices:
+                continue
+            tried_prices.add(px_s)
             for form in forms:
                 cid = self.cid(cid_ch, pos=pos)
                 body = ctrl_payload(
@@ -2405,6 +2706,8 @@ class Pulse:
                         typ = str(o.get("type") or "")
                         side = str(o.get("positionSide") or "").upper()
                         if side != pos.side:
+                            continue
+                        if getattr(self, "strict_ownership", False) and not self.control_matches_position(pos, o):
                             continue
                         live = real_oid(o.get("orderId") or o.get("orderID"))
                         if not live:
@@ -2470,6 +2773,16 @@ class Pulse:
         return not (has_sl and has_tp)
 
     def entries_blocked(self) -> bool:
+        now = time.time()
+        if not self.order_guard_safe():
+            return True
+        if getattr(self, "intent_state_bad", False) or getattr(self, "external_close_state_bad", False):
+            return True
+        if getattr(self, "recon_ok", True) is False:
+            return True
+        last_balance = float(getattr(self, "last_bal", 0) or 0)
+        if last_balance <= 0 or now - last_balance > BALANCE_STALE_S or last_balance > now + 5.0:
+            return True
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return True
         if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
@@ -2492,6 +2805,10 @@ class Pulse:
         for pos in list(self.open.values()):
             px = self.px.get(pos.symbol) or pos.entry
             need = self.missing_controls(pos)
+            if not self.market_price_fresh(pos.symbol):
+                if need:
+                    miss += 1
+                continue
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{pos.symbol}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
                 continue
@@ -2538,8 +2855,22 @@ class Pulse:
             return False
         return str(o.get("type") or "") in TP_TYPES
 
+    def control_matches_position(self, pos: Position, order: Dict[str, Any]) -> bool:
+        """A strict control must be our side and cover exactly our recorded quantity."""
+        if not self.order_is_ours(order) or str(order.get("positionSide") or "").upper() != pos.side:
+            return False
+        if str(order.get("closePosition") or "").lower() in ("true", "1"):
+            return False
+        try:
+            qty = float(order.get("origQty") or order.get("quantity") or 0)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(qty) and qty > 0 and abs(qty - pos.qty) <= max(1e-9, pos.qty * 1e-6)
+
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
+        if not self.ownership_safe(pos):
+            return
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return
         if time.time() < self.ctrl_skip.get(pos.symbol, 0) and pos.sl_oid and pos.tp_oid:
@@ -2548,9 +2879,8 @@ class Pulse:
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
-            b["closePosition"] = "true"
             b["clientOrderID"] = self.cid(ch, pos=pos)
-            if "closePosition" in b:
+            if not getattr(self, "strict_ownership", False):
                 b["closePosition"] = "true"
         r = self.api.batch_place([sl_b, tp_b])
         self.did_io = True
@@ -2571,27 +2901,29 @@ class Pulse:
             kind = self._cid_kind(o)
             if typ in SL_TYPES or kind in ("u", "s"):
                 pos.sl_oid = pos.sec_sl_oid = oid
-                pos.sl = want_sl
+                pos.sl = pos.sec_sl = want_sl
             elif typ in TP_TYPES or kind in ("v", "t"):
                 pos.tp_oid = pos.sec_tp_oid = oid
-                pos.tp = want_tp
+                pos.tp = pos.sec_tp = want_tp
         if not real_oid(pos.sl_oid):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
-                pos.sl = want_sl
+                pos.sl = pos.sec_sl or want_sl
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
             if pos.tp_oid:
-                pos.tp = want_tp
+                pos.tp = pos.sec_tp or want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         pos.overall = pos.controls_ok
-        pos.close_position = True
+        pos.close_position = not getattr(self, "strict_ownership", False)
         pos.ctrl_qty = pos.qty
         pos.ctrl_verified = pos.controls_ok
         self._oo_cache.pop("*", None)
         self._oo_cache.pop(pos.symbol, None)
 
     def ensure_controls(self, pos: Position) -> None:
+        if not self.ownership_safe(pos):
+            return
         now = time.time()
         if now < self.ctrl_skip.get("__order_cap__", 0):
             return
@@ -2614,15 +2946,15 @@ class Pulse:
                 oid = self.place_ctrl(pos, "sec-sl", want_sl)
                 if oid:
                     pos.sl_oid = pos.sec_sl_oid = oid
-                    pos.sl = want_sl
+                    pos.sl = pos.sec_sl or want_sl
             if not real_oid(pos.tp_oid):
                 oid = self.place_ctrl(pos, "sec-tp", want_tp)
                 if oid:
                     pos.tp_oid = pos.sec_tp_oid = oid
-                    pos.tp = want_tp
+                    pos.tp = pos.sec_tp or want_tp
             pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             pos.overall = True
-            pos.close_position = True
+            pos.close_position = not getattr(self, "strict_ownership", False)
             pos.ctrl_qty = pos.qty
             self.ctrl_skip[f"sync:{pos.symbol}"] = time.time() + 12.0
             return
@@ -2630,6 +2962,13 @@ class Pulse:
         side = pos.side
         sls = [o for o in orders if self._order_is_sl(o) and str(o.get("positionSide") or "").upper() == side]
         tps = [o for o in orders if self._order_is_tp(o) and str(o.get("positionSide") or "").upper() == side]
+        if getattr(self, "strict_ownership", False) and any(not self.control_matches_position(pos, o) for o in sls + tps):
+            # Do not cancel and replace an unknown-size or whole-position control:
+            # leave the existing protection intact for manual reconciliation.
+            pos.ownership_conflict = True
+            self.__dict__.setdefault("_ownership_verified", set()).discard(pos.symbol)
+            self.save_open_book()
+            return
 
         def qty_ok(o: Dict[str, Any]) -> bool:
             try:
@@ -2679,7 +3018,7 @@ class Pulse:
         if not pos.sec_tp_oid and pos.tp_oid:
             pos.sec_tp_oid, pos.sec_tp = pos.tp_oid, pos.tp
         if sec_sls or pos.sl_oid:
-            pos.close_position = True
+            pos.close_position = not getattr(self, "strict_ownership", False)
         now = time.time()
         last_sync = float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
         can_replace = now >= last_sync
@@ -2709,6 +3048,10 @@ class Pulse:
             oid = self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want)
             if oid:
                 self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
+                if is_sl:
+                    pos.sl = pos.sec_sl or want
+                else:
+                    pos.tp = pos.sec_tp or want
             return oid or have_oid
 
         pos.sl_oid = pos.sec_sl_oid = _place_side(True, pos.sl_oid or pos.sec_sl_oid, pos.sl, want_sl, bool(sls), sls)
@@ -2721,7 +3064,7 @@ class Pulse:
         pos.ctrl_verified = bool(sls and tps)
         pos.ctrl_qty = pos.qty
         pos.overall = bool((real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) or (real_oid(pos.sec_sl_oid) and real_oid(pos.sec_tp_oid)))
-        pos.close_position = True
+        pos.close_position = not getattr(self, "strict_ownership", False)
 
     def _ctrl_body(self, pos: Position, kind: str, price: float) -> Dict[str, Any]:
         price = self.clamp_ctrl_price(pos, kind, price)
@@ -2733,13 +3076,15 @@ class Pulse:
             self.fmt_px(c, price),
             self.fmt_qty(c, pos.qty),
             self.cid("u" if kind == "sl" else "v", pos=pos),
-            close_pos=True,
-            with_qty=False,
+            close_pos=not getattr(self, "strict_ownership", False),
+            with_qty=bool(getattr(self, "strict_ownership", False)),
         )
 
     def replace_sl(self, pos: Position, new_sl: float) -> bool:
         """Move the exchange stop to new_sl. True when the protection sits at that level (already there, or placed);
         False when it was throttled or the replacement failed. The caller commits its trail state only on True."""
+        if not self.ownership_safe(pos):
+            return False
         now = time.time()
         if now < self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
             return False
@@ -2756,7 +3101,8 @@ class Pulse:
         if old_oid and hasattr(self.api, "cancel_replace"):
             body = ctrl_payload(
                 pos.symbol, pos.side, "sl", self.fmt_px(c, new_sl), self.fmt_qty(c, pos.qty),
-                self.cid("u", pos=pos), close_pos=True, with_qty=False,
+                self.cid("u", pos=pos), close_pos=not getattr(self, "strict_ownership", False),
+                with_qty=bool(getattr(self, "strict_ownership", False)),
             )
             body["cancelOrderId"] = old_oid
             r = self.api.cancel_replace(body)
@@ -2769,6 +3115,8 @@ class Pulse:
                 self._oo_cache.pop("*", None)
                 self._oo_cache.pop(pos.symbol, None)
         if not replaced:
+            if old_oid and getattr(self, "strict_ownership", False):
+                return False                 # do not cancel the old stop before a replacement exists
             if pos.sl_oid:
                 self.cancel_order(pos.symbol, pos.sl_oid)
             if pos.sec_sl_oid and pos.sec_sl_oid != pos.sl_oid:
@@ -2778,10 +3126,12 @@ class Pulse:
             pos.sec_sl = new_sl
             oid = self.place_ctrl(pos, "sec-sl", new_sl)
             pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
+            if pos.sl_oid:
+                pos.sl = pos.sec_sl or new_sl
         want_tp = self.desired_sl_tp(pos)[1]
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))
-            pos.tp = want_tp
+            pos.tp = pos.sec_tp or want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         self.ctrl_skip[f"sync:{pos.symbol}"] = now + 12.0
         return bool(real_oid(pos.sl_oid))
@@ -2814,7 +3164,9 @@ class Pulse:
             {"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)},
         ]
         pid = str(getattr(pos, "position_id", "") or "")
-        if pid:
+        if getattr(self, "strict_ownership", False):
+            forms = forms[:1]               # never close the exchange's whole aggregate
+        elif pid:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
         for f in forms:                       # the manager records this close itself: the fill sync must not count it again
             self.seen_fill_cids.add(f["clientOrderID"])
@@ -2894,7 +3246,7 @@ class Pulse:
 
     def settle_pending_close(self, pos: Position) -> bool:
         """Read the existing close order only; retain unresolved accounting across refresh/restart."""
-        if not pos.close_pending:
+        if not pos.close_pending or not self.ownership_safe(pos):
             return False
         qty = pos.qty + pos.close_filled_qty
         ok, price = self.market_close(pos)   # pending branch only: never sends another order
@@ -2926,11 +3278,15 @@ class Pulse:
 
     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
+        if sym in getattr(self, "foreign_symbols", set()) or sym in getattr(self, "foreign_order_symbols", set()):
+            return "foreign-position"
         if conf < self.sets.entry_conf:   # the same setEntryConf the replay uses
             return "low-conf"
         if (self.px.get(sym) or 0) <= 0:
             return "no-px"
         side = "LONG" if direction > 0 else "SHORT"
+        if f"{sym}:{side}" in getattr(self, "external_closes", {}):
+            return "externally-closed"
         if self.occupying(sym, side, pack):
             return "slot-taken"
         if pack == "indications" and str(reason).startswith("ind:"):
@@ -3022,6 +3378,15 @@ class Pulse:
     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
         if self.entries_blocked():
             return
+        if not self.order_guard_safe(sym):
+            return
+        if sym in getattr(self, "foreign_symbols", set()) or sym in getattr(self, "foreign_order_symbols", set()):
+            return
+        side = "LONG" if direction > 0 else "SHORT"
+        if f"{sym}:{side}" in getattr(self, "external_closes", {}):
+            return
+        if not self.market_price_fresh(sym):
+            return
         if self.halted or os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
             return
         if time.time() < self.cooldown.get("__book__", 0):
@@ -3031,6 +3396,10 @@ class Pulse:
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
         if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or sym in self.open:
+            return
+        # A timed-out entry may have reached the venue. Fail closed for this
+        # symbol for the rest of this process, on either side.
+        if any(str(k).startswith(sym + ":") for k in (getattr(self, "unknown_entry", {}) or {})):
             return
         if time.time() < self.cooldown.get(sym, 0):
             return
@@ -3049,14 +3418,18 @@ class Pulse:
         px = self.px.get(sym) or 0
         if not c or px <= 0:
             return
+        # Do not size against a contract maximum or an old persisted value
+        # until both account sides have been confirmed at the target.
+        applied_lev = self.ensure_max_leverage(sym, force=True)
+        if applied_lev <= 0 or applied_lev != self.leverage_for(c):
+            return
         qty = self.size_qty(c, px)
         if qty <= 0:
             return
         notional = qty * px
         if notional > self.max_book_notional() * 1.02:
             return
-        self.ensure_max_leverage(sym)
-        lev = self.leverage_for(c)
+        lev = applied_lev
         margin = notional / max(1, lev)
         if margin > float(self.available or 0) * 0.95:
             return
@@ -3105,7 +3478,7 @@ class Pulse:
                 trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
                 trail_set_id = trail_st.id
                 trail_idx = int(getattr(trail_st, "idx", -1))
-        if not chosen and self.block.enabled and self.strat_block:
+        if not chosen and self.block.enabled and self.strat_block and getattr(self, "block_exit_enabled", True):
             # a Block stack that was increased stays increased: the parent opens at V0 x (1 + carried x ratio) until the
             # group's net is back to equal, within the book and what the balance can carry
             scale = self.block.parent_scale(sym, side)
@@ -3140,13 +3513,24 @@ class Pulse:
             body.update(attach)
             return body
 
+        # The leverage and scope checks above can perform network I/O. Recheck
+        # freshness immediately before sending an entry after that delay.
+        if (self.entries_blocked() or not self.market_price_fresh(sym)
+                or self.available <= 0 or margin > self.available * 0.95):
+            return
+        intent_key = f"{sym}:{side}"
+        if not self._record_entry_intent(intent_key, cid):
+            return
         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
         self.did_io = True
-        if not self.ok(r) and attach:
+        if not self.ok(r) and attach and not (r.get("error") or r.get("code") == -1):
             msg0 = str(r.get("msg") or "").lower()
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
-                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)))
+                cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
+                if not self._record_entry_intent(intent_key, cid):
+                    return
+                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                 self.did_io = True
         if not self.ok(r):
             msg = str(r.get("msg") or "")
@@ -3156,25 +3540,25 @@ class Pulse:
                 self.lev_max[sym] = cap
                 if c is not None:
                     c.max_lev = cap
-                for lev_side in ("LONG", "SHORT"):
-                    self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": sym, "side": lev_side, "leverage": cap})
-                self.lev_map[sym] = cap
+                # An order rejection is not proof that either side was set to
+                # this cap. Revalidate both sides on a future attempt.
+                self.lev_map.pop(sym, None)
                 self._persist_lev()
-                r = self.api.post(
-                    "/openApi/swap/v2/trade/order",
-                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
-                )
-                self.did_io = True
-                msg = str(r.get("msg") or "")
             m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-            if m2 and not self.ok(r):
+            if m2 and not self.ok(r) and not (r.get("error") or r.get("code") == -1):
                 need = float(m2.group(1))
                 c.min_qty = max(float(c.min_qty or 0), need)
                 qty = self.round_qty_up(c, need)
-                if qty > 0:
+                retry_margin = qty * px / max(1, lev)
+                if (qty > 0 and qty * px <= self.max_book_notional() * 1.02
+                        and retry_margin <= self.available * 0.95
+                        and not self.entries_blocked() and self.market_price_fresh(sym)):
+                    cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
+                    if not self._record_entry_intent(intent_key, cid):
+                        return
                     r = self.api.post(
                         "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
+                        _entry_body(qty, cid),
                     )
                     self.did_io = True
                     msg = str(r.get("msg") or "")
@@ -3189,11 +3573,10 @@ class Pulse:
                 if "order size" in low or "available amount" in low:
                     self.cooldown[sym] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
-                if r.get("error") or r.get("code") == -1:
-                    # transport failure: the order may have filled. Adopt the position if it shows up.
-                    if not hasattr(self, "unknown_entry"):
-                        self.unknown_entry = {}
-                    self.unknown_entry[f"{sym}:{side}"] = time.time()
+                # A transport failure may have reached the venue, so retain
+                # its persisted intent. A definite rejection can be cleared.
+                if r.get("cooled") or not (r.get("error") or r.get("code") == -1):
+                    self._clear_entry_intent(intent_key)
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     return
@@ -3203,13 +3586,24 @@ class Pulse:
                 return
         data = (r.get("data") or {}).get("order") or r.get("data") or {}
         data = self.confirmed_order(data, sym, cid)
+        echoed = str(data.get("clientOrderID") or data.get("clientOrderId") or "")
+        fill_side = str(data.get("side") or "").upper()
+        fill_position_side = str(data.get("positionSide") or "").upper()
+        if (str(data.get("symbol") or sym) != sym or (echoed and echoed.lower() != cid.lower())
+                or (fill_side and fill_side != order_side) or (fill_position_side and fill_position_side not in (side, "BOTH"))):
+            self.last_error = "entry response identity mismatch; awaiting reconciliation"
+            return
         self.last_error = ""
+        status = str(data.get("status") or data.get("orderStatus") or "").upper()
+        if status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED") and executed_qty(data) == 0:
+            self._clear_entry_intent(intent_key)
+            return
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
         filled = filled_qty(data, qty)
-        if data.get("fillUnconfirmed") or not math.isfinite(avg) or avg <= 0 or not math.isfinite(filled) or filled <= 0:
+        if (data.get("fillUnconfirmed") or not math.isfinite(avg) or avg <= 0 or not math.isfinite(filled) or filled <= 0
+                or (getattr(self, "strict_ownership", False) and filled > qty * 1.000001)):
             self.cooldown[sym] = time.time() + 60
             self.owned_syms.add(sym)
-            self.__dict__.setdefault("unknown_entry", {})[f"{sym}:{side}"] = time.time()
             self.last_error = "entry fill unconfirmed; awaiting venue reconciliation"
             return
         attached_sl = extract_oid(data.get("stopLoss") if isinstance(data.get("stopLoss"), dict) else {"data": {"stopLoss": data.get("stopLoss")}}) if isinstance(data, dict) else ""
@@ -3281,7 +3675,9 @@ class Pulse:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
         self.open[sym] = pos
         self.owned_syms.add(sym)
-        self.save_open_book()
+        self.__dict__.setdefault("_ownership_verified", set()).add(sym)
+        if self.save_open_book():
+            self._clear_entry_intent(intent_key)
         if cid:
             self.seen_fill_cids.add(cid)
         slip = abs(avg - px) / px if px > 0 else 0.0
@@ -3324,17 +3720,35 @@ class Pulse:
             return False
         if not self.ok(r):
             return False
-        for p in (r.get("data") or []):
+        rows = r.get("data")
+        if not isinstance(rows, list):
+            return False
+        for p in rows:
+            if not isinstance(p, dict):
+                return False
             if str(p.get("symbol") or "") != pos.symbol:
                 continue
-            side = (p.get("positionSide") or "").upper() or ("LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT")
-            if side != pos.side:
-                continue
             try:
-                amt = abs(float(p.get("positionAmt") or p.get("availableAmt") or 0))
+                raw_amt = p.get("positionAmt")
+                amt = float(raw_amt if raw_amt not in (None, "") else (p.get("availableAmt") or 0))
             except Exception:
-                amt = 0.0
-            if amt > 1e-12:
+                return False
+            if not math.isfinite(amt):
+                return False
+            if abs(amt) <= 1e-12:
+                try:
+                    available_amt = float(p.get("availableAmt") or 0)
+                except (TypeError, ValueError):
+                    return False
+                if not math.isfinite(available_amt) or abs(available_amt) > 1e-12:
+                    return False
+                continue
+            side = str(p.get("positionSide") or "").upper()
+            if side not in ("LONG", "SHORT"):
+                if raw_amt in (None, ""):
+                    return False
+                side = "LONG" if amt > 0 else "SHORT"
+            if side == pos.side:
                 return False
         return True
 
@@ -3358,9 +3772,18 @@ class Pulse:
                 if str(o.get("symbol") or pos.symbol) != pos.symbol:
                     log(f"VENUE-OID mismatch {pos.symbol} {kind} oid={oid} venue symbol={o.get('symbol')}", every=60.0, key=f"oidmis:{pos.symbol}")
                     continue
+                if getattr(self, "strict_ownership", False) and not self.cid_ours(self.order_cid(o)):
+                    continue
+                order_position_side = str(o.get("positionSide") or "").upper()
+                if order_position_side and order_position_side not in (pos.side, "BOTH"):
+                    continue
                 status = str(o.get("status") or o.get("orderStatus") or "").upper()
                 if status not in ("FILLED", "FINISHED", "FILLED_FULLY"):
                     continue
+                if getattr(self, "strict_ownership", False):
+                    amount = executed_qty(o)
+                    if amount is None or not math.isfinite(amount) or abs(amount - pos.qty) > max(1e-9, pos.qty * 1e-6):
+                        continue
                 try:
                     px = float(o.get("avgPrice") or 0)
                 except Exception:
@@ -3420,14 +3843,29 @@ class Pulse:
                 rows2 = r2.get("data") if self.ok(r2) else None
                 if not isinstance(rows2, list):
                     return
-                confirmed = {(str(p.get("symbol") or ""), "LONG" if float(p.get("positionAmt") or 0) >= 0 else "SHORT")
-                             for p in rows2 if abs(float(p.get("positionAmt") or 0)) > 1e-12}
+                confirmed = set()
+                try:
+                    for row in rows2:
+                        amt = float(row.get("positionAmt") or row.get("availableAmt") or 0)
+                        if not math.isfinite(amt):
+                            return
+                        if abs(amt) <= 1e-12:
+                            continue
+                        side = str(row.get("positionSide") or "").upper()
+                        if side not in ("LONG", "SHORT"):
+                            side = "LONG" if amt > 0 else "SHORT"
+                        confirmed.add((str(row.get("symbol") or ""), side))
+                except (AttributeError, TypeError, ValueError):
+                    return
             if (pos.symbol, pos.side) in confirmed:
+                continue
+            if not self.record_external_close(pos):
                 continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(pos.symbol)
             self.open.pop(pos.symbol, None)
+            self.__dict__.setdefault("_ownership_verified", set()).discard(pos.symbol)
             self.cooldown[pos.symbol] = time.time() + 90.0
         self.save_open_book()
 
@@ -3437,6 +3875,10 @@ class Pulse:
         hit = self.venue_exit(pos)
         if not hit:
             return False
+        if getattr(self, "strict_ownership", False):
+            if pos.ownership_conflict:
+                return False
+            self.__dict__.setdefault("_ownership_verified", set()).add(pos.symbol)  # the tagged full exit proves this recovered position
         log(f"VENUE {hit[0]} {pos.symbol} {pos.side} @{hit[1]} ({why})")
         self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
         self.close_pos(pos, hit[1], hit[0], exchange=False)
@@ -3453,12 +3895,23 @@ class Pulse:
             return
         if self.close_from_venue(pos, why):
             return
+        if getattr(self, "strict_ownership", False):
+            if not self.record_external_close(pos):
+                return
+            self._exec_inc("dropped")
+            self.cancel_controls(pos.symbol)
+            self.open.pop(pos.symbol, None)
+            self.__dict__.setdefault("_ownership_verified", set()).discard(pos.symbol)
+            self.save_open_book()
+            return
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
         self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
         pos.exit_price_estimated = True
         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
+        if not self.ownership_safe(pos):
+            return
         quality_issue = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
         skip_eval = False   # verified emergency closes are real cash outcomes, including their losses
         for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", "")):
@@ -3609,6 +4062,7 @@ class Pulse:
             # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
             self.block.on_parent_close(pos.symbol, pos.side, pnl)
         self.open.pop(pos.symbol, None)
+        self.__dict__.setdefault("_ownership_verified", set()).discard(pos.symbol)
         self.save_open_book()
         try:
             with open(TRADES_PATH, "a") as f:
@@ -3684,7 +4138,7 @@ class Pulse:
                         pos.trail = prev
         own = self.sets.sets.get(pos.set_id)            # the Set's own hold (stepHoldOn / stepHoldMin), else the global time stop
         hold_bars = pos.set_hold_bars or int(getattr(own, "hold_bars", 0) or 0) or int(self.sets.hist_time_bars)
-        if age >= float(hold_bars) * 60.0:
+        if hold_bars > 0 and age >= float(hold_bars) * 60.0:
             self.close_pos(pos, px, "time")
             return
         # scratch: the replay checks it on a bar close, at least scratch_s after the entry. Live checks each completed 1m
@@ -3706,6 +4160,8 @@ class Pulse:
         now = time.time()
         self.ingest_ws_px()
         for pos in list(self.open.values()):
+            if not self.ownership_safe(pos):
+                continue
             px = self.px.get(pos.symbol) or 0
             if pos.close_pending:
                 self.settle_pending_close(pos)
@@ -3713,7 +4169,7 @@ class Pulse:
             if pos.close_filled_qty > 0 and pos.close_reason:
                 self.close_pos(pos, px or pos.entry, pos.close_reason)
                 continue
-            if px <= 0:
+            if px <= 0 or not self.market_price_fresh(pos.symbol):
                 continue
             age = now - pos.opened_at
             if age >= MAX_HOLD_S and not pos.set_id:
@@ -3830,7 +4286,9 @@ class Pulse:
                         conn = str(rec.get("conn") or rec.get("connection") or "")
                         if not (1.6e9 < t <= time.time() + 300.0) or not math.isfinite(pnl) or rec.get("ours", True) is False:
                             continue
-                        if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT) or "unverified-exit" in str(rec.get("reason") or ""):
+                        if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT) or "unverified-exit" in str(rec.get("reason") or "").lower():
+                            continue
+                        if getattr(self, "strict_ownership", False) and not self.cid_ours(cid):
                             continue
                         self._exec_note(Closed(t, str(rec.get("symbol") or ""), str(rec.get("side") or ""),
                             0, 0, 0, pnl, 0, str(rec.get("reason") or ""), 0,
@@ -3859,6 +4317,9 @@ class Pulse:
     def _exec_note(self, rec: "Closed") -> None:
         if getattr(rec, "ours", True) is not False:
             self._exec_count(rec.set_id, rec.pnl)
+            self.exec_n["netUsdt"] = float(self.exec_n.get("netUsdt", 0.0)) + float(rec.pnl)
+            if float(rec.t) >= float(getattr(self, "started", float("inf"))):
+                self._exec_inc("sessionClosed")
             self._exec_inc("blockAddFills", len(getattr(rec, "block_fills", []) or []))
             if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
                 lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
@@ -3966,6 +4427,8 @@ class Pulse:
                     entry_slippage=float(rec.get("entry_slippage") or 0), exit_slippage=float(rec.get("exit_slippage") or 0),
                 )
                 cid = c.client_id
+                if not c.ours or (getattr(self, "strict_ownership", False) and not self.cid_ours(cid)):
+                    continue
                 if cid and not self.cid_ours(cid):
                     continue
                 if "unverified-exit" in str(c.reason or "").lower():
@@ -4000,6 +4463,8 @@ class Pulse:
                     if not cutoff <= float(row.get("t") or 0) <= now or row.get("ours") is False:
                         continue
                     cid = str(row.get("client_id") or "")
+                    if getattr(self, "strict_ownership", False) and not self.cid_ours(cid):
+                        continue
                     if cid and not self.cid_ours(cid):
                         continue
                     if row.get("conn") and row["conn"] != CONN_SHORT:
@@ -4081,7 +4546,7 @@ class Pulse:
         if ov.get("scratchMinPct") is not None:
             SCRATCH_MIN = float(ov["scratchMinPct"]) / 100.0 if float(ov["scratchMinPct"]) > 0.02 else float(ov["scratchMinPct"])
         if ov.get("scanS"):
-            SCAN_S = max(0.20, min(8.0, float(ov["scanS"])))
+            SCAN_S = max(0.10, min(8.0, float(ov["scanS"])))
         if ov.get("cooldownS") is not None:
             COOLDOWN_S = float(ov["cooldownS"])
         if ov.get("staggerS"):
@@ -4091,6 +4556,13 @@ class Pulse:
         self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
                                                               self.contracts, time.time())
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", .25)))
+        self.strict_ownership = bool(ov.get("strictOwnership", False))
+        if initial and self.strict_ownership:
+            self.recon_ok = False
+            self.open = {s: p for s, p in self.open.items() if p.client_id and self.cid_ours(p.client_id)}
+        # Set and Exit parents have different add/recovery paths. An installation
+        # can keep the measured Set lane on while holding the Exit lane off.
+        self.block_exit_enabled = bool(ov.get("blockExitEnabled", True))
         ov["configuredPositionCostPct"] = configured_cost
         ov["positionCostPct"] = self.position_cost_pct
         self._fee_config_dirty = False
@@ -4116,6 +4588,10 @@ class Pulse:
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
+        try:
+            self.symbol_rotate_s = max(18.0, min(3600.0, float(ov.get("symbolRotateS", 18.0))))
+        except (TypeError, ValueError):
+            self.symbol_rotate_s = 18.0
         try:
             self.symbol_cap = max(0, int(ov.get("symbolCap") if ov.get("symbolCap") is not None else 0))
         except Exception:
@@ -4156,7 +4632,7 @@ class Pulse:
         except Exception:
             pass
         if not initial:
-            self.pool.submit(self.set_leverage)
+            self.schedule_leverage_update()
         # CTS Block defaults, overlay wins
         b_en = ov.get("blockEnabled", cts.get("variantBlockEnabled", True))
         try:
@@ -4254,8 +4730,6 @@ class Pulse:
             if mx <= 0:
                 continue
             self.lev_max[s] = mx
-            if int(self.lev_map.get(s) or 0) < mx:
-                self.lev_map[s] = mx
 
     def ensure_contracts(self) -> None:
         missing = [s for s in SYMBOLS if s not in self.contracts]
@@ -4298,6 +4772,8 @@ class Pulse:
             "staggerS": STAGGER_S,
             "controlOrders": getattr(self, "control_orders", True),
             "blockEnabled": self.block.enabled,
+            "blockExitEnabled": self.block_exit_enabled,
+            "blockAddsHeldForControls": bool(getattr(self, "strict_ownership", False) and self.control_orders),
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
             "blockProfitFactorRatio": self.block.pf_ratio,
@@ -4444,7 +4920,8 @@ class Pulse:
     def exit_lane_pf(self) -> float:
         """Net PF (after PositionCost) of the last Block-window closes of positions without a Set, or 0 with fewer than
         Block's minimum samples. The evidence Block stacks on."""
-        rows = [c for c in self.closed if not getattr(c, "set_id", "")]
+        source = self.strategy_closes() if getattr(self, "strict_ownership", False) else self.closed
+        rows = [c for c in source if not getattr(c, "set_id", "")]
         n = int(getattr(self.block, "window", 25) or 25)
         res = last_n_cost_pf(rows, n=n, cost_pct=self.position_cost_pct)
         if int(res.get("count") or 0) < int(getattr(self.block, "min_samples", 5) or 5):
@@ -4463,10 +4940,43 @@ class Pulse:
             opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
         return opens
 
+    def block_risk_qty(self, pos: Position, px: float) -> float:
+        """Maximum extra quantity under the parent-plus-add stop-loss budget."""
+        if (pos.side not in ("LONG", "SHORT") or not math.isfinite(px) or px <= 0
+                or not math.isfinite(pos.sl) or pos.sl <= 0 or not math.isfinite(pos.entry)
+                or pos.entry <= 0 or not math.isfinite(pos.qty) or pos.qty <= 0):
+            return 0.0
+        risk_pct = float(getattr(self, "block_risk_pct", 0.0))
+        if not math.isfinite(risk_pct) or risk_pct < 0:
+            return 0.0
+        if risk_pct == 0:
+            return float("inf")
+        equity = float(self.equity or 0)
+        if not math.isfinite(equity) or equity <= 0:
+            return 0.0
+        cf = cost_as_frac(self.position_cost_pct)
+        if not math.isfinite(cf) or cf < 0:
+            return 0.0
+        sign = 1 if pos.side == "LONG" else -1
+        loss_each = max(0.0, (px - pos.sl) * sign) + px * cf
+        existing_loss = max(0.0, (pos.entry - pos.sl) * sign) * pos.qty + pos.entry * pos.qty * cf
+        risk_room = max(0.0, equity * risk_pct / 100.0 - existing_loss)
+        return risk_room / loss_each if loss_each > 0 else 0.0
+
+    @staticmethod
+    def block_order_matches(pos: Position, data: Dict[str, Any], cid: str) -> bool:
+        echoed = str(data.get("clientOrderID") or data.get("clientOrderId") or "")
+        symbol = str(data.get("symbol") or pos.symbol)
+        side = str(data.get("side") or "").upper()
+        position_side = str(data.get("positionSide") or "").upper()
+        return (symbol == pos.symbol and (not echoed or echoed.lower() == cid.lower())
+                and (not side or side == ("BUY" if pos.side == "LONG" else "SELL"))
+                and (not position_side or position_side in (pos.side, "BOTH")))
+
     def maybe_block_adds(self) -> None:
         """CTS Block Live: add-on only against an existing same-side parent."""
         self.maybe_set_block_adds()
-        if self.halted or not self.block.enabled or not self.strat_block:
+        if self.halted or not self.block.enabled or not self.strat_block or not getattr(self, "block_exit_enabled", True):
             return
         if self.entries_blocked():
             return
@@ -4500,7 +5010,11 @@ class Pulse:
         for pos in list(self.open.values()):
             if emitted >= add_budget:
                 break
-            if pos.close_filled_qty > 0:
+            if not self.ownership_safe(pos):
+                continue
+            if not self.market_price_fresh(pos.symbol):
+                continue
+            if pos.close_filled_qty > 0 or pos.close_pending or pos.block_pending or pos.dca_fills:
                 continue
             if pos.set_id:
                 continue           # no add-on to a Set position: it would re-anchor the entry, stop and target the Set validated
@@ -4545,20 +5059,11 @@ class Pulse:
             # (Block's evaluation already limits one order to one partial: ratio x V0)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
             add_cap = min(self.notional_cap() * max(1.0, float(self.block.volume_ratio)), room)
-            qty = self.cap_order_qty(c, px, raw, add_cap)
-            if qty < c.min_qty or qty <= 0:
-                bumped = self.min_order_qty(c, px)
-                if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:
-                    qty = bumped
-                else:
-                    if raw * px > self.notional_cap() * 4:
-                        self.block.pause_count(lane, int(row["blockCount"]), 180)
-                        log(f"BLOCK skip oversized {pos.symbol} n={row['blockCount']} want={raw} cap={add_cap:.2f}")
-                    continue
-            if qty * px < c.min_usdt * 0.98:
-                bumped = self.min_order_qty(c, px)
-                if bumped > 0:
-                    qty = bumped
+            qty = self.round_qty(c, min(raw, add_cap / px, self.avail_notional(c) / px,
+                                        self.block_risk_qty(pos, px)))
+            # A venue minimum may never inflate the group's planned partial.
+            if qty < self.min_order_qty(c, px) or qty <= 0:
+                continue
             if (pos.qty + qty) * px > self.max_book_notional() * 1.05:
                 key = f"{pos.symbol}:{row['blockCount']}:cap"
                 now = time.time()
@@ -4591,24 +5096,6 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
-                m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-                if m2:
-                    need = float(m2.group(1))
-                    c.min_qty = max(float(c.min_qty or 0), need)
-                    qty = self.round_qty_up(c, need)
-                    r = self.api.post(
-                        "/openApi/swap/v2/trade/order",
-                        {
-                            "symbol": pos.symbol,
-                            "type": "MARKET",
-                            "side": order_side,
-                            "positionSide": pos.side,
-                            "quantity": qty,
-                            "clientOrderID": self.cid("b", pos=pos),
-                        },
-                    )
-                    self.did_io = True
-                    msg = str(r.get("msg") or "")
                 if not self.ok(r):
                     self.errors += 1
                     self.last_error = f"block {pos.symbol} n={row['blockCount']} {msg}"[:240]
@@ -4652,7 +5139,7 @@ class Pulse:
 
     def maybe_set_block_adds(self) -> None:
         """Independent, measured adds. A Set's levels, hold and base result never move."""
-        parents = [p for p in self.open.values() if p.set_id and p.base_entry > 0 and p.base_qty > 0]
+        parents = [p for p in self.open.values() if p.set_id and p.base_entry > 0 and p.base_qty > 0 and self.ownership_safe(p)]
         if not parents or not self.block.enabled or not self.strat_block:
             return
         if getattr(self, "set_block", None) is None:
@@ -4660,8 +5147,13 @@ class Pulse:
         now = time.time()
         lookback = self.sets.lookback * 60.0
         for pos in parents:
+            if not self.market_price_fresh(pos.symbol):
+                continue
             px = float(self.px.get(pos.symbol) or 0)
             self.set_block.observe(pos, px, now, self.block, self.position_cost_pct, lookback)
+        if getattr(self, "strict_ownership", False) and getattr(self, "control_orders", True):
+            # Quantity-bound SL/TP cannot yet be resized atomically after an add.
+            return
         # Evidence continues during an entry pause, inadequate margin or a failed gate.
         if (self.halted or self.entries_blocked() or self.available <= 0
                 or any(os.path.exists(p) for p in (STOP_PATH, PAUSE_PATH, STOP_ALL))
@@ -4670,6 +5162,8 @@ class Pulse:
                 or self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > now):
             return
         for pos in parents:
+            if not self.market_price_fresh(pos.symbol):
+                continue
             if pos.block_pending or pos.dca_fills or pos.close_filled_qty > 0 or pos.close_pending:
                 continue
             px = float(self.px.get(pos.symbol) or 0)
@@ -4691,15 +5185,9 @@ class Pulse:
             if row is None:
                 continue
             room = max(0.0, min(self.max_book_notional() - pos.qty * px, self.avail_notional(c)))
-            risk_qty = float("inf")
-            if self.block_risk_pct > 0:
-                # Total parent loss at its existing stop, fees included. Adds never
-                # move that stop, and a minimum lot cannot override this budget.
-                sign = 1 if pos.side == "LONG" else -1
-                loss_each = max(0.0, (px - pos.sl) * sign) + px * cf
-                existing_loss = max(0.0, (pos.entry - pos.sl) * sign) * pos.qty + pos.entry * pos.qty * cf
-                risk_room = max(0.0, self.equity * self.block_risk_pct / 100 - existing_loss)
-                risk_qty = risk_room / loss_each if loss_each > 0 else 0.0
+            # Total parent loss at its existing stop, fees included. Adds never
+            # move that stop, and a minimum lot cannot override this budget.
+            risk_qty = self.block_risk_qty(pos, px)
             qty = self.round_qty(c, min(row["qty"], room / px, risk_qty))
             # No minimum-lot bump beyond the independent group's planned volume.
             if qty < self.min_order_qty(c, px) or qty <= 0:
@@ -4708,8 +5196,9 @@ class Pulse:
             if margin > self.available * 0.38:
                 continue
             cid = self.cid("b", pos=pos)
-            pos.block_pending = {"group": row["group"], "qty": qty, "client_id": cid, "t": now}
-            if not self.save_open_book():  # never send without a persisted intent
+            pos.block_pending = {"group": row["group"], "qty": qty, "client_id": cid, "t": now,
+                                 "base_qty": pos.qty, "base_entry": pos.entry}
+            if not self.save_open_book(durable=True):  # never send without a persisted intent
                 pos.block_pending = {}
                 return
             try:
@@ -4728,10 +5217,18 @@ class Pulse:
                 return
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
             data = self.confirmed_order(data, pos.symbol, cid)
+            if not self.block_order_matches(pos, data, cid):
+                return                       # never attribute another order's fill
             avg = float(data.get("avgPrice") or data.get("price") or px)
             filled = filled_qty(data, qty)
+            if not data.get("fillUnconfirmed") and filled == 0:
+                pos.block_pending = {}       # terminal no-fill, safe to reconsider
+                self.save_open_book()
+                return
             if data.get("fillUnconfirmed") or not math.isfinite(avg) or not math.isfinite(filled) or avg <= 0 or filled <= 0:
                 return
+            if filled > qty * 1.000001:
+                return                       # unexpected fill; reconcile manually
             fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
             pos.block_fills.append({"group": row["group"], "qty": filled, "price": avg, "client_id": cid, "t": now,
                                     "fee_usdt": fee if source != "configured-estimate" else None})
@@ -4740,9 +5237,11 @@ class Pulse:
             pos.entry = (pos.qty * pos.entry + filled * avg) / (pos.qty + filled)
             pos.qty += filled
             pos.notional = pos.qty * pos.entry
+            intent = pos.block_pending
             pos.block_pending = {}
             self.available = max(0.0, self.available - margin)
-            self.save_open_book()
+            if not self.save_open_book(durable=True):
+                pos.block_pending = intent   # keep the order blocked until reconciliation can save it
             # Close-position controls already cover the aggregate. Reconciliation
             # updates quantity-based controls without re-anchoring the Set's levels.
             self.ensure_controls(pos)
@@ -4782,8 +5281,12 @@ class Pulse:
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
         for pos in list(self.open.values()):
+            if not self.ownership_safe(pos):
+                continue
             if emitted >= add_budget:
                 break
+            if not self.market_price_fresh(pos.symbol):
+                continue
             if not self.dca_eligible(pos):
                 continue           # a Set position is added to only when dcaOnSets / dcaOnAxis say so (both off by default)
             if time.time() < self.dca_fail_cd.get(pos.symbol, 0):
@@ -4897,7 +5400,7 @@ class Pulse:
             emitted += 1
             log(f"DCA ADD {pos.symbol} {pos.side} n={row['n']} +{filled} avg={pos.entry:.6f} adv={row['adversePct']*100:.2f}%")
 
-    def _budget(self):
+    def _budget(self, count_cycle: bool = False):
         try:
             return self.load.observe(
                 n_sym=len(SYMBOLS),
@@ -4906,7 +5409,7 @@ class Pulse:
                 warm_ms=float(self.warm_ms or 0),
                 hist_busy=bool(self.hist_busy),
                 kline_ban=time.time() < float(getattr(self, "kline_ban", 0) or 0),
-                cycle_overrun=bool(getattr(self, "cycle_overrun", False)),
+                cycle_overrun=bool(getattr(self, "cycle_overrun", False)) if count_cycle else None,
             )
         except Exception:
             from load_engine import Budget
@@ -4920,6 +5423,7 @@ class Pulse:
         n = 0
         n += trim_map(self.px, keep)
         n += trim_map(self.last_px, keep)
+        n += trim_map(self.price_ts, keep)
         n += trim_map(self.chg, keep)
         n += trim_map(self.vol1h, keep)
         n += trim_map(self.vol1h_ts, keep)
@@ -5019,6 +5523,8 @@ class Pulse:
             if getattr(c, "ours", True) is False:
                 continue
             cid = getattr(c, "client_id", "") or ""
+            if getattr(self, "strict_ownership", False) and not self.cid_ours(cid):
+                continue
             if cid and not self.cid_ours(cid):
                 continue
             conn = getattr(c, "conn", "") or ""
@@ -5222,16 +5728,140 @@ class Pulse:
         for pos in list(self.open.values()):
             self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why)
 
-    def adopt_exchange_positions(self) -> None:
+    def _recon_signature(self) -> Tuple[Any, ...]:
+        positions = tuple(sorted((s, id(p), p.side, p.qty, p.opened_at, bool(p.close_pending), p.close_filled_qty,
+                                  str((p.block_pending or {}).get("client_id") or ""))
+                                 for s, p in self.open.items()))
+        unknown = tuple(sorted((str(k), float(v)) for k, v in (getattr(self, "unknown_entry", {}) or {}).items()))
+        return positions, unknown
+
+    def order_guard_safe(self, symbol: str = "") -> bool:
+        """A recent, validated order snapshot is required before opening risk or changing leverage."""
+        if not getattr(self, "strict_ownership", False):
+            return True
+        stamp, foreign = getattr(self, "_order_guard_snapshot", (0.0, frozenset()))
+        age = time.monotonic() - stamp
+        return stamp > 0 and 0 <= age <= 15.0 and (not symbol or symbol not in foreign)
+
+    def schedule_order_guard(self) -> None:
+        if not getattr(self, "strict_ownership", False) or getattr(self, "_order_guard_future", None) is not None:
+            return
+        now = time.monotonic()
+        if now < self._order_guard_next:
+            return
+        self._order_guard_started = now
+        self._order_guard_next = now + 5.0
+        self._order_guard_future = self._order_guard_pool.submit(self.api.get, "/openApi/swap/v2/trade/openOrders")
+
+    def poll_order_guard(self) -> bool:
+        future = getattr(self, "_order_guard_future", None)
+        if future is None or not future.done():
+            return False
+        self._order_guard_future = None
+        started = self._order_guard_started
+        try:
+            reply = future.result()
+            if time.monotonic() - started > 12.0 or not isinstance(reply, dict) or not self.ok(reply):
+                raise ValueError("failed or stale order snapshot")
+            data = reply.get("data")
+            rows = data.get("orders") if isinstance(data, dict) else data
+            if not isinstance(rows, list) or any(not isinstance(row, dict) or not row.get("symbol") for row in rows):
+                raise ValueError("malformed order snapshot")
+            # Do not accept an unexpectedly empty snapshot while managing open
+            # positions; protective-order propagation can lag on this venue.
+            if not rows and self.open:
+                raise ValueError("empty order snapshot with open positions")
+            foreign = frozenset(str(row["symbol"]) for row in rows if not self.order_is_ours(row))
+        except Exception:
+            self._order_guard_snapshot = (0.0, frozenset())
+            return False
+        self._order_guard_snapshot = (started, foreign)
+        return True
+
+    def schedule_position_read(self) -> None:
+        """Fetch one positions snapshot off the cycle; never overlap this read."""
+        if getattr(self, "_recon_future", None) is not None:
+            return
+        self._recon_started = time.monotonic()
+        self._recon_book = self._recon_signature()
+        self._recon_future = self._recon_pool.submit(self.api.get, "/openApi/swap/v2/user/positions")
+
+    def poll_position_read(self) -> bool:
+        future = getattr(self, "_recon_future", None)
+        if future is None or not future.done():
+            return False
+        self._recon_future = None
+        if time.monotonic() - self._recon_started > 12.0 or self._recon_signature() != self._recon_book:
+            self.recon_ok = False
+            self.recon_detail = "position snapshot stale or book changed; retrying"
+            return False                   # never apply a stale read to a changed local book
+        try:
+            reply = future.result()
+        except Exception:
+            self.recon_ok = False
+            self.recon_detail = "position snapshot failed"
+            return False
+        self.adopt_exchange_positions(reply)
+        return True
+
+    def settle_set_block_pending(self, pos: Position, venue_qty: float) -> bool:
+        """Attribute a recovered add only to its own confirmed order and matching position."""
+        intent = pos.block_pending or {}
+        try:
+            cid = str(intent["client_id"])
+            base_qty = float(intent["base_qty"])
+            requested = float(intent["qty"])
+            group = int(intent["group"])
+            stamp = float(intent["t"])
+            if not pos.set_id or not self.cid_ours(cid) or group < 1:
+                return False
+            if not all(math.isfinite(x) for x in (base_qty, requested, stamp, venue_qty)) or base_qty <= 0 or requested <= 0:
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False                 # older or damaged intent: keep blocked
+        data = self.confirmed_order({}, pos.symbol, cid)
+        if data.get("fillUnconfirmed"):
+            return False
+        if not self.block_order_matches(pos, data, cid):
+            return False
+        filled = executed_qty(data)
+        if filled is None or not math.isfinite(filled) or filled < 0 or filled > requested * 1.000001:
+            return False
+        if abs(venue_qty - (base_qty + filled)) > max(1e-9, venue_qty * 1e-6):
+            return False                 # exchange snapshot and order do not agree
+        if filled > 0:
+            try:
+                avg = float(data.get("avgPrice") or 0)
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(avg) or avg <= 0:
+                return False
+            existing = [x for x in pos.block_fills if str(x.get("client_id") or "").lower() == cid.lower()]
+            if existing:
+                if len(existing) != 1 or abs(float(existing[0].get("qty") or 0) - filled) > max(1e-9, filled * 1e-6):
+                    return False
+            else:
+                fee, source = self.fill_cost(data, filled, avg, pos.symbol, pos)
+                pos.block_fills.append({"group": group, "qty": filled, "price": avg, "client_id": cid, "t": stamp,
+                                        "fee_usdt": fee if source != "configured-estimate" else None})
+                if pos.entry_fee_usdt is not None:
+                    pos.entry_fee_usdt += fee
+                    pos.fee_source = source
+        pos.block_pending = {}
+        return True
+
+    def adopt_exchange_positions(self, reply: Optional[Dict[str, Any]] = None) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
         self.did_io = True
-        r = self.api.get("/openApi/swap/v2/user/positions")
+        r = self.api.get("/openApi/swap/v2/user/positions") if reply is None else reply
         if not self.ok(r):
             self.recon_ok = False
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
-        rows = r.get("data") or []
+        rows = r.get("data")
         if not isinstance(rows, list):
+            self.recon_ok = False
+            self.recon_detail = "invalid positions snapshot"
             return
         live_n = 0
         for p in rows:
@@ -5241,6 +5871,8 @@ class Pulse:
             except Exception:
                 pass
         if live_n == 0 and self.open:
+            self.recon_ok = False
+            self.recon_detail = "empty position snapshot awaiting verification"
             # an empty list can be lag or a rate limit: only the third empty pass in a row, and only a position the
             # direction-aware check confirms flat, leaves the book
             self._adopt_empty_n = int(getattr(self, "_adopt_empty_n", 0) or 0) + 1
@@ -5250,17 +5882,23 @@ class Pulse:
                     if pos and pos.close_pending:
                         self.settle_pending_close(pos)
                         continue
-                    if not pos or time.time() - float(pos.opened_at or 0) < 180.0 or not self._exchange_flat(pos):
+                    if not pos or (not getattr(self, "strict_ownership", False) and time.time() - float(pos.opened_at or 0) < 180.0) or not self._exchange_flat(pos):
                         continue
                     if self.close_from_venue(pos, "stale"):
                         self.cooldown[sym] = time.time() + 90.0
+                        continue
+                    if not self.record_external_close(pos):
                         continue
                     log(f"DROP stale local {sym} (exchange flat)")
                     self._exec_inc("dropped")       # left the book with no close record: counted, never lost
                     self.cancel_controls(sym)
                     self.open.pop(sym, None)
+                    self.__dict__.setdefault("_ownership_verified", set()).discard(sym)
                     self.cooldown[sym] = time.time() + 90.0
                 self.save_open_book()
+            if getattr(self, "strict_ownership", False) and self._adopt_empty_n >= 3:
+                self.recon_ok = True
+                self.recon_detail = "flat snapshot confirmed; unresolved symbols remain isolated" if self.open else "flat snapshot confirmed"
             log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
             return
         self._adopt_empty_n = 0
@@ -5276,7 +5914,9 @@ class Pulse:
             sym = p.get("symbol")
             if not sym:
                 continue
-            side = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
+            side = str(p.get("positionSide") or "").upper()
+            if side not in ("LONG", "SHORT"):
+                side = "LONG" if amt > 0 else "SHORT"
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
             qty = abs(amt)
             ours = next((pos for pos in self.open.values() if pos.symbol == sym and pos.side == side), None)
@@ -5291,13 +5931,17 @@ class Pulse:
                 tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
             except Exception:
                 tagged = []
-            owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
-            unknown = time.time() - float((getattr(self, "unknown_entry", {}) or {}).get(f"{sym}:{side}", 0) or 0) < 180.0
-            if not tagged and not owned and not unknown:
+            strict = bool(getattr(self, "strict_ownership", False))
+            owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or (not strict and (ours.sl_oid or ours.tp_oid))))
+            intent_key = f"{sym}:{side}"
+            intent_cid = (getattr(self, "entry_intent_ids", {}) or {}).get(intent_key, "")
+            intent = self._verified_entry_intent(intent_key, sym, side, qty) if (strict or not tagged) and not owned and intent_cid else None
+            unknown = intent is not None
+            if not owned and not unknown and (strict or not tagged):
                 foreign.add(f"{sym}:{side}")
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
-            if live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
+            if not strict and live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
                 self.ensure_max_leverage(sym, force=True)
             try:
                 liq = float(p.get("liquidationPrice") or p.get("liqPrice") or p.get("avgLiquidationPrice") or 0)
@@ -5306,6 +5950,8 @@ class Pulse:
             pid = str(p.get("positionId") or p.get("positionID") or "")
             if ours is not None:
                 if ours.close_pending:
+                    if strict and not ours.ownership_conflict and abs(qty - ours.qty) <= max(1e-9, qty * 1e-6):
+                        self.__dict__.setdefault("_ownership_verified", set()).add(sym)
                     self.settle_pending_close(ours)
                     continue
                 if liq > 0:
@@ -5315,23 +5961,25 @@ class Pulse:
                 if px > 0 and ours.close_filled_qty == 0:
                     # A position snapshot has no close fill price/fee attribution.
                     # It must not undo a confirmed partial or count it a second time.
-                    if ours.block_pending and qty > ours.qty + 1e-12:
-                        add_qty = qty - ours.qty
-                        add_price = (qty * px - ours.qty * ours.entry) / add_qty
-                        intent = ours.block_pending
-                        if add_price > 0 and add_qty <= float(intent.get("qty") or 0) * 1.001:
-                            fee, source = self.fill_cost({}, add_qty, add_price, sym, ours)
-                            ours.block_fills.append({"group": int(intent["group"]), "qty": add_qty, "price": add_price,
-                                                    "client_id": intent["client_id"], "t": intent["t"],
-                                                    "fee_usdt": fee if source != "configured-estimate" else None})
-                            if ours.entry_fee_usdt is not None:
-                                ours.entry_fee_usdt += fee
-                                ours.fee_source = "exchange-rate-estimate"
-                            ours.block_pending = {}
+                    old_pending = dict(ours.block_pending or {})
+                    settled = bool(old_pending) and self.settle_set_block_pending(ours, qty)
+                    if strict and not settled and (old_pending or abs(qty - ours.qty) > max(1e-9, qty * 1e-6)):
+                        self.__dict__.setdefault("_ownership_verified", set()).discard(sym)
+                        if not old_pending:
+                            ours.ownership_conflict = True
+                        foreign.add(f"{sym}:{side}")
+                        continue
+                    if strict and ours.ownership_conflict:
+                        self.__dict__.setdefault("_ownership_verified", set()).discard(sym)
+                        foreign.add(f"{sym}:{side}")
+                        continue
                     ours.qty = qty
                     ours.entry = px
                     ours.notional = qty * px
                     ours.ours = True
+                    self.__dict__.setdefault("_ownership_verified", set()).add(sym)
+                    if settled and not self.save_open_book(durable=True):
+                        ours.block_pending = old_pending
                 if not getattr(ours, "set_id", "") and tagged:
                     try:
                         trk = self.parse_track(self.order_cid(tagged[0])) or {}
@@ -5346,7 +5994,7 @@ class Pulse:
                 continue
             if px <= 0:
                 continue
-            track = self.parse_track(self.order_cid(tagged[0])) if tagged else {}
+            track = self.parse_track(self.order_cid(tagged[0]) if tagged else intent_cid) if (tagged or unknown) else {}
             track = track or {}
             sl_ratio = float(track.get("sl") or self.variants.current_sl())
             trail_key, trail_arm, trail_give = self.variants.current_trail()
@@ -5374,11 +6022,22 @@ class Pulse:
                     trail_key, trail_arm, trail_give = "", 0.0, 0.0
             sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
             tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
-            cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
+            cid = (self.order_cid(tagged[0]) if tagged else intent_cid) or self.cid("o")
             set_id = str(track.get("set_id") or "")
             pack = str(track.get("pack") or ("indications" if set_id.startswith("ind") else "general"))
+            opened_at = time.time()
+            if intent:
+                try:
+                    fill_time = float(intent.get("updateTime") or intent.get("time") or 0)
+                    if fill_time > 1e12:
+                        fill_time /= 1000.0
+                    intent_at = float(self.unknown_entry.get(intent_key) or 0)
+                    if math.isfinite(fill_time) and intent_at - 30 <= fill_time <= opened_at + 5:
+                        opened_at = fill_time
+                except (TypeError, ValueError):
+                    pass
             self.open[sym] = Position(
-                symbol=sym, side=side, qty=qty, entry=px, opened_at=time.time(),
+                symbol=sym, side=side, qty=qty, entry=px, opened_at=opened_at,
                 sl=sl, tp=tp, peak=px, notional=qty * px, reason=f"recover {src} set={set_id or 'def'}", conf=0.35,
                 sl_ratio=sl_ratio, trail_key=trail_key,
                 trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
@@ -5389,6 +6048,8 @@ class Pulse:
                 liq=liq, position_id=pid, lane=str(track.get("lane") or ("pos" if set_id else "")),
             )
             rec_pos = self.open[sym]
+            if unknown:
+                self.__dict__.setdefault("_ownership_verified", set()).add(sym)
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
             log(f"RECOVER {sym} {side} qty={qty} cid={cid}", every=20.0, key=f"rec:{sym}")
             if getattr(self, "control_orders", True):
@@ -5396,6 +6057,8 @@ class Pulse:
                 self.place_ctrl_pair(rec_pos)
                 if self.missing_controls(rec_pos):
                     self.ensure_controls(rec_pos)
+            if unknown and self.save_open_book():
+                self._clear_entry_intent(intent_key)
         for sym in list(self.open):
             pos = self.open.get(sym)
             if not pos or pos.symbol in live:
@@ -5404,29 +6067,35 @@ class Pulse:
                 self.settle_pending_close(pos)
                 continue
             age = time.time() - float(pos.opened_at or 0)
-            if age < 180.0:
+            if age < 180.0 and not getattr(self, "strict_ownership", False):
                 continue
-            if pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""):
+            if getattr(self, "strict_ownership", False) or pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""):
                 if not self._exchange_flat(pos):
                     continue
             if self.close_from_venue(pos, "stale"):
                 self.cooldown[sym] = time.time() + 90.0
                 continue
+            if not self.record_external_close(pos):
+                continue
             log(f"DROP stale local {sym} age={age:.0f}s")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(sym)
             self.open.pop(sym, None)
+            self.__dict__.setdefault("_ownership_verified", set()).discard(sym)
             self.cooldown[sym] = time.time() + 90.0
         self.ignored_foreign = len(foreign)
+        self.foreign_symbols = {x.split(":", 1)[0] for x in foreign}
         ours_live = {k.split(":")[0] for k in live if k not in {x.split(":")[0] for x in foreign}}
         book_syms = set(self.open)
         issues = []
         for pos in self.open.values():
             if pos.symbol not in live:
                 issues.append(f"book-only {pos.symbol}")
+            if getattr(self, "strict_ownership", False) and not self.ownership_safe(pos):
+                issues.append(f"ownership unresolved {pos.symbol}")
         if abs(len(self.open) - len(book_syms & live)) > 0 and book_syms - live:
             issues.append(f"count book={len(self.open)} live_ours={len(live - {x.split(':')[0] for x in foreign})}")
-        self.recon_ok = not issues
+        self.recon_ok = not issues or bool(getattr(self, "strict_ownership", False))
         self.recon_detail = (
             f"ok ours={len(self.open)} foreign={len(foreign)} live={len(live)}"
             if not issues
@@ -5434,22 +6103,55 @@ class Pulse:
         )[:160]
         self.save_open_book()
 
-    def sync_own_fills(self) -> None:
-        """Pull FILLED orders with our tracking id. Ignore everything else. Feed Set live tape."""
-        self.did_io = True
+    def _fetch_own_fills(self) -> Optional[List[Dict[str, Any]]]:
+        """Read the bounded order history without mutating the position book."""
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
         data = r.get("data") or {}
         orders = data.get("orders") if isinstance(data, dict) else data
-        if not isinstance(orders, list) or not orders:
+        if not self.ok(r) or not isinstance(orders, list) or not orders:
             r = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
+            if not self.ok(r):
+                return None
             data = r.get("data") or {}
-            orders = data.get("fill_orders") or data.get("fills") or data.get("orders") or data
-            if isinstance(data, dict) and isinstance(data.get("list"), list):
-                orders = data["list"]
+            if isinstance(data, dict):
+                orders = data.get("list") or data.get("fill_orders") or data.get("fills") or data.get("orders") or []
+            else:
+                orders = data
+        return orders if isinstance(orders, list) else None
+
+    def schedule_fill_read(self) -> None:
+        if getattr(self, "_fill_future", None) is not None:
+            return
+        self._fill_started = time.monotonic()
+        self._fill_future = self._fill_pool.submit(self._fetch_own_fills)
+
+    def poll_fill_read(self) -> bool:
+        future = getattr(self, "_fill_future", None)
+        if future is None or not future.done():
+            return False
+        self._fill_future = None
+        if time.monotonic() - self._fill_started > 12.0:
+            return False
+        try:
+            orders = future.result()
+        except Exception:
+            return False
+        if orders is None:
+            return False
+        self.sync_own_fills(orders)
+        return True
+
+    def sync_own_fills(self, orders: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Apply FILLED orders with our tracking id to the current position book."""
+        self.did_io = True
+        if orders is None:
+            orders = self._fetch_own_fills()
         if not isinstance(orders, list):
             return
         n = 0
-        for o in orders:
+        for o in orders[:50]:
+            if not isinstance(o, dict):
+                continue
             cid = self.order_cid(o)
             if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
                 continue
@@ -5457,11 +6159,13 @@ class Pulse:
                 self.seen_fill_cids.add(cid)
                 continue
             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
+            if getattr(self, "strict_ownership", False) and not status:
+                continue
             if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
                 continue
             track = self.parse_track(cid) or {}
             kind = track.get("kind") or ""
-            if kind not in ("c", "s", "t"):
+            if kind not in ("c", "s", "t", "u", "v"):
                 if kind == "o":
                     self.seen_fill_cids.add(cid)
                     if o.get("symbol"):
@@ -5475,15 +6179,25 @@ class Pulse:
             if not math.isfinite(qty) or not math.isfinite(px) or qty <= 0 or px <= 0:
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
-            held = next((p for p in self.open.values() if oid and kind in ("s", "t") and str(o.get("symbol") or "") == p.symbol
+            held = next((p for p in self.open.values() if oid and kind in ("s", "t", "u", "v") and str(o.get("symbol") or "") == p.symbol
                          and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
             if held is not None:
+                if getattr(self, "strict_ownership", False) and not self.ownership_safe(held):
+                    continue             # retry after the position is reconciled
+                side = str(o.get("positionSide") or "").upper()
+                if getattr(self, "strict_ownership", False) and (executed_qty(o) is None or side not in ("", held.side, "BOTH") or
+                        abs(qty - held.qty) > max(1e-9, held.qty * 1e-6)):
+                    held.ownership_conflict = True
+                    self.__dict__.setdefault("_ownership_verified", set()).discard(held.symbol)
+                    self.save_open_book()
+                    self._exec_inc("skipped")
+                    continue            # partial or mismatched control fill: no fabricated full close
                 # the venue closed a position we still hold: record it as that lane's close (once; close_pos marks the
                 # stop and TP ids as seen and feeds the Set itself)
                 self.seen_fill_cids.add(cid)
                 self.cancel_controls(held.symbol)
                 self.record_exit_fee(held, o, min(qty, held.qty), px)
-                self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
+                self.close_pos(held, px, "sl" if kind in ("s", "u") else "tp", exchange=False)
                 n += 1
                 continue
             # An orphan fill has no verified entry price or fee basis. Scoring an exchange-reported
@@ -5494,17 +6208,27 @@ class Pulse:
         if n:
             log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)
 
+    def schedule_leverage_update(self) -> bool:
+        """Keep at most one background leverage sweep in flight."""
+        with self._lev_guard:
+            future = self._lev_future
+            if future is not None and not future.done():
+                return False
+            self._lev_future = self.pool.submit(self.set_leverage)
+            return True
+
     def set_leverage(self) -> None:
         """Actively keep every desk symbol at its target leverage (exchange max, or the pulse leverage when max is off)."""
         self._load_lev_file()
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
             return
-        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
+        symbols = [s for s in SYMBOLS if self.leverage_symbol_safe(s)]
+        need = [s for s in symbols if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
         if not need:
             now = time.time()
-            if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
+            if now - getattr(self, "_lev_rot_ts", 0) > 90 and symbols:
                 self._lev_rot_ts = now
-                rot = SYMBOLS[int(now / 90) % len(SYMBOLS)]
+                rot = symbols[int(now / 90) % len(symbols)]
                 self.ensure_max_leverage(rot, force=True)
             return
         for s in need[:12]:
@@ -5639,11 +6363,13 @@ class Pulse:
         self.record_test("uni-sort-default", coerce_symbol_sort(getattr(self, "symbol_sort", "vol1h")) == "vol1h" or coerce_symbol_sort(self.overlay.get("symbolSort")) in SYMBOL_SORTS, f"sort={self.symbol_sort}")
 
     def stats(self) -> Dict[str, Any]:
-        realized = sum(c.pnl for c in self.closed)
-        wr = (self.wins / (self.wins + self.losses) * 100) if (self.wins + self.losses) else 0
+        realized = float(getattr(self, "exec_n", {}).get("netUsdt", sum(c.pnl for c in self.strategy_closes())))
+        wins = int(getattr(self, "exec_n", {}).get("wins", self.wins))
+        losses = int(getattr(self, "exec_n", {}).get("losses", self.losses))
+        wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
         dd = self.dd_now() * 100.0
         age = time.time() - self.started
-        per_min = (self.wins + self.losses) / (age / 60) if age > 1 else 0
+        per_min = int(getattr(self, "exec_n", {}).get("sessionClosed", 0)) / (age / 60) if age > 1 else 0
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
         pc["minPf"] = self.coord.min_pf
@@ -5669,13 +6395,19 @@ class Pulse:
             "usedMargin": round(self.used, 4),
             "unrealized": round(self.upnl, 4),
             "realizedPnl": round(realized, 4),
+            "realizedPnlScope": "verified system closes for this connection",
             "sessionPnl": round(self.equity - self.start_eq, 4) if self.start_eq else 0,
+            "sessionPnlScope": "account equity change; may include other activity",
             "pnlPct": round((self.equity - self.start_eq) / self.start_eq * 100, 3) if self.start_eq else 0,
             "drawdownPct": round(max(0, dd), 3),
-            "wins": self.wins,
-            "losses": self.losses,
+            "wins": wins,
+            "losses": losses,
             "winRate": round(wr, 1),
             "openCount": len(self.open),
+            "pendingEntryCount": len(getattr(self, "unknown_entry", {}) or {}),
+            "entryIntentStoreError": bool(getattr(self, "intent_state_bad", False)),
+            "externalCloseQuarantineCount": len(getattr(self, "external_closes", {}) or {}),
+            "externalCloseStoreError": bool(getattr(self, "external_close_state_bad", False)),
             "maxOpen": MAX_OPEN,
             "symbols": SYMBOLS,
             "regime": self.regime,
@@ -5730,6 +6462,8 @@ class Pulse:
                     "symbol": p.symbol,
                     "side": p.side,
                     "qty": p.qty,
+                    "ownershipConflict": bool(p.ownership_conflict),
+                    "ownershipVerified": bool(self.ownership_safe(p)),
                     "entry": p.entry,
                     "px": self.px.get(p.symbol),
                     "uPnlPct": round(((self.px.get(p.symbol, p.entry) - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100, 3),
@@ -5769,6 +6503,7 @@ class Pulse:
             "symbolCount": len(SYMBOLS),
             "symbolMax": MAX_SYMBOLS,
             "scanMs": round(self.last_scan_ms, 1),
+            "cycleTotalMs": round(float(getattr(self, "last_cycle_ms", 0.0) or 0.0), 1),
             "rssMb": round(rss_mb(), 1),
             "klinesReady": sum(1 for s in SYMBOLS if s in self.klines),
             "klinesTf": {tf: sum(1 for s in SYMBOLS if s in self.klines_tf.get(tf, {})) for tf in TIMEFRAMES},
@@ -5897,7 +6632,10 @@ class Pulse:
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
             },
-            "recon": {"ok": self.recon_ok, "detail": self.recon_detail},
+            "recon": {"ok": self.recon_ok, "detail": self.recon_detail,
+                      "orderSnapshotFresh": self.order_guard_safe() if getattr(self, "strict_ownership", False) else None,
+                      "orderSnapshotRequired": bool(getattr(self, "strict_ownership", False)),
+                      "foreignOrderSymbols": len(getattr(self, "_order_guard_snapshot", (0.0, frozenset()))[1])},
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
             "symbols": len(SYMBOLS),
             "scan": {
@@ -6310,8 +7048,6 @@ class Pulse:
             t0 = time.time()
             try:
                 self.refresh_fees()
-                if time.time() - self.last_bal > BALANCE_EVERY:
-                    self.refresh_balance()
                 self.refresh_klines()
                 self.refresh_vol1h()
                 self.process_indications()
@@ -6325,6 +7061,23 @@ class Pulse:
             remain = float(getattr(self.load.last_budget, "warm_s", 0.32) or 0.32) - (time.time() - t0)
             if remain > 0:
                 time.sleep(remain)
+
+    def _balance_tick(self) -> None:
+        now = time.time()
+        if now < self._balance_next_at or now - self.last_bal <= BALANCE_EVERY:
+            return
+        self._balance_next_at = now + BALANCE_EVERY
+        try:
+            self.refresh_balance()
+        except Exception:
+            self.available = 0.0
+            self.errors += 1
+            self.last_error = "balance refresh failed"
+
+    def _balance_loop(self) -> None:
+        while not self._balance_stop:
+            self._balance_tick()
+            time.sleep(0.25)
 
     def _ctrl_watch_loop(self) -> None:
         """Event-based control coordination: any create/delete/touch of the
@@ -6351,7 +7104,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "stopped"
-            self.refresh_tickers()
+            self.refresh_tickers(background=True)
             self.seed_px_bars()
             self.priority_controls()
             self.manage()   # open positions keep their local SL, TP, trail and time exits while stopped
@@ -6364,7 +7117,7 @@ class Pulse:
             if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
                 self._pre_pause_halt = self.halt_reason
             self.halt_reason = "paused"
-            self.refresh_tickers()
+            self.refresh_tickers(background=True)
             self.seed_px_bars()
             self.priority_controls()
             self.manage()
@@ -6394,19 +7147,23 @@ class Pulse:
                 self.halt_reason = None
         self.cycle += 1
         self.did_io = False
-        self._budget()
-        self.refresh_tickers()
+        self._budget(count_cycle=True)
+        self.poll_order_guard()
+        self.schedule_order_guard()
+        self.refresh_tickers(background=True)
         self.seed_px_bars()
         unprotected = self.priority_controls()
-        if self.cycle % 8 == 0:
-            self.maybe_reload_config()
-        if self.cycle % 25 == 0:
-            self.adopt_exchange_positions()
+        if self.poll_position_read():
             unprotected = self.priority_controls()
-        if self.cycle % 150 == 0:
-            self.sync_own_fills()
-        if self.cycle % 220 == 0:
-            self.pool.submit(self.set_leverage)
+        if self.cycle % cycle_stride(1.6, SCAN_S) == 0:
+            self.maybe_reload_config()
+        if self.cycle % cycle_stride(5.0, SCAN_S) == 0:
+            self.schedule_position_read()
+        self.poll_fill_read()
+        if self.cycle % cycle_stride(30.0, SCAN_S) == 0:
+            self.schedule_fill_read()
+        if self.cycle % cycle_stride(44.0, SCAN_S) == 0:
+            self.schedule_leverage_update()
         self.manage()
         if unprotected:
             unprotected = self.priority_controls()
@@ -6417,9 +7174,9 @@ class Pulse:
                 self.maybe_dca_adds()
             else:
                 self.maybe_entries()
-        if self.cycle % QA_EVERY == 0:
+        if self.cycle % cycle_stride(1.0, SCAN_S) == 0:
             self.qa_tick()
-        if self.cycle % 12 == 0:
+        if self.cycle % cycle_stride(2.4, SCAN_S) == 0:
             self.trim_caches(force=self.load.last_budget.level in ("overload", "critical"))
 
     def run(self) -> None:
@@ -6459,10 +7216,12 @@ class Pulse:
         sd_notify("WATCHDOG=1")
         self.run_self_tests()
         sd_notify("WATCHDOG=1")
-        self.pool.submit(self.set_leverage)
+        self.schedule_leverage_update()
         self.write_stats()
         warm = threading.Thread(target=self._warm_loop, name="warm-feed", daemon=True)
         warm.start()
+        balance = threading.Thread(target=self._balance_loop, name="balance-feed", daemon=True)
+        balance.start()
         hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
         hist.start()
         ctrl = threading.Thread(target=self._ctrl_watch_loop, name="ctrl-watch", daemon=True)
@@ -6487,7 +7246,7 @@ class Pulse:
                     self.api.err.write("loop", msg=self.last_error[:300])
             dt = time.perf_counter() - t0
             self.last_scan_ms = dt * 1000.0
-            self.last_scan_io = bool(self.did_io or self.hist_busy or dt > SCAN_S)
+            self.last_scan_io = bool(self.did_io)
             self.cycle_overrun = dt > SCAN_S and not (self.did_io or self.hist_busy)
             try:
                 self.write_stats()
@@ -6495,14 +7254,13 @@ class Pulse:
                 pass
             sd_notify("WATCHDOG=1")
             wall = time.perf_counter() - t0
+            self.last_cycle_ms = wall * 1000.0
             gap = pace_gap_s(t0, time.perf_counter(), SCAN_S)
             self.cycle_wait_ms = gap * 1000.0
             self.cycle_busy = False
             # a tick never starts a cycle early: the next one starts at least SCAN_S after this one began
             if gap > 0:
                 time.sleep(gap)
-            elif wall > SCAN_S:
-                self._stats_force = True
 
 
 def make_api(conn: str, key: str, secret: str, base: str):

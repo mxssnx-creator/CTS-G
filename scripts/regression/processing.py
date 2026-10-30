@@ -1118,10 +1118,10 @@ def _rows(sid, wins, losses, t0=1000.0):
     out, t = [], t0
     for _ in range(losses):
         t += 60
-        out.append((t, "S0-USDT", "LONG", -0.0032, -0.002, 600.0, "sl", sid))
+        out.append((t, "S0-USDT", "LONG", -0.0032, -0.002, 30.0, "sl", sid))
     for _ in range(wins):
         t += 60
-        out.append((t, "S0-USDT", "LONG", 0.0028, 0.004, 600.0, "tp", sid))
+        out.append((t, "S0-USDT", "LONG", 0.0028, 0.004, 30.0, "tp", sid))
     return out
 
 
@@ -1131,6 +1131,7 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     margin. A manual step hold and the master switch override it."""
     from set_engine import HOLD_KEY
     b = _book(n_syms=1, bars=300)
+    b.cooldown_bars = 0  # synthetic 60-second spacing models a zero-cooldown lane
     lo = next(x for x in b.by_idx if x.kind == "base" and x.step == 3)
     hi = next(x for x in b.by_idx if x.kind == "base" and x.step == 8)
 
@@ -1146,11 +1147,12 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     got["cap"] = run(lo, ref, {30: _rows(lo.id, 40, 0) + _rows(lo.id, 0, 50, t0=5000.0)})
     got["cap_good"] = run(lo, ref, {30: _rows(lo.id, 0, 40) + _rows(lo.id, 50, 0, t0=5000.0)})
     got["few"] = run(lo, ref, {15: _rows(lo.id, 5, 0)})                 # 5 orders, all wins: below holdAutoMin
+    got["few reference"] = run(lo, _rows(lo.id, 0, 5), {15: _rows(lo.id, 45, 5)})
     got["tie"] = run(lo, _rows(lo.id, 30, 20), {15: _rows(lo.id, 30, 20)})      # an equal PF keeps the global stop
     got["better"] = run(lo, _rows(lo.id, 30, 20), {15: _rows(lo.id, 31, 19)})   # +9%: replaces it
     # a PF only 1% above the global stop's is inside the margin and keeps the global stop; 5% above replaces it
     def with_loss(wins, losses, loss_pct):
-        return [(1000.0 + 60 * k, "S0-USDT", "LONG", 0.0, (0.004 if k >= losses else loss_pct), 600.0, "x", lo.id) for k in range(wins + losses)]
+        return [(1000.0 + 60 * k, "S0-USDT", "LONG", 0.0, (0.004 if k >= losses else loss_pct), 30.0, "x", lo.id) for k in range(wins + losses)]
     got["inside margin"] = run(lo, with_loss(30, 20, -0.002), {15: with_loss(30, 20, -0.00197)})
     got["outside margin"] = run(lo, with_loss(30, 20, -0.002), {15: with_loss(30, 20, -0.0018)})
     got["high"] = run(hi, _rows(hi.id, 10, 30), {120: _rows(hi.id, 40, 10), 10: _rows(hi.id, 50, 0)})   # 10 min is not a step-8 candidate
@@ -1166,11 +1168,125 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH
     ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50 and got["best"][2] == 50
           and got["cap"][0] == 0 and got["cap_good"][0] == 30 and got["cap_good"][1] == 50
-          and got["few"][0] == 0 and got["tie"][0] == 0 and got["inside margin"][0] == 0 and got["outside margin"][0] == 15 and got["better"][0] == 15 and got["high"][0] == 120
+          and got["few"][0] == 0 and got["few reference"][0] == 0 and got["tie"][0] == 0 and got["inside margin"][0] == 0 and got["outside margin"][0] == 15 and got["better"][0] == 15 and got["high"][0] == 120
           and lo.hold_auto and man.auto_holds(m3) == () and m3.hold_bars == 17 and not m3.hold_auto and man.auto_holds(m4) != ()
           and not off.auto_holds(off.by_idx[0]) and all(x.hold_bars == 0 for x in off.by_idx)
           and not auto_off.auto_holds(auto_off.by_idx[0]) and all(x.hold_bars == 0 for x in auto_off.by_idx))
     return ok, f"(hold, orders judged, tape rows) {got}; manual step 3 -> {m3.hold_bars} min, master off and auto off keep the global stop"
+
+
+def trailing_no_time_limit_requires_open_position_evidence():
+    from set_engine import HOLD_KEY
+    b = _book(n_syms=1, bars=300)
+    st = next(x for x in b.by_idx if x.kind == "trail")
+    ref = _rows(st.id, 10, 30)
+    def select(candidate, base=ref):
+        b._hist_rows = {"S0-USDT": {st.id: base, f"{st.id}{HOLD_KEY}-1": candidate}}
+        b._choose_hold(st, base, ["S0-USDT"], 0.0)
+        return st.hold_bars
+    small = select(_rows(st.id, 5, 0))
+    worse = select(_rows(st.id, 5, 45))
+    no_reference = select(_rows(st.id, 45, 5), _rows(st.id, 0, 5))
+    better = select(_rows(st.id, 45, 5))
+    return (small, worse, no_reference, better) == (0, 0, 0, 0), f"incomplete unlimited evidence never overrides timed reference: {small}/{worse}/{no_reference}/{better}"
+
+
+def removed_hold_candidate_is_not_reused_on_rebuild():
+    """An existing Set's removed choice cannot be copied to a new entry after a rebuild."""
+    b = _book(n_syms=1, bars=300)
+    st = next(x for x in b.by_idx if x.kind == "trail")
+    st.hold_bars, st.hold_auto = -1, True
+    sid = st.id
+    b._rebuild_sets()
+    current = b.sets[sid]
+    removed = (current.hold_bars, current.hold_auto)
+    valid = b.auto_holds(current)[0]
+    current.hold_bars, current.hold_auto = valid, True
+    b._rebuild_sets()
+    kept = (b.sets[sid].hold_bars, b.sets[sid].hold_auto)
+    return removed == (0, False) and kept == (valid, True), f"removed={removed}, retained valid hold={kept}"
+
+
+def trailing_unlimited_decision_is_causal():
+    from set_engine import hold_choice_at, prefix_sums
+    ref = _rows("tr", 10, 20)
+    good = _rows("tr", 30, 0)
+    cands = [(0, ref), (-1, good)]
+    def prefix(rows):
+        nets = [r[4] - .0012 for r in rows]
+        return ([r[0] for r in rows], *prefix_sums(nets))
+    pre = [prefix(rows) for _, rows in cands]
+    early = hold_choice_at(cands, pre, 1500.0, 30, 10, 1.02)
+    later = hold_choice_at(cands, pre, 2800.0, 30, 10, 1.02)
+    # Future outcomes cannot affect an earlier decision.
+    changed = good[:25] + [(r[0], *r[1:4], -.5, *r[5:]) for r in good[25:]]
+    altered = [(0, ref), (-1, changed)]
+    same = hold_choice_at(altered, [prefix(rows) for _, rows in altered], 2300.0, 30, 10, 1.02)
+    original = hold_choice_at(cands, pre, 2300.0, 30, 10, 1.02)
+    return early == 0 and later == 1 and same == original, f"early={early} later={later} prior decision before/after future edit={original}/{same}"
+
+
+def paired_hold_screen_marks_open_positions_once():
+    """Both sides use the same entry and mark an unclosed position at the common horizon, deducting cost once."""
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from hold_paired_screen import outcome
+    from set_engine import SetState
+    st = SetState(id="trail", pack="general", tf="1m", sl_ratio=1.0,
+                  trail_key="t", trail_arm=5.0, trail_give=1.0, tp_pct=0.1, kind="trail")
+    cfg = {"entry_conf": 0.5, "time_bars": 45, "scratch_bars": 999, "scratch_min": 1.0,
+           "cooldown": 0, "cost_pct": 0.12, "honor_tp": False, "sl_floor_steps": 1}
+    values = []
+    for side in (1, -1):
+        prices = [100.0] + [100.0 - side * (0.2 if i <= 45 else 0.4) for i in range(1, 91)]
+        bars = [[p, p + 0.01, p - 0.01, p, 1.0] for p in prices]
+        timed = outcome(st, "S", bars, 0, side, 1.0, cfg, 45, 90)
+        unlimited = outcome(st, "S", bars, 0, side, 1.0, cfg, -1, 90)
+        values.append((timed, unlimited))
+    ok = all(not t["marked"] and t["reason"] == "time" and abs(t["net"] + 0.0032) < 1e-10
+             and u["marked"] and abs(u["net"] + 0.0052) < 1e-10 for t, u in values)
+    return ok, f"long/short timed and horizon-marked outcomes={values}"
+
+
+def missing_main_evidence_discards_stale_short_choice():
+    """A prior short-window choice is not trusted when its entry evidence is missing."""
+    b = _book(n_syms=1, bars=300)
+    b.main_on, b.short_on, b.main_n = True, True, 30
+    st = b.by_idx[0]
+    st.proc_replayed, st.proc_total, st.main_short_win = True, 10, 5
+    st.main_evidence = None
+    st.proc, st.exe, st.neg = [(990.0, 0.01)], [], []
+    missing = b._streams(st, now=1000.0)[3]
+    st.proc_replayed, st.main_short_win = False, 5
+    st.hist = []
+    rebuilt = b._streams(st, now=1000.0)[3]
+    return missing == 30 and rebuilt == 30, f"missing evidence={missing}, fresh empty chain={rebuilt}, default={b.main_n}"
+
+
+def overlapping_hold_shadows_use_reference_tape():
+    """Different candidate holds cannot create concurrent positions in the same Set/symbol lane."""
+    from set_engine import HOLD_KEY, causal_hold_tape_checked
+    b = _book(n_syms=1, bars=300)
+    st = next(x for x in b.by_idx if x.kind == "base" and x.step == 3)
+    cf = 0.0012
+    ref = [(1000 + i * 100, "S", "LONG", 0, (0.003 if i % 2 else -0.003) + cf, 40, "ref", st.id)
+           for i in range(10)]
+    alt = [(1000 + i * 100, "S", "LONG", 0, -0.005 + cf, 40, "alt", st.id) for i in range(10)]
+    ref.append((4000, "S", "LONG", 0, 0.001 + cf, 2050, "longref", st.id))
+    alt.extend((2100 + i * 70, "S", "LONG", 0, 0.02 + cf, 40, "alt", st.id) for i in range(10))
+    alt.append((4200, "S", "LONG", 0, 0.001 + cf, 1300, "longalt", st.id))
+    raw, overlap = causal_hold_tape_checked([(0, ref), (20, alt)], 50, 10, 1.02, cf)
+    # Separate symbols may legitimately be open at the same time.
+    alt_other = [(r[0], "OTHER", *r[2:]) for r in alt]
+    _, separate = causal_hold_tape_checked([(0, ref), (20, alt_other)], 50, 10, 1.02, cf)
+    ref_cool = ref[:-1] + [(2250, "S", "LONG", 0, 0.001 + cf, 300, "longref", st.id)]
+    _, no_cooldown = causal_hold_tape_checked([(0, ref_cool), (20, alt)], 50, 10, 1.02, cf)
+    _, cooldown = causal_hold_tape_checked([(0, ref_cool), (20, alt)], 50, 10, 1.02, cf, 120)
+    b._hist_rows = {"S": {st.id: ref, f"{st.id}{HOLD_KEY}20": alt}}
+    chosen = b._choose_hold(st, ref, ["S"], 0)
+    ok = (overlap and not separate and not no_cooldown and cooldown and chosen == ref
+          and st.hold_bars == 0 and bool(st.hold_auto_blocked))
+    return ok, f"mixed rows={len(raw)}, collision={overlap}, separate-symbol={separate}, gap with/without cooldown={cooldown}/{no_cooldown}, fallback={st.hold_bars}, reason={st.hold_auto_blocked}"
 
 
 def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
@@ -1184,6 +1300,8 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
     bad, chosen = [], 0
     for st in b.by_idx:
         allowed = {0, *(HOLD_AUTO_LOW if b.step_of(st) <= 5 else HOLD_AUTO_HIGH)}
+        if st.kind == "trail":
+            allowed.add(-1)
         if st.hold_bars not in allowed or not st.hold_auto:
             bad.append((st.id, st.hold_bars))
         if st.hold_bars:
@@ -1336,15 +1454,16 @@ def every_validation_gate_asks_the_base_minimum_pf():
     from exit_engine import ExitBook
 
     def gates(ov):
-        sb = SetBook(); sb.load(overlay(**ov))
-        co = Coordinator(); co.load({}, ov)
-        ex = ExitBook(); ex.load(ov)
-        dc = DcaBook(); dc.load(ov)
+        config = overlay(**ov)
+        sb = SetBook(); sb.load(config)
+        co = Coordinator(); co.load({}, config)
+        ex = ExitBook(); ex.load(config)
+        dc = DcaBook(); dc.load(config)
         pk = sb.packs[0]
         return {"main": sb.pack_min_pf.get(pk, sb.min_pf), "coord": co.min_pf, "exit": ex.min_pf, "dca": dc.min_pf}
     own = {"minPf": 1.15, "exitMinPf": 1.12, "dcaMinPf": 1.2}
     got = {"default": gates({}), "base 1.4": gates({"setMinPf": 1.4, **own}), "unlinked": gates({"setMinPf": 1.4, "minPfLinked": False, **own})}
-    want = {"default": {k: 1.25 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
+    want = {"default": {k: 1.2 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
             "unlinked": {"main": 1.4, "coord": 1.15, "exit": 1.12, "dca": 1.2}}
     return got == want, f"{got}"
 
@@ -1546,6 +1665,12 @@ CHECKS = [
     ("processing.set-failure-isolated", memo.memoized(set_failure_isolated)),
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
+    ("processing.trailing-unlimited-needs-open-position-evidence", trailing_no_time_limit_requires_open_position_evidence),
+    ("processing.removed-hold-candidate-not-reused", removed_hold_candidate_is_not_reused_on_rebuild),
+    ("processing.trailing-unlimited-is-causal", trailing_unlimited_decision_is_causal),
+    ("processing.paired-hold-screen-marks-open-positions-once", paired_hold_screen_marks_open_positions_once),
+    ("processing.missing-main-evidence-discards-stale-short-choice", missing_main_evidence_discards_stale_short_choice),
+    ("processing.overlapping-hold-shadows-use-reference", overlapping_hold_shadows_use_reference_tape),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
     ("processing.hold-auto-tape-is-causal", hold_auto_tape_is_causal),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),

@@ -43,7 +43,271 @@ def _bare_pulse():
     p.klines = p.klines_tf["1m"]
     p.bar_min = {}
     p.real_1m = {}
+    p.price_ts = {}
+    p.last_bal = pt.time.time()
     return p
+
+
+def stale_or_failed_balance_blocks_entries():
+    """Old, invalid and failed balance reads cannot fund entries; a valid zero remains zero."""
+    p = _bare_pulse()
+    p.ctrl_skip = {}
+    p.boot_ts = 0
+    p.control_orders = False
+    p.open = {}
+    p.errors = 0
+    p.available = 5.0
+    p.start_eq = p.session_eq = 10.0
+    p.dd_halt = 0.0
+    p.halted = False
+    p.halt_reason = None
+    p.last_bal = pt.time.time() - pt.BALANCE_STALE_S - 1
+    stale = p.entries_blocked()
+    p.last_bal = pt.time.time()
+    fresh = not p.entries_blocked()
+    p.recon_ok = False
+    bad_recon = p.entries_blocked()
+    p.recon_ok = True
+    class Api:
+        def __init__(self, reply): self.reply = reply
+        def get(self, path): return self.reply
+    p.api = Api({"code": -1, "msg": "timeout", "data": {"availableMargin": 5}})
+    p.refresh_balance()
+    failed_zero = p.available == 0
+    p.available = 5.0
+    p.api = Api({"code": 0, "data": {"balance": {"equity": "10", "availableMargin": "NaN"}}})
+    p.refresh_balance()
+    invalid_zero = p.available == 0
+    p.api = Api({"code": 0, "data": {"balance": {"equity": "10", "availableMargin": 0, "availableBalance": 9}}})
+    p.refresh_balance()
+    explicit_zero = p.available == 0
+    p.api = Api({"code": 0, "data": {"balance": {"equity": "10", "availableMargin": "3"}}})
+    p.refresh_balance()
+    recovered = p.available == 3 and not p.entries_blocked()
+    ok = stale and fresh and bad_recon and failed_zero and invalid_zero and explicit_zero and recovered
+    return ok, f"stale={stale} fresh={fresh} failed reconciliation={bad_recon} failed={failed_zero} invalid={invalid_zero} zero={explicit_zero} recovered={recovered}"
+
+
+def websocket_last_price_follows_declines():
+    """An old high must not make a legal short stop appear illegal after the market falls."""
+    p = _bare_pulse()
+    p.api = types.SimpleNamespace(px={"A-USDT": 100.0}, px_ts={"A-USDT": pt.time.time()})
+    p.px, p.last_px = {}, {}
+    old = pt.SYMBOLS
+    try:
+        pt.SYMBOLS = ["A-USDT"]
+        p.ingest_ws_px()
+        p.api.px["A-USDT"] = 90.0
+        p.api.px_ts["A-USDT"] = pt.time.time()
+        p.ingest_ws_px()
+        p.api.px["A-USDT"] = float("inf")
+        p.api.px_ts["A-USDT"] = pt.time.time()
+        p.ingest_ws_px()
+        band = p.px_band("A-USDT")
+        pos = pt.Position(symbol="A-USDT", side="SHORT", qty=1, entry=90, opened_at=1, sl=91, tp=89, peak=90)
+        legal = p.sl_legal(pos, 91.0)
+    finally:
+        pt.SYMBOLS = old
+    return band == (90.0, 90.0, 90.0, 90.0) and legal, f"price band={band}; short stop legal={legal}"
+
+
+def ticker_fallback_is_nonblocking_and_preserves_newer_tick():
+    """A slow REST ticker cannot hold the cycle or overwrite a newer WebSocket price."""
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    started, release = threading.Event(), threading.Event()
+    class Api:
+        def __init__(self):
+            self.px, self.px_ts = {}, {}
+            self.hub = types.SimpleNamespace(ok=False, last_msg=0)
+            self.calls = 0
+        def public(self, path):
+            self.calls += 1
+            started.set()
+            release.wait(2)
+            return {"code": 0, "data": [{"symbol": "A-USDT", "lastPrice": "90"}]}
+    p.api = Api()
+    p.px, p.last_px = {}, {}
+    p.last_uni, p.symbol_sort = pt.time.time(), "vol1h"
+    p._ticker_future, p._ticker_started = None, 0
+    p._ticker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    old = pt.SYMBOLS
+    try:
+        pt.SYMBOLS = ["A-USDT"]
+        t = pt.time.monotonic()
+        p.refresh_tickers(background=True)
+        elapsed = pt.time.monotonic() - t
+        started.wait(1)
+        p.refresh_tickers(background=True)
+        p.api.px["A-USDT"] = 100
+        p.api.px_ts["A-USDT"] = pt.time.time()
+        p.ingest_ws_px()
+        release.set()
+        p._ticker_future.result(timeout=2)
+        p.refresh_tickers(background=True)
+        latest = p.px.get("A-USDT")
+        fresh = p.market_price_fresh("A-USDT")
+        p.price_ts["A-USDT"] = pt.time.time() - pt.PRICE_STALE_S - 1
+        stale = not p.market_price_fresh("A-USDT")
+        calls = p.api.calls
+    finally:
+        release.set()
+        p._ticker_pool.shutdown(wait=True)
+        pt.SYMBOLS = old
+    ok = elapsed < 0.1 and calls == 1 and latest == 100 and fresh and stale
+    return ok, f"cycle wait={elapsed*1000:.2f}ms requests={calls} newer price={latest} fresh={fresh} stale={stale}"
+
+
+def entry_rechecks_price_after_network_delay():
+    """A price or balance that becomes invalid during a network check cannot create an entry order."""
+    def run(kind):
+        sym = "BTC-USDT"
+        venue = _StubExchange(executed="1")
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5, max_lev=50)}
+        p = pt.Pulse(venue, contracts)
+        p.boot_ts = 0
+        p.last_bal = pt.time.time()
+        p.available = 50
+        p.px[sym] = 100
+        p.price_ts[sym] = pt.time.time()
+        p.halted = False
+        p.entry_sense = lambda *a, **k: None
+        p.sets.use_historic_gate = False
+        def slow_leverage(_sym, force=False):
+            if kind == "price":
+                p.price_ts[sym] = pt.time.time() - pt.PRICE_STALE_S - 1
+            else:
+                p.available = 0
+            return p.leverage_for(contracts[sym])
+        p.ensure_max_leverage = slow_leverage
+        p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+        return len([x for path, x in venue.posts if path.endswith("/trade/order")]), len(p.open)
+    price = _isolated(lambda: run("price"))
+    balance = _isolated(lambda: run("balance"))
+    return price == (0, 0) and balance == (0, 0), f"(orders, positions) after stale price={price}, failed balance={balance}"
+
+
+def cycles_keep_managing_when_ticker_read_is_slow():
+    """A blocked fallback read must not hold subsequent cycles or suppress active-position management."""
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    release = threading.Event()
+    class Api:
+        px, px_ts = {}, {}
+        hub = types.SimpleNamespace(ok=False, last_msg=0)
+        def public(self, path):
+            release.wait(2)
+            return {"code": 0, "data": []}
+    p.api, p.px, p.last_px = Api(), {}, {}
+    p._ticker_future, p._ticker_started = None, 0
+    p._ticker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    p.last_uni, p.halt_reason, p.halted, p.cycle = pt.time.time(), None, False, 0
+    p._budget = lambda **kw: None
+    p.seed_px_bars = p.maybe_reload_config = lambda: None
+    p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(level="normal"))
+    p.adopt_exchange_positions = p.sync_own_fills = p.qa_tick = lambda: None
+    p.maybe_entries = p.maybe_block_adds = p.maybe_dca_adds = lambda: None
+    p.trim_caches = lambda **kw: None
+    p.priority_controls = lambda: 0
+    calls = []
+    p.manage = lambda: calls.append(1)
+    old = pt.SYMBOLS
+    try:
+        pt.SYMBOLS = [f"S{i}-USDT" for i in range(30)]
+        times = []
+        for _ in range(40):
+            start = pt.time.perf_counter()
+            p._one_cycle()
+            times.append((pt.time.perf_counter() - start) * 1000)
+    finally:
+        release.set()
+        p._ticker_pool.shutdown(wait=True)
+        pt.SYMBOLS = old
+    ok = len(calls) == 40 and max(times) < 100
+    return ok, f"management calls={len(calls)} max cycle={max(times):.2f}ms with blocked ticker"
+
+
+def faster_scan_keeps_periodic_work_frequency():
+    """A 100 ms scan must not double reconciliation, fill, or configuration polling."""
+    periods = (1.0, 1.6, 2.4, 5.0, 30.0, 44.0)
+    pairs = [(pt.cycle_stride(s, 0.1) * 0.1, pt.cycle_stride(s, 0.2) * 0.2) for s in periods]
+    return all(abs(a - b) < 1e-9 for a, b in pairs), f"period seconds at 100/200ms={pairs}"
+
+
+def slow_warm_feed_does_not_block_balance():
+    """A blocked market-data worker must not stop balance refresh or cause rapid retry storms."""
+    import threading
+    p = _bare_pulse()
+    entered, release = threading.Event(), threading.Event()
+    p._warm_stop, p._balance_next_at, p.last_bal = False, 0, 0
+    p.available, p.errors, p.last_error = 5.0, 0, ""
+    p.api = types.SimpleNamespace()
+    p.load = types.SimpleNamespace(last_budget=types.SimpleNamespace(warm_s=.01))
+    def slow_fees():
+        entered.set()
+        release.wait(2)
+    p.refresh_fees = slow_fees
+    p.refresh_klines = p.refresh_vol1h = p.process_indications = p.update_regime = lambda: None
+    calls = []
+    def balance():
+        calls.append(1)
+        p.last_bal = pt.time.time()
+        p.available = 3
+    p.refresh_balance = balance
+    t = threading.Thread(target=p._warm_loop)
+    t.start()
+    try:
+        entered.wait(1)
+        start = pt.time.monotonic()
+        p._balance_tick()
+        elapsed = pt.time.monotonic() - start
+        p._balance_tick()
+        once = len(calls) == 1 and p.available == 3
+        p.last_bal, p._balance_next_at, p.available = 0, 0, 9
+        def fail(): raise RuntimeError("offline")
+        p.refresh_balance = fail
+        p._balance_tick()
+        failed_safe = p.available == 0 and p.errors == 1
+    finally:
+        p._warm_stop = True
+        release.set()
+        t.join(2)
+    ok = elapsed < .1 and once and failed_safe and not t.is_alive()
+    return ok, f"balance tick={elapsed*1000:.2f}ms; no duplicate={once}; failed-safe={failed_safe}"
+
+
+def extra_source_switch_controls_all_external_reads():
+    """Turning off extra sources prevents both prefetch and per-symbol external reads."""
+    from indication_engine import EXTRA, IndicationBook
+    p = _bare_pulse()
+    p.indications = IndicationBook()
+    p._budget = lambda: types.SimpleNamespace(extra_n=1, extra_sources=True, scan_chunk=30)
+    p.open, p.universe, p.px = {}, [], {"A-USDT": 100.0}
+    p.load = types.SimpleNamespace(cursor_ind=0, scan_window=lambda *a: (["A-USDT"], 0))
+    bars = [[100.0, 101.0, 99.0, 100.0, 1.0] for _ in range(30)]
+    p.real_bars_1m = lambda s: bars
+    p.ready_1m = lambda s: len(bars)
+    p.score = lambda s: (0, "", 0.0)
+    p.tf_on = {"1m": True, "5m": False, "15m": False}
+    p.klines_tf = {"1m": {"A-USDT": bars}}
+    calls = []
+    old_prefetch, old_get, old_symbols = EXTRA.prefetch, EXTRA.get, pt.SYMBOLS
+    EXTRA.prefetch = lambda pairs: calls.append(("prefetch", list(pairs)))
+    EXTRA.get = lambda src, sym: (calls.append(("get", src, sym)) or [])
+    try:
+        pt.SYMBOLS = ["A-USDT"]
+        p.indications.load({"indExtraSources": False})
+        p.process_indications()
+        disabled = list(calls)
+        p.indications.load({"indExtraSources": True})
+        p.process_indications()
+        enabled = list(calls)
+    finally:
+        EXTRA.prefetch, EXTRA.get, pt.SYMBOLS = old_prefetch, old_get, old_symbols
+    ok = not disabled and any(x[0] == "prefetch" for x in enabled) and sum(x[0] == "get" for x in enabled) == 2
+    return ok, f"disabled external reads={len(disabled)}; enabled mocked operations={len(enabled)}"
 
 
 def restored_book_drops_a_position_only_when_two_reads_agree():
@@ -82,9 +346,29 @@ def restored_book_drops_a_position_only_when_two_reads_agree():
     both = run([oneway], [oneway], [("A-USDT", "SHORT")])                    # one-way mode: the sign of the amount is the side
     empty = run([], [], [("A-USDT", "LONG")])                                # two empty reads: the account is flat, the ghost is dropped
     empty_lag = run([], [mine], [("A-USDT", "LONG")])                        # an empty first read that the second read contradicts: kept
-    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == [] and empty_lag == ["A-USDT"]
+    short_lag = run([], [{"symbol": "A-USDT", "positionSide": "SHORT", "positionAmt": "1"}], [("A-USDT", "SHORT")])
+    ok = lag == ["A-USDT"] and gone == [] and held == ["A-USDT"] and both == ["A-USDT"] and empty == [] and empty_lag == ["A-USDT"] and short_lag == ["A-USDT"]
     return ok, (f"lagging read kept={lag}, two reads agree dropped={gone}, listed kept={held}, one-way short kept={both}, "
-                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}")
+                f"two empty reads dropped={empty == []}, empty then listed kept={empty_lag}, positive-qty short={short_lag}")
+
+
+def exchange_flat_requires_a_valid_direction_aware_snapshot():
+    p = _bare_pulse()
+    pos = pt.Position(symbol="A-USDT", side="SHORT", qty=1, entry=10, opened_at=1, sl=11, tp=9, peak=10)
+    cases = [
+        ({}, False),
+        ([{"symbol": "A-USDT", "positionSide": "BOTH", "positionAmt": "-1"}], False),
+        ([{"symbol": "A-USDT", "positionSide": "SHORT", "positionAmt": "1"}], False),
+        ([{"symbol": "A-USDT", "positionSide": "SHORT", "positionAmt": "NaN"}], False),
+        ([{"symbol": "A-USDT", "positionSide": "SHORT", "positionAmt": "0", "availableAmt": "1"}], False),
+        ([{"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "1"}], True),
+        ([], True),
+    ]
+    results = []
+    for rows, want in cases:
+        p.api = types.SimpleNamespace(get=lambda path, rows=rows: {"code": 0, "data": rows})
+        results.append((p._exchange_flat(pos), want))
+    return all(got == want for got, want in results), f"(flat, expected)={results}"
 
 
 def cycles_start_at_least_scan_apart():
@@ -165,6 +449,179 @@ def order_leverage_follows_the_target():
         pt.LEVERAGE = saved
     ok = (on, off, capped) == (150, 25, 10)
     return ok, f"orders: max on={on} max off={off} max off with a known max of 10={capped}"
+
+
+def leverage_requires_account_confirmation():
+    """Contract maxima cannot masquerade as applied leverage, and partial updates block the entry."""
+    p = _bare_pulse()
+    p.contracts = {"BTC-USDT": pt.Contract(symbol="BTC-USDT", min_qty=.001, step=.001, qprec=3, pprec=2, min_usdt=5, max_lev=150)}
+    p.seed_lev_from_contracts()
+    seeded_only_max = p.lev_max.get("BTC-USDT") == 150 and "BTC-USDT" not in p.lev_map
+
+    class RefuseSecond(_StubExchange):
+        def get(self, path, extra=None):
+            return {"code": 0, "data": {"maxLongLeverage": "150", "maxShortLeverage": "150", "longLeverage": "10", "shortLeverage": "10"}}
+        def post(self, path, body):
+            if path.endswith("/trade/leverage"):
+                self.posts.append((path, body))
+                return {"code": 0} if body.get("side") == "LONG" else {"code": 1, "msg": "refused"}
+            return super().post(path, body)
+    def failed():
+        venue = RefuseSecond()
+        pulse, sym = _enter(venue)
+        return len([1 for path, _ in venue.posts if path.endswith("/trade/order")]), sym in pulse.lev_map
+    orders, recorded = _isolated(failed)
+    return seeded_only_max and orders == 0 and not recorded, f"contract only max={seeded_only_max}; rejected leverage -> orders={orders}, recorded={recorded}"
+
+
+def x01_max_leverage_does_not_change_margin_type():
+    class ChangeLeverage(_StubExchange):
+        def get(self, path, extra=None):
+            return {"code": 0, "data": {"maxLongLeverage": "150", "maxShortLeverage": "150", "longLeverage": "10", "shortLeverage": "10"}}
+    def run():
+        venue = ChangeLeverage()
+        pulse, sym = _enter(venue)
+        return ([path for path, _ in venue.posts if path.endswith("/trade/leverage")],
+                [path for path, _ in venue.posts if path.endswith("/trade/marginType")], sym in pulse.open)
+    saved = pt.CONN_SHORT
+    try:
+        pt.CONN_SHORT = "bingx-x01"
+        lever, margin, opened = _isolated(run)
+    finally:
+        pt.CONN_SHORT = saved
+    return len(lever) == 2 and not margin and opened, f"leverage changes={len(lever)}, margin-type changes={len(margin)}, stub entry={opened}"
+
+
+def minimum_order_rejection_cannot_bypass_entry_limits():
+    class OversizedMinimum(_StubExchange):
+        def post(self, path, body):
+            if path.endswith("/trade/order"):
+                self.posts.append((path, body))
+                return {"code": 100400, "msg": "minimum order amount is 1000"}
+            return super().post(path, body)
+    def run():
+        venue = OversizedMinimum()
+        p, sym = _enter(venue)
+        return len([1 for path, _ in venue.posts if path.endswith("/trade/order")]), sym in p.open
+    orders, opened = _isolated(run)
+    return orders == 1 and not opened, f"order attempts={orders}; opened={opened}"
+
+
+def retried_minimum_order_keeps_its_actual_client_id():
+    class RetryVenue(_StubExchange):
+        def post(self, path, body):
+            if path.endswith("/trade/order"):
+                self.posts.append((path, dict(body)))
+                attempts = [p for p, _ in self.posts if p.endswith("/trade/order")]
+                if len(attempts) == 1:
+                    return {"code": 100400, "msg": "minimum order amount is 0.06"}
+                return {"code": 0, "data": {"order": {"orderId": "1", "avgPrice": "100", "executedQty": "0.06", "status": "FILLED"}}}
+            return super().post(path, body)
+    def run():
+        sym = "BTC-USDT"
+        venue = RetryVenue()
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=.001, step=.001, qprec=3, pprec=2, min_usdt=5, max_lev=150)}
+        p = pt.Pulse(venue, contracts)
+        p.boot_ts, p.last_bal, p.available, p.halted = 0, pt.time.time(), 50, False
+        p.px[sym], p.price_ts[sym] = 100.0, pt.time.time()
+        p.control_orders = False
+        p.entry_sense = lambda *a, **k: None
+        p.max_book_notional = lambda: 100.0
+        p.sets.use_historic_gate = False
+        p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", .7)
+        ids = [b['clientOrderID'] for path, b in venue.posts if path.endswith('/trade/order')]
+        return ids, p.open.get(sym).client_id if sym in p.open else None
+    ids, recorded = _isolated(run)
+    return len(ids) == 2 and ids[0] != ids[1] and recorded == ids[1], f"attempts={len(ids)} distinct IDs={len(set(ids))}; recorded retry ID={bool(ids and recorded == ids[-1])}"
+
+
+def uncertain_entry_blocks_retries_for_the_symbol():
+    """A lost answer cannot lead to a second order after the short cooldown, even on the other side."""
+    class CountLost(_StubExchange):
+        def post(self, path, body):
+            if path.endswith("/trade/order"):
+                self.posts.append((path, body))
+                return {"code": -1, "msg": "timed out", "error": True}
+            return super().post(path, body)
+    def run():
+        venue = CountLost()
+        p, sym = _enter(venue)
+        before = len([1 for path, _ in venue.posts if path.endswith("/trade/order")])
+        p.cooldown[sym] = 0
+        p.place(sym, -1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+        after = len([1 for path, _ in venue.posts if path.endswith("/trade/order")])
+        return before, after, f"{sym}:LONG" in p.unknown_entry
+    before, after, unknown = _isolated(run)
+    return before == after == 1 and unknown, f"order attempts before={before}, after={after}, uncertain={unknown}"
+
+
+def uncertain_entry_survives_restart():
+    import json
+    def run():
+        venue = _LostAnswerVenue()
+        p, sym = _enter(venue)
+        key = f"{sym}:LONG"
+        saved = json.load(open(pt.entry_intent_path()))
+        p2 = pt.Pulse(_StubExchange(), _offline_contracts())
+        persisted = key in saved and p2.entry_intent_ids.get(key) == saved[key]["cid"] and key in p2.unknown_entry
+        private = os.stat(pt.entry_intent_path()).st_mode & 0o077 == 0
+        return persisted, private, p2.intent_state_bad
+    persisted, private, bad = _isolated(run)
+    return persisted and private and not bad, f"restored={persisted}; private={private}; invalid state={bad}"
+
+
+def failed_intent_persistence_blocks_order():
+    def run():
+        pt.OPEN_PATH = os.path.join(os.path.dirname(pt.OPEN_PATH), "missing", "open.json")
+        venue = _StubExchange()
+        p, sym = _enter(venue)
+        attempts = len([1 for path, _ in venue.posts if path.endswith("/trade/order")])
+        return attempts, p.intent_state_bad, sym in p.open
+    attempts, bad, opened = _isolated(run)
+    return attempts == 0 and bad and not opened, f"order attempts={attempts}; persistence failure={bad}; opened={opened}"
+
+
+def uncertain_adoption_requires_matching_fill():
+    p = _bare_pulse()
+    key, cid = "A-USDT:LONG", pt.TAG + "o-test"
+    p.entry_intent_ids = {key: cid}
+    rows = [
+        {"status": "FILLED", "executedQty": "1", "avgPrice": "100", "side": "BUY", "positionSide": "LONG", "clientOrderId": cid},
+        {"status": "FILLED", "executedQty": "2", "avgPrice": "100", "side": "BUY", "positionSide": "LONG", "clientOrderId": cid},
+        {"status": "FILLED", "executedQty": "1", "avgPrice": "100", "side": "SELL", "positionSide": "LONG", "clientOrderId": cid},
+        {"status": "FILLED", "executedQty": "1", "avgPrice": "100", "side": "BUY", "positionSide": "LONG", "clientOrderId": "foreign"},
+        {"fillUnconfirmed": True},
+    ]
+    out = []
+    for row in rows:
+        p.confirmed_order = lambda data, symbol, cid, row=row: row
+        out.append(p._verified_entry_intent(key, "A-USDT", "LONG", 1.0) is not None)
+    return out == [True, False, False, False, False], f"(matched, bad quantity, bad side, bad ID, unconfirmed)={out}"
+
+
+def uncertain_entry_recovery_uses_its_own_fill():
+    def run(match):
+        p, sym = _enter(_LostAnswerVenue())
+        key = f"{sym}:LONG"
+        cid = p.entry_intent_ids[key]
+        fill_at = pt.time.time() - 1
+        class Venue(_StubExchange):
+            def get(self, path, extra=None):
+                if path.endswith('/user/positions'):
+                    return {"code": 0, "data": [{"symbol": sym, "positionSide": "LONG", "positionAmt": "0.05", "avgPrice": "100"}]}
+                if path.endswith('/trade/order'):
+                    return {"code": 0, "data": {"order": {"symbol": sym, "status": "FILLED", "executedQty": "0.05", "avgPrice": "100", "side": "BUY", "positionSide": "LONG", "clientOrderId": cid if match else "foreign", "updateTime": int(fill_at * 1000)}}}
+                return super().get(path, extra)
+        p.api = Venue()
+        p.control_orders = False
+        p.our_orders = lambda *a, **k: []
+        p.adopt_exchange_positions()
+        pos = p.open.get(sym)
+        return bool(pos), (pos.client_id if pos else ""), key in p.unknown_entry, cid, (pos.opened_at if pos else 0), fill_at
+    yes = _isolated(lambda: run(True))
+    no = _isolated(lambda: run(False))
+    ok = yes[0] and yes[1] == yes[3] and not yes[2] and abs(yes[4] - yes[5]) < .01 and not no[0] and no[2]
+    return ok, f"matching fill adopted={yes[0]} with original ID={yes[1] == yes[3]} intent cleared={not yes[2]}; foreign fill adopted={no[0]} intent retained={no[2]}"
 
 
 def padding_does_not_count_as_readiness():
@@ -314,7 +771,9 @@ def entry_lifecycle_with_a_stub_exchange():
             p = pt.Pulse(api, contracts)
             p.boot_ts = 0.0
             p.px[sym] = 100.0
+            p.price_ts[sym] = pt.time.time()
             p.available = 50.0
+            p.last_bal = pt.time.time()
             p.halted = False
             p.entry_sense = lambda *a, **k: None
             p.sets.use_historic_gate = False  # this fixture exercises an untagged venue entry
@@ -357,7 +816,9 @@ def _enter(venue):
     p = pt.Pulse(venue, contracts)
     p.boot_ts = 0.0
     p.px[sym] = 100.0
+    p.price_ts[sym] = pt.time.time()
     p.available = 50.0
+    p.last_bal = pt.time.time()
     p.halted = False
     p.entry_sense = lambda *a, **k: None
     p.sets.use_historic_gate = False  # the isolated venue fixture opens a non-Set position
@@ -409,29 +870,51 @@ def symbol_cap_applies_under_a_wildcard():
     p.symbols_dynamic = True
     p.overlay_wild = True
     p.open = {}
-    p.universe = [{"symbol": f"S{i:02d}-USDT", "vol1h": float(100 - i), "maxLeverage": 50, "quoteVolume": 1.0,
-                   "vol24h": 0.0, "changePct": 0.0} for i in range(60)]
+    p.universe = [{"symbol": f"S{i:03d}-USDT", "vol1h": float(100 - i), "maxLeverage": 50, "quoteVolume": 1.0,
+                   "vol24h": 0.0, "changePct": 0.0} for i in range(100)]
     p.last_dyn_sel = 0.0
     p.contracts = {}
     p.sets = types.SimpleNamespace(set_symbols=lambda *a, **k: None, enabled=False)
     out = {}
     try:
-        p.symbol_cap = 30
+        p.symbol_cap = 70
         p.apply_dynamic_symbols(force=True)
         out["capped"] = len(pt.SYMBOLS)
         p.symbol_cap = 0
         p.apply_dynamic_symbols(force=True)
         out["uncapped"] = len(pt.SYMBOLS)
-        p.symbol_cap = 30
-        p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
+        p.symbol_cap = 70
+        p.open = {"S099-USDT": types.SimpleNamespace(symbol="S099-USDT")}
         p.apply_dynamic_symbols(force=True)
-        out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+        out["with_open"] = (len(pt.SYMBOLS), "S099-USDT" in pt.SYMBOLS)
     except Exception as exc:  # noqa: BLE001
         return False, f"raised {type(exc).__name__}: {exc}"
     finally:
         pt.SYMBOLS[:] = saved_syms
-    ok = out.get("capped") == 30 and out.get("uncapped") == 60 and out.get("with_open") == (30, True)
-    return ok, f"wildcard cap 30 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 30 + one open -> {out.get('with_open')}"
+    ok = out.get("capped") == 70 and out.get("uncapped") == 100 and out.get("with_open") == (70, True)
+    return ok, f"wildcard cap 70 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 70 + one open -> {out.get('with_open')}"
+
+
+def symbol_rotation_respects_configured_interval():
+    p = _bare_pulse()
+    p.symbol_sort, p.symbols_dynamic, p.symbol_cap = "vol1h", True, 2
+    p.symbol_rotate_s, p.last_dyn_sel, p.overlay_wild = 300.0, 0.0, True
+    p.open, p.contracts = {}, {}
+    p.ensure_contracts = lambda: None
+    p.universe = [{"symbol": f"{s}-USDT", "maxLeverage": 50, "vol1h": v} for s, v in (("A", 3), ("B", 2), ("C", 1))]
+    old = list(pt.SYMBOLS)
+    try:
+        p.apply_dynamic_symbols(force=True)
+        first = list(pt.SYMBOLS)
+        p.universe[2]["vol1h"] = 10
+        p.apply_dynamic_symbols()
+        early = list(pt.SYMBOLS)
+        p.last_dyn_sel -= 301
+        p.apply_dynamic_symbols()
+        later = list(pt.SYMBOLS)
+    finally:
+        pt.SYMBOLS[:] = old
+    return first == early == ["A-USDT", "B-USDT"] and later == ["C-USDT", "A-USDT"], f"initial={first}; before interval={early}; after interval={later}"
 
 
 class _RefusingCloseVenue(_StubExchange):
@@ -464,6 +947,163 @@ def _isolated(fn):
             return fn()
         finally:
             pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.TRADES_PATH, pt.dump_cts_settings = saved
+
+
+def requested_local_configuration_reaches_engine():
+    """The prepared x01 settings survive the engine's configuration clamp."""
+    import json
+    config_globals = ("TARGET_NOTIONAL", "LEVERAGE", "MAX_OPEN", "MAX_PER_GROUP", "SL_PCT", "TP_PCT",
+                      "USE_MAX_LEVERAGE", "TRAIL_ARM", "TRAIL_GIVE", "TIME_STOP_S", "SCRATCH_S", "SCRATCH_MIN",
+                      "SCAN_S", "COOLDOWN_S", "STAGGER_S")
+    saved = {key: getattr(pt, key) for key in config_globals}
+    saved_path, saved_symbols = pt.OVERLAY_PATH, list(pt.SYMBOLS)
+    with tempfile.TemporaryDirectory() as td:
+        pt.OVERLAY_PATH = os.path.join(td, "overlay.json")
+        with open(os.path.join(PULSE, "overlay-bingx-x01.json")) as f:
+            config = json.load(f)
+        with open(pt.OVERLAY_PATH, "w") as f:
+            json.dump(config, f)
+        try:
+            def run():
+                p = pt.Pulse(_StubExchange(), _offline_contracts())
+                return (p.symbol_cap, p.volume_factor, pt.SCAN_S)
+            got = _isolated(run)
+        finally:
+            pt.OVERLAY_PATH = saved_path
+            for key, value in saved.items():
+                setattr(pt, key, value)
+            pt.SYMBOLS[:] = saved_symbols
+    return got == (70, 0.05, 0.2), f"symbol cap, factor, scan interval = {got}"
+
+
+def background_budget_reads_do_not_repeat_a_cycle_overrun():
+    """One slow main cycle cannot be counted again by repeated warm-thread reads."""
+    import load_engine as le
+    p = _bare_pulse()
+    p.load = le.LoadGovernor()
+    p.open, p.last_scan_ms, p.warm_ms, p.hist_busy = {}, 250.0, 0.0, False
+    p.cycle_overrun = True
+    old_rss = le.rss_mb
+    try:
+        le.rss_mb = lambda: 40.0
+        p._budget(count_cycle=True)
+        for _ in range(12):
+            p._budget()
+        slow = (p.load.overrun_n, p.load.level)
+        p.cycle_overrun, p.last_scan_ms = False, 10.0
+        p._budget(count_cycle=True)
+        recovered = (p.load.overrun_n, p.load.level)
+    finally:
+        le.rss_mb = old_rss
+    return slow == (1, "overload") and recovered[0] == 0, f"slow={slow}; recovered={recovered}"
+
+
+def ownership_order_read_is_nonblocking_and_never_overlaps():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    p.strict_ownership, p.open = True, {}
+    p._order_guard_snapshot, p._order_guard_future = (0.0, frozenset()), None
+    p._order_guard_next = p._order_guard_started = 0.0
+    p._order_guard_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    class Api:
+        def get(self, path):
+            calls.append(path)
+            started.set()
+            release.wait(2)
+            return {"code": 0, "data": {"orders": []}}
+    p.api = Api()
+    try:
+        begin = pt.time.monotonic()
+        p.schedule_order_guard()
+        started.wait(1)
+        for _ in range(20):
+            p.schedule_order_guard()
+            p.poll_order_guard()
+        elapsed = (pt.time.monotonic() - begin) * 1000
+        blocked = not p.order_guard_safe("NEXT-USDT")
+        release.set()
+        p._order_guard_future.result(timeout=2)
+        recovered = p.poll_order_guard() and p.order_guard_safe("NEXT-USDT")
+    finally:
+        release.set()
+        p._order_guard_pool.shutdown(wait=True)
+    return elapsed < 100 and len(calls) == 1 and blocked and recovered, f"{elapsed:.2f}ms, calls={len(calls)}, blocked while unknown={blocked}, recovered={recovered}"
+
+
+def stale_price_cannot_trigger_a_software_exit():
+    """A stale price is ignored; the same fresh price executes the Set's own stop."""
+    def run():
+        venue = _StubExchange(executed="1")
+        p, sym = _enter(venue)
+        p.control_orders = False
+        pos = p.open[sym]
+        p.px[sym] = pos.sl * 0.98
+        p.price_ts[sym] = pt.time.time() - pt.PRICE_STALE_S - 1
+        before = len(venue.posts)
+        p.manage()
+        held = sym in p.open and len(venue.posts) == before
+        p.price_ts[sym] = pt.time.time()
+        p.manage()
+        closed = sym not in p.open and len(venue.posts) > before
+        return held, closed
+    held, closed = _isolated(run)
+    return held and closed, f"stale held={held}; fresh stop closed={closed}"
+
+
+def stale_price_does_not_replace_exchange_controls():
+    """Existing exchange controls stay untouched when the current market price is stale."""
+    p = _bare_pulse()
+    pos = pt.Position(symbol="A-USDT", side="LONG", qty=1, entry=100, opened_at=1, sl=99, tp=101, peak=100)
+    p.open, p.px, p.ctrl_skip, p.control_orders = {pos.symbol: pos}, {pos.symbol: 100}, {}, True
+    p.missing_controls = lambda pos: False
+    p.controls_illegal = lambda pos: True
+    replaced = []
+    p.ensure_controls = lambda pos: replaced.append(pos.symbol)
+    p.price_ts[pos.symbol] = pt.time.time() - pt.PRICE_STALE_S - 1
+    p.priority_controls()
+    stale_writes = len(replaced)
+    p.price_ts[pos.symbol] = pt.time.time()
+    p.priority_controls()
+    return stale_writes == 0 and replaced == [pos.symbol], f"stale writes={stale_writes}; fresh checks={len(replaced)}"
+
+
+def slow_cycles_do_not_force_stats_every_cycle():
+    """A CPU-bound overrun is reported as such and does not defeat the stats write throttle."""
+    class NoThread:
+        def __init__(self, *a, **kw): pass
+        def start(self): pass
+    def run():
+        p = pt.Pulse(_StubExchange(), _offline_contracts())
+        p.pool = types.SimpleNamespace(submit=lambda *a, **k: None)
+        for name in ("refresh_balance", "refresh_fees", "refresh_tickers", "refresh_klines", "process_indications",
+                     "update_regime", "sync_own_fills", "reconcile_restored_book", "adopt_exchange_positions",
+                     "list_orders", "priority_controls", "_load_lev_file", "run_self_tests"):
+            setattr(p, name, lambda *a, **k: None)
+        writes, cycles = [], []
+        p.stats = lambda: (writes.append(1) or {})
+        p.write_results_export = lambda: None
+        p._stats_force, p._stats_ts = False, 0.0
+        def one():
+            if len(cycles) == 3:
+                raise SystemExit()
+            cycles.append(1)
+            p.did_io = False
+            pt.time.sleep(.12)
+        p._one_cycle = one
+        old_threads, old_scan, old_notify = pt.threading, pt.SCAN_S, pt.sd_notify
+        pt.threading, pt.SCAN_S, pt.sd_notify = types.SimpleNamespace(Thread=NoThread), .1, lambda *a: None
+        try:
+            try: p.run()
+            except SystemExit: pass
+        finally:
+            pt.threading, pt.SCAN_S, pt.sd_notify = old_threads, old_scan, old_notify
+        return len(writes), p.last_scan_io, p.cycle_overrun, p.last_cycle_ms
+    writes, io, overrun, elapsed = _isolated(run)
+    ok = writes == 1 and not io and overrun and elapsed >= 100
+    return ok, f"stats writes={writes}, mislabelled I/O={io}, overrun={overrun}, total={elapsed:.1f}ms"
 
 
 def failed_close_keeps_the_position_protected():
@@ -500,7 +1140,9 @@ def lost_entry_answer_is_remembered_for_adoption():
         p = pt.Pulse(_LostAnswerVenue(), contracts)
         p.boot_ts = 0.0
         p.px[sym] = 100.0
+        p.price_ts[sym] = pt.time.time()
         p.available = 50.0
+        p.last_bal = pt.time.time()
         p.halted = False
         p.entry_sense = lambda *a, **k: None
         p.sets.use_historic_gate = False  # exercise venue recovery independently of Set validation
@@ -691,7 +1333,9 @@ def a_set_fill_keeps_the_sets_own_sl_and_tp():
         p = pt.Pulse(venue, contracts)
         p.boot_ts = 0.0
         p.px[sym] = 100.0
+        p.price_ts[sym] = pt.time.time()
         p.available = 50.0
+        p.last_bal = pt.time.time()
         p.halted = False
         p.entry_sense = lambda *a, **k: None
         st = types.SimpleNamespace(id="indications:1m:sl0.50:st2", idx=3, pack="indications", kind="base", step=2, sl_ratio=0.5,
@@ -1103,7 +1747,9 @@ def a_set_position_gets_no_add_on_lane():
             p = pt.Pulse(_StubExchange(executed="1", requested="1"), contracts)
             p.boot_ts = 0.0
             p.px[sym] = 100.0
+            p.price_ts[sym] = pt.time.time()
             p.available = 50.0
+            p.last_bal = pt.time.time()
             p.halted = False
             p.entry_sense = lambda *a, **k: None
             st = p.sets.by_idx[0] if (with_set and p.sets.by_idx) else None
@@ -1238,6 +1884,200 @@ def no_entry_on_a_symbol_that_failed_the_data_check():
     bad = p.entry_sense("BAD-USDT", 1, "gen:x", 0.9, "general")
     good = p.entry_sense("OK-USDT", 1, "gen:x", 0.9, "general")
     return bad == "data-quality" and good != "data-quality", f"failed symbol -> {bad}; clean symbol -> {good}"
+
+
+def short_history_cannot_pass_symbol_quality():
+    """A symbol absent from the quality map can still be missing the minimum history."""
+    b = pt.SetBook()
+    b.min_bars = 20
+    b.bars["TEST-USDT"] = [[100.0, 101.0, 99.0, 100.0, 1.0] for _ in range(19)]
+    short = not b.symbol_ok("TEST-USDT")
+    b.bars["TEST-USDT"].append([100.0, 101.0, 99.0, 100.0, 1.0])
+    enough = b.symbol_ok("TEST-USDT")
+    b.bars["TEST-USDT"][-1] = [100.0, 300.0, 99.0, 300.0, 1.0]
+    spike = not b.symbol_ok("TEST-USDT") and b.quality.get("TEST-USDT") == "spike"
+    return short and enough and spike, f"short blocked={short}; sufficient bars={enough}; spike blocked={spike}"
+
+
+def automatic_memory_budget_responds_to_headroom():
+    """The adaptive budget leaves system reserve, shrinks under pressure and honors its cap."""
+    import load_engine as le
+    governor = le.LoadGovernor()
+    governor.configure({"rssAutoLimit": True, "rssSoftMb": 768, "rssHardMb": 1536})
+    old = le.system_memory_mb
+    try:
+        le.system_memory_mb = lambda: (8192.0, 4000.0)
+        governor.observe(n_sym=30, rss_mb=500.0)
+        rich = (governor.soft_limit(30), governor.hard_limit(30), governor.level)
+        governor._auto_memory_at = 0
+        le.system_memory_mb = lambda: (8192.0, 256.0)
+        governor.observe(n_sym=30, rss_mb=500.0)
+        tight = (governor.soft_limit(30), governor.hard_limit(30), governor.level)
+        governor._auto_memory_at = 0
+        le.system_memory_mb = lambda: None
+        governor.observe(n_sym=30, rss_mb=500.0)
+        fallback = (governor.soft_limit(30), governor.hard_limit(30))
+    finally:
+        le.system_memory_mb = old
+    ok = (500 < rich[1] <= 8192 * .4 and tight[1] == 500 and tight[0] < tight[1]
+          and tight[2] in ("overload", "critical") and fallback == (768, 1536))
+    return ok, f"ample headroom={rich}; constrained headroom={tight}; no telemetry fallback={fallback}"
+
+
+def set_control_fallback_never_moves_inside_lane():
+    """A rejected Set control cannot fall back to a closer stop or target."""
+    p = _bare_pulse()
+    sym = "T-USDT"
+    p.px, p.last_px = {sym: 100.0}, {sym: 100.0}
+    p.contracts = {sym: pt.Contract(symbol=sym, min_qty=.001, step=.001, qprec=3, pprec=2, min_usdt=1, max_lev=50)}
+    p.cid = lambda *a, **k: "test-cid"
+    class Refuse:
+        path_cd = {}
+        def __init__(self): self.prices = []
+        def post(self, path, body):
+            self.prices.append(float(body['stopPrice']))
+            return {"code": 100400, "msg": "invalid trigger price"}
+    results = []
+    for side, kind, intended in (("LONG", "sl", 95.0), ("LONG", "tp", 105.0),
+                                 ("SHORT", "sl", 105.0), ("SHORT", "tp", 95.0)):
+        p.api, p.ctrl_skip = Refuse(), {}
+        pos = pt.Position(symbol=sym, side=side, qty=1, entry=100, opened_at=1,
+                          sl=95 if side == "LONG" else 105, tp=105 if side == "LONG" else 95,
+                          peak=100, set_id="general:1m:sl1.00:st8")
+        oid = p.place_ctrl(pos, "sec-" + kind, intended)
+        prices = p.api.prices
+        safe = all((v <= intended if side == "LONG" else v >= intended) if kind == "sl"
+                   else (v >= intended if side == "LONG" else v <= intended) for v in prices)
+        results.append((side, kind, prices, not oid and bool(prices) and safe))
+    return all(r[-1] for r in results), f"fallbacks={results}"
+
+
+def control_pair_records_the_accepted_fallback_price():
+    p = _bare_pulse()
+    p.ctrl_skip, p._oo_cache = {}, {}
+    p.api = types.SimpleNamespace(batch_place=lambda orders: {"code": 1}, path_cd={})
+    p.desired_sl_tp = lambda pos: (95.0, 105.0, 95.0, 105.0)
+    p._ctrl_body = lambda pos, kind, price: {"type": kind, "stopPrice": price}
+    p.cid = lambda *a, **k: "test-cid"
+    def accepted(pos, kind, price):
+        if kind == "sec-sl": pos.sec_sl = 94.0
+        else: pos.sec_tp = 106.0
+        return "123" if kind == "sec-sl" else "456"
+    p.place_ctrl = accepted
+    pos = pt.Position(symbol="T-USDT", side="LONG", qty=1, entry=100, opened_at=1, sl=95, tp=105, peak=100)
+    p.place_ctrl_pair(pos)
+    ok = (pos.sl, pos.tp, pos.sec_sl, pos.sec_tp) == (94.0, 106.0, 94.0, 106.0) and pos.controls_ok
+    return ok, f"recorded SL/TP=({pos.sl}, {pos.tp}); controls={pos.controls_ok}"
+
+
+def positions_read_is_nonblocking_and_rejects_stale_book():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def __init__(self): self.calls = 0
+        def get(self, path):
+            self.calls += 1
+            entered.set()
+            release.wait(2)
+            return {"code": 0, "data": []}
+    p.api, p.open = Slow(), {}
+    p._recon_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    p._recon_future = None
+    applied = []
+    p.adopt_exchange_positions = lambda reply: applied.append(reply)
+    try:
+        p.schedule_position_read()
+        entered.wait(1)
+        t0 = pt.time.perf_counter()
+        for _ in range(20):
+            p.schedule_position_read()
+            p.poll_position_read()
+        elapsed = pt.time.perf_counter() - t0
+        calls = p.api.calls
+        release.set()
+        p._recon_future.result(timeout=2)
+        fresh = p.poll_position_read() and len(applied) == 1
+        p.schedule_position_read()
+        p._recon_future.result(timeout=2)
+        p.open["T-USDT"] = pt.Position(symbol="T-USDT", side="LONG", qty=1, entry=100,
+                                      opened_at=1, sl=95, tp=105, peak=100)
+        discarded = not p.poll_position_read() and len(applied) == 1
+    finally:
+        release.set()
+        p._recon_pool.shutdown(wait=True)
+    ok = elapsed < 0.1 and calls == 1 and fresh and discarded
+    return ok, f"blocked read poll={elapsed*1000:.2f}ms calls={calls}; fresh applied={fresh}; changed-book snapshot discarded={discarded}"
+
+
+def fill_history_read_is_nonblocking_and_discards_stale_results():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def __init__(self): self.calls = 0
+        def get(self, path, extra=None):
+            self.calls += 1
+            entered.set()
+            release.wait(2)
+            return {"code": 0, "data": {"orders": [{"orderId": "1"}]}}
+    p.api = Slow()
+    p._fill_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    p._fill_future = None
+    applied = []
+    p.sync_own_fills = lambda rows: applied.append(rows)
+    try:
+        p.schedule_fill_read()
+        entered.wait(1)
+        t0 = pt.time.perf_counter()
+        for _ in range(20):
+            p.schedule_fill_read()
+            p.poll_fill_read()
+        elapsed, calls = pt.time.perf_counter() - t0, p.api.calls
+        release.set()
+        p._fill_future.result(timeout=2)
+        fresh = p.poll_fill_read() and len(applied) == 1
+        p.schedule_fill_read()
+        p._fill_future.result(timeout=2)
+        p._fill_started -= 13
+        discarded = not p.poll_fill_read() and len(applied) == 1
+    finally:
+        release.set()
+        p._fill_pool.shutdown(wait=True)
+    ok = elapsed < 0.1 and calls == 1 and fresh and discarded
+    return ok, f"blocked read poll={elapsed*1000:.2f}ms calls={calls}; fresh applied={fresh}; stale discarded={discarded}"
+
+
+def leverage_sweeps_do_not_overlap():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    p.pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    p._lev_guard, p._lev_future = threading.Lock(), None
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def slow():
+        calls.append(1)
+        entered.set()
+        release.wait(2)
+    p.set_leverage = slow
+    try:
+        first = p.schedule_leverage_update()
+        entered.wait(1)
+        t0 = pt.time.perf_counter()
+        overlaps = sum(p.schedule_leverage_update() for _ in range(20))
+        elapsed = pt.time.perf_counter() - t0
+        release.set()
+        p._lev_future.result(timeout=2)
+        next_scheduled = p.schedule_leverage_update()
+        p._lev_future.result(timeout=2)
+    finally:
+        release.set()
+        p.pool.shutdown(wait=True)
+    ok = first and overlaps == 0 and next_scheduled and len(calls) == 2 and elapsed < .1
+    return ok, f"overlapping sweeps={overlaps}, next scheduled={next_scheduled}, scheduler={elapsed*1000:.2f}ms"
 
 
 def _signal_book():
@@ -1390,6 +2230,7 @@ def entry_does_not_open_when_the_set_disappears_after_sense():
         p = pt.Pulse(venue, {sym: contract})
         p.boot_ts, p.available, p.halted = 0.0, 50.0, False
         p.px[sym] = 100.0
+        p.price_ts[sym] = pt.time.time()
         p.entry_sense = lambda *args, **kwargs: None
         p.sets.pick_any = lambda _pack, **kw: None
         p.place(sym, 1, "set:indications:signal", .8)
@@ -1638,7 +2479,9 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
                 os.remove(pt.OPEN_PATH)
             p = pt.Pulse(_StubExchange(executed="1", requested="1"), contracts)
             p.boot_ts, p.available, p.halted = 0.0, 50.0, False
+            p.last_bal = pt.time.time()
             p.px[sym] = 100.0
+            p.price_ts[sym] = pt.time.time()
             p.entry_sense = lambda *a, **k: None
             st = p.sets.by_idx[0]
             p.sets.pick_any = lambda pack, _st=st, **kw: _st
@@ -1668,6 +2511,18 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 
 
 CHECKS = [
+    ("trader.stale-or-failed-balance-blocks-entries", stale_or_failed_balance_blocks_entries),
+    ("trader.websocket-last-price-follows-declines", websocket_last_price_follows_declines),
+    ("trader.ticker-fallback-nonblocking", ticker_fallback_is_nonblocking_and_preserves_newer_tick),
+    ("trader.entry-rechecks-price-after-delay", entry_rechecks_price_after_network_delay),
+    ("trader.cycle-continues-during-ticker-read", cycles_keep_managing_when_ticker_read_is_slow),
+    ("trader.faster-scan-keeps-poll-frequency", faster_scan_keeps_periodic_work_frequency),
+    ("trader.slow-warm-feed-does-not-block-balance", slow_warm_feed_does_not_block_balance),
+    ("trader.requested-local-configuration-reaches-engine", requested_local_configuration_reaches_engine),
+    ("trader.extra-source-switch-controls-external-reads", extra_source_switch_controls_all_external_reads),
+    ("trader.stale-price-cannot-trigger-software-exit", stale_price_cannot_trigger_a_software_exit),
+    ("trader.stale-price-does-not-replace-controls", stale_price_does_not_replace_exchange_controls),
+    ("trader.slow-cycle-does-not-force-stats", slow_cycles_do_not_force_stats_every_cycle),
     ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
     ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),
     ("trader.completed-minutes-do-not-bridge-gaps-or-bad-rows", completed_minutes_do_not_bridge_gaps_or_bad_rows),
@@ -1688,6 +2543,7 @@ CHECKS = [
     ("trader.no-entry-on-a-failed-data-check", no_entry_on_a_symbol_that_failed_the_data_check),
     ("trader.history-thread-fetches-at-start", history_thread_fetches_at_start_and_never_replays_padding),
     ("trader.restored-book-drop-needs-two-reads", restored_book_drops_a_position_only_when_two_reads_agree),
+    ("trader.flat-read-is-direction-aware", exchange_flat_requires_a_valid_direction_aware_snapshot),
     ("trader.history-kept-offline-and-topped-up", history_thread_keeps_real_history_and_tops_up_a_partial_one),
     ("trader.departed-symbol-leaves-set-history", a_symbol_that_left_the_universe_leaves_the_set_history),
     ("trader.credentials-from-private-file", credentials_come_from_a_private_file_without_redis),
@@ -1708,6 +2564,7 @@ CHECKS = [
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
     ("trader.symbol-cap-applies-under-a-wildcard", symbol_cap_applies_under_a_wildcard),
+    ("trader.symbol-rotation-interval", symbol_rotation_respects_configured_interval),
     ("trader.partial-close-closes-the-remainder", partial_close_fill_closes_the_remainder),
     ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),
     ("trader.partial-fill-sized-from-executed", partial_fill_is_sized_from_the_executed_quantity),
@@ -1718,6 +2575,24 @@ CHECKS = [
     ("trader.overlay-reads-leverage-settings", overlay_reads_leverage_settings),
     ("trader.max-toggle-decides-the-target", max_toggle_decides_the_target),
     ("trader.order-leverage-follows-the-target", order_leverage_follows_the_target),
+    ("trader.leverage-requires-account-confirmation", leverage_requires_account_confirmation),
+    ("trader.x01-leverage-preserves-margin-type", x01_max_leverage_does_not_change_margin_type),
+    ("trader.minimum-order-retry-respects-limits", minimum_order_rejection_cannot_bypass_entry_limits),
+    ("trader.minimum-order-retry-keeps-client-id", retried_minimum_order_keeps_its_actual_client_id),
+    ("trader.short-history-blocks-symbol", short_history_cannot_pass_symbol_quality),
+    ("trader.uncertain-entry-blocks-retry", uncertain_entry_blocks_retries_for_the_symbol),
+    ("trader.uncertain-entry-survives-restart", uncertain_entry_survives_restart),
+    ("trader.intent-write-failure-blocks-order", failed_intent_persistence_blocks_order),
+    ("trader.uncertain-adoption-requires-matched-fill", uncertain_adoption_requires_matching_fill),
+    ("trader.uncertain-entry-recovery", uncertain_entry_recovery_uses_its_own_fill),
+    ("trader.automatic-memory-budget", automatic_memory_budget_responds_to_headroom),
+    ("trader.budget-counts-only-completed-cycles", background_budget_reads_do_not_repeat_a_cycle_overrun),
+    ("trader.ownership-orders-nonblocking", ownership_order_read_is_nonblocking_and_never_overlaps),
+    ("trader.set-control-fallback-stays-outside", set_control_fallback_never_moves_inside_lane),
+    ("trader.control-pair-records-accepted-price", control_pair_records_the_accepted_fallback_price),
+    ("trader.positions-read-nonblocking", positions_read_is_nonblocking_and_rejects_stale_book),
+    ("trader.fill-history-read-nonblocking", fill_history_read_is_nonblocking_and_discards_stale_results),
+    ("trader.leverage-sweeps-do-not-overlap", leverage_sweeps_do_not_overlap),
     ("trader.padding-is-not-readiness", padding_does_not_count_as_readiness),
     ("trader.only-main-loop-pings-watchdog", only_the_main_loop_pings_the_watchdog),
 ]
