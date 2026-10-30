@@ -43,7 +43,7 @@ class FeeSchedule:
             data = reply.get("data") or {}
             row = data.get("commission") or data
             taker, maker = fee_rate(row.get("takerCommissionRate")), fee_rate(row.get("makerCommissionRate"))
-            if reply.get("code") != 0 or taker is None or maker is None:
+            if number(reply.get("code")) != 0 or taker is None or maker is None:
                 self.error = f"commission rate unavailable ({reply.get('code')})"
                 self.retry_at[symbol] = now + 60
                 return False
@@ -94,7 +94,8 @@ def fill_fee(data, qty, price, maker, taker, fallback_pct):
     rate = maker if is_maker and maker is not None else taker
     if rate is not None:
         return qty * price * rate, "maker-rate" if is_maker and maker is not None else "taker-rate"
-    # Legacy rows retain the configured allowance until a venue rate is known.
+    # The fallback is a fee-only round-trip estimate. Fill prices already
+    # incorporate execution slippage, so it must not include the paper allowance.
     return qty * price * fallback_pct / 200, "configured-estimate"
 
 

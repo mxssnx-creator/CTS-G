@@ -211,8 +211,9 @@ def block_parent_unchanged_end_to_end():
         p.close_pos(pos, 101, "tp", exchange=False)
         own = p.sets.sets[st.id].live[-1]
         rec = p.closed[-1]
-        base_cash = (101 - before[0]) * before[1] - before[0] * before[1] * .0012
-        add_cash = sum((101 - f["price"]) * f["qty"] - f["price"] * f["qty"] * .0012 for f in rec.block_fills)
+        fee_rate = max(0.0, p.overlay["configuredPositionCostPct"] - p.slippage_allowance_pct) / 200
+        base_cash = (101 - before[0]) * before[1] - (before[0] + 101) * before[1] * fee_rate
+        add_cash = sum((101 - f["price"]) * f["qty"] - (f["price"] + 101) * f["qty"] * fee_rate for f in rec.block_fills)
         ok = isolated and grew and before == after and recovered.block_fills == pos.block_fills and abs(own["pnl_pct"] - .01) < 1e-12 and abs(rec.pnl - base_cash - add_cash) < 1e-10
         return ok, f"added={grew}, lane isolated={isolated}, parent unchanged={before == after}, base return={own['pnl_pct']:.6f}, aggregate cash error={rec.pnl-base_cash-add_cash:.2g}"
 

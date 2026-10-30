@@ -70,6 +70,59 @@ def rate_lookup_and_bybit_translation():
     return ok, f"one cached read; zero maker fee preserved; Bybit request={seen[0][0][1:]}"
 
 
+def selected_fees_exclude_inactive_symbols():
+    import pulse_trader as pt
+    original = pt.SYMBOLS
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.contracts = {"ACTIVE": types.SimpleNamespace(maker_fee=.0002, taker_fee=.001),
+                   "OTHER": types.SimpleNamespace(maker_fee=.0002, taker_fee=.03)}
+    p.fee_schedule = FeeSchedule()
+    p.overlay = {"configuredPositionCostPct": .12}
+    p.position_cost_pct, p.slippage_allowance_pct = .12, .02
+    p._fee_config_dirty = False
+    p.api = types.SimpleNamespace(get=lambda *_: {"code": "0", "data": {"commission":
+        {"makerCommissionRate": "0.0002", "takerCommissionRate": "0.001"}}})
+    try:
+        pt.SYMBOLS = ["ACTIVE"]
+        p.refresh_fees()
+        paper = p.fee_schedule.paper_budget(.12, .02, p.active_fee_contracts(), 0)
+        fee, source = p.fill_cost({}, 2, 100, "UNKNOWN")
+        pos = types.SimpleNamespace(fee_source="reported-fee")
+        p.note_fee_source(pos, "taker-rate")
+        rate_source = pos.fee_source
+        p.note_fee_source(pos, "configured-estimate")
+        p.note_fee_source(pos, "reported-fee")
+        ok = (abs(paper - .22) < 1e-12 and p._fee_config_dirty
+              and p.fee_schedule.rates("ACTIVE")[2] == "account-rate"
+              and abs(fee - .1) < 1e-12 and source == "configured-estimate"
+              and rate_source == "exchange-rate-estimate" and pos.fee_source == "configured-estimate")
+    finally:
+        pt.SYMBOLS = original
+    return ok, f"active-only paper={paper}; unknown-symbol fee={fee}; source={source}"
+
+
+def fallback_fees_do_not_charge_slippage_twice():
+    from lanes import _Env, SYM
+    outcomes = []
+    for direction in (1, -1):
+        with _Env() as env:
+            p = env.p
+            p.open.clear(); p.last_entry_ts = 0; p.cooldown = {}; p.equity = 1000
+            p.px[SYM] = 100
+            env.venue.price = lambda: 100.02 if direction > 0 else 99.98
+            p.place(SYM, direction, "gen:fee-test", .9)
+            pos = p.open[SYM]
+            p.px[SYM] = 101 if direction > 0 else 99
+            env.venue.price = lambda: 100.98 if direction > 0 else 99.02
+            p.close_pos(pos, p.px[SYM], "time")
+            rec = p.closed[-1]
+            fee_rate = max(0, p.overlay["configuredPositionCostPct"] - p.slippage_allowance_pct) / 200
+            expected = rec.qty * (rec.exit - rec.entry) * direction - rec.qty * (rec.entry + rec.exit) * fee_rate
+            outcomes.append(abs(rec.pnl - expected) < 1e-10 and rec.fee_source == "configured-estimate"
+                            and rec.net_pnl_pct is not None and rec.fees_usdt is not None)
+    return all(outcomes), f"long and short configured-fee estimates with slipped fills={outcomes}"
+
+
 def pulse_fill_to_stats():
     from lanes import _Env, SYM
     import pulse_trader as pt
@@ -290,7 +343,8 @@ def restart_does_not_seed_foreign_exit_lanes():
 
 CHECKS = [("cost-accounting." + fn.__name__.replace("_", "-"), fn) for fn in (
     fee_and_slippage_oracle, net_result_survives_consumers_and_cost_changes,
-    rate_lookup_and_bybit_translation, pulse_fill_to_stats, partial_close_retry_and_unfilled_close,
+    rate_lookup_and_bybit_translation, selected_fees_exclude_inactive_symbols,
+    fallback_fees_do_not_charge_slippage_twice, pulse_fill_to_stats, partial_close_retry_and_unfilled_close,
     execution_outcomes_survive_caps_and_emergency_closes, unattributed_aggregate_fee_does_not_score_base,
     execution_scope_counts_survive_restart, acknowledged_close_waits_for_the_same_order,
     pending_close_survives_position_refresh_and_restart, pending_partial_is_settled_once_then_manager_closes_remainder,

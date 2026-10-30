@@ -277,7 +277,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="c958c1a3360e9edfb0cf157174a4e2dd55f01bb5"
+  local pt_want="4ee4c72c89808d3c83a7336af5ed7b5d61f43040"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
@@ -291,7 +291,7 @@ restore_pulse_trader() {
   if curl -fsSL -m 90 -o "$scratch/server/pulse/pulse_trader.py" \
       "https://raw.githubusercontent.com/mxssnx-creator/CTS-G/2b3432d7b3/server/pulse/pulse_trader.py" \
     && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_base" ]] \
-    && git -C "$scratch" apply "$pt_patch" \
+    && git -C "$scratch" apply --unidiff-zero "$pt_patch" \
     && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_want" ]]; then
     cp -a "$scratch/server/pulse/pulse_trader.py" "$pt"
     rm -rf "$scratch"
