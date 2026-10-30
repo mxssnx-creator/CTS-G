@@ -23,6 +23,14 @@ The candidate constructs stage membership using earlier history, then limits cur
 
 Targeted stage tests cover both false admission and false rejection at a lookback boundary, a full replay across expiry, window-scoped short-window voting against an independently calculated oracle, cost and lane independence, and expiry of hold-candidate evidence. The original 3,192-Set historical replay and the longer-context variant each completed the simulator's sampled 60/60 engine/gate consistency check. Both produced zero modeled closes and zero open positions. The candle source was the locally available archived feed identified by SHA-256 `e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03`; the feed and locally generated shadow caches are not included. Run `trade_sim.py` only with a trusted cache generated for this exact grid and data.
 
+The 3,192-Set grid comes from separate draft #123 at `7db0ea9724fe5984efb4726c6e9fababa946e44f`; it is not present on the Stable-02-01 base of this branch. For this audit the candidate's `set_engine.py` and `stage_eval.py` changes were applied to that reference tree. After generating a fresh shadow cache and reference JSON for the exact grid with `trade_sim.py` (`holdEnabled=false`, `histLookbackBars=720`, `histLookbackAuto=false`, `positionCostPct=0.15`, `extraIndicators=[donchian_break,rsi2_reversion]`, `--last-hours 12 --eval-every 3600 --refresh 0`), copy `scripts/stage_context_audit.py` into that tree and run:
+
+```bash
+python scripts/stage_context_audit.py --data DATA_DIR --cache TRUSTED_SHADOW.pkl --reference REFERENCE.json --out STAGES.json
+```
+
+The audit records input-file checksums and rejects mismatched symbol counts and the settings recorded by the reference. It cannot verify every setting or prove that an equal-count cache belongs to the data or grid; generate it fresh from trusted inputs. Its 12h results matched the earlier independent recount.
+
 ## Release blockers
 
 - The extra replay context increases work. On one BCH symbol, 3,192 Sets and holds off, a cold paper replay took 2.78 s before versus 8.60 s with context; memory peaks were approximately 60 MiB versus 79 MiB. A separate one-symbol, 67-Set automatic-hold trial took 2.04 s cold / 0.20 s warm before versus 8.25 s cold / 0.80 s warm with context, with approximate peaks 28 MiB / 46 MiB. These exploratory, concurrently run measurements are not 50-symbol or live-cycle benchmarks. A four-symbol synthetic paging/startup test took 66 s. The requested sub-500-ms running-cycle target is not demonstrated.
