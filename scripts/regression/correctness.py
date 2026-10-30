@@ -387,6 +387,7 @@ def strict_foreign_open_orders_block_entry_and_leverage():
     with _Env() as env:
         p = env.p
         p.strict_ownership, p.recon_ok = True, True
+        p._order_guard_snapshot = (time.monotonic(), frozenset({"OTHER-USDT"}))
         p._oo_cache = {}
         rows = [{"symbol": "OTHER-USDT", "clientOrderId": "another-system", "type": "LIMIT"}]
         p.api.get = lambda path, extra=None: {"code": 0, "data": {"orders": rows}}
@@ -398,11 +399,38 @@ def strict_foreign_open_orders_block_entry_and_leverage():
         return ok, f"foreign symbol held={ok}, exchange posts={len(env.venue.posts)-before}"
 
 
+def strict_order_guard_requires_fresh_valid_snapshot():
+    from concurrent.futures import Future
+    from lanes import _Env
+    with _Env() as env:
+        p = env.p
+        p.strict_ownership, p.recon_ok = True, True
+        before = len(env.venue.posts)
+        p._order_guard_snapshot = (0.0, frozenset())
+        p.place("NEXT-USDT", 1, "gen:x", 1.0)
+        unknown_blocked = not p.order_guard_safe("NEXT-USDT") and p.ensure_max_leverage("NEXT-USDT", force=True) == 0 and len(env.venue.posts) == before
+        def finish(reply, age=0.0):
+            p._order_guard_started = time.monotonic() - age
+            p._order_guard_future = Future()
+            p._order_guard_future.set_result(reply)
+            return p.poll_order_guard()
+        valid = finish({"code": 0, "data": {"orders": [{"symbol": "FOREIGN-USDT", "clientOrderId": "external"}]}})
+        selective = p.order_guard_safe("NEXT-USDT") and not p.order_guard_safe("FOREIGN-USDT")
+        failed = not finish({"code": -1, "msg": "unavailable"}) and not p.order_guard_safe()
+        malformed = not finish({"code": 0, "data": {}}) and not p.order_guard_safe()
+        stale = not finish({"code": 0, "data": {"orders": []}}, 13.0) and not p.order_guard_safe()
+        empty_with_position = not finish({"code": 0, "data": {"orders": []}}) and not p.order_guard_safe()
+        p.open = {}
+        recovered = finish({"code": 0, "data": {"orders": []}}) and p.order_guard_safe("NEXT-USDT")
+        return all((unknown_blocked, valid, selective, failed, malformed, stale, empty_with_position, recovered)), f"unknown={unknown_blocked}, foreign selective={selective}, failed={failed}, malformed={malformed}, stale={stale}, empty-held={empty_with_position}, recovered={recovered}"
+
+
 def strict_control_cancellation_is_side_and_tag_scoped():
     from lanes import _Env, SYM
     with _Env() as env:
         p, pos = env.p, env.pos
         p.strict_ownership = True
+        p._order_guard_snapshot = (time.monotonic(), frozenset())
         p._ownership_verified.add(SYM)
         own = p.cid("u", pos=pos)
         rows = [{"symbol": SYM, "positionSide": "LONG", "type": "STOP_MARKET", "orderId": "1", "clientOrderId": own},
@@ -522,6 +550,7 @@ def manually_closed_position_is_quarantined_without_blocking_other_symbols():
     with _Env() as env:
         p, pos = env.p, env.pos
         p.strict_ownership = True
+        p._order_guard_snapshot = (time.monotonic(), frozenset())
         p._ownership_verified.add(SYM)
         p.our_orders = lambda *a, **k: []
         p._exchange_flat = lambda held: True
@@ -555,6 +584,7 @@ CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     block_risk_budget_both_sides_and_invalid_stop, block_pending_recovery_requires_matching_order_and_position,
     strict_ownership_blocks_foreign_and_aggregate_changes, strict_leverage_never_changes_foreign_or_quarantined_symbols,
     strict_foreign_open_orders_block_entry_and_leverage,
+    strict_order_guard_requires_fresh_valid_snapshot,
     strict_control_cancellation_is_side_and_tag_scoped,
     strict_controls_are_quantity_bound_and_unsafe_existing_controls_are_held, strict_block_add_waits_for_safe_control_resize,
     strict_close_does_not_fallback_to_entire_position, strict_overall_control_fill_is_counted_only_when_complete,

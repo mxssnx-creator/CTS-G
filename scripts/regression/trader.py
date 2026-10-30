@@ -998,6 +998,41 @@ def background_budget_reads_do_not_repeat_a_cycle_overrun():
     return slow == (1, "overload") and recovered[0] == 0, f"slow={slow}; recovered={recovered}"
 
 
+def ownership_order_read_is_nonblocking_and_never_overlaps():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    p.strict_ownership, p.open = True, {}
+    p._order_guard_snapshot, p._order_guard_future = (0.0, frozenset()), None
+    p._order_guard_next = p._order_guard_started = 0.0
+    p._order_guard_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    class Api:
+        def get(self, path):
+            calls.append(path)
+            started.set()
+            release.wait(2)
+            return {"code": 0, "data": {"orders": []}}
+    p.api = Api()
+    try:
+        begin = pt.time.monotonic()
+        p.schedule_order_guard()
+        started.wait(1)
+        for _ in range(20):
+            p.schedule_order_guard()
+            p.poll_order_guard()
+        elapsed = (pt.time.monotonic() - begin) * 1000
+        blocked = not p.order_guard_safe("NEXT-USDT")
+        release.set()
+        p._order_guard_future.result(timeout=2)
+        recovered = p.poll_order_guard() and p.order_guard_safe("NEXT-USDT")
+    finally:
+        release.set()
+        p._order_guard_pool.shutdown(wait=True)
+    return elapsed < 100 and len(calls) == 1 and blocked and recovered, f"{elapsed:.2f}ms, calls={len(calls)}, blocked while unknown={blocked}, recovered={recovered}"
+
+
 def stale_price_cannot_trigger_a_software_exit():
     """A stale price is ignored; the same fresh price executes the Set's own stop."""
     def run():
@@ -2552,6 +2587,7 @@ CHECKS = [
     ("trader.uncertain-entry-recovery", uncertain_entry_recovery_uses_its_own_fill),
     ("trader.automatic-memory-budget", automatic_memory_budget_responds_to_headroom),
     ("trader.budget-counts-only-completed-cycles", background_budget_reads_do_not_repeat_a_cycle_overrun),
+    ("trader.ownership-orders-nonblocking", ownership_order_read_is_nonblocking_and_never_overlaps),
     ("trader.set-control-fallback-stays-outside", set_control_fallback_never_moves_inside_lane),
     ("trader.control-pair-records-accepted-price", control_pair_records_the_accepted_fallback_price),
     ("trader.positions-read-nonblocking", positions_read_is_nonblocking_and_rejects_stale_book),

@@ -783,6 +783,11 @@ class Pulse:
         self._fill_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fill-read")
         self._fill_future = None
         self._fill_started = 0.0
+        self._order_guard_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ownership-orders")
+        self._order_guard_future = None
+        self._order_guard_started = 0.0
+        self._order_guard_next = 0.0
+        self._order_guard_snapshot = (0.0, frozenset())
         self.lev_map: Dict[str, int] = {}
         self.lev_max: Dict[str, int] = {}
         self.use_max_leverage = True
@@ -1033,6 +1038,8 @@ class Pulse:
     def leverage_symbol_safe(self, symbol: str) -> bool:
         if not getattr(self, "strict_ownership", False):
             return True
+        if not self.order_guard_safe(symbol):
+            return False
         if (not getattr(self, "recon_ok", False) or symbol in getattr(self, "foreign_symbols", set())
                 or symbol in getattr(self, "foreign_order_symbols", set())):
             return False
@@ -2767,6 +2774,8 @@ class Pulse:
 
     def entries_blocked(self) -> bool:
         now = time.time()
+        if not self.order_guard_safe():
+            return True
         if getattr(self, "intent_state_bad", False) or getattr(self, "external_close_state_bad", False):
             return True
         if getattr(self, "recon_ok", True) is False:
@@ -3368,6 +3377,8 @@ class Pulse:
 
     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
         if self.entries_blocked():
+            return
+        if not self.order_guard_safe(sym):
             return
         if sym in getattr(self, "foreign_symbols", set()) or sym in getattr(self, "foreign_order_symbols", set()):
             return
@@ -5724,6 +5735,49 @@ class Pulse:
         unknown = tuple(sorted((str(k), float(v)) for k, v in (getattr(self, "unknown_entry", {}) or {}).items()))
         return positions, unknown
 
+    def order_guard_safe(self, symbol: str = "") -> bool:
+        """A recent, validated order snapshot is required before opening risk or changing leverage."""
+        if not getattr(self, "strict_ownership", False):
+            return True
+        stamp, foreign = getattr(self, "_order_guard_snapshot", (0.0, frozenset()))
+        age = time.monotonic() - stamp
+        return stamp > 0 and 0 <= age <= 15.0 and (not symbol or symbol not in foreign)
+
+    def schedule_order_guard(self) -> None:
+        if not getattr(self, "strict_ownership", False) or getattr(self, "_order_guard_future", None) is not None:
+            return
+        now = time.monotonic()
+        if now < self._order_guard_next:
+            return
+        self._order_guard_started = now
+        self._order_guard_next = now + 5.0
+        self._order_guard_future = self._order_guard_pool.submit(self.api.get, "/openApi/swap/v2/trade/openOrders")
+
+    def poll_order_guard(self) -> bool:
+        future = getattr(self, "_order_guard_future", None)
+        if future is None or not future.done():
+            return False
+        self._order_guard_future = None
+        started = self._order_guard_started
+        try:
+            reply = future.result()
+            if time.monotonic() - started > 12.0 or not isinstance(reply, dict) or not self.ok(reply):
+                raise ValueError("failed or stale order snapshot")
+            data = reply.get("data")
+            rows = data.get("orders") if isinstance(data, dict) else data
+            if not isinstance(rows, list) or any(not isinstance(row, dict) or not row.get("symbol") for row in rows):
+                raise ValueError("malformed order snapshot")
+            # Do not accept an unexpectedly empty snapshot while managing open
+            # positions; protective-order propagation can lag on this venue.
+            if not rows and self.open:
+                raise ValueError("empty order snapshot with open positions")
+            foreign = frozenset(str(row["symbol"]) for row in rows if not self.order_is_ours(row))
+        except Exception:
+            self._order_guard_snapshot = (0.0, frozenset())
+            return False
+        self._order_guard_snapshot = (started, foreign)
+        return True
+
     def schedule_position_read(self) -> None:
         """Fetch one positions snapshot off the cycle; never overlap this read."""
         if getattr(self, "_recon_future", None) is not None:
@@ -6578,7 +6632,10 @@ class Pulse:
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
             },
-            "recon": {"ok": self.recon_ok, "detail": self.recon_detail},
+            "recon": {"ok": self.recon_ok, "detail": self.recon_detail,
+                      "orderSnapshotFresh": self.order_guard_safe() if getattr(self, "strict_ownership", False) else None,
+                      "orderSnapshotRequired": bool(getattr(self, "strict_ownership", False)),
+                      "foreignOrderSymbols": len(getattr(self, "_order_guard_snapshot", (0.0, frozenset()))[1])},
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
             "symbols": len(SYMBOLS),
             "scan": {
@@ -7091,6 +7148,8 @@ class Pulse:
         self.cycle += 1
         self.did_io = False
         self._budget(count_cycle=True)
+        self.poll_order_guard()
+        self.schedule_order_guard()
         self.refresh_tickers(background=True)
         self.seed_px_bars()
         unprotected = self.priority_controls()
