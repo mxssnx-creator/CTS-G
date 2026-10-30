@@ -771,6 +771,8 @@ class Pulse:
         self.kline_ts_tf: Dict[str, Dict[str, float]] = {tf: {} for tf in TIMEFRAMES}
         self.kline_ts: Dict[str, float] = self.kline_ts_tf["1m"]
         self.pool = ThreadPoolExecutor(max_workers=KLINE_WORKERS)
+        self._lev_guard = threading.Lock()
+        self._lev_future = None
         self._ticker_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ticker-read")
         self._ticker_future = None
         self._ticker_started = 0.0
@@ -778,6 +780,9 @@ class Pulse:
         self._recon_future = None
         self._recon_started = 0.0
         self._recon_book = ()
+        self._fill_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fill-read")
+        self._fill_future = None
+        self._fill_started = 0.0
         self.lev_map: Dict[str, int] = {}
         self.lev_max: Dict[str, int] = {}
         self.use_max_leverage = True
@@ -1024,8 +1029,20 @@ class Pulse:
                 self.lev_map[str(k)] = n
                 self.lev_max.setdefault(str(k), n)
 
+    def leverage_symbol_safe(self, symbol: str) -> bool:
+        if not getattr(self, "strict_ownership", False):
+            return True
+        if not getattr(self, "recon_ok", False) or symbol in getattr(self, "foreign_symbols", set()):
+            return False
+        if any(str(k).startswith(symbol + ":") for k in (getattr(self, "external_closes", {}) or {})):
+            return False
+        pos = getattr(self, "open", {}).get(symbol)
+        return pos is None or self.ownership_safe(pos)
+
     def ensure_max_leverage(self, symbol: str, force: bool = False) -> int:
         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
+        if not self.leverage_symbol_safe(symbol):
+            return 0
         c = self.contracts.get(symbol)
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
         tgt = self.target_leverage(mx)
@@ -4599,7 +4616,7 @@ class Pulse:
         except Exception:
             pass
         if not initial:
-            self.pool.submit(self.set_leverage)
+            self.schedule_leverage_update()
         # CTS Block defaults, overlay wins
         b_en = ov.get("blockEnabled", cts.get("variantBlockEnabled", True))
         try:
@@ -5865,7 +5882,7 @@ class Pulse:
                 foreign.add(f"{sym}:{side}")
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
-            if live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
+            if not strict and live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
                 self.ensure_max_leverage(sym, force=True)
             try:
                 liq = float(p.get("liquidationPrice") or p.get("liqPrice") or p.get("avgLiquidationPrice") or 0)
@@ -6027,22 +6044,55 @@ class Pulse:
         )[:160]
         self.save_open_book()
 
-    def sync_own_fills(self) -> None:
-        """Pull FILLED orders with our tracking id. Ignore everything else. Feed Set live tape."""
-        self.did_io = True
+    def _fetch_own_fills(self) -> Optional[List[Dict[str, Any]]]:
+        """Read the bounded order history without mutating the position book."""
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
         data = r.get("data") or {}
         orders = data.get("orders") if isinstance(data, dict) else data
-        if not isinstance(orders, list) or not orders:
+        if not self.ok(r) or not isinstance(orders, list) or not orders:
             r = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
+            if not self.ok(r):
+                return None
             data = r.get("data") or {}
-            orders = data.get("fill_orders") or data.get("fills") or data.get("orders") or data
-            if isinstance(data, dict) and isinstance(data.get("list"), list):
-                orders = data["list"]
+            if isinstance(data, dict):
+                orders = data.get("list") or data.get("fill_orders") or data.get("fills") or data.get("orders") or []
+            else:
+                orders = data
+        return orders if isinstance(orders, list) else None
+
+    def schedule_fill_read(self) -> None:
+        if getattr(self, "_fill_future", None) is not None:
+            return
+        self._fill_started = time.monotonic()
+        self._fill_future = self._fill_pool.submit(self._fetch_own_fills)
+
+    def poll_fill_read(self) -> bool:
+        future = getattr(self, "_fill_future", None)
+        if future is None or not future.done():
+            return False
+        self._fill_future = None
+        if time.monotonic() - self._fill_started > 12.0:
+            return False
+        try:
+            orders = future.result()
+        except Exception:
+            return False
+        if orders is None:
+            return False
+        self.sync_own_fills(orders)
+        return True
+
+    def sync_own_fills(self, orders: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Apply FILLED orders with our tracking id to the current position book."""
+        self.did_io = True
+        if orders is None:
+            orders = self._fetch_own_fills()
         if not isinstance(orders, list):
             return
         n = 0
-        for o in orders:
+        for o in orders[:50]:
+            if not isinstance(o, dict):
+                continue
             cid = self.order_cid(o)
             if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
                 continue
@@ -6050,6 +6100,8 @@ class Pulse:
                 self.seen_fill_cids.add(cid)
                 continue
             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
+            if getattr(self, "strict_ownership", False) and not status:
+                continue
             if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
                 continue
             track = self.parse_track(cid) or {}
@@ -6071,6 +6123,8 @@ class Pulse:
             held = next((p for p in self.open.values() if oid and kind in ("s", "t", "u", "v") and str(o.get("symbol") or "") == p.symbol
                          and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
             if held is not None:
+                if getattr(self, "strict_ownership", False) and not self.ownership_safe(held):
+                    continue             # retry after the position is reconciled
                 side = str(o.get("positionSide") or "").upper()
                 if getattr(self, "strict_ownership", False) and (executed_qty(o) is None or side not in ("", held.side, "BOTH") or
                         abs(qty - held.qty) > max(1e-9, held.qty * 1e-6)):
@@ -6095,17 +6149,27 @@ class Pulse:
         if n:
             log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)
 
+    def schedule_leverage_update(self) -> bool:
+        """Keep at most one background leverage sweep in flight."""
+        with self._lev_guard:
+            future = self._lev_future
+            if future is not None and not future.done():
+                return False
+            self._lev_future = self.pool.submit(self.set_leverage)
+            return True
+
     def set_leverage(self) -> None:
         """Actively keep every desk symbol at its target leverage (exchange max, or the pulse leverage when max is off)."""
         self._load_lev_file()
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
             return
-        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
+        symbols = [s for s in SYMBOLS if self.leverage_symbol_safe(s)]
+        need = [s for s in symbols if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
         if not need:
             now = time.time()
-            if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
+            if now - getattr(self, "_lev_rot_ts", 0) > 90 and symbols:
                 self._lev_rot_ts = now
-                rot = SYMBOLS[int(now / 90) % len(SYMBOLS)]
+                rot = symbols[int(now / 90) % len(symbols)]
                 self.ensure_max_leverage(rot, force=True)
             return
         for s in need[:12]:
@@ -7031,10 +7095,11 @@ class Pulse:
             self.maybe_reload_config()
         if self.cycle % cycle_stride(5.0, SCAN_S) == 0:
             self.schedule_position_read()
+        self.poll_fill_read()
         if self.cycle % cycle_stride(30.0, SCAN_S) == 0:
-            self.sync_own_fills()
+            self.schedule_fill_read()
         if self.cycle % cycle_stride(44.0, SCAN_S) == 0:
-            self.pool.submit(self.set_leverage)
+            self.schedule_leverage_update()
         self.manage()
         if unprotected:
             unprotected = self.priority_controls()
@@ -7087,7 +7152,7 @@ class Pulse:
         sd_notify("WATCHDOG=1")
         self.run_self_tests()
         sd_notify("WATCHDOG=1")
-        self.pool.submit(self.set_leverage)
+        self.schedule_leverage_update()
         self.write_stats()
         warm = threading.Thread(target=self._warm_loop, name="warm-feed", daemon=True)
         warm.start()

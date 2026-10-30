@@ -360,6 +360,28 @@ def strict_ownership_blocks_foreign_and_aggregate_changes():
         return verified and foreign_entry and conflict and untouched, f"verified={verified}, foreign entry blocked={foreign_entry}, conflict held={conflict}, no order={untouched}"
 
 
+def strict_leverage_never_changes_foreign_or_quarantined_symbols():
+    from lanes import _Env
+    with _Env() as env:
+        p = env.p
+        p.strict_ownership, p.recon_ok = True, True
+        p.foreign_symbols = {"FOREIGN-USDT"}
+        p.external_closes["QUARANTINED-USDT:LONG"] = {"client_id": p.cid("o")}
+        calls = []
+        p.api.get = lambda *a, **k: calls.append("GET") or {"code": 0, "data": {}}
+        p.api.post = lambda *a, **k: calls.append("POST") or {"code": 0}
+        foreign = p.ensure_max_leverage("FOREIGN-USDT", force=True)
+        quarantined = p.ensure_max_leverage("QUARANTINED-USDT", force=True)
+        previous = pt.SYMBOLS
+        try:
+            pt.SYMBOLS = ["FOREIGN-USDT", "QUARANTINED-USDT"]
+            p.set_leverage()
+        finally:
+            pt.SYMBOLS = previous
+        ok = foreign == quarantined == 0 and not calls
+        return ok, f"foreign={foreign}, quarantined={quarantined}, exchange requests={calls}"
+
+
 def strict_control_cancellation_is_side_and_tag_scoped():
     from lanes import _Env, SYM
     with _Env() as env:
@@ -515,7 +537,8 @@ CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     block_parent_unchanged_end_to_end, drawdown_plain_oracle, flat_rsi_and_relation_names,
     fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure,
     block_risk_budget_both_sides_and_invalid_stop, block_pending_recovery_requires_matching_order_and_position,
-    strict_ownership_blocks_foreign_and_aggregate_changes, strict_control_cancellation_is_side_and_tag_scoped,
+    strict_ownership_blocks_foreign_and_aggregate_changes, strict_leverage_never_changes_foreign_or_quarantined_symbols,
+    strict_control_cancellation_is_side_and_tag_scoped,
     strict_controls_are_quantity_bound_and_unsafe_existing_controls_are_held, strict_block_add_waits_for_safe_control_resize,
     strict_close_does_not_fallback_to_entire_position, strict_overall_control_fill_is_counted_only_when_complete,
     strict_net_uses_only_tagged_connection_records,

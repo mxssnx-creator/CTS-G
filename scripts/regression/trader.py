@@ -1946,6 +1946,75 @@ def positions_read_is_nonblocking_and_rejects_stale_book():
     return ok, f"blocked read poll={elapsed*1000:.2f}ms calls={calls}; fresh applied={fresh}; changed-book snapshot discarded={discarded}"
 
 
+def fill_history_read_is_nonblocking_and_discards_stale_results():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    entered, release = threading.Event(), threading.Event()
+    class Slow:
+        def __init__(self): self.calls = 0
+        def get(self, path, extra=None):
+            self.calls += 1
+            entered.set()
+            release.wait(2)
+            return {"code": 0, "data": {"orders": [{"orderId": "1"}]}}
+    p.api = Slow()
+    p._fill_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    p._fill_future = None
+    applied = []
+    p.sync_own_fills = lambda rows: applied.append(rows)
+    try:
+        p.schedule_fill_read()
+        entered.wait(1)
+        t0 = pt.time.perf_counter()
+        for _ in range(20):
+            p.schedule_fill_read()
+            p.poll_fill_read()
+        elapsed, calls = pt.time.perf_counter() - t0, p.api.calls
+        release.set()
+        p._fill_future.result(timeout=2)
+        fresh = p.poll_fill_read() and len(applied) == 1
+        p.schedule_fill_read()
+        p._fill_future.result(timeout=2)
+        p._fill_started -= 13
+        discarded = not p.poll_fill_read() and len(applied) == 1
+    finally:
+        release.set()
+        p._fill_pool.shutdown(wait=True)
+    ok = elapsed < 0.1 and calls == 1 and fresh and discarded
+    return ok, f"blocked read poll={elapsed*1000:.2f}ms calls={calls}; fresh applied={fresh}; stale discarded={discarded}"
+
+
+def leverage_sweeps_do_not_overlap():
+    import concurrent.futures
+    import threading
+    p = _bare_pulse()
+    p.pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    p._lev_guard, p._lev_future = threading.Lock(), None
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def slow():
+        calls.append(1)
+        entered.set()
+        release.wait(2)
+    p.set_leverage = slow
+    try:
+        first = p.schedule_leverage_update()
+        entered.wait(1)
+        t0 = pt.time.perf_counter()
+        overlaps = sum(p.schedule_leverage_update() for _ in range(20))
+        elapsed = pt.time.perf_counter() - t0
+        release.set()
+        p._lev_future.result(timeout=2)
+        next_scheduled = p.schedule_leverage_update()
+        p._lev_future.result(timeout=2)
+    finally:
+        release.set()
+        p.pool.shutdown(wait=True)
+    ok = first and overlaps == 0 and next_scheduled and len(calls) == 2 and elapsed < .1
+    return ok, f"overlapping sweeps={overlaps}, next scheduled={next_scheduled}, scheduler={elapsed*1000:.2f}ms"
+
+
 def _signal_book():
     """A SetBook on the shipped x01 overlay with one symbol's history ending on a known completed minute."""
     import json
@@ -2455,6 +2524,8 @@ CHECKS = [
     ("trader.set-control-fallback-stays-outside", set_control_fallback_never_moves_inside_lane),
     ("trader.control-pair-records-accepted-price", control_pair_records_the_accepted_fallback_price),
     ("trader.positions-read-nonblocking", positions_read_is_nonblocking_and_rejects_stale_book),
+    ("trader.fill-history-read-nonblocking", fill_history_read_is_nonblocking_and_discards_stale_results),
+    ("trader.leverage-sweeps-do-not-overlap", leverage_sweeps_do_not_overlap),
     ("trader.padding-is-not-readiness", padding_does_not_count_as_readiness),
     ("trader.only-main-loop-pings-watchdog", only_the_main_loop_pings_the_watchdog),
 ]
