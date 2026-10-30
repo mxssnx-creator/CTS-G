@@ -15,6 +15,7 @@ backpressure, RSS caps, malloc_trim):
 from __future__ import annotations
 
 import gc
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -32,6 +33,57 @@ def rss_mb() -> float:
         return pages * 4096 / 1048576.0
     except Exception:
         return 0.0
+
+
+def system_memory_mb() -> Optional[Tuple[float, float]]:
+    """Return the available host/cgroup capacity and conservative headroom in MiB."""
+    try:
+        values = {}
+        with open("/proc/meminfo") as f:
+            for row in f:
+                key, _, rest = row.partition(":")
+                if key in ("MemTotal", "MemAvailable"):
+                    values[key] = float(rest.strip().split()[0]) / 1024.0
+        total, available = values["MemTotal"], values["MemAvailable"]
+        try:
+            with open("/sys/fs/cgroup/memory.max") as f:
+                limit_raw = f.read().strip()
+        except OSError:
+            limit_raw = "max"
+        if limit_raw != "max":
+            try:
+                limit = int(limit_raw) / 1048576.0
+                with open("/sys/fs/cgroup/memory.current") as f:
+                    used = int(f.read().strip()) / 1048576.0
+                inactive = 0.0
+                try:
+                    with open("/sys/fs/cgroup/memory.stat") as f:
+                        for row in f:
+                            key, _, value = row.partition(" ")
+                            if key == "inactive_file":
+                                inactive = max(0.0, int(value) / 1048576.0)
+                                break
+                except (OSError, ValueError):
+                    pass
+                if 0 < limit <= total:
+                    total = limit
+                    available = min(available, max(0.0, limit - used + min(inactive, used)))
+            except (OSError, ValueError):
+                return None
+        if not (math.isfinite(total) and math.isfinite(available) and total > 0 and available >= 0):
+            return None
+        return total, min(total, available)
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+def adaptive_memory_limits(total_mb: float, available_mb: float, current_rss_mb: float) -> Tuple[float, float]:
+    """Reserve system headroom and bound the engine to at most 40% of the memory limit."""
+    reserve = max(256.0, total_mb * 0.12)
+    budget = max(0.0, available_mb - reserve) * 0.5
+    hard = max(60.0, min(total_mb * 0.4, max(0.0, current_rss_mb) + budget))
+    soft = max(40.0, min(hard, hard * 0.65))
+    return soft, hard
 
 
 def malloc_trim() -> bool:
@@ -152,6 +204,10 @@ class LoadGovernor:
         self.partial = True
         self.soft_mb = 0.0  # 0 = scale with universe
         self.hard_mb = 0.0
+        self.auto_memory = False
+        self._auto_soft = 0.0
+        self._auto_hard = 0.0
+        self._auto_memory_at = 0.0
         self.level = "normal"
         self.rss = 0.0
         self.rss_peak = 0.0
@@ -174,6 +230,8 @@ class LoadGovernor:
     def configure(self, ov: Optional[Dict[str, Any]] = None) -> None:
         ov = ov or {}
         self.partial = bool(ov.get("loadPartial", True))
+        self.auto_memory = bool(ov.get("rssAutoLimit", False))
+        self._auto_memory_at = 0.0
         try:
             if ov.get("rssSoftMb") is not None:
                 self.soft_mb = max(40.0, float(ov.get("rssSoftMb") or 0))
@@ -183,11 +241,15 @@ class LoadGovernor:
             pass
 
     def soft_limit(self, n_sym: int) -> float:
+        if self.auto_memory and self._auto_soft > 0:
+            return self._auto_soft
         if self.soft_mb > 0:
             return self.soft_mb
         return 90.0 + max(0, n_sym) * 0.35
 
     def hard_limit(self, n_sym: int) -> float:
+        if self.auto_memory and self._auto_hard > 0:
+            return self._auto_hard
         if self.hard_mb > 0:
             return self.hard_mb
         return 140.0 + max(0, n_sym) * 0.55
@@ -206,6 +268,13 @@ class LoadGovernor:
     ) -> Budget:
         rss = float(rss_mb if rss_mb is not None else globals()["rss_mb"]())
         with self.lock:
+            if self.auto_memory and time.monotonic() - self._auto_memory_at >= 5.0:
+                mem = system_memory_mb()
+                if mem is not None:
+                    self._auto_soft, self._auto_hard = adaptive_memory_limits(mem[0], mem[1], rss)
+                else:
+                    self._auto_soft = self._auto_hard = 0.0
+                self._auto_memory_at = time.monotonic()
             self.n_sym = int(n_sym)
             self.n_open = int(n_open)
             self.hot_ms = float(hot_ms)

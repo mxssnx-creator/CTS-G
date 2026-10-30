@@ -2087,8 +2087,12 @@ class SetBook:
         return not why
 
     def symbol_ok(self, symbol: str) -> bool:
-        """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
-        return symbol not in self.quality
+        """Require enough current bars and a passing data check before using a symbol for an entry.
+
+        A short history is intentionally absent from the quality-summary map;
+        absence from that map therefore cannot establish that it is usable.
+        """
+        return self.usable(symbol)
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
         """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only

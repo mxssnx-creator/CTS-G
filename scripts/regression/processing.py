@@ -1336,15 +1336,16 @@ def every_validation_gate_asks_the_base_minimum_pf():
     from exit_engine import ExitBook
 
     def gates(ov):
-        sb = SetBook(); sb.load(overlay(**ov))
-        co = Coordinator(); co.load({}, ov)
-        ex = ExitBook(); ex.load(ov)
-        dc = DcaBook(); dc.load(ov)
+        config = overlay(**ov)
+        sb = SetBook(); sb.load(config)
+        co = Coordinator(); co.load({}, config)
+        ex = ExitBook(); ex.load(config)
+        dc = DcaBook(); dc.load(config)
         pk = sb.packs[0]
         return {"main": sb.pack_min_pf.get(pk, sb.min_pf), "coord": co.min_pf, "exit": ex.min_pf, "dca": dc.min_pf}
     own = {"minPf": 1.15, "exitMinPf": 1.12, "dcaMinPf": 1.2}
     got = {"default": gates({}), "base 1.4": gates({"setMinPf": 1.4, **own}), "unlinked": gates({"setMinPf": 1.4, "minPfLinked": False, **own})}
-    want = {"default": {k: 1.25 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
+    want = {"default": {k: 1.2 for k in got["default"]}, "base 1.4": {k: 1.4 for k in got["default"]},
             "unlinked": {"main": 1.4, "coord": 1.15, "exit": 1.12, "dca": 1.2}}
     return got == want, f"{got}"
 

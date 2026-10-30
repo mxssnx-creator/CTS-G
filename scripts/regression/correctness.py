@@ -292,11 +292,138 @@ def frozen_hold_and_block_intent_failure():
         p.manage_set_lane(pos, pos.entry, time.time(), 600, 0)
         p.sets.gate_reason = lambda st: ""
         p.set_block.candidate = lambda *a, **k: {"group": 1, "qty": pos.qty, "paper": {"pf": 2}}
-        p.save_open_book = lambda: False
+        p.save_open_book = lambda **kw: False
         p.px[SYM] = pos.entry * 1.002
         before = len(env.venue.posts)
         p.maybe_set_block_adds()
         return not early and calls == ["time"] and len(env.venue.posts) == before, f"entry hold kept={not early and calls == ['time']}; no order without persisted intent={len(env.venue.posts)==before}"
+
+
+def block_risk_budget_both_sides_and_invalid_stop():
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.block_risk_pct, p.equity, p.position_cost_pct = 1.0, 1000.0, .12
+    long = types.SimpleNamespace(side="LONG", entry=100.0, sl=99.0, qty=1.0)
+    short = types.SimpleNamespace(side="SHORT", entry=100.0, sl=101.0, qty=1.0)
+    want_long = (10.0 - 1.12) / (1.5 + 100.5 * .0012)
+    want_short = (10.0 - 1.12) / (1.5 + 99.5 * .0012)
+    got = (p.block_risk_qty(long, 100.5), p.block_risk_qty(short, 99.5))
+    long.sl = 0.0
+    invalid = p.block_risk_qty(long, 100.5)
+    p.equity = .56
+    tiny = p.block_risk_qty(short, 99.5)
+    ok = abs(got[0] - want_long) < 1e-9 and abs(got[1] - want_short) < 1e-9 and invalid == tiny == 0.0
+    return ok, f"long/short={got}, invalid stop={invalid}, tiny balance={tiny}"
+
+
+def block_pending_recovery_requires_matching_order_and_position():
+    from lanes import _Env
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        pos.set_id = p.sets.by_idx[0].id
+        cid = p.cid("b", pos=pos)
+        pos.block_pending = {"group": 1, "qty": .02, "client_id": cid, "t": time.time(),
+                             "base_qty": pos.qty, "base_entry": pos.entry}
+        original = dict(pos.block_pending)
+        row = {"symbol": pos.symbol, "clientOrderId": "foreign", "side": "BUY", "positionSide": "LONG",
+               "status": "FILLED", "executedQty": ".02", "avgPrice": "100.5"}
+        p.confirmed_order = lambda *a: dict(row)
+        foreign = not p.settle_set_block_pending(pos, pos.qty + .02) and not pos.block_fills
+        row["clientOrderId"] = cid
+        wrong_qty = not p.settle_set_block_pending(pos, pos.qty + .03) and not pos.block_fills
+        accepted = p.settle_set_block_pending(pos, pos.qty + .02) and len(pos.block_fills) == 1
+        pos.block_pending = original
+        duplicate = p.settle_set_block_pending(pos, pos.qty + .02) and len(pos.block_fills) == 1
+        return foreign and wrong_qty and accepted and duplicate, f"foreign={foreign}, qty mismatch={wrong_qty}, matched={accepted}, idempotent={duplicate}"
+
+
+def strict_ownership_blocks_foreign_and_aggregate_changes():
+    from lanes import _Env, SYM
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        p.strict_ownership = True
+        p._ownership_verified.clear()
+        p.our_orders = lambda *a, **k: []
+        def snap(qty, include_foreign=False):
+            rows = [{"symbol": SYM, "positionSide": "LONG", "positionAmt": str(qty), "avgPrice": str(pos.entry)}]
+            if include_foreign:
+                rows.append({"symbol": "FOREIGN-USDT", "positionSide": "SHORT", "positionAmt": "-1", "avgPrice": "20"})
+            p.adopt_exchange_positions({"code": 0, "data": rows})
+        snap(pos.qty, True)
+        verified = p.ownership_safe(pos) and "FOREIGN-USDT" in p.foreign_symbols
+        foreign_entry = pt.Pulse.entry_sense(p, "FOREIGN-USDT", 1, "gen:x", 1.0, "general") == "foreign-position"
+        initial_qty, before = pos.qty, len(env.venue.posts)
+        snap(pos.qty + .1, True)
+        p.close_pos(pos, pos.entry, "time")
+        p.ensure_controls(pos)
+        conflict = pos.ownership_conflict and not p.ownership_safe(pos) and "ownership unresolved" in p.recon_detail
+        untouched = pos.qty == initial_qty and len(env.venue.posts) == before
+        return verified and foreign_entry and conflict and untouched, f"verified={verified}, foreign entry blocked={foreign_entry}, conflict held={conflict}, no order={untouched}"
+
+
+def strict_control_cancellation_is_side_and_tag_scoped():
+    from lanes import _Env, SYM
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        p.strict_ownership = True
+        p._ownership_verified.add(SYM)
+        own = p.cid("u", pos=pos)
+        rows = [{"symbol": SYM, "positionSide": "LONG", "type": "STOP_MARKET", "orderId": "1", "clientOrderId": own},
+                {"symbol": SYM, "positionSide": "SHORT", "type": "STOP_MARKET", "orderId": "2", "clientOrderId": own},
+                {"symbol": SYM, "positionSide": "LONG", "type": "STOP_MARKET", "orderId": "3", "clientOrderId": "other-system"}]
+        p.list_orders = lambda symbol=None: rows
+        deleted = []
+        p.api.delete = lambda path, body: deleted.append(body["orderId"]) or {"code": 0}
+        p.cancel_controls(SYM)
+        return deleted == ["1"], f"canceled order IDs={deleted}"
+
+
+def strict_net_uses_only_tagged_connection_records():
+    from lanes import _Env
+    with _Env() as env:
+        p = env.p
+        p.strict_ownership = True
+        cid = p.cid("o")
+        base = {"t": time.time(), "symbol": "BTC-USDT", "side": "LONG", "reason": "time", "ours": True}
+        rows = [{**base, "pnl": 2, "client_id": cid, "conn": pt.CONN_SHORT},
+                {**base, "pnl": 20, "client_id": "other-system", "conn": pt.CONN_SHORT},
+                {**base, "pnl": 30, "client_id": "", "conn": pt.CONN_SHORT},
+                {**base, "pnl": 40, "client_id": cid, "conn": "other-connection"},
+                {**base, "pnl": 50, "client_id": cid, "conn": pt.CONN_SHORT, "ours": False}]
+        with open(pt.TRADES_PATH, "w") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+        p._exec_boot()
+        ok = p.exec_n.get("exit") == 1 and p.exec_n.get("netUsdt") == 2
+        return ok, f"verified closes={p.exec_n.get('exit')}, net={p.exec_n.get('netUsdt')}"
+
+
+def manually_closed_position_is_quarantined_without_blocking_other_symbols():
+    from lanes import _Env, SYM
+    with _Env() as env:
+        p, pos = env.p, env.pos
+        p.strict_ownership = True
+        p._ownership_verified.add(SYM)
+        p.our_orders = lambda *a, **k: []
+        p._exchange_flat = lambda held: True
+        p.close_from_venue = lambda held, why: False
+        p.cancel_controls = lambda *a, **k: None
+        before_posts, before_closed = len(env.venue.posts), len(p.closed)
+        p.adopt_exchange_positions({"code": 0, "data": [{"symbol": "OTHER-USDT", "positionSide": "SHORT", "positionAmt": "-1", "avgPrice": "20"}]})
+        key = f"{SYM}:LONG"
+        blocked = SYM not in p.open and key in p.external_closes
+        p.place(SYM, 1, "gen:x", 1.0)
+        no_reopen = len(env.venue.posts) == before_posts
+        p.entries_blocked = pt.Pulse.entries_blocked.__get__(p)
+        p.contracts["NEXT-USDT"] = pt.Contract(symbol="NEXT-USDT", min_qty=.001, step=.001, qprec=3, pprec=8, min_usdt=1, max_lev=50)
+        p.px["NEXT-USDT"], p.price_ts["NEXT-USDT"] = 100.0, time.time()
+        p.place("NEXT-USDT", 1, "gen:x", 1.0)
+        clone = pt.Pulse.__new__(pt.Pulse)
+        clone.external_closes, clone.external_close_state_bad = {}, False
+        clone._load_external_closes()
+        persistent = key in clone.external_closes and not clone.external_close_state_bad
+        continued = p.recon_ok and "OTHER-USDT" in p.foreign_symbols and "NEXT-USDT" in p.open
+        no_fake = no_reopen and len(p.closed) == before_closed and p.exec_n.get("dropped", 0) >= 1
+        return blocked and persistent and continued and no_fake, f"blocked={blocked}, restart state={persistent}, different symbol opened={continued}, no fabricated result={no_fake}"
 
 
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
@@ -304,4 +431,7 @@ CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     axis_continuation_and_set_isolation, block_independent_evidence_and_restart, block_actual_and_paper_costs,
     block_pause_count_and_zero_are_respected,
     block_parent_unchanged_end_to_end, drawdown_plain_oracle, flat_rsi_and_relation_names,
-    fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure)]
+    fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure,
+    block_risk_budget_both_sides_and_invalid_stop, block_pending_recovery_requires_matching_order_and_position,
+    strict_ownership_blocks_foreign_and_aggregate_changes, strict_control_cancellation_is_side_and_tag_scoped,
+    strict_net_uses_only_tagged_connection_records, manually_closed_position_is_quarantined_without_blocking_other_symbols)]

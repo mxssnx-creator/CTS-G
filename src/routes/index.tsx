@@ -98,7 +98,7 @@ function DeskPage() {
                 </p>
               ) : null}
               <p className={`mt-1 font-mono text-sm ${pnlClass(session)}`}>
-                session {session >= 0 ? "+" : ""}
+                account change {session >= 0 ? "+" : ""}
                 {fmt(session, 4)} · {fmt(stats?.pnlPct, 2)}%
               </p>
             </div>
@@ -107,10 +107,16 @@ function DeskPage() {
               <span className="font-mono text-right tabular-nums">${fmt(stats?.available, 3)}</span>
               <span className="text-muted">Used margin</span>
               <span className="font-mono text-right tabular-nums">${fmt(stats?.usedMargin, 3)}</span>
-              <span className="text-muted">Unrealized</span>
+              <span className="text-muted">Account unrealized</span>
               <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.unrealized ?? 0)}`}>
                 {fmt(stats?.unrealized, 4)}
               </span>
+              {conn !== "overall" ? <>
+                <span className="text-muted">Verified system net</span>
+                <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.realizedPnl ?? 0)}`}>
+                  {stats?.realizedPnlScope === "verified system closes for this connection" ? fmt(stats.realizedPnl, 4) : "—"}
+                </span>
+              </> : null}
               <span className="text-muted">Uptime</span>
               <span className="font-mono text-right">{stats ? ago(stats.uptimeS) : "—"}</span>
             </div>

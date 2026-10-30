@@ -109,6 +109,7 @@ class HealthMonitor:
             return {"pf": pf, "sets": finite(row.get("sets")), "orders": finite(row.get("n")), "source": "paper"}
         result.update(running=running, halted=bool(stats.get("halted")), paused=bool(stats.get("paused")),
                       symbolCount=count, cycle=cycle, errors=errors, openCount=open_count,
+                      scanMs=finite(stats.get("scanMs")), cycleTotalMs=finite(stats.get("cycleTotalMs")),
                       paperBase=stage("base"), paperMain=stage("main"),
                       healthy=not warnings, warnings=warnings)
         return result

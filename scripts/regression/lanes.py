@@ -135,7 +135,9 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
             b.pick_trail = lambda pack: None
             p.boot_ts = 0.0
             p.px[SYM] = 100.0
+            p.price_ts[SYM] = pt.time.time()
             p.available = 900.0
+            p.last_bal = pt.time.time()
             p.halted = False
             p.entry_sense = lambda *a, **k: None
             p.control_orders = False
@@ -170,9 +172,11 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
                 ticks = (o_, l_, h_, c_) if side > 0 else (o_, h_, l_, c_)
                 for k, (dt, px) in enumerate(zip((1.0, 20.0, 40.0, 60.0), ticks)):
                     clock.t = T_BASE + bi * 60.0 + dt
+                    p.last_bal = clock.t  # emulate the independently refreshed balance feed
                     if k == 3:
                         p.last_closed_1m = {SYM: (int((T_BASE + bi * 60.0) // 60), c_)}
                     p.px[SYM] = px
+                    p.price_ts[SYM] = pt.time.time()
                     p.manage()
                     if dca is not None and SYM in p.open:
                         p.maybe_dca_adds()
@@ -586,6 +590,7 @@ def exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own():
             p = pt.Pulse(_Venue(), contracts)
             p.sets = b
             p.px[SYM] = 100.0
+            p.price_ts[SYM] = pt.time.time()
             exit_n0 = sum(v.n for v in p.exits.lanes.values())
             before = snap()
             free = pt.Position(symbol=SYM, side="LONG", qty=1.0, entry=100.0, opened_at=_real_time.time() - 900, sl=99.0,
@@ -684,6 +689,7 @@ def a_recovered_set_position_keeps_its_own_lane():
                 p = pt.Pulse(venue, contracts)
                 p.sets = b
                 p.px[SYM] = 100.0
+                p.price_ts[SYM] = pt.time.time()
                 p.control_orders = False
                 p.open = {}
                 cid = p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)
@@ -746,7 +752,9 @@ class _Env:
         p.sets.pick_trail = lambda pack: None
         p.boot_ts = 0.0
         p.px[SYM] = 100.0
+        p.price_ts[SYM] = pt.time.time()
         p.available = 900.0
+        p.last_bal = pt.time.time()
         p.halted = False
         p.entry_sense = lambda *a, **k: None
         p.sets.use_historic_gate = False  # Block exercises its independent non-Set parent
@@ -754,6 +762,8 @@ class _Env:
         p.closed = []
         p.block.enabled = True
         p.strat_block = True
+        p.block_exit_enabled = True  # exercise the legacy Exit-parent lane explicitly
+        p.block_risk_pct = 0.0       # individual checks set a risk budget when testing it
         p.block.max_stack = 3
         p.block_last_emit = 0.0
         p.cooldown = {}
@@ -885,21 +895,21 @@ def block_stack_stays_inside_the_book_cap():
     return ok, f"stack qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400"
 
 
-def block_min_order_bump_does_not_break_the_book_cap():
-    """Near the cap the computed add is under the venue's minimum order, so the add is bumped to the minimum. A bump that
-    would carry the position more than 5 % over the book cap is refused."""
+def block_partial_below_minimum_is_not_bumped():
+    """A planned partial below the venue minimum must not be inflated, even when there is room in the book."""
     with _Env() as e:
         e.exit_closes(10, 0.01)
         e.p.contracts[SYM].min_qty = 0.3              # a 30 USDT minimum order at 100
-        e.p.max_book_notional = lambda: 400.0
+        e.p.max_book_notional = lambda: 4000.0
         e.p.notional_cap = lambda: 150.0
-        e.pos.qty = 3.98                              # 398 USDT: the room is 2 USDT, the bump would end at about 430
-        e.p.block.lanes[e.p.block.key(SYM, "LONG")].base_qty = 3.98
+        e.p.block.volume_ratio = 0.25
+        e.pos.qty = 1.0
+        e.p.block.lanes[e.p.block.key(SYM, "LONG")].base_qty = 1.0
         e.p.px[SYM] = 100.5
+        before = len(e.venue.posts)
         e.p.maybe_block_adds()
-        notional = e.pos.qty * e.p.px[SYM]
-    ok = abs(e.pos.qty - 3.98) < 1e-9 and notional <= 400.0 * 1.05
-    return ok, f"qty={round(e.pos.qty, 3)} notional={round(notional, 2)} cap=400 (+5 %)"
+        ok = e.pos.qty == 1.0 and len(e.venue.posts) == before
+    return ok, f"planned partial 0.25 below minimum 0.3: no order={ok}"
 
 
 def a_venue_order_at_the_level_is_left_to_fill():
@@ -1372,7 +1382,7 @@ CHECKS = [
     ("trader.block-fill-updates-position-and-stop", block_fill_updates_the_position_and_its_stop),
     ("trader.block-lane-resets-and-ignores-set-closes", block_lane_resets_on_its_parent_close_and_ignores_set_closes),
     ("trader.block-stack-inside-book-cap", block_stack_stays_inside_the_book_cap),
-    ("trader.block-min-order-bump-inside-book-cap", block_min_order_bump_does_not_break_the_book_cap),
+    ("trader.block-partial-below-minimum-not-bumped", block_partial_below_minimum_is_not_bumped),
     ("trader.lanes-differential-independence", other_strategies_never_change_a_set_position),
     ("trader.lanes-set-stats-own-closes-only", exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own),
     ("trader.lanes-effective-pf-is-validated-pool", effective_pf_is_the_pool_of_the_validated_sets),

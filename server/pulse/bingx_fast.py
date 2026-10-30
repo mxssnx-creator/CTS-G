@@ -52,6 +52,9 @@ except Exception:
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
 RECV = 5000
+# A delayed read can safely be retried with a longer validity window. Never
+# replay a mutating request: an unanswered order may already have reached BingX.
+READ_RETRY_RECV = 15000
 UA = "grok-x01-pulse/2.0"
 
 # CTS connector numbers (UID / IP)
@@ -168,6 +171,17 @@ class PriceHub:
     def set_symbols(self, symbols: List[str]) -> None:
         self.symbols = list(symbols)
 
+    def _sync_subscriptions(self, ws: Any, subscribed: set) -> set:
+        """Apply universe changes on the WebSocket thread, without reconnecting."""
+        wanted = set(s for s in self.symbols if s)
+        changes = [("unsub", s) for s in sorted(subscribed - wanted)]
+        changes += [("sub", s) for s in sorted(wanted - subscribed)]
+        for i, (op, sym) in enumerate(changes):
+            ws.send(dumps({"id": f"{op}-{sym}", "reqType": op, "dataType": f"{sym}@ticker"}))
+            if i and i % 80 == 0:
+                time.sleep(0.04)
+        return wanted
+
     def _run(self) -> None:
         while not self.stop:
             try:
@@ -185,50 +199,49 @@ class PriceHub:
             enable_multithread=True,
         )
         self.ok = True
-        for i, s in enumerate(self.symbols):
-            ws.send(dumps({"id": f"{i}-t", "reqType": "sub", "dataType": f"{s}@ticker"}))
-            if i and i % 80 == 0:
-                time.sleep(0.04)
-        ws.settimeout(15)
-        while not self.stop:
-            raw = ws.recv()
-            if raw is None:
-                break
-            if isinstance(raw, (bytes, bytearray)) and raw[:2] != b"\x1f\x8b":
+        subscribed: set = set()
+        last_recv = time.monotonic()
+        try:
+            ws.settimeout(2)
+            while not self.stop:
+                subscribed = self._sync_subscriptions(ws, subscribed)
                 try:
-                    txt = raw.decode("utf-8", "ignore")
-                except Exception:
-                    txt = ""
-            elif isinstance(raw, str):
-                txt = raw
-            else:
-                txt = ""
-            if txt.lower() in ("ping", "pong"):
-                try:
-                    ws.send("Pong")
-                except Exception:
+                    raw = ws.recv()
+                except _ws.WebSocketTimeoutException:
+                    if time.monotonic() - last_recv > 30:
+                        raise TimeoutError("BingX WebSocket silent for 30 seconds")
+                    continue
+                if raw is None or raw == "" or raw == b"":
                     break
-                self.last_msg = time.time()
-                continue
-            data = _decode_ws(raw)
-            if data is None:
-                continue
-            if isinstance(data, dict) and data.get("ping") is not None:
+                last_recv = time.monotonic()
                 try:
+                    text = gzip.decompress(raw).decode("utf-8") if isinstance(raw, (bytes, bytearray)) and raw[:2] == b"\x1f\x8b" else (raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+                except (OSError, UnicodeError):
+                    continue
+                if isinstance(text, str) and text.lower() == "ping":
+                    ws.send("Pong")
+                    self.last_msg = time.time()
+                    continue
+                if isinstance(text, str) and text.lower() == "pong":
+                    self.last_msg = time.time()
+                    continue
+                data = _decode_ws(text)
+                if data is None:
+                    continue
+                if isinstance(data, dict) and data.get("ping") is not None:
                     ping = data.get("ping")
                     ws.send(dumps({"pong": ping if ping not in (True, False) else int(time.time() * 1000)}))
-                except Exception:
-                    break
+                    self.last_msg = time.time()
+                    continue
                 self.last_msg = time.time()
-                continue
-            self.last_msg = time.time()
-            self.n += 1
-            _apply_px(data, self.on_px)
-        try:
-            ws.close()
-        except Exception:
-            pass
-        self.ok = False
+                self.n += 1
+                _apply_px(data, self.on_px)
+        finally:
+            try:
+                ws.close()
+            except Exception:
+                pass
+            self.ok = False
 
 
 def _decode_ws(raw: Any) -> Optional[Any]:
@@ -306,6 +319,7 @@ class FastBingX:
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=30),
             )
         self.px: Dict[str, float] = {}
+        self.px_ts: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
         self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
         self.on_event = None
@@ -328,6 +342,7 @@ class FastBingX:
 
     def _on_px(self, symbol: str, px: float) -> None:
         self.px[symbol] = px
+        self.px_ts[symbol] = time.time()
         self.stats["ws"] += 1
         cb = getattr(self, "on_event", None)
         if cb:
@@ -400,6 +415,15 @@ class FastBingX:
         self.stats["rest"] += 1
         try:
             body = self._http(method, url)
+            msg = str(body.get("msg") or "").lower() if isinstance(body, dict) else ""
+            timestamp_rejected = isinstance(body, dict) and body.get("code") == 109400 and "timestamp" in msg
+            balance_timed_out = (isinstance(body, dict) and body.get("code") == -1
+                                 and path.endswith("/user/balance") and "timed out" in msg)
+            if method == "GET" and (timestamp_rejected or balance_timed_out):
+                params["timestamp"] = str(self._next_ts())
+                params["recvWindow"] = str(READ_RETRY_RECV)
+                self.stats["rest"] += 1
+                body = self._http(method, f"{path}?{self._sign(params)}")
         except Exception as e:
             self.stats["err"] += 1
             self.err.write("http", method=method, path=path, msg=str(e)[:220])
