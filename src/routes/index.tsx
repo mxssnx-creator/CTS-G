@@ -112,7 +112,7 @@ function DeskPage() {
                 {fmt(stats?.unrealized, 4)}
               </span>
               {conn !== "overall" ? <>
-                <span className="text-muted">Verified system net</span>
+                <span className="text-muted" title="Only verified system closes are included; some fees may be estimated.">System net (verified closes)</span>
                 <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.realizedPnl ?? 0)}`}>
                   {stats?.realizedPnlScope === "verified system closes for this connection" ? fmt(stats.realizedPnl, 4) : "—"}
                 </span>
