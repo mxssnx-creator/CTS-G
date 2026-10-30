@@ -1,0 +1,114 @@
+{
+  "presetSha256": "e52f428553851fed346643bfce2d747b7630f5541f7f47f52c6af9aad9b8e880",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "lookbackBars": 720,
+  "holdAuto": true,
+  "costPct": 0.12,
+  "checkpoints": [
+    {
+      "t": 1792256400,
+      "sets": 2587,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 2294,
+        "pass": 241,
+        "short": 10,
+        "stop-cap": 42
+      },
+      "entryReasons": {
+        "pf<min": 2294,
+        "main": 107,
+        "real": 134,
+        "short": 10,
+        "stop-cap": 42
+      },
+      "basePassed": 241,
+      "basePf": 5.513117981540492,
+      "baseNoLoss": false,
+      "baseOrders": 11967,
+      "atLeast12": 2587,
+      "atLeast25": 2587,
+      "baseLongPassed": 251,
+      "baseShortPassed": 1314,
+      "autoHoldSelected": 1281,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {
+        "0": 5,
+        "1": 7,
+        "4": 8,
+        "5": 57,
+        "6": 54,
+        "8": 3
+      },
+      "stageCounts": {
+        "base": 241,
+        "main": 134,
+        "negative": 5,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 64,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        },
+        "trend": {
+          "sets": 353,
+          "basePassed": 34,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "breakout": {
+          "sets": 353,
+          "basePassed": 7,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "reversion": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "flow": {
+          "sets": 353,
+          "basePassed": 60,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "multi": {
+          "sets": 353,
+          "basePassed": 76,
+          "atLeast12": 353,
+          "atLeast25": 353
+        }
+      },
+      "elapsedSeconds": 176.548
+    }
+  ],
+  "maxRssKiB": 463532,
+  "scope": "historical SetBook snapshots only; not modeled execution or exchange fills"
+}
