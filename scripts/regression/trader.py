@@ -444,6 +444,54 @@ def symbol_cap_applies_under_a_wildcard():
                 f"31 open positions -> {out.get('protect_more_than_cap')}")
 
 
+def x01_bootstrap_honors_cap_before_ranked_tickers():
+    """A real Pulse initialization with an offline fake cannot begin with an unbounded wildcard."""
+    saved_syms, saved_loader, saved_overlay = list(pt.SYMBOLS), pt.load_contracts, pt.OVERLAY_PATH
+    saved_open_loader = pt.Pulse._load_open_book
+    names = [f"S{i:02d}-USDT" for i in range(60)]
+    contracts = {s: pt.Contract(symbol=s, min_qty=0.001, step=0.001, qprec=3, pprec=6,
+                                min_usdt=5.0, max_lev=50) for s in names}
+
+    def run():
+        pt.load_contracts = lambda wanted=None: contracts if wanted is None else {s: contracts[s] for s in wanted if s in contracts}
+        pt.OVERLAY_PATH = os.path.join(PULSE, "overlay-bingx-x01.json")
+        p = pt.Pulse(_StubExchange(), dict(contracts))
+        try:
+            initial = list(pt.SYMBOLS)
+            no_rank = not p.universe
+            p.universe = [{"symbol": s, "vol1h": float(i), "maxLeverage": 50, "quoteVolume": 1.0,
+                           "vol24h": 0.0, "changePct": 0.0} for i, s in enumerate(names)]
+            p.apply_dynamic_symbols(force=True)
+            ranked = list(pt.SYMBOLS)
+        finally:
+            p.pool.shutdown(wait=True)
+        pt.Pulse._load_open_book = lambda self: self.open.update(
+            {s: types.SimpleNamespace(symbol=s) for s in names[:31]})
+        q = pt.Pulse(_StubExchange(), dict(contracts))
+        try:
+            restored = list(pt.SYMBOLS)
+        finally:
+            q.pool.shutdown(wait=True)
+        return initial, no_rank, ranked, restored
+
+    try:
+        initial, no_rank, ranked, restored = _isolated(run)
+        held = pt.bootstrap_symbols(names, ["S59-USDT"], 30)
+        many_held = pt.bootstrap_symbols(names, names[:31], 30)
+        unlimited = pt.bootstrap_symbols(names, ["OUTSIDE-USDT"], 0)
+    finally:
+        pt.SYMBOLS[:] = saved_syms
+        pt.load_contracts, pt.OVERLAY_PATH = saved_loader, saved_overlay
+        pt.Pulse._load_open_book = saved_open_loader
+    ok = (no_rank and len(initial) == 30 and initial == names[:30]
+          and len(ranked) == 30 and ranked[0] == "S59-USDT"
+          and len(held) == 30 and "S59-USDT" in held
+          and len(many_held) == 31 and len(restored) == 31 and set(restored) == set(names[:31])
+          and len(unlimited) == 61 and "OUTSIDE-USDT" in unlimited)
+    return ok, (f"before ticker={len(initial)}; ranked={len(ranked)} first={ranked[0] if ranked else None}; "
+                f"held={len(held)}; 31 restored={len(restored)}; unlimited={len(unlimited)}")
+
+
 class _RefusingCloseVenue(_StubExchange):
     """Entry fills fully; every closing order is refused."""
 
@@ -2112,6 +2160,7 @@ CHECKS = [
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
     ("trader.symbol-cap-applies-under-a-wildcard", symbol_cap_applies_under_a_wildcard),
+    ("trader.x01-bootstrap-honors-cap-before-ranked-tickers", x01_bootstrap_honors_cap_before_ranked_tickers),
     ("trader.partial-close-closes-the-remainder", partial_close_fill_closes_the_remainder),
     ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),
     ("trader.partial-fill-sized-from-executed", partial_fill_is_sized_from_the_executed_quantity),
