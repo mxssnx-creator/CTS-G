@@ -799,6 +799,28 @@ def flat_candle_gap_cannot_preserve_short_history_cache():
         pt.SYMBOLS[:], pt.time.sleep = saved, sleep
 
 
+def fifty_short_histories_refresh_without_full_repaging():
+    """Bound request volume across a synthetic 50-symbol short-history universe."""
+    import set_engine as se
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = [f"S{i:02d}-USDT" for i in range(50)]
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = _PagedKlines(n=2501), se.SetBook()
+        p.api.rows[0].update(open="0.1", high="0.2", low="0.05", close="0.1")
+        p.sets.lookback = 2400
+        first = p._hist_fetch()
+        first_requests = len(p.api.requests)
+        p.api.requests.clear()
+        second = p._hist_fetch()
+        limits = [int(row["limit"]) for row in p.api.requests]
+        return (len(first) == len(second) == 50 and first_requests == 150
+                and len(limits) == 50 and set(limits) == {120}), f"symbols={len(second)}; requests backfill/refresh={first_requests}/{len(limits)}; refresh limits={set(limits)}"
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
 def history_chunks_rotate_even_when_many_positions_are_open():
     """Every history symbol must eventually refresh; live open-position priority cannot starve it."""
     from load_engine import LoadGovernor
@@ -2029,6 +2051,7 @@ CHECKS = [
     ("trader.short-history-backfill-bounded", short_history_backfill_is_temporarily_bounded),
     ("trader.short-history-cache-rejects-bad-pages", short_history_cache_rejects_failed_or_invalid_pages),
     ("trader.flat-candle-gap-invalidates-short-cache", flat_candle_gap_cannot_preserve_short_history_cache),
+    ("trader.fifty-short-histories-bound-refresh", fifty_short_histories_refresh_without_full_repaging),
     ("trader.history-chunks-rotate-fairly", history_chunks_rotate_even_when_many_positions_are_open),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
