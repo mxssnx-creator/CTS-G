@@ -113,6 +113,26 @@ def symbol_rank_key(row: Dict[str, Any], sort: str) -> Tuple[float, float]:
     return (lev, -symbol_metric(row, s))
 
 
+def bootstrap_symbols(names: Sequence[str], open_symbols: Sequence[str], cap: int) -> List[str]:
+    """Bound a provisional universe while retaining every symbol with an existing position.
+
+    Names are only a fallback until the exchange ticker supplies a ranked
+    universe. An open symbol is never dropped merely to meet the scan cap.
+    """
+    ordered_open = list(dict.fromkeys(s for s in open_symbols if s))
+    if cap <= 0:
+        return list(dict.fromkeys(list(names) + ordered_open))
+    selected = list(ordered_open)
+    seen = set(selected)
+    for name in names:
+        if len(selected) >= cap:
+            break
+        if name and name not in seen:
+            selected.append(name)
+            seen.add(name)
+    return selected
+
+
 def rank_self_test() -> Tuple[bool, str]:
     rows = [
         {"symbol": "A-USDT", "maxLeverage": 50, "vol1h": 9.0, "vol24h": 0, "quoteVolume": 1, "changePct": 0},
@@ -4245,7 +4265,10 @@ class Pulse:
             names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
             names.sort()
             if names:
-                SYMBOLS[:] = names
+                held = [getattr(p, "symbol", "") for p in self.open.values()]
+                # Before the first ticker response there is no ranked universe.
+                # Do not briefly launch an unbounded wildcard scan in that gap.
+                SYMBOLS[:] = bootstrap_symbols(names, held, self.symbol_cap if self.symbols_dynamic else 0)
                 self.contracts.update(extra)
         elif cleaned:
             SYMBOLS[:] = cleaned
