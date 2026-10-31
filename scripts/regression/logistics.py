@@ -395,7 +395,16 @@ def update_preserves_local_work_without_force():
     return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
 
 
+def regression_runner_reports_progress():
+    """Slow parallel checks show a heartbeat without changing ordered results."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_regression_progress.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
+
+
 CHECKS = [
+    ("logistics.regression-runner-reports-progress", regression_runner_reports_progress),
     ("logistics.update-preserves-local-work-without-force", update_preserves_local_work_without_force),
     ("logistics.node-floor-covers-vite-and-nitro", node_floor_covers_vite_and_nitro),
     ("logistics.zero-is-a-value-not-a-default", zero_is_a_value_not_a_default),
