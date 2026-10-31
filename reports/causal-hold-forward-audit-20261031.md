@@ -14,6 +14,8 @@ In a separate [archived-data prefix check](secure-minimal-hold-prefix-20261031.j
 
 The updated **Secure, Minimal** preset disables the existing Negative lane, which can bypass the positive Main gate and does not implement the requested independent opposite-direction strategy. The systemwide default is unchanged. This is a safety restriction, not completion of that strategy. The saved JSON and Settings preset are tested for equality.
 
+The first full regression run passed 436 checks and failed six memoized processing checks: its test cache returned candidate rows without the newly required replay inputs. After repairing that test harness, all **70 processing checks** passed in a focused rerun; nine causal-hold checks, 109 standalone engine checks, 83 TypeScript checks, typecheck and the production build also passed. The Node suite passed 191 checks with four skips; lint reported seven warnings and no errors. The entire 442-check run was not repeated after the harness repair.
+
 ## Corrected checkpoint and subsequent outcomes
 
 All studies use the previously inspected archive of eight symbols and an **assumed** 0.12% round-trip cost. They do not include actual account fees, venue fills or a 50-symbol execution test. The windows below contain overlapping Sets and market observations; they are not independent funded positions.
@@ -21,6 +23,8 @@ All studies use the previously inspected archive of eight symbols and an **assum
 At the hindsight-selected **17 October, 19:00 Vienna time** (17:00 UTC), a fresh 12-hour cold-start snapshot of the revised preset scored 67 of 822 Sets through Base, 58 through Main, and none through Real. The 58 Main-passing Sets held only 5–8 Real-window closes against the required 15. A separate stage-chain calculation matched all 67 Base-passing Sets on the same pooled paper tapes. This checks that calculation, not the validity of its source identities or missing stage context. [Snapshot and hashes](secure-minimal-current-checkpoint-20261031.json).
 
 A different **continuous** paper study reconstructed positions through the entire archived period, used strictly earlier closes at each hourly decision, and examined subsequent entries in the same Set. Its initial state, history and clock differ from the cold-start snapshot; the two sets of counts should not be compared as if they were identical runs. Across 12 checkpoints, eight Set-checkpoint observations passed Base; none passed Main or Real. All 210,541 reconstructed closes were checked for same-Set/symbol overlap, with none found. An order-by-order stage oracle matched the eight Base observations using the same bounded input.
+
+The eight Base observations had Main-window samples of 0, 1 or 7 closes, all below the required 25. A research reconstruction using the available older entry-time evidence changed one sample from zero to two closes with PF 0; it did not produce a Main or Real pass. This is evidence that the history boundary can alter stage membership, not a production fix. [Stage diagnostic](secure-minimal-stage-diagnostic-12h-20261031.json).
 
 | Following paper window | Mature Set-checkpoint observations | Net returns counted | Pooled PF |
 | --- | ---: | ---: | ---: |
@@ -31,11 +35,14 @@ Only windows with all requested subsequent closes before the archive ended are i
 
 The same study was repeated with **72 hours of available prehistory** and the same 12-hour trading period. It found 25 Base Set-checkpoint observations across 21 distinct Sets, with no Main or Real observation passing. The 25 complete next-eight windows contained 200 returns and had pooled PF **0.253**; 22 complete next-15 windows contained 330 returns and had pooled PF **0.292**. An arithmetic recount agreed with the stored values. The run checked 1,116,351 reconstructed closes for same-Set/symbol overlap and found none; its stage oracle matched all 25 Base observations on the same bounded tapes. This uses the same retrospective trading period and does not create an independent holdout. [Longer-prehistory data and hashes](secure-minimal-forward-72h-prehistory-20261031.json).
 
+All 25 longer-prehistory observations had fewer than the required 25 Main closes; their samples ranged from 0 to 17. A research reconstruction including earlier entry-time evidence changed one sample from eight closes to four; neither version passed Main. The comparison uses the same engine's stage rules and pooled paper tapes, and is not a finished runtime repair. [Stage diagnostic](secure-minimal-stage-diagnostic-72h-20261031.json).
+
 The full corrected cold-start checkpoint series using the **earlier** preset with Negative enabled yielded 120 Base and 93 Main Set-checkpoint observations, and zero Real/Real Negative observations. This is a separate configuration and overlapping snapshot series, not the revised preset's forward result. [Prior-preset corrected series](secure-minimal-causal-hold-checkpoints-20261031.json).
 
 ## Remaining release blockers
 
 - A high historical Base PF cannot ensure a high or increasing forward PF. The continuous results above do not meet that goal.
+- The existing size policy also permits lower **configured floors** later in the positive chain: for this preset, the Base last-50 window asks 1.50, Main last-25 asks 1.25 and Real last-15 asks 1.15. A recognized Signal-labeled pack asks 1.30 at every stage. These labels currently mean window lengths, not the requested independent strategy ranges. A range-aware stage policy still needs design and integration; silently replacing the requested defaults would not prove better forward outcomes.
 - The current stage reconstruction can lose older evidence needed to decide whether an entry belonged to Main or Real. The separate [stage-history draft](https://github.com/mxssnx-creator/CTS-G/pull/130) documents a proposed repair and unresolved performance and timing checks. The independent oracle here reads the same bounded tapes and does not resolve that defect.
 - The study selects holds at every paper entry; live choices refresh periodically. It excludes closes at the decision timestamp, while the runtime scorer currently includes them. The actual refresh/entry/close order needs a shared, tested contract.
 - Set evidence remains pooled across symbols and directions; the requested independent source, range and symbol/side qualification and actual CTS-A-O Signals integration remain unfinished. The requested independent inverse Negative strategy is also unfinished.
@@ -51,6 +58,8 @@ python3 scripts/audit_causal_hold_forward.py --data /tmp/ctsg-12h --preset prese
 python3 scripts/prepare_signal_reference.py --feed /path/to/feed.json.gz --out /tmp/ctsg-72h --symbols 8 --pre-hours 72 --forward-hours 12
 python3 scripts/audit_causal_hold_forward.py --data /tmp/ctsg-72h --preset presets/secure-minimal.json --start 1792227600 --hours 12 --symbols 8 --out /tmp/ctsg-forward-72h.json
 python3 scripts/audit_hold_prefix.py --data /tmp/ctsg-12h --preset presets/secure-minimal.json --cut 1792256400 --out /tmp/ctsg-prefix.json
+python3 scripts/diagnose_forward_stages.py --data /tmp/ctsg-12h --preset presets/secure-minimal.json --audit /tmp/ctsg-forward-12h.json --out /tmp/ctsg-stages-12h.json
+python3 scripts/diagnose_forward_stages.py --data /tmp/ctsg-72h --preset presets/secure-minimal.json --audit /tmp/ctsg-forward-72h.json --out /tmp/ctsg-stages-72h.json
 ```
 
 The input hashes in the result files should be checked before comparing outcomes. Timing and memory depend on the host and are not live capacity tests.
