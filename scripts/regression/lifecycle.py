@@ -75,6 +75,62 @@ def interval_never_back_to_back():
     return ok, f"right_after={right_after_a_pass} retry={retry_fires} mid={mid_interval} refresh={refresh_fires}"
 
 
+def history_growth_retries_quickly_only_while_progressing():
+    """Thirty synthetic symbols: fresh chunks accelerate; a stalled chunk falls back, without bypassing the gate."""
+    b = _book(histLookbackBars=240, histLookbackMax=480, histLookbackAuto=True,
+              histMinBars=60, histWarmup=16, holdEnabled=False, setMinStep=2, setStepMax=2,
+              setSlRatios=[0.5], trailVariants=["0.3:0.1"], stratGeneral=True, stratIndications=False)
+    names = [f"S{i:02d}-USDT" for i in range(30)]
+    bars = synth_bars(11, 100)
+    b.bars = {symbol: bars for symbol in names}
+    b._replay_symbol = lambda *_args, **_kwargs: None
+    b.lookback, b._lookback_grown, b.refresh_s = 480, 480, 120
+    b._lookback_pending, b._lookback_retry_fast, b.progress.ready = True, True, True
+
+    def elapsed(seconds, book=b):
+        book.last_run = time.time() - seconds
+        return book.due()
+
+    initial = (elapsed(1), elapsed(31))
+    b.replay_all(now=T0, symbols=names[:6], expected_symbols=names)
+    first = (b._lookback_progress_count, b._lookback_retry_fast, elapsed(31),
+             b.base_validation_reason(b.by_idx[0]))
+    b.replay_all(now=T0, symbols=names[:6], expected_symbols=names)
+    stalled = (b._lookback_progress_count, b._lookback_retry_fast, elapsed(31), elapsed(121))
+    counts, fast, reasons = [], [], []
+    for offset in range(6, 30, 6):
+        b.replay_all(now=T0, symbols=names[offset:offset + 6], expected_symbols=names)
+        counts.append(b._lookback_progress_count)
+        fast.append(b._lookback_retry_fast)
+        reasons.append(b.base_validation_reason(b.by_idx[0]))
+    finished = (b._lookback_pending, b._lookback_retry_fast, elapsed(31))
+    b._running = True
+    running_blocks = not elapsed(121)
+    b._running = False
+    failed = _book(histLookbackBars=240, histLookbackMax=480, histLookbackAuto=True,
+                   histMinBars=60, histWarmup=16, holdEnabled=False, setMinStep=2, setStepMax=2,
+                   setSlRatios=[0.5], trailVariants=["0.3:0.1"], stratGeneral=True, stratIndications=False)
+    failed.bars, failed.lookback, failed.refresh_s = dict(b.bars), 480, 120
+    failed._lookback_pending, failed._lookback_retry_fast, failed.progress.ready = True, True, True
+    def replay_one(symbol, *_args, **_kwargs):
+        if symbol == names[0]:
+            raise ValueError("synthetic missing page")
+    failed._replay_symbol = replay_one
+    failed.replay_all(now=T0, symbols=names[:6], expected_symbols=names)
+    error_case = (failed.progress.errors, failed._lookback_progress_count,
+                  failed._lookback_retry_fast, elapsed(31, failed), elapsed(121, failed))
+    failed._replay_symbol = lambda *_args, **_kwargs: None
+    failed.replay_all(now=T0, symbols=names[:6], expected_symbols=names)
+    recovered = (failed._lookback_progress_count, failed._lookback_retry_fast)
+    ok = (initial == (False, True) and first == (6, True, True, "history")
+          and stalled == (6, False, False, True) and counts == [12, 18, 24, 30]
+          and fast == [True, True, True, False] and reasons[:3] == ["history"] * 3
+          and reasons[-1] != "history" and finished == (False, False, False) and running_blocks
+          and error_case == (1, 5, False, False, True) and recovered == (6, True))
+    return ok, (f"initial={initial}, first={first}, stalled={stalled}, counts={counts}, "
+                f"fast={fast}, finished={finished}, running_blocks={running_blocks}, error={error_case}, recovered={recovered}")
+
+
 def every_set_evaluated_and_valid_passes_gates():
     # a looser PF bar on this synthetic market gives hundreds of valid Sets, so the invariant is not vacuous
     b = _bars_book(n_syms=2, bars=500, setMinPf=0.9, setGateMinTrades=5)
@@ -228,6 +284,7 @@ def trader_reads_existing_set_attributes():
 CHECKS = [
     ("lifecycle.coverage-counts-sum-to-grid", coverage_counts_sum_to_grid),
     ("lifecycle.interval-never-back-to-back", interval_never_back_to_back),
+    ("lifecycle.history-growth-bounded-progress-retry", history_growth_retries_quickly_only_while_progressing),
     ("lifecycle.every-set-evaluated-valid-passes-gate", every_set_evaluated_and_valid_passes_gates),
     ("lifecycle.failing-set-isolated", failing_set_isolated_others_score),
     ("lifecycle.invalid-recovers-without-reset", invalid_set_recovers_without_reset),
