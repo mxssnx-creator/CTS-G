@@ -387,7 +387,16 @@ def node_floor_covers_vite_and_nitro():
     return ok, f"engines.node={floor!r}"
 
 
+def update_preserves_local_work_without_force():
+    """An updater cannot silently reset a diverged or dirty checkout."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_safe_git_update.py")],
+                            capture_output=True, text=True, timeout=60)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
+
+
 CHECKS = [
+    ("logistics.update-preserves-local-work-without-force", update_preserves_local_work_without_force),
     ("logistics.node-floor-covers-vite-and-nitro", node_floor_covers_vite_and_nitro),
     ("logistics.zero-is-a-value-not-a-default", zero_is_a_value_not_a_default),
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
