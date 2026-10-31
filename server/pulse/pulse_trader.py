@@ -160,6 +160,7 @@ KLINE_EVERY = 2.4
 KLINE_WORKERS = 4
 KLINE_LIMIT = 60
 HIST_PAGE = 1000   # the venue refuses a klines limit above 1000 bars per request (109400)
+HIST_SHORT_RETRY_S = 60.0  # retry an exhausted listing soon, without paging it on every refresh
 KLINE_BATCH = 12
 TF_EVERY = {"1m": 2.0, "5m": 6.0, "15m": 12.0}
 TF_BATCH = {"1m": 8, "5m": 12, "15m": 8}
@@ -6307,6 +6308,11 @@ class Pulse:
         # window.  The extra forming minute is discarded below.
         lookback = int(self.sets.history_bars()) + 1
         page = HIST_PAGE
+        short_cache = self.__dict__.setdefault("_hist_short_cache", {})
+        cache_now = time.monotonic()
+        for key in list(short_cache):
+            if short_cache[key].get("expires", 0) <= cache_now:
+                short_cache.pop(key, None)
         stored = 0
         chunk = 4
         all_names = list(dict.fromkeys(symbols if symbols is not None else SYMBOLS))
@@ -6328,15 +6334,27 @@ class Pulse:
             names = all_names[i : i + chunk]
             # The book stores completed bars only. A 90% threshold missed a 240-bar
             # growth step once history was long enough, leaving the older bars unfetched.
-            short = {s: len(self.sets.bars.get(s) or []) < lookback - 1 for s in names}
+            cached_short = {}
+            for s in names:
+                held = self.sets.bars.get(s) or []
+                last = self.sets.bar_t.get(s)
+                cached = short_cache.get(s) or {}
+                oldest = last - (len(held) - 1) * 60 if last is not None and held else None
+                cached_short[s] = bool(len(held) >= 16 and oldest is not None
+                    and cached.get("target") == lookback and cached.get("expires", 0) > cache_now
+                    and oldest <= cached.get("oldest", float("-inf")) + 1e-6)
+            short = {s: len(self.sets.bars.get(s) or []) < lookback - 1 and not cached_short[s] for s in names}
             first = _gather([(path, {"symbol": s, "interval": "1m", "limit": str(min(page, lookback) if short[s] else 120)}) for s in names])
             rows_by: Dict[str, List[Any]] = {}
             failed = set(names)
+            exhausted = set()
             for _p, extra, body in first:
                 sym = str(extra.get("symbol"))
                 if sym in failed and _ok_page(body):
                     rows_by[sym] = sorted(body["data"], key=self._kline_time)
                     failed.discard(sym)
+                    if short[sym] and len(rows_by[sym]) < int(extra["limit"]):
+                        exhausted.add(sym)
             # a full page means older bars may exist: page backwards (endTime just before the oldest bar held) until the
             # lookback is filled or the venue has no more
             pending = [s for s in names if short[s] and len(rows_by.get(s) or []) >= page and lookback > page]
@@ -6359,12 +6377,22 @@ class Pulse:
                         continue
                     old = sorted(body["data"], key=self._kline_time)
                     rows_by[sym] = old + rows_by[sym]
+                    if len(old) < int(extra["limit"]):
+                        exhausted.add(sym)
                     if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
                         pending.append(sym)
                 failed.update(str(extra.get("symbol")) for _p, extra in reqs if str(extra.get("symbol")) not in answered)
             for s in names:
                 bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
                 if s and bars:
+                    old_last = self.sets.bar_t.get(s)
+                    first_new = last_t - (len(bars) - 1) * 60 if last_t is not None else None
+                    time_gap = bool(old_last is not None and first_new is not None and first_new > old_last + 60.000001)
+                    if time_gap:
+                        # Identical/flat candle values can look like an overlap
+                        # despite a timestamp gap.  Do not join across it.
+                        self.sets.bars.pop(s, None)
+                        self.sets.bar_t.pop(s, None)
                     self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
                     # A valid shorter page can mean a newly listed symbol has no older
@@ -6373,9 +6401,29 @@ class Pulse:
                     # A formerly full series can become short when its recent
                     # refresh no longer overlaps. Fetch its missing history on the
                     # next pass instead of certifying the short refresh as complete.
-                    refreshed_full = short[s] or len(self.sets.bars.get(s) or []) >= lookback - 1
+                    held = self.sets.bars.get(s) or []
+                    held_last = self.sets.bar_t.get(s)
+                    held_oldest = held_last - (len(held) - 1) * 60 if held_last is not None and held else None
+                    cached_retained = bool(cached_short[s] and not time_gap and held_oldest is not None
+                        and held_oldest <= short_cache[s]["oldest"] + 1e-6)
+                    if cached_short[s] and not cached_retained:
+                        short_cache.pop(s, None)  # a gap or replacement requires full backfill next time
+                    refreshed_full = short[s] or len(held) >= lookback - 1 or cached_retained
                     if s not in failed and len(bars) >= 16 and last_t is not None and refreshed_full:
                         refreshed.add(s)
+                    if short[s] and s in exhausted and s not in failed and len(bars) >= 16 and last_t is not None:
+                        minute = float(int(time.time() // 60) * 60)
+                        completed = [self._kline_time(row) for row in rows_by.get(s, ())
+                                     if 0 < self._kline_time(row) / 1000.0 + 60.0 <= minute]
+                        complete = set(completed)
+                        first_bar = last_t - (len(bars) - 1) * 60
+                        # Do not cache an apparent end caused by a gap, duplicate,
+                        # or invalid candle discarded by _closed_klines.
+                        if len(completed) == len(complete) == len(bars) and complete and abs(min(complete) / 1000.0 - first_bar) < 1e-6:
+                            short_cache[s] = {"expires": cache_now + HIST_SHORT_RETRY_S,
+                                              "oldest": first_bar, "target": lookback}
+                    if len(held) >= lookback - 1:
+                        short_cache.pop(s, None)
             time.sleep(0.12)
         self.sets.progress.detail = f"fetched {stored}/{len(all_names)}"
         sizes = sorted(len(self.sets.bars.get(s) or []) for s in all_names)

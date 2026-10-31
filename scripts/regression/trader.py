@@ -681,6 +681,146 @@ def history_growth_retries_failed_or_missing_pages():
     return ok, f"failure/retry={cases}; valid short listing={available} {short_n} bars; stale gap={gap_first} -> {gap_second}"
 
 
+def short_history_backfill_is_temporarily_bounded():
+    """An exhausted listing is refreshed cheaply, but gaps and expiry retry backfill."""
+    import set_engine as se
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ["A-USDT"]
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = _PagedKlines(n=2501), se.SetBook()
+        p.api.rows[0].update(open="0.1", high="0.2", low="0.05", close="0.1")
+        p.sets.lookback = 2400
+        first = p._hist_fetch(["A-USDT"])
+        first_pages = len(p.api.requests)
+        p.api.requests.clear()
+        second = p._hist_fetch(["A-USDT"])
+        second_limits = [int(row["limit"]) for row in p.api.requests]
+        cached_n = len(p.sets.bars["A-USDT"])
+        p._hist_short_cache["A-USDT"]["expires"] = 0
+        p.api.requests.clear()
+        expired = p._hist_fetch(["A-USDT"])
+        expired_pages = len(p.api.requests)
+        # A refresh that no longer overlaps must invalidate the cache; it
+        # must not certify the truncated series until backfill succeeds.
+        for row in p.api.rows:
+            for key in ("open", "high", "low", "close"):
+                row[key] = str(float(row[key]) + 10000)
+        p.api.requests.clear()
+        gap = p._hist_fetch(["A-USDT"])
+        gap_limits = [int(row["limit"]) for row in p.api.requests]
+        p.api.requests.clear()
+        recovered = p._hist_fetch(["A-USDT"])
+        recovered_pages = len(p.api.requests)
+        p.sets.lookback = 2500
+        p.api.requests.clear()
+        grown = p._hist_fetch(["A-USDT"])
+        grown_pages = len(p.api.requests)
+        return (first == second == expired == recovered == grown == {"A-USDT"}
+                and first_pages > 1 and second_limits == [120] and cached_n == 2500
+                and expired_pages > 1 and gap == set() and gap_limits == [120]
+                and recovered_pages > 1 and grown_pages > 1), f"pages first/refresh/expired/gap/recover/growth={first_pages}/{second_limits}/{expired_pages}/{gap_limits}/{recovered_pages}/{grown_pages}; gap={gap}"
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
+def short_history_cache_rejects_failed_or_invalid_pages():
+    import set_engine as se
+
+    class Failing(_PagedKlines):
+        def gather_public(self, reqs, timeout=4.2):
+            rows = super().gather_public(reqs, timeout)
+            return [(path, extra, {"error": True, "msg": "retry"} if "endTime" in extra else body)
+                    for path, extra, body in rows]
+
+    class Duplicating(_PagedKlines):
+        def gather_public(self, reqs, timeout=4.2):
+            rows = super().gather_public(reqs, timeout)
+            for _path, _extra, body in rows:
+                if body.get("data"):
+                    body["data"].append(dict(body["data"][-1]))
+            return rows
+
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ["A-USDT"]
+        pt.time.sleep = lambda _s: None
+        invalid = _bare_pulse()
+        invalid.api, invalid.sets = _PagedKlines(n=2501), se.SetBook()
+        invalid.sets.lookback = 2400
+        invalid._hist_fetch(["A-USDT"])
+        invalid_cached = "A-USDT" in invalid._hist_short_cache
+        invalid.api.requests.clear()
+        invalid._hist_fetch(["A-USDT"])
+        invalid_retry = len(invalid.api.requests) > 1
+        failed = _bare_pulse()
+        failed.api, failed.sets = Failing(n=2501), se.SetBook()
+        failed.sets.lookback = 2400
+        first = failed._hist_fetch(["A-USDT"])
+        failed_cached = "A-USDT" in failed._hist_short_cache
+        failed.api.requests.clear()
+        failed._hist_fetch(["A-USDT"])
+        failed_retry = len(failed.api.requests) > 1
+        duplicate = _bare_pulse()
+        duplicate.api, duplicate.sets = Duplicating(n=2501), se.SetBook()
+        duplicate.api.rows[0].update(open="0.1", high="0.2", low="0.05", close="0.1")
+        duplicate.sets.lookback = 2400
+        duplicate._hist_fetch(["A-USDT"])
+        duplicate_cached = "A-USDT" in duplicate._hist_short_cache
+        return (not invalid_cached and invalid_retry and not first and not failed_cached and failed_retry
+                and not duplicate_cached), f"invalid cached/retried={invalid_cached}/{invalid_retry}; failed cached/retried={failed_cached}/{failed_retry}; duplicate cached={duplicate_cached}"
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
+def flat_candle_gap_cannot_preserve_short_history_cache():
+    """Identical candle values must not hide a real timestamp gap."""
+    import set_engine as se
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ["A-USDT"]
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = _PagedKlines(n=2501), se.SetBook()
+        for row in p.api.rows:
+            row.update(open="100", high="100", low="100", close="100")
+        p.sets.lookback = 2400
+        p._hist_fetch(["A-USDT"])
+        p.sets.bar_t["A-USDT"] -= 300 * 60
+        p.api.requests.clear()
+        gap = p._hist_fetch(["A-USDT"])
+        gap_limits, remaining = [int(row["limit"]) for row in p.api.requests], len(p.sets.bars["A-USDT"])
+        p.api.requests.clear()
+        recovered = p._hist_fetch(["A-USDT"])
+        return (gap == set() and gap_limits == [120] and remaining == 119 and recovered == {"A-USDT"}
+                and len(p.api.requests) > 1), f"gap={gap}; remaining={remaining}; recovery pages={len(p.api.requests)}"
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
+def fifty_short_histories_refresh_without_full_repaging():
+    """Bound request volume across a synthetic 50-symbol short-history universe."""
+    import set_engine as se
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = [f"S{i:02d}-USDT" for i in range(50)]
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = _PagedKlines(n=2501), se.SetBook()
+        p.api.rows[0].update(open="0.1", high="0.2", low="0.05", close="0.1")
+        p.sets.lookback = 2400
+        first = p._hist_fetch()
+        first_requests = len(p.api.requests)
+        p.api.requests.clear()
+        second = p._hist_fetch()
+        limits = [int(row["limit"]) for row in p.api.requests]
+        return (len(first) == len(second) == 50 and first_requests == 150
+                and len(limits) == 50 and set(limits) == {120}), f"symbols={len(second)}; requests backfill/refresh={first_requests}/{len(limits)}; refresh limits={set(limits)}"
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
 def history_chunks_rotate_even_when_many_positions_are_open():
     """Every history symbol must eventually refresh; live open-position priority cannot starve it."""
     from load_engine import LoadGovernor
@@ -1908,6 +2048,10 @@ CHECKS = [
     ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
     ("trader.history-growth-fetches-three-days", grown_history_fetches_the_full_target_up_to_three_days),
     ("trader.history-growth-retries-failed-pages", history_growth_retries_failed_or_missing_pages),
+    ("trader.short-history-backfill-bounded", short_history_backfill_is_temporarily_bounded),
+    ("trader.short-history-cache-rejects-bad-pages", short_history_cache_rejects_failed_or_invalid_pages),
+    ("trader.flat-candle-gap-invalidates-short-cache", flat_candle_gap_cannot_preserve_short_history_cache),
+    ("trader.fifty-short-histories-bound-refresh", fifty_short_histories_refresh_without_full_repaging),
     ("trader.history-chunks-rotate-fairly", history_chunks_rotate_even_when_many_positions_are_open),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
