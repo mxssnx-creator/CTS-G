@@ -140,6 +140,27 @@ def dynamic_hold_with_stage_entry_context():
     return older > 0 and visible > 0 and all(matching), f"older={older}; visible={visible}; independent stage lanes={matching}"
 
 
+def context_audit_matches_windowed_stage_chain():
+    import sys
+    sys.path.insert(0, str(Path(ROOT) / "scripts"))
+    from audit_causal_hold_forward import independent_visible_chain
+    from stages import CFG_FULL, _tape
+
+    rng = random.Random(617)
+    params = replace(CFG_FULL, base_long=10, base_short=0, gate_min=2, floor=1.0,
+                     size_floors=(), long_floor=0.0, lookback_s=4000.0, max_dd_s=1e9,
+                     main_n=8, short_on=True, short_windows=(4, 6), short_min=3, short_margin=1.0)
+    mismatches = []
+    for i in range(12):
+        ts, entries, nets = _tape(rng, 160, "regime", 60.0, hold=300.0)
+        cutoff = ts[-1] - params.lookback_s
+        expected = independent_visible_chain(ts, entries, nets, params, cutoff)
+        actual = se.stage_chain(ts, entries, nets, params, window_start=cutoff)
+        if expected != actual:
+            mismatches.append(i)
+    return not mismatches, f"12 independent current-window stage votes; mismatches={mismatches}"
+
+
 def dynamic_hold_retained_across_chunks():
     b, st, symbols, _holds, base_ts = _fixture("trail")
     data = b._hist_inputs[symbols[0]]
@@ -274,6 +295,7 @@ def memoized_replays_keep_inputs_and_invalidate_hold_changes():
 CHECKS = [
     ("hold-causal.independent-dynamic-walk", dynamic_hold_matches_independent_walk),
     ("hold-causal.dynamic-stage-entry-context", dynamic_hold_with_stage_entry_context),
+    ("hold-causal.context-audit-oracle", context_audit_matches_windowed_stage_chain),
     ("hold-causal.chunked-position-state", dynamic_hold_retained_across_chunks),
     ("hold-causal.splice-overlap-and-missed-entries", old_splice_can_overlap_and_lose_entries),
     ("hold-causal.same-time-and-expired-evidence", selection_excludes_same_time_and_expired_evidence),
