@@ -108,6 +108,59 @@ def dynamic_hold_matches_independent_walk():
     return comparisons == 2 and orders > 0 and len(choices) > 1, f"{comparisons} base/trail walks, {orders} rows, holds selected {sorted(choices)}"
 
 
+def dynamic_hold_with_stage_entry_context():
+    """Reconstruct one-position hold lanes before scoring the current stage window."""
+    import sys
+    sys.path.insert(0, str(Path(ROOT) / "scripts"))
+    import main_stage_audit as oracle
+
+    b, st, symbols, _holds, _base_ts = _fixture("base")
+    cutoff = T0 - b.lookback * se.BAR_S
+    context_cutoff = T0 - b.history_bars() * se.BAR_S
+    base = b._tape_rows(st.id, symbols, context_cutoff, T0)
+    rows = b._choose_hold(st, base, symbols, context_cutoff, T0, scoring_cutoff=cutoff)
+    params = replace(b.stage_params(st.pack), base_long=8, base_short=0, gate_min=2,
+                     floor=1.0, size_floors=(), long_floor=0.0, max_dd_s=1e12,
+                     consistency=0.0, main_on=True, main_n=3, short_on=False,
+                     neg_on=False, real_on=True, real_n=3, full_window=False,
+                     base_min_n=0, main_min_n=0)
+    b.stage_params = lambda _pack: params
+    b.main_on, b.short_on = True, False
+    ts = [r[0] for r in rows]
+    entries = [r[0] - r[5] for r in rows]
+    nets = [r[4] - se.cost_as_frac(b.cost_pct) for r in rows]
+    expected = oracle.naive_chain(ts, entries, nets, params)
+    b.set_processed(st, rows, now=T0)
+    matching = []
+    for lane, actual in (("main", st.proc), ("real", st.exe), ("realneg", st.neg)):
+        wanted = [(ts[i], nets[i]) for i in expected[lane] if ts[i] >= cutoff]
+        matching.append(actual == wanted)
+    older = sum(t < cutoff for t in ts)
+    visible = len(ts) - older
+    return older > 0 and visible > 0 and all(matching), f"older={older}; visible={visible}; independent stage lanes={matching}"
+
+
+def context_audit_matches_windowed_stage_chain():
+    import sys
+    sys.path.insert(0, str(Path(ROOT) / "scripts"))
+    from audit_causal_hold_forward import independent_visible_chain
+    from stages import CFG_FULL, _tape
+
+    rng = random.Random(617)
+    params = replace(CFG_FULL, base_long=10, base_short=0, gate_min=2, floor=1.0,
+                     size_floors=(), long_floor=0.0, lookback_s=4000.0, max_dd_s=1e9,
+                     main_n=8, short_on=True, short_windows=(4, 6), short_min=3, short_margin=1.0)
+    mismatches = []
+    for i in range(12):
+        ts, entries, nets = _tape(rng, 160, "regime", 60.0, hold=300.0)
+        cutoff = ts[-1] - params.lookback_s
+        expected = independent_visible_chain(ts, entries, nets, params, cutoff)
+        actual = se.stage_chain(ts, entries, nets, params, window_start=cutoff)
+        if expected != actual:
+            mismatches.append(i)
+    return not mismatches, f"12 independent current-window stage votes; mismatches={mismatches}"
+
+
 def dynamic_hold_retained_across_chunks():
     b, st, symbols, _holds, base_ts = _fixture("trail")
     data = b._hist_inputs[symbols[0]]
@@ -241,6 +294,8 @@ def memoized_replays_keep_inputs_and_invalidate_hold_changes():
 
 CHECKS = [
     ("hold-causal.independent-dynamic-walk", dynamic_hold_matches_independent_walk),
+    ("hold-causal.dynamic-stage-entry-context", dynamic_hold_with_stage_entry_context),
+    ("hold-causal.context-audit-oracle", context_audit_matches_windowed_stage_chain),
     ("hold-causal.chunked-position-state", dynamic_hold_retained_across_chunks),
     ("hold-causal.splice-overlap-and-missed-entries", old_splice_can_overlap_and_lose_entries),
     ("hold-causal.same-time-and-expired-evidence", selection_excludes_same_time_and_expired_evidence),

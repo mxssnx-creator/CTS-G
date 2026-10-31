@@ -3,8 +3,9 @@
 
 The candidate-hold tapes are counterfactual evidence only. The scored tape is
 replayed through a single position per Set/symbol with past-only hold choices.
-Stage membership still has the known bounded-context limitation; the study is
-not an exchange execution simulator or a sealed holdout.
+Stage membership uses available older entry-time context, but incomplete feeds
+are reported rather than treated as full context. This is not an exchange
+execution simulator or a sealed holdout.
 """
 import argparse
 import bisect
@@ -42,6 +43,41 @@ def metric(rows, n):
     gains = sum(v for v in vals if v > 0)
     losses = -sum(v for v in vals if v < 0)
     return {"returns": vals, "gain": gains, "loss": losses}
+
+
+def independent_visible_chain(ts, entries, nets, params, cutoff):
+    """Plain full-context reconstruction, then restrict today's vote/window."""
+    full = oracle.naive_chain(ts, entries, nets, params)
+    main = full["main"]
+    short_n = params.main_n
+    if params.main_on and params.short_on:
+        def eligible_results(window):
+            selected = []
+            for i in main:
+                if ts[i] < cutoff:
+                    continue
+                prior = [nets[j] for j in main
+                         if entries[i] - params.lookback_s <= ts[j] < entries[i]][-window:]
+                need = window if params.full_window else 1
+                if len(prior) >= need and round(oracle._pf(prior), 4) + 1e-9 >= params.floor_for(window):
+                    selected.append(nets[i])
+            return selected
+
+        reference = oracle._pf(eligible_results(params.main_n))
+        best = reference
+        for window in params.short_windows:
+            values = eligible_results(int(window))
+            pf = oracle._pf(values)
+            if (len(values) >= params.short_min and pf > best + se.SHORT_EPS
+                    and pf >= reference * params.short_margin - se.SHORT_EPS):
+                best, short_n = pf, int(window)
+    keep = [j for j, i in enumerate(main) if ts[i] >= cutoff]
+    return {"main": [main[j] for j in keep],
+            "real": [i for i in full["real"] if ts[i] >= cutoff],
+            "realneg": [i for i in full["realneg"] if ts[i] >= cutoff],
+            "short_n": short_n,
+            "short_by_order": [full["short_by_order"][j] for j in keep],
+            "main_context": main}
 
 
 def main():
@@ -101,20 +137,24 @@ def main():
         times_closed = [row[0] for row in dynamic]
         for checkpoint in checkpoints:
             # Strictly earlier closes: no same-clock evidence for the decision.
-            lo = bisect.bisect_left(times_closed, checkpoint - book.lookback * se.BAR_S)
+            cutoff = checkpoint - book.lookback * se.BAR_S
+            lo = bisect.bisect_left(times_closed, cutoff)
+            context_lo = bisect.bisect_left(times_closed, checkpoint - book.history_bars() * se.BAR_S)
             hi = bisect.bisect_left(times_closed, checkpoint)
             visible = dynamic[lo:hi]
-            book.set_processed(st, visible)
-            st.hist = [dict(zip(se._ROW_KEYS, row)) for row in visible]
+            context = dynamic[context_lo:hi]
+            book.set_processed(st, context, now=checkpoint)
+            st.hist = [dict(zip(se._ROW_KEYS, row)) for row in visible[-max(40, book.gate_window):]]
             st.last_error = ""
             book._score_one(st, now=checkpoint)
             if book.base_validation_reason(st):
                 continue
-            ts = [row[0] for row in visible]
-            entries = [row[0] - row[5] for row in visible]
-            nets = [row[4] - se.cost_as_frac(book.cost_pct) for row in visible]
-            expected = oracle.naive_chain(ts, entries, nets, book.stage_params(st.pack))
-            actual = se.stage_chain(ts, entries, nets, book.stage_params(st.pack))
+            ts = [row[0] for row in context]
+            entries = [row[0] - row[5] for row in context]
+            nets = [row[4] - se.cost_as_frac(book.cost_pct) for row in context]
+            params = book.stage_params(st.pack)
+            expected = independent_visible_chain(ts, entries, nets, params, cutoff)
+            actual = se.stage_chain(ts, entries, nets, params, window_start=cutoff)
             if expected != actual or (st.proc_total, st.exe_total, st.neg_total) != tuple(len(expected[k]) for k in ("main", "real", "realneg")):
                 raise RuntimeError(f"stage chain mismatch: {st.id} at {checkpoint}")
             oracle_checked += 1
@@ -147,10 +187,12 @@ def main():
         summary[cohort] = item
     if inputs != fingerprint(args.data, names, Path(args.preset)):
         raise RuntimeError("inputs changed during the study")
-    result = {"scope": "continuous pooled Set/symbol paper lanes; historical checkpoints; incomplete stage context; not venue execution or sealed holdout",
+    missing_context = [t for t in checkpoints if any(times[sym][0] > t - book.history_bars() * se.BAR_S for sym in names)]
+    result = {"scope": "continuous pooled Set/symbol paper lanes; historical checkpoints; available entry-time context; not venue execution or sealed holdout",
               "timingLimitation": "The study reselects holds at each paper entry; the live engine refreshes choices periodically. Decisions exclude closes at the checkpoint, while the current runtime scorer includes them. No live refresh schedule, fills, spread or venue latency are reproduced.",
               "symbols": names, "sets": len(book.by_idx), "costPct": book.cost_pct,
-              "lookbackBars": book.lookback, "start": checkpoints[0], "end": end,
+              "lookbackBars": book.lookback, "contextBars": book.history_bars(),
+              "checkpointsWithShortContext": missing_context, "start": checkpoints[0], "end": end,
               "elapsedSeconds": round(time.monotonic() - started, 3), "sha256": inputs,
               "dynamicRowsCheckedForOverlap": dynamic_rows, "overlappingRows": 0,
               "baseStageChainsMatchedOracle": oracle_checked,

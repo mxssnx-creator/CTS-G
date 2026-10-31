@@ -291,15 +291,14 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
 
 
 def chain_at(book, tapes: Tapes, st, now: float):
-    """(chain, nets): the Set's chain over its orders in the lookback before now (set_engine.stage_chain, the replay's rule). The chain reads the
-    Base and Main windows and the Negative windows, never the Real last N: variants that differ only in Real N share it."""
+    """Score stage membership using earlier entry-time context, then keep the current lookback window."""
     lb = book.lookback * 60.0
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
     e = bisect.bisect_left(tx, now)
-    lo = bisect.bisect_left(tx, now - lb)
+    lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
     ts, ents = list(tx[lo:e]), list(te[lo:e])
     nets = [x - tapes.cf for x in pp[lo:e]]
-    return se.stage_chain(ts, ents, nets, book.stage_params(st.pack)), nets
+    return se.stage_chain(ts, ents, nets, book.stage_params(st.pack), window_start=now - lb), nets
 
 
 def stage_lane(book, tapes: Tapes, st, now: float) -> str:
@@ -345,6 +344,12 @@ def gate_until(book, tapes: Tapes, st, now: float) -> float:
         until = min(until, next_change(st.idx, now, lb))
     if lo < end:
         until = min(until, float(tx[lo]) + lb)
+    # Context is bounded as well: if its oldest close expires, a reconstructed
+    # historical membership can change even when the Base window does not.
+    context_s = book.history_bars() * 60.0
+    context_lo = bisect.bisect_left(tx, now - context_s)
+    if context_lo < end:
+        until = min(until, float(tx[context_lo]) + context_s)
     _, _, pp = tapes.window(st.idx, now, lb, book.gate_window)
     wt = tx[max(lo, end - book.gate_window):end]
     eq = peak = 0.0
@@ -400,12 +405,12 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
                 continue
         picks.append((st, now))
     for st, now in picks:
-        tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, 10 ** 9)
+        tx, te, pp = tapes.window(st.idx, now, book.history_bars() * 60.0, 10 ** 9)
         st.hist = [{"t": float(a), "pnl": float(x) - tapes.cf, "pnl_pct": float(x), "hold_s": float(a - b), "reason": "x"}
                    for a, b, x in zip(tx, te, pp)]
         st.live = []
         book._score_one(st, now=now)
-        st.n = len(st.hist)
+        st.n = sum(1 for t in tx if t >= now - book.lookback * 60.0)
         eng_valid = book.gate_reason(st) == ""
         eng_lane = book.lane_of(st)
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
