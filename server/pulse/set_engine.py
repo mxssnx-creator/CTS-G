@@ -1769,7 +1769,10 @@ class SetBook:
         self.short_on = bool(True if sov["Enabled"] is None else sov["Enabled"])
         self.short_ratio = max(0.1, min(1.0, float(MAIN_SHORT_MAX_RATIO if sov["MaxRatio"] is None else sov["MaxRatio"])))
         short_cap = max(1, int(self.main_n * self.short_ratio + 1e-9))                 # long 25, ratio 0.5: short windows of at most 12
-        self.short_windows = tuple(w for w in parse_windows(sov["Windows"], MAIN_SHORT_WINDOWS) if w <= short_cap) or (short_cap,)
+        # Do not synthesize the cap as a candidate: it may not be one of the
+        # configured windows. If none survive, _main_short_choice retains the
+        # long-window reference, as it already does when no candidate wins.
+        self.short_windows = tuple(w for w in parse_windows(sov["Windows"], MAIN_SHORT_WINDOWS) if w <= short_cap)
         self.short_min = max(3, min(200, int(MAIN_SHORT_MIN_DEFAULT if sov["Min"] is None else sov["Min"])))
         self.short_margin = max(1.0, min(2.0, float(MAIN_SHORT_MARGIN if sov["Margin"] is None else sov["Margin"])))
         # the Main minimal window, a third last-N next to the long and the short one: the newest 1-3 results of the Main Set all positive (or all negative)

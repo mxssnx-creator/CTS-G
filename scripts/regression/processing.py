@@ -1242,10 +1242,11 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
 
 
 def validation_windows_follow_the_overall_n_floor_8_on_the_gates_only():
-    """pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN and trailRecalcN follow the overall validation's last N
+    """pfWindow, setPfWindow, exitPfWindow, slToTpRecalcN and trailRecalcN follow the overall validation's last N
     (setGateWindow) while windowsLinked is on (the default); unlinked each takes its own N, and no last-N validation reads fewer than
     8 orders (the hold Auto sample, the samples of Exit, Block and the coordinator, the Axis windows) whatever the setting. The Base gate's
-    minimum order count (setGateMinTrades) is no part of that floor: 0 = off, any other value is taken as it is."""
+    minimum order count (setGateMinTrades) is no part of that floor: 0 = off, any other value is taken as it is. The separate
+    DCA PF window is intentionally independent of windowsLinked and has its own minimum of five."""
     from block_engine import BlockBook
     from coord_engine import Coordinator
     from dca_engine import DcaBook
