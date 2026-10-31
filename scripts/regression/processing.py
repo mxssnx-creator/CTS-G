@@ -1174,8 +1174,14 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
 
     def run(st, base, cands):
         b._hist_rows = {"S0-USDT": {st.id: base, **{f"{st.id}{HOLD_KEY}{h}": r for h, r in cands.items()}}}
-        rows = b._choose_hold(st, b._tape_rows(st.id, ["S0-USDT"], 0.0), ["S0-USDT"], 0.0)
-        return st.hold_bars, st.hold_auto_n, len(rows)
+        try:
+            b._choose_hold(st, b._tape_rows(st.id, ["S0-USDT"], 0.0), ["S0-USDT"], 0.0)
+        except ValueError as exc:
+            if str(exc) != "automatic-hold replay inputs unavailable":
+                raise
+        else:
+            raise AssertionError("candidate rows alone must not be spliced into a scored tape")
+        return st.hold_bars, st.hold_auto_n
 
     got = {}
     ref = _rows(lo.id, 20, 30)                                          # PF 0.9 at the global stop
@@ -1202,7 +1208,7 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     s6 = next(x for x in b.by_idx if x.kind == "base" and x.step == 6)
     tr = next(x for x in b.by_idx if x.kind == "trail" and b.step_of(x) >= 6)
     ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH
-    ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50 and got["best"][2] == 50
+    ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50
           and got["cap"][0] == 0 and got["cap_good"][0] == 30 and got["cap_good"][1] == 50
           and got["few"][0] == 0 and got["tie"][0] == 0 and got["inside margin"][0] == 0 and got["outside margin"][0] == 15 and got["better"][0] == 15 and got["high"][0] == 120
           and lo.hold_auto and man.auto_holds(m3) == () and m3.hold_bars == 17 and not m3.hold_auto and man.auto_holds(m4) != ()
@@ -1563,9 +1569,11 @@ def sets_with_few_orders_are_judged_when_the_minimum_is_off():
 
 
 def hold_auto_tape_is_causal():
-    """causal_hold_tape: an order comes from the hold that was chosen at its entry, judged on the orders closed before it. A candidate
-    hold that is poor early and strong late replaces the reference only for the orders opened after it became the better one; the
-    old rule (the hold chosen now applied to the whole tape) took its early losses too. The choice now equals hold_choice_at(+inf)."""
+    """The legacy diagnostic splice uses past-only candidate choices; it is not a valid single-position tape.
+
+    This narrow check does not assert that selected candidate trades can coexist. The independent
+    dynamic-lane regression checks the actual entry, overlap and cooldown behavior.
+    """
     from set_engine import causal_hold_tape, hold_choice_at, prefix_sums, HOLD_AUTO_MARGIN
     cf = 0.0012
     # reference: alternating +0.3 % / -0.2 % net (PF 1.5); the 20-minute hold: 15 losing orders, then 15 strong ones; an order every 10 min
@@ -1664,7 +1672,7 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
     ("processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders", hold_auto_picks_each_sets_own_best_hold_from_its_last_orders),
     ("processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape", hold_auto_replay_assigns_holds_and_judges_the_chosen_tape),
-    ("processing.hold-auto-tape-is-causal", hold_auto_tape_is_causal),
+    ("processing.legacy-splice-choices-are-past-only", hold_auto_tape_is_causal),
     ("processing.validation-windows-follow-overall-n-floor-8-gates-only", validation_windows_follow_the_overall_n_floor_8_on_the_gates_only),
     ("processing.real-gate-per-set-at-the-base-minimum-pf", real_gate_is_per_set_at_the_base_minimum_pf),
     ("processing.no-gate-asks-less-than-pf-1.1", no_gate_asks_less_than_pf_1_1),

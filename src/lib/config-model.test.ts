@@ -19,6 +19,7 @@ test("Secure, Minimal is an isolated, bounded 50-symbol preset", () => {
   assert.deepEqual([preset.blockEnabled, preset.stratBlock, preset.dcaEnabled, preset.stratDca], [false, false, false, false]);
   assert.deepEqual([preset.setMinStep, preset.setStepMax, preset.shortRangeStepMin, preset.shortRangeStepMax], [2, 8, 2, 6]);
   assert.deepEqual([preset.histLookbackBars, preset.histLookbackAuto, preset.setGateMinTrades, preset.stageFullWindow], [720, false, 12, true]);
+  assert.equal(preset.mainNegEnabled, false, "the unverified inverse lane cannot bypass Main in this preset");
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) assert.equal(preset[key], PF_TYPE_DEFAULTS[key]);
   preset.symbols.push("TEST-USDT");
   assert.equal(secureMinimalPreset().symbols.includes("TEST-USDT"), false);

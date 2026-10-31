@@ -351,13 +351,14 @@ def _base_tail_ok(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[flo
 
 
 def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequence[Tuple[List[float], List[float], List[float]]], t: float,
-                   max_n: int, min_n: int, margin: float) -> int:
+                   max_n: int, min_n: int, margin: float, lookback_s: float = float("inf")) -> int:
     """Index of the hold candidate chosen at time t (the Auto Mode's rule on the orders closed before t: the reference, cands[0],
     unless a candidate with min_n orders beats it by the margin and is the best). prefix[c] = (exit times, gain prefix, loss prefix)."""
     def pf_n(c: int) -> Tuple[float, int]:
         ts, g, l_ = prefix[c]
         e = bisect.bisect_left(ts, t)
-        s0 = max(0, e - max_n)
+        lo = bisect.bisect_left(ts, t - lookback_s) if math.isfinite(lookback_s) else 0
+        s0 = max(lo, e - max_n)
         gp, gl = g[e] - g[s0], l_[e] - l_[s0]
         return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
     ref_pf, _ = pf_n(0)
@@ -370,9 +371,11 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
 
 
 def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float) -> List[tuple]:
-    """The hold Auto Mode's tape, causal: every candidate's order whose entry fell while that candidate was the chosen hold (chosen on
-    the orders closed before the entry, hold_choice_at), in exit order. cands = [(hold, rows)], the reference first; rows are the
-    replay's tuples (exit t at 0, pnl_pct at 4, hold_s at 5)."""
+    """Legacy candidate-splice diagnostic, not an executable position tape.
+
+    Its choices use past data but rows can overlap and omit entries. It must not
+    be used for stage evidence or execution; those require a single lane replay.
+    """
     prefix = []
     for _h, rows in cands:
         ts = [finite(r[0]) for r in rows]
@@ -1282,6 +1285,7 @@ class SetLane:
         cfg: Dict[str, Any],
         cand: Optional[Sequence[int]] = None,
         acc: Optional["BarIndex"] = None,
+        select_hold: Optional[Callable[[int], int]] = None,
     ) -> List[Dict[str, Any]]:
         """Advance over bars[i0:i1]. Same rules as step(), applied to the whole range in one loop.
         acc: the symbol's BarIndex; with it a base lane finds its exit by lookup (same result as the walk).
@@ -1314,6 +1318,10 @@ class SetLane:
         out: List[Dict[str, Any]] = []
         i = i0
         while i < i1:
+            if o is not None:
+                # A dynamically chosen hold belongs to the open position. Later
+                # choices must never change the time stop of an existing trade.
+                time_bars = o.get("time_bars", self.hold or cfg["time_bars"])
             if o is not None and acc is not None and (not use_trail or o.get("trail") is None):
                 # an unarmed position (every base lane, and a trailing lane until its arm is reached) exits like a base
                 # lane: find the exit bar by lookup. A trailing lane that arms first hands over to the walk at that bar.
@@ -1482,6 +1490,11 @@ class SetLane:
                 else:
                     sl, tp = close * (1 + sl_frac), close * (1 - tp_use)
                 o = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": j, "trail": None}
+                if select_hold is not None:
+                    chosen = int(select_hold(j))
+                    if chosen < 0:
+                        raise ValueError("selected hold must be nonnegative")
+                    o["time_bars"] = chosen or cfg["time_bars"]
             i = j + 1
         self.open = o
         self.cool = cool
@@ -1623,6 +1636,9 @@ class SetBook:
         self._topo_gen = 0
         # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
         self._hist_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        # The inputs paired with each symbol's candidate tapes. Automatic-hold
+        # history is re-simulated from actual entry opportunities, not spliced.
+        self._hist_inputs: Dict[str, Dict[str, Any]] = {}
         self._hist_replay_key: Dict[str, Tuple[int, int]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         # open time (s) of the newest row of self.bars[symbol] when that row is a completed exchange minute; absent when the
@@ -1655,6 +1671,7 @@ class SetBook:
                 # Until a complete pass under the new rules, no old row may validate
                 # a new signal/cost/hold configuration (including chunked refreshes).
                 self._hist_rows.clear()
+                self._hist_inputs.clear()
                 self._hist_replay_key.clear()
                 self._sig_cache.clear()
                 self.progress.ready = False
@@ -2399,7 +2416,7 @@ class SetBook:
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
                 per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 try:
-                    self._replay_symbol(symbol, per_set, now, on_step=on_step)
+                    inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
                 except Exception as exc:  # one symbol never stops the others
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
@@ -2411,6 +2428,7 @@ class SetBook:
                         aborted = True
                         break                       # never restore an old-rules chunk after load invalidated it
                     self._hist_rows[symbol] = packed
+                    self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
@@ -2422,6 +2440,7 @@ class SetBook:
                 live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
                     del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
+                    self._hist_inputs.pop(s, None)
                     self._hist_replay_key.pop(s, None)
                 for s in [s for s in self._sig_cache if s not in live]:
                     del self._sig_cache[s]          # and so do their signal memo entries
@@ -2487,7 +2506,7 @@ class SetBook:
             self._running = False
             self._after_pass()
 
-    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> None:
+    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
         bars = self.bars[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
@@ -2534,9 +2553,11 @@ class SetBook:
                     out.append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
                                 "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
                                 "reason": done["reason"], "set_id": st.id})
-                if h:
-                    del out[:-HOLD_AUTO_MAX_ORDERS]  # only the newest orders of a candidate can be among the last 50 overall
             self.progress.set_id = st.id
+        # Candidate evidence must cover every entry being reconstructed, not just
+        # the most recent 50 closes at the final scoring time.
+        return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg,
+                "dirs": dirs, "confs": confs, "cand": cand, "acc": acc}
 
     def _adapt_lookback(self) -> None:
         """Grow collection history when too many scored Sets have sparse evidence.
@@ -2579,19 +2600,40 @@ class SetBook:
 
         ref_pf, ref_n = judge(base)
         best = (ref_pf, 0, base, ref_n)
-        cands = [(0, base)]
+        cands = [(0, self._tape_rows(st.id, tape_order, float("-inf"), until=until))]
         for h in holds:
-            rows = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, cutoff, until=until)
-            cands.append((h, rows))
+            rows_all = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, float("-inf"), until=until)
+            cands.append((h, rows_all))
+            rows = [r for r in rows_all if r[0] >= cutoff]
             pf, n = judge(rows)
             if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
                 best = (pf, h, rows, n)
         # the choice now (on every order closed so far) is what a new position opens with
         st.hold_bars, st.hold_auto = best[1], True
         st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
-        # the tape the Set is judged on is causal: each order comes from the hold that was chosen at its entry, on the orders closed
-        # before it (as live positions opened); the hold chosen now is never applied to orders opened before the choice existed
-        return causal_hold_tape(cands, self.hold_auto_max, self.hold_auto_min, HOLD_AUTO_MARGIN, cf)
+        prefixes = []
+        for _hold, rows in cands:
+            gains, losses = prefix_sums([finite(r[4]) - cf for r in rows])
+            prefixes.append(([finite(r[0]) for r in rows], gains, losses))
+        out: List[tuple] = []
+        for symbol in tape_order:
+            data = self._hist_inputs.get(symbol)
+            if data is None or st.pack not in data["dirs"]:
+                raise ValueError("automatic-hold replay inputs unavailable")
+            bars, base_ts = data["bars"], data["base_ts"]
+            def choose(i: int) -> int:
+                idx = hold_choice_at(cands, prefixes, base_ts + i * BAR_S,
+                                     self.hold_auto_max, self.hold_auto_min,
+                                     HOLD_AUTO_MARGIN, self.lookback * BAR_S)
+                return cands[idx][0]
+            lane = SetLane(st, symbol)
+            done = lane.scan(data["warmup"], len(bars), bars, data["dirs"][st.pack], data["confs"][st.pack],
+                             True, data["cfg"], data["cand"][st.pack], data["acc"], select_hold=choose)
+            for row in done:
+                t = base_ts + row["exit_i"] * BAR_S
+                if t >= cutoff and (until is None or t <= until):
+                    out.append((t, symbol, row["side"], row["pnl"], row["pnl_pct"], row["hold_s"], row["reason"], st.id))
+        return sorted(out, key=_row_t)
 
     def floor_for(self, n: int, pack: str) -> float:
         """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""

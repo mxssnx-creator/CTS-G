@@ -187,7 +187,7 @@
   "mainShortMargin": 1.02,
   "mainMinN": 0,
   "mainMinMode": "positive",
-  "mainNegEnabled": true,
+  "mainNegEnabled": false,
   "mainNegWindows": [
     5,
     10

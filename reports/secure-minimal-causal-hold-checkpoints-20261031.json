@@ -1,0 +1,688 @@
+{
+  "presetSha256": "33ff269b84e67c779879866d578f2c9a176f5d047923afbf1e0e6242f0cb51cc",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "lookbackBars": 720,
+  "holdAuto": true,
+  "costPct": 0.12,
+  "checkpoints": [
+    {
+      "t": 1792227600,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 777,
+        "stop-cap": 12,
+        "short": 22,
+        "pass": 11
+      },
+      "entryReasons": {
+        "pf<min": 777,
+        "stop-cap": 12,
+        "short": 22,
+        "main": 11
+      },
+      "basePassed": 11,
+      "basePf": 1.6004265763335723,
+      "baseNoLoss": false,
+      "baseOrders": 550,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 33,
+      "baseShortPassed": 17,
+      "autoHoldSelected": 246,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 11,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 11,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 25.652
+    },
+    {
+      "t": 1792231200,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 18,
+      "autoHoldSelected": 519,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 26.207
+    },
+    {
+      "t": 1792234800,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 6,
+      "autoHoldSelected": 558,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 27.001
+    },
+    {
+      "t": 1792238400,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 18,
+      "autoHoldSelected": 352,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 25.884
+    },
+    {
+      "t": 1792242000,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 42,
+      "autoHoldSelected": 453,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 26.201
+    },
+    {
+      "t": 1792245600,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 36,
+      "autoHoldSelected": 673,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 27.253
+    },
+    {
+      "t": 1792249200,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 0,
+      "autoHoldSelected": 689,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 36.633
+    },
+    {
+      "t": 1792252800,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 810,
+        "stop-cap": 12
+      },
+      "basePassed": 0,
+      "basePf": null,
+      "baseNoLoss": false,
+      "baseOrders": 0,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 0,
+      "baseShortPassed": 4,
+      "autoHoldSelected": 729,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 0,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 38.569
+    },
+    {
+      "t": 1792256400,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 740,
+        "pass": 67,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 740,
+        "main": 9,
+        "real": 58,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "basePassed": 67,
+      "basePf": 7.621421639299356,
+      "baseNoLoss": false,
+      "baseOrders": 3350,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 70,
+      "baseShortPassed": 339,
+      "autoHoldSelected": 463,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {
+        "5": 7,
+        "6": 50,
+        "8": 1
+      },
+      "stageCounts": {
+        "base": 67,
+        "main": 58,
+        "negative": 1,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 67,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 45.956
+    },
+    {
+      "t": 1792260000,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 766,
+        "pass": 38,
+        "short": 6,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 766,
+        "main": 3,
+        "real": 35,
+        "short": 6,
+        "stop-cap": 12
+      },
+      "basePassed": 38,
+      "basePf": 1.7438081792292799,
+      "baseNoLoss": false,
+      "baseOrders": 1900,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 44,
+      "baseShortPassed": 68,
+      "autoHoldSelected": 437,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {
+        "0": 7,
+        "2": 27,
+        "4": 1
+      },
+      "stageCounts": {
+        "base": 38,
+        "main": 35,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 38,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 39.384
+    },
+    {
+      "t": 1792263600,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 808,
+        "pass": 2,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 808,
+        "main": 2,
+        "stop-cap": 12
+      },
+      "basePassed": 2,
+      "basePf": 1.6324517364986906,
+      "baseNoLoss": false,
+      "baseOrders": 100,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 2,
+      "baseShortPassed": 44,
+      "autoHoldSelected": 465,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 2,
+        "main": 0,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 2,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 36.613
+    },
+    {
+      "t": 1792267200,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 807,
+        "pass": 2,
+        "stop-cap": 12,
+        "short": 1
+      },
+      "entryReasons": {
+        "pf<min": 807,
+        "main": 2,
+        "stop-cap": 12,
+        "short": 1
+      },
+      "basePassed": 2,
+      "basePf": 1.7079679175678588,
+      "baseNoLoss": false,
+      "baseOrders": 100,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 3,
+      "baseShortPassed": 37,
+      "autoHoldSelected": 696,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {},
+      "stageCounts": {
+        "base": 2,
+        "main": 0,
+        "negative": 1,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 2,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 45.03
+    }
+  ],
+  "maxRssKiB": 180252,
+  "scope": "historical SetBook snapshots only; not modeled execution or exchange fills",
+  "validityNote": "Corrected automatic-hold replay. This is the prior preset with mainNegEnabled=true, not the updated Secure, Minimal preset. Twelve overlapping hourly paper snapshots, eight archived symbols, assumed 0.12% round-trip cost. Current-window stage reconstruction can lack earlier entry context; symbol/side tapes are pooled. Not exchange execution or a PF guarantee.",
+  "sourceSha256": {
+    "server/pulse/set_engine.py": "2da33d5cfed5913ae6a71c39b6e3aee1b7c8d70a61da272445d57b7d25c931fd",
+    "scripts/audit_preset_progress.py": "0d3e7af47fad608849df41f7db4ba78d04eb3d64aaf77881e1e411fbc2cb695e",
+    "../secure-minimal-original-auto-20261031.json": "33ff269b84e67c779879866d578f2c9a176f5d047923afbf1e0e6242f0cb51cc"
+  },
+  "marketSha256": {
+    "ADA-USDT": "1a05b2dd626e8e0941422946898a257bafb4278e093027cc0d6f1253dc311dab",
+    "AVAX-USDT": "576b929deb42a5ecd0c0ddf01d2ba99157ab12ffa4efba990daf826086551a51",
+    "BCH-USDT": "8a90af8129436778ab896a2b1d4382a702a39705c1e4dc965a96934edc1621f6",
+    "BNB-USDT": "9db36cd51f5af868c4e39936c59c69a5b4c2edad78d9b32248bc5d7fdef9c8fa",
+    "BTC-USDT": "0a0b72b76f88bfb31bbd21df076fe5d0434761795a96863857dbd87adb2aadfa",
+    "DOGE-USDT": "dd4632564a105052586785a1f0bcee667fec7f913c37b110c08a4910f47184b1",
+    "DOT-USDT": "ccec6360b47a9efced69a9d52c14e04f0fd7c60a62fe6fd0e3bd20573fc4d837",
+    "ETH-USDT": "8483a25e5367b5c153555bd7bc4a374b74e44ded24e2fe74eabb25f12e1b727e"
+  }
+}
