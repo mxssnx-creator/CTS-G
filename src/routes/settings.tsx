@@ -737,7 +737,7 @@ function SettingsPage() {
                   label="Main · short candidates"
                   value={overlay.mainShortWindows}
                   options={[5, 10, 15, 20, 25]}
-                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)} with the long window ${overlay.mainGateN}`}
+                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)} with the long window ${overlay.mainGateN}; if none qualify, the long reference remains`}
                   onChange={(v) => patch("mainShortWindows", v)}
                 />
                 <Slider
