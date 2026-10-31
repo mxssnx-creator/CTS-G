@@ -5,6 +5,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux-common.sh
 source "$HERE/linux-common.sh"
+# shellcheck source=git-update.sh
+source "$HERE/git-update.sh"
 
 FROM_DIR=""
 FORCE=0
@@ -72,15 +74,9 @@ if [[ -n "$FROM_DIR" ]]; then
 elif [[ -d "$CTS_G_ROOT/.git" ]]; then
   configure_git "$CTS_G_ROOT"
   git -C "$CTS_G_ROOT" fetch --prune "$GIT_REMOTE"
-  git -C "$CTS_G_ROOT" checkout -f "$BRANCH" >/dev/null 2>&1 || git -C "$CTS_G_ROOT" checkout -B "$BRANCH"
-  if [[ "$FORCE" -eq 1 ]]; then
-    git -C "$CTS_G_ROOT" reset --hard "$GIT_REMOTE/$BRANCH"
-    ok "hard reset $GIT_REMOTE/$BRANCH"
-  else
-    git -C "$CTS_G_ROOT" merge --ff-only "$GIT_REMOTE/$BRANCH" \
-      || git -C "$CTS_G_ROOT" reset --hard "$GIT_REMOTE/$BRANCH"
-    ok "fast-forward $BRANCH"
-  fi
+  cts_git_update "$CTS_G_ROOT" "$GIT_REMOTE" "$BRANCH" "$FORCE" \
+    || die "Git update failed. Resolve local changes/divergence; without --force no hard reset is attempted."
+  [[ "$FORCE" -eq 1 ]] && ok "hard reset $GIT_REMOTE/$BRANCH" || ok "fast-forward $BRANCH"
 else
   die "no git clone at $CTS_G_ROOT and no --from-dir given"
 fi
