@@ -1062,6 +1062,7 @@ class SetState:
     deact_reason: str = ""          # the gate reason of the last evaluation ('' when valid)
     evaluated_at: float = 0.0       # wall time of the last successful evaluation (freshness, live only)
     score_at: float = 0.0           # event-time clock of the last scoring pass
+    score_before: bool = False      # decision-time paper windows exclude closes at this clock
     locked: bool = False
     source_n: int = 0
 
@@ -2483,10 +2484,13 @@ class SetBook:
                     aborted = True                  # keep each Set's last complete scores; the next pass redoes them
                     self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
                 tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
+                # A paper entry at this decision clock cannot use an unordered
+                # close stamped at the same instant as evidence.
+                decision_upper = math.nextafter(now, float("-inf"))
                 for st in ([] if stale else self.by_idx):
                     try:
-                        full = self._tape_rows(st.id, tape_order, context_cutoff, until=now)
-                        full = self._choose_hold(st, full, tape_order, context_cutoff, until=now, scoring_cutoff=cutoff)
+                        full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
+                        full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
                         self.set_processed(st, full, now=now)
                         visible = [r for r in full if r[0] >= cutoff]
                         st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window):]]
@@ -2732,13 +2736,17 @@ class SetBook:
         st.main_evidence = ch.get("main_evidence")
         st.proc_replayed = True
 
-    def _streams(self, st: SetState, now: Optional[float] = None) -> Tuple[List[float], List[float], List[float], int]:
+    def _streams(self, st: SetState, now: Optional[float] = None, before: Optional[bool] = None) -> Tuple[List[float], List[float], List[float], int]:
         """Paper Main, Real and Real Negative streams, each causal on the same paper history.
         Actual fills are validated separately by execution_stats; mixing them here double-counts
         overlapping entries and changes short-window votes without rebuilding their stage chain."""
         anchor = finite(now) if now is not None else st.score_at
         cutoff = anchor - self.lookback * BAR_S if anchor > 0 else float("-inf")
         upper = anchor if anchor > 0 else float("inf")
+        if before is None:
+            before = bool(getattr(st, "score_before", False)) if now is None else False
+        if before and anchor > 0:
+            upper = math.nextafter(upper, float("-inf"))
         if getattr(st, "proc_replayed", False):
             m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.main_n)
             evidence = st.main_evidence
@@ -2815,18 +2823,22 @@ class SetBook:
         """The Set's paper Main Set (orders opened while Base passed)."""
         return self._streams(st)[0]
 
-    def _tape_at(self, st: SetState, now: float) -> List[Dict[str, Any]]:
+    def _tape_at(self, st: SetState, now: float, before: bool = False) -> List[Dict[str, Any]]:
         cutoff = now - self.lookback * BAR_S if now > 0 else float("-inf")
         upper = now if now > 0 else float("inf")
+        if before and now > 0:
+            upper = math.nextafter(upper, float("-inf"))
         return by_time([row for row in st.tape() if cutoff <= finite(row.get("t")) <= upper])
 
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
+        before = now is not None and finite(now) > 0
         if now is None:
             anchor = max((finite(row.get("t")) for row in st.tape()), default=0.0)
         else:
             anchor = finite(now)
         st.score_at = anchor
-        tape = self._tape_at(st, anchor)                             # only closed orders within the lookback
+        st.score_before = before
+        tape = self._tape_at(st, anchor, before=before)              # strictly earlier at a decision clock
         cf = cost_as_frac(self.cost_pct)
         for i, row in enumerate(tape):
             try:
@@ -2881,7 +2893,7 @@ class SetBook:
         st.base_min_gp, st.base_min_gl = sum(x for x in mw if x > 0), -sum(x for x in mw if x < 0)
         st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
                                                     and sign_ok(mw, self.base_min_positive, self.base_min_both, self.base_min_avg))
-        m_, r_, q_, short_n = self._streams(st, now=anchor)      # the stages after Base read the Set's Main / Real / Real Negative Sets
+        m_, r_, q_, short_n = self._streams(st, now=anchor, before=before)  # paper stages use the same decision boundary
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack))
         st.stage = v
         st.main_short_win = short_n
@@ -3345,7 +3357,7 @@ class SetBook:
             n_rows = 0
             for x in sts:
                 rk = self.rank_key(x)
-                for r in self._tape_at(x, x.score_at)[-self.gate_window:]:
+                for r in self._tape_at(x, x.score_at, before=getattr(x, "score_before", False))[-self.gate_window:]:
                     n_rows += 1
                     k = (r.get("symbol"), int(round(finite(r.get("t")) - finite(r.get("hold_s")))), x.pack, r.get("side"))
                     cur = best.get(k)

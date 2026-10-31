@@ -189,7 +189,7 @@ def main():
         raise RuntimeError("inputs changed during the study")
     missing_context = [t for t in checkpoints if any(times[sym][0] > t - book.history_bars() * se.BAR_S for sym in names)]
     result = {"scope": "continuous pooled Set/symbol paper lanes; historical checkpoints; available entry-time context; not venue execution or sealed holdout",
-              "timingLimitation": "The study reselects holds at each paper entry; the live engine refreshes choices periodically. Decisions exclude closes at the checkpoint, while the current runtime scorer includes them. No live refresh schedule, fills, spread or venue latency are reproduced.",
+              "timingLimitation": "The study reselects holds at each paper entry; the live engine refreshes choices periodically. Paper decision windows exclude closes at the checkpoint. No live refresh schedule, fills, spread, venue latency or exchange event ordering are reproduced.",
               "symbols": names, "sets": len(book.by_idx), "costPct": book.cost_pct,
               "lookbackBars": book.lookback, "contextBars": book.history_bars(),
               "checkpointsWithShortContext": missing_context, "start": checkpoints[0], "end": end,

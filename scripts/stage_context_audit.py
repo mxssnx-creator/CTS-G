@@ -75,8 +75,8 @@ def summarize(book, tapes, checkpoints):
 def compare_runtime_boundary(book, tapes, checkpoints):
     """Compare the simulator and runtime Base gates where a close equals a checkpoint.
 
-    Uses the same local paper rows for both. This is not a live test and does not
-    settle whether checkpoint or entry-time decisions should include that close.
+    Uses the same local paper rows for both. Both decision paths should exclude
+    equal-time closes; this does not establish live exchange event ordering.
     """
     if book.fresh_s:
         raise ValueError("boundary comparison requires freshness checks disabled")
@@ -108,8 +108,8 @@ def compare_runtime_boundary(book, tapes, checkpoints):
                                     "runtime_n": st.gate_n, "runtime_pf": st.gate_pf,
                                     "runtime_reason": reason or ("minimal" if not runtime else "")})
             st.hist, st.live, st.proc_replayed = original_hist, original_live, original_proc
-    result["note"] = ("Same paper rows, Base only: simulator excludes closes at the checkpoint; "
-                      "runtime scorer includes them. This is not a live execution test.")
+    result["note"] = ("Same paper rows, Base only: both decision paths exclude closes at the checkpoint. "
+                      "This is not a live execution test.")
     return result
 
 
@@ -120,7 +120,7 @@ def main():
     ap.add_argument("--reference", required=True, help="trade_sim JSON from the exact grid and data")
     ap.add_argument("--out", required=True)
     ap.add_argument("--compare-runtime-boundary", action="store_true",
-                    help="compare strict simulator and inclusive runtime Base scoring at equal timestamps")
+                    help="compare simulator and runtime Base decision scoring at equal timestamps")
     args = ap.parse_args()
     reference = json.loads(Path(args.reference).read_text())
     cfg, gates = reference["config"], reference["gate"]
