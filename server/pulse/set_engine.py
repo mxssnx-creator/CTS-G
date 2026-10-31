@@ -1574,6 +1574,9 @@ class SetBook:
         self.lookback_sample_target = LOOKBACK_SAMPLE_TARGET
         self._lookback_grown = 0
         self._lookback_pending = False
+        self._lookback_retry_fast = False
+        self._lookback_progress_key = None
+        self._lookback_progress_count = 0
         self.main_on = True
         self.main_n = MAIN_GATE_N_DEFAULT
         self.base_short = BASE_SHORT_N_DEFAULT
@@ -1729,6 +1732,9 @@ class SetBook:
         self.lookback_auto = bool(ov.get("histLookbackAuto", True))
         if not self.lookback_auto:
             self._lookback_pending = False
+            self._lookback_retry_fast = False
+            self._lookback_progress_key = None
+            self._lookback_progress_count = 0
         self.lookback_max = max(self.lookback_cfg, min(LOOKBACK_MAX, int(num(ov, "histLookbackMax", LOOKBACK_MAX))))
         self.lookback_sample_target = max(1, min(200, int(num(ov, "histLookbackTargetN", LOOKBACK_SAMPLE_TARGET))))
         self.lookback = max(self.lookback_cfg, min(self.lookback_max, int(getattr(self, "_lookback_grown", 0) or 0))) if self.lookback_auto else self.lookback_cfg
@@ -2391,10 +2397,11 @@ class SetBook:
             self.on_live_close(rec)
 
     def due(self) -> bool:
-        """Interval-driven in every state: refresh_s once a complete pass exists, retry_s until then. Never back to back."""
+        """Pace ordinary refreshes and bounded retries for a progressing history rebuild."""
         if not self.enabled or self._running:
             return False
-        wait = self.refresh_s if self.progress.ready else self.retry_s
+        recovering = self._lookback_pending and self._lookback_retry_fast
+        wait = min(self.retry_s, self.refresh_s) if recovering else (self.refresh_s if self.progress.ready else self.retry_s)
         return time.time() - self.last_run >= wait
 
     def replay_all(
@@ -2526,11 +2533,23 @@ class SetBook:
                     # until every usable expected symbol has been replayed at that
                     # length and topology before deciding whether to grow again.
                     expected = live if expected_symbols is None else live.intersection(expected_symbols)
-                    if (expected and not sym_failed and self.lookback == lookback0 and self._topo_gen == gen0
-                            and all(self._hist_replay_key.get(s) == (lookback0, gen0) for s in expected)):
+                    consistent = bool(expected and not sym_failed and self.lookback == lookback0 and self._topo_gen == gen0)
+                    matched = sum(self._hist_replay_key.get(s) == (lookback0, gen0) for s in expected)
+                    if self._lookback_pending:
+                        key = (lookback0, gen0, tuple(sorted(expected)))
+                        if key != self._lookback_progress_key:
+                            self._lookback_progress_key = key
+                            self._lookback_progress_count = 0
+                        self._lookback_retry_fast = bool(consistent and matched > self._lookback_progress_count)
+                        self._lookback_progress_count = matched
+                    if consistent and matched == len(expected):
                         self._lookback_pending = False
+                        self._lookback_retry_fast = False
                         self._adapt_lookback()
                     self._record_pf_progress()
+            if self._lookback_pending and (not names or ok_syms == 0 or aborted):
+                # An unsuccessful/aborted pass must not produce a rapid retry loop.
+                self._lookback_retry_fast = False
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
@@ -2622,6 +2641,9 @@ class SetBook:
             # Until every symbol has been rescored at the new length, the Set
             # statistics may still mix histories from two different windows.
             self._lookback_pending = True
+            self._lookback_retry_fast = True
+            self._lookback_progress_key = None
+            self._lookback_progress_count = 0
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
@@ -3632,6 +3654,7 @@ class SetBook:
             "ready": p.ready,
             "lookback": self.lookback,
             "lookbackPending": self._lookback_pending,
+            "lookbackFastRetry": self._lookback_pending and self._lookback_retry_fast,
             "stageContextBars": self.history_bars(),
             "stageContextFullSymbols": sum(len(bars) >= self.history_bars() for bars in self.bars.values()),
             "stageContextShortSymbols": sum(len(bars) < self.history_bars() for bars in self.bars.values()),
