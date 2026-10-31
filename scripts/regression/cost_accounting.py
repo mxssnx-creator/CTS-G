@@ -24,6 +24,30 @@ def fee_and_slippage_oracle():
     return ok, "entry and exit notionals, both sides, reported zero, maker proof, slippage counted in prices once"
 
 
+def mixed_liquidity_and_slippage_on_each_leg():
+    """Check both directions and every maker/taker pairing against cash math."""
+    maker, taker, slip, qty = .0002, .0005, .00025, 3.4
+    checks = []
+    for direction, side in ((1, "LONG"), (-1, "SHORT")):
+        entry_ref, exit_ref = 100.0, 100.0 + direction * .5
+        # Both fills are adverse; the entry and exit each have their own price
+        # and notional.  Slippage is already reflected in those fill prices.
+        entry = entry_ref * (1 + direction * slip)
+        exit_ = exit_ref * (1 - direction * slip)
+        for entry_maker in (False, True):
+            for exit_maker in (False, True):
+                e, es = fill_fee({"isMaker": entry_maker}, qty, entry, maker, taker, .1)
+                x, xs = fill_fee({"isMaker": exit_maker}, qty, exit_, maker, taker, .1)
+                got = execution_result(entry, exit_, qty, side, e, x)
+                expected = qty * ((exit_ - entry) * direction
+                                  - entry * (maker if entry_maker else taker)
+                                  - exit_ * (maker if exit_maker else taker))
+                checks.append(abs(got["net"] - expected) < 1e-12
+                              and es == ("maker-rate" if entry_maker else "taker-rate")
+                              and xs == ("maker-rate" if exit_maker else "taker-rate"))
+    return all(checks), f"eight long/short maker/taker combinations; per-fill fees and slippage once={checks}"
+
+
 def net_result_survives_consumers_and_cost_changes():
     from coord_engine import Coordinator
     from exit_engine import ExitBook
@@ -439,7 +463,7 @@ def restart_does_not_seed_foreign_exit_lanes():
 
 
 CHECKS = [("cost-accounting." + fn.__name__.replace("_", "-"), fn) for fn in (
-    fee_and_slippage_oracle, net_result_survives_consumers_and_cost_changes,
+    fee_and_slippage_oracle, mixed_liquidity_and_slippage_on_each_leg, net_result_survives_consumers_and_cost_changes,
     rate_lookup_and_bybit_translation, selected_fees_exclude_inactive_symbols,
     fallback_fees_do_not_charge_slippage_twice, pulse_fill_to_stats, partial_close_retry_and_unfilled_close,
     execution_outcomes_survive_caps_and_emergency_closes, unattributed_aggregate_fee_does_not_score_base,
