@@ -2493,12 +2493,14 @@
 @@ -4804 +6304 @@
 -            return
 +            return set()
-@@ -4806,2 +6306,2 @@
+@@ -4806,2 +6306,4 @@
 -        limit = str(self.sets.lookback)
 -        reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
-+        lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
++        # Fetch earlier entry-time context as well as the current evaluation
++        # window.  The extra forming minute is discarded below.
++        lookback = int(self.sets.history_bars()) + 1
 +        page = HIST_PAGE
-@@ -4810,6 +6310,4 @@
+@@ -4810,6 +6312,4 @@
 -        for i in range(0, len(reqs), chunk):
 -            self.sets.progress.detail = f"fetch {i}/{len(reqs)}"
 -            self.sets.progress.pct = (i / max(1, len(reqs))) * 8.0
@@ -2509,7 +2511,7 @@
 +        refreshed: set[str] = set()
 +
 +        def _gather(batch: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-@@ -4817,8 +6315,50 @@
+@@ -4817,8 +6317,50 @@
 -                rows = self.api.gather_public(batch, timeout=6.0)
 -            else:
 -                for path, extra in batch:
@@ -2568,10 +2570,10 @@
 +                failed.update(str(extra.get("symbol")) for _p, extra in reqs if str(extra.get("symbol")) not in answered)
 +            for s in names:
 +                bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
-@@ -4826 +6366 @@
+@@ -4826 +6368 @@
 -                    self.sets.ingest_bars(s, bars)
 +                    self.sets.ingest_bars(s, bars, last_t=last_t)
-@@ -4827,0 +6368,9 @@
+@@ -4827,0 +6370,9 @@
 +                    # A valid shorter page can mean a newly listed symbol has no older
 +                    # bars. A failed/missing page is different: retry it before treating
 +                    # this symbol as replayed at an expanded history length.
@@ -2581,7 +2583,7 @@
 +                    refreshed_full = short[s] or len(self.sets.bars.get(s) or []) >= lookback - 1
 +                    if s not in failed and len(bars) >= 16 and last_t is not None and refreshed_full:
 +                        refreshed.add(s)
-@@ -4829 +6378,47 @@
+@@ -4829 +6380,47 @@
 -        self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
 +        self.sets.progress.detail = f"fetched {stored}/{len(all_names)}"
 +        sizes = sorted(len(self.sets.bars.get(s) or []) for s in all_names)
@@ -2608,7 +2610,7 @@
 +                self.sets.ingest_bars(s, bars, tail=True)
 +        if not self.sets.due():
 +            return
-+        full = int(self.sets.lookback * 0.9)
++        full = int(self.sets.history_bars() * 0.9)
 +        have = sum(1 for s in hist_universe if len(self.sets.bars.get(s) or []) >= full)
 +        fetched = None
 +        if self.sets._lookback_pending or have < max(4, len(hist_universe) // 2):
@@ -2630,7 +2632,7 @@
 +                                     abort=lambda: self.load.last_budget.level == "critical")
 +        finally:
 +            self.hist_busy = False
-@@ -4834,30 +6429 @@
+@@ -4834,30 +6431 @@
 -                for s in SYMBOLS:
 -                    bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
 -                    if bars:
@@ -2662,11 +2664,11 @@
 -                    finally:
 -                        self.hist_busy = False
 +                self._hist_tick()
-@@ -4878,0 +6445 @@
+@@ -4878,0 +6447 @@
 +                self.refresh_fees()
-@@ -4891 +6457,0 @@
+@@ -4891 +6459,0 @@
 -            sd_notify("WATCHDOG=1")
-@@ -4895,0 +6462,16 @@
+@@ -4895,0 +6464,16 @@
 +    def _ctrl_watch_loop(self) -> None:
 +        """Event-based control coordination: any create/delete/touch of the
 +        control files (STOP / PAUSE / STOP_ALL / reset-eq) wakes the main
@@ -2683,51 +2685,51 @@
 +                pass
 +            time.sleep(0.15)
 +
-@@ -4904,0 +6487,2 @@
+@@ -4904,0 +6489,2 @@
 +            self.refresh_tickers()
 +            self.seed_px_bars()
-@@ -4905,0 +6490 @@
+@@ -4905,0 +6492 @@
 +            self.manage()   # open positions keep their local SL, TP, trail and time exits while stopped
-@@ -4907 +6492,2 @@
+@@ -4907 +6494,2 @@
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
 +            self.wake_ev.wait(timeout=0.4)
-@@ -4919 +6505,2 @@
+@@ -4919 +6507,2 @@
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
 +            self.wake_ev.wait(timeout=0.4)
-@@ -4923,0 +6511,5 @@
+@@ -4923,0 +6513,5 @@
 +            if os.path.exists(RESET_EQ_PATH):
 +                # Explicit Start: fresh session — the reset-eq rescue in
 +                # refresh_balance re-baselines equity; never restore the
 +                # pre-stop economic halt across an explicit start.
 +                pre = None
-@@ -4930 +6522 @@
+@@ -4930 +6524 @@
 -            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
 +            elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
-@@ -4973,0 +6566 @@
+@@ -4973,0 +6568 @@
 +        self.refresh_fees()
-@@ -4986,0 +6580,4 @@
+@@ -4986,0 +6582,4 @@
 +        try:
 +            self.reconcile_restored_book()
 +        except Exception:
 +            log("reconcile_restored_book failed: " + traceback.format_exc()[-160:])
-@@ -5003,0 +6601,2 @@
+@@ -5003,0 +6603,2 @@
 +        ctrl = threading.Thread(target=self._ctrl_watch_loop, name="ctrl-watch", daemon=True)
 +        ctrl.start()
-@@ -5032,2 +6631,2 @@
+@@ -5032,2 +6633,2 @@
 -            remain = SCAN_S - wall
 -            self.cycle_wait_ms = max(0.0, remain) * 1000.0
 +            gap = pace_gap_s(t0, time.perf_counter(), SCAN_S)
 +            self.cycle_wait_ms = gap * 1000.0
-@@ -5035,3 +6634,3 @@
+@@ -5035,3 +6636,3 @@
 -            if remain > 0:
 -                self.wake_ev.clear()
 -                self.wake_ev.wait(timeout=remain)
 +            # a tick never starts a cycle early: the next one starts at least SCAN_S after this one began
 +            if gap > 0:
 +                time.sleep(gap)
-@@ -5041,0 +6641,8 @@
+@@ -5041,0 +6643,8 @@
 +def make_api(conn: str, key: str, secret: str, base: str):
 +    """The venue client of a connection: bybit-* talks to Bybit V5 (bybit_fast), everything else to BingX."""
 +    if str(conn).startswith("bybit-"):
@@ -2736,14 +2738,14 @@
 +    return FastBingX(key, secret, ErrorLog(ERR_PATH), base=base)
 +
 +
-@@ -5042,0 +6650,4 @@
+@@ -5042,0 +6652,4 @@
 +    if IS_BYBIT:
 +        from bybit_fast import fetch_contract_rows
 +        return {c["symbol"]: Contract(c["symbol"], c["min_qty"], c["step"], c["qprec"], c["pprec"], c["min_usdt"], c["max_lev"])
 +                for c in fetch_contract_rows(BASE, want)}
-@@ -5072,0 +6684 @@
+@@ -5072,0 +6686 @@
 +            fee_rate(c.get("makerFeeRate")), fee_rate(c.get("takerFeeRate")),
-@@ -5088,0 +6701,7 @@
+@@ -5088,0 +6703,7 @@
 +def _mode_label() -> str:
 +    try:
 +        return mode_of(BASE)
@@ -2751,12 +2753,12 @@
 +        return "UNPINNED"
 +
 +
-@@ -5093,2 +6712,2 @@
+@@ -5093,2 +6714,2 @@
 -    key = redis_hget("api_key")
 -    secret = redis_hget("api_secret")
 +    key = connection_field("api_key")
 +    secret = connection_field("api_secret")
-@@ -5097,6 +6716,6 @@
+@@ -5097,6 +6718,6 @@
 -    test = (redis_hget("is_testnet") or "").strip().lower()
 -    if test in ("1", "true", "yes") or "vst" in (redis_hget("base_url") or "").lower():
 -        BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")

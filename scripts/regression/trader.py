@@ -545,21 +545,22 @@ def history_is_fetched_in_pages_within_the_venue_limit():
     try:
         pt.SYMBOLS[:] = ["A-USDT", "B-USDT"]
         p = _bare_pulse()
-        venue = _PagedKlines()
+        venue = _PagedKlines(n=8000)
         p.api = venue
         p.sets = se.SetBook()
         p.sets.lookback = 1920
+        target = p.sets.history_bars()
         p._hist_fetch()
         first_requests = list(venue.requests)
         have = {s: len(p.sets.bars.get(s) or []) for s in pt.SYMBOLS}
         closes = [b[3] for b in (p.sets.bars.get("A-USDT") or [])]
-        contiguous = closes == [float(x) for x in range(3000 - 1 - 1920, 3000 - 1)]     # the forming last minute is not a bar
+        contiguous = closes == [float(x) for x in range(8000 - 1 - target, 8000 - 1)]     # the forming last minute is not a bar
         venue.requests.clear()
         p._hist_fetch()
         refresh_limits = sorted({int(r["limit"]) for r in venue.requests})
     finally:
         pt.SYMBOLS[:] = saved
-    ok = (all(n == 1920 for n in have.values()) and contiguous and all(int(r["limit"]) <= 1000 for r in first_requests)
+    ok = (all(n == target for n in have.values()) and contiguous and all(int(r["limit"]) <= 1000 for r in first_requests)
           and any("endTime" in r for r in first_requests) and refresh_limits == [120])
     return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
 
@@ -573,16 +574,20 @@ def grown_history_fetches_the_full_target_up_to_three_days():
         pt.SYMBOLS[:] = ["A-USDT"]
         pt.time.sleep = lambda _s: None
         p = _bare_pulse()
-        venue = _PagedKlines(n=5001)
+        # Stage reconstruction now needs older entry-time context in addition
+        # to the visible lookback.  Supply enough venue history to verify the
+        # entire context target at every growth step.
+        venue = _PagedKlines(n=20001)
         p.api, p.sets = venue, se.SetBook()
         got = []
         for target in (1920, 2160, 2400, 4320):
             p.sets.lookback = target
+            context_target = p.sets.history_bars()
             venue.requests.clear()
             p._hist_fetch()
             closes = [row[3] for row in p.sets.bars.get("A-USDT", [])]
-            expected = [float(x) for x in range(5000 - target, 5000)]
-            got.append((target, len(closes), closes == expected, max(int(r["limit"]) for r in venue.requests)))
+            expected = [float(x) for x in range(20000 - context_target, 20000)]
+            got.append((context_target, len(closes), closes == expected, max(int(r["limit"]) for r in venue.requests)))
         venue.requests.clear()
         p._hist_fetch()
         refresh = [int(r["limit"]) for r in venue.requests]
@@ -599,7 +604,7 @@ def history_growth_retries_failed_or_missing_pages():
 
     class Venue(_PagedKlines):
         def __init__(self, failure):
-            super().__init__(n=5001)
+            super().__init__(n=20001)
             self.failure = failure
 
         def gather_public(self, reqs, timeout=4.2):
@@ -641,7 +646,7 @@ def history_growth_retries_failed_or_missing_pages():
         p._hist_tick()
         second = (list(replayed), p.sets._lookback_pending,
                   dict(p.sets._hist_replay_key), len(p.sets.bars["B-USDT"]))
-        return first, second
+        return first, second, p.sets.history_bars()
 
     saved, sleep = list(pt.SYMBOLS), pt.time.sleep
     try:
@@ -658,20 +663,21 @@ def history_growth_retries_failed_or_missing_pages():
         # A previously full history whose recent refresh no longer overlaps
         # must fetch the missing older bars on the next pass.
         gap = _bare_pulse()
-        gap.api, gap.sets = _PagedKlines(n=5001), se.SetBook()
+        gap.api, gap.sets = _PagedKlines(n=20001), se.SetBook()
         gap.sets.lookback = 2400
-        old, old_t = gap._closed_klines(gap.api.rows[-3000:-600])
+        gap_target = gap.sets.history_bars()
+        old, old_t = gap._closed_klines(gap.api.rows[-gap_target - 600:-600])
         gap.sets.ingest_bars("A-USDT", old, last_t=old_t)
         gap_first = gap._hist_fetch(["A-USDT"]), len(gap.sets.bars["A-USDT"])
         gap_second = gap._hist_fetch(["A-USDT"]), len(gap.sets.bars["A-USDT"])
     finally:
         pt.SYMBOLS[:], pt.time.sleep = saved, sleep
-    ok = (all(first[0] == ["A-USDT"] and first[1] and "B-USDT" not in first[2] and first[3] < 2400
+    ok = (all(first[0] == ["A-USDT"] and first[1] and "B-USDT" not in first[2] and first[3] < target
               and set(second[0]) == {"A-USDT", "B-USDT"} and not second[1]
-              and set(second[2]) == {"A-USDT", "B-USDT"} and second[3] == 2400
-              for first, second in cases)
+              and set(second[2]) == {"A-USDT", "B-USDT"} and second[3] == target
+              for first, second, target in cases)
           and available == {"A-USDT"} and short_n == 499
-          and gap_first == (set(), 119) and gap_second == ({"A-USDT"}, 2400))
+          and gap_first == (set(), 119) and gap_second == ({"A-USDT"}, gap_target))
     return ok, f"failure/retry={cases}; valid short listing={available} {short_n} bars; stale gap={gap_first} -> {gap_second}"
 
 
@@ -1077,11 +1083,12 @@ def history_thread_fetches_at_start_and_never_replays_padding():
     try:
         pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
         p = _bare_pulse()
-        p.api = _PagedKlines()
+        p.api = _PagedKlines(n=8000)
         p.sets = se.SetBook()
         from common import overlay, SMALL
-        p.sets.load(overlay(**SMALL))
+        p.sets.load(overlay(**{**SMALL, "holdEnabled": False}))
         p.sets.lookback = 1920
+        target = p.sets.history_bars()
         for s_ in pt.SYMBOLS:
             p.klines_tf["1m"][s_] = [[100.0, 100.0, 100.0, 100.0, 0.0]] * 60       # the seed padding
             p.real_1m[s_] = 0
@@ -1095,7 +1102,7 @@ def history_thread_fetches_at_start_and_never_replays_padding():
         replayed = p.sets.progress.symbols_total
     finally:
         pt.SYMBOLS[:] = saved
-    ok = all(n == 1920 for n in sizes.values()) and flat == 0 and replayed == 4
+    ok = all(n == target for n in sizes.values()) and flat == 0 and replayed == 4
     return ok, f"bars={sizes} padded rows in the Set history={flat} symbols replayed={replayed}"
 
 
@@ -1184,14 +1191,18 @@ def history_thread_keeps_real_history_and_tops_up_a_partial_one():
     saved = list(pt.SYMBOLS)
     try:
         pt.SYMBOLS[:] = ["A-USDT", "B-USDT", "C-USDT", "D-USDT"]
-        kept, kept_flat = run(_Offline(), 1920)
-        topped, topped_flat = run(_PagedKlines(), 500)
-        livetail, _ = run(_Offline(), 1920, live=True)
+        probe = se.SetBook()
+        probe.load(overlay(**SMALL))
+        probe.lookback = 1920
+        target = probe.history_bars()
+        kept, kept_flat = run(_Offline(), target)
+        topped, topped_flat = run(_PagedKlines(n=8000), 500)
+        livetail, _ = run(_Offline(), target, live=True)
         boot_live, boot_flat = run(_Offline(), 0, live=True)      # no history yet: the live-built real rows bootstrap it, never the padding
         boot_none, _ = run(_Offline(), 0)                          # no history and no real rows: nothing is ingested
     finally:
         pt.SYMBOLS[:] = saved
-    ok = all(n == 1920 for n in kept) and kept_flat == 0 and all(n == 1920 for n in topped) and topped_flat == 0 and all(n == 1920 for n in livetail) \
+    ok = all(n == target for n in kept) and kept_flat == 0 and all(n == target for n in topped) and topped_flat == 0 and all(n == target for n in livetail) \
          and all(n == 40 for n in boot_live) and boot_flat == 0 and all(n == 0 for n in boot_none)
     return ok, f"bootstrap from live-built rows {boot_live} (no real rows {boot_none}); live-built tail on a full history -> {livetail}; offline full history -> {kept} (padded rows {kept_flat}); partial 500 -> {topped} (padded rows {topped_flat})"
 

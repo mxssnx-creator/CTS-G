@@ -436,6 +436,65 @@ def negative_lane_does_not_pollute_main_passing_pf():
     return ok, f"Main-pass PF {p['main']['pf']} on {p['main']['sets']}; all-lane PF {p['mainAllLanes']['pf']} on {p['mainAllLanes']['sets']}"
 
 
+def stage_entry_history_survives_window_boundary():
+    """Past qualifying evidence must neither vanish nor turn a past losing window into a one-win pass."""
+    p = replace(CFG_FULL, base_long=5, base_short=0, gate_min=1, floor=1.25,
+                size_floors=(), long_floor=0.0, lookback_s=100.0, max_dd_s=1e9,
+                main_n=2, short_on=False, neg_on=False, real_n=2)
+    ts = [35, 45, 55, 101, 106, 115]
+    ent = [34, 44, 54, 100, 105, 114]
+    losses = [-0.02, -0.02, -0.02, 0.01, 0.01, 0.01]
+    wins = [0.01] * len(ts)
+    l = stage_chain(ts, ent, losses, p, window_start=100)
+    w = stage_chain(ts, ent, wins, p, window_start=100)
+    lost_context = stage_chain(ts[3:], ent[3:], losses[3:], p)
+    missing_context = stage_chain(ts[3:], ent[3:], wins[3:], p)
+    # With the true prior losses no later order qualifies. With prior wins,
+    # all three later orders are members of both stages. The old clipped
+    # reconstruction gets both cases wrong.
+    book = SetBook()
+    book.load(overlay(**SMALL))
+    book.lookback, book.cost_pct, book.short_on = 100.0 / 60.0, 0.0, False
+    book.stage_params = lambda _pack: p
+    st = book.by_idx[0]
+    tuples = [(t, 'S-USDT', 'LONG', x, x, t - e, 'test', st.id)
+              for t, e, x in zip(ts, ent, wins)]
+    book.set_processed(st, tuples, now=200)
+    main_stream, real_stream, _negative, _short = book._streams(st, now=200)
+    ok = (l['main'] == [] and l['real'] == [] and w['main'] == [3, 4, 5]
+          and w['real'] == [3, 4, 5] and lost_context['main'] == [1, 2]
+          and missing_context['main'] == [1, 2] and missing_context['real'] == [2]
+          and main_stream == [0.01] * 3 and real_stream == [0.01] * 3)
+    return ok, f"loss context main={l['main']} vs clipped={lost_context['main']}; win context real={w['real']} vs clipped={missing_context['real']}"
+
+
+def replay_scores_visible_orders_using_entry_history():
+    """A complete replay preserves stage admission from prior context while counting only the current window."""
+    p = replace(CFG_FULL, base_long=5, base_short=0, gate_min=1, floor=1.25,
+                size_floors=(), long_floor=0.0, lookback_s=6000.0, max_dd_s=1e9,
+                main_n=2, short_on=False, neg_on=False, real_n=2)
+    book = SetBook()
+    book.load(overlay(**{**SMALL, 'holdEnabled': False, 'histLookbackAuto': False}))
+    book.lookback, book.cost_pct, book.short_on, book.main_n, book.realst_n = 100, 0.0, False, 2, 2
+    book.stage_params = lambda _pack: p
+    st = book.by_idx[0]
+    book.by_idx, book.sets = [st], {st.id: st}
+    symbol = 'S-USDT'
+    book.bars[symbol] = synth_bars(31, 200)
+    times = [35, 45, 55, 101, 106, 115]
+    entries = [34, 44, 54, 100, 105, 114]
+    rows = [dict(t=T0 + t * 60, symbol=symbol, side='LONG', pnl=0.01, pnl_pct=0.01,
+                 hold_s=(t - e) * 60, reason='test', set_id=st.id) for t, e in zip(times, entries)]
+    def replay(_symbol, hist, _now, on_step=None):
+        hist[st.id].extend(rows)
+    book._replay_symbol = replay
+    book.replay_all(now=T0 + 200 * 60)
+    first = (st.proc_total, st.exe_total, st.n, len(st.hist), book.progress.errors)
+    book.replay_all(now=T0 + 202 * 60)
+    second = (st.proc_total, st.exe_total, st.n, len(st.hist), book.progress.errors)
+    return first == (3, 3, 3, 3, 0) and second == (2, 2, 2, 2, 0), f"first={first}; after one visible close expires={second}"
+
+
 def debug_uses_each_window_pf_floor():
     """The trace must explain the same size-dependent gates that admit the Set."""
     import stage_debug as dbg
@@ -448,6 +507,70 @@ def debug_uses_each_window_pf_floor():
     ok = last['base_long_pf'] == 1.5 and last['base_stop'] == 'long' and not last['in_main'] and dbg.consistent(tr)
     return ok, f"PF={last['base_long_pf']} floor=2.0, stop={last['base_stop']}, consistent={dbg.consistent(tr)}"
 
+
+def bounded_stage_window_matches_independent_vote():
+    """Older evidence may establish an entry, but only in-window results may vote for today's short window."""
+    rng = random.Random(284)
+    p = replace(CFG_FULL, base_long=10, base_short=0, floor=1.0, main_n=8,
+                short_windows=(4, 6), short_min=3, short_margin=1.0,
+                lookback_s=4000.0, max_dd_s=1e9, size_floors=(), long_floor=0.0)
+    failures = []
+    for k in range(24):
+        ts, ent, nets = _tape(rng, 160, 'regime', 60.0, hold=300.0)
+        cut = ts[-1] - p.lookback_s
+        full = stage_chain(ts, ent, nets, p)
+        got = stage_chain(ts, ent, nets, p, window_start=cut)
+        def included(window):
+            out = []
+            for i in full['main']:
+                prior = [nets[j] for j in full['main'] if ent[i] - p.lookback_s <= ts[j] < ent[i]][-window:]
+                gp = sum(x for x in prior if x > 0)
+                gl = -sum(x for x in prior if x < 0)
+                pf = round(se.pf_of(gp, gl), 4)
+                if ts[i] >= cut and len(prior) >= (window if p.full_window else 1) and pf + 1e-9 >= p.floor_for(window):
+                    out.append(nets[i])
+            return out
+        def pf(v):
+            return se.pf_of(sum(x for x in v if x > 0), -sum(x for x in v if x < 0))
+        ref = pf(included(p.main_n))
+        best, chosen = ref, p.main_n
+        for window in p.short_windows:
+            v = included(window)
+            candidate = pf(v)
+            if len(v) >= p.short_min and candidate > best + se.SHORT_EPS and candidate >= ref * p.short_margin - se.SHORT_EPS:
+                best, chosen = candidate, window
+        expected = {lane: [i for i in full[lane] if ts[i] >= cut] for lane in ('main', 'real', 'realneg')}
+        if any(got[lane] != expected[lane] for lane in expected) or got['short_n'] != chosen:
+            failures.append(k)
+    return not failures, f"24 independent entry-time reconstructions; mismatches={failures}"
+
+
+def hold_selection_ignores_expired_candidate_evidence():
+    """Past candidate results outside the configured window cannot choose the current hold."""
+    reference = [(-1.0, 10.0), (1.0, 90.0)]
+    alternative = [(10.0, 10.0), (-1.0, 90.0)]
+    prefix = []
+    for rows in (reference, alternative):
+        values = [value for value, _ in rows]
+        gains, losses = se.prefix_sums(values)
+        prefix.append(([t for _, t in rows], gains, losses))
+    cands = [(0, []), (10, [])]
+    all_history = se.hold_choice_at(cands, prefix, 100.0, 50, 1, 1.0)
+    window = se.hold_choice_at(cands, prefix, 100.0, 50, 1, 1.0, 20.0)
+    return all_history == 1 and window == 0, f"unbounded candidate={all_history}; 20-second window candidate={window}"
+
+
+def context_budget_includes_configured_hold():
+    """A manual or automatic hold longer than the reference time stop contributes to historical warmup."""
+    b = SetBook()
+    b.load(overlay(**SMALL))
+    b.lookback, b.warmup, b.hist_time_bars = 100, 16, 45
+    b.main_on, b.neg_on, b.realst_on = True, False, True
+    b.hold_auto, b.step_hold = False, {1: 720}
+    manual = b.history_bars()
+    b.step_hold, b.hold_auto = {}, True
+    automatic = b.history_bars()
+    return (manual == 300 + 16 + 2 * 720 and automatic == 300 + 16 + 2 * max(se.HOLD_AUTO_HIGH)), f"manual={manual}, automatic={automatic}"
 
 
 def set_and_lane_ids_never_collide():
@@ -469,7 +592,12 @@ def set_and_lane_ids_never_collide():
 
 
 CHECKS = [
+    ("stages.entry-history-survives-window-boundary", stage_entry_history_survives_window_boundary),
+    ("stages.replay-scores-visible-orders-using-entry-history", replay_scores_visible_orders_using_entry_history),
     ("stages.debug-uses-each-window-pf-floor", debug_uses_each_window_pf_floor),
+    ("stages.bounded-stage-window-matches-independent-vote", bounded_stage_window_matches_independent_vote),
+    ("stages.hold-selection-ignores-expired-candidate-evidence", hold_selection_ignores_expired_candidate_evidence),
+    ("stages.context-budget-includes-configured-hold", context_budget_includes_configured_hold),
     ("stages.replay-and-current-verdict-use-same-pf-rounding", replay_and_current_verdict_use_the_same_pf_rounding),
     ("stages.negative-lane-does-not-pollute-main-passing-pf", negative_lane_does_not_pollute_main_passing_pf),
     ("stages.every-window-is-judged-on-its-own", every_window_is_judged_on_its_own),

@@ -6303,7 +6303,9 @@ class Pulse:
         if not self.sets.enabled:
             return set()
         self.sets.progress.phase = "fetch"
-        lookback = int(self.sets.lookback) + 1        # + the minute still forming, which is dropped: lookback completed bars
+        # Fetch earlier entry-time context as well as the current evaluation
+        # window.  The extra forming minute is discarded below.
+        lookback = int(self.sets.history_bars()) + 1
         page = HIST_PAGE
         stored = 0
         chunk = 4
@@ -6400,7 +6402,7 @@ class Pulse:
                 self.sets.ingest_bars(s, bars, tail=True)
         if not self.sets.due():
             return
-        full = int(self.sets.lookback * 0.9)
+        full = int(self.sets.history_bars() * 0.9)
         have = sum(1 for s in hist_universe if len(self.sets.bars.get(s) or []) >= full)
         fetched = None
         if self.sets._lookback_pending or have < max(4, len(hist_universe) // 2):

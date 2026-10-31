@@ -624,9 +624,9 @@ def ingest_keeps_history_on_live_refresh():
     repeat_ok = b.bars[sym] == full
     newer = synth_bars(55, 30, start=full[-1][3])
     b.ingest_bars(sym, full[-60:] + newer)
-    expected = (full + newer)[-b.lookback:]
+    expected = (full + newer)[-b.history_bars():]
     joined = b.bars[sym] == expected
-    return repeat_ok and joined, f"len={len(b.bars[sym])} repeat_ok={repeat_ok} joined={joined} lookback={b.lookback}"
+    return repeat_ok and joined, f"len={len(b.bars[sym])} repeat_ok={repeat_ok} joined={joined} evaluation lookback={b.lookback} context cap={b.history_bars()}"
 
 
 def live_dedupe_and_history_rows_stay_bounded():
