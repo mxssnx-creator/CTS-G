@@ -1,0 +1,29 @@
+{
+  "scope": "two-symbol archived-data prefix check; no venue or execution-parity claim",
+  "cut": 1792256400,
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT"
+  ],
+  "sets": {
+    "indications:1m:sl0.75:st5": {
+      "fullPrefixCloses": 110,
+      "croppedCloses": 110,
+      "identical": true
+    },
+    "indications:1m:tr0.36:0.36": {
+      "fullPrefixCloses": 125,
+      "croppedCloses": 125,
+      "identical": true
+    }
+  },
+  "sourceSha256": {
+    "set_engine.py": "2da33d5cfed5913ae6a71c39b6e3aee1b7c8d70a61da272445d57b7d25c931fd",
+    "script": "af7e4461e827751341fd84c8c1cde75213e2e0987aa992ac3cac284ec0745ad7",
+    "preset": "84113a86d51142bd883633229361f41d56146ff6a47b39c612896cd5f526cdde"
+  },
+  "marketSha256": {
+    "ADA-USDT": "1a05b2dd626e8e0941422946898a257bafb4278e093027cc0d6f1253dc311dab",
+    "AVAX-USDT": "576b929deb42a5ecd0c0ddf01d2ba99157ab12ffa4efba990daf826086551a51"
+  }
+}

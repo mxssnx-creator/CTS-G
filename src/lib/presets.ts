@@ -41,5 +41,8 @@ export function secureMinimalPreset(): PulseOverlay {
     setGateMinTrades: 12,
     stageFullWindow: true,
     minPfBySize: true,
+    // The existing Negative lane bypasses a passing positive Main window and
+    // does not yet simulate the requested independent opposite-direction Set.
+    mainNegEnabled: false,
   };
 }

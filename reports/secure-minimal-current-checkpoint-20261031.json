@@ -1,0 +1,102 @@
+{
+  "presetSha256": "84113a86d51142bd883633229361f41d56146ff6a47b39c612896cd5f526cdde",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "lookbackBars": 720,
+  "holdAuto": true,
+  "costPct": 0.12,
+  "checkpoints": [
+    {
+      "t": 1792256400,
+      "sets": 822,
+      "symbols": 8,
+      "baseReasons": {
+        "pf<min": 740,
+        "pass": 67,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "entryReasons": {
+        "pf<min": 740,
+        "main": 9,
+        "real": 58,
+        "short": 3,
+        "stop-cap": 12
+      },
+      "basePassed": 67,
+      "basePf": 7.621421639299356,
+      "baseNoLoss": false,
+      "baseOrders": 3350,
+      "atLeast12": 822,
+      "atLeast25": 822,
+      "baseLongPassed": 70,
+      "baseShortPassed": 339,
+      "autoHoldSelected": 463,
+      "mainPassingWithFullRealWindow": 0,
+      "mainPassingRealWindowSamples": {
+        "5": 7,
+        "6": 50,
+        "8": 1
+      },
+      "stageCounts": {
+        "base": 67,
+        "main": 58,
+        "negative": 0,
+        "real": 0,
+        "realNeg": 0
+      },
+      "byPack": {
+        "indications": {
+          "sets": 353,
+          "basePassed": 67,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "general": {
+          "sets": 353,
+          "basePassed": 0,
+          "atLeast12": 353,
+          "atLeast25": 353
+        },
+        "shortrange": {
+          "sets": 116,
+          "basePassed": 0,
+          "atLeast12": 116,
+          "atLeast25": 116
+        }
+      },
+      "elapsedSeconds": 48.174,
+      "independentChainAudit": {
+        "sets": 67,
+        "differences": [],
+        "scope": "same pooled Set tape; not per-symbol-side or venue parity"
+      }
+    }
+  ],
+  "maxRssKiB": 165816,
+  "scope": "historical SetBook snapshots only; not modeled execution or exchange fills",
+  "validityNote": "One corrected cold-start historical snapshot of the current preset. Stage context before the scoring window, independent symbol/side lanes and live refresh/fill parity are not established.",
+  "sourceSha256": {
+    "server/pulse/set_engine.py": "2da33d5cfed5913ae6a71c39b6e3aee1b7c8d70a61da272445d57b7d25c931fd",
+    "scripts/audit_preset_progress.py": "0d3e7af47fad608849df41f7db4ba78d04eb3d64aaf77881e1e411fbc2cb695e",
+    "presets/secure-minimal.json": "84113a86d51142bd883633229361f41d56146ff6a47b39c612896cd5f526cdde"
+  },
+  "marketSha256": {
+    "ADA-USDT": "1a05b2dd626e8e0941422946898a257bafb4278e093027cc0d6f1253dc311dab",
+    "AVAX-USDT": "576b929deb42a5ecd0c0ddf01d2ba99157ab12ffa4efba990daf826086551a51",
+    "BCH-USDT": "8a90af8129436778ab896a2b1d4382a702a39705c1e4dc965a96934edc1621f6",
+    "BNB-USDT": "9db36cd51f5af868c4e39936c59c69a5b4c2edad78d9b32248bc5d7fdef9c8fa",
+    "BTC-USDT": "0a0b72b76f88bfb31bbd21df076fe5d0434761795a96863857dbd87adb2aadfa",
+    "DOGE-USDT": "dd4632564a105052586785a1f0bcee667fec7f913c37b110c08a4910f47184b1",
+    "DOT-USDT": "ccec6360b47a9efced69a9d52c14e04f0fd7c60a62fe6fd0e3bd20573fc4d837",
+    "ETH-USDT": "8483a25e5367b5c153555bd7bc4a374b74e44ded24e2fe74eabb25f12e1b727e"
+  }
+}

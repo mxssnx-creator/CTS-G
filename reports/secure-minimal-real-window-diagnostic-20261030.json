@@ -1,4 +1,5 @@
 {
+  "validityWarning": "WITHDRAWN: automatic-hold candidate tapes can overlap and omit trades; stage/PF counts are not reliable evidence. Retained for traceability.",
   "presetSha256": "33ff269b84e67c779879866d578f2c9a176f5d047923afbf1e0e6242f0cb51cc",
   "symbols": [
     "ADA-USDT",
