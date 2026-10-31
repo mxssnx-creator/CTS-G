@@ -1721,6 +1721,50 @@ def entry_selection_keeps_packs_and_axis_lanes_independent():
     return bool(ok), f"selected={first}, {second}, {third}; scopes={scope}; negative alternative={picked is alternative}"
 
 
+def one_dynamic_set_axis_does_not_block_other_sets():
+    """With real SetBook selection, a blocked high-ranked Set cannot mask another Set's lane."""
+    from coord_engine import Coordinator
+    from set_engine import SetBook
+    import time
+
+    book = SetBook()
+    book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0,
+               "minPfBySize": False, "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 3,
+               "setSlRatios": [0.5, 1.0], "trailVariants": ["0.3:0.1"],
+               "stratGeneral": True, "stratIndications": False})
+    rows = [st for st in book.by_idx if st.pack == "general" and st.kind == "base"]
+    first, second = rows[:2]
+    book.by_idx = [first, second]
+    book.sets = {st.id: st for st in book.by_idx}
+    now = time.time()
+    for st, score in ((first, 2.0), (second, 1.5)):
+        st.active, st.locked, st.last_error = True, False, ""
+        st.gate_n, st.gate_pf, st.n = 20, score, 20
+        st.max_dd_s, st.score_at = 0, now
+    coordinator = Coordinator()
+    coordinator.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False,
+                          "axisContEnabled": False, "minPfLinked": False, "minPf": 1.1})
+    p = _bare_pulse()
+    p.sets, p.coord, p.open, p.position_cost_pct = book, coordinator, {}, 0.12
+
+    def evidence(st, result):
+        st.exe = [(now - 60 * i, result) for i in range(4, 0, -1)]
+
+    evidence(first, -0.004)
+    evidence(second, 0.004)
+    selected_after_first_fails = p._scope_choice("general")
+    evidence(first, 0.004)
+    evidence(second, -0.004)
+    selected_after_second_fails = p._scope_choice("general")
+    evidence(first, -0.004)
+    none_when_both_fail = p._scope_choice("general")
+    ok = (first.id != second.id and selected_after_first_fails[0] is second
+          and selected_after_second_fails[0] is first and none_when_both_fail[0] is None)
+    return ok, (f"independent Sets={first.id}, {second.id}; first blocked -> "
+                f"{getattr(selected_after_first_fails[0], 'id', None)}; second blocked -> "
+                f"{getattr(selected_after_second_fails[0], 'id', None)}; both blocked -> none={none_when_both_fail[0] is None}")
+
+
 def entry_does_not_open_when_the_set_disappears_after_sense():
     """A validation change between entry_sense and placement cannot create an untagged live position."""
     def run():
@@ -2011,6 +2055,7 @@ CHECKS = [
     ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),
     ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
     ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),
+    ("trader.one-dynamic-set-axis-does-not-block-other-sets", one_dynamic_set_axis_does_not_block_other_sets),
     ("trader.completed-minutes-do-not-bridge-gaps-or-bad-rows", completed_minutes_do_not_bridge_gaps_or_bad_rows),
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
     ("trader.lanes-every-stage-on-its-own-lane", every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats),
