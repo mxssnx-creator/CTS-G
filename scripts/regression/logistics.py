@@ -95,6 +95,7 @@ def _ts_default(raw):
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
+    "symbolCap": "x01 uses 30 symbols by owner request; the shared desk default remains 50",
     # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",

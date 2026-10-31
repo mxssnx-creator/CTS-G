@@ -6,6 +6,7 @@ These checks read the working file, so they cover the same code the pin covers.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import tempfile
 import types
@@ -426,12 +427,21 @@ def symbol_cap_applies_under_a_wildcard():
         p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
         p.apply_dynamic_symbols(force=True)
         out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+        p.symbol_cap = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"]
+        p.apply_dynamic_symbols(force=True)
+        out["x01"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+        p.open = {f"S{i:02d}-USDT": types.SimpleNamespace(symbol=f"S{i:02d}-USDT") for i in range(31)}
+        p.apply_dynamic_symbols(force=True)
+        out["protect_more_than_cap"] = (len(pt.SYMBOLS), all(s in pt.SYMBOLS for s in p.open))
     except Exception as exc:  # noqa: BLE001
         return False, f"raised {type(exc).__name__}: {exc}"
     finally:
         pt.SYMBOLS[:] = saved_syms
-    ok = out.get("capped") == 50 and out.get("uncapped") == 60 and out.get("with_open") == (50, True)
-    return ok, f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 50 + one open -> {out.get('with_open')}"
+    ok = (out.get("capped") == 50 and out.get("uncapped") == 60 and out.get("with_open") == (50, True)
+          and out.get("x01") == (30, True) and out.get("protect_more_than_cap") == (31, True))
+    return ok, (f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; "
+                f"cap 50 + one open -> {out.get('with_open')}; x01 -> {out.get('x01')}; "
+                f"31 open positions -> {out.get('protect_more_than_cap')}")
 
 
 class _RefusingCloseVenue(_StubExchange):
