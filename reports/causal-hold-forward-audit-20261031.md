@@ -29,6 +29,8 @@ A different **continuous** paper study reconstructed positions through the entir
 
 Only windows with all requested subsequent closes before the archive ended are included. The next-8 and next-15 cohorts differ. Results include losses and subtract the assumed cost once. They are retrospective, selected Set tapes, not executed trades or an unseen holdout. The underlying observations and input/source hashes are in [the forward data](secure-minimal-forward-after-base-20261031.json). A separate arithmetic recount reproduced the gains, losses and PFs from those records.
 
+The same study was repeated with **72 hours of available prehistory** and the same 12-hour trading period. It found 25 Base Set-checkpoint observations across 21 distinct Sets, with no Main or Real observation passing. The 25 complete next-eight windows contained 200 returns and had pooled PF **0.253**; 22 complete next-15 windows contained 330 returns and had pooled PF **0.292**. An arithmetic recount agreed with the stored values. The run checked 1,116,351 reconstructed closes for same-Set/symbol overlap and found none; its stage oracle matched all 25 Base observations on the same bounded tapes. This uses the same retrospective trading period and does not create an independent holdout. [Longer-prehistory data and hashes](secure-minimal-forward-72h-prehistory-20261031.json).
+
 The full corrected cold-start checkpoint series using the **earlier** preset with Negative enabled yielded 120 Base and 93 Main Set-checkpoint observations, and zero Real/Real Negative observations. This is a separate configuration and overlapping snapshot series, not the revised preset's forward result. [Prior-preset corrected series](secure-minimal-causal-hold-checkpoints-20261031.json).
 
 ## Remaining release blockers
@@ -38,3 +40,17 @@ The full corrected cold-start checkpoint series using the **earlier** preset wit
 - The study selects holds at every paper entry; live choices refresh periodically. It excludes closes at the decision timestamp, while the runtime scorer currently includes them. The actual refresh/entry/close order needs a shared, tested contract.
 - Set evidence remains pooled across symbols and directions; the requested independent source, range and symbol/side qualification and actual CTS-A-O Signals integration remain unfinished. The requested independent inverse Negative strategy is also unfinished.
 - Eight archived symbols and modeled costs do not establish 50-symbol capacity, low realized drawdown, live PF, exchange fees, order ownership or protective-order behavior. Existing positions and market gaps can exceed modeled risk limits.
+
+## Reproduction
+
+With the same checked-in CTS-A-O Signals coverage feed available locally, create a new scratch directory for each data preparation. The archived feed SHA-256 is `e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03`. These commands are paper analysis and do not connect to a venue.
+
+```sh
+python3 scripts/prepare_signal_reference.py --feed /path/to/feed.json.gz --out /tmp/ctsg-12h --symbols 8 --pre-hours 12 --forward-hours 12
+python3 scripts/audit_causal_hold_forward.py --data /tmp/ctsg-12h --preset presets/secure-minimal.json --start 1792227600 --hours 12 --symbols 8 --out /tmp/ctsg-forward-12h.json
+python3 scripts/prepare_signal_reference.py --feed /path/to/feed.json.gz --out /tmp/ctsg-72h --symbols 8 --pre-hours 72 --forward-hours 12
+python3 scripts/audit_causal_hold_forward.py --data /tmp/ctsg-72h --preset presets/secure-minimal.json --start 1792227600 --hours 12 --symbols 8 --out /tmp/ctsg-forward-72h.json
+python3 scripts/audit_hold_prefix.py --data /tmp/ctsg-12h --preset presets/secure-minimal.json --cut 1792256400 --out /tmp/ctsg-prefix.json
+```
+
+The input hashes in the result files should be checked before comparing outcomes. Timing and memory depend on the host and are not live capacity tests.
