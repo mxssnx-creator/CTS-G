@@ -212,6 +212,33 @@ def secure_preset_cannot_bypass_main_through_negative_lane():
     return not p.neg_on and not result["pos"] and not result["negl"], f"negative enabled={p.neg_on}; losing Main admitted={result['pos'] or result['negl']}"
 
 
+def memoized_replays_keep_inputs_and_invalidate_hold_changes():
+    import memo
+    def make(**options):
+        b = se.SetBook(); b.load(overlay(**SMALL, **options))
+        b.bars["A-USDT"] = synth_bars(992, 300, drift=0.0002)
+        return b
+    memo.clear()
+    previous_mode = memo.MODE
+    try:
+        memo.MODE = "verify"
+        one, two = make(), make()
+        key = memo._key(one, "A-USDT", T0)
+        changed_hold = memo._key(make(holdAuto=False), "A-USDT", T0)
+        changed_stop = memo._key(make(slMinSteps=3), "A-USDT", T0)
+        with memo.using():
+            one.replay_all(now=T0)
+            two.replay_all(now=T0)
+        a = [(x.id, x.n, x.gate_pf, x.proc, x.exe, x.last_error) for x in one.by_idx]
+        b = [(x.id, x.n, x.gate_pf, x.proc, x.exe, x.last_error) for x in two.by_idx]
+        ok = (a == b and not one.progress.errors and not two.progress.errors and memo.STATS["verified"] >= 1
+              and two._hist_inputs.get("A-USDT") is not None and key != changed_hold and key != changed_stop)
+        return ok, f"fresh/cached equal={a == b}; errors={one.progress.errors}/{two.progress.errors}; verified hits={memo.STATS['verified']}; hold/stop invalidate={key != changed_hold}/{key != changed_stop}"
+    finally:
+        memo.MODE = previous_mode
+        memo.clear()
+
+
 CHECKS = [
     ("hold-causal.independent-dynamic-walk", dynamic_hold_matches_independent_walk),
     ("hold-causal.chunked-position-state", dynamic_hold_retained_across_chunks),
@@ -221,4 +248,5 @@ CHECKS = [
     ("hold-causal.candidate-entry-history", candidate_history_is_not_capped_to_the_final_last_50),
     ("hold-causal.signal-stage-floor", signal_floor_applies_to_each_stage),
     ("hold-causal.secure-preset-requires-main", secure_preset_cannot_bypass_main_through_negative_lane),
+    ("hold-causal.memoized-replay-inputs", memoized_replays_keep_inputs_and_invalidate_hold_changes),
 ]

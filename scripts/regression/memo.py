@@ -33,9 +33,11 @@ def _key(b: SetBook, symbol: str, now: float):
     bars = b.bars[symbol]
     digest = hashlib.blake2b(repr(bars).encode(), digest_size=16).hexdigest()
     settings = json.dumps(b.ind_settings, sort_keys=True, default=str)
-    sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, st.tp_pct, st.sl_ratio) for st in b.by_idx)
+    sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, st.tp_pct, st.sl_ratio,
+                  st.hold_bars, b.auto_holds(st)) for st in b.by_idx)
     return (symbol, digest, float(now), b.bar_t.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
-            b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, bool(getattr(b, "hist_honor_tp", True)), sets)
+            b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, b.sl_min_steps,
+            bool(getattr(b, "hist_honor_tp", True)), sets)
 
 
 def _rows_of(hist: dict) -> dict:
@@ -49,28 +51,32 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
     cached = _CACHE.get(key)
     if cached is None:
         fresh = {sid: [] for sid in hist}
-        _ORIG(self, symbol, fresh, now, on_step=on_step)
-        _CACHE[key] = _rows_of(fresh)
+        inputs = _ORIG(self, symbol, fresh, now, on_step=on_step)
+        _CACHE[key] = (_rows_of(fresh), inputs)
         while len(_CACHE) > MAX_CACHED_SYMBOLS:
             _CACHE.popitem(last=False)
         STATS["miss"] += 1
         for sid, rows in fresh.items():
             hist.setdefault(sid, []).extend(dict(r) for r in rows)
-        return
+        return inputs
+    cached_rows, cached_inputs = cached
     if MODE == "verify":
         check = {sid: [] for sid in hist}
-        _ORIG(self, symbol, check, now, on_step=on_step)
-        if _rows_of(check) != cached:
+        check_inputs = _ORIG(self, symbol, check, now, on_step=on_step)
+        if _rows_of(check) != cached_rows or any(check_inputs[k] != cached_inputs[k] for k in ("bars", "base_ts", "warmup", "cfg", "dirs", "confs", "cand")):
             raise AssertionError(f"memo mismatch for {symbol} at {now}: cached rows differ from a fresh replay")
         STATS["verified"] += 1
     STATS["hit"] += 1
     _CACHE.move_to_end(key)
-    for sid, rows in cached.items():
+    for sid, rows in cached_rows.items():
         hist.setdefault(sid, []).extend(dict(r) for r in rows)
     if self.by_idx:
         last = [st for st in self.by_idx if st.pack in self.packs]
         if last:
             self.progress.set_id = last[-1].id
+    # Replay inputs are read-only in the engine. Use this book's equal bars,
+    # while retaining the candidate arrays and index paired with cached rows.
+    return {**cached_inputs, "bars": self.bars[symbol]}
 
 
 SetBook._replay_symbol = _replay
