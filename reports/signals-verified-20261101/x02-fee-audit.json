@@ -1,0 +1,112 @@
+{
+  "passed": true,
+  "environment": "x02 VST demo",
+  "method": "Decimal cash ledger vs engine execution_result; actual reported commissions once",
+  "orders": [
+    {
+      "symbol": "DOGE-USDT",
+      "positionSide": "LONG",
+      "side": "BUY",
+      "qty": 54.0,
+      "value": 4.05486,
+      "commission": -0.002027,
+      "fills": 1,
+      "orderHash": "dc784faf9a94732f"
+    },
+    {
+      "symbol": "DOGE-USDT",
+      "positionSide": "LONG",
+      "side": "BUY",
+      "qty": 27.0,
+      "value": 2.02797,
+      "commission": -0.001014,
+      "fills": 1,
+      "orderHash": "e63fb7d467bef35a"
+    },
+    {
+      "symbol": "DOGE-USDT",
+      "positionSide": "LONG",
+      "side": "SELL",
+      "qty": 27.0,
+      "value": 2.02743,
+      "commission": -0.001014,
+      "fills": 1,
+      "orderHash": "bb2cf6bf9af9a76c"
+    },
+    {
+      "symbol": "DOGE-USDT",
+      "positionSide": "LONG",
+      "side": "SELL",
+      "qty": 54.0,
+      "value": 4.05378,
+      "commission": -0.002027,
+      "fills": 1,
+      "orderHash": "21ef1c4780a7f64b"
+    },
+    {
+      "symbol": "ADA-USDT",
+      "positionSide": "SHORT",
+      "side": "SELL",
+      "qty": 22.0,
+      "value": 4.2108,
+      "commission": -0.002105,
+      "fills": 1,
+      "orderHash": "6623c325e07a481c"
+    },
+    {
+      "symbol": "ADA-USDT",
+      "positionSide": "SHORT",
+      "side": "SELL",
+      "qty": 11.0,
+      "value": 2.1054,
+      "commission": -0.001053,
+      "fills": 1,
+      "orderHash": "2c9f0e6fa57b6df4"
+    },
+    {
+      "symbol": "ADA-USDT",
+      "positionSide": "SHORT",
+      "side": "BUY",
+      "qty": 11.0,
+      "value": 2.1087,
+      "commission": -0.001054,
+      "fills": 1,
+      "orderHash": "51f6ba9786964ec3"
+    },
+    {
+      "symbol": "ADA-USDT",
+      "positionSide": "SHORT",
+      "side": "BUY",
+      "qty": 22.0,
+      "value": 4.2174,
+      "commission": -0.002109,
+      "fills": 1,
+      "orderHash": "8c3b86905032bdf9"
+    }
+  ],
+  "comparisons": [
+    {
+      "symbol": "DOGE-USDT",
+      "side": "LONG",
+      "quantity": 81.0,
+      "gross": -0.00162,
+      "fees": 0.006082,
+      "net": -0.007702,
+      "engineNet": -0.007702000000000496,
+      "remaining": 0,
+      "ownOrders": 0
+    },
+    {
+      "symbol": "ADA-USDT",
+      "side": "SHORT",
+      "quantity": 33.0,
+      "gross": -0.0099,
+      "fees": 0.006321,
+      "net": -0.016221,
+      "engineNet": -0.016221000000000742,
+      "remaining": 0,
+      "ownOrders": 0
+    }
+  ],
+  "scope": "acceptance round trips; not strategy profitability or a live engine qualification"
+}

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import configparser
+import math
 import os
 import re
 import subprocess
@@ -12,7 +14,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "bef89a246e3b9dccf1ed37fec9235c8160092811"
+PIN_WANT = "6c6aa8bc42856371f86dcb0773f6faf4d994175f"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -95,6 +97,7 @@ def _ts_default(raw):
 # A desk default that differs from the shipped overlay on purpose. Each one names its decision.
 DESK_DEFAULT_EXCEPTIONS = {
     "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
+    "symbolCap": "x01 uses 30 symbols by owner request; the shared desk default remains 50",
     # owner decision 2026-10-28, x01 only: minimum order size and the drawdown halt off; the desk default keeps the
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
@@ -387,7 +390,122 @@ def node_floor_covers_vite_and_nitro():
     return ok, f"engines.node={floor!r}"
 
 
+def update_preserves_local_work_without_force():
+    """An updater cannot silently reset a diverged or dirty checkout."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_safe_git_update.py")],
+                            capture_output=True, text=True, timeout=60)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
+
+
+def regression_runner_reports_progress():
+    """Slow parallel checks show a heartbeat without changing ordered results."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_regression_progress.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
+
+
+def remote_installer_preserves_local_work_and_forwards_flags():
+    """Use disposable local repositories and a fake SSH; no remote host is contacted."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_safe_remote_install.py")],
+                            capture_output=True, text=True, timeout=60)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
+
+
+def systemd_services_retry_without_exhausting_their_start_limit():
+    """Automatic restarts remain rate-limited but cannot themselves exhaust the configured start window."""
+    issues = []
+    details = []
+    for name in ("grok-pulse@.service", "grok-pulse-http.service", "grok-desk.service"):
+        cfg = configparser.ConfigParser(interpolation=None, strict=False)
+        cfg.read(os.path.join(ROOT, "deploy", name), encoding="utf-8")
+        try:
+            interval = cfg.getfloat("Unit", "StartLimitIntervalSec")
+            burst = cfg.getint("Unit", "StartLimitBurst")
+            delay = cfg.getfloat("Service", "RestartSec")
+            restart = cfg.get("Service", "Restart")
+        except (configparser.Error, ValueError) as exc:
+            issues.append(f"{name}: {exc}")
+            continue
+        attempts = math.ceil(interval / delay) + 1 if delay > 0 else float("inf")
+        if (restart != "always" or not 0 < delay < 60 or interval <= 0 or attempts >= burst
+                or cfg.has_option("Service", "StartLimitIntervalSec")):
+            issues.append(f"{name}: restart={restart}, delay={delay}, attempts={attempts}, burst={burst}")
+        details.append(f"{name}: <= {attempts} attempts/{interval:g}s, limit={burst}")
+    return not issues, "; ".join(issues or details)
+
+
+def startup_controls_fail_closed_and_respect_disabled_lanes():
+    """All service and Redis calls are stubs; this check cannot start a trader."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_startup_controls.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-500:]
+
+
+def install_can_keep_the_virtual_instance_off():
+    """A live-only install disables/stops x02 without changing the default for other installations."""
+    common = os.path.join(ROOT, "deploy", "linux-common.sh")
+    script = r'''source "$1"
+systemctl() {
+  printf 'CMD' >> "$CTSG_STUB_LOG"; printf ' <%s>' "$@" >> "$CTSG_STUB_LOG"; printf '\n' >> "$CTSG_STUB_LOG"
+  if [[ "$1" == is-enabled ]]; then [[ "$CTSG_VST_ENABLED" == 1 ]]; fi
+}
+redis_has_keys() { return 1; }
+if [[ "$2" != preserve ]]; then enable_stack "$2"; fi
+start_stack 1 "$2"
+'''
+    outputs = []
+    with tempfile.TemporaryDirectory() as td:
+        for active in ("0", "1", "preserve"):
+            log = os.path.join(td, f"systemctl-{active}.log")
+            env = dict(os.environ, CTSG_STUB_LOG=log, CTSG_VST_ENABLED="0" if active == "preserve" else "1")
+            proc = subprocess.run(["bash", "-c", script, "--", common, active], capture_output=True, text=True, timeout=10, env=env)
+            if proc.returncode:
+                return False, f"stub systemctl failed: {proc.stderr[-200:]}"
+            with open(log, encoding="utf-8") as fh:
+                outputs.append(fh.read())
+    off, default, preserved = outputs
+    unit = "<grok-pulse@bingx-x02.service>"
+    has = lambda out, op: any(line.startswith(f"CMD <{op}>") and unit in line for line in out.splitlines())
+    ok = (has(off, "disable") and has(off, "stop") and not has(off, "enable") and not has(off, "restart")
+          and has(default, "enable") and has(default, "restart") and not has(default, "disable")
+          and not has(preserved, "restart") and not has(preserved, "stop")
+          and "CMD <restart> <grok-pulse@bingx-x01.service>" in off)
+    return ok, f"live-only x02 disabled/stopped={has(off, 'disable')}/{has(off, 'stop')}; default enabled/restarted={has(default, 'enable')}/{has(default, 'restart')}; disabled update preserved={not has(preserved, 'restart')}"
+
+
+def live_only_does_not_continue_after_x02_control_failure():
+    """A failed disable or stop cannot be hidden by starting the target or the live engine."""
+    common = os.path.join(ROOT, "deploy", "linux-common.sh")
+    script = r'''source "$1"
+systemctl() {
+  printf 'CMD'; printf ' <%s>' "$@"; printf '\n'
+  [[ "$1" != "$CTSG_FAIL_OP" ]]
+}
+redis_has_keys() { return 1; }
+if [[ "$2" == disable ]]; then enable_stack 0 && start_stack 1 0; else start_stack 1 0; fi
+'''
+    results = []
+    for op in ("disable", "stop"):
+        proc = subprocess.run(["bash", "-c", script, "--", common, op], capture_output=True, text=True, timeout=10,
+                              env=dict(os.environ, CTSG_FAIL_OP=op))
+        continued = ("<restart> <grok-pulse@bingx-x01.service>" in proc.stdout or
+                     "<start> <grok-pulse.target>" in proc.stdout)
+        results.append(proc.returncode != 0 and not continued)
+    return all(results), f"disable/stop failures abort before live or target: {results}"
+
+
 CHECKS = [
+    ("logistics.startup-controls-fail-closed", startup_controls_fail_closed_and_respect_disabled_lanes),
+    ("logistics.remote-installer-preserves-local-work", remote_installer_preserves_local_work_and_forwards_flags),
+    ("logistics.live-only-fails-closed-on-x02-control-error", live_only_does_not_continue_after_x02_control_failure),
+    ("logistics.live-only-install-keeps-x02-off", install_can_keep_the_virtual_instance_off),
+    ("logistics.systemd-services-retry-within-start-limit", systemd_services_retry_without_exhausting_their_start_limit),
+    ("logistics.regression-runner-reports-progress", regression_runner_reports_progress),
+    ("logistics.update-preserves-local-work-without-force", update_preserves_local_work_without_force),
     ("logistics.node-floor-covers-vite-and-nitro", node_floor_covers_vite_and_nitro),
     ("logistics.zero-is-a-value-not-a-default", zero_is_a_value_not_a_default),
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),

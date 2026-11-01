@@ -6,6 +6,7 @@ These checks read the working file, so they cover the same code the pin covers.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import tempfile
 import types
@@ -64,7 +65,7 @@ def restored_book_drops_a_position_only_when_two_reads_agree():
         p.api = Api()
         p.cooldown = {}
         p.close_from_venue = lambda pos_, why: False
-        p.cancel_controls = lambda sym: None
+        p.cancel_controls = lambda sym, **kw: None
         p.save_open_book = lambda: None
         real_sleep = pt.time.sleep
         pt.time.sleep = lambda s_: None
@@ -426,12 +427,69 @@ def symbol_cap_applies_under_a_wildcard():
         p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
         p.apply_dynamic_symbols(force=True)
         out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+        p.symbol_cap = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"]
+        p.apply_dynamic_symbols(force=True)
+        out["x01"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
+        p.open = {f"S{i:02d}-USDT": types.SimpleNamespace(symbol=f"S{i:02d}-USDT") for i in range(31)}
+        p.apply_dynamic_symbols(force=True)
+        out["protect_more_than_cap"] = (len(pt.SYMBOLS), all(s in pt.SYMBOLS for s in p.open))
     except Exception as exc:  # noqa: BLE001
         return False, f"raised {type(exc).__name__}: {exc}"
     finally:
         pt.SYMBOLS[:] = saved_syms
-    ok = out.get("capped") == 50 and out.get("uncapped") == 60 and out.get("with_open") == (50, True)
-    return ok, f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; cap 50 + one open -> {out.get('with_open')}"
+    ok = (out.get("capped") == 50 and out.get("uncapped") == 60 and out.get("with_open") == (50, True)
+          and out.get("x01") == (30, True) and out.get("protect_more_than_cap") == (31, True))
+    return ok, (f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; "
+                f"cap 50 + one open -> {out.get('with_open')}; x01 -> {out.get('x01')}; "
+                f"31 open positions -> {out.get('protect_more_than_cap')}")
+
+
+def x01_bootstrap_honors_cap_before_ranked_tickers():
+    """A real Pulse initialization with an offline fake cannot begin with an unbounded wildcard."""
+    saved_syms, saved_loader, saved_overlay = list(pt.SYMBOLS), pt.load_contracts, pt.OVERLAY_PATH
+    saved_open_loader = pt.Pulse._load_open_book
+    names = [f"S{i:02d}-USDT" for i in range(60)]
+    contracts = {s: pt.Contract(symbol=s, min_qty=0.001, step=0.001, qprec=3, pprec=6,
+                                min_usdt=5.0, max_lev=50) for s in names}
+
+    def run():
+        pt.load_contracts = lambda wanted=None: contracts if wanted is None else {s: contracts[s] for s in wanted if s in contracts}
+        pt.OVERLAY_PATH = os.path.join(PULSE, "overlay-bingx-x01.json")
+        p = pt.Pulse(_StubExchange(), dict(contracts))
+        try:
+            initial = list(pt.SYMBOLS)
+            no_rank = not p.universe
+            p.universe = [{"symbol": s, "vol1h": float(i), "maxLeverage": 50, "quoteVolume": 1.0,
+                           "vol24h": 0.0, "changePct": 0.0} for i, s in enumerate(names)]
+            p.apply_dynamic_symbols(force=True)
+            ranked = list(pt.SYMBOLS)
+        finally:
+            p.pool.shutdown(wait=True)
+        pt.Pulse._load_open_book = lambda self: self.open.update(
+            {s: types.SimpleNamespace(symbol=s) for s in names[:31]})
+        q = pt.Pulse(_StubExchange(), dict(contracts))
+        try:
+            restored = list(pt.SYMBOLS)
+        finally:
+            q.pool.shutdown(wait=True)
+        return initial, no_rank, ranked, restored
+
+    try:
+        initial, no_rank, ranked, restored = _isolated(run)
+        held = pt.bootstrap_symbols(names, ["S59-USDT"], 30)
+        many_held = pt.bootstrap_symbols(names, names[:31], 30)
+        unlimited = pt.bootstrap_symbols(names, ["OUTSIDE-USDT"], 0)
+    finally:
+        pt.SYMBOLS[:] = saved_syms
+        pt.load_contracts, pt.OVERLAY_PATH = saved_loader, saved_overlay
+        pt.Pulse._load_open_book = saved_open_loader
+    ok = (no_rank and len(initial) == 30 and initial == names[:30]
+          and len(ranked) == 30 and ranked[0] == "S59-USDT"
+          and len(held) == 30 and "S59-USDT" in held
+          and len(many_held) == 31 and len(restored) == 31 and set(restored) == set(names[:31])
+          and len(unlimited) == 61 and "OUTSIDE-USDT" in unlimited)
+    return ok, (f"before ticker={len(initial)}; ranked={len(ranked)} first={ranked[0] if ranked else None}; "
+                f"held={len(held)}; 31 restored={len(restored)}; unlimited={len(unlimited)}")
 
 
 class _RefusingCloseVenue(_StubExchange):
@@ -467,9 +525,7 @@ def _isolated(fn):
 
 
 def failed_close_keeps_the_position_protected():
-    """A close the venue refuses must leave the position in the book with its stops re-armable: the stops were
-    cancelled before the close, so their ids are dropped and missing_controls is true. A symbol banned for a no-ctrl
-    close is blocked for new entries, not erased from the book."""
+    """A refused close retains the position and its existing protection until a full close is confirmed."""
     def run():
         p, sym = _enter(_RefusingCloseVenue(executed="1", requested="1"))
         pos = p.open[sym]
@@ -477,7 +533,7 @@ def failed_close_keeps_the_position_protected():
         p.close_pos(pos, 100.0, "no-ctrl-test")
         return had, sym in p.open, p.missing_controls(pos), sym in p.ignore_syms
     had, kept, missing, banned = _isolated(run)
-    return had and kept and missing and banned, f"stops before={had} kept in book={kept} stops re-armable={missing} banned={banned}"
+    return had and kept and not missing and banned, f"stops before={had} kept in book={kept} protection retained={not missing} banned={banned}"
 
 
 def partial_close_is_recorded_at_the_full_size():
@@ -934,14 +990,16 @@ def a_venue_order_of_another_symbol_is_not_this_exit():
     position's exit (x02 recorded ZCAT closed at WLD's take-profit, +20 %); a fill of the position's own symbol still is."""
     import types
     p = _bare_pulse()
-    pos = types.SimpleNamespace(symbol="ZCAT-USDT", sl_oid="", sec_sl_oid="", tp_oid="2115874311641849856", sec_tp_oid="")
+    pos = pt.Position("ZCAT-USDT", "LONG", 1, .04, 1, .03, .05, .04, tp_oid="2115874311641849856")
+    p.save_open_book = lambda: True
+    p.fill_cost = lambda *args: (0, "reported-fee")
 
     class _Api:
         def __init__(self, sym, px):
             self.sym, self.px = sym, px
 
         def get(self, path, params=None):
-            return {"code": 0, "data": {"order": {"symbol": self.sym, "status": "FILLED", "avgPrice": self.px}}}
+            return {"code": 0, "data": {"order": {"symbol": self.sym, "positionSide": "LONG", "orderId": "2115874311641849856", "executedQty": "1", "status": "FILLED", "avgPrice": self.px}}}
 
     p.api = _Api("WLD-USDT", "0.3985")
     other = pt.Pulse.venue_exit(p, pos)
@@ -1454,7 +1512,7 @@ def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
             p.last_error = f"close {_p.symbol} over 20 error code:109420 requests"
             return False, _p.entry
         p.market_close = refused
-        p.cancel_controls = lambda s_: None
+        p.cancel_controls = lambda s_, **kw: None
         lines = []
         saved_log = pt.log
         pt.log = lambda msg, *a, **k: lines.append(msg)
@@ -1646,6 +1704,83 @@ def completed_minutes_only_reach_the_set_history():
     return ok, f"bars={len(bars)} last={last_t} (want {minute - 60.0}) v3 order fixed={ordered}"
 
 
+def thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch():
+    """All 30 ready symbols can compete before an opening; larger universes remain bounded and finish next cycle."""
+    minute = 1_790_000_100.0
+    names = [f"S{i:02d}-USDT" for i in range(31)]
+
+    class Sets:
+        packs = ["general"]
+        bar_t = {s: minute - 60 for s in names}
+        def entry_signals(self, sym, _t):
+            return [("general", 1, (names.index(sym) + 1) / 100, "signal")]
+
+    def pulse():
+        p = _bare_pulse()
+        p.open = {}
+        p.sets = Sets()
+        p._scope_pick = lambda pack: (object(), "")
+        return p
+
+    old_syms = pt.SYMBOLS
+    try:
+        p = pulse()
+        pt.SYMBOLS = names[:30]
+        first = p.set_entry_candidates(now=minute + 1)
+        best = max(first.values()) if first else None
+        q = pulse()
+        pt.SYMBOLS = names
+        bounded = q.set_entry_candidates(now=minute + 1)
+        completed = q.set_entry_candidates(now=minute + 2)
+    finally:
+        pt.SYMBOLS = old_syms
+    ok = len(first) == 30 and best and best[1] == names[29] and len(bounded) == 30 and len(completed) == 31
+    return bool(ok), f"30 ready={len(first)}, highest={best and best[1]}, 31-symbol batches={len(bounded)}/{len(completed)}"
+
+
+def strongest_ready_symbol_can_take_the_first_slot():
+    """A stronger 30th ready signal competes at the real entry loop, not merely in the candidate helper."""
+    from coord_engine import Coordinator
+    minute = 1_790_000_100.0
+    names = [f"S{i:02d}-USDT" for i in range(30)]
+    class Sets:
+        enabled = use_historic_gate = True
+        packs = ["general"]
+        bar_t = {s: minute - 60 for s in names}
+        def entry_signals(self, sym, _t):
+            return [("general", 1, (names.index(sym) + 1) / 100, "signal")]
+        def pick_any(self, pack):
+            return types.SimpleNamespace(last15_pf=2.0, last15_n=50, pack=pack)
+        def pack_open(self, _pack):
+            return True
+    p = _bare_pulse()
+    p.sets, p.open, p.halted = Sets(), {}, False
+    p.strat_general = False
+    p.coord = Coordinator()
+    p.coord.load({}, {})
+    p._scope_pick = lambda pack: (object(), "")
+    p.strategy_closes = lambda: []
+    p.real_stage_paper = False
+    p.entries_blocked = lambda: False
+    p.rearrange_opens = lambda: []
+    p.maybe_block_adds = p.maybe_dca_adds = lambda: None
+    p.available, p.cooldown, p.skip_log, p.contracts, p.px = 100.0, {}, {}, {}, {}
+    p.avail_notional = lambda *a: 100.0
+    placed = []
+    def place(sym, _direction, _why, _conf):
+        placed.append(sym)
+        p.open[sym] = object()
+    p.place = place
+    old_syms, old_max, old_time = pt.SYMBOLS, pt.MAX_OPEN, pt.time.time
+    try:
+        pt.SYMBOLS, pt.MAX_OPEN = names, 1
+        pt.time.time = lambda: minute + 5
+        p.maybe_entries()
+    finally:
+        pt.SYMBOLS, pt.MAX_OPEN, pt.time.time = old_syms, old_max, old_time
+    return placed == [names[-1]], f"first opened={placed}; expected strongest ready symbol={names[-1]}"
+
+
 def completed_minutes_do_not_bridge_gaps_or_bad_rows():
     """The timestamp-free history can represent only a contiguous series of completed minutes."""
     p = _bare_pulse()
@@ -1719,6 +1854,50 @@ def entry_selection_keeps_packs_and_axis_lanes_independent():
           and third and third[3].startswith("set:strong:") and picked is alternative and not blocked
           and scope == ((True, ""), (False, "pack:strong:pos")))
     return bool(ok), f"selected={first}, {second}, {third}; scopes={scope}; negative alternative={picked is alternative}"
+
+
+def one_dynamic_set_axis_does_not_block_other_sets():
+    """With real SetBook selection, a blocked high-ranked Set cannot mask another Set's lane."""
+    from coord_engine import Coordinator
+    from set_engine import SetBook
+    import time
+
+    book = SetBook()
+    book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0,
+               "minPfBySize": False, "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 3,
+               "setSlRatios": [0.5, 1.0], "trailVariants": ["0.3:0.1"],
+               "stratGeneral": True, "stratIndications": False})
+    rows = [st for st in book.by_idx if st.pack == "general" and st.kind == "base"]
+    first, second = rows[:2]
+    book.by_idx = [first, second]
+    book.sets = {st.id: st for st in book.by_idx}
+    now = time.time()
+    for st, score in ((first, 2.0), (second, 1.5)):
+        st.active, st.locked, st.last_error = True, False, ""
+        st.gate_n, st.gate_pf, st.n = 20, score, 20
+        st.max_dd_s, st.score_at = 0, now
+    coordinator = Coordinator()
+    coordinator.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False,
+                          "axisContEnabled": False, "minPfLinked": False, "minPf": 1.1})
+    p = _bare_pulse()
+    p.sets, p.coord, p.open, p.position_cost_pct = book, coordinator, {}, 0.12
+
+    def evidence(st, result):
+        st.exe = [(now - 60 * i, result) for i in range(4, 0, -1)]
+
+    evidence(first, -0.004)
+    evidence(second, 0.004)
+    selected_after_first_fails = p._scope_choice("general")
+    evidence(first, 0.004)
+    evidence(second, -0.004)
+    selected_after_second_fails = p._scope_choice("general")
+    evidence(first, -0.004)
+    none_when_both_fail = p._scope_choice("general")
+    ok = (first.id != second.id and selected_after_first_fails[0] is second
+          and selected_after_second_fails[0] is first and none_when_both_fail[0] is None)
+    return ok, (f"independent Sets={first.id}, {second.id}; first blocked -> "
+                f"{getattr(selected_after_first_fails[0], 'id', None)}; second blocked -> "
+                f"{getattr(selected_after_second_fails[0], 'id', None)}; both blocked -> none={none_when_both_fail[0] is None}")
 
 
 def entry_does_not_open_when_the_set_disappears_after_sense():
@@ -2008,9 +2187,12 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 
 
 CHECKS = [
+    ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
+    ("trader.thirty-ready-symbols-compete-in-one-bounded-batch", thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch),
     ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),
     ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
     ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),
+    ("trader.one-dynamic-set-axis-does-not-block-other-sets", one_dynamic_set_axis_does_not_block_other_sets),
     ("trader.completed-minutes-do-not-bridge-gaps-or-bad-rows", completed_minutes_do_not_bridge_gaps_or_bad_rows),
     ("trader.live-entry-is-the-replays-signal", live_entries_are_the_replays_signal_on_the_completed_minute),
     ("trader.lanes-every-stage-on-its-own-lane", every_stage_runs_on_its_own_lane_from_entry_to_close_and_stats),
@@ -2057,6 +2239,7 @@ CHECKS = [
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
     ("trader.symbol-cap-applies-under-a-wildcard", symbol_cap_applies_under_a_wildcard),
+    ("trader.x01-bootstrap-honors-cap-before-ranked-tickers", x01_bootstrap_honors_cap_before_ranked_tickers),
     ("trader.partial-close-closes-the-remainder", partial_close_fill_closes_the_remainder),
     ("trader.entry-lifecycle-stub-exchange", entry_lifecycle_with_a_stub_exchange),
     ("trader.partial-fill-sized-from-executed", partial_fill_is_sized_from_the_executed_quantity),

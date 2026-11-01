@@ -7,6 +7,18 @@ from position_cost import last_n_cost_pf
 from stats_report import enrich, _row
 
 
+def pf_evidence_distinguishes_high_finite_and_no_loss():
+    from position_cost import pf_evidence
+    expected = [(0, 0, 0, "empty", None), (0, 0, 1, "flat", None),
+                (1, 0, 1, "no-loss", None), (1, .001, 2, "finite", 1000)]
+    for gain, loss, n, state, pf in expected:
+        got = pf_evidence(gain, loss, n)
+        if got["pfState"] != state or got["pfFinite"] != pf:
+            return False, str(got)
+    got = last_n_cost_pf([{"pnl_pct": 1.0012}, {"pnl_pct": .0002}], 2, .12)
+    return got["pfState"] == "finite" and abs(got["pfFinite"] - 1000) < 1e-9, "finite PF 1000 is not the legacy no-loss sentinel"
+
+
 def fee_and_slippage_oracle():
     # Fees use each leg's own notional. Actual prices already include slippage.
     for side, entry, exit_ in (("LONG", 100.02, 101), ("SHORT", 99.98, 99)):
@@ -462,7 +474,15 @@ def restart_does_not_seed_foreign_exit_lanes():
     return counts == (1, 1, 1), f"own default-lane rows only: Exit/SL/trailing={counts}"
 
 
+def zero_allowance_preserves_measured_net_percentage():
+    rows = [{"t": T0 + i, "pnl_pct": net, "net_pnl_pct": net} for i, net in enumerate((.0004, -.0002))]
+    got = last_n_cost_pf(rows, 2, 0)
+    return got["netPct"] == .01 and got["netSumPct"] == .02 and got["pf"] == 2, f"mean={got['netPct']} sum={got['netSumPct']} PF={got['pf']}"
+
+
 CHECKS = [("cost-accounting." + fn.__name__.replace("_", "-"), fn) for fn in (
+    zero_allowance_preserves_measured_net_percentage,
+    pf_evidence_distinguishes_high_finite_and_no_loss,
     fee_and_slippage_oracle, mixed_liquidity_and_slippage_on_each_leg, net_result_survives_consumers_and_cost_changes,
     rate_lookup_and_bybit_translation, selected_fees_exclude_inactive_symbols,
     fallback_fees_do_not_charge_slippage_twice, pulse_fill_to_stats, partial_close_retry_and_unfilled_close,

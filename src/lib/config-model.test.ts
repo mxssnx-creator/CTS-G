@@ -1,10 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { defaultOverlay, overlayFromCts, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { defaultOverlay, overlayFromCts, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("Normal admission is independent and a raw trailing module disable survives a settings save", () => {
+  const loaded = overlayFromCts(cts(), { stratNormal: false, stratTrailing: true,
+    modules: { "strategy.trailing": false } });
+  assert.equal(loaded.stratNormal, false);
+  assert.equal(loaded.stratGeneral, true);
+  assert.equal(loaded.stratTrailing, false);
+  const saved = syncOverlayFlags(loaded);
+  assert.equal(saved.modules?.["strategy.trailing"], false);
+  assert.equal(saved.modules?.["strategy.trailRecalc"], false);
+  const enabled = syncOverlayFlags({ ...loaded, stratTrailing: true });
+  assert.equal(enabled.modules?.["strategy.trailing"], true, "explicit operator toggle can enable it again");
+});
 
 test("Secure, Minimal is an isolated, bounded 50-symbol preset", () => {
   const preset = secureMinimalPreset();
@@ -34,13 +47,16 @@ test("PF defaults, saved overrides and an independent reset agree", () => {
   const saved = overlayFromCts(cts({ minPfShort: 1.4, minPfSignals: 1.6 }), { minPfMinimal: 1.2 });
   assert.equal(saved.minPfShort, 1.4);
   assert.equal(saved.minPfMinimal, 1.2);
-  assert.equal(saved.minPfSignals, 1.6);
+  assert.equal(saved.minPfSignals, 2.2, "legacy Signal floors are raised to the owner's minimum");
+  assert.equal(overlayFromCts(cts({}), { minPfSignals: 1.3 }).minPfSignals, 2.2);
+  assert.equal(syncOverlayFlags({ ...saved, minPfSignals: 1.3 }).minPfSignals, 2.2);
+  assert.equal(syncOverlayFlags({ ...saved, minPfSignals: 2.7 }).minPfSignals, 2.7);
   const bounds = overlayFromCts(cts(), { minPfMicroN: 9, minPfMinimalN: 3, minPfShortN: 4, minPfMediumN: 7 });
   assert.deepEqual([bounds.minPfMicroN, bounds.minPfMinimalN, bounds.minPfShortN, bounds.minPfMediumN], [9, 9, 9, 9]);
   const reset = defaultOverlay();
   reset.minPfSignals = 2;
   reset.symbols.push("TEST-USDT");
-  assert.equal(defaultOverlay().minPfSignals, 1.3);
+  assert.equal(defaultOverlay().minPfSignals, 2.2);
   assert.equal(defaultOverlay().symbols.includes("TEST-USDT"), false);
 });
 

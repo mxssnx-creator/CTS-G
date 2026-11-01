@@ -99,7 +99,7 @@ export const PF_TYPE_DEFAULTS = {
   minPfShort: 1.15,
   minPfMedium: 1.25,
   minPfLong: 1.5,
-  minPfSignals: 1.3,
+  minPfSignals: 2.2,
 } as const;
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
@@ -221,6 +221,7 @@ export type PulseOverlay = {
   stratIndications: boolean;
   stratBlock: boolean;
   stratTrailing: boolean;
+  stratNormal: boolean;
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
@@ -465,6 +466,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratIndications: true,
   stratBlock: true,
   stratTrailing: true,
+  stratNormal: true,
   stratGeneral: true,
   stratShortRange: true,
   stratTrend: false,
@@ -673,6 +675,7 @@ export type CtsSettings = {
   stratIndications?: boolean;
   stratBlock?: boolean;
   stratTrailing?: boolean;
+  stratNormal?: boolean;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
   stratTrend?: boolean;
@@ -924,6 +927,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratIndications: bool(cts.stratIndications, true),
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
+    stratNormal: bool(cts.stratNormal, true),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
     stratTrend: bool(cts.stratTrend, false),
@@ -971,7 +975,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfShort: pfFloor(num(cts.minPfShort, PF_TYPE_DEFAULTS.minPfShort)),
     minPfMedium: pfFloor(num(cts.minPfMedium, PF_TYPE_DEFAULTS.minPfMedium)),
     minPfLong: pfFloor(num(cts.minPfLong, PF_TYPE_DEFAULTS.minPfLong)),
-    minPfSignals: pfFloor(num(cts.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals)),
+    minPfSignals: Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(cts.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals))),
     minPfMicroN: Math.max(1, Math.round(num(cts.minPfMicroN, 5))),
     minPfMinimalN: Math.max(1, Math.round(num(cts.minPfMinimalN, 10))),
     minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
@@ -1044,6 +1048,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),
   };
+  // A raw module disable must not be displayed or re-saved as an enabled strategy.
+  out.minPfSignals = Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(out.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals)));
+  out.stratTrailing = out.stratTrailing && out.modules["strategy.trailing"] !== false;
   if (Array.isArray(live?.symbols)) out.symbols = live.symbols as string[];
   if (live?.symbolsAll != null) out.symbolsAll = bool(live.symbolsAll, out.symbolsAll);
   out.symbolSort = coerceSymbolSort(out.symbolSort ?? live?.symbolSort);
@@ -1116,6 +1123,7 @@ export async function fetchCtsSettings(conn = "overall"): Promise<CtsSettings | 
 export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
+    minPfSignals: Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(overlay.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals))),
     symbols: capSymbols(overlay.symbols || []),
   };
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {

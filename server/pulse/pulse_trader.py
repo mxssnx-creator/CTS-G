@@ -28,7 +28,7 @@ from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, ad
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
-from modules import resolve as resolve_modules
+from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
@@ -111,6 +111,26 @@ def symbol_rank_key(row: Dict[str, Any], sort: str) -> Tuple[float, float]:
     if s == "leverage":
         return (lev, -symbol_metric(row, "vol1h"))
     return (lev, -symbol_metric(row, s))
+
+
+def bootstrap_symbols(names: Sequence[str], open_symbols: Sequence[str], cap: int) -> List[str]:
+    """Bound a provisional universe while retaining every symbol with an existing position.
+
+    Names are only a fallback until the exchange ticker supplies a ranked
+    universe. An open symbol is never dropped merely to meet the scan cap.
+    """
+    ordered_open = list(dict.fromkeys(s for s in open_symbols if s))
+    if cap <= 0:
+        return list(dict.fromkeys(list(names) + ordered_open))
+    selected = list(ordered_open)
+    seen = set(selected)
+    for name in names:
+        if len(selected) >= cap:
+            break
+        if name and name not in seen:
+            selected.append(name)
+            seen.add(name)
+    return selected
 
 
 def rank_self_test() -> Tuple[bool, str]:
@@ -196,7 +216,7 @@ def pack_of_reason(reason: Any) -> str:
 CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
-ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
+ENTRY_SIG_BUDGET = 30     # one full x01 universe competes; larger universes continue in later cycles
 DD_HALT = 0.80                  # owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (ddHaltPct)
 EQ_MIN = 0.20
 RECV = 5000
@@ -337,7 +357,11 @@ def ctrl_payload(
     otype: str = "",
     working: str = "MARK_PRICE",
 ) -> Dict[str, Any]:
-    """BingX rejects quantity + closePosition together. Never mix them."""
+    """BingX trigger-market protection requires quantity even with closePosition.
+
+    Confirmed on x02 VST: omitting it returns 109400. closePosition still
+    covers the entire position after stacking; quantity supplies validation.
+    """
     is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
     close_side = "SELL" if str(side).upper() == "LONG" else "BUY"
     if not otype:
@@ -353,6 +377,8 @@ def ctrl_payload(
     }
     if close_pos:
         body["closePosition"] = "true"
+        if otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            body["quantity"] = str(qty)
     elif with_qty and str(qty):
         body["quantity"] = str(qty)
     if otype in ("STOP", "TAKE_PROFIT"):
@@ -653,6 +679,7 @@ class Position:
     liq: float = 0.0
     position_id: str = ""
     ctrl_verified: bool = False
+    ctrl_undercovered: bool = False            # a known quantity shortfall blocks further entries
     dca_ref: float = 0.0                       # entry the position opened at; a DCA add moves entry to the average
     dca_fills: list = field(default_factory=list)   # [price, qty] of the DCA adds (the add-on lane's own result)
     lane: str = ""                             # the Set's lane at entry: "pos" (Base -> Main -> Real) or "neg" (Real Negative)
@@ -675,6 +702,7 @@ class Position:
     exit_price_estimated: bool = False
     close_pending: dict = field(default_factory=dict)
     close_reason: str = ""
+    control_fill_state: dict = field(default_factory=dict)  # cumulative quantities/notionals/fees by protective order ID
 
 
 @dataclass
@@ -1258,11 +1286,9 @@ class Pulse:
             symbol=symbol, side=side, qty=qty, entry=px or 1.0, opened_at=time.time(),
             sl=px or 1.0, tp=px or 1.0, peak=px or 1.0, notional=qty * (px or 0), ours=True,
         )
-        try:
-            self.cancel_controls(symbol)
-        except Exception:
-            pass
         ok, _ = self.market_close(dummy)
+        if ok:
+            self.cancel_controls(symbol, side=side)
         self.ban_sym(symbol)
         log(f"FLATTEN untracked {symbol} {side} q={qty} n={(qty*(px or 0)):.1f} ok={ok}")
         return ok
@@ -1294,7 +1320,7 @@ class Pulse:
                 pos = Position(**kw)
             except Exception:
                 continue
-            if pos.qty <= 0:
+            if pos.qty <= 0 and pos.close_filled_qty <= 0:
                 continue
             if pos.client_id and not self.cid_ours(pos.client_id):
                 continue
@@ -2235,12 +2261,20 @@ class Pulse:
         self.last_error = f"cancel {symbol} {r.get('msg')}"[:200]
         return False
 
-    def cancel_controls(self, symbol: str, keep: Optional[set] = None) -> None:
+    def cancel_controls(self, symbol: str, keep: Optional[set] = None, *, side: str = "") -> None:
+        """Cancel owned controls only for the confirmed-flat position direction.
+
+        Unknown/one-way order direction is not evidence that it belongs to a
+        requested hedge side. Symbol-wide cleanup remains explicit for callers
+        that established the entire symbol is flat.
+        """
         keep = keep or set()
         self._oo_cache.pop("*", None)   # controls placed in the last seconds must be visible to this sweep
         self._oo_cache.pop(symbol, None)
         for o in self.list_orders(symbol):
             if not self.order_is_ours(o):
+                continue
+            if side and str(o.get("positionSide") or "").upper() != side.upper():
                 continue
             oid = str(o.get("orderId") or "")
             typ = str(o.get("type") or "")
@@ -2306,7 +2340,7 @@ class Pulse:
     def max_range_prices(self, pos: Position) -> Tuple[float, float]:
         """Overall security SL/TP: widest of the order range and overlay max."""
         sl_f, tp_f, sl_lo, sl_hi = self.opt_fracs(pos)
-        sl_w = max(sl_f, sl_hi, float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
+        sl_w = max(sl_f, sl_hi, float(self.sl_max), float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
         tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
@@ -2433,8 +2467,11 @@ class Pulse:
             {"close_pos": False, "with_qty": True, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
             {"close_pos": True, "with_qty": False, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
             {"close_pos": False, "with_qty": True, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
-            {"close_pos": True, "with_qty": False, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
         ]
+        if is_sec:
+            # Overall protection follows the whole position when stacks grow.
+            # Quantity fallbacks remain available, but are never called close-all.
+            forms.sort(key=lambda form: not form["close_pos"])
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
@@ -2454,8 +2491,6 @@ class Pulse:
                     pos.symbol, pos.side, "sl" if is_sl else "tp", px_s, qty_s, cid,
                     close_pos=bool(form["close_pos"]), with_qty=bool(form["with_qty"]), otype=str(form["otype"]),
                 )
-                if "quantity" in body and body.get("closePosition"):
-                    body.pop("quantity", None)
                 r = self.api.post("/openApi/swap/v2/trade/order", body)
                 self.did_io = True
                 if r.get("cooled"):
@@ -2476,11 +2511,22 @@ class Pulse:
                         if side != pos.side:
                             continue
                         live = real_oid(o.get("orderId") or o.get("orderID"))
-                        if not live:
+                        if not live or not self.control_covers_quantity(pos, o):
                             continue
-                        if is_sl and (typ in SL_TYPES or self._cid_kind(o) in ("s", "u")):
-                            return live
-                        if (not is_sl) and (typ in TP_TYPES or self._cid_kind(o) in ("t", "v")):
+                        matching = (typ in SL_TYPES or self._cid_kind(o) in ("s", "u")) if is_sl else (typ in TP_TYPES or self._cid_kind(o) in ("t", "v"))
+                        if matching:
+                            try:
+                                actual = float(o.get("stopPrice") or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            if not math.isfinite(actual) or actual <= 0:
+                                continue
+                            pos.close_position = str(o.get("closePosition")).lower() in ("true", "1")
+                            pos.ctrl_qty = pos.qty
+                            if is_sl:
+                                pos.sec_sl = actual
+                            else:
+                                pos.sec_tp = actual
                             return live
                     continue
                 if kind_err == "qty_close":
@@ -2531,12 +2577,23 @@ class Pulse:
         log(f"CTRL {kind} {pos.symbol} {pos.side} oid={oid} closePos={pos.close_position} qty={pos.qty} @{price}")
         return oid
 
+    @staticmethod
+    def control_covers_quantity(pos: Position, order: Dict[str, Any]) -> bool:
+        if str(order.get("closePosition")).lower() in ("true", "1"):
+            return True
+        try:
+            remaining = float(order.get("origQty") or order.get("quantity") or 0) - max(0, float(order.get("executedQty") or 0))
+            return math.isfinite(remaining) and remaining + max(1e-12, pos.qty * 1e-10) >= pos.qty
+        except (TypeError, ValueError):
+            return False
+
     def missing_controls(self, pos: Position) -> bool:
         if not getattr(self, "control_orders", True):
             return False
         has_sl = bool(real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", "")))
         has_tp = bool(real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")))
-        return not (has_sl and has_tp)
+        grown = (not getattr(pos, "close_position", False) and float(getattr(pos, "ctrl_qty", 0) or 0) + 1e-12 < pos.qty)
+        return not (has_sl and has_tp) or bool(getattr(pos, "ctrl_undercovered", False)) or grown
 
     def entries_blocked(self) -> bool:
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
@@ -2613,7 +2670,8 @@ class Pulse:
             return
         if time.time() < self.ctrl_skip.get(pos.symbol, 0) and pos.sl_oid and pos.tp_oid:
             return
-        want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
+        _, _, want_sl, want_tp = self.desired_sl_tp(pos)
+        pos.sec_sl, pos.sec_tp = want_sl, want_tp
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
@@ -2639,22 +2697,39 @@ class Pulse:
             typ = str(o.get("type") or "")
             kind = self._cid_kind(o)
             if typ in SL_TYPES or kind in ("u", "s"):
+                try:
+                    actual = float(o.get("stopPrice") or sl_b["stopPrice"])
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(actual) or actual <= 0:
+                    continue
                 pos.sl_oid = pos.sec_sl_oid = oid
-                pos.sl = want_sl
+                pos.sl = pos.sec_sl = actual
             elif typ in TP_TYPES or kind in ("v", "t"):
+                try:
+                    actual = float(o.get("stopPrice") or tp_b["stopPrice"])
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(actual) or actual <= 0:
+                    continue
                 pos.tp_oid = pos.sec_tp_oid = oid
-                pos.tp = want_tp
+                pos.tp = pos.sec_tp = actual
+        sl_full, tp_full = bool(real_oid(pos.sl_oid)), bool(real_oid(pos.tp_oid))
         if not real_oid(pos.sl_oid):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
-                pos.sl = want_sl
+                pos.sl = pos.sec_sl or want_sl
+                sl_full = pos.close_position
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
             if pos.tp_oid:
-                pos.tp = want_tp
+                pos.tp = pos.sec_tp or want_tp
+                tp_full = pos.close_position
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+        if pos.controls_ok:
+            pos.ctrl_undercovered = False
         pos.overall = pos.controls_ok
-        pos.close_position = True
+        pos.close_position = sl_full and tp_full
         pos.ctrl_qty = pos.qty
         pos.ctrl_verified = pos.controls_ok
         self._oo_cache.pop("*", None)
@@ -2662,22 +2737,24 @@ class Pulse:
 
     def ensure_controls(self, pos: Position) -> None:
         now = time.time()
+        if not pos.close_position and pos.ctrl_qty + 1e-12 < pos.qty:
+            pos.ctrl_undercovered = True
         if now < self.ctrl_skip.get("__order_cap__", 0):
             return
         have_both = bool((real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))) and (real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", ""))))
-        if have_both and now < self.ctrl_skip.get(pos.symbol, 0) and getattr(pos, "ctrl_verified", False):
+        if have_both and not pos.ctrl_undercovered and now < self.ctrl_skip.get(pos.symbol, 0) and getattr(pos, "ctrl_verified", False):
             return
         if self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() and have_both:
             return
-        want_sl, want_tp, sec_sl, sec_tp = self.desired_sl_tp(pos)
-        pos.sec_sl, pos.sec_tp = sec_sl, sec_tp
+        _, _, sec_sl, sec_tp = self.desired_sl_tp(pos)
+        want_sl, want_tp = sec_sl, sec_tp
         if not real_oid(pos.sl_oid) and not real_oid(pos.tp_oid):
             self.place_ctrl_pair(pos)
             if real_oid(pos.sl_oid) and real_oid(pos.tp_oid):
                 return
         banned = self.api.path_cd.get("/openApi/swap/v2/trade/openOrders", 0) > time.time()
         all_rows = [] if banned else self.list_orders(pos.symbol)
-        orders = [o for o in all_rows if self.order_is_ours(o)]
+        orders = [o for o in all_rows if self.order_is_ours(o) and str(o.get("symbol") or pos.symbol) == pos.symbol]
         if banned:
             if not real_oid(pos.sl_oid):
                 oid = self.place_ctrl(pos, "sec-sl", want_sl)
@@ -2689,10 +2766,10 @@ class Pulse:
                 if oid:
                     pos.tp_oid = pos.sec_tp_oid = oid
                     pos.tp = want_tp
-            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
-            pos.overall = True
-            pos.close_position = True
-            pos.ctrl_qty = pos.qty
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) and not pos.ctrl_undercovered
+            pos.overall = pos.controls_ok
+            # Do not turn a cached quantity order into close-all evidence while
+            # openOrders is unavailable. Keep previous coverage/provenance.
             self.ctrl_skip[f"sync:{pos.symbol}"] = time.time() + 12.0
             return
         # Empty REST is not "no orders" — never drop live oids.
@@ -2700,97 +2777,64 @@ class Pulse:
         sls = [o for o in orders if self._order_is_sl(o) and str(o.get("positionSide") or "").upper() == side]
         tps = [o for o in orders if self._order_is_tp(o) and str(o.get("positionSide") or "").upper() == side]
 
+        def close_all(o: Dict[str, Any]) -> bool:
+            return str(o.get("closePosition")).lower() in ("true", "1")
+
         def qty_ok(o: Dict[str, Any]) -> bool:
-            try:
-                q = float(o.get("origQty") or o.get("quantity") or 0)
-            except Exception:
-                q = 0.0
-            if q <= 0:
-                return True
-            return q + 1e-12 >= pos.qty * 0.95
+            return self.control_covers_quantity(pos, o)
 
-        stale = [o for o in sls + tps if not qty_ok(o)]
-        for extra in stale:
-            self.cancel_order(pos.symbol, str(extra.get("orderId")), self.order_cid(extra))
-        sls = [o for o in sls if o not in stale]
-        tps = [o for o in tps if o not in stale]
-        sec_sls = [o for o in sls if self._cid_kind(o) == "u" or str(o.get("closePosition")).lower() in ("true", "1")]
-        ord_sls = [o for o in sls if o not in sec_sls]
-        sec_tps = [o for o in tps if self._cid_kind(o) == "v" or (str(o.get("closePosition")).lower() in ("true", "1") and o not in sec_sls)]
-        ord_tps = [o for o in tps if o not in sec_tps]
-        for extra in ord_sls[1:] + sec_sls[1:] + ord_tps[1:] + sec_tps[1:]:
-            self.cancel_order(pos.symbol, str(extra.get("orderId")), self.order_cid(extra))
-        ord_sls, sec_sls, ord_tps, sec_tps = ord_sls[:1], sec_sls[:1], ord_tps[:1], sec_tps[:1]
-        want_sl, want_tp, sec_sl, sec_tp = self.desired_sl_tp(pos)
-        pos.sec_sl, pos.sec_tp = sec_sl, sec_tp
+        can_replace = now >= float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
+        previous_full, previous_undercovered = pos.close_position, pos.ctrl_undercovered
 
-        def _bind(rows: List[Dict[str, Any]], attr_oid: str, attr_px: str) -> None:
-            if rows:
-                oid = real_oid(rows[0].get("orderId") or rows[0].get("orderID"))
-                if oid:
-                    setattr(pos, attr_oid, oid)
+        def refresh(is_sl: bool, rows: List[Dict[str, Any]], want: float):
+            old = real_oid(pos.sl_oid or pos.sec_sl_oid) if is_sl else real_oid(pos.tp_oid or pos.sec_tp_oid)
+            price = (pos.sec_sl or pos.sl) if is_sl else (pos.sec_tp or pos.tp)
+            valid = [o for o in rows if real_oid(o.get("orderId") or o.get("orderID"))]
+            valid.sort(key=lambda o: (not qty_ok(o), str(o.get("orderId") or o.get("orderID")) != old, not close_all(o)))
+            selected = valid[0] if valid else None
+            covered = bool(old) and not previous_undercovered
+            full = bool(previous_full)
+            if selected:
+                old = real_oid(selected.get("orderId") or selected.get("orderID"))
                 try:
-                    setattr(pos, attr_px, float(rows[0].get("stopPrice") or getattr(pos, attr_px)))
-                except Exception:
-                    pass
-            # keep in-memory oid when REST lag returns empty
+                    price = float(selected.get("stopPrice") or price)
+                except (TypeError, ValueError):
+                    price = 0.0
+                covered, full = qty_ok(selected), close_all(selected)
+            legal = self.sl_legal(pos, price) if is_sl else self.tp_legal(pos, price)
+            covered = covered and legal
+            # Never widen an already tighter, legal SL. TP remains the outer
+            # safety target; each Set's own inner exits are managed separately.
+            moved = ((want > price * 1.0008 if side == "LONG" else want < price * .9992)
+                     if is_sl else abs(want-price) > max(abs(price)*.0008, 1e-12))
+            replace = not old or not covered or (can_replace and (not legal or moved))
+            verified = bool(selected) and covered
+            if replace:
+                # First obtain the new protection. A failed post must never
+                # strand the position or return a cancelled ID as protected.
+                oid = real_oid(self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want))
+                if oid and oid != old:
+                    old, price, covered, verified, full = oid, (pos.sec_sl if is_sl else pos.sec_tp) or want, True, True, bool(pos.close_position)
+                    self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
+            if covered and old:
+                for extra in valid:
+                    oid = real_oid(extra.get("orderId") or extra.get("orderID"))
+                    if oid != old:
+                        self.cancel_order(pos.symbol, oid, self.order_cid(extra))
+            return old, price, covered, verified, full
 
-        _bind(ord_sls, "sl_oid", "sl")
-        _bind(ord_tps, "tp_oid", "tp")
-        _bind(sec_sls, "sec_sl_oid", "sec_sl")
-        _bind(sec_tps, "sec_tp_oid", "sec_tp")
-        if not pos.sl_oid and pos.sec_sl_oid:
-            pos.sl_oid, pos.sl = pos.sec_sl_oid, pos.sec_sl or pos.sl
-        if not pos.tp_oid and pos.sec_tp_oid:
-            pos.tp_oid, pos.tp = pos.sec_tp_oid, pos.sec_tp or pos.tp
-        if not pos.sec_sl_oid and pos.sl_oid:
-            pos.sec_sl_oid, pos.sec_sl = pos.sl_oid, pos.sl
-        if not pos.sec_tp_oid and pos.tp_oid:
-            pos.sec_tp_oid, pos.sec_tp = pos.tp_oid, pos.tp
-        if sec_sls or pos.sl_oid:
-            pos.close_position = True
-        now = time.time()
-        last_sync = float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
-        can_replace = now >= last_sync
-
-        def _place_side(is_sl: bool, have_oid: str, have_px: float, want: float, live_have: bool, live_rows: List[Dict[str, Any]]) -> str:
-            have_oid = real_oid(have_oid)
-            mark = float(self.px.get(pos.symbol) or 0)
-            side_ok = False
-            if have_px > 0 and mark > 0:
-                if is_sl:
-                    side_ok = (pos.side == "LONG" and have_px < mark) or (pos.side == "SHORT" and have_px > mark)
-                else:
-                    side_ok = (pos.side == "LONG" and have_px > mark) or (pos.side == "SHORT" and have_px < mark)
-            trail = False
-            if is_sl and side_ok and want > 0:
-                if pos.side == "LONG" and want > have_px * 1.0008 and want < mark:
-                    trail = True
-                if pos.side == "SHORT" and want < have_px * 0.9992 and want > mark:
-                    trail = True
-            if have_oid and live_have and side_ok and not trail:
-                return have_oid
-            if have_oid and live_have and not can_replace:
-                return have_oid
-            if have_oid and live_have:
-                cid = self.order_cid(live_rows[0]) if live_rows else ""
-                self.cancel_order(pos.symbol, have_oid, cid)
-            oid = self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want)
-            if oid:
-                self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
-            return oid or have_oid
-
-        pos.sl_oid = pos.sec_sl_oid = _place_side(True, pos.sl_oid or pos.sec_sl_oid, pos.sl, want_sl, bool(sls), sls)
-        if pos.sl_oid:
-            pos.sl = want_sl if not pos.sl or not self.sl_legal(pos, pos.sl) else pos.sl
-        pos.tp_oid = pos.sec_tp_oid = _place_side(False, pos.tp_oid or pos.sec_tp_oid, pos.tp, want_tp, bool(tps), tps)
-        if pos.tp_oid:
-            pos.tp = want_tp if not pos.tp or not self.tp_legal(pos, pos.tp) else pos.tp
-        pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
-        pos.ctrl_verified = bool(sls and tps)
-        pos.ctrl_qty = pos.qty
-        pos.overall = bool((real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) or (real_oid(pos.sec_sl_oid) and real_oid(pos.sec_tp_oid)))
-        pos.close_position = True
+        sl = refresh(True, sls, want_sl)
+        tp = refresh(False, tps, want_tp)
+        pos.sl_oid = pos.sec_sl_oid = sl[0]
+        pos.tp_oid = pos.sec_tp_oid = tp[0]
+        pos.sl = pos.sec_sl = sl[1]
+        pos.tp = pos.sec_tp = tp[1]
+        pos.ctrl_undercovered = not (sl[2] and tp[2])
+        pos.controls_ok = bool(sl[0] and tp[0]) and not pos.ctrl_undercovered
+        pos.ctrl_verified = sl[3] and tp[3]
+        pos.ctrl_qty = pos.qty if pos.controls_ok else 0.0
+        pos.overall = pos.controls_ok
+        pos.close_position = sl[4] and tp[4]
 
     def _ctrl_body(self, pos: Position, kind: str, price: float) -> Dict[str, Any]:
         price = self.clamp_ctrl_price(pos, kind, price)
@@ -2831,22 +2875,34 @@ class Pulse:
             r = self.api.cancel_replace(body)
             self.did_io = True
             if self.ok(r):
-                oid = extract_oid(r) or old_oid
+                oid = real_oid(extract_oid(r))
+                if not oid:
+                    # An acknowledged cancel/replace without a new ID may have
+                    # cancelled the old stop. Reconcile; never call that old ID
+                    # protected or send an immediate duplicate replacement.
+                    pos.controls_ok = pos.ctrl_verified = False
+                    pos.ctrl_undercovered = True
+                    return False
                 pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
                 pos.sl = pos.sec_sl = new_sl
                 replaced = True
                 self._oo_cache.pop("*", None)
                 self._oo_cache.pop(pos.symbol, None)
+            else:
+                # A failed cancel/replace is not proof the cancel leg failed.
+                pos.controls_ok = pos.ctrl_verified = False
+                pos.ctrl_undercovered = True
         if not replaced:
-            if pos.sl_oid:
-                self.cancel_order(pos.symbol, pos.sl_oid)
-            if pos.sec_sl_oid and pos.sec_sl_oid != pos.sl_oid:
-                self.cancel_order(pos.symbol, pos.sec_sl_oid)
-            pos.sl_oid = pos.sec_sl_oid = ""
-            pos.sl = new_sl
-            pos.sec_sl = new_sl
-            oid = self.place_ctrl(pos, "sec-sl", new_sl)
-            pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
+            old_ids = {real_oid(pos.sl_oid), real_oid(pos.sec_sl_oid)} - {""}
+            old_price, old_sec = pos.sl, pos.sec_sl
+            oid = real_oid(self.place_ctrl(pos, "sec-sl", new_sl))
+            if not oid or oid in old_ids:
+                pos.sl, pos.sec_sl = old_price, old_sec
+                return False
+            pos.sl_oid = pos.sec_sl_oid = oid
+            pos.sl = pos.sec_sl = pos.sec_sl or new_sl
+            for old in old_ids:
+                self.cancel_order(pos.symbol, old)
         want_tp = self.desired_sl_tp(pos)[1]
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))
@@ -2871,7 +2927,7 @@ class Pulse:
             total = pos.close_filled_qty + qty
             value = pos.close_filled_value + qty * px
             pos.close_pending = {}
-            if qty >= pos.qty * .999:
+            if pos.qty - qty <= max(1e-12, pos.qty * 1e-10):
                 return True, value / total if total else px
             pos.qty -= qty
             pos.close_filled_qty, pos.close_filled_value = total, value
@@ -2933,7 +2989,7 @@ class Pulse:
                     px = self.px.get(pos.symbol) or pos.entry
                 ex = executed_qty(data)
                 self.record_exit_fee(pos, data, min(pos.qty, ex) if ex is not None else pos.qty, px)
-                if ex is not None and ex < float(pos.qty) * 0.999:
+                if ex is not None and float(pos.qty) - ex > max(1e-12, float(pos.qty) * 1e-10):
                     # partial close fill: the rest is still open on the venue. Keep the position at what is left and
                     # close the remainder with the next form instead of reporting a full close.
                     done_qty += ex
@@ -2972,7 +3028,7 @@ class Pulse:
         pos.qty = qty
         # market_close already combined all partial prices. Do not blend them twice.
         pos.close_filled_qty = pos.close_filled_value = 0.0
-        self.cancel_controls(pos.symbol)
+        self.cancel_controls(pos.symbol, side=pos.side)
         self.close_pos(pos, price, pos.close_reason or "pending-close", exchange=False)
         return True
 
@@ -3428,19 +3484,72 @@ class Pulse:
                     log(f"VENUE-OID mismatch {pos.symbol} {kind} oid={oid} venue symbol={o.get('symbol')}", every=60.0, key=f"oidmis:{pos.symbol}")
                     continue
                 status = str(o.get("status") or o.get("orderStatus") or "").upper()
-                if status not in ("FILLED", "FINISHED", "FILLED_FULLY"):
+                if status not in ("FILLED", "FINISHED", "FILLED_FULLY", "PARTIALLY_FILLED"):
                     continue
                 try:
                     px = float(o.get("avgPrice") or 0)
                 except Exception:
                     px = 0.0
                 if math.isfinite(px) and px > 0:
-                    # Record the cumulative order fee only once before close_pos.
-                    if getattr(pos, "entry_fee_usdt", None) is not None:
-                        remaining = max(0.0, pos.qty + pos.close_filled_qty - pos.exit_fee_qty)
-                        self.record_exit_fee(pos, o, remaining, px)
-                    return kind, px
+                    if self.apply_control_fill(pos, {**o, "orderId": str(oid)}, kind):
+                        return kind, px
         return None
+
+    def apply_control_fill(self, pos: Position, order: Dict[str, Any], kind: str) -> bool:
+        """Account only new, observed protective fills; retain any real remainder.
+
+        A FILLED quantity order can cover only part of a stacked position.
+        Cumulative repeated/partial snapshots are indexed by order ID and their
+        fee/value deltas are booked once. Missing quantity is not full closure.
+        """
+        oid = real_oid(order.get("orderId") or order.get("orderID"))
+        side = str(order.get("positionSide") or pos.side).upper()
+        if not oid or str(order.get("symbol") or pos.symbol) != pos.symbol or side != pos.side:
+            return False
+        owned_ids = {str(pos.sl_oid), str(pos.sec_sl_oid), str(pos.tp_oid), str(pos.sec_tp_oid), *pos.control_fill_state}
+        if oid not in owned_ids:
+            return False
+        total = executed_qty(order)
+        try:
+            price = float(order.get("avgPrice") or 0)
+        except (TypeError, ValueError):
+            return False
+        if total is None or total <= 0 or not math.isfinite(price) or price <= 0:
+            return False
+        previous = pos.control_fill_state.get(oid, {"qty": 0.0, "value": 0.0, "fee": 0.0})
+        delta = total - previous["qty"]
+        tolerance = max(1e-12, pos.qty * 1e-10)
+        if delta < -tolerance:
+            return False
+        if abs(delta) <= tolerance:
+            delta = 0.0
+        value = total * price - previous["value"]
+        if delta > pos.qty + tolerance or not math.isfinite(value) or (delta > 0 and value <= 0):
+            self.last_error = f"protective fill {pos.symbol} exceeds reconciled remaining position"
+            pos.ctrl_verified = False
+            return False
+        fee, source = self.fill_cost(order, total, price, pos.symbol, pos)
+        if not math.isfinite(fee):
+            return False
+        if pos.entry_fee_usdt is not None:
+            pos.exit_fee_usdt += fee - previous["fee"]
+            pos.exit_fee_qty += delta
+            self.note_fee_source(pos, source)
+        pos.control_fill_state[oid] = {"qty": total, "value": total * price, "fee": fee}
+        pos.close_filled_qty += delta
+        pos.close_filled_value += value
+        pos.qty = max(0.0, pos.qty - delta)
+        pos.notional = pos.qty * pos.entry
+        pos.close_reason = kind
+        terminal = str(order.get("status") or order.get("orderStatus") or "").upper() != "PARTIALLY_FILLED"
+        if terminal:
+            for attr in ("sl_oid", "sec_sl_oid", "tp_oid", "sec_tp_oid"):
+                if str(getattr(pos, attr, "")) == oid:
+                    setattr(pos, attr, "")
+        pos.controls_ok = pos.ctrl_verified = False
+        pos.ctrl_undercovered = True
+        self.save_open_book()
+        return pos.qty <= tolerance
 
     def reconcile_restored_book(self) -> None:
         """Positions in the saved book that the venue no longer holds were closed there (by their own stop or TP) while the
@@ -3448,6 +3557,17 @@ class Pulse:
         a position that does not exist draws "position not exist", and 20 of those in 8 minutes ban the whole order API
         (x02 lost its order path for minutes after every restart this way). A venue fill is recorded as that lane's close;
         a position with no fill found is dropped only when a second read, 2 s later, does not hold it either."""
+        if not self.open:
+            return
+        for pos in list(self.open.values()):
+            if pos.qty <= 1e-12 and pos.close_filled_qty > 0 and pos.close_reason:
+                # A crash may occur after persisting the final protective fill
+                # but before recording Closed. The saved fill journal has the
+                # complete quantity, value and fees; never send a zero-qty close
+                # or discard this real execution during restart.
+                self.cancel_controls(pos.symbol, side=pos.side)
+                self.close_pos(pos, pos.close_filled_value / pos.close_filled_qty,
+                               pos.close_reason, exchange=False)
         if not self.open:
             return
         try:
@@ -3495,7 +3615,7 @@ class Pulse:
                 continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
-            self.cancel_controls(pos.symbol)
+            self.cancel_controls(pos.symbol, side=pos.side)
             self.open.pop(pos.symbol, None)
             self.cooldown[pos.symbol] = time.time() + 90.0
         self.save_open_book()
@@ -3507,7 +3627,7 @@ class Pulse:
         if not hit:
             return False
         log(f"VENUE {hit[0]} {pos.symbol} {pos.side} @{hit[1]} ({why})")
-        self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
+        self.cancel_controls(pos.symbol, side=pos.side)   # an exchange-side SL/TP does not cancel its sibling
         self.close_pos(pos, hit[1], hit[0], exchange=False)
         return True
 
@@ -3523,36 +3643,31 @@ class Pulse:
         if self.close_from_venue(pos, why):
             return
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
-        self.cancel_controls(pos.symbol)   # an exchange-side SL/TP does not cancel its sibling
+        self.cancel_controls(pos.symbol, side=pos.side)   # an exchange-side SL/TP does not cancel its sibling
         pos.exit_price_estimated = True
         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         quality_issue = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl", "bad-fill"))
         skip_eval = False   # verified emergency closes are real cash outcomes, including their losses
-        for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", "")):
-            if real_oid(oid):                 # an exchange-side stop fill of this position is the close recorded below
-                self.seen_fill_oids.add(str(oid))
         if exchange:
             if pos.close_pending or pos.close_filled_qty > 0:
                 reason = pos.close_reason or reason
             else:
                 pos.close_reason = reason
-            self.cancel_controls(pos.symbol)
-            self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
             q_full = pos.qty + pos.close_filled_qty  # includes partials retained from earlier attempts
             ok, exit_px = self.market_close(pos)
             if not ok:
-                # the stops were just cancelled and the position is still open: forget their ids so the next cycle
-                # re-places them, and keep the position in the book (a banned symbol only blocks new entries)
-                pos.sl_oid = pos.sec_sl_oid = pos.tp_oid = pos.sec_tp_oid = ""
-                pos.controls_ok = False
-                pos.ctrl_verified = False
+                # A rejected, partial or unknown close still has live exposure.
+                # Its previous protective orders remain in force until a full
+                # close is confirmed. Never erase their IDs on a failed close.
                 self.ctrl_skip.pop(pos.symbol, None)
                 if quality_issue:
                     self.ignore_syms[pos.symbol] = time.time() + 1800.0
                 log(f"CLOSE FAIL {pos.symbol} {pos.side} {reason}: {self.last_error}", every=30.0, key=f"close-fail:{pos.symbol}")
                 return
+            self.cancel_controls(pos.symbol, side=pos.side)
+            self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
             pos.qty = q_full
         else:
             if not math.isfinite(px) or px <= 0:
@@ -3562,6 +3677,9 @@ class Pulse:
                 full = pos.qty + pos.close_filled_qty
                 exit_px = (pos.close_filled_value + pos.qty * exit_px) / full
                 pos.qty = full
+        for oid in (pos.sl_oid, pos.tp_oid, getattr(pos, "sec_sl_oid", ""), getattr(pos, "sec_tp_oid", ""), *pos.control_fill_state):
+            if real_oid(oid):
+                self.seen_fill_oids.add(str(oid))
         if pos.exit_price_estimated:
             skip_eval = True
             reason = str(reason) + "-unverified-exit"
@@ -3618,6 +3736,14 @@ class Pulse:
             self.seen_fill_cids.add(pos.client_id)
         if skip_eval:
             self._exec_inc("skipped")       # closed, not scored: counted apart so no order goes missing
+            # Keep the unverified outcome in the durable audit. Readers exclude
+            # its estimated return from PF; restart must retain the missing-fill
+            # count instead of silently forgetting the position.
+            try:
+                with open(TRADES_PATH, "a") as f:
+                    f.write(json.dumps(asdict(rec)) + "\n")
+            except Exception:
+                self.last_error = f"unverified exit audit persistence failed: {pos.symbol}"
             self.open.pop(pos.symbol, None)
             self.ban_sym(pos.symbol)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
@@ -3739,8 +3865,9 @@ class Pulse:
                 return
         arm = float(pos.trail_arm or 0.0)
         give = float(pos.trail_give or 0.0)
-        # only a trailing Set trails (its own arm and give, as replayed); the Trailing strategy switch does not decide it
-        if pos.trail_set_id and pos.trail_set_id == pos.set_id and arm > 0 and give > 0:
+        # Off stops new adjustments, never removes an already protective stop.
+        if (getattr(self, "strat_trail", True) and pos.trail_set_id
+                and pos.trail_set_id == pos.set_id and arm > 0 and give > 0):
             fav = (pos.peak - e) / e if side > 0 else (e - pos.peak) / e
             if fav >= arm:
                 pos.trail_armed = True
@@ -3900,7 +4027,10 @@ class Pulse:
                         conn = str(rec.get("conn") or rec.get("connection") or "")
                         if not (1.6e9 < t <= time.time() + 300.0) or rec.get("ours", True) is False:
                             continue
-                        if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT) or "unverified-exit" in str(rec.get("reason") or ""):
+                        if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT):
+                            continue
+                        if "unverified-exit" in str(rec.get("reason") or "").lower():
+                            self._exec_inc("skipped")
                             continue
                         self._exec_note(Closed(t, str(rec.get("symbol") or ""), str(rec.get("side") or ""),
                             0, 0, 0, pnl if pnl is not None else float("nan"), 0, str(rec.get("reason") or ""), 0,
@@ -4210,7 +4340,7 @@ class Pulse:
         }
         self.strat_ind = bool(ov.get("stratIndications", True))
         self.strat_block = bool(ov.get("stratBlock", True))
-        self.strat_trail = bool(ov.get("stratTrailing", True))
+        self.strat_trail = trailing_enabled(ov)
         self.strat_general = bool(ov.get("stratGeneral", True))
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
@@ -4245,7 +4375,10 @@ class Pulse:
             names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
             names.sort()
             if names:
-                SYMBOLS[:] = names
+                held = [getattr(p, "symbol", "") for p in self.open.values()]
+                # Before the first ticker response there is no ranked universe.
+                # Do not briefly launch an unbounded wildcard scan in that gap.
+                SYMBOLS[:] = bootstrap_symbols(names, held, self.symbol_cap if self.symbols_dynamic else 0)
                 self.contracts.update(extra)
         elif cleaned:
             SYMBOLS[:] = cleaned
@@ -4737,8 +4870,8 @@ class Pulse:
             pos.notional = pos.qty * pos.entry
             self.available = max(0.0, self.available - margin)
             if getattr(self, "control_orders", True):
-                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
-                pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
+                # Close-all protection already covers the added amount. Keep
+                # existing orders until any required replacement is accepted.
                 pos.ctrl_verified = False
                 self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
                 self.ctrl_skip.pop(pos.symbol, None)
@@ -4992,8 +5125,8 @@ class Pulse:
                 pass
             self.available = max(0.0, self.available - margin)
             if getattr(self, "control_orders", True):
-                self.cancel_controls(pos.symbol)   # the old pair is replaced, not stacked
-                pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
+                # As with Block adds, never leave a larger position unprotected
+                # merely to resize/reprice its existing safety pair.
                 pos.ctrl_verified = False
                 self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
                 self.ctrl_skip.pop(pos.symbol, None)
@@ -5362,7 +5495,7 @@ class Pulse:
                         continue
                     log(f"DROP stale local {sym} (exchange flat)")
                     self._exec_inc("dropped")       # left the book with no close record: counted, never lost
-                    self.cancel_controls(sym)
+                    self.cancel_controls(sym, side=pos.side)
                     self.open.pop(sym, None)
                     self.cooldown[sym] = time.time() + 90.0
                 self.save_open_book()
@@ -5417,6 +5550,18 @@ class Pulse:
                     ours.liq = liq
                 if pid:
                     ours.position_id = pid
+                if qty < ours.qty - max(1e-12, ours.qty * 1e-10):
+                    # A smaller position snapshot is evidence of a reduction,
+                    # not its execution price or fee. Reconcile the actual
+                    # control fill before changing qty, otherwise the later
+                    # fill callback deducts the same partial a second time.
+                    if self.close_from_venue(ours, "partial-reconcile"):
+                        continue
+                    if abs(ours.qty - qty) > max(1e-12, ours.qty * 1e-10):
+                        ours.controls_ok = ours.ctrl_verified = False
+                        ours.ctrl_undercovered = True
+                        self.last_error = f"unattributed position reduction: {sym} {side}; waiting for own fills"
+                    continue
                 if px > 0 and ours.close_filled_qty == 0:
                     # A position snapshot has no close fill price/fee attribution.
                     # It must not undo a confirmed partial or count it a second time.
@@ -5519,7 +5664,7 @@ class Pulse:
                 continue
             log(f"DROP stale local {sym} age={age:.0f}s")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
-            self.cancel_controls(sym)
+            self.cancel_controls(sym, side=pos.side)
             self.open.pop(sym, None)
             self.cooldown[sym] = time.time() + 90.0
         self.ignored_foreign = len(foreign)
@@ -5562,11 +5707,11 @@ class Pulse:
                 self.seen_fill_cids.add(cid)
                 continue
             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
-            if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
+            if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "PARTIALLY_FILLED"):
                 continue
             track = self.parse_track(cid) or {}
             kind = track.get("kind") or ""
-            if kind not in ("c", "s", "t"):
+            if kind not in ("c", "s", "t", "u", "v"):
                 if kind == "o":
                     self.seen_fill_cids.add(cid)
                     if o.get("symbol"):
@@ -5580,15 +5725,18 @@ class Pulse:
             if not math.isfinite(qty) or not math.isfinite(px) or qty <= 0 or px <= 0:
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
-            held = next((p for p in self.open.values() if oid and kind in ("s", "t") and str(o.get("symbol") or "") == p.symbol
-                         and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""))), None)
+            held = next((p for p in self.open.values() if oid and kind in ("s", "t", "u", "v") and str(o.get("symbol") or "") == p.symbol
+                         and oid in (p.sl_oid, p.tp_oid, getattr(p, "sec_sl_oid", ""), getattr(p, "sec_tp_oid", ""), *p.control_fill_state)), None)
             if held is not None:
                 # the venue closed a position we still hold: record it as that lane's close (once; close_pos marks the
                 # stop and TP ids as seen and feeds the Set itself)
-                self.seen_fill_cids.add(cid)
-                self.cancel_controls(held.symbol)
-                self.record_exit_fee(held, o, min(qty, held.qty), px)
-                self.close_pos(held, px, "sl" if kind == "s" else "tp", exchange=False)
+                why = "sl" if kind in ("s", "u") else "tp"
+                full = self.apply_control_fill(held, o, why)
+                if status != "PARTIALLY_FILLED":
+                    self.seen_fill_cids.add(cid)
+                if full:
+                    self.cancel_controls(held.symbol, side=held.side)
+                    self.close_pos(held, px, why, exchange=False)
                 n += 1
                 continue
             # An orphan fill has no verified entry price or fee basis. Scoring an exchange-reported
@@ -5849,8 +5997,10 @@ class Pulse:
                     "secTp": getattr(p, "sec_tp", 0.0),
                     "secSlOid": getattr(p, "sec_sl_oid", ""),
                     "secTpOid": getattr(p, "sec_tp_oid", ""),
-                    "controls": p.controls_ok,
-                    "overall": bool(getattr(p, "overall", True)),
+                    "controls": p.controls_ok and not self.missing_controls(p),
+                    "overall": bool(getattr(p, "overall", False)) and not self.missing_controls(p),
+                    "ctrlVerified": bool(p.ctrl_verified),
+                    "ctrlUndercovered": bool(p.ctrl_undercovered),
                     "closePosition": bool(getattr(p, "close_position", True)),
                     "ctrlQty": getattr(p, "ctrl_qty", p.qty),
                     "slRangePct": [round(self.opt_fracs(p)[2] * 100, 3), round(self.opt_fracs(p)[3] * 100, 3)],
@@ -5999,9 +6149,10 @@ class Pulse:
             },
             "controls": {
                 "open": len(self.open),
-                "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
-                "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
-                "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
+                "ok": sum(1 for p in self.open.values() if p.controls_ok and not self.missing_controls(p)),
+                "missing": sum(1 for p in self.open.values() if self.missing_controls(p)),
+                "security": sum(1 for p in self.open.values() if p.sec_sl_oid and p.sec_tp_oid and not self.missing_controls(p)),
+                "undercovered": sum(1 for p in self.open.values() if p.ctrl_undercovered),
             },
             "recon": {"ok": self.recon_ok, "detail": self.recon_detail},
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
@@ -6159,7 +6310,7 @@ class Pulse:
         for p in self.open.values():
             if (time.time() - p.opened_at) <= 90.0:
                 continue
-            if not (real_oid(p.sl_oid) and real_oid(p.tp_oid) or (real_oid(getattr(p, "sec_sl_oid", "")) and real_oid(getattr(p, "sec_tp_oid", "")))):
+            if self.missing_controls(p):
                 overall_ok = False
         range_ok = True
         for p in self.open.values():
@@ -6391,8 +6542,7 @@ class Pulse:
                     if time_gap:
                         # Identical/flat candle values can look like an overlap
                         # despite a timestamp gap.  Do not join across it.
-                        self.sets.bars.pop(s, None)
-                        self.sets.bar_t.pop(s, None)
+                        self.sets.discard_bars(s)
                     self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
                     # A valid shorter page can mean a newly listed symbol has no older

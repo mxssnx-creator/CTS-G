@@ -327,6 +327,7 @@ def apply_control(conn: str, action: str) -> tuple:
 def _apply_control_locked(conn: str, action: str) -> tuple:
     ids = [l["id"] for l in LANES] if conn in ("", "overall") else [conn]
     notes = []
+    all_ok = True
     for cid in ids:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
@@ -337,18 +338,21 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             _touch(pause)
             notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
         elif action in ("start", "resume"):
-            _unlink(pause)
-            _unlink(stop)
-            _unlink(STOP_ALL_PATH)
-            # Explicit Start = fresh session: engine re-baselines session equity
-            # on the next balance tick, so a latched drawdown/equity halt clears.
-            _touch(reset_eq)
             rc, out = _sysctl("start", unit)
             if rc != 0:
                 # start-limit-hit after a crash loop blocks start — reset and retry once.
                 _sysctl("reset-failed", unit, timeout=8)
                 rc, out = _sysctl("start", unit)
             st = unit_state(cid, fresh=True)
+            started = rc == 0 and st == "active"
+            all_ok = all_ok and started
+            if started:
+                # Do not release entry halts or reset equity on a failed start.
+                # Active is only service acknowledgement, not exchange readiness;
+                # the stats view separately checks the engine's fresh heartbeat.
+                _touch(reset_eq)
+                _unlink(pause)
+                _unlink(stop)
             notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
             _unlink(pause)
@@ -357,7 +361,14 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             _touch(stop)
             st = unit_state(cid, fresh=True)
             notes.append(f"{cid} stop (entries halted, exits still managed) state={st}")
-    return True, "; ".join(notes)
+    if action in ("start", "resume") and all_ok and os.path.exists(STOP_ALL_PATH):
+        # Clearing a global halt for one lane must not resume the other lanes.
+        # Materialize their equivalent per-lane halt before removing the global one.
+        for lane in LANES + EXTRA_LANES:
+            if lane["id"] not in ids:
+                _touch(os.path.join(DIR, f"STOP-{lane['id']}"))
+        _unlink(STOP_ALL_PATH)
+    return all_ok, "; ".join(notes)
 
 
 def load_json(path: str) -> dict:
@@ -498,6 +509,7 @@ def lane_summary(lane: dict) -> dict:
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
         "pfCost": pc.get("pf"),
         "pfDetail": pc or None,   # the lane's own PF block: a lane view must not inherit the overall one
+        "costModel": st.get("costModel"),
         "controlsOk": cov.get("ok") or 0,
         "controlsMissing": cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
@@ -863,9 +875,11 @@ def _token_ok(sent: str) -> bool:
 
 
 def heal_loop() -> None:
-    """Restart crashed/failed engines unless the user stopped them on purpose.
-    After a crash loop systemd start-limit leaves a unit dead; reset-failed +
-    start revives it, so the desk always comes back on its own."""
+    """Recover enabled, inactive/failed engines only; never override a disabled lane.
+    A host without systemd uses heartbeat-only liveness and no service recovery.
+    """
+    if not HALT_ON_INACTIVE:
+        return
     last: dict = {}
     while True:
         try:
@@ -877,21 +891,31 @@ def heal_loop() -> None:
                 with CONTROL_LOCK:
                     if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
                         continue
+                    unit = f"grok-pulse@{cid}"
+                    rc, enabled = _sysctl("is-enabled", unit, timeout=6)
+                    if rc != 0 or enabled.strip() not in ("enabled", "enabled-runtime"):
+                        continue  # --no-vst, masked, static or unavailable manager: no automatic start
                     state = unit_state(cid, fresh=True)
-                    if state == "active":
+                    if state not in ("inactive", "failed"):
                         continue
                     now = time.time()
                     if now - float(last.get(cid, 0) or 0) < 150.0:
                         continue
                     try:
-                        p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
-                        if not (p.stdout or "").strip():
-                            continue  # no keys — engine would exit instantly
+                        credentials_ok = True
+                        for field in ("api_key", "api_secret"):
+                            p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", field], capture_output=True, text=True, timeout=6)
+                            if p.returncode != 0 or (p.stdout or "").strip() in ("", "(nil)"):
+                                credentials_ok = False
+                                break
+                        if not credentials_ok:
+                            continue  # no complete credentials — engine would exit instantly
                     except Exception:
                         continue
                     last[cid] = now
-                    _sysctl("reset-failed", f"grok-pulse@{cid}", timeout=8)
-                    rc, out = _sysctl("start", f"grok-pulse@{cid}")
+                    rc, out = _sysctl("reset-failed", unit, timeout=8)
+                    if rc == 0:
+                        rc, out = _sysctl("start", unit)
                 try:
                     with open(os.path.join(DIR, "http.log"), "a") as f:
                         f.write(f"heal {cid} rc={rc} {out[:120]}\n")

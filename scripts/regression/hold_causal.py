@@ -247,14 +247,14 @@ def signal_floor_applies_to_each_stage():
     p = b.stage_params("signal.example")
     p = replace(p, main_on=True, main_n=2, short_on=False, neg_on=False, real_on=True,
                 real_n=2, full_window=True, main_min_n=0)
-    good, weak = [0.014, -0.01], [0.0129, -0.01]
+    good, weak = [0.023, -0.01], [0.0219, -0.01]
     all_pass = se.stage_verdicts(good, good, [], 2, p)
     weak_main = se.stage_verdicts(weak, good, [], 2, p)
     weak_real = se.stage_verdicts(good, weak, [], 2, p)
-    short_sample = se.stage_verdicts(good, [0.014], [], 2, p)
-    floors_ok = all(abs(p.floor_for(n) - 1.3) < 1e-9 for n in (2, 5, 25, 100))
+    short_sample = se.stage_verdicts(good, [0.023], [], 2, p)
+    floors_ok = all(abs(p.floor_for(n) - 2.2) < 1e-9 for n in (2, 5, 25, 100))
     ok = floors_ok and all_pass["pos"] and not weak_main["pos"] and not weak_real["pos"] and not short_sample["pos"]
-    return ok, f"signal floor 1.3 across windows={floors_ok}; pass={all_pass['pos']}; weak Main/Real and short sample blocked={not weak_main['pos'], not weak_real['pos'], not short_sample['pos']}"
+    return ok, f"signal floor 2.2 across windows={floors_ok}; pass={all_pass['pos']}; weak Main/Real and short sample blocked={not weak_main['pos'], not weak_real['pos'], not short_sample['pos']}"
 
 
 def secure_preset_cannot_bypass_main_through_negative_lane():

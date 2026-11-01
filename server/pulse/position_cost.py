@@ -175,12 +175,18 @@ def _pnl_pct_of(row: Any) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
+def pf_evidence(gain: float, loss: float, count: int) -> Dict[str, Any]:
+    """Display evidence, separate from the legacy no-loss gate sentinel (99)."""
+    return {"netGain": gain, "netLoss": loss, "pfFinite": gain / loss if loss > 0 else None,
+            "pfState": "empty" if count == 0 else "finite" if loss > 0 else "no-loss" if gain > 0 else "flat"}
+
+
 def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
     scan_all: bool = True,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """The net PF and the figures of the newest n measurable closes of rows. scan_all (default): every row is read, so `skipped` counts all the rows without a finite
     pnl_pct. scan_all False (the scoring pass, which never reads `skipped`): the rows are read from the end until n measurable ones are found, the same window
     without touching the rest of a long tape; `skipped` then counts only the rows met on the way."""
@@ -223,8 +229,9 @@ def last_n_cost_pf(
         "avgR": round(avg_r, 4),
         "ratio": round(ratio, 4),
         "pf": round(pf, 4),
+        **pf_evidence(gp, gl, count),
         "costPct": float(cost_pct),
-        "netPct": round(net_move_pct(ratio, cost_pct), 4),            # the mean net per position (percent): netSumPct / count
+        "netPct": round(net_sum_pct / count, 4) if count else 0.0,  # measured net, also correct when the allowance is zero
         "grossPct": round(100 * sum(v for _, v in window) / count, 4) if count else 0.0,
         "averageCostPct": round(100 * sum(v - row_net_pnl_pct(r, cost_pct) for r, v in window) / count, 6) if count else 0.0,
         "netSumPct": round(net_sum_pct, 4),

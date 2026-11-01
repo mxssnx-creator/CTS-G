@@ -26,6 +26,7 @@ import { CoverageBar } from "@/components/coverage-overview";
 import type { ConnType } from "@/lib/connections";
 import { createPoller } from "@/lib/poll";
 import { DEFAULT_OVERLAY } from "@/lib/config-model";
+import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
 
@@ -54,7 +55,10 @@ function DeskPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, pnl_pct: c.pnl_pct })),
+        stats?.closed ?? [],
+        Date.now(),
+        stats?.pfCost?.costPct ?? stats?.costModel?.paperCostPct,
+        stats?.pfCost?.minPf,
       ),
     [stats],
   );
@@ -112,7 +116,7 @@ function DeskPage() {
                 {fmt(stats?.unrealized, 4)}
               </span>
               <span className="text-muted">Uptime</span>
-              <span className="font-mono text-right">{stats ? ago(stats.uptimeS) : "—"}</span>
+              <span className="font-mono text-right">{stats?.uptimeS != null ? ago(stats.uptimeS) : "—"}</span>
             </div>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -142,7 +146,7 @@ function DeskPage() {
               E {d.expectancy >= 0 ? "+" : ""}
               {d.expectancy.toFixed(4)}
             </span>
-            <span className="text-right">{stats?.activityPerMin ?? 0}/min</span>
+            <span className="text-right">{stats?.activityPerMin ?? "—"}/min</span>
           </div>
         </div>
       </section>
@@ -199,12 +203,12 @@ function DeskPage() {
                   <dt>Age</dt>
                   <dd className="text-right text-fg">{ago(p.ageS)}</dd>
                   <dt>Controls</dt>
-                  <dd className={`text-right ${p.controls ? "text-primary" : "text-danger"}`}>
-                    {p.controls ? "SL+TP" : "none"}
+                  <dd className={`text-right ${hasControlCoverage(p) ? "text-primary" : "text-warn"}`}>
+                    {controlCoverage(p)}
                   </dd>
                   <dt>Security</dt>
-                  <dd className={`text-right ${p.secSlOid && p.secTpOid ? "text-primary" : "text-danger"}`}>
-                    {p.secSlOid && p.secTpOid ? "SEC" : "gap"}
+                  <dd className={`text-right ${hasControlCoverage(p) ? "text-primary" : "text-warn"}`}>
+                    {hasControlCoverage(p) ? (p.closePosition ? "Whole position" : `Qty ${p.ctrlQty}`) : "Unconfirmed"}
                   </dd>
                   <dt>SL:TP</dt>
                   <dd className="text-right text-fg">{p.slRatio != null ? p.slRatio.toFixed(1) : "—"}</dd>
@@ -436,11 +440,11 @@ function ControlsStrip({ stats }: { stats: LiveStats | null }) {
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const n = c?.open ?? open.length;
-  const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 8);
+  const gaps = open.filter((p) => !hasControlCoverage(p)).slice(0, 8);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="controls-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={miss ? "text-danger" : "text-primary"}>
+        <span className={miss || gaps.length || !stats ? "text-warn" : "text-primary"}>
           controls · {ok}/{n} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {miss}</span>
@@ -450,7 +454,7 @@ function ControlsStrip({ stats }: { stats: LiveStats | null }) {
           gap {gaps.map((p) => `${p.symbol.replace("-USDT", "")} ${p.side === "LONG" ? "L" : "S"}`).join(" · ")}
         </p>
       ) : (
-        <p className="mt-1 text-muted">order SL+TP and symbol+direction security both sides</p>
+        <p className="mt-1 text-muted">{open.length ? "Reported position coverage; venue reconciliation and freshness still required." : "No open-position evidence in this snapshot."}</p>
       )}
     </div>
   );

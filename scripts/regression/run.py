@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 from common import Skip  # noqa: E402
 
 # logistics is static and fails in well under a second: it runs first so a broken pin or config fails fast
-SUITES = ["logistics", "exchange", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "hold_causal", "golden", "correctness", "cost_accounting", "replay_provenance", "monitoring"]
+SUITES = ["logistics", "exchange", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "hold_causal", "golden", "correctness", "cost_accounting", "replay_provenance", "monitoring", "history_snapshot", "signals"]
 
 
 def selftests():
@@ -100,7 +100,7 @@ def _groups(checks, jobs):
     return groups
 
 
-def _run_parallel(checks, jobs):
+def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
     ctx = multiprocessing.get_context("fork")
     q = ctx.Queue()
     groups = _groups(checks, jobs)
@@ -109,18 +109,34 @@ def _run_parallel(checks, jobs):
         p.start()
     results = {}
     finished = 0
+    started = last_progress = time.monotonic()
+
+    def progress():
+        nonlocal last_progress
+        now = time.monotonic()
+        if progress_interval_s > 0 and now - last_progress >= progress_interval_s:
+            alive = sum(p.is_alive() for p in procs)
+            print(f"regression progress: {len(results)}/{len(checks)} checks reported; "
+                  f"{alive} workers active; {now - started:.0f}s elapsed", file=sys.stderr, flush=True)
+            last_progress = now
+
     while finished < len(groups):
         try:
-            item = q.get(timeout=5)
+            item = q.get(timeout=queue_timeout_s)
         except Exception:  # queue.Empty: no news for 5 s; a worker that died without its sentinel must not hang us
             if not any(p.is_alive() for p in procs) and finished < len(groups):
                 break
+            progress()
             continue
         if item is None:
             finished += 1
+            progress()
             continue
         i, res = item
         results[i] = res
+        if res["status"] == "FAIL":
+            print(f"regression early failure: {res['name']}: {res['detail']}", file=sys.stderr, flush=True)
+        progress()
     for p in procs:
         p.join(timeout=10)
     out = []

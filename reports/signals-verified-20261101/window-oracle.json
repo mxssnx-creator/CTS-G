@@ -1,0 +1,407 @@
+{
+  "schema": "signals-window-scalar-audit-v1",
+  "passed": true,
+  "roots": 24,
+  "paths": 1190,
+  "checks": [
+    {
+      "source": "r-st-pullback",
+      "root": "79977fa7ea8dcfb016504bd2",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "r-st-pullback",
+        "sourceRange": "medium",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-middle-exit",
+      "paths": 86,
+      "stageChecks": 258,
+      "archivedStreams": 89
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "12ecf4591da118b82d6622dc",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "BCH-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-middle-signals",
+      "paths": 51,
+      "stageChecks": 153,
+      "archivedStreams": 46
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "399d6b040989336d2612ddd5",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "BCH-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-signals",
+      "paths": 51,
+      "stageChecks": 153,
+      "archivedStreams": 46
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "4adfd0530a6ed5cb9bc93a32",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "BCH-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-exit",
+      "paths": 50,
+      "stageChecks": 150,
+      "archivedStreams": 45
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "4a458476c68f1c1a55c94c9d",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "BCH-USDT",
+        "tf": 1
+      },
+      "protection": "normal-middle-exit",
+      "paths": 49,
+      "stageChecks": 147,
+      "archivedStreams": 43
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "da1913e19b46a291eea781df",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "BCH-USDT",
+        "tf": 1
+      },
+      "protection": "normal-middle-signals",
+      "paths": 49,
+      "stageChecks": 147,
+      "archivedStreams": 43
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "b86acd256722ec008f5c78e0",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-st-pullback",
+        "sourceRange": "medium",
+        "symbol": "DOT-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-low-signals",
+      "paths": 45,
+      "stageChecks": 135,
+      "archivedStreams": 39
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "636e4dc1e3c69eb76602ea60",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "DOT-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-low-exit",
+      "paths": 41,
+      "stageChecks": 123,
+      "archivedStreams": 35
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "80ced9b60dfd39e5331b99ce",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-exit",
+      "paths": 38,
+      "stageChecks": 114,
+      "archivedStreams": 31
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "25180f36b90b40b7b16c8a7a",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "normal-middle-exit",
+      "paths": 32,
+      "stageChecks": 96,
+      "archivedStreams": 25
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "befc5825e4f19b8a3d0d2ab0",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "AVAX-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-signals",
+      "paths": 32,
+      "stageChecks": 96,
+      "archivedStreams": 25
+    },
+    {
+      "source": "r-st-pullback",
+      "root": "d8a3c36ac97e5d0b40d9b6f5",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-st-pullback",
+        "sourceRange": "short",
+        "symbol": "AVAX-USDT",
+        "tf": 1
+      },
+      "protection": "normal-middle-signals",
+      "paths": 30,
+      "stageChecks": 90,
+      "archivedStreams": 23
+    },
+    {
+      "source": "r-fisher",
+      "root": "9542a165cca1b5a8159954a1",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-fisher",
+        "sourceRange": "short",
+        "symbol": "AVAX-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-exit",
+      "paths": 58,
+      "stageChecks": 174,
+      "archivedStreams": 55
+    },
+    {
+      "source": "r-fisher",
+      "root": "f1de24bf020195b854070be6",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "r-fisher",
+        "sourceRange": "short",
+        "symbol": "AVAX-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-middle-exit",
+      "paths": 58,
+      "stageChecks": 174,
+      "archivedStreams": 55
+    },
+    {
+      "source": "s2-active-hf",
+      "root": "37323f9e2071974d773f93e8",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "s2-active-hf",
+        "sourceRange": "medium",
+        "symbol": "AVAX-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-low-signals",
+      "paths": 56,
+      "stageChecks": 168,
+      "archivedStreams": 51
+    },
+    {
+      "source": "s2-active-hf",
+      "root": "214310a68f4880c4072ed25e",
+      "identity": {
+        "coordination": "source",
+        "side": 1,
+        "source": "s2-active-hf",
+        "sourceRange": "short",
+        "symbol": "AVAX-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-low-signals",
+      "paths": 53,
+      "stageChecks": 159,
+      "archivedStreams": 48
+    },
+    {
+      "source": "sig-coord-v2-r65-n3-i2-brb7f16q855gqwbnqzfnj",
+      "root": "e9a063a80458edb4ab198536",
+      "identity": {
+        "coordination": "dominating",
+        "side": -1,
+        "source": "sig-coord-v2-r65-n3-i2-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "medium",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-middle-signals",
+      "paths": 60,
+      "stageChecks": 180,
+      "archivedStreams": 58
+    },
+    {
+      "source": "sig-coord-v2-r65-n3-i2-brb7f16q855gqwbnqzfnj",
+      "root": "5b16c50efef79f04359d9048",
+      "identity": {
+        "coordination": "dominating",
+        "side": -1,
+        "source": "sig-coord-v2-r65-n3-i2-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "medium",
+        "symbol": "ADA-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-low-exit",
+      "paths": 49,
+      "stageChecks": 147,
+      "archivedStreams": 43
+    },
+    {
+      "source": "sig-coord-v2-r60-n3-i1-brb7f16q855gqwbnqzfnj",
+      "root": "4aff48e92999ba3825e6319f",
+      "identity": {
+        "coordination": "dominating",
+        "side": -1,
+        "source": "sig-coord-v2-r60-n3-i1-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "short",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-middle-signals",
+      "paths": 57,
+      "stageChecks": 171,
+      "archivedStreams": 53
+    },
+    {
+      "source": "sig-coord-v2-r60-n3-i1-brb7f16q855gqwbnqzfnj",
+      "root": "9b073a7e566ee7a8478cc71c",
+      "identity": {
+        "coordination": "dominating",
+        "side": -1,
+        "source": "sig-coord-v2-r60-n3-i1-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "short",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-signals",
+      "paths": 50,
+      "stageChecks": 150,
+      "archivedStreams": 44
+    },
+    {
+      "source": "s2-block-stack",
+      "root": "5d94c9f6303ddfffdec3c8bf",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "s2-block-stack",
+        "sourceRange": "medium",
+        "symbol": "DOGE-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-middle-signals",
+      "paths": 51,
+      "stageChecks": 153,
+      "archivedStreams": 45
+    },
+    {
+      "source": "s2-block-stack",
+      "root": "9a6b398c5e56f017f53f83cd",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "s2-block-stack",
+        "sourceRange": "short",
+        "symbol": "ADA-USDT",
+        "tf": 1
+      },
+      "protection": "normal-low-signals",
+      "paths": 49,
+      "stageChecks": 147,
+      "archivedStreams": 44
+    },
+    {
+      "source": "cci",
+      "root": "d230d262cbd8fbbd2d6bb39f",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "cci",
+        "sourceRange": "short",
+        "symbol": "ETH-USDT",
+        "tf": 1
+      },
+      "protection": "normal-low-signals",
+      "paths": 46,
+      "stageChecks": 138,
+      "archivedStreams": 41
+    },
+    {
+      "source": "cci",
+      "root": "2493b6b17f3b4e58e78674cc",
+      "identity": {
+        "coordination": "source",
+        "side": -1,
+        "source": "cci",
+        "sourceRange": "short",
+        "symbol": "ETH-USDT",
+        "tf": 1
+      },
+      "protection": "trailing-only-low-signals",
+      "paths": 49,
+      "stageChecks": 147,
+      "archivedStreams": 44
+    }
+  ],
+  "seconds": 7.1282828289986355,
+  "scope": "deterministic sample; all 1764 policy pairs separately covered on controlled fixtures",
+  "provenance": {
+    "configSha256": "579ddbbff0f3c1aa140a57cdb747a400e2cd16446c3c1da2f16b1a43a8d1a323",
+    "eventsSha256": "c3a6a8c9b3f33b1971eb0bdf952d89af3182d378854dda3da2e20f1710b3776d",
+    "feedSha256": "e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03",
+    "sourceSha256": {
+      "scripts/run_signal_windows.py": "18a85f3e89b5e832959d8b6471aa6528b5d3c0db9e95b367deeed1b390434309",
+      "server/pulse/signal_progress.py": "c212ce788fcb6710cab2585eade147476cd8db9333fd242dcac16c160b65d236",
+      "server/pulse/signal_replay.py": "5f913285ac3963300f8c203b9f54687d93aaa7d550bb57e331883dbdda6d0992",
+      "server/pulse/signal_windows.py": "36e237a21fb0f30796ca3b2620634968dcfc40bd961d382404d079343fa5fc03"
+    },
+    "unseenHoldout": false
+  },
+  "oracleSha256": "96b4563e115e603b4888957598cd5d689002b72461506d6997c1632a0d067b9f"
+}

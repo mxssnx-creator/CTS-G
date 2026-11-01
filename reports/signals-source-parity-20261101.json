@@ -1,0 +1,13 @@
+{
+  "reference": "2599b652b9429c34d290a07e8df1d70a62d80462",
+  "cases": 48,
+  "comparedBars": 57600,
+  "differences": [],
+  "differenceCount": 0,
+  "sourceHashes": {
+    "src/core/math/indicators.ts": "948c163cd7d9e18acc57a4757c698115c034ef1d657e033b1d2e1536e60ccd93",
+    "src/core/indications/registry.ts": "e3f05440da70223d7a42d01da69691e6493e833dedf9271089cd7dd57afb7042",
+    "src/core/indications/cache.ts": "f75792e9e7b2f74c50e59ef4f1cfbaa1a4cc7f02b0dae84f179be7ba501f48fa",
+    "src/core/signal-config.ts": "c506bcead1ba0802948dbdf2c41f9302135621d3a3f17b2a8d2b2f2a76a9827c"
+  }
+}

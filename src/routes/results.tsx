@@ -13,6 +13,8 @@ import { BaseValidationPanel } from "@/components/base-validation-panel";
 import { SetsOverview } from "@/components/sets-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import { formatPf } from "@/lib/sets-view";
+import { evidencePfText } from "@/lib/evidence-view";
+import { CostEvidencePanel, StageEvidencePanel } from "@/components/evidence-panel";
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
 
@@ -40,7 +42,10 @@ function ResultsPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, pnl_pct: c.pnl_pct })),
+        stats?.closed ?? [],
+        Date.now(),
+        stats?.pfCost?.costPct ?? stats?.costModel?.paperCostPct,
+        stats?.pfCost?.minPf,
       ),
     [stats],
   );
@@ -60,6 +65,8 @@ function ResultsPage() {
       </p>
       <StatsOverview data={overview} live={stats} />
       <BaseValidationPanel live={stats} minPf={stats?.sets?.minPf ?? GATE_MIN_PF_DEFAULT} />
+      <StageEvidencePanel stats={stats} />
+      <CostEvidencePanel stats={stats} />
 
       <div className="flex flex-wrap gap-2">
         <a
@@ -79,13 +86,13 @@ function ResultsPage() {
       </div>
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Hero k="Trades" v={String(closed.length)} s={`${d.longs}L / ${d.shorts}S`} />
-        <Hero k="Gross profit" v={`+${d.gp.toFixed(4)}`} s={`avg win ${d.avgWin.toFixed(4)}`} good />
-        <Hero k="Gross loss" v={d.gl ? `-${d.gl.toFixed(4)}` : "0"} s={`avg loss ${d.avgLoss.toFixed(4)}`} bad={d.gl > 0} />
+        <Hero k="Recorded closes" v={String(closed.length)} s={`${d.longs}L / ${d.shorts}S · available tape`} />
+        <Hero k="Net winning cash" v={`+${d.gp.toFixed(4)}`} s={`avg win ${d.avgWin.toFixed(4)}`} good />
+        <Hero k="Net losing cash" v={d.gl ? `-${d.gl.toFixed(4)}` : "0"} s={`avg loss ${d.avgLoss.toFixed(4)}`} bad={d.gl > 0} />
         <Hero
           k="PF after cost"
-          v={(stats?.pfCost?.pf ?? stats?.profitFactor ?? 1).toFixed(2)}
-          s={`Net gains ÷ net losses · min ${stats?.pfCost?.minPf ?? DEFAULT_OVERLAY.minPf} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
+          v={evidencePfText(stats?.pfCost, stats?.pfCost?.count)}
+          s={`Recorded return window · n ${stats?.pfCost?.count ?? "—"} · min ${stats?.pfCost?.minPf ?? DEFAULT_OVERLAY.minPf}`}
         />
       </section>
 

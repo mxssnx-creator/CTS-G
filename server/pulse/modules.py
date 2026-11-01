@@ -34,6 +34,12 @@ DEFAULT_FLAGS = {
 }
 
 
+def trailing_enabled(overlay: Dict[str, Any]) -> bool:
+    """Both controls authorize trailing; an explicit disable always wins."""
+    mods = overlay.get("modules") if isinstance(overlay.get("modules"), dict) else {}
+    return bool(overlay.get("stratTrailing", True)) and bool(mods.get("strategy.trailing", True))
+
+
 def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
     flags = dict(DEFAULT_FLAGS)
     mods = overlay.get("modules") if isinstance(overlay.get("modules"), dict) else {}
@@ -62,10 +68,8 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags["risk.slTpRatios"] = True
     if "trailAuto" in overlay:
         flags["strategy.trailRecalc"] = bool(overlay.get("trailAuto", True))
-    if "stratTrailing" in overlay:
-        flags["strategy.trailing"] = bool(overlay["stratTrailing"])
-        if "trailAuto" not in overlay:
-            flags["strategy.trailRecalc"] = bool(overlay["stratTrailing"])
+    flags["strategy.trailing"] = trailing_enabled(overlay)
+    flags["strategy.trailRecalc"] = flags["strategy.trailRecalc"] and flags["strategy.trailing"]
     if "exitEnabled" in overlay:
         flags["strategy.exits"] = bool(overlay["exitEnabled"])
     if "histEnabled" in overlay:

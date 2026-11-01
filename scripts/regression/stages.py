@@ -573,6 +573,82 @@ def context_budget_includes_configured_hold():
     return (manual == 300 + 16 + 2 * 720 and automatic == 300 + 16 + 2 * max(se.HOLD_AUTO_HIGH)), f"manual={manual}, automatic={automatic}"
 
 
+def decision_clock_excludes_simultaneous_paper_close():
+    """A decision sees strictly earlier paper closes; actual close accounting is retained."""
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "holdEnabled": False, "histLookbackAuto": False}))
+    st = b.by_idx[0]
+    cf = b.cost_pct / 100.0
+    st.hist = [{"t": T0 - 60, "pnl_pct": cf - .01, "pnl": -.01, "hold_s": 60, "reason": "sl"},
+               {"t": T0, "pnl_pct": cf + .02, "pnl": .02, "hold_s": 60, "reason": "tp"}]
+    st.live = [{"t": T0, "lane": "pos", "pnl_pct": .01, "net_pnl_pct": .009, "fee_source": "reported-fee"}]
+    st.proc, st.exe = [(T0 - 60, -.01), (T0, .02)], [(T0 - 60, -.01), (T0, .02)]
+    st.proc_total, st.proc_replayed = 2, True
+    b._score_one(st, now=T0)
+    at_decision = (st.gate_n, st.gate_pf)
+    paper_streams = b._streams(st)[:2]
+    displayed = len(b._tape_at(st, st.score_at, before=st.score_before))
+    live_count = b.execution_stats(st, "pos", now=T0)["n"]
+    b._score_one(st, now=T0 + 1)
+    after = (st.gate_n, st.gate_pf)
+    b._score_one(st)
+    no_explicit_clock = st.gate_n
+    ok = (at_decision == (1, 0.0) and paper_streams == ([-.01], [-.01]) and displayed == 1
+          and after == (2, 2.0) and no_explicit_clock == 2 and live_count == 1)
+    return ok, f"decision={at_decision}; paper streams={paper_streams}; displayed={displayed}; after={after}; implicit={no_explicit_clock}; actual close count={live_count}"
+
+
+def replay_decision_clock_excludes_simultaneous_close():
+    """A full replay must not retain equal-time or future rows in a decision."""
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "holdEnabled": False, "histLookbackAuto": False}))
+    st = b.by_idx[0]
+    b.by_idx, b.sets = [st], {st.id: st}
+    symbol = "S-USDT"
+    b.bars[symbol] = synth_bars(31, 200)
+    rows = [dict(t=t, symbol=symbol, side="LONG", pnl=.01, pnl_pct=.01,
+                 hold_s=60, reason="test", set_id=st.id) for t in (T0 - 60, T0, T0 + 60)]
+    def replay(_symbol, hist, _now, on_step=None):
+        hist[st.id].extend(rows)
+    b._replay_symbol = replay
+    b.replay_all(now=T0)
+    at_decision = (st.n, st.gate_n, [row["t"] for row in st.hist])
+    b.replay_all(now=T0 + 60)
+    later = (st.n, st.gate_n, [row["t"] for row in st.hist])
+    ok = at_decision == (1, 1, [T0 - 60]) and later == (2, 2, [T0 - 60, T0])
+    return ok, f"decision={at_decision}; later={later}"
+
+
+def decision_clock_matches_independent_base_windows():
+    """Base windows agree with the independent simulator at and after equal-time closes."""
+    import stage_eval as sg
+    import stage_context_audit as context_audit
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "holdEnabled": False, "histLookbackAuto": False}))
+    st = b.by_idx[0]
+    cf = b.cost_pct / 100.0
+    ts = [T0 - 60, T0, T0]
+    entries = [T0 - 120, T0 - 60, T0 - 60]
+    gross = [cf - .01, cf + .02, cf - .005]
+    st.hist = [{"t": t, "pnl_pct": p, "pnl": p - cf, "hold_s": t - e, "reason": "test"}
+               for t, e, p in zip(ts, entries, gross)]
+    tapes = sg.Tapes.__new__(sg.Tapes)
+    tapes.cf, tapes.by_set = cf, {st.idx: (ts, entries, gross)}
+    comparisons = []
+    for pack in ("general", "signal.example"):
+        st.pack = pack
+        for now in (T0, T0 + 1):
+            b._score_one(st, now=now)
+            independent = sg.base_eval(b, tapes, st, now)
+            comparisons.append((st.gate_n, st.gate_pf) == (independent["n"], independent["pf"]))
+    b.by_idx, b.fresh_s, b.base_min_n = [st], 0, 0
+    context_audit.sg = sg
+    boundary = context_audit.compare_runtime_boundary(b, tapes, [T0])
+    parity = (boundary["set_observations"] == 1 and boundary["different_n_or_pf"] == 0
+              and not boundary["strict_pass_runtime_fail"] and not boundary["strict_fail_runtime_pass"])
+    return all(comparisons) and parity, f"general/Signal-labeled, at/after close={comparisons}; boundary parity={parity}"
+
+
 def set_and_lane_ids_never_collide():
     """Every Set has one id, and the Sets its orders form (<id>:main, :real, :realneg) are distinct from it and from every other Set's: an Exit Set (<pack>:1m:sl<r>:st<n>:xt)
     never reads as its base twin, a trailing Set never as either, in the book, in the snapshot's index and in the client id the live order carries."""
@@ -591,13 +667,41 @@ def set_and_lane_ids_never_collide():
     return ok, f"{len(ids)} Sets, {len(derived)} derived Set ids, all distinct: {len(set(allids)) == len(allids)}; {len(exits)} Exit Sets, each with a base twin: {twins <= base_ids}"
 
 
+def paper_scope_cutoffs_isolation_and_bounded_work():
+    """An independent full-scan oracle checks the coordinator's bounded merge."""
+    import subprocess
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_paper_scopes.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
+
+
+def independent_strategy_switches():
+    import subprocess
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_strategy_switches.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
+
+
+def independent_all_range_stage_oracle():
+    import subprocess
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_independent_ranges.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
+
+
 CHECKS = [
+    ("stages.independent-all-range-oracle", independent_all_range_stage_oracle),
+    ("stages.independent-strategy-switches", independent_strategy_switches),
+    ("stages.paper-scope-clock-isolation-and-bounded-work", paper_scope_cutoffs_isolation_and_bounded_work),
     ("stages.entry-history-survives-window-boundary", stage_entry_history_survives_window_boundary),
     ("stages.replay-scores-visible-orders-using-entry-history", replay_scores_visible_orders_using_entry_history),
     ("stages.debug-uses-each-window-pf-floor", debug_uses_each_window_pf_floor),
     ("stages.bounded-stage-window-matches-independent-vote", bounded_stage_window_matches_independent_vote),
     ("stages.hold-selection-ignores-expired-candidate-evidence", hold_selection_ignores_expired_candidate_evidence),
     ("stages.context-budget-includes-configured-hold", context_budget_includes_configured_hold),
+    ("stages.decision-clock-excludes-simultaneous-paper-close", decision_clock_excludes_simultaneous_paper_close),
+    ("stages.replay-clock-excludes-simultaneous-close", replay_decision_clock_excludes_simultaneous_close),
+    ("stages.decision-clock-matches-independent-base", decision_clock_matches_independent_base_windows),
     ("stages.replay-and-current-verdict-use-same-pf-rounding", replay_and_current_verdict_use_the_same_pf_rounding),
     ("stages.negative-lane-does-not-pollute-main-passing-pf", negative_lane_does_not_pollute_main_passing_pf),
     ("stages.every-window-is-judged-on-its-own", every_window_is_judged_on_its_own),

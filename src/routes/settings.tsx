@@ -27,8 +27,10 @@ import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
+import { CostEvidencePanel } from "@/components/evidence-panel";
 import { secureMinimalPreset } from "@/lib/presets";
 import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS, minMode } from "@/lib/config-model";
+import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -229,6 +231,7 @@ function SettingsPage() {
               <CoveragePanel live={stats} />
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
+                <EnableSlider label="Normal Set entries" on={overlay.stratNormal} hint="Off disables new Normal entries; internal paper Sets and enabled additional strategy types continue processing." onChange={(v) => patch("stratNormal", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
                 <EnableSlider label="Trend (Sets and Base evaluation)" on={overlay.stratTrend} onChange={(v) => patch("stratTrend", v)} />
@@ -237,7 +240,7 @@ function SettingsPage() {
                 <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
                 <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
-                <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
+                <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="Off disables trailing Sets, peak-following and recalculation. Existing protective stops remain managed." onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
@@ -282,6 +285,7 @@ function SettingsPage() {
               title="Profit factor · PositionCost"
               hint="PF = net gains ÷ net losses over the selected window"
             >
+              <CostEvidencePanel stats={stats} />
               <Grid>
                 <Slider
                   label="Paper cost allowance"
@@ -737,7 +741,7 @@ function SettingsPage() {
                   label="Main · short candidates"
                   value={overlay.mainShortWindows}
                   options={[5, 10, 15, 20, 25]}
-                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)} with the long window ${overlay.mainGateN}`}
+                  hint={`Candidate selection, not simultaneous independent lanes. Effective candidates: ${overlay.mainShortWindows.filter(n => n <= Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}; excluded by ratio: ${overlay.mainShortWindows.filter(n => n > Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}. Long reference ${overlay.mainGateN} remains if none qualify.`}
                   onChange={(v) => patch("mainShortWindows", v)}
                 />
                 <Slider
@@ -1815,10 +1819,10 @@ function PfWindowControls({
       <Slider
         label="Signals · min PF"
         value={overlay.minPfSignals}
-        min={1.05}
+        min={2.2}
         max={3}
         step={0.01}
-        hint="default 1.30 · the CTS-A-O Signal source is not yet connected in CTS-G"
+        hint="minimum 2.20 · own Signal evidence only; the full CTS-A-O Signal adapter is not yet connected in CTS-G"
         onChange={(v) => patch("minPfSignals", v)}
       />
     </>
@@ -2262,13 +2266,13 @@ function connHint(conn: string, stats: LiveStats | null) {
 function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const c = stats?.coverage?.controls;
   const open = stats?.open ?? [];
-  const missing = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid));
+  const missing = open.filter((p) => !hasControlCoverage(p));
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
-        <span className={(c?.missing ?? missing.length) ? "text-danger" : "text-primary"}>
+        <span className={missing.length || c?.missing || !stats ? "text-warn" : "text-primary"}>
           live controls · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {c?.missing ?? missing.length}</span>
@@ -2277,12 +2281,12 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
         <div className="mt-2 flex flex-wrap gap-2 text-danger">
           {missing.slice(0, 12).map((p) => (
             <span key={`${p.symbol}-${p.side}`}>
-              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {p.controls ? "" : "SL/TP"} {p.secSlOid && p.secTpOid ? "" : "SEC"}
+              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {controlCoverage(p)}
             </span>
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">Every open has SL + TP and a symbol+direction security pair</p>
+        <p className="mt-2 text-muted">{open.length ? "Coverage reported for listed positions; not a fresh independent venue check." : "No open-position evidence in this snapshot."}</p>
       )}
     </div>
   );

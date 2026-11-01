@@ -177,7 +177,7 @@ def short_window_is_at_most_half_of_the_long_window():
 
 def main_short_windows_are_at_most_half_of_the_long_window():
     """The Main short windows (the former Auto window) are capped at mainShortMaxRatio (default 0.5) of the Main long window (owner 2026-10-29): long 25 keeps
-    short 5 and 10 and drops 15, long 40 keeps up to 20, long 8 (cap 4) falls back to the cap itself, a ratio of 1 keeps every candidate, the ratio is held
+    short 5 and 10 and drops 15, long 40 keeps up to 20, an empty intersection keeps no candidate, a ratio of 1 keeps every candidate, the ratio is held
     to 0.1..1. The earlier mainAuto* keys still load when their mainShort* twin is absent, and the new key wins when both are given."""
     def shorts(**ov):
         b = SetBook()
@@ -186,10 +186,11 @@ def main_short_windows_are_at_most_half_of_the_long_window():
     got = {"25 default": shorts(mainGateN=25, mainShortWindows=[5, 10, 15]), "40": shorts(mainGateN=40, mainShortWindows=[5, 10, 15, 20, 25]),
            "8": shorts(mainGateN=8, mainShortWindows=[5, 10, 15]), "25 ratio 1": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=1.0),
            "25 ratio .3": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=0.3), "shipped": shorts(),
+           "no configured candidate under cap": shorts(mainGateN=20, mainShortWindows=[10, 15], mainShortMaxRatio=0.25),
            "legacy keys": shorts(mainGateN=25, mainShortWindows=None, mainShortMaxRatio=None, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
            "new key wins": shorts(mainGateN=25, mainShortWindows=[5, 10], mainAutoWindows=[5]) }
     want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (5,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
-            "legacy keys": (5,), "new key wins": (5, 10)}
+            "no configured candidate under cap": (), "legacy keys": (5,), "new key wins": (5, 10)}
     bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
     bare.load({"mainGateN": 25, "mainShortWindows": [5, 10, 15]})
     got["engine default"] = bare.short_windows
@@ -203,6 +204,38 @@ def main_short_windows_are_at_most_half_of_the_long_window():
     got["new enabled/min/margin win"] = (new.short_on, new.short_min, new.short_margin)
     want["new enabled/min/margin win"] = (True, 6, 1.2)
     return got == want, f"{ {k: v for k, v in got.items() if v != want[k]} or 'every case as asked'}"
+
+
+def main_short_selection_never_invents_a_window():
+    """A capped-out configured range cannot create a new candidate, even when that candidate would otherwise win.
+
+    The same tape with 5 explicitly configured must still be able to select 5;
+    with every candidate capped out, all current and historical choices retain
+    the existing long-window reference. This is a synthetic selection test, not
+    evidence of profitability or a reason to bypass other gates.
+    """
+    import random
+    from set_engine import _main_short_choice, _main_windows
+
+    rng = random.Random(1947)
+    times = [O + 60 * i for i in range(50)]
+    entries = [t - 1 for t in times]
+    nets = [rng.choice([-0.004, -0.002, 0.001, 0.003, 0.006]) for _ in times]
+
+    def choose(windows):
+        b = SetBook()
+        b.load(overlay(mainGateN=20, mainShortMaxRatio=0.25, mainShortWindows=windows,
+                       mainShortMin=3, mainShortMargin=1.0, minPfBySize=False))
+        p = b.stage_params("general")
+        ends, starts, passes = _main_windows(times, nets, entries, p)
+        current, history = _main_short_choice(nets, ends, starts, p, passes)
+        return p.short_windows, current, history
+
+    capped, fallback, choices = choose([10, 15])
+    explicit, chosen, explicit_choices = choose([5, 10, 15])
+    ok = (capped == () and fallback == 20 and all(n == 20 for n in choices)
+          and explicit == (5,) and chosen == 5 and set(explicit_choices) <= {5, 20})
+    return ok, f"capped={capped}, selected={fallback}, explicit={explicit}, selected={chosen}"
 
 
 def main_minimal_window_positive_and_negative():
@@ -416,9 +449,9 @@ def signal_floor_is_separate_from_window_classes():
     params = b.stage_params("sig-example")
     stage = [params.floor_for(n) for n in (5, 15, 25, 50)]
     ordinary = [b.floor_for(n, "indications") for n in (5, 15, 25, 50)]
-    b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=1.7))
+    b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=2.7))
     changed = [b.floor_for(5, "signals"), b.stage_params("signal.indicator").floor_for(50)]
-    ok = values == [1.3] * 4 and stage == values and ordinary == [1.05, 1.15, 1.25, 1.5] and changed == [1.7, 1.7]
+    ok = values == [2.2] * 4 and stage == values and ordinary == [1.05, 1.15, 1.25, 1.5] and changed == [2.7, 2.7]
     return ok, f"signals={values}, stage={stage}, ordinary={ordinary}, changed={changed}"
 
 
@@ -429,7 +462,7 @@ def pf_defaults_match_every_shipped_overlay():
     import re
     from common import ROOT, PULSE
     want = {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15,
-            "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 1.3}
+            "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}
     src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     block = src.split("export const PF_TYPE_DEFAULTS = {", 1)[1].split("} as const;", 1)[0]
     desk = {key: float(value) for key, value in re.findall(r"(minPf\w+):\s*([0-9.]+)", block)}
@@ -511,6 +544,7 @@ CHECKS = [
     ("gates.every-window-asks-the-minimum-pf-of-its-size", every_window_asks_the_minimum_pf_of_its_size),
     ("gates.base-minimal-window-positive-and-negative", base_minimal_window_positive_and_negative),
     ("gates.main-short-windows-are-at-most-half-of-the-long-window", main_short_windows_are_at_most_half_of_the_long_window),
+    ("gates.main-short-selection-never-invents-a-window", main_short_selection_never_invents_a_window),
     ("gates.main-minimal-window-positive-and-negative", main_minimal_window_positive_and_negative),
     ("gates.short-window-is-at-most-half-of-the-long-window", short_window_is_at_most_half_of_the_long_window),
     ("gates.stage-short-window-judges-the-orders-it-has", stage_short_window_judges_the_orders_it_has),

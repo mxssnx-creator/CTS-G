@@ -45,12 +45,55 @@ test("the overall view is returned unchanged", () => {
   assert.equal(viewFromSnapshot(s, "overall"), s);
 });
 
+test("connection views never inherit mixed fee rates from Overall", () => {
+  const s = overallSnapshot();
+  s.costModel = { paperCostPct: .9 };
+  s.lanes![0].costModel = { paperCostPct: .12 };
+  assert.equal(viewFromSnapshot(s, "live")?.costModel?.paperCostPct, .12);
+  assert.equal(viewFromSnapshot(s, "vst")?.costModel, undefined);
+});
+
+test("a USDT unit is not proof of account ownership and mixed Set figures cannot leak", () => {
+  const s = overallSnapshot();
+  s.open.push({ symbol: "BYBIT-USDT", unit: "USDT", connection: "bybit-x01", clientId: "Gb01x" } as LiveStats["open"][number]);
+  s.open.push({ symbol: "UNKNOWN-USDT", unit: "USDT" } as LiveStats["open"][number]);
+  s.sets = { setCount: 999 };
+  s.progressPct = 100;
+  const live = viewFromSnapshot(s, "live");
+  assert.deepEqual(live?.open.map(p => p.symbol), ["BTC-USDT"]);
+  assert.equal(live?.sets, undefined);
+  assert.equal(live?.progressPct, undefined);
+});
+
 test("a lane view lists only the closed rows that lane closed", () => {
   const s = overallSnapshot();
   const live = viewFromSnapshot(s, "live");
   const vst = viewFromSnapshot(s, "vst");
   assert.deepEqual((live?.closed ?? []).map((c) => c.symbol), ["BTC-USDT", "SOL-USDT"]);
   assert.deepEqual((vst?.closed ?? []).map((c) => c.symbol), ["ETH-USDT"]);
+});
+
+test("compact lane statistics never relabel Overall progress, diagnostics or account details", () => {
+  const s = overallSnapshot();
+  const fields = ["progressSymbol", "progressSetId", "progressSymbolsDone", "progressSymbolsTotal",
+    "progressSetsDone", "progressSetsTotal", "progressBarsDone", "progressBarsTotal",
+    "progressElapsedMs", "progressLastRunMs", "progressCycle", "progressError", "klinesReady",
+    "cycle", "lastError", "rssMb", "uptimeS", "startEquity", "realizedPnl", "leverage",
+    "targetNotional", "coverage", "api", "engine", "tests", "indications"] as const;
+  for (const key of fields) Object.assign(s, { [key]: 999 });
+  s.signals = [{ symbol: "OTHER-LANE" }];
+  s.prices = { "OTHER-LANE": 123 };
+  s.errors = 999;
+  s.lanes![0].errors = 0;
+  const live = viewFromSnapshot(s, "live")!;
+  for (const key of fields) assert.equal(live[key], undefined, key);
+  assert.equal(live.errors, 0);
+  assert.equal(live.compactFallback, true);
+  assert.deepEqual(live.signals, []);
+  assert.deepEqual(live.prices, {});
+  assert.equal(live.lanes?.length, 1);
+  s.lanes![0].progressSetsDone = 7;
+  assert.equal(viewFromSnapshot(s, "live")?.progressSetsDone, 7);
 });
 
 test("a lane view lists only the open symbols of that lane", () => {

@@ -30,12 +30,14 @@ const files = [
   "src/lib/analytics.test.ts",
   "src/lib/base-progress.test.ts",
   "src/lib/execution-scope.test.ts",
+  "src/lib/evidence-view.test.ts",
   "src/lib/poll.test.ts",
   "src/lib/sets-view.test.ts",
   "src/lib/config-model.test.ts",
   "src/lib/live-stats.test.ts",
   "src/lib/poll-http.test.ts",
   "src/lib/hourly-pf.test.ts",
+  "src/lib/control-coverage.test.ts",
 ];
 const run = spawnSync(
   process.execPath,
