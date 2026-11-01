@@ -134,6 +134,8 @@ def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
             continue
         i, res = item
         results[i] = res
+        if res["status"] == "FAIL":
+            print(f"regression early failure: {res['name']}: {res['detail']}", file=sys.stderr, flush=True)
         progress()
     for p in procs:
         p.join(timeout=10)

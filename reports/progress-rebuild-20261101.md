@@ -43,6 +43,8 @@ Existing-checkout installs now use the same non-forcing, fast-forward-only Git
 update as the updater instead of an unconditional checkout/reset. A fake-SSH
 integration test covers spaced paths, flag forwarding and preservation of
 dirty and diverged work; no remote server was contacted.
+Parallel regressions now emit each failure immediately to stderr while keeping
+their final results ordered, so long replay checks cannot hide earlier errors.
 
 An independent reconstruction of the previously studied ordinary CTS-G tapes
 reproduced all 25 selected Base Set/checkpoints and all 1,116,351 shadow

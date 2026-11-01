@@ -17,15 +17,21 @@ def slow():
     return True, "finished"
 
 
+def fail():
+    return False, "deliberate diagnostic failure"
+
+
 def main():
     stderr = io.StringIO()
     with redirect_stderr(stderr):
-        results = regression._run_parallel([("first", slow), ("second", slow)], 2,
+        results = regression._run_parallel([("first", slow), ("second", slow), ("failure", fail)], 2,
                                            progress_interval_s=0.04, queue_timeout_s=0.02)
-    assert [r["name"] for r in results] == ["first", "second"]
-    assert all(r["status"] == "PASS" for r in results)
+    assert [r["name"] for r in results] == ["first", "second", "failure"]
+    assert [r["status"] for r in results] == ["PASS", "PASS", "FAIL"]
     assert "regression progress:" in stderr.getvalue() and "workers active" in stderr.getvalue()
-    print("parallel regression progress: heartbeat and ordered results passed")
+    assert "regression early failure: failure" in stderr.getvalue()
+    assert "deliberate diagnostic failure" in stderr.getvalue()
+    print("parallel regression progress: heartbeat, early failures and ordered results passed")
 
 
 if __name__ == "__main__":
