@@ -1,0 +1,96 @@
+{
+  "schema": "cts-g-signals-independent-audit-v1",
+  "scenarios": {
+    "existing-six": {
+      "modeledOrders": 46,
+      "settled": 45,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0025069885034761396,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "new-three-frozen": {
+      "modeledOrders": 0,
+      "settled": 0,
+      "marks": 721,
+      "allTypeStageContextsCompared": 13824,
+      "maxCashError": 0.0,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "nine-dynamic": {
+      "modeledOrders": 50,
+      "settled": 49,
+      "marks": 721,
+      "allTypeStageContextsCompared": 20736,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0026128162671411074,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "nine-frozen": {
+      "modeledOrders": 0,
+      "settled": 0,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 0.0,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "nine-stress": {
+      "modeledOrders": 14,
+      "settled": 14,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 0.0,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.00205505643806066,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "wide-dynamic": {
+      "modeledOrders": 15,
+      "settled": 12,
+      "marks": 721,
+      "allTypeStageContextsCompared": 34560,
+      "maxCashError": 0.0,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0017962013792883601,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "wide-frozen": {
+      "modeledOrders": 0,
+      "settled": 0,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 0.0,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0,
+      "differenceCount": 0,
+      "differences": []
+    }
+  },
+  "activeStageOptimization": null,
+  "seconds": 84.04481247600052,
+  "limits": [
+    "shared source-onset inputs, separately registry-parity-tested",
+    "all three protection types independently replayed across every expanded stage context; no DCA/Active/venue oracle",
+    "cash/marks reconstruct modeled execution, not venue executions or untouched out-of-sample performance"
+  ]
+}

@@ -1,0 +1,422 @@
+{
+  "scope": "frozen historical CTS-A-O ordinary modeled cohort; not current CTS-G, Signals profitability, a new replay or live fills",
+  "normalization": "unit net return = stored r / recorded external execution multiplier; no second fee subtraction",
+  "arms": {
+    "control": {
+      "measured": {
+        "n": 336,
+        "gain": 1.5518340682853198,
+        "loss": 0.41986297348946183,
+        "pf": 3.696048868963363,
+        "pfState": "finite"
+      },
+      "byType": {
+        "dca": {
+          "n": 184,
+          "gain": 0.9842999999999879,
+          "loss": 0.33853555967841775,
+          "pf": 2.9075232183437265,
+          "pfState": "finite"
+        },
+        "trailing": {
+          "n": 110,
+          "gain": 0.3462271313480303,
+          "loss": 0.03144734724745097,
+          "pf": 11.009740459939573,
+          "pfState": "finite"
+        },
+        "trailing-only": {
+          "n": 42,
+          "gain": 0.22130693693730166,
+          "loss": 0.04988006656359312,
+          "pf": 4.436781106840604,
+          "pfState": "finite"
+        }
+      },
+      "recordedCounts": {
+        "openedPositions": 47,
+        "closedPositions": 42,
+        "openPositions": 5,
+        "openedOrders": 354,
+        "settledOrders": 336,
+        "openOrders": 18,
+        "basis": "funded-modeled-allocations"
+      },
+      "study": {
+        "id": "control",
+        "protocolSha256": "9ae110598b8cc1e243c04a32af294770409dff2fdb3dbc4833cc081fb7acb5d1",
+        "feedSha256": "bd4b66e09c65b990082ccc56dfd2624fd18815d01767a315dc002dfa0f6f02b0",
+        "sourceSha256": "627ce026ab9f0b7398ddecdba7905bafb21cac158db90ff065c7999aebdd2c6f",
+        "sourceCheckpoint": "2599b652b9429c34d290a07e8df1d70a62d80462",
+        "symbols": [
+          "ADA-USDT",
+          "APT-USDT",
+          "ARB-USDT",
+          "ATOM-USDT",
+          "AVAX-USDT",
+          "BCH-USDT",
+          "BNB-USDT",
+          "BTC-USDT"
+        ],
+        "window": {
+          "evaluationFromT": 1791460800000,
+          "tradeStartT": 1791504000000,
+          "endT": 1791547200000,
+          "preH": 12,
+          "runH": 12
+        },
+        "scope": "Base-qualified engine execution and separately qualified exact-config Signals; combined funded account reported separately"
+      },
+      "costFraction": 0.0015,
+      "rawSha256": "a3c6ee805a3d9c325eca72a3a83e9a8afb257e5134162d5ce0776fc381036fd3",
+      "reportSha256": "be89fc9aedd8878e074be4417cec4a59a9a4e0a18479159e3a0e1cf909b34b77",
+      "sidecars": {
+        "session-items-ba1e9e0d-c7b3-4d88-a070-34c460a0863f/000000.jsonl": "ebf61f4ea6e7f482e3d40e133cf696f7c5f48cb66157f8fce0b5905c430d424c"
+      },
+      "addedOrChangedRows": 0,
+      "removedOrChangedRows": 0,
+      "fixedCloseCostSensitivity": {
+        "scope": "hypothetical equal-entry-notional fees/slippage on simple rows only; no requalification",
+        "excludedMultiLegRows": 184,
+        "scenarios": {
+          "maker-maker": {
+            "roundTripCostFraction": 0.0009,
+            "n": 152,
+            "gain": 0.6399747603980823,
+            "loss": 0.06256810592379448,
+            "pf": 10.22845027748717,
+            "pfState": "finite"
+          },
+          "maker-taker": {
+            "roundTripCostFraction": 0.0012,
+            "n": 152,
+            "gain": 0.6021415872832883,
+            "loss": 0.07033493280900037,
+            "pf": 8.561060105345485,
+            "pfState": "finite"
+          },
+          "taker-taker": {
+            "roundTripCostFraction": 0.0015,
+            "n": 152,
+            "gain": 0.5675340682853319,
+            "loss": 0.0813274138110441,
+            "pf": 6.978385782731751,
+            "pfState": "finite"
+          }
+        }
+      }
+    },
+    "distance": {
+      "measured": {
+        "n": 336,
+        "gain": 1.5518340682853198,
+        "loss": 0.41986297348946183,
+        "pf": 3.696048868963363,
+        "pfState": "finite"
+      },
+      "byType": {
+        "dca": {
+          "n": 184,
+          "gain": 0.9842999999999879,
+          "loss": 0.33853555967841775,
+          "pf": 2.9075232183437265,
+          "pfState": "finite"
+        },
+        "trailing": {
+          "n": 110,
+          "gain": 0.3462271313480303,
+          "loss": 0.03144734724745097,
+          "pf": 11.009740459939573,
+          "pfState": "finite"
+        },
+        "trailing-only": {
+          "n": 42,
+          "gain": 0.22130693693730166,
+          "loss": 0.04988006656359312,
+          "pf": 4.436781106840604,
+          "pfState": "finite"
+        }
+      },
+      "recordedCounts": {
+        "openedPositions": 47,
+        "closedPositions": 42,
+        "openPositions": 5,
+        "openedOrders": 354,
+        "settledOrders": 336,
+        "openOrders": 18,
+        "basis": "funded-modeled-allocations"
+      },
+      "study": {
+        "id": "distance",
+        "protocolSha256": "cc18778c821219825f91ba86abb2e7d6df9179102d4e7fa896eeab27dcf9dd18",
+        "feedSha256": "bd4b66e09c65b990082ccc56dfd2624fd18815d01767a315dc002dfa0f6f02b0",
+        "sourceSha256": "627ce026ab9f0b7398ddecdba7905bafb21cac158db90ff065c7999aebdd2c6f",
+        "sourceCheckpoint": "2599b652b9429c34d290a07e8df1d70a62d80462",
+        "symbols": [
+          "ADA-USDT",
+          "APT-USDT",
+          "ARB-USDT",
+          "ATOM-USDT",
+          "AVAX-USDT",
+          "BCH-USDT",
+          "BNB-USDT",
+          "BTC-USDT"
+        ],
+        "window": {
+          "evaluationFromT": 1791460800000,
+          "tradeStartT": 1791504000000,
+          "endT": 1791547200000,
+          "preH": 12,
+          "runH": 12
+        },
+        "scope": "Base-qualified engine execution and separately qualified exact-config Signals; combined funded account reported separately"
+      },
+      "costFraction": 0.0015,
+      "rawSha256": "94a5c9f16650a5a4f0482881214886af2ad484fba510cf98e817990e698ce3d0",
+      "reportSha256": "3254902fb701a62ff8981be6ccf189ef65dc57eca6995ffea6d1a92b7eb54c7c",
+      "sidecars": {
+        "session-items-728a335b-8dc3-4518-9dee-71688d05c26c/000000.jsonl": "ebf61f4ea6e7f482e3d40e133cf696f7c5f48cb66157f8fce0b5905c430d424c"
+      },
+      "addedOrChangedRows": 0,
+      "removedOrChangedRows": 0,
+      "fixedCloseCostSensitivity": {
+        "scope": "hypothetical equal-entry-notional fees/slippage on simple rows only; no requalification",
+        "excludedMultiLegRows": 184,
+        "scenarios": {
+          "maker-maker": {
+            "roundTripCostFraction": 0.0009,
+            "n": 152,
+            "gain": 0.6399747603980823,
+            "loss": 0.06256810592379448,
+            "pf": 10.22845027748717,
+            "pfState": "finite"
+          },
+          "maker-taker": {
+            "roundTripCostFraction": 0.0012,
+            "n": 152,
+            "gain": 0.6021415872832883,
+            "loss": 0.07033493280900037,
+            "pf": 8.561060105345485,
+            "pfState": "finite"
+          },
+          "taker-taker": {
+            "roundTripCostFraction": 0.0015,
+            "n": 152,
+            "gain": 0.5675340682853319,
+            "loss": 0.0813274138110441,
+            "pf": 6.978385782731751,
+            "pfState": "finite"
+          }
+        }
+      }
+    },
+    "last8": {
+      "measured": {
+        "n": 336,
+        "gain": 1.5518340682853198,
+        "loss": 0.41986297348946183,
+        "pf": 3.696048868963363,
+        "pfState": "finite"
+      },
+      "byType": {
+        "dca": {
+          "n": 184,
+          "gain": 0.9842999999999879,
+          "loss": 0.33853555967841775,
+          "pf": 2.9075232183437265,
+          "pfState": "finite"
+        },
+        "trailing": {
+          "n": 110,
+          "gain": 0.3462271313480303,
+          "loss": 0.03144734724745097,
+          "pf": 11.009740459939573,
+          "pfState": "finite"
+        },
+        "trailing-only": {
+          "n": 42,
+          "gain": 0.22130693693730166,
+          "loss": 0.04988006656359312,
+          "pf": 4.436781106840604,
+          "pfState": "finite"
+        }
+      },
+      "recordedCounts": {
+        "openedPositions": 47,
+        "closedPositions": 42,
+        "openPositions": 5,
+        "openedOrders": 354,
+        "settledOrders": 336,
+        "openOrders": 18,
+        "basis": "funded-modeled-allocations"
+      },
+      "study": {
+        "id": "last8",
+        "protocolSha256": "08d8dcfcb7469c7a9fb19012410a27143fee587c6175bd3c58fcfbe2cf7e9761",
+        "feedSha256": "bd4b66e09c65b990082ccc56dfd2624fd18815d01767a315dc002dfa0f6f02b0",
+        "sourceSha256": "627ce026ab9f0b7398ddecdba7905bafb21cac158db90ff065c7999aebdd2c6f",
+        "sourceCheckpoint": "2599b652b9429c34d290a07e8df1d70a62d80462",
+        "symbols": [
+          "ADA-USDT",
+          "APT-USDT",
+          "ARB-USDT",
+          "ATOM-USDT",
+          "AVAX-USDT",
+          "BCH-USDT",
+          "BNB-USDT",
+          "BTC-USDT"
+        ],
+        "window": {
+          "evaluationFromT": 1791460800000,
+          "tradeStartT": 1791504000000,
+          "endT": 1791547200000,
+          "preH": 12,
+          "runH": 12
+        },
+        "scope": "Base-qualified engine execution and separately qualified exact-config Signals; combined funded account reported separately"
+      },
+      "costFraction": 0.0015,
+      "rawSha256": "8ffe41c68fe48bc11da97544088d39bffc342e6db0411c6cdd017dc4eecdafa1",
+      "reportSha256": "4ed8d5e2e2bf34dbc36ff80677b002e53f6b58764dbfc70b61c2283acf3d2c7f",
+      "sidecars": {
+        "session-items-58b354e5-728d-45b9-be80-2017da5b7159/000000.jsonl": "ebf61f4ea6e7f482e3d40e133cf696f7c5f48cb66157f8fce0b5905c430d424c"
+      },
+      "addedOrChangedRows": 0,
+      "removedOrChangedRows": 0,
+      "fixedCloseCostSensitivity": {
+        "scope": "hypothetical equal-entry-notional fees/slippage on simple rows only; no requalification",
+        "excludedMultiLegRows": 184,
+        "scenarios": {
+          "maker-maker": {
+            "roundTripCostFraction": 0.0009,
+            "n": 152,
+            "gain": 0.6399747603980823,
+            "loss": 0.06256810592379448,
+            "pf": 10.22845027748717,
+            "pfState": "finite"
+          },
+          "maker-taker": {
+            "roundTripCostFraction": 0.0012,
+            "n": 152,
+            "gain": 0.6021415872832883,
+            "loss": 0.07033493280900037,
+            "pf": 8.561060105345485,
+            "pfState": "finite"
+          },
+          "taker-taker": {
+            "roundTripCostFraction": 0.0015,
+            "n": 152,
+            "gain": 0.5675340682853319,
+            "loss": 0.0813274138110441,
+            "pf": 6.978385782731751,
+            "pfState": "finite"
+          }
+        }
+      }
+    },
+    "last8-distance": {
+      "measured": {
+        "n": 336,
+        "gain": 1.5518340682853198,
+        "loss": 0.41986297348946183,
+        "pf": 3.696048868963363,
+        "pfState": "finite"
+      },
+      "byType": {
+        "dca": {
+          "n": 184,
+          "gain": 0.9842999999999879,
+          "loss": 0.33853555967841775,
+          "pf": 2.9075232183437265,
+          "pfState": "finite"
+        },
+        "trailing": {
+          "n": 110,
+          "gain": 0.3462271313480303,
+          "loss": 0.03144734724745097,
+          "pf": 11.009740459939573,
+          "pfState": "finite"
+        },
+        "trailing-only": {
+          "n": 42,
+          "gain": 0.22130693693730166,
+          "loss": 0.04988006656359312,
+          "pf": 4.436781106840604,
+          "pfState": "finite"
+        }
+      },
+      "recordedCounts": {
+        "openedPositions": 47,
+        "closedPositions": 42,
+        "openPositions": 5,
+        "openedOrders": 354,
+        "settledOrders": 336,
+        "openOrders": 18,
+        "basis": "funded-modeled-allocations"
+      },
+      "study": {
+        "id": "last8-distance",
+        "protocolSha256": "447d8304baf8f5af0821c73d07e00a8db70e311e8d096853bbe75731e8770529",
+        "feedSha256": "bd4b66e09c65b990082ccc56dfd2624fd18815d01767a315dc002dfa0f6f02b0",
+        "sourceSha256": "627ce026ab9f0b7398ddecdba7905bafb21cac158db90ff065c7999aebdd2c6f",
+        "sourceCheckpoint": "2599b652b9429c34d290a07e8df1d70a62d80462",
+        "symbols": [
+          "ADA-USDT",
+          "APT-USDT",
+          "ARB-USDT",
+          "ATOM-USDT",
+          "AVAX-USDT",
+          "BCH-USDT",
+          "BNB-USDT",
+          "BTC-USDT"
+        ],
+        "window": {
+          "evaluationFromT": 1791460800000,
+          "tradeStartT": 1791504000000,
+          "endT": 1791547200000,
+          "preH": 12,
+          "runH": 12
+        },
+        "scope": "Base-qualified engine execution and separately qualified exact-config Signals; combined funded account reported separately"
+      },
+      "costFraction": 0.0015,
+      "rawSha256": "1c147e0b23a18453e6c9858a009f81326cddbe7e5398f758024434a9b5f3315e",
+      "reportSha256": "0edc37ff09535617eb6552b08092ba2fe09a55c4c664eb543138a69dd17a5d12",
+      "sidecars": {
+        "session-items-c812b12d-27f5-474b-8f7e-3d810acd787c/000000.jsonl": "ebf61f4ea6e7f482e3d40e133cf696f7c5f48cb66157f8fce0b5905c430d424c"
+      },
+      "addedOrChangedRows": 0,
+      "removedOrChangedRows": 0,
+      "fixedCloseCostSensitivity": {
+        "scope": "hypothetical equal-entry-notional fees/slippage on simple rows only; no requalification",
+        "excludedMultiLegRows": 184,
+        "scenarios": {
+          "maker-maker": {
+            "roundTripCostFraction": 0.0009,
+            "n": 152,
+            "gain": 0.6399747603980823,
+            "loss": 0.06256810592379448,
+            "pf": 10.22845027748717,
+            "pfState": "finite"
+          },
+          "maker-taker": {
+            "roundTripCostFraction": 0.0012,
+            "n": 152,
+            "gain": 0.6021415872832883,
+            "loss": 0.07033493280900037,
+            "pf": 8.561060105345485,
+            "pfState": "finite"
+          },
+          "taker-taker": {
+            "roundTripCostFraction": 0.0015,
+            "n": 152,
+            "gain": 0.5675340682853319,
+            "loss": 0.0813274138110441,
+            "pf": 6.978385782731751,
+            "pfState": "finite"
+          }
+        }
+      }
+    }
+  }
+}

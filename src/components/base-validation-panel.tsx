@@ -68,8 +68,8 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
     [pb],
   );
   if (!pb) return null;
-  const hoursWithPf = hourly.filter((h) => h.pf !== null || h.noLoss);
-  const hoursPositive = hoursWithPf.filter((h) => h.noLoss || (h.pf !== null && h.pf >= 1)).length;
+  const hoursWithCash = hourly.filter((h) => !h.partial && h.netCash !== null);
+  const hoursPositive = hoursWithCash.filter((h) => h.netCash !== null && h.netCash > 0).length;
   const noLossHours = hourly.filter((h) => h.noLoss).length;
   const missingHours = hourly.filter((h) => h.missing > 0).length;
   return (
@@ -104,8 +104,8 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
         </ClientChart>
       </Panel>
       <Panel
-        title="PF per hour"
-        hint={`Last 24 h of available recorded closes · ${hoursPositive}/${hoursWithPf.length} measurable hours at PF ≥ 1 · ${noLossHours} no-loss hours not plotted${missingHours ? ` · ${missingHours} hours with missing returns` : ""} · fees may be estimated`}
+        title="Recorded closes per hour · UTC"
+        hint={`Last 24 clock-hour buckets · ${hoursPositive}/${hoursWithCash.length} completed, measurable close-cash hours strictly positive · ${noLossHours} no-loss return hours not plotted${missingHours ? ` · ${missingHours} hours with missing returns` : ""} · current hour partial; fees may be estimated`}
       >
         <ClientChart height={200}>
           <LineChart data={hourly} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
@@ -118,6 +118,20 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
             <Line type="monotone" dataKey="pf" name="PF" stroke="#4c8dff" strokeWidth={2} dot={{ r: 2 }} connectNulls={false} />
           </LineChart>
         </ClientChart>
+        <p className="mt-2 text-xs text-muted">Return PF does not weight different order amounts. Close cash below does; neither measures account equity per hour. Historical open-position P&amp;L, funding and complete exchange coverage are not available here. Empty hours are unknown, not profitable.</p>
+        <details className="mt-3"><summary className="cursor-pointer text-sm">Hourly amounts and completeness</summary>
+          <div className="mt-2 overflow-x-auto"><table className="w-full min-w-xl text-left text-xs">
+            <caption className="sr-only">Available recorded closes only, not verified hourly account profit</caption>
+            <thead><tr>{["UTC start", "Window", "Closes", "Return PF", "Cash PF", "Close net cash", "Missing return / amount", "Estimated or unknown fees"].map(label => <th scope="col" className="p-2 font-medium" key={label}>{label}</th>)}</tr></thead>
+            <tbody>{hourly.map(row => <tr key={row.from} className="border-t border-border">
+              <th scope="row" className="p-2 font-medium">{new Date(row.from*1000).toISOString().slice(0,16).replace("T"," ")}</th>
+              <td className="p-2">{row.partial ? "Partial" : "Completed"}</td><td className="p-2">{row.n}</td>
+              <td className="p-2">{row.pf?.toFixed(3) ?? (row.noLoss ? "No loss" : "—")}</td>
+              <td className="p-2">{row.cashPf?.toFixed(3) ?? (row.cashNoLoss ? "No loss" : "—")}</td>
+              <td className="p-2">{row.netCash?.toFixed(4) ?? "Unknown"}</td><td className="p-2">{row.missing} / {row.cashMissing}</td><td className="p-2">{row.estimated}</td>
+            </tr>)}</tbody>
+          </table></div>
+        </details>
       </Panel>
       <Panel
         title="Continuous progress"

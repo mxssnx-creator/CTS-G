@@ -30,6 +30,7 @@ import { CoveragePanel } from "@/components/coverage-overview";
 import { CostEvidencePanel } from "@/components/evidence-panel";
 import { secureMinimalPreset } from "@/lib/presets";
 import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS, minMode } from "@/lib/config-model";
+import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -1818,10 +1819,10 @@ function PfWindowControls({
       <Slider
         label="Signals · min PF"
         value={overlay.minPfSignals}
-        min={1.05}
+        min={2.2}
         max={3}
         step={0.01}
-        hint="default 1.30 · the CTS-A-O Signal source is not yet connected in CTS-G"
+        hint="minimum 2.20 · own Signal evidence only; the full CTS-A-O Signal adapter is not yet connected in CTS-G"
         onChange={(v) => patch("minPfSignals", v)}
       />
     </>
@@ -2265,13 +2266,13 @@ function connHint(conn: string, stats: LiveStats | null) {
 function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const c = stats?.coverage?.controls;
   const open = stats?.open ?? [];
-  const missing = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid));
+  const missing = open.filter((p) => !hasControlCoverage(p));
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
-        <span className={(c?.missing ?? missing.length) ? "text-danger" : "text-primary"}>
+        <span className={missing.length || c?.missing || !stats ? "text-warn" : "text-primary"}>
           live controls · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {c?.missing ?? missing.length}</span>
@@ -2280,12 +2281,12 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
         <div className="mt-2 flex flex-wrap gap-2 text-danger">
           {missing.slice(0, 12).map((p) => (
             <span key={`${p.symbol}-${p.side}`}>
-              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {p.controls ? "" : "SL/TP"} {p.secSlOid && p.secTpOid ? "" : "SEC"}
+              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {controlCoverage(p)}
             </span>
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">Every open has SL + TP and a symbol+direction security pair</p>
+        <p className="mt-2 text-muted">{open.length ? "Coverage reported for listed positions; not a fresh independent venue check." : "No open-position evidence in this snapshot."}</p>
       )}
     </div>
   );

@@ -1,0 +1,20 @@
+{
+  "schema": "cts-g-signals-replay-v1",
+  "mode": "offline-only",
+  "sources": ["ema-cross", "macd-cross", "rsi-reversal"],
+  "ranges": ["short", "medium"],
+  "timeframes": [1, 5, 15, 30],
+  "protections": [
+    {"id": "normal-1pct", "kind": "normal", "tp": 0.01, "sl": 0.01, "trailArm": 0, "trailGap": 0, "holdMinutes": 60},
+    {"id": "trail-1pct", "kind": "trailing", "tp": 0.01, "sl": 0.01, "trailArm": 0.005, "trailGap": 0.003, "holdMinutes": 60},
+    {"id": "trail-only", "kind": "trailing-only", "tp": 0, "sl": 0.01, "trailArm": 0.005, "trailGap": 0.003, "holdMinutes": 60}
+  ],
+  "lastNLanes": [{"base": 4, "main": 4, "real": 4}, {"base": 12, "main": 8, "real": 4}],
+  "minPf": 2.2,
+  "historyMinutes": 720,
+  "maxContextDrawdown": 0.04,
+  "normalEnabled": true,
+  "trailingEnabled": true,
+  "fees": {"maker": 0.0002, "taker": 0.0005, "slippagePerLeg": 0.0001, "entryLiquidity": "taker", "exitLiquidity": "taker", "source": "configured-scenario"},
+  "risk": {"initialEquity": 1000, "notionalPerOrder": 25, "maxOpen": 4, "maxGrossExposure": 100, "maxDrawdown": 0.02, "maxHourlyLoss": 0.005}
+}

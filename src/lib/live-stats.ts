@@ -17,6 +17,10 @@ export type LiveOpen = {
   secSlOid?: string;
   secTpOid?: string;
   controls?: boolean;
+  ctrlVerified?: boolean;
+  ctrlUndercovered?: boolean;
+  closePosition?: boolean;
+  ctrlQty?: number;
   overall?: boolean;
   security?: boolean;
   connection?: string;
@@ -406,7 +410,7 @@ export type LiveStats = {
       steps?: number[];
       dims?: { pack?: number; sl?: number; trail?: number; step?: number };
     };
-    controls?: { open?: number; ok?: number; missing?: number; security?: number };
+    controls?: { open?: number; ok?: number; missing?: number; security?: number; undercovered?: number };
     recon?: { ok?: boolean; detail?: string };
     px?: number;
     symbols?: number;

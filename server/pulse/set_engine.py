@@ -1621,7 +1621,7 @@ class SetBook:
         self.pf_by_size = True
         self.size_floors: Tuple[Tuple[int, float], ...] = ((5, 1.05), (10, 1.10), (20, 1.15), (35, 1.25))
         self.size_long_pf = 1.5
-        self.signal_min_pf = 1.3
+        self.signal_min_pf = 2.2
         self.max_modeled_stop_loss_pct = 0.0
         self.stop_cap_invalid = False
         self.consistency_pf = 0.0
@@ -1827,7 +1827,7 @@ class SetBook:
         pfs = [pf_floor(ov.get(k), d) for k, d in (("minPfMicro", 1.05), ("minPfMinimal", 1.10), ("minPfShort", 1.15), ("minPfMedium", 1.25))]
         self.size_floors = tuple(zip(bounds, pfs))
         self.size_long_pf = pf_floor(ov.get("minPfLong"), 1.5)
-        self.signal_min_pf = pf_floor(ov.get("minPfSignals"), 1.3)
+        self.signal_min_pf = max(2.2, pf_floor(ov.get("minPfSignals"), 2.2))
         raw_stop_cap = ov.get("maxModeledStopLossPct")
         try:
             stop_cap = 0.0 if raw_stop_cap is None else float(raw_stop_cap)
