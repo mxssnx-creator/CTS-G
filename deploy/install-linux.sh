@@ -15,6 +15,7 @@ FROM_DIR=""
 DO_CLONE=0
 START_LIVE=0
 NO_START=0
+NO_VST=0
 PORT_EXPLICIT=0
 NAME_EXPLICIT=0
 
@@ -33,12 +34,16 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
   --branch NAME     Branch (default: main)
   --start-live      Start grok-pulse@bingx-x01
+  --no-vst          Disable x02 auto-start; stop x02 when starting services
   --no-start        Install units but do not start services
   --yes             No-op (install never prompts)
   -h, --help
 
 Packages and Node are installed only if missing. Overlay/open positions are
-never flattened. Prints a results block with URLs at the end.
+never flattened. --no-vst does not cancel x02 orders or close its positions;
+stopping x02 also stops its position manager, so verify its protection first.
+with --no-start it disables auto-start but leaves an already running x02 alone.
+Prints a results block with URLs at the end.
 EOF
 }
 
@@ -52,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --start-live) START_LIVE=1; shift ;;
+    --no-vst) NO_VST=1; shift ;;
     --no-start) NO_START=1; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
@@ -104,13 +110,13 @@ seed_env
 sync_pulse_tree
 npm_install_desk
 install_units
-enable_stack
+enable_stack "$((1 - NO_VST))"
 
 if [[ "$NO_START" -eq 1 ]]; then
   skip "start ( --no-start )"
   print_results
 else
-  start_stack "$START_LIVE"
+  start_stack "$START_LIVE" "$((1 - NO_VST))"
   health_report
 fi
 

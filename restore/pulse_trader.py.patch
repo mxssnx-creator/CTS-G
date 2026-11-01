@@ -92,7 +92,7 @@
 +CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
 +CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 +ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
-+ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
++ENTRY_SIG_BUDGET = 30     # one full x01 universe competes; larger universes continue in later cycles
 +DD_HALT = 0.80                  # owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (ddHaltPct)
 @@ -150,0 +223,2 @@
 +_CONN_SUFFIX = CONN_SHORT.split("-")[-1]

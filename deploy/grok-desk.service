@@ -4,6 +4,8 @@ Documentation=https://github.com/mxssnx-creator/CTS-G
 After=network-online.target grok-pulse-http.service
 Wants=network-online.target
 PartOf=grok-pulse.target
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -11,7 +13,7 @@ EnvironmentFile=-/etc/cts-g/cts-g.env
 WorkingDirectory=/opt/cts-g
 ExecStart=/opt/cts-g/deploy/cts-g-desk.sh
 Restart=always
-RestartSec=3
+RestartSec=15
 TimeoutStartSec=120
 TimeoutStopSec=20
 KillMode=mixed

@@ -10,6 +10,7 @@ REMOTE_USER="${REMOTE_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 IDENTITY="${IDENTITY:-}"
 START_LIVE=0
+NO_VST=0
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,7 @@ Usage: ./deploy/remote-install.sh [options]
   --branch NAME     Git branch (default: main)
   --repo URL        Git remote
   --start-live      Start Live engine
+  --no-vst          Disable/stop x02; verify its position protection first
   --yes             No-op (never prompts)
   -h, --help
 EOF
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --start-live) START_LIVE=1; shift ;;
+    --no-vst) NO_VST=1; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
@@ -56,6 +59,8 @@ log "remote ${REMOTE_USER}@${REMOTE_HOST}:${SSH_PORT} → $CTS_G_ROOT  desk :$DE
 
 LIVE_FLAG=""
 [[ "$START_LIVE" -eq 1 ]] && LIVE_FLAG="--start-live"
+VST_FLAG=""
+[[ "$NO_VST" -eq 1 ]] && VST_FLAG="--no-vst"
 
 remote=$(cat <<EOF
 set -euo pipefail
@@ -78,7 +83,7 @@ else
   git clone --branch $BRANCH --depth 1 '$REPO_URL' $CTS_G_ROOT
 fi
 chmod 755 $CTS_G_ROOT/deploy/*.sh
-$CTS_G_ROOT/deploy/install-linux.sh --yes --name $CTS_G_NAME --port $DESK_PORT --host $REMOTE_HOST --from-dir $CTS_G_ROOT $LIVE_FLAG
+$CTS_G_ROOT/deploy/install-linux.sh --yes --name $CTS_G_NAME --port $DESK_PORT --host $REMOTE_HOST --from-dir $CTS_G_ROOT $LIVE_FLAG $VST_FLAG
 EOF
 )
 

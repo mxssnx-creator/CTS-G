@@ -17,6 +17,29 @@ compatibility failure; after its fix, the **484-check full rerun passed**.
 Four separate admission-oracle tests and two Signal study-preparation tests
 also passed. None is a live performance or profitability test.
 
+## Follow-up: first candidate batch and service continuity
+
+The ordinary entry scanner formerly computed at most 16 previously unseen
+symbol signals per cycle. With 30 ready symbols, later signals could not
+compete for the first opening. Its bounded batch is now 30; larger universes
+still continue on later cycles. A synthetic independent fixture confirms that
+all 30 ready symbols are included and a 31st is deferred to the next cycle.
+An entry-loop fixture also confirms that the strongest same-direction ready
+signal at symbol 30 receives the first available slot in that controlled case.
+The existing signal confidence ranking, directional preference, availability,
+Set qualification, scope checks and other risk rules remain unchanged. This
+does not establish that the first eligible order will be profitable.
+
+The engine's systemd `StartLimitIntervalSec` was misplaced in `[Service]` and
+was ignored. Engine, HTTP and desk units now declare a bounded retry window in
+`[Unit]` and a 15-second restart delay, so repeated automatic retries alone
+cannot exhaust the configured 20-start/120-second limit. This is not proof of
+a running or recoverable remote installation. An explicit installer/updater
+`--no-vst` disables x02 auto-start and stops its manager when services are
+started. It does not close positions or cancel orders; protection must be
+verified before stopping. Later updates preserve an already-disabled x02.
+Mocked systemd checks exercise these paths without modifying real services.
+
 An independent reconstruction of the previously studied ordinary CTS-G tapes
 reproduced all 25 selected Base Set/checkpoints and all 1,116,351 shadow
 closes, with zero same-Set/symbol overlaps. The archived eight-symbol study
