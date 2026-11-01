@@ -33,7 +33,22 @@ export type LiveOpen = {
   indKind?: string;
 };
 
-export type LanePfDetail = {
+export type PfEvidence = {
+  pfFinite?: number | null;
+  pfState?: "finite" | "no-loss" | "empty" | "flat";
+  netGain?: number;
+  netLoss?: number;
+};
+
+export type CostModel = {
+  paperCostPct?: number;
+  slippageAllowancePct?: number;
+  executionSlippage?: string;
+  error?: string;
+  symbols?: Record<string, { makerRate: number | null; takerRate: number | null; source: string }>;
+};
+
+export type LanePfDetail = PfEvidence & {
   n?: number;
   count?: number;
   avgR?: number;
@@ -71,16 +86,16 @@ export type LiveClosed = {
 
 /** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
  * Set (all configured Sets), and the share of Sets validated, in total and per strategy pack. */
-export type PfPool = { pf: number; n: number; sets: number };
+export type PfPool = PfEvidence & { pf: number; n: number; sets: number };
 /** One stage's figures over the Sets that pass it (`pfBase.stages`): `n` is the window orders behind the PF, `orders` all orders of the stage's Set. */
-export type StageFigure = { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };
+export type StageFigure = PfEvidence & { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };
 /**
  * One last-N window on its own (`pfBase.windows`): the Sets of the stage's population that pass THIS window alone (`pop` of them are judged: all Sets for Base,
  * the Base-passing Sets for Main, the Main-passing Sets for Real), their share of that population (`pct`) and of every configured Set (`pctAll`), the pooled PF of
  * the orders this window reads (`pf`, `orders` behind it) and the mean of the Sets' own PFs. `n` is the configured window (a list for the Main short and
  * Negative candidates), `chosen` (Main short) how many Sets run each candidate, `mode` (minimal windows) positive / negative / both.
  */
-export type WindowFigure = {
+export type WindowFigure = PfEvidence & {
   on: boolean;
   n: number | number[] | null;
   pop: number;
@@ -183,21 +198,24 @@ export type Execution = {
 };
 
 export type LiveStats = {
+  /** Compact Overall fallback: only explicitly attributed connection fields are available. */
+  compactFallback?: boolean;
+  costModel?: CostModel;
   /** Sets and orders after every validation gate, as executed (open positions stay handled until closed). */
   execution?: Execution;
   running: boolean;
   mode: string;
   connection: string;
   exchange: string;
-  startedAt: number;
+  startedAt?: number;
   now: number;
-  uptimeS: number;
+  uptimeS?: number;
   equity: number;
-  startEquity: number;
+  startEquity?: number;
   available: number;
   usedMargin: number | null;
   unrealized: number;
-  realizedPnl: number;
+  realizedPnl?: number;
   sessionPnl: number;
   pnlPct: number | null;
   drawdownPct: number | null;
@@ -256,17 +274,17 @@ export type LiveStats = {
   };
   halted: boolean;
   haltReason: string | null;
-  leverage: number;
+  leverage?: number;
   useMaxLeverage?: boolean;
   leverageMap?: Record<string, number>;
-  slPct: number;
-  tpPct: number;
-  targetNotional: number;
-  activityPerMin: number;
-  consecLoss: number;
+  slPct?: number;
+  tpPct?: number;
+  targetNotional?: number;
+  activityPerMin?: number;
+  consecLoss?: number;
   errors: number;
-  lastError: string;
-  cycle: number;
+  lastError?: string;
+  cycle?: number;
   progressPct?: number;
   progressPhase?: string;
   progressDetail?: string;
@@ -463,6 +481,7 @@ export type LiveStats = {
     pfCost?: number;
     /** The lane's own PF block (null when the lane reports none). */
     pfDetail?: LanePfDetail | null;
+    costModel?: CostModel | null;
     pfUsdt?: number;
     progressErrors?: number;
     statsAgeS?: number;
@@ -538,7 +557,7 @@ export type LiveStats = {
     rest?: number;
     ws?: number;
   };
-  pfCost?: {
+  pfCost?: PfEvidence & {
     n?: number;
     count?: number;
     avgR?: number;
@@ -573,6 +592,12 @@ export type LiveStats = {
     trailScores?: Array<{ key: string; n: number; ratio: number; pf: number; selected: boolean; inRange?: boolean }>;
   };
   sets?: {
+    normalEntriesEnabled?: boolean;
+    lastNMode?: string;
+    independentLastNLanes?: boolean;
+    stageContextBars?: number;
+    stageContextFullSymbols?: number;
+    stageContextShortSymbols?: number;
     enabled?: boolean;
     ready?: boolean;
     lookback?: number;
@@ -751,15 +776,20 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   const lane = (s.lanes || []).find((l) => l.type === conn);
   if (!lane) return null;
   const prefix = cidPrefix(conn);
-  const unitWant = conn === "vst" ? "vst" : "usdt";
   const open = (s.open || []).filter((p) => {
+    if (p.connection) return p.connection === lane.id;
+    if (p.connType) return p.connType === conn;
     const cid = String(p.clientId || "");
-    if (prefix && cid.startsWith(prefix)) return true;
-    const u = String(p.unit || "").toLowerCase();
-    return Boolean(u) && u === unitWant;
+    return Boolean(prefix) && cid.startsWith(prefix);
   });
   return {
-    ...s,
+    // An allowlist prevents every future Overall-only field from silently
+    // acquiring this connection's label. Detailed stats use the direct endpoint.
+    compactFallback: true,
+    now: s.now,
+    lanes: [lane],
+    signals: [],
+    prices: {},
     connType: conn,
     connection: lane.id || (conn === "live" ? "bingx-x01" : "bingx-x02"),
     unit: lane.unit || (conn === "vst" ? "VST" : "USDT"),
@@ -767,11 +797,11 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
     running: lane.running,
     halted: lane.halted,
-    haltReason: lane.haltReason ?? s.haltReason ?? null,
+    haltReason: lane.haltReason ?? null,
     paused: lane.paused,
     equity: lane.equity,
-    available: lane.available ?? s.available,
-    unrealized: lane.unrealized ?? 0,
+    available: lane.available,
+    unrealized: lane.unrealized,
     sessionPnl: lane.sessionPnl,
     wins: lane.wins,
     losses: lane.losses,
@@ -779,6 +809,15 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     openCount: lane.openCount,
     open,
     // everything the overall snapshot merges across lanes is taken from this lane only
+    // These blocks have no per-lane payload in this compact fallback. Missing is
+    // safer than relabeling pooled results as this account's independent evidence.
+    sets: undefined,
+    execution: undefined,
+    coord: undefined,
+    variants: undefined,
+    block: undefined,
+    exits: undefined,
+    dca: undefined,
     closed: (s.closed ?? []).filter((c) => c.connection === lane.id),
     symbols: Array.from(new Set(open.map((p) => String(p.symbol)))).sort(),
     usedMargin: lane.usedMargin ?? null,
@@ -786,31 +825,34 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     drawdownPct: lane.drawdownPct ?? null,
     maxOpen: lane.maxOpen ?? null,
     pfCost: lane.pfDetail ?? undefined,
+    costModel: lane.costModel ?? undefined,
     profitFactor: lane.pf ?? undefined,
     stale: Boolean(lane.stale),
-    symbolCount: lane.symbolCount ?? s.symbolCount,
-    scanMs: lane.scanMs ?? s.scanMs,
-    lastError: lane.lastError ?? s.lastError,
+    symbolCount: lane.symbolCount,
+    scanMs: lane.scanMs,
+    rssMb: lane.rssMb,
+    errors: lane.errors,
+    lastError: lane.lastError,
     pf: lane.pf ?? undefined,
-    progressPct: lane.progressPct ?? s.progressPct,
-    progressPhase: lane.progressPhase ?? s.progressPhase,
-    progressDetail: lane.progressDetail ?? s.progressDetail,
-    progressReady: lane.progressReady ?? s.progressReady,
-    progressSymbol: lane.progressSymbol ?? s.progressSymbol,
-    progressSetId: lane.progressSetId ?? s.progressSetId,
-    progressSymbolsDone: lane.progressSymbolsDone ?? s.progressSymbolsDone,
-    progressSymbolsTotal: lane.progressSymbolsTotal ?? s.progressSymbolsTotal,
-    progressSetsDone: lane.progressSetsDone ?? s.progressSetsDone,
-    progressSetsTotal: lane.progressSetsTotal ?? s.progressSetsTotal,
-    progressBarsDone: lane.progressBarsDone ?? s.progressBarsDone,
-    progressBarsTotal: lane.progressBarsTotal ?? s.progressBarsTotal,
-    progressElapsedMs: lane.progressElapsedMs ?? s.progressElapsedMs,
-    progressLastRunMs: lane.progressLastRunMs ?? s.progressLastRunMs,
-    progressCycle: lane.progressCycle ?? s.progressCycle,
-    progressError: lane.progressError ?? s.progressError,
-    klinesReady: lane.klinesReady ?? s.klinesReady,
-    alive: lane.alive ?? s.alive,
-    cycle: lane.cycle ?? s.cycle,
+    progressPct: lane.progressPct,
+    progressPhase: lane.progressPhase,
+    progressDetail: lane.progressDetail,
+    progressReady: lane.progressReady,
+    progressSymbol: lane.progressSymbol,
+    progressSetId: lane.progressSetId,
+    progressSymbolsDone: lane.progressSymbolsDone,
+    progressSymbolsTotal: lane.progressSymbolsTotal,
+    progressSetsDone: lane.progressSetsDone,
+    progressSetsTotal: lane.progressSetsTotal,
+    progressBarsDone: lane.progressBarsDone,
+    progressBarsTotal: lane.progressBarsTotal,
+    progressElapsedMs: lane.progressElapsedMs,
+    progressLastRunMs: lane.progressLastRunMs,
+    progressCycle: lane.progressCycle,
+    progressError: lane.progressError,
+    klinesReady: lane.klinesReady,
+    alive: lane.alive,
+    cycle: lane.cycle,
   };
 }
 

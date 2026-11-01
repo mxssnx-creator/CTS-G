@@ -1,4 +1,5 @@
 /** CTS live-trading analytics: profit factor windows + drawdown-time average. */
+import type { PfEvidence } from "./live-stats.ts";
 
 export type PfRow = { pnl: number; t: number; notional?: number; pnl_pct?: number; net_pnl_pct?: number | null };
 
@@ -28,7 +29,7 @@ export type DrawdownTimeMetric = {
   inDrawdown: boolean;
 };
 
-export type CostPfMetric = {
+export type CostPfMetric = PfEvidence & {
   n: number;
   count: number;
   avgR: number;
@@ -199,8 +200,12 @@ export function lastNCostPf(
     avgR: round(avgR),
     ratio: round(ratio),
     pf: round(pf),
+    pfFinite: gl > 0 ? gp / gl : null,
+    pfState: count === 0 ? "empty" : gl > 0 ? "finite" : gp > 0 ? "no-loss" : "flat",
+    netGain: gp,
+    netLoss: gl,
     costPct,
-    netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
+    netPct: count ? round(100 * (gp - gl) / count) : 0,
     grossPct: count ? round(100 * newest.reduce((sum, row) => sum + finite(row.pnl_pct), 0) / count) : 0,
     netSumPct: round(100 * (gp - gl)),
     minPf,
@@ -208,7 +213,7 @@ export function lastNCostPf(
   };
 }
 
-export function buildOverview(rows: PfRow[], now = Date.now()) {
+export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITION_COST_PCT_DEFAULT, minPf = 1.1) {
   const newestFirst = [...rows].sort((a, b) => b.t - a.t);
   const withinHours = (hours: number) =>
     newestFirst.filter((row) => {
@@ -217,19 +222,19 @@ export function buildOverview(rows: PfRow[], now = Date.now()) {
     });
   return {
     generatedAt: now,
-    last4: lastNCostPf(newestFirst, 4),
-    costPf: lastNCostPf(newestFirst, 15, POSITION_COST_PCT_DEFAULT, 1.1),
+    last4: lastNCostPf(newestFirst, 4, costPct, minPf),
+    costPf: lastNCostPf(newestFirst, 15, costPct, minPf),
     positionWindows: {
-      "12": lastNCostPf(newestFirst, 12),
-      "15": lastNCostPf(newestFirst, 15),
-      "25": lastNCostPf(newestFirst, 25),
-      "75": lastNCostPf(newestFirst, 75),
-      "150": lastNCostPf(newestFirst, 150),
+      "12": lastNCostPf(newestFirst, 12, costPct, minPf),
+      "15": lastNCostPf(newestFirst, 15, costPct, minPf),
+      "25": lastNCostPf(newestFirst, 25, costPct, minPf),
+      "75": lastNCostPf(newestFirst, 75, costPct, minPf),
+      "150": lastNCostPf(newestFirst, 150, costPct, minPf),
     } as const,
     timeWindows: {
-      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1),
-      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1),
-      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1),
+      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1, costPct, minPf),
+      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1, costPct, minPf),
+      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1, costPct, minPf),
     } as const,
     drawdown3d: calculateDrawdownTime(newestFirst, now, 3),
     drawdownAll: calculateDrawdownTime(newestFirst, now, 3650),

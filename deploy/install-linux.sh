@@ -69,6 +69,7 @@ done
 
 require_linux
 require_root
+require_systemd
 
 log "install  name=$CTS_G_NAME  root=$CTS_G_ROOT  desk=:${DESK_PORT}  branch=$BRANCH"
 log "unattended — no prompts; skip software already present"

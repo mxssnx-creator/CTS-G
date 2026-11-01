@@ -8,6 +8,7 @@ Neither book writes the other.
 from __future__ import annotations
 
 import time
+from modules import trailing_enabled
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -203,7 +204,7 @@ class VariantBook:
         self.trail_give_max = float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX)
         self.trail_give_factor = float(ov.get("trailGiveFactor") or TRAIL_GIVE_FACTOR)
         self.trail_recalc_give = bool(ov.get("trailRecalcGive", True))
-        self.trail_auto = bool(ov.get("trailAuto", True))
+        self.trail_auto = trailing_enabled(ov) and bool(ov.get("trailAuto", True))
         self.trail_recalc_n = max(MIN_VALIDATION_N, window_n(ov, "trailRecalcN", fallback=MIN_VALIDATION_N))
         self.trail_recalc_every = max(3, int(ov.get("trailRecalcEvery") or 8))
         arm = ov.get("trailArmPct")

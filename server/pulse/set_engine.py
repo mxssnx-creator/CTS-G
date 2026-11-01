@@ -18,11 +18,12 @@ from array import array
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from itertools import accumulate, repeat
+from itertools import accumulate, islice, repeat
 from operator import le, neg
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from config_num import num
+from modules import trailing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
     base_min_pf,
@@ -32,6 +33,7 @@ from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
     normalize_cost_pct,
+    pf_evidence,
     last_n_cost_pf,
     signed_result_r,
     SL_RATIOS,
@@ -1652,6 +1654,7 @@ class SetBook:
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
         self.hist_honor_tp = True
+        self.normal_entries = True
         self.exit_sets = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
         self.packs: List[str] = list(PACKS)
@@ -1740,6 +1743,7 @@ class SetBook:
 
     def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
+        self.normal_entries = bool(ov.get("stratNormal", True))
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
         # Collection grows for sparse scored Sets independently of the admission gate.
@@ -1893,7 +1897,7 @@ class SetBook:
             extra_names = []
         extra_names = sorted({str(x) for x in extra_names if extra_known(str(x))})
         packs.extend(EXTRA_INDICATOR_PREFIX + name for name in extra_names)
-        self.packs = packs or ["indications"]
+        self.packs = packs       # an explicitly empty strategy selection stays empty
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
         self.short_steps = list(range(lo, hi + 1))
@@ -1937,6 +1941,8 @@ class SetBook:
         self.trails = [t for t in self.trails
                        if math.isfinite(t[1]) and math.isfinite(t[2])
                        and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9]
+        if not trailing_enabled(ov):
+            self.trails = []
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
         except Exception:
@@ -3145,6 +3151,8 @@ class SetBook:
 
     def gate_reason(self, st: SetState) -> str:
         """Entry readiness: PF/risk validation plus the Set's own minimal coordination."""
+        if st.kind == "base" and not self.normal_entries:
+            return "type-disabled"  # internal paper processing continues; only Normal entries are disabled
         reason = self.base_validation_reason(st)
         if reason:
             return reason
@@ -3355,15 +3363,20 @@ class SetBook:
         return self._real_paper_scopes(n, scoped=True)
 
     def _real_paper_scopes(self, n: int, scoped: bool) -> Dict[str, List[Dict[str, Any]]]:
-        """Bound each output while scanning, and never feed an expired/future replay result to an Axis."""
+        """Newest eligible paper rows per scope, on each Set's scored decision clock.
+
+        Tapes are chronological. Merge their bounded tails instead of scanning
+        every stored row on each entry cycle. A pack/lane's newest n rows are
+        sufficient for every parent scope's newest n rows too.
+        """
         n = max(1, int(n))
         cf = cost_as_frac(self.cost_pct)
-        by: Dict[str, List[Tuple[float, int, float, str]]] = {"overall": []}
+        by: Dict[str, list] = {"overall": []}
         if scoped:
             by.update({"lane:pos": [], "lane:neg": []})
             for p in self.packs:
                 by.update({f"pack:{p}": [], f"pack:{p}:pos": [], f"pack:{p}:neg": []})
-        def add(key: str, item: Tuple[float, int, float, str]) -> None:
+        def add(key: str, item: tuple) -> None:
             heap = by.setdefault(key, [])
             if len(heap) < n:
                 heapq.heappush(heap, item)
@@ -3373,19 +3386,34 @@ class SetBook:
             anchor = max((st.score_at for st in self.by_idx), default=0.0)
             cutoff = anchor - self._evidence_lookback() * BAR_S if anchor > 0 else float("-inf")
             upper = anchor if anchor > 0 else float("inf")
-            seq = 0
-            for st in self.by_idx:
-                for lane, src in (("pos", st.exe or []), ("neg", getattr(st, "neg", None) or [])):
-                    for t, value in src[-n:]:
-                        if not cutoff <= t <= upper:
-                            continue
-                        item = (t, seq, value, lane)
-                        seq += 1
-                        add("overall", item)
-                        if scoped:
-                            add(f"lane:{lane}", item)
-                            add(f"pack:{st.pack}", item)
-                            add(f"pack:{st.pack}:{lane}", item)
+            streams: Dict[tuple, list] = {}
+
+            def tail(src, lo, hi, set_order, lane_order, lane):
+                for row_order in range(hi - 1, lo - 1, -1):
+                    t, value = src[row_order]
+                    # Stable ties retain the former Set/lane/row scan order.
+                    yield (t, (set_order, lane_order, row_order), value, lane)
+
+            for si, st in enumerate(self.by_idx):
+                limit = min(upper, st.score_at) if st.score_at > 0 else upper
+                if st.score_at > 0 and getattr(st, "score_before", False):
+                    limit = math.nextafter(limit, float("-inf"))
+                for li, (lane, src) in enumerate((("pos", st.exe or []), ("neg", getattr(st, "neg", None) or []))):
+                    # Apply time eligibility before truncating to Last-N. Future
+                    # rows must not displace eligible older closes from a window.
+                    lo = bisect.bisect_left(src, (cutoff, float("-inf")))
+                    hi = bisect.bisect_right(src, (limit, float("inf")))
+                    lo = max(lo, hi - n)
+                    if hi > lo:
+                        key = (st.pack, lane) if scoped else ("", "")
+                        streams.setdefault(key, []).append(tail(src, lo, hi, si, li, lane))
+            for (pack, lane), tapes in streams.items():
+                for item in islice(heapq.merge(*tapes, reverse=True), n):
+                    add("overall", item)
+                    if scoped:
+                        add(f"lane:{lane}", item)
+                        add(f"pack:{pack}", item)
+                        add(f"pack:{pack}:{lane}", item)
         return {key: [{"t": t, "pnl_pct": value + cf, "pnl": value, "lane": lane}
                       for t, _seq, value, lane in sorted(rows)] for key, rows in by.items()}
 
@@ -3503,7 +3531,8 @@ class SetBook:
             gp = sum(x.gate_gp for x in sts)
             gl = sum(x.gate_gl for x in sts)
             pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-            return {"pf": pf, "n": sum(x.gate_n for x in sts), "sets": len(sts)}
+            n = sum(x.gate_n for x in sts)
+            return {"pf": pf, "n": n, "sets": len(sts), **pf_evidence(gp, gl, n)}
         cf_ = cost_as_frac(self.cost_pct)
 
         def per_entry(sts: List[SetState]) -> Dict[str, Any]:
@@ -3564,8 +3593,9 @@ class SetBook:
             window orders and the plain mean of their own PFs (a window without a loss counts RANK_PF_CAP), never an average over all Sets."""
             gp, gl = sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts)
             pfs = [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
+            n = sum(int(getattr(x, n_key)) for x in sts)
             return {"sets": len(sts), "pct": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),
-                    "meanPf": round(sum(pfs) / len(pfs), 4) if pfs else 0.0, "n": sum(int(getattr(x, n_key)) for x in sts),
+                    "meanPf": round(sum(pfs) / len(pfs), 4) if pfs else 0.0, "n": n, **pf_evidence(gp, gl, n),
                     "orders": sum(int(getattr(x, orders_key)) for x in sts), "source": "paper"}
         stages = {"base": stage_row(base_only, "gate_gp", "gate_gl", "gate_n", "gate_n"),
                   "main": stage_row(main_pass, "main_gp", "main_gl", "main_n", "proc_total"),
@@ -3587,6 +3617,8 @@ class SetBook:
                    "meanPf": None if coordination else (round(sum(pfs) / len(pfs), 4) if pfs else 0.0), "orders": sum(nn(x) for x in sts)}
             if coordination:
                 row["role"] = "coordination"
+            else:
+                row.update(pf_evidence(gp, gl, row["orders"]))
             return row
         sv = lambda x: x.stage or {}                                                      # noqa: E731
         mp = main_pass
@@ -3794,6 +3826,9 @@ class SetBook:
             "historySnapshotAgeS": (round(max(0.0, time.time() - self._history_snapshot_oldest_at), 1)
                                     if self._history_snapshot_usable() and self._history_snapshot_oldest_at > 0 else None),
             "stageContextBars": self.history_bars(),
+            "normalEntriesEnabled": self.normal_entries,
+            "lastNMode": "adaptive-candidate-selection",
+            "independentLastNLanes": False,
             "stageContextFullSymbols": sum(len(bars) >= self.history_bars() for bars in self.bars.values()),
             "stageContextShortSymbols": sum(len(bars) < self.history_bars() for bars in self.bars.values()),
             "pfWindow": self.pf_n,

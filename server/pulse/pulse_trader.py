@@ -28,7 +28,7 @@ from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, ad
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
-from modules import resolve as resolve_modules
+from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
@@ -3759,8 +3759,9 @@ class Pulse:
                 return
         arm = float(pos.trail_arm or 0.0)
         give = float(pos.trail_give or 0.0)
-        # only a trailing Set trails (its own arm and give, as replayed); the Trailing strategy switch does not decide it
-        if pos.trail_set_id and pos.trail_set_id == pos.set_id and arm > 0 and give > 0:
+        # Off stops new adjustments, never removes an already protective stop.
+        if (getattr(self, "strat_trail", True) and pos.trail_set_id
+                and pos.trail_set_id == pos.set_id and arm > 0 and give > 0):
             fav = (pos.peak - e) / e if side > 0 else (e - pos.peak) / e
             if fav >= arm:
                 pos.trail_armed = True
@@ -4230,7 +4231,7 @@ class Pulse:
         }
         self.strat_ind = bool(ov.get("stratIndications", True))
         self.strat_block = bool(ov.get("stratBlock", True))
-        self.strat_trail = bool(ov.get("stratTrailing", True))
+        self.strat_trail = trailing_enabled(ov)
         self.strat_general = bool(ov.get("stratGeneral", True))
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")

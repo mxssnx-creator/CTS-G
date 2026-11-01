@@ -27,6 +27,7 @@ import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
+import { CostEvidencePanel } from "@/components/evidence-panel";
 import { secureMinimalPreset } from "@/lib/presets";
 import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS, minMode } from "@/lib/config-model";
 
@@ -229,6 +230,7 @@ function SettingsPage() {
               <CoveragePanel live={stats} />
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
+                <EnableSlider label="Normal Set entries" on={overlay.stratNormal} hint="Off disables new Normal entries; internal paper Sets and enabled additional strategy types continue processing." onChange={(v) => patch("stratNormal", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
                 <EnableSlider label="Trend (Sets and Base evaluation)" on={overlay.stratTrend} onChange={(v) => patch("stratTrend", v)} />
@@ -237,7 +239,7 @@ function SettingsPage() {
                 <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
                 <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
-                <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
+                <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="Off disables trailing Sets, peak-following and recalculation. Existing protective stops remain managed." onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
@@ -282,6 +284,7 @@ function SettingsPage() {
               title="Profit factor · PositionCost"
               hint="PF = net gains ÷ net losses over the selected window"
             >
+              <CostEvidencePanel stats={stats} />
               <Grid>
                 <Slider
                   label="Paper cost allowance"
@@ -737,7 +740,7 @@ function SettingsPage() {
                   label="Main · short candidates"
                   value={overlay.mainShortWindows}
                   options={[5, 10, 15, 20, 25]}
-                  hint={`default 5-15 step 5 · per Set, the window whose past validations were followed by the best PF on its Main Set · at most ${Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)} with the long window ${overlay.mainGateN}; if none qualify, the long reference remains`}
+                  hint={`Candidate selection, not simultaneous independent lanes. Effective candidates: ${overlay.mainShortWindows.filter(n => n <= Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}; excluded by ratio: ${overlay.mainShortWindows.filter(n => n > Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}. Long reference ${overlay.mainGateN} remains if none qualify.`}
                   onChange={(v) => patch("mainShortWindows", v)}
                 />
                 <Slider

@@ -1,6 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lastNCostPf } from "./analytics.ts";
+import { buildOverview, lastNCostPf } from "./analytics.ts";
+import { evidencePfText } from "./evidence-view.ts";
+
+test("browser calculations preserve finite high PF, no-loss, flat and empty evidence", () => {
+  const calculate = (nets: number[]) => lastNCostPf(nets.map((net, t) => ({ t, pnl: net, pnl_pct: net, net_pnl_pct: net })), 15);
+  for (const [nets, state, display] of [
+    [[1, -.001], "finite", "1000.0000"],
+    [[.1, .2], "no-loss", "No observed losses"],
+    [[0, 0], "flat", "Flat (PF undefined)"],
+    [[], "empty", "— (no sample)"],
+  ] as const) {
+    const result = calculate([...nets]);
+    assert.equal(result.pfState, state);
+    assert.equal(evidencePfText(result, result.count), display);
+  }
+});
 
 test("recorded execution net is not charged a second cost", () => {
   const rows = [
@@ -12,6 +27,21 @@ test("recorded execution net is not charged a second cost", () => {
     assert.equal(metrics.pf, 2);
     assert.equal(metrics.grossPct, 0.1);
     assert.equal(metrics.netSumPct, 0.02);
+  }
+});
+
+test("every overview window keeps recorded net and uses the selected cost only for gross-only rows", () => {
+  const rows = [{ t: 1, pnl: .04, pnl_pct: .001, net_pnl_pct: .0004 },
+    { t: 2, pnl: -.02, pnl_pct: .001, net_pnl_pct: -.0002 },
+    { t: 3, pnl: .01, pnl_pct: .004 }];
+  for (const cost of [0, .12, .3]) {
+    const overview = buildOverview(rows, 4000, cost, 1.7);
+    for (const m of [overview.costPf, overview.last4, ...Object.values(overview.positionWindows), ...Object.values(overview.timeWindows)]) {
+      assert.equal(m.costPct, cost);
+      assert.equal(m.minPf, 1.7);
+      assert.equal(m.pf, Number(((.0004 + .004 - cost / 100) / .0002).toFixed(4)));
+      assert.equal(m.netPct, Number((100 * (.0004 - .0002 + .004 - cost / 100) / 3).toFixed(4)));
+    }
   }
 });
 

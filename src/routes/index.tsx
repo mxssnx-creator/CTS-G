@@ -54,7 +54,10 @@ function DeskPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, pnl_pct: c.pnl_pct })),
+        stats?.closed ?? [],
+        Date.now(),
+        stats?.pfCost?.costPct ?? stats?.costModel?.paperCostPct,
+        stats?.pfCost?.minPf,
       ),
     [stats],
   );
@@ -112,7 +115,7 @@ function DeskPage() {
                 {fmt(stats?.unrealized, 4)}
               </span>
               <span className="text-muted">Uptime</span>
-              <span className="font-mono text-right">{stats ? ago(stats.uptimeS) : "—"}</span>
+              <span className="font-mono text-right">{stats?.uptimeS != null ? ago(stats.uptimeS) : "—"}</span>
             </div>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -142,7 +145,7 @@ function DeskPage() {
               E {d.expectancy >= 0 ? "+" : ""}
               {d.expectancy.toFixed(4)}
             </span>
-            <span className="text-right">{stats?.activityPerMin ?? 0}/min</span>
+            <span className="text-right">{stats?.activityPerMin ?? "—"}/min</span>
           </div>
         </div>
       </section>

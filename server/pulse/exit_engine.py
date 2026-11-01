@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from config_num import num
+from modules import trailing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
     MIN_VALIDATION_N,
@@ -124,7 +125,7 @@ class ExitBook:
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
         self.best_of = bool(ov.get("exitBestOf", True))
         self.lock_on = bool(ov.get("exitLockOn", True))
-        self.peak_on = bool(ov.get("exitPeakOn", True))
+        self.peak_on = trailing_enabled(ov) and bool(ov.get("exitPeakOn", True))
         self.rev_on = bool(ov.get("exitRevOn", False))
         self.time_on = bool(ov.get("exitTimeOn", False))
         self.lock_pct = pct_to_frac(num(ov, "exitLockPct", 0.15))

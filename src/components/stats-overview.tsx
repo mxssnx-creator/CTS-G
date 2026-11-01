@@ -4,6 +4,7 @@ import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
 import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
 import { executionScopeText, scopeStatus } from "@/lib/execution-scope";
+import { evidencePfText } from "@/lib/evidence-view";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -38,16 +39,17 @@ export function StatsOverview({
   };
   const heroes = (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {live?.compactFallback ? <p role="status" className="col-span-full text-sm text-muted">Compact connection snapshot: only explicitly attributed figures are shown. Detailed progress, settings and execution evidence require this connection's full statistics.</p> : null}
         <Hero
           k={`Last ${cost.n || 15} PF`}
-          v={cost.count ? formatPf(cost.pf) : "—"}
+          v={evidencePfText(live?.pfCost ?? cost, cost.count)}
           s={`Net gains ÷ net losses · R ${cost.avgR.toFixed(2)} · net ${cost.netSumPct >= 0 ? "+" : ""}${cost.netSumPct.toFixed(2)}% (${cost.netPct >= 0 ? "+" : ""}${cost.netPct.toFixed(3)}% per position) · n ${cost.count} · ${cost.count < 8 ? "insufficient evidence" : cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
         {live?.sets?.pfBase ? (
           <Hero
             k="Base-window PF · all-stage validated"
-            v={formatPf(live.sets.pfBase.base.n ? live.sets.pfBase.base.pf : null)}
+            v={evidencePfText(live.sets.pfBase.base, live.sets.pfBase.base.n)}
             s={`${live.sets.pfBase.base.sets} PF-validated Sets${live.sets.pfBase.validatedPct != null ? ` (${live.sets.pfBase.validatedPct.toFixed(1)}%${live.sets.pfBase.validatedBasePct != null && live.sets.pfBase.main?.on ? `, Base alone ${live.sets.pfBase.validatedBasePct.toFixed(1)}%` : ""})` : ""} · n ${live.sets.pfBase.base.n}${live.sets.pfBase.main?.on ? ` · Main last ${live.sets.pfBase.main.lastN}: PF ${formatPf(live.sets.pfBase.main.n ? live.sets.pfBase.main.pf : null)} (${live.sets.pfBase.main.n} orders)` : ""}${live.sets.pfBase.baseEntry && live.sets.pfBase.baseEntry.entries ? ` · per entry PF ${formatPf(live.sets.pfBase.baseEntry.pf)} (${live.sets.pfBase.baseEntry.entries} entries, ${live.sets.pfBase.baseEntry.setsPerEntry} Sets each)` : ""}${live.sets.pfBase.real ? ` · Real Sets PF ${formatPf((live.sets.pfBase.real.n ?? live.sets.pfBase.real.orders) ? live.sets.pfBase.real.pf : null)} (${live.sets.pfBase.real.orders} orders)` : ""} · before Base ${formatPf(live.sets.pfBase.unfiltered.n ? live.sets.pfBase.unfiltered.pf : null)}`}
             tone={!live.sets.pfBase.base.sets ? "ok" : live.sets.pfBase.base.pf >= 1.1 ? "good" : live.sets.pfBase.base.pf < 1 ? "bad" : "ok"}
           />
@@ -80,20 +82,20 @@ export function StatsOverview({
         ) : null}
         <Hero
           k="Drawdown time avg"
-          v={formatDuration(dd.averageDurationMs || all.averageDurationMs)}
-          s={`${dd.episodes || all.episodes} episodes · 3d`}
+          v={dd.samples ? formatDuration(dd.averageDurationMs) : "—"}
+          s={`${dd.episodes} episodes · ${dd.samples} recorded closes · 3d`}
           tone={dd.inDrawdown ? "bad" : "ok"}
         />
         <Hero
           k="Current DD time"
-          v={formatDuration(dd.currentDurationMs)}
-          s={dd.inDrawdown ? `depth ${dd.currentDepth.toFixed(4)}` : "at peak"}
-          tone={dd.inDrawdown ? "bad" : "good"}
+          v={dd.samples ? formatDuration(dd.currentDurationMs) : "—"}
+          s={!dd.samples ? "no recorded closes in 3d" : dd.inDrawdown ? `depth ${dd.currentDepth.toFixed(4)}` : "at peak of available 3d tape"}
+          tone={!dd.samples ? "ok" : dd.inDrawdown ? "bad" : "good"}
         />
         <Hero
           k="Max DD episode"
-          v={formatDuration(dd.maxDurationMs || all.maxDurationMs)}
-          s={`depth ${Math.max(dd.maxDepth, all.maxDepth).toFixed(4)}`}
+          v={dd.samples ? formatDuration(dd.maxDurationMs) : "—"}
+          s={`depth ${dd.maxDepth.toFixed(4)} · available 3d tape`}
         />
       </div>
   );
@@ -106,6 +108,7 @@ export function StatsOverview({
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Profit factor after costs">
+          <p className="mb-3 text-xs text-muted">Recorded net returns are used unchanged. Gross-only rows use a {data.costPf.costPct}% round-trip estimate; this is not proof of actual fill fees.</p>
           <table className="w-full text-sm">
             <thead className="font-mono text-[11px] text-muted">
               <tr>
@@ -173,8 +176,8 @@ function StagesCard({ live }: { live: LiveStats | null | undefined }) {
             <th className="pb-2 text-left font-medium">Stage</th>
             <th className="pb-2 text-right font-medium">Valid Sets</th>
             <th className="pb-2 text-right font-medium">% of all</th>
-            <th className="pb-2 text-right font-medium" title="Gross profit over gross loss of the valid Sets' window orders">PF (valid)</th>
-            <th className="pb-2 text-right font-medium" title="Mean of the valid Sets' own PFs">Mean PF</th>
+            <th className="pb-2 text-right font-medium" title="Net gains over net losses of the valid Sets' window samples">PF (valid)</th>
+            <th className="pb-2 text-right font-medium" title="Sum of net positive and absolute negative returns; not account cash">Net gain / loss</th>
             <th className="pb-2 text-right font-medium">Window orders</th>
           </tr>
         </thead>
@@ -184,8 +187,8 @@ function StagesCard({ live }: { live: LiveStats | null | undefined }) {
               <td className="py-1.5">{r.label}</td>
               <td className="py-1.5 text-right">{r.sets}</td>
               <td className="py-1.5 text-right">{r.pct.toFixed(1)}%</td>
-              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{formatPf(r.pf)}</td>
-              <td className="py-1.5 text-right">{formatPf(r.meanPf)}</td>
+              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{evidencePfText(live?.sets?.pfBase?.stages?.[r.key], r.orders)}</td>
+              <td className="py-1.5 text-right">{live?.sets?.pfBase?.stages?.[r.key]?.netGain?.toFixed(4) ?? "—"} / {live?.sets?.pfBase?.stages?.[r.key]?.netLoss?.toFixed(4) ?? "—"}</td>
               <td className="py-1.5 text-right">{r.orders}</td>
             </tr>
           ))}
@@ -215,7 +218,7 @@ function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
             <th className="pb-2 text-right font-medium" title="Sets judged by this window's stage">Judged</th>
             <th className="pb-2 text-right font-medium">Pass</th>
             <th className="pb-2 text-right font-medium" title="Share of the Sets its stage judges">% of judged</th>
-            <th className="pb-2 text-right font-medium" title="Gross profit over gross loss of the orders this window reads, over the Sets that pass it">PF</th>
+            <th className="pb-2 text-right font-medium" title="Net gains over net losses of the samples this window reads, over the Sets that pass it">PF</th>
             <th className="pb-2 text-right font-medium" title="Orders behind that PF">Orders</th>
           </tr>
         </thead>
@@ -227,7 +230,7 @@ function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
               <td className="py-1.5 text-right">{r.on ? r.pop : "—"}</td>
               <td className="py-1.5 text-right">{r.on ? r.sets : "—"}</td>
               <td className="py-1.5 text-right">{r.on ? `${r.pct.toFixed(1)}%` : "—"}</td>
-              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{formatPf(r.pf)}</td>
+              <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{!r.on ? "Disabled" : live?.sets?.pfBase?.windows?.[r.key]?.role === "coordination" ? "Sign condition" : evidencePfText(live?.sets?.pfBase?.windows?.[r.key], r.orders)}</td>
               <td className="py-1.5 text-right">{r.on ? r.orders : "—"}</td>
             </tr>
           ))}
@@ -245,7 +248,7 @@ function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
       <td className="py-2 text-right font-mono tabular-nums">{m.count}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.avgR.toFixed(2)}</td>
       <td className={`py-2 text-right font-mono tabular-nums ${tone === "good" ? "text-primary" : tone === "bad" ? "text-danger" : ""}`}>
-        {m.count ? formatPf(m.pf) : "—"}
+        {evidencePfText(m, m.count)}
       </td>
       <td className={`py-2 text-right font-mono tabular-nums ${m.count < 1 ? "" : m.netPct >= 0 ? "text-primary" : "text-danger"}`}>
         {m.count < 1 ? "—" : `${m.netPct >= 0 ? "+" : ""}${m.netPct.toFixed(3)}`}

@@ -667,7 +667,32 @@ def set_and_lane_ids_never_collide():
     return ok, f"{len(ids)} Sets, {len(derived)} derived Set ids, all distinct: {len(set(allids)) == len(allids)}; {len(exits)} Exit Sets, each with a base twin: {twins <= base_ids}"
 
 
+def paper_scope_cutoffs_isolation_and_bounded_work():
+    """An independent full-scan oracle checks the coordinator's bounded merge."""
+    import subprocess
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_paper_scopes.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
+
+
+def independent_strategy_switches():
+    import subprocess
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_strategy_switches.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
+
+
+def independent_all_range_stage_oracle():
+    import subprocess
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_independent_ranges.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
+
+
 CHECKS = [
+    ("stages.independent-all-range-oracle", independent_all_range_stage_oracle),
+    ("stages.independent-strategy-switches", independent_strategy_switches),
+    ("stages.paper-scope-clock-isolation-and-bounded-work", paper_scope_cutoffs_isolation_and_bounded_work),
     ("stages.entry-history-survives-window-boundary", stage_entry_history_survives_window_boundary),
     ("stages.replay-scores-visible-orders-using-entry-history", replay_scores_visible_orders_using_entry_history),
     ("stages.debug-uses-each-window-pf-floor", debug_uses_each_window_pf_floor),

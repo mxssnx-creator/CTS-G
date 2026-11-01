@@ -221,6 +221,7 @@ export type PulseOverlay = {
   stratIndications: boolean;
   stratBlock: boolean;
   stratTrailing: boolean;
+  stratNormal: boolean;
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
@@ -465,6 +466,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratIndications: true,
   stratBlock: true,
   stratTrailing: true,
+  stratNormal: true,
   stratGeneral: true,
   stratShortRange: true,
   stratTrend: false,
@@ -673,6 +675,7 @@ export type CtsSettings = {
   stratIndications?: boolean;
   stratBlock?: boolean;
   stratTrailing?: boolean;
+  stratNormal?: boolean;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
   stratTrend?: boolean;
@@ -924,6 +927,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratIndications: bool(cts.stratIndications, true),
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
+    stratNormal: bool(cts.stratNormal, true),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
     stratTrend: bool(cts.stratTrend, false),
@@ -1044,6 +1048,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),
   };
+  // A raw module disable must not be displayed or re-saved as an enabled strategy.
+  out.stratTrailing = out.stratTrailing && out.modules["strategy.trailing"] !== false;
   if (Array.isArray(live?.symbols)) out.symbols = live.symbols as string[];
   if (live?.symbolsAll != null) out.symbolsAll = bool(live.symbolsAll, out.symbolsAll);
   out.symbolSort = coerceSymbolSort(out.symbolSort ?? live?.symbolSort);

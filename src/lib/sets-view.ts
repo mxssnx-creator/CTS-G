@@ -231,7 +231,7 @@ export function pfByStep(
     .map(([step, rs]) => ({ step, pf: pooledPf(rs), valid: rs.length, orders: rs.reduce((a, r) => a + Number(r.gn ?? 0), 0) }));
 }
 
-export type StageRow = { key: string; label: string; sets: number; pct: number; pf: number | null; meanPf: number | null; orders: number };
+export type StageRow = { key: "base" | "main" | "real" | "realNeg" | "valid"; label: string; sets: number; pct: number; pf: number | null; meanPf: number | null; orders: number };
 
 const STAGE_LABELS: Array<[StageRow["key"], string]> = [
   ["base", "Base · long and short PF"],
@@ -249,7 +249,7 @@ export function stageFigures(pb: Pick<PfBase, "stages"> | null | undefined): Sta
   const st = pb?.stages;
   if (!st) return [];
   return STAGE_LABELS.map(([key, label]) => {
-    const r = st[key as "base" | "main" | "real" | "realNeg" | "valid"];
+    const r = st[key];
     return { key, label, sets: r.sets, pct: r.pct, pf: r.sets > 0 && r.n > 0 ? r.pf : null, meanPf: r.sets > 0 && r.n > 0 ? r.meanPf : null, orders: r.n };
   });
 }
@@ -303,10 +303,11 @@ export function windowFigures(pb: Pick<PfBase, "windows"> | null | undefined): W
   });
 }
 
-/** A PF for display: a window without a loss has no finite PF (the engine reports 99), so it reads "no loss" rather than 99.00. */
+/** Without explicit evidence, legacy 99 can be a no-loss sentinel OR a finite ratio.
+ * Larger finite ratios are not no-loss sentinels. Evidence-aware views use evidencePfText. */
 export function formatPf(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return "—";
-  return Number(v) >= 99 ? "no loss" : Number(v).toFixed(digits);
+  return Number(v) === 99 ? "— (legacy PF state)" : Number(v).toFixed(digits);
 }
 
 /** An empty or unknown stage has no measured PF. */

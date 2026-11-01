@@ -30,6 +30,7 @@ const files = [
   "src/lib/analytics.test.ts",
   "src/lib/base-progress.test.ts",
   "src/lib/execution-scope.test.ts",
+  "src/lib/evidence-view.test.ts",
   "src/lib/poll.test.ts",
   "src/lib/sets-view.test.ts",
   "src/lib/config-model.test.ts",

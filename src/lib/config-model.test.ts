@@ -1,10 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { defaultOverlay, overlayFromCts, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { defaultOverlay, overlayFromCts, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("Normal admission is independent and a raw trailing module disable survives a settings save", () => {
+  const loaded = overlayFromCts(cts(), { stratNormal: false, stratTrailing: true,
+    modules: { "strategy.trailing": false } });
+  assert.equal(loaded.stratNormal, false);
+  assert.equal(loaded.stratGeneral, true);
+  assert.equal(loaded.stratTrailing, false);
+  const saved = syncOverlayFlags(loaded);
+  assert.equal(saved.modules["strategy.trailing"], false);
+  assert.equal(saved.modules["strategy.trailRecalc"], false);
+  const enabled = syncOverlayFlags({ ...loaded, stratTrailing: true });
+  assert.equal(enabled.modules["strategy.trailing"], true, "explicit operator toggle can enable it again");
+});
 
 test("Secure, Minimal is an isolated, bounded 50-symbol preset", () => {
   const preset = secureMinimalPreset();

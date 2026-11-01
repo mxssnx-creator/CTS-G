@@ -60,6 +60,7 @@ done
 
 require_linux
 require_root
+require_systemd
 
 [[ -d "$CTS_G_ROOT" ]] || die "$CTS_G_ROOT missing — run deploy/install-linux.sh first"
 [[ -d "$PULSE_DIR" ]] || die "$PULSE_DIR missing — run deploy/install-linux.sh first"

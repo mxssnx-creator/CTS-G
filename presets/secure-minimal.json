@@ -109,6 +109,7 @@
   "stratIndications": true,
   "stratBlock": false,
   "stratTrailing": true,
+  "stratNormal": true,
   "stratGeneral": true,
   "stratShortRange": true,
   "stratTrend": false,

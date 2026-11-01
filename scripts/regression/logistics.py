@@ -14,7 +14,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "d0049a8bf9de29f49e1eb9e03baf019e5674b60c"
+PIN_WANT = "6ca110bcc5aec16d938935172df8eeeb438f6d76"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -437,6 +437,14 @@ def systemd_services_retry_without_exhausting_their_start_limit():
     return not issues, "; ".join(issues or details)
 
 
+def startup_controls_fail_closed_and_respect_disabled_lanes():
+    """All service and Redis calls are stubs; this check cannot start a trader."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_startup_controls.py")],
+                            capture_output=True, text=True, timeout=30)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-500:]
+
+
 def install_can_keep_the_virtual_instance_off():
     """A live-only install disables/stops x02 without changing the default for other installations."""
     common = os.path.join(ROOT, "deploy", "linux-common.sh")
@@ -491,6 +499,7 @@ if [[ "$2" == disable ]]; then enable_stack 0 && start_stack 1 0; else start_sta
 
 
 CHECKS = [
+    ("logistics.startup-controls-fail-closed", startup_controls_fail_closed_and_respect_disabled_lanes),
     ("logistics.remote-installer-preserves-local-work", remote_installer_preserves_local_work_and_forwards_flags),
     ("logistics.live-only-fails-closed-on-x02-control-error", live_only_does_not_continue_after_x02_control_failure),
     ("logistics.live-only-install-keeps-x02-off", install_can_keep_the_virtual_instance_off),

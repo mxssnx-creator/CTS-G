@@ -54,6 +54,20 @@ require_linux() {
   [[ "$(uname -s)" == Linux ]] || die "Linux only"
 }
 
+systemd_runtime_present() {
+  [[ -d /run/systemd/system ]]
+}
+
+require_systemd() {
+  # Check the manager, not just the binary (containers can ship a stub systemctl).
+  # Called before packages, file copies or service mutations. Never print the
+  # manager environment: it may contain secrets.
+  if ! systemd_runtime_present || ! command -v systemctl >/dev/null 2>&1 \
+      || ! systemctl --system show-environment >/dev/null 2>&1; then
+    die "a running systemd manager is required; installer made no package, file or service changes"
+  fi
+}
+
 script_repo_root() {
   local caller="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
   local here
@@ -277,7 +291,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="d0049a8bf9de29f49e1eb9e03baf019e5674b60c"
+  local pt_want="6ca110bcc5aec16d938935172df8eeeb438f6d76"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then

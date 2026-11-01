@@ -151,8 +151,9 @@ test("effective PF per step pools the valid Sets of that step only", () => {
   ]);
 });
 
-test("a PF for display: a window without a loss reads no loss, not 99.00; missing values read a dash", () => {
-  assert.equal(formatPf(99), "no loss");
+test("legacy 99 is ambiguous without evidence; high finite PF is not a no-loss sentinel", () => {
+  assert.equal(formatPf(99), "— (legacy PF state)");
+  assert.equal(formatPf(1000), "1000.00");
   assert.equal(formatPf(1.2345), "1.23");
   assert.equal(formatPf(0), "0.00");
   assert.equal(formatPf(null), "—");
@@ -165,7 +166,7 @@ test("stage PF is unavailable without its own window sample", () => {
   assert.equal(formatPfWithCount(0, 0), "—");
   assert.equal(formatPfWithCount(99, undefined), "—");
   assert.equal(formatPfWithCount(0, 3), "0.00");
-  assert.equal(formatPfWithCount(99, 3), "no loss");
+  assert.equal(formatPfWithCount(99, 3), "— (legacy PF state)");
 });
 
 test("a flat or empty set window has no measured PF", () => {
