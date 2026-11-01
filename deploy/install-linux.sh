@@ -10,6 +10,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux-common.sh
 source "$HERE/linux-common.sh"
+# shellcheck source=git-update.sh
+source "$HERE/git-update.sh"
 
 FROM_DIR=""
 DO_CLONE=0
@@ -82,8 +84,8 @@ if [[ "$DO_CLONE" -eq 1 ]]; then
     git -C "$CTS_G_ROOT" remote set-url origin "$REPO_URL" 2>/dev/null \
       || git -C "$CTS_G_ROOT" remote add origin "$REPO_URL"
     git -C "$CTS_G_ROOT" fetch --prune origin
-    git -C "$CTS_G_ROOT" checkout -f "$BRANCH" >/dev/null 2>&1 || git -C "$CTS_G_ROOT" checkout -B "$BRANCH"
-    git -C "$CTS_G_ROOT" reset --hard "origin/$BRANCH"
+    cts_git_update "$CTS_G_ROOT" origin "$BRANCH" 0 \
+      || die "Git update failed. Resolve local changes/divergence; the installer will not reset them."
     ok "git updated $CTS_G_ROOT"
   elif [[ -f "$CTS_G_ROOT/server/pulse/pulse_trader.py" ]]; then
     skip "tree already at $CTS_G_ROOT (not a clone)"

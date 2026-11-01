@@ -406,6 +406,14 @@ def regression_runner_reports_progress():
     return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
 
 
+def remote_installer_preserves_local_work_and_forwards_flags():
+    """Use disposable local repositories and a fake SSH; no remote host is contacted."""
+    import sys
+    result = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "test_safe_remote_install.py")],
+                            capture_output=True, text=True, timeout=60)
+    return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-400:]
+
+
 def systemd_services_retry_without_exhausting_their_start_limit():
     """Automatic restarts remain rate-limited but cannot themselves exhaust the configured start window."""
     issues = []
@@ -483,6 +491,7 @@ if [[ "$2" == disable ]]; then enable_stack 0 && start_stack 1 0; else start_sta
 
 
 CHECKS = [
+    ("logistics.remote-installer-preserves-local-work", remote_installer_preserves_local_work_and_forwards_flags),
     ("logistics.live-only-fails-closed-on-x02-control-error", live_only_does_not_continue_after_x02_control_failure),
     ("logistics.live-only-install-keeps-x02-off", install_can_keep_the_virtual_instance_off),
     ("logistics.systemd-services-retry-within-start-limit", systemd_services_retry_without_exhausting_their_start_limit),

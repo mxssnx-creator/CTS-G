@@ -39,6 +39,10 @@ a running or recoverable remote installation. An explicit installer/updater
 started. It does not close positions or cancel orders; protection must be
 verified before stopping. Later updates preserve an already-disabled x02.
 Mocked systemd checks exercise these paths without modifying real services.
+Existing-checkout installs now use the same non-forcing, fast-forward-only Git
+update as the updater instead of an unconditional checkout/reset. A fake-SSH
+integration test covers spaced paths, flag forwarding and preservation of
+dirty and diverged work; no remote server was contacted.
 
 An independent reconstruction of the previously studied ordinary CTS-G tapes
 reproduced all 25 selected Base Set/checkpoints and all 1,116,351 shadow

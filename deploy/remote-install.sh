@@ -5,6 +5,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux-common.sh
 source "$HERE/linux-common.sh"
+# shellcheck source=git-update.sh
+source "$HERE/git-update.sh"
 
 REMOTE_USER="${REMOTE_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
@@ -62,28 +64,38 @@ LIVE_FLAG=""
 VST_FLAG=""
 [[ "$NO_VST" -eq 1 ]] && VST_FLAG="--no-vst"
 
+# Quote every local value embedded in the remote script. The updater definition is
+# embedded as code from this checkout; the remote checkout might be an older version.
+printf -v CTS_REMOTE_ROOT_Q '%q' "$CTS_G_ROOT"
+printf -v CTS_REMOTE_PARENT_Q '%q' "$(dirname "$CTS_G_ROOT")"
+printf -v CTS_REMOTE_REPO_Q '%q' "$REPO_URL"
+printf -v CTS_REMOTE_BRANCH_Q '%q' "$BRANCH"
+printf -v CTS_REMOTE_NAME_Q '%q' "$CTS_G_NAME"
+printf -v CTS_REMOTE_PORT_Q '%q' "$DESK_PORT"
+printf -v CTS_REMOTE_HOST_Q '%q' "$REMOTE_HOST"
+
 remote=$(cat <<EOF
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a GIT_TERMINAL_PROMPT=0
+$(declare -f cts_git_update)
 if command -v git >/dev/null && command -v curl >/dev/null; then
   true
 elif command -v apt-get >/dev/null; then
   apt-get update -y -qq
   apt-get install -y -qq --no-install-recommends git ca-certificates curl
 fi
-if [[ -d $CTS_G_ROOT/.git ]]; then
-  git -C $CTS_G_ROOT remote set-url origin '$REPO_URL' || git -C $CTS_G_ROOT remote add origin '$REPO_URL'
-  git -C $CTS_G_ROOT fetch --prune origin
-  git -C $CTS_G_ROOT checkout -f $BRANCH || git -C $CTS_G_ROOT checkout -B $BRANCH
-  git -C $CTS_G_ROOT reset --hard origin/$BRANCH
-elif [[ -f $CTS_G_ROOT/server/pulse/pulse_trader.py ]]; then
+if [[ -d $CTS_REMOTE_ROOT_Q/.git ]]; then
+  git -C $CTS_REMOTE_ROOT_Q remote set-url origin $CTS_REMOTE_REPO_Q || git -C $CTS_REMOTE_ROOT_Q remote add origin $CTS_REMOTE_REPO_Q
+  git -C $CTS_REMOTE_ROOT_Q fetch --prune origin
+  cts_git_update $CTS_REMOTE_ROOT_Q origin $CTS_REMOTE_BRANCH_Q 0 || { echo 'Git update failed; local work was not reset.' >&2; exit 1; }
+elif [[ -f $CTS_REMOTE_ROOT_Q/server/pulse/pulse_trader.py ]]; then
   true
 else
-  mkdir -p $(dirname $CTS_G_ROOT)
-  git clone --branch $BRANCH --depth 1 '$REPO_URL' $CTS_G_ROOT
+  mkdir -p $CTS_REMOTE_PARENT_Q
+  git clone --branch $CTS_REMOTE_BRANCH_Q --depth 1 $CTS_REMOTE_REPO_Q $CTS_REMOTE_ROOT_Q
 fi
-chmod 755 $CTS_G_ROOT/deploy/*.sh
-$CTS_G_ROOT/deploy/install-linux.sh --yes --name $CTS_G_NAME --port $DESK_PORT --host $REMOTE_HOST --from-dir $CTS_G_ROOT $LIVE_FLAG $VST_FLAG
+chmod 755 $CTS_REMOTE_ROOT_Q/deploy/*.sh
+$CTS_REMOTE_ROOT_Q/deploy/install-linux.sh --yes --name $CTS_REMOTE_NAME_Q --port $CTS_REMOTE_PORT_Q --host $CTS_REMOTE_HOST_Q --from-dir $CTS_REMOTE_ROOT_Q $LIVE_FLAG $VST_FLAG
 EOF
 )
 
