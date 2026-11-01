@@ -277,7 +277,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="4a3c47773d87f662a668c4703335f0c5a626a106"
+  local pt_want="d0049a8bf9de29f49e1eb9e03baf019e5674b60c"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
@@ -400,18 +400,49 @@ redis_has_keys() {
   [[ -n "$key" && -n "$sec" && "$key" != "(nil)" && "$sec" != "(nil)" ]]
 }
 
+disable_vst_autostart() {
+  if systemctl disable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1; then
+    ok "vst auto-start disabled"
+  else
+    fail "disable vst auto-start"
+    return 1
+  fi
+}
+
 enable_stack() {
+  local enable_vst="${1:-1}"
   systemctl enable grok-pulse.target grok-pulse-http.service grok-desk.service >/dev/null 2>&1 || true
-  systemctl enable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1 || true
+  if [[ "$enable_vst" == "1" ]]; then
+    systemctl enable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1 || true
+  else
+    disable_vst_autostart || return 1
+  fi
   systemctl enable "grok-pulse@${LIVE_SLOT}.service" >/dev/null 2>&1 || true
   ok "units enabled"
 }
 
 start_stack() {
   local start_live="${1:-0}"
+  local start_vst="${2:-1}"
   systemctl restart grok-pulse-http.service || fail "start grok-pulse-http"
   systemctl restart grok-desk.service || fail "start grok-desk"
-  systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst"
+  case "$start_vst" in
+    1) systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst" ;;
+    0)
+      # Stopping an engine does not flatten positions or cancel its venue orders.
+      warn "stopping $VST_SLOT also stops its active position manager; verify existing protection separately"
+      systemctl stop "grok-pulse@${VST_SLOT}.service" || { fail "stop vst"; return 1; }
+      ok "vst stopped (positions and orders unchanged)"
+      ;;
+    preserve)
+      if systemctl is-enabled --quiet "grok-pulse@${VST_SLOT}.service"; then
+        systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst"
+      else
+        skip "vst restart (auto-start disabled)"
+      fi
+      ;;
+    *) fail "invalid vst start mode"; return 1 ;;
+  esac
   if [[ "$start_live" == "1" ]]; then
     systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
   elif redis_has_keys "$LIVE_SLOT"; then

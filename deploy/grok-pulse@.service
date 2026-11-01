@@ -4,6 +4,9 @@ Documentation=https://github.com/mxssnx-creator/CTS-G
 After=network-online.target redis-server.service redis.service grok-pulse-http.service
 Wants=network-online.target
 PartOf=grok-pulse.target
+# Leave room for repeated automatic retries without disabling the rate limit.
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=notify
@@ -14,9 +17,7 @@ EnvironmentFile=-/etc/cts-g/cts-g.env
 WorkingDirectory=/opt/grok-x01-pulse
 ExecStart=/usr/bin/python3 -O /opt/grok-x01-pulse/pulse_trader.py
 Restart=always
-RestartSec=2
-StartLimitBurst=20
-StartLimitIntervalSec=120
+RestartSec=15
 TimeoutStartSec=90
 TimeoutStopSec=25
 KillMode=mixed

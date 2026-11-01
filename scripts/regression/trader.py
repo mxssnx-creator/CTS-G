@@ -1704,6 +1704,83 @@ def completed_minutes_only_reach_the_set_history():
     return ok, f"bars={len(bars)} last={last_t} (want {minute - 60.0}) v3 order fixed={ordered}"
 
 
+def thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch():
+    """All 30 ready symbols can compete before an opening; larger universes remain bounded and finish next cycle."""
+    minute = 1_790_000_100.0
+    names = [f"S{i:02d}-USDT" for i in range(31)]
+
+    class Sets:
+        packs = ["general"]
+        bar_t = {s: minute - 60 for s in names}
+        def entry_signals(self, sym, _t):
+            return [("general", 1, (names.index(sym) + 1) / 100, "signal")]
+
+    def pulse():
+        p = _bare_pulse()
+        p.open = {}
+        p.sets = Sets()
+        p._scope_pick = lambda pack: (object(), "")
+        return p
+
+    old_syms = pt.SYMBOLS
+    try:
+        p = pulse()
+        pt.SYMBOLS = names[:30]
+        first = p.set_entry_candidates(now=minute + 1)
+        best = max(first.values()) if first else None
+        q = pulse()
+        pt.SYMBOLS = names
+        bounded = q.set_entry_candidates(now=minute + 1)
+        completed = q.set_entry_candidates(now=minute + 2)
+    finally:
+        pt.SYMBOLS = old_syms
+    ok = len(first) == 30 and best and best[1] == names[29] and len(bounded) == 30 and len(completed) == 31
+    return bool(ok), f"30 ready={len(first)}, highest={best and best[1]}, 31-symbol batches={len(bounded)}/{len(completed)}"
+
+
+def strongest_ready_symbol_can_take_the_first_slot():
+    """A stronger 30th ready signal competes at the real entry loop, not merely in the candidate helper."""
+    from coord_engine import Coordinator
+    minute = 1_790_000_100.0
+    names = [f"S{i:02d}-USDT" for i in range(30)]
+    class Sets:
+        enabled = use_historic_gate = True
+        packs = ["general"]
+        bar_t = {s: minute - 60 for s in names}
+        def entry_signals(self, sym, _t):
+            return [("general", 1, (names.index(sym) + 1) / 100, "signal")]
+        def pick_any(self, pack):
+            return types.SimpleNamespace(last15_pf=2.0, last15_n=50, pack=pack)
+        def pack_open(self, _pack):
+            return True
+    p = _bare_pulse()
+    p.sets, p.open, p.halted = Sets(), {}, False
+    p.strat_general = False
+    p.coord = Coordinator()
+    p.coord.load({}, {})
+    p._scope_pick = lambda pack: (object(), "")
+    p.strategy_closes = lambda: []
+    p.real_stage_paper = False
+    p.entries_blocked = lambda: False
+    p.rearrange_opens = lambda: []
+    p.maybe_block_adds = p.maybe_dca_adds = lambda: None
+    p.available, p.cooldown, p.skip_log, p.contracts, p.px = 100.0, {}, {}, {}, {}
+    p.avail_notional = lambda *a: 100.0
+    placed = []
+    def place(sym, _direction, _why, _conf):
+        placed.append(sym)
+        p.open[sym] = object()
+    p.place = place
+    old_syms, old_max, old_time = pt.SYMBOLS, pt.MAX_OPEN, pt.time.time
+    try:
+        pt.SYMBOLS, pt.MAX_OPEN = names, 1
+        pt.time.time = lambda: minute + 5
+        p.maybe_entries()
+    finally:
+        pt.SYMBOLS, pt.MAX_OPEN, pt.time.time = old_syms, old_max, old_time
+    return placed == [names[-1]], f"first opened={placed}; expected strongest ready symbol={names[-1]}"
+
+
 def completed_minutes_do_not_bridge_gaps_or_bad_rows():
     """The timestamp-free history can represent only a contiguous series of completed minutes."""
     p = _bare_pulse()
@@ -2110,6 +2187,8 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 
 
 CHECKS = [
+    ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
+    ("trader.thirty-ready-symbols-compete-in-one-bounded-batch", thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch),
     ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),
     ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
     ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),

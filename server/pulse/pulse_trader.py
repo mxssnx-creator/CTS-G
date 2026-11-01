@@ -216,7 +216,7 @@ def pack_of_reason(reason: Any) -> str:
 CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
-ENTRY_SIG_BUDGET = 16     # entry signals computed per cycle (one per symbol and minute); the rest follow on the next cycles
+ENTRY_SIG_BUDGET = 30     # one full x01 universe competes; larger universes continue in later cycles
 DD_HALT = 0.80                  # owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (ddHaltPct)
 EQ_MIN = 0.20
 RECV = 5000
@@ -6414,8 +6414,7 @@ class Pulse:
                     if time_gap:
                         # Identical/flat candle values can look like an overlap
                         # despite a timestamp gap.  Do not join across it.
-                        self.sets.bars.pop(s, None)
-                        self.sets.bar_t.pop(s, None)
+                        self.sets.discard_bars(s)
                     self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
                     # A valid shorter page can mean a newly listed symbol has no older
