@@ -45,6 +45,13 @@ integration test covers spaced paths, flag forwarding and preservation of
 dirty and diverged work; no remote server was contacted.
 Parallel regressions now emit each failure immediately to stderr while keeping
 their final results ordered, so long replay checks cannot hide earlier errors.
+The first follow-up full run reported 486/487 passing. A diagnostic rerun
+identified its failing backoff test: it assumed a nine-second cooldown even
+when an earlier test had set the worker's configurable value to three seconds.
+The fixture now tests both configured values and restores its prior state; it
+passes when explicitly seeded with the previously failing three-second value.
+The trading cooldown implementation was not changed. A complete rerun on this
+latest fixture is still required.
 
 An independent reconstruction of the previously studied ordinary CTS-G tapes
 reproduced all 25 selected Base Set/checkpoints and all 1,116,351 shadow

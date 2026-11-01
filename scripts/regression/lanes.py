@@ -1082,21 +1082,28 @@ def a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests():
 
 
 def a_symbol_that_keeps_losing_rests_longer_each_time():
-    """The wait before a symbol may be entered again: COOLDOWN_S after a win; four times longer after each loss in a row
-    (9, 36, 144, 576 s, capped at 30 min); a stop-out within 30 s of the entry bans it for 30 minutes."""
-    p = pt.Pulse.__new__(pt.Pulse)
-    p.position_cost_pct = 0.12
-    p.ignore_syms = {}
-    waits = [p.symbol_backoff("A-USDT", -0.01, 300.0, "sl") for _ in range(6)]
-    after_win = p.symbol_backoff("A-USDT", 0.01, 300.0, "tp")
-    loss_after_win = p.symbol_backoff("A-USDT", -0.01, 300.0, "sl")       # the count starts over after a win
-    p.symbol_backoff("B-USDT", -0.0005, 300.0, "scratch+")             # a gross gain under the cost is a loss
-    small = p.symbol_backoff("B-USDT", -0.0005, 300.0, "scratch+")
-    p.symbol_backoff("C-USDT", -0.1, 3.0, "sl")                         # fast stop-out
-    banned = p.ignore_syms.get("C-USDT", 0.0) - _real_time.time()
-    ok = waits == [9.0, 36.0, 144.0, 576.0, 1800.0, 1800.0] and after_win == 9.0 and loss_after_win == 9.0 \
-        and small == 36.0 and banned > 1700 and "A-USDT" not in p.ignore_syms
-    return ok, f"waits after 6 losses={waits}; after a win={after_win}, next loss={loss_after_win}; cost-eaten gain twice={small}; fast stop-out ban={round(banned)}s"
+    """Use the configured cooldown, even when an earlier test changed it, and restore shared worker state."""
+    old_cooldown = pt.COOLDOWN_S
+    results = {}
+    try:
+        for cooldown in (3.0, 9.0):
+            pt.COOLDOWN_S = cooldown
+            p = pt.Pulse.__new__(pt.Pulse)
+            p.position_cost_pct = 0.12
+            p.ignore_syms = {}
+            waits = [p.symbol_backoff("A-USDT", -0.01, 300.0, "sl") for _ in range(6)]
+            after_win = p.symbol_backoff("A-USDT", 0.01, 300.0, "tp")
+            loss_after_win = p.symbol_backoff("A-USDT", -0.01, 300.0, "sl")
+            p.symbol_backoff("B-USDT", -0.0005, 300.0, "scratch+")
+            small = p.symbol_backoff("B-USDT", -0.0005, 300.0, "scratch+")
+            p.symbol_backoff("C-USDT", -0.1, 3.0, "sl")
+            banned = p.ignore_syms.get("C-USDT", 0.0) - _real_time.time()
+            expected = [min(1800.0, cooldown * (4 ** i)) for i in range(6)]
+            results[cooldown] = (waits == expected and after_win == cooldown and loss_after_win == cooldown
+                                 and small == cooldown * 4 and banned > 1700 and "A-USDT" not in p.ignore_syms)
+    finally:
+        pt.COOLDOWN_S = old_cooldown
+    return all(results.values()), f"configured cooldowns {results}; original worker cooldown restored={pt.COOLDOWN_S == old_cooldown}"
 
 
 def position_size_has_a_hard_ceiling():
