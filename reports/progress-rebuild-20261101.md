@@ -50,8 +50,9 @@ identified its failing backoff test: it assumed a nine-second cooldown even
 when an earlier test had set the worker's configurable value to three seconds.
 The fixture now tests both configured values and restores its prior state; it
 passes when explicitly seeded with the previously failing three-second value.
-The trading cooldown implementation was not changed. A complete rerun on this
-latest fixture has started; its final result is not yet available.
+The trading cooldown implementation was not changed. A complete rerun on the
+corrected fixture passed **490/490 checks** (0 failures, 0 skips, 435 seconds,
+four workers). These results are offline and do not establish live readiness.
 
 An independent reconstruction of the previously studied ordinary CTS-G tapes
 reproduced all 25 selected Base Set/checkpoints and all 1,116,351 shadow
