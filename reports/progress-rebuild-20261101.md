@@ -51,7 +51,7 @@ when an earlier test had set the worker's configurable value to three seconds.
 The fixture now tests both configured values and restores its prior state; it
 passes when explicitly seeded with the previously failing three-second value.
 The trading cooldown implementation was not changed. A complete rerun on this
-latest fixture is still required.
+latest fixture has started; its final result is not yet available.
 
 An independent reconstruction of the previously studied ordinary CTS-G tapes
 reproduced all 25 selected Base Set/checkpoints and all 1,116,351 shadow
@@ -137,6 +137,10 @@ the later window; it was not promoted.
   Restore an approved route, reconcile ownership and protection, and verify the
   actual system before a live start. No parameter was promoted from these
   retrospective tests.
+- The service still sets fixed `MemoryHigh=400M` and `MemoryMax=640M`; the
+  load governor's automatic thresholds depend on symbol count, not available
+  host/cgroup memory. The requested host-aware memory budget is not complete and
+  was not guessed without visibility into Redis and other workloads.
 
 The offline evidence archive has SHA-256
 `1dd1c78e53b9003c162f5d5c101d0d780727f5569d67fdffab8b1f1de64979dc`.
