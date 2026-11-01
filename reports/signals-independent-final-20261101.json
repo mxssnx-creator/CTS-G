@@ -1,0 +1,78 @@
+{
+  "schema": "cts-g-signals-independent-audit-v1",
+  "scenarios": {
+    "baseline": {
+      "modeledOrders": 57,
+      "settled": 55,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.002962642915138355,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "expanded": {
+      "modeledOrders": 93,
+      "settled": 91,
+      "marks": 721,
+      "allTypeStageContextsCompared": 27648,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.00342064252668705,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "cost-stress": {
+      "modeledOrders": 60,
+      "settled": 59,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 3.469446951953614e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0028837217659183484,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "maker-hypothesis": {
+      "modeledOrders": 103,
+      "settled": 101,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.004061278530799084,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "smaller-book": {
+      "modeledOrders": 49,
+      "settled": 48,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 3.469446951953614e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0007553124879915246,
+      "differenceCount": 0,
+      "differences": []
+    }
+  },
+  "activeStageOptimization": {
+    "beforeSha256": "58792ca3a9aa6fd1fad5b1e8eba9bf26e3c9ac67393731c253556e32743c1e10",
+    "afterSha256": "58792ca3a9aa6fd1fad5b1e8eba9bf26e3c9ac67393731c253556e32743c1e10",
+    "equal": true,
+    "beforeSeconds": 6.569415638994542,
+    "afterSeconds": 5.195003925997298
+  },
+  "seconds": 32.882421803005855,
+  "limits": [
+    "shared source-onset inputs, separately registry-parity-tested",
+    "all three protection types independently replayed across every expanded stage context; no DCA/Active/venue oracle",
+    "cash/marks reconstruct modeled execution, not venue executions or untouched out-of-sample performance"
+  ]
+}

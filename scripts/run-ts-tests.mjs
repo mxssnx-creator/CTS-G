@@ -37,6 +37,7 @@ const files = [
   "src/lib/live-stats.test.ts",
   "src/lib/poll-http.test.ts",
   "src/lib/hourly-pf.test.ts",
+  "src/lib/control-coverage.test.ts",
 ];
 const run = spawnSync(
   process.execPath,

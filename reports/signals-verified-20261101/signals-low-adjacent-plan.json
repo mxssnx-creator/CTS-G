@@ -1,0 +1,163 @@
+{
+  "selectionRule": "First-window net positive, >=3 settled, PF>=2.2 or no losses, DD<=0.2%; exploratory small sample",
+  "sources": [],
+  "tradeStart": 1791547200000,
+  "end": 1791590400000,
+  "config": {
+    "mode": "offline-only",
+    "progress": {
+      "base": {
+        "long": [
+          5,
+          10,
+          15,
+          20
+        ],
+        "minimal": [
+          1,
+          2,
+          3
+        ],
+        "polarity": [
+          "positive",
+          "negative"
+        ],
+        "short": [
+          4,
+          6,
+          8,
+          10
+        ],
+        "shortRatio": 0.5
+      },
+      "fees": {
+        "entryLiquidity": "taker",
+        "exitLiquidity": "taker",
+        "maker": 0.0002,
+        "slippagePerLeg": 0.0001,
+        "source": "configured-scenario",
+        "taker": 0.0005
+      },
+      "historyMinutes": 6000,
+      "main": {
+        "long": [
+          5,
+          8,
+          10,
+          15,
+          20
+        ],
+        "minimal": [
+          1,
+          2,
+          3
+        ],
+        "polarity": [
+          "positive",
+          "negative"
+        ],
+        "short": [
+          4,
+          6,
+          8,
+          10
+        ],
+        "shortRatio": 0.5
+      },
+      "maxContextDrawdown": 0.01,
+      "minPf": 2.2,
+      "realLastN": "coordinated"
+    },
+    "protections": [
+      {
+        "id": "normal-tight-signals",
+        "kind": "normal",
+        "tp": 0.0045,
+        "sl": 0.003,
+        "trailArm": 0,
+        "trailGap": 0,
+        "holdMinutes": 45,
+        "strategyRange": "signals"
+      },
+      {
+        "id": "normal-tight-exit",
+        "kind": "normal",
+        "tp": 0.0045,
+        "sl": 0.003,
+        "trailArm": 0,
+        "trailGap": 0,
+        "holdMinutes": 45,
+        "strategyRange": "exit"
+      },
+      {
+        "id": "normal-balanced-signals",
+        "kind": "normal",
+        "tp": 0.007,
+        "sl": 0.0045,
+        "trailArm": 0,
+        "trailGap": 0,
+        "holdMinutes": 60,
+        "strategyRange": "signals"
+      },
+      {
+        "id": "normal-balanced-exit",
+        "kind": "normal",
+        "tp": 0.007,
+        "sl": 0.0045,
+        "trailArm": 0,
+        "trailGap": 0,
+        "holdMinutes": 60,
+        "strategyRange": "exit"
+      },
+      {
+        "id": "trailing-tight-signals",
+        "kind": "trailing",
+        "tp": 0.009,
+        "sl": 0.0035,
+        "trailArm": 0.0045,
+        "trailGap": 0.002,
+        "holdMinutes": 60,
+        "strategyRange": "signals"
+      },
+      {
+        "id": "trailing-tight-exit",
+        "kind": "trailing",
+        "tp": 0.009,
+        "sl": 0.0035,
+        "trailArm": 0.0045,
+        "trailGap": 0.002,
+        "holdMinutes": 60,
+        "strategyRange": "exit"
+      },
+      {
+        "id": "trailing-only-tight-signals",
+        "kind": "trailing-only",
+        "tp": 0,
+        "sl": 0.0045,
+        "trailArm": 0.006,
+        "trailGap": 0.0025,
+        "holdMinutes": 90,
+        "strategyRange": "signals"
+      },
+      {
+        "id": "trailing-only-tight-exit",
+        "kind": "trailing-only",
+        "tp": 0,
+        "sl": 0.0045,
+        "trailArm": 0.006,
+        "trailGap": 0.0025,
+        "holdMinutes": 90,
+        "strategyRange": "exit"
+      }
+    ],
+    "risk": {
+      "initialEquity": 1000,
+      "maxDrawdown": 0.005,
+      "maxGrossExposure": 40,
+      "maxHourlyLoss": 0.002,
+      "maxOpen": 4,
+      "notionalPerOrder": 10
+    },
+    "schema": "cts-g-signals-windows-v2"
+  }
+}

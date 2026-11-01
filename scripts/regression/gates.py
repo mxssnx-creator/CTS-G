@@ -449,9 +449,9 @@ def signal_floor_is_separate_from_window_classes():
     params = b.stage_params("sig-example")
     stage = [params.floor_for(n) for n in (5, 15, 25, 50)]
     ordinary = [b.floor_for(n, "indications") for n in (5, 15, 25, 50)]
-    b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=1.7))
+    b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=2.7))
     changed = [b.floor_for(5, "signals"), b.stage_params("signal.indicator").floor_for(50)]
-    ok = values == [1.3] * 4 and stage == values and ordinary == [1.05, 1.15, 1.25, 1.5] and changed == [1.7, 1.7]
+    ok = values == [2.2] * 4 and stage == values and ordinary == [1.05, 1.15, 1.25, 1.5] and changed == [2.7, 2.7]
     return ok, f"signals={values}, stage={stage}, ordinary={ordinary}, changed={changed}"
 
 
@@ -462,7 +462,7 @@ def pf_defaults_match_every_shipped_overlay():
     import re
     from common import ROOT, PULSE
     want = {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15,
-            "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 1.3}
+            "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}
     src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     block = src.split("export const PF_TYPE_DEFAULTS = {", 1)[1].split("} as const;", 1)[0]
     desk = {key: float(value) for key, value in re.findall(r"(minPf\w+):\s*([0-9.]+)", block)}

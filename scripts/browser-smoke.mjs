@@ -92,24 +92,36 @@ let browser = null;
 try {
   browser = await chromium.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    executablePath: process.env.BROWSER_SMOKE_EXECUTABLE_PATH || undefined,
+    args: ["--no-sandbox", "--disable-dev-shm-usage",
+      ...(process.env.BROWSER_SMOKE_SINGLE_PROCESS === "1" ? ["--single-process", "--no-zygote", "--use-gl=angle", "--use-angle=swiftshader"] : [])],
   });
 
   const viewports = {};
+  const context = await browser.newContext();
   for (const vp of VIEWPORTS) {
     const errors = { consoleErrors: [], pageErrors: [] };
-    const page = await browser.newPage({
-      viewport: { width: vp.width, height: vp.height },
-    });
+    const requestFailures = [];
+    const page = await context.newPage();
+    await page.setViewportSize({ width: vp.width, height: vp.height });
     page.on("console", (msg) => {
       if (msg.type() === "error") errors.consoleErrors.push(msg.text());
     });
     page.on("pageerror", (err) => errors.pageErrors.push(String(err?.message || err)));
+    page.on("requestfailed", request => {
+      const failed = new URL(request.url());
+      requestFailures.push({ url: failed.origin + failed.pathname, error: request.failure()?.errorText });
+    });
+    page.on("response", response => {
+      if (response.status() < 400) return;
+      const failed = new URL(response.url());
+      requestFailures.push({ url: failed.origin + failed.pathname, status: response.status() });
+    });
     // `domcontentloaded`, not `networkidle`: Vite keeps an HMR websocket open, so
     // networkidle never settles and would burn the whole timeout.
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     const status = resp?.status() ?? 0;
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(Math.min(10000, Math.max(1000, Number(process.env.BROWSER_SMOKE_SETTLE_MS) || 1000)));
 
     const title = await page.title();
     const hasCanvas = (await page.locator("canvas").count()) > 0;
@@ -136,6 +148,7 @@ try {
       horizontalOverflow,
       consoleErrors: errors.consoleErrors,
       pageErrors: errors.pageErrors,
+      requestFailures,
       screenshot: vp.screenshot,
     };
   }

@@ -65,7 +65,7 @@ def restored_book_drops_a_position_only_when_two_reads_agree():
         p.api = Api()
         p.cooldown = {}
         p.close_from_venue = lambda pos_, why: False
-        p.cancel_controls = lambda sym: None
+        p.cancel_controls = lambda sym, **kw: None
         p.save_open_book = lambda: None
         real_sleep = pt.time.sleep
         pt.time.sleep = lambda s_: None
@@ -525,9 +525,7 @@ def _isolated(fn):
 
 
 def failed_close_keeps_the_position_protected():
-    """A close the venue refuses must leave the position in the book with its stops re-armable: the stops were
-    cancelled before the close, so their ids are dropped and missing_controls is true. A symbol banned for a no-ctrl
-    close is blocked for new entries, not erased from the book."""
+    """A refused close retains the position and its existing protection until a full close is confirmed."""
     def run():
         p, sym = _enter(_RefusingCloseVenue(executed="1", requested="1"))
         pos = p.open[sym]
@@ -535,7 +533,7 @@ def failed_close_keeps_the_position_protected():
         p.close_pos(pos, 100.0, "no-ctrl-test")
         return had, sym in p.open, p.missing_controls(pos), sym in p.ignore_syms
     had, kept, missing, banned = _isolated(run)
-    return had and kept and missing and banned, f"stops before={had} kept in book={kept} stops re-armable={missing} banned={banned}"
+    return had and kept and not missing and banned, f"stops before={had} kept in book={kept} protection retained={not missing} banned={banned}"
 
 
 def partial_close_is_recorded_at_the_full_size():
@@ -992,14 +990,16 @@ def a_venue_order_of_another_symbol_is_not_this_exit():
     position's exit (x02 recorded ZCAT closed at WLD's take-profit, +20 %); a fill of the position's own symbol still is."""
     import types
     p = _bare_pulse()
-    pos = types.SimpleNamespace(symbol="ZCAT-USDT", sl_oid="", sec_sl_oid="", tp_oid="2115874311641849856", sec_tp_oid="")
+    pos = pt.Position("ZCAT-USDT", "LONG", 1, .04, 1, .03, .05, .04, tp_oid="2115874311641849856")
+    p.save_open_book = lambda: True
+    p.fill_cost = lambda *args: (0, "reported-fee")
 
     class _Api:
         def __init__(self, sym, px):
             self.sym, self.px = sym, px
 
         def get(self, path, params=None):
-            return {"code": 0, "data": {"order": {"symbol": self.sym, "status": "FILLED", "avgPrice": self.px}}}
+            return {"code": 0, "data": {"order": {"symbol": self.sym, "positionSide": "LONG", "orderId": "2115874311641849856", "executedQty": "1", "status": "FILLED", "avgPrice": self.px}}}
 
     p.api = _Api("WLD-USDT", "0.3985")
     other = pt.Pulse.venue_exit(p, pos)
@@ -1512,7 +1512,7 @@ def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
             p.last_error = f"close {_p.symbol} over 20 error code:109420 requests"
             return False, _p.entry
         p.market_close = refused
-        p.cancel_controls = lambda s_: None
+        p.cancel_controls = lambda s_, **kw: None
         lines = []
         saved_log = pt.log
         pt.log = lambda msg, *a, **k: lines.append(msg)

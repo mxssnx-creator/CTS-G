@@ -1002,10 +1002,11 @@ def a_venue_order_at_the_level_is_left_to_fill():
 class _FilledOrderVenue(_Venue):
     """The venue after a position's own stop or TP filled: the position is gone, the order reports FILLED."""
 
-    def __init__(self, filled_oid: str, fill_px: float) -> None:
+    def __init__(self, filled_oid: str, fill_px: float, qty: float = 1.0) -> None:
         super().__init__()
         self.filled_oid = filled_oid
         self.fill_px = fill_px
+        self.qty = qty
         self.flat = False
 
     def get(self, path, extra=None):
@@ -1014,10 +1015,11 @@ class _FilledOrderVenue(_Venue):
         if path.endswith("/trade/order"):
             oid = str((extra or {}).get("orderId") or "")
             st = "FILLED" if oid == self.filled_oid else "NEW"
-            return {"code": 0, "data": {"order": {"orderId": oid, "status": st, "avgPrice": str(self.fill_px)}}}
+            return {"code": 0, "data": {"order": {"orderId": oid, "status": st, "symbol": SYM,
+                "positionSide": "LONG", "executedQty": str(self.qty if st == "FILLED" else 0), "avgPrice": str(self.fill_px)}}}
         if path.endswith("/trade/allOrders"):
             return {"code": 0, "data": {"orders": [{"orderId": self.filled_oid, "status": "FILLED", "symbol": SYM,
-                                                    "positionSide": "LONG", "executedQty": "1", "avgPrice": str(self.fill_px),
+                                                    "positionSide": "LONG", "executedQty": str(self.qty), "avgPrice": str(self.fill_px),
                                                     "clientOrderID": self.cid}]}}
         return _Venue.get(self, path, extra)
 
@@ -1034,7 +1036,7 @@ def a_venue_close_is_recorded_as_its_lanes_close():
             pos.set_id, pos.pack = st.id, st.pack
             pos.sl_oid, pos.tp_oid = "501", "502"
             pos.opened_at = _real_time.time() - 600
-            venue = _FilledOrderVenue("502", 101.3)
+            venue = _FilledOrderVenue("502", 101.3, pos.qty)
             venue.cid = e.p.cid("t", pos=pos)
             e.p.api = venue
             e.p.control_orders = True
@@ -1063,6 +1065,46 @@ def a_venue_close_is_recorded_as_its_lanes_close():
             out[path] = (SYM in e.p.open, [(c.reason, round(c.exit, 4)) for c in rec], len(seen))
     ok = all(v == (False, [("tp", 101.3)], 1) for v in out.values())
     return ok, f"(still open, recorded closes, Set live closes): {out}"
+
+
+def a_partial_snapshot_cannot_pre_deduct_the_later_control_fill():
+    with _Env() as e:
+        pos=e.pos;original=pos.qty
+        pos.sl_oid,pos.tp_oid='501','502'
+        venue=_FilledOrderVenue('502',101.3,original/2)
+        venue.cid=e.p.cid('t',pos=pos);e.p.api=venue
+        e.p.our_orders=lambda symbol:[]
+        base_get=venue.get
+        venue.get=lambda path,extra=None: ({'code':0,'data':[{'symbol':SYM,'positionSide':'LONG',
+            'positionAmt':str(original/2),'avgPrice':str(pos.entry)}]} if path.endswith('/user/positions') else base_get(path,extra))
+        e.p.adopt_exchange_positions();e.p.adopt_exchange_positions()
+        state=(pos.qty,pos.close_filled_qty,pos.close_filled_value)
+        ok=abs(pos.qty-original/2)<1e-12 and abs(pos.close_filled_qty-original/2)<1e-12 and abs(pos.close_filled_value-original/2*101.3)<1e-10
+        return ok,f'original={original}; remaining, filled, exit value={state}'
+
+
+def a_persisted_complete_control_fill_survives_restart():
+    with _Env() as e:
+        pos=e.pos;qty=pos.qty;pos.tp_oid='502'
+        e.p.apply_control_fill(pos,{'orderId':'502','symbol':SYM,'positionSide':pos.side,
+            'executedQty':qty,'avgPrice':101.3,'status':'FILLED'},'tp')
+        e.p.open.clear();e.p._load_open_book()
+        restored=SYM in e.p.open and e.p.open[SYM].qty==0
+        e.p.reconcile_restored_book();e.p.reconcile_restored_book()
+        closed=[c for c in e.p.closed if c.symbol==SYM]
+        ok=restored and SYM not in e.p.open and len(closed)==1 and abs(closed[0].qty-qty)<1e-12 and abs(closed[0].exit-101.3)<1e-12
+        return ok,f'zero-remaining journal restored={restored}; recorded closes={len(closed)}'
+
+
+def an_unverified_exit_remains_in_audit_without_scoring():
+    import json
+    with _Env() as e:
+        e.pos.exit_price_estimated=True
+        e.p.close_pos(e.pos,100,'missing-fill',exchange=False)
+        with open(pt.TRADES_PATH) as stream:rows=[json.loads(line) for line in stream]
+        e.p._exec_boot();e.p._load_trade_history()
+        ok=len(rows)==1 and 'unverified-exit' in rows[0]['reason'] and e.p.exec_n['skipped']==1 and not e.p.closed
+        return ok,f'audited={len(rows)}; unverified after restart={e.p.exec_n["skipped"]}; scored={len(e.p.closed)}'
 
 
 def a_fill_far_from_its_reference_price_is_closed_and_the_symbol_rests():
@@ -1407,6 +1449,9 @@ CHECKS = [
     ("trader.lanes-own-stop-level", set_lane_stops_at_its_own_level_when_the_venue_stop_sits_farther),
     ("trader.lanes-venue-order-left-to-fill", a_venue_order_at_the_level_is_left_to_fill),
     ("trader.lanes-venue-close-recorded", a_venue_close_is_recorded_as_its_lanes_close),
+    ("trader.lanes-partial-snapshot-fill-once", a_partial_snapshot_cannot_pre_deduct_the_later_control_fill),
+    ("trader.lanes-final-control-fill-restart", a_persisted_complete_control_fill_survives_restart),
+    ("trader.lanes-unverified-exit-audit", an_unverified_exit_remains_in_audit_without_scoring),
     ("trader.lanes-recovered-set-keeps-its-lane", a_recovered_set_position_keeps_its_own_lane),
     ("processing.explicit-trail-variants-keep-their-arm", explicit_trail_variants_keep_their_own_arm),
     ("processing.stable-sets-with-many-orders-first", stable_sets_with_many_orders_are_chosen_first),

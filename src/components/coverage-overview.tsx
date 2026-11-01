@@ -1,5 +1,6 @@
 import type { LiveStats } from "@/lib/live-stats";
 import { formatPf, stageFigures } from "@/lib/sets-view";
+import { hasControlCoverage } from "@/lib/control-coverage";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
 const TYPES = ["state", "direction", "move", "active", "common", "signals"] as const;
@@ -62,8 +63,8 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         <span className={miss ? "text-danger" : "text-primary"}>
           controls {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} SL+TP · {ctrl?.security ?? 0} sec
         </span>
-        <span className={recon?.ok === false ? "text-danger" : "text-primary"}>
-          recon {recon?.ok === false ? recon.detail || "gap" : "ok"}
+        <span className={recon?.ok === true ? "text-primary" : "text-warn"}>
+          recon {recon?.ok === true ? "ok" : recon?.detail || "unverified"}
         </span>
         <span>
           block {cov?.block?.enabled ? "on" : "off"} · {cov?.block?.countN ?? 0} counts · {cov?.block?.liveLanes ?? 0} lanes
@@ -126,7 +127,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
   const px = cov?.px ?? scan?.px ?? 0;
   const n = cov?.symbols ?? scan?.universe ?? live?.symbolCount ?? 0;
   const open = live?.open ?? [];
-  const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 10);
+  const gaps = open.filter((p) => !hasControlCoverage(p)).slice(0, 10);
   return (
     <div className="space-y-3" data-testid="coverage-panel">
       <CoverageBar live={live} />
@@ -134,8 +135,8 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Scan universe" v={`${px}/${n || 0} px`} ok={n > 0 && px >= n} />
         <KV k="Klines 1/5/15" v={`${scan?.kl1m ?? "—"} / ${scan?.kl5m ?? "—"} / ${scan?.kl15m ?? "—"}`} ok={Boolean(scan && scan.kl1m && scan.kl5m && scan.kl15m)} />
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
-        <KV k="Recon" v={String(recon?.detail || (recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false} />
-        <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
+        <KV k="Recon" v={String(recon?.detail || (recon?.ok ? "ok" : "unverified"))} ok={recon?.ok === true} />
+        <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} reported SL+TP · ${ctrl?.undercovered ?? "—"} quantity gaps`} ok={Boolean(ctrl && ctrl.missing === 0 && gaps.length === 0)} />
         <KV k="Sets" v={`${sets.activeCount ?? 0}/${sets.setCount ?? 0} live · hist ${sets.histFills ?? 0}`} ok={(sets.activeCount ?? 0) > 0} />
         <KV k="Set families" v={`base ${sets.families?.base ?? "—"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
         <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes`} ok={blk?.enabled !== false} />
@@ -182,7 +183,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
           control gap {gaps.map((p) => `${p.symbol.replace("-USDT", "")} ${p.side === "LONG" ? "L" : "S"}`).join(" · ")}
         </p>
       ) : (
-        <p className="font-mono text-xs text-muted">Every open has order SL+TP and symbol+direction security</p>
+        <p className="font-mono text-xs text-muted">{open.length ? "Coverage reported for listed positions; confirm freshness and venue reconciliation." : "No open-position evidence in this snapshot."}</p>
       )}
       {counts.length > 0 ? (
         <div className="overflow-x-auto">
