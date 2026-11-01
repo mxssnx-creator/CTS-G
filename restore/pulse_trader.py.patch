@@ -2617,7 +2617,7 @@
 +                failed.update(str(extra.get("symbol")) for _p, extra in reqs if str(extra.get("symbol")) not in answered)
 +            for s in names:
 +                bars, last_t = self._closed_klines(rows_by.get(s) or [])     # the forming minute is not a bar yet
-@@ -4826 +6411,9 @@
+@@ -4826 +6411,8 @@
 -                    self.sets.ingest_bars(s, bars)
 +                    old_last = self.sets.bar_t.get(s)
 +                    first_new = last_t - (len(bars) - 1) * 60 if last_t is not None else None
@@ -2625,10 +2625,9 @@
 +                    if time_gap:
 +                        # Identical/flat candle values can look like an overlap
 +                        # despite a timestamp gap.  Do not join across it.
-+                        self.sets.bars.pop(s, None)
-+                        self.sets.bar_t.pop(s, None)
++                        self.sets.discard_bars(s)
 +                    self.sets.ingest_bars(s, bars, last_t=last_t)
-@@ -4827,0 +6421,29 @@
+@@ -4827,0 +6420,29 @@
 +                    # A valid shorter page can mean a newly listed symbol has no older
 +                    # bars. A failed/missing page is different: retry it before treating
 +                    # this symbol as replayed at an expanded history length.
@@ -2658,7 +2657,7 @@
 +                                              "oldest": first_bar, "target": lookback}
 +                    if len(held) >= lookback - 1:
 +                        short_cache.pop(s, None)
-@@ -4829 +6451,47 @@
+@@ -4829 +6450,47 @@
 -        self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
 +        self.sets.progress.detail = f"fetched {stored}/{len(all_names)}"
 +        sizes = sorted(len(self.sets.bars.get(s) or []) for s in all_names)
@@ -2707,7 +2706,7 @@
 +                                     abort=lambda: self.load.last_budget.level == "critical")
 +        finally:
 +            self.hist_busy = False
-@@ -4834,30 +6502 @@
+@@ -4834,30 +6501 @@
 -                for s in SYMBOLS:
 -                    bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
 -                    if bars:
@@ -2739,11 +2738,11 @@
 -                    finally:
 -                        self.hist_busy = False
 +                self._hist_tick()
-@@ -4878,0 +6518 @@
+@@ -4878,0 +6517 @@
 +                self.refresh_fees()
-@@ -4891 +6530,0 @@
+@@ -4891 +6529,0 @@
 -            sd_notify("WATCHDOG=1")
-@@ -4895,0 +6535,16 @@
+@@ -4895,0 +6534,16 @@
 +    def _ctrl_watch_loop(self) -> None:
 +        """Event-based control coordination: any create/delete/touch of the
 +        control files (STOP / PAUSE / STOP_ALL / reset-eq) wakes the main
@@ -2760,51 +2759,51 @@
 +                pass
 +            time.sleep(0.15)
 +
-@@ -4904,0 +6560,2 @@
+@@ -4904,0 +6559,2 @@
 +            self.refresh_tickers()
 +            self.seed_px_bars()
-@@ -4905,0 +6563 @@
+@@ -4905,0 +6562 @@
 +            self.manage()   # open positions keep their local SL, TP, trail and time exits while stopped
-@@ -4907 +6565,2 @@
+@@ -4907 +6564,2 @@
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
 +            self.wake_ev.wait(timeout=0.4)
-@@ -4919 +6578,2 @@
+@@ -4919 +6577,2 @@
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
 +            self.wake_ev.wait(timeout=0.4)
-@@ -4923,0 +6584,5 @@
+@@ -4923,0 +6583,5 @@
 +            if os.path.exists(RESET_EQ_PATH):
 +                # Explicit Start: fresh session — the reset-eq rescue in
 +                # refresh_balance re-baselines equity; never restore the
 +                # pre-stop economic halt across an explicit start.
 +                pre = None
-@@ -4930 +6595 @@
+@@ -4930 +6594 @@
 -            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
 +            elif self.dd_halt > 0 and self.dd_now() >= self.dd_halt:
-@@ -4973,0 +6639 @@
+@@ -4973,0 +6638 @@
 +        self.refresh_fees()
-@@ -4986,0 +6653,4 @@
+@@ -4986,0 +6652,4 @@
 +        try:
 +            self.reconcile_restored_book()
 +        except Exception:
 +            log("reconcile_restored_book failed: " + traceback.format_exc()[-160:])
-@@ -5003,0 +6674,2 @@
+@@ -5003,0 +6673,2 @@
 +        ctrl = threading.Thread(target=self._ctrl_watch_loop, name="ctrl-watch", daemon=True)
 +        ctrl.start()
-@@ -5032,2 +6704,2 @@
+@@ -5032,2 +6703,2 @@
 -            remain = SCAN_S - wall
 -            self.cycle_wait_ms = max(0.0, remain) * 1000.0
 +            gap = pace_gap_s(t0, time.perf_counter(), SCAN_S)
 +            self.cycle_wait_ms = gap * 1000.0
-@@ -5035,3 +6707,3 @@
+@@ -5035,3 +6706,3 @@
 -            if remain > 0:
 -                self.wake_ev.clear()
 -                self.wake_ev.wait(timeout=remain)
 +            # a tick never starts a cycle early: the next one starts at least SCAN_S after this one began
 +            if gap > 0:
 +                time.sleep(gap)
-@@ -5041,0 +6714,8 @@
+@@ -5041,0 +6713,8 @@
 +def make_api(conn: str, key: str, secret: str, base: str):
 +    """The venue client of a connection: bybit-* talks to Bybit V5 (bybit_fast), everything else to BingX."""
 +    if str(conn).startswith("bybit-"):
@@ -2813,14 +2812,14 @@
 +    return FastBingX(key, secret, ErrorLog(ERR_PATH), base=base)
 +
 +
-@@ -5042,0 +6723,4 @@
+@@ -5042,0 +6722,4 @@
 +    if IS_BYBIT:
 +        from bybit_fast import fetch_contract_rows
 +        return {c["symbol"]: Contract(c["symbol"], c["min_qty"], c["step"], c["qprec"], c["pprec"], c["min_usdt"], c["max_lev"])
 +                for c in fetch_contract_rows(BASE, want)}
-@@ -5072,0 +6757 @@
+@@ -5072,0 +6756 @@
 +            fee_rate(c.get("makerFeeRate")), fee_rate(c.get("takerFeeRate")),
-@@ -5088,0 +6774,7 @@
+@@ -5088,0 +6773,7 @@
 +def _mode_label() -> str:
 +    try:
 +        return mode_of(BASE)
@@ -2828,12 +2827,12 @@
 +        return "UNPINNED"
 +
 +
-@@ -5093,2 +6785,2 @@
+@@ -5093,2 +6784,2 @@
 -    key = redis_hget("api_key")
 -    secret = redis_hget("api_secret")
 +    key = connection_field("api_key")
 +    secret = connection_field("api_secret")
-@@ -5097,6 +6789,6 @@
+@@ -5097,6 +6788,6 @@
 -    test = (redis_hget("is_testnet") or "").strip().lower()
 -    if test in ("1", "true", "yes") or "vst" in (redis_hget("base_url") or "").lower():
 -        BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")

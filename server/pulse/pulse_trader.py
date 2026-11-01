@@ -6414,8 +6414,7 @@ class Pulse:
                     if time_gap:
                         # Identical/flat candle values can look like an overlap
                         # despite a timestamp gap.  Do not join across it.
-                        self.sets.bars.pop(s, None)
-                        self.sets.bar_t.pop(s, None)
+                        self.sets.discard_bars(s)
                     self.sets.ingest_bars(s, bars, last_t=last_t)
                     stored += 1
                     # A valid shorter page can mean a newly listed symbol has no older

@@ -1577,6 +1577,15 @@ class SetBook:
         self._lookback_retry_fast = False
         self._lookback_progress_key = None
         self._lookback_progress_count = 0
+        # Opt-in only: keep the last complete, fresh score while a larger
+        # history window is assembled. Mixed-version rows never score entries.
+        self.hist_keep_last_complete = False
+        self._history_snapshot_active = False
+        self._history_snapshot_gen = -1
+        self._history_snapshot_symbols: frozenset[str] = frozenset()
+        self._history_snapshot_lookback = 0
+        self._history_snapshot_oldest_at = 0.0
+        self._history_snapshot_promoting = False
         self.main_on = True
         self.main_n = MAIN_GATE_N_DEFAULT
         self.base_short = BASE_SHORT_N_DEFAULT
@@ -1662,6 +1671,8 @@ class SetBook:
         # history is re-simulated from actual entry opportunities, not spliced.
         self._hist_inputs: Dict[str, Dict[str, Any]] = {}
         self._hist_replay_key: Dict[str, Tuple[int, int]] = {}
+        self._hist_replay_at: Dict[str, float] = {}
+        self._hist_replay_bar_at: Dict[str, Optional[float]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         # open time (s) of the newest row of self.bars[symbol] when that row is a completed exchange minute; absent when the
         # series ends in rows of unknown time (live ticks). Live entries read a signal only on the bar this names.
@@ -1682,7 +1693,7 @@ class SetBook:
             self._load(ov, cts)
             signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
-                              self.sl_min_steps, self.trail_min_steps, self.hold_auto, self.lookback,
+                              self.sl_min_steps, self.trail_min_steps, self.hold_auto, self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
@@ -1695,7 +1706,10 @@ class SetBook:
                 self._hist_rows.clear()
                 self._hist_inputs.clear()
                 self._hist_replay_key.clear()
+                self._hist_replay_at.clear()
+                self._hist_replay_bar_at.clear()
                 self._sig_cache.clear()
+                self._history_snapshot_active = False
                 self.progress.ready = False
                 self.last_run = 0.0
                 for st in self.by_idx:
@@ -1730,6 +1744,7 @@ class SetBook:
         self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
         # Collection grows for sparse scored Sets independently of the admission gate.
         self.lookback_auto = bool(ov.get("histLookbackAuto", True))
+        self.hist_keep_last_complete = bool(ov.get("histKeepLastComplete", False))
         if not self.lookback_auto:
             self._lookback_pending = False
             self._lookback_retry_fast = False
@@ -1978,6 +1993,8 @@ class SetBook:
         return list(range(lo, hi + 1))
 
     def _rebuild_sets(self) -> None:
+        # The score snapshot is tied to the exact Set topology and rules.
+        self._history_snapshot_active = False
         keep = {**self.retired, **self.sets}
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
@@ -2219,8 +2236,16 @@ class SetBook:
         where they line up with the stored series; they never replace a history they do not overlap. last_t: the open time
         of the last given row, a completed minute (the caller drops the still-forming one); kept in bar_t when the joined
         series ends on that row."""
+        with self._lock:
+            self._ingest_bars(symbol, bars, tail, last_t)
+
+    def _ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool, last_t: Optional[float]) -> None:
         if not bars:
             return
+        watching = self._lookback_pending and self._history_snapshot_active
+        if watching and (symbol not in self._history_snapshot_symbols or not self.bars.get(symbol)):
+            self._history_snapshot_active = False
+        old_last = self.bar_t.get(symbol)
         cleaned: List[List[float]] = []
         for b in bars:
             if len(b) < 5:
@@ -2231,6 +2256,9 @@ class SetBook:
             cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
             old = self.bars.get(symbol) or []
+            first_new = float(last_t) - (len(cleaned) - 1) * BAR_S if last_t is not None else None
+            if watching and old_last is not None and first_new is not None and first_new > old_last + BAR_S + 1e-6:
+                self._history_snapshot_active = False
             joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.history_bars() :]
             self.bars[symbol] = joined
             bar_t = self.__dict__.setdefault("bar_t", {})
@@ -2238,6 +2266,8 @@ class SetBook:
                 bar_t[symbol] = float(last_t)
             elif not old or not joined or joined[-1] != old[-1]:
                 bar_t.pop(symbol, None)           # the series now ends on a row of unknown time
+            if watching and not self.usable(symbol):
+                self._history_snapshot_active = False
 
     def entry_signals(self, symbol: str, bar_open_t: float) -> List[Tuple[str, int, float, str]]:
         """Every qualified replay signal for the completed minute, strongest first, with its own pack intact."""
@@ -2263,7 +2293,13 @@ class SetBook:
         return hits[0] if hits else None
 
     def trim_bars(self, keep: Sequence[str]) -> int:
+        with self._lock:
+            return self._trim_bars(keep)
+
+    def _trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)
+        if self._lookback_pending and self._history_snapshot_active and want != self._history_snapshot_symbols:
+            self._history_snapshot_active = False
         n = 0
         for s in list(self.bars):
             if s not in want:
@@ -2271,6 +2307,14 @@ class SetBook:
                 self.__dict__.setdefault("bar_t", {}).pop(s, None)
                 n += 1
         return n
+
+    def discard_bars(self, symbol: str) -> None:
+        """Discard a broken series atomically with invalidating its prior snapshot."""
+        with self._lock:
+            if self._lookback_pending and symbol in self._history_snapshot_symbols:
+                self._history_snapshot_active = False
+            self.bars.pop(symbol, None)
+            self.bar_t.pop(symbol, None)
 
     def clamp_bars(self, max_n: int) -> int:
         cap = max(60, int(max_n or self.lookback))
@@ -2390,7 +2434,12 @@ class SetBook:
                 st.live_neg_n += 1
             else:
                 st.live_pos_n += 1
-            self._score_one(st, now=max(row["t"], st.score_at) or None)
+            if self.hist_keep_last_complete and self._lookback_pending:
+                # A live close must update execution evidence, but it must not
+                # make an old paper snapshot look freshly replayed.
+                st.deact_reason = self.gate_reason(st)
+            else:
+                self._score_one(st, now=max(row["t"], st.score_at) or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
         for rec in closed:
@@ -2459,6 +2508,7 @@ class SetBook:
                 self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
                 per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+                replay_bar_at = self.bar_t.get(symbol)
                 try:
                     inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
                 except Exception as exc:  # one symbol never stops the others
@@ -2474,6 +2524,8 @@ class SetBook:
                     self._hist_rows[symbol] = packed
                     self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
+                    self._hist_replay_at[symbol] = time.time()
+                    self._hist_replay_bar_at[symbol] = replay_bar_at
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
                     on_step()
@@ -2481,36 +2533,70 @@ class SetBook:
             self.progress.pct = 90.0
             cutoff = now - self.lookback * BAR_S
             context_cutoff = now - self.history_bars() * BAR_S
+            scoring_stale = False
             with self._lock:
                 live = {s for s in self.bars if self.usable(s)}
                 for s in [s for s in self._hist_rows if s not in live]:
                     del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
                     self._hist_inputs.pop(s, None)
                     self._hist_replay_key.pop(s, None)
+                    self._hist_replay_at.pop(s, None)
+                    self._hist_replay_bar_at.pop(s, None)
                 for s in [s for s in self._sig_cache if s not in live]:
                     del self._sig_cache[s]          # and so do their signal memo entries
                 stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
                 if stale:
                     aborted = True                  # keep each Set's last complete scores; the next pass redoes them
                     self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
-                tape_order = sorted(self._hist_rows)       # equal exit times order by symbol, whatever the replay order was
+                expected = live if expected_symbols is None else live.intersection(expected_symbols)
+                pending_snapshot = self.hist_keep_last_complete and self._lookback_pending
+                if pending_snapshot and expected != self._history_snapshot_symbols:
+                    self._history_snapshot_active = False
+                expected_available = expected_symbols is None or set(expected_symbols).issubset(live)
+                def current(s: str) -> bool:
+                    oldest_allowed = time.time() - self._snapshot_max_age()
+                    replayed = (self._hist_replay_key.get(s) == (lookback0, gen0)
+                                and self._hist_replay_at.get(s, 0.0) >= oldest_allowed)
+                    if self.fresh_s > 0:
+                        # Live snapshots must have a dated, recent completed bar.
+                        bar_at = self._hist_replay_bar_at.get(s)
+                        decision_now = now + max(0.0, time.time() - t0)
+                        replayed = bool(replayed and bar_at is not None
+                                        and decision_now - self._snapshot_max_age() - BAR_S <= bar_at <= now)
+                    return replayed
+                snapshot_complete = bool(expected_available and all(current(s) for s in expected))
+                complete = bool(expected and not sym_failed and not aborted and not stale
+                                and self.lookback == lookback0
+                                and (snapshot_complete if self.hist_keep_last_complete else
+                                     all(self._hist_replay_key.get(s) == (lookback0, gen0) for s in expected)))
+                defer_score = pending_snapshot and not complete
+                if pending_snapshot and complete:
+                    # Block new entries during the atomic promotion itself. If
+                    # scoring unexpectedly fails, the old snapshot is not reused.
+                    self._history_snapshot_active = False
+                    self._history_snapshot_promoting = True
+                tape_order = sorted(expected.intersection(self._hist_rows) if self.hist_keep_last_complete else self._hist_rows)
+                # Equal exit times order by symbol, whatever the replay order was.
                 # A paper entry at this decision clock cannot use an unordered
                 # close stamped at the same instant as evidence.
                 decision_upper = math.nextafter(now, float("-inf"))
-                for st in ([] if stale else self.by_idx):
-                    try:
-                        full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
-                        full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
-                        self.set_processed(st, full, now=now)
-                        visible = [r for r in full if r[0] >= cutoff]
-                        st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window):]]
-                        st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
-                        self._score_one(st, now=max(now, st.score_at) if st.live else now)
-                        st.n = len(visible)           # paper count in the evaluation window
-                    except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
-                        st.last_error = f"{type(exc).__name__}: {exc}"[:160]
-                        st.deact_reason = "error"
-                        errors.append(f"set {st.id}: {st.last_error}")
+                try:
+                    for st in ([] if stale or defer_score else self.by_idx):
+                        try:
+                            full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
+                            full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
+                            self.set_processed(st, full, now=now)
+                            visible = [r for r in full if r[0] >= cutoff]
+                            st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window):]]
+                            st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
+                            self._score_one(st, now=max(now, st.score_at) if st.live else now)
+                            st.n = len(visible)           # paper count in the evaluation window
+                        except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
+                            st.last_error = f"{type(exc).__name__}: {exc}"[:160]
+                            st.deact_reason = "error"
+                            errors.append(f"set {st.id}: {st.last_error}")
+                finally:
+                    self._history_snapshot_promoting = False
             ok_syms = len(names) - sym_failed
             self.progress.errors = len(errors)
             self.progress.error = "; ".join(errors[:3])[:220]
@@ -2525,16 +2611,24 @@ class SetBook:
             elif aborted:
                 self.progress.phase = "partial"
             else:
-                self.progress.phase = "ready"
-                self.progress.pct = 100.0
+                self.progress.phase = "rebuilding" if defer_score else "ready"
+                self.progress.pct = 90.0 if defer_score else 100.0
                 self.progress.ready = True
                 with self._lock:
                     # A chunk is not the whole universe. After each growth step, wait
                     # until every usable expected symbol has been replayed at that
                     # length and topology before deciding whether to grow again.
                     expected = live if expected_symbols is None else live.intersection(expected_symbols)
-                    consistent = bool(expected and not sym_failed and self.lookback == lookback0 and self._topo_gen == gen0)
-                    matched = sum(self._hist_replay_key.get(s) == (lookback0, gen0) for s in expected)
+                    consistent = bool(expected and not sym_failed and self.lookback == lookback0 and self._topo_gen == gen0
+                                      and (not self.hist_keep_last_complete or expected_available))
+                    matched = sum((current(s) if self.hist_keep_last_complete else
+                                   self._hist_replay_key.get(s) == (lookback0, gen0)) for s in expected)
+                    if pending_snapshot and not defer_score and (not consistent or matched != len(expected)):
+                        # Evidence may expire while a large Set grid is being
+                        # scored. Do not publish that pass as complete.
+                        scoring_stale = True
+                        self.progress.phase = "partial"
+                        self.progress.pct = 90.0
                     if self._lookback_pending:
                         key = (lookback0, gen0, tuple(sorted(expected)))
                         if key != self._lookback_progress_key:
@@ -2542,17 +2636,36 @@ class SetBook:
                             self._lookback_progress_count = 0
                         self._lookback_retry_fast = bool(consistent and matched > self._lookback_progress_count)
                         self._lookback_progress_count = matched
-                    if consistent and matched == len(expected):
+                    if consistent and matched == len(expected) and not defer_score:
                         self._lookback_pending = False
                         self._lookback_retry_fast = False
+                        if self.hist_keep_last_complete:
+                            self._history_snapshot_active = True
+                            self._history_snapshot_gen = gen0
+                            self._history_snapshot_symbols = frozenset(expected)
+                            self._history_snapshot_lookback = lookback0
+                            oldest_at = min(self._hist_replay_at[s] for s in expected)
+                            if self.fresh_s > 0:
+                                # Include the age already present in a replayed
+                                # bar; scoring later cannot make that data newer.
+                                decision_now = now + max(0.0, time.time() - t0)
+                                oldest_at = min(oldest_at, *(time.time() - max(0.0, decision_now - (self._hist_replay_bar_at[s] + BAR_S))
+                                                             for s in expected))
+                            self._history_snapshot_oldest_at = oldest_at
+                            if pending_snapshot:
+                                for st in self.by_idx:
+                                    st.deact_reason = self.gate_reason(st)
                         self._adapt_lookback()
-                    self._record_pf_progress()
+                    if not defer_score and not scoring_stale:
+                        self._record_pf_progress()
             if self._lookback_pending and (not names or ok_syms == 0 or aborted):
                 # An unsuccessful/aborted pass must not produce a rapid retry loop.
                 self._lookback_retry_fast = False
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
+                + (" · rebuilding; prior scores retained" if defer_score else "")
+                + (" · evidence expired during scoring" if scoring_stale else "")
                 + (" · partial" if aborted else "")
                 + (f" · {len(errors)} errors" if errors else "")
             )
@@ -2716,7 +2829,7 @@ class SetBook:
         """The chain's rules for a pack (its own minimum PF floor)."""
         return StageParams(base_long=self.gate_window, base_short=self.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
                            gate_min=self.gate_min,
-                           floor=self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s, lookback_s=self.lookback * BAR_S,
+                           floor=self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s, lookback_s=self._evidence_lookback() * BAR_S,
                            size_floors=self.size_floors if self.pf_by_size and not is_signal_pack(pack) else (), long_floor=self.size_long_pf,
                            consistency=self.consistency_pf, main_on=self.main_on, main_n=self.main_n, short_on=self.short_on,
                            short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
@@ -2732,7 +2845,7 @@ class SetBook:
         ts = [finite(r[0]) for r in full]
         ents = [ts[k] - finite(full[k][5]) for k in range(len(full))]
         nets = [finite(r[4]) - cf for r in full]
-        cutoff = finite(now) - self.lookback * BAR_S if now is not None else None
+        cutoff = finite(now) - self._evidence_lookback() * BAR_S if now is not None else None
         ch = stage_chain(ts, ents, nets, self.stage_params(st.pack), window_start=cutoff)
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
         out["short_n"] = ch["short_n"]
@@ -2766,7 +2879,7 @@ class SetBook:
         Actual fills are validated separately by execution_stats; mixing them here double-counts
         overlapping entries and changes short-window votes without rebuilding their stage chain."""
         anchor = finite(now) if now is not None else st.score_at
-        cutoff = anchor - self.lookback * BAR_S if anchor > 0 else float("-inf")
+        cutoff = anchor - self._evidence_lookback() * BAR_S if anchor > 0 else float("-inf")
         upper = anchor if anchor > 0 else float("inf")
         if before is None:
             before = bool(getattr(st, "score_before", False)) if now is None else False
@@ -2813,8 +2926,11 @@ class SetBook:
         fresh assessment. The paper chain keeps running while this gate is closed.
         """
         anchor = finite(now) if now is not None else st.score_at
+        if now is None and self.hist_keep_last_complete:
+            anchor = max(anchor, max((finite(r.get("t")) for r in st.live), default=0.0))
         upper = anchor if anchor > 0 else float("inf")
-        cutoff = upper - self.lookback * BAR_S if anchor > 0 else float("-inf")
+        effective_lookback = self._evidence_lookback()
+        cutoff = upper - effective_lookback * BAR_S if anchor > 0 else float("-inf")
         rows = sorted((r for r in st.live if str(r.get("lane") or "pos") == lane
                        and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-self.realst_n:]
         nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
@@ -2849,7 +2965,7 @@ class SetBook:
         return self._streams(st)[0]
 
     def _tape_at(self, st: SetState, now: float, before: bool = False) -> List[Dict[str, Any]]:
-        cutoff = now - self.lookback * BAR_S if now > 0 else float("-inf")
+        cutoff = now - self._evidence_lookback() * BAR_S if now > 0 else float("-inf")
         upper = now if now > 0 else float("inf")
         if before and now > 0:
             upper = math.nextafter(upper, float("-inf"))
@@ -2969,6 +3085,17 @@ class SetBook:
         st.evaluated_at = time.time()
         st.deact_reason = self.gate_reason(st)
 
+    def _snapshot_max_age(self) -> float:
+        return self.fresh_s if self.fresh_s > 0 else 2.0 * self.refresh_s
+
+    def _history_snapshot_usable(self) -> bool:
+        return bool(self.hist_keep_last_complete and self._lookback_pending and self._history_snapshot_active
+                    and not self._history_snapshot_promoting and self._history_snapshot_gen == self._topo_gen
+                    and self._history_snapshot_lookback > 0)
+
+    def _evidence_lookback(self) -> int:
+        return self._history_snapshot_lookback if self._history_snapshot_usable() else self.lookback
+
     def base_validation_reason(self, st: SetState) -> str:
         """Base PF/risk validation, independent of the minimal coordination condition."""
         if st.locked:
@@ -2979,8 +3106,14 @@ class SetBook:
             return "error"
         if self.stop_cap_exceeded(st):
             return "stop-cap"
-        if self._lookback_pending:
+        if self._history_snapshot_promoting:
             return "history"
+        if self._lookback_pending:
+            if not self._history_snapshot_usable():
+                return "history"
+            oldest = min(st.evaluated_at, self._history_snapshot_oldest_at)
+            if oldest <= 0 or time.time() - oldest > self._snapshot_max_age():
+                return "stale"
         if st.gate_n < self.gate_min:
             return "n<min"
         if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack):
@@ -3238,7 +3371,7 @@ class SetBook:
                 heapq.heapreplace(heap, item)
         with self._lock:
             anchor = max((st.score_at for st in self.by_idx), default=0.0)
-            cutoff = anchor - self.lookback * BAR_S if anchor > 0 else float("-inf")
+            cutoff = anchor - self._evidence_lookback() * BAR_S if anchor > 0 else float("-inf")
             upper = anchor if anchor > 0 else float("inf")
             seq = 0
             for st in self.by_idx:
@@ -3655,6 +3788,11 @@ class SetBook:
             "lookback": self.lookback,
             "lookbackPending": self._lookback_pending,
             "lookbackFastRetry": self._lookback_pending and self._lookback_retry_fast,
+            "historySnapshotUsable": bool(self._history_snapshot_usable() and self._history_snapshot_oldest_at > 0
+                                          and time.time() - self._history_snapshot_oldest_at <= self._snapshot_max_age()),
+            "historySnapshotLookback": self._history_snapshot_lookback if self._history_snapshot_usable() else None,
+            "historySnapshotAgeS": (round(max(0.0, time.time() - self._history_snapshot_oldest_at), 1)
+                                    if self._history_snapshot_usable() and self._history_snapshot_oldest_at > 0 else None),
             "stageContextBars": self.history_bars(),
             "stageContextFullSymbols": sum(len(bars) >= self.history_bars() for bars in self.bars.values()),
             "stageContextShortSymbols": sum(len(bars) < self.history_bars() for bars in self.bars.values()),
