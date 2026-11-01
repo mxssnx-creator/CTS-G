@@ -2242,10 +2242,10 @@ class SetBook:
     def _ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool, last_t: Optional[float]) -> None:
         if not bars:
             return
-        watching = self._lookback_pending and self._history_snapshot_active
+        watching = getattr(self, "_lookback_pending", False) and getattr(self, "_history_snapshot_active", False)
         if watching and (symbol not in self._history_snapshot_symbols or not self.bars.get(symbol)):
             self._history_snapshot_active = False
-        old_last = self.bar_t.get(symbol)
+        old_last = self.__dict__.setdefault("bar_t", {}).get(symbol)
         cleaned: List[List[float]] = []
         for b in bars:
             if len(b) < 5:
