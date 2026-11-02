@@ -205,6 +205,12 @@ def set_kind_of(set_id: str) -> str:
     return "base"
 
 
+def side_of_set_id(set_id: str) -> int:
+    """The trade direction a Set id names: "<pack>:L:1m:..." long (+1), "<pack>:S:1m:..." short (-1), a Set that trades both 0."""
+    m = re.match(r"^[^:]+:([LS]):1m:", str(set_id or ""))
+    return 0 if not m else (1 if m.group(1) == "L" else -1)
+
+
 def pack_of_reason(reason: Any) -> str:
     """The pack an entry reason belongs to: "set:<pack>:..." (a Set entry), "ind:..." (indications), else general."""
     r = str(reason or "")
@@ -1377,7 +1383,10 @@ class Pulse:
             nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + digest + "".join(random.choices(alphabet, k=4))
             return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"
         ix = f"{max(0, idx):04d}"      # four digits: the default grid already holds more than 1000 Sets
-        nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + "".join(random.choices(alphabet, k=4))
+        # the nonce is: the lane char, then the Set's direction as an UPPER case L / S (the random alphabet is lower case, so a combined Set's random char never
+        # reads as a direction), then three random chars -- a decode by content can tell a long Set from its short twin
+        side_c = {1: "L", -1: "S"}.get(side_of_set_id(set_id))
+        nonce = (CID_NEG_MARK if lane == "neg" else random.choice(alphabet)) + (side_c or random.choice(alphabet)) + "".join(random.choices(alphabet, k=3))
         return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
 
     def cid_ours(self, cid: str) -> bool:
@@ -1436,6 +1445,8 @@ class Pulse:
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
 
         lane = "neg" if rest[12:13] == CID_NEG_MARK and len(rest) >= 13 and (extra_pack or rest[8:12].isdigit()) else "pos"
+        # the direction of a split Set rides in the nonce (extra packs carry it in their digest of the whole id); anything else is a combined Set
+        side = 0 if extra_pack else {"L": 1, "S": -1}.get(rest[13:14], 0) if len(rest) >= 14 and rest[8:12].isdigit() else 0
 
         def _row(st_obj: Any) -> Dict[str, Any]:
             return {"kind": kind, "pack": st_obj.pack, "sl": st_obj.sl_ratio, "trail": st_obj.trail_key, "step": st_obj.step,
@@ -1449,7 +1460,7 @@ class Pulse:
                         return False
                     if hashlib.sha256(st_obj.id.encode("utf-8")).hexdigest()[:10] != signature:
                         return False
-                elif str(getattr(st_obj, "pack", "")) != pack:
+                elif str(getattr(st_obj, "pack", "")) != pack or int(getattr(st_obj, "side", 0) or 0) != side:
                     return False
                 if st_obj.kind == "trail":
                     return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06

@@ -557,7 +557,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 tr = tr[0]
                 # the symbol rests after the close as the lane and live do: the cooldown, and after a WIN at least the pause the plan chose at that exit bar
                 rest = int(cfg["cooldown"])
-                if tr["pnl"] > 0:
+                if tr["pnl_pct"] - cf > 0:       # a win: net of PositionCost above zero (the lane's own test)
                     pz = (shadow[s][3].get(-1) or {}).get((pack, st.side))
                     if pz is not None:
                         rest = max(rest, int(pz[tr["exit_i"]]))

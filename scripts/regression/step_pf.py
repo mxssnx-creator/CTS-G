@@ -18,7 +18,7 @@ def _book(**extra):
 
 def manual_floor_is_one_plus_step_times_ratio():
     table = [(0.2, 0.2, 1.04), (0.25, 0.2, 1.04), (0.29, 0.2, 1.04), (0.3, 0.2, 1.06), (3.2, 0.2, 1.64), (3.5, 0.2, 1.70), (9.0, 0.2, 1.70),
-             (0.1, 0.2, 1.04), (0.2, 1.1, 1.22), (3.5, 1.1, 4.85), (1.0, 0.1, 1.10)]
+             (0.1, 0.2, 1.04), (0.2, 1.1, 1.22), (3.5, 1.1, 4.85), (1.0, 0.1, 1.10), (0.5, 0.2, 1.10)]
     got = [round(se.manual_step_floor(tp, ratio), 6) for tp, ratio, _ in table]
     want = [w for _, _, w in table]
     ratios = {raw: se.step_pf_ratio(raw) for raw in (0.05, 0.1, 0.2, 0.33, 1.1, 1.5, "x", None)}
@@ -181,7 +181,25 @@ def settings_reach_the_engine_and_the_replay_key():
     return ok, f"defaults on/auto/ratio {d.pf_by_step}/{d.pf_step_auto}/{d.pf_step_ratio}/N {d.pf_step_auto_n}; bad values -> {bad.pf_step_ratio}/{bad.pf_step_auto_n}/{bad.pf_step_auto_min}; replay key moves with the settings"
 
 
+def a_half_percent_step_at_ratio_point_two_asks_exactly_1_1():
+    """The owner's example: TP step 0.5 % at ratio 0.2 -> 1 (neutral) + 0.5 x 0.2 = 1.10. The gate sits exactly there for the Set that has that step,
+    and a neighbour step asks its own number (0.4 % -> 1.08, 0.6 % -> 1.12)."""
+    b = _book(stagesEnabled=False, setGateShortN=0, setGateMinTrades=0, setMinStep=4, setStepMax=6)
+    by = {s.step: s for s in b.by_idx if s.kind == "base" and s.sl_ratio == 1.0}
+    st = by[5]
+    st.active, st.locked, st.last_error, st.gate_n, st.max_dd_s = True, False, "", 50, 0.0
+    verdicts = {}
+    for pf in (1.0999, 1.10, 1.1001):
+        st.gate_pf = pf
+        verdicts[pf] = bool(b.is_eligible(st))
+    floors = {k: round(b.step_floor(v), 6) for k, v in sorted(by.items())}
+    ok = (st.tp_pct == 0.005 and floors == {4: 1.08, 5: 1.1, 6: 1.12} and se.manual_step_floor(0.5, 0.2) == 1.1
+          and verdicts == {1.0999: False, 1.1: True, 1.1001: True} and b.floor_for(50, st.pack, st) == 1.1)
+    return ok, f"step 5 = {st.tp_pct * 100:.1f} % TP: floors by step {floors}; gate PF 1.0999 / 1.10 / 1.1001 -> {verdicts}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     manual_floor_is_one_plus_step_times_ratio, one_floor_for_every_window_and_stage,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
-    copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key)]
+    copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
+    a_half_percent_step_at_ratio_point_two_asks_exactly_1_1)]

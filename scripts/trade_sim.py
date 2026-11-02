@@ -98,8 +98,9 @@ def main() -> int:
         if replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
             raise ValueError("replay inputs changed during cache generation")
         replay_cache.save(a.cache, shadow, manifest)
-    if any(len(shadow[names[0]][3]) != len(book.by_idx) for _ in (0,)):
-        print(f"cache holds {len(shadow[names[0]][3])} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")
+    held = sum(1 for k in shadow[names[0]][3] if isinstance(k, int) and k >= 0)       # Set entries only: key -1 holds the per-bar pause arrays, not a Set
+    if held != len(book.by_idx):
+        print(f"cache holds {held} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")
         return 2
     tapes = sg.Tapes(book, names, times, shadow)
     cf = cost_as_frac(book.cost_pct)

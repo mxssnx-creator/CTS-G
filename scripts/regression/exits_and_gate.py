@@ -149,7 +149,7 @@ def trail_arms_then_gives_back():
 def explicit_trail_list_obeys_the_minimum_distance():
     b = SetBook()
     b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
-            "setSlRatios": [3.5], "trailVariants": ["0.3:0.1", "0.2:0.1", "0.9:0.5"]})
+            "setSlRatios": [3.5], "trailVariants": ["0.3:0.1", "0.2:0.1", "0.9:0.5"], "directionMode": "both"})
     trails = sorted((s.trail_arm, s.trail_give) for s in b.by_idx if s.kind == "trail")
     floor = 3 * COST          # PositionCost + 2 steps
     ok = trails and all(g >= floor - 1e-9 and a >= g - 1e-9 for a, g in trails) and len(trails) == len(set(trails))

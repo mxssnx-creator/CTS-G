@@ -172,7 +172,35 @@ def direction_mode_setting():
     return ok, f"default split={d.direction_split}, split={s.direction_split}, both={not b.direction_split}, junk -> split={junk.direction_split}; replay key differs={s._evaluation_config != b._evaluation_config}"
 
 
+def client_order_ids_name_the_direction():
+    """A client order id decodes to its own Set, and when the grid index no longer points at it (a restart after a grid change) the content alone must tell a
+    long Set from its short twin; a combined Set's id carries no direction mark."""
+    import pulse_trader as pt
+    b = _book("split")
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.sets = b
+    wrong, swapped, marks = [], [], set()
+    for st in b.by_idx:
+        cid = p.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)
+        marks.add(cid[len(pt.TAG) + 13: len(pt.TAG) + 14])
+        if (p.parse_track(cid) or {}).get("set_id") != st.id:
+            wrong.append(st.id)
+        twin = next((x for x in b.by_idx if x.pack == st.pack and x.kind == st.kind and x.step == st.step and x.sl_ratio == st.sl_ratio
+                     and x.trail_key == st.trail_key and x.side == -st.side), None)
+        if twin is not None:
+            k = len(pt.TAG) + 8
+            moved = cid[:k] + f"{twin.idx:04d}" + cid[k + 4:]          # the index points at the OTHER direction's Set
+            if (p.parse_track(moved) or {}).get("set_id") != st.id:
+                swapped.append(st.id)
+    c = _book("both")
+    q = pt.Pulse.__new__(pt.Pulse)
+    q.sets = c
+    both_marks = {q.cid("o", set_id=st.id, pack=st.pack, set_idx=st.idx)[len(pt.TAG) + 13: len(pt.TAG) + 14] for st in c.by_idx}
+    ok = not wrong and not swapped and {"L", "S"} <= marks and not (both_marks & {"L", "S"}) and pt.side_of_set_id("general:S:1m:sl1.00:st3") == -1
+    return ok, f"{len(b.by_idx)} split ids round-trip (wrong {len(wrong)}); with the index pointing at the other direction's twin, wrong {len(swapped)}; direction marks {sorted(marks & {'L', 'S'})}, none on combined Sets"
+
+
 CHECKS = [("direction." + fn.__name__.replace("_", "-"), fn) for fn in (
     split_grid_is_the_combined_grid_twice, a_set_only_ever_trades_its_own_direction, removing_one_direction_leaves_the_other_untouched,
     pause_is_learned_per_direction, learned_floors_are_per_direction, a_signal_is_judged_only_by_a_set_of_its_direction,
-    live_rest_after_a_win_follows_the_closed_positions_direction, direction_mode_setting)]
+    live_rest_after_a_win_follows_the_closed_positions_direction, direction_mode_setting, client_order_ids_name_the_direction)]

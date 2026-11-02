@@ -481,14 +481,14 @@ def simulator_validates_at_entry_and_refreshes_at_the_boundary():
     hour = float((int(T0) // 3600) * 3600)
     bars = [[100.0, 101.0, 99.0, 100.0, 1.0] for _ in range(60)]
     times = [int(hour) + i * 60 for i in range(60)]
-    dirs = [1 if i in (0, 2) else 0 for i in range(60)]
+    dirs = [1 if i in (0, 4) else 0 for i in range(60)]       # the second signal is past the two-bar cooldown the simulator rests an executed symbol for
     conf = [0.9] * 60
     shadow = {"S": (0, {st.pack: dirs}, {st.pack: conf}, {})}
     calls = []
     gate, until, scan = sg.gate_metrics, sg.gate_until, se.SetLane.scan
     try:
         sg.gate_metrics = lambda _b, _t, _s, t: (calls.append(t) or True, (True, 1, 1, 0, 0), 1, 2.0)
-        sg.gate_until = lambda _b, _t, _s, t: hour + 180.0
+        sg.gate_until = lambda _b, _t, _s, t: hour + 300.0       # the cache expires exactly at the second entry's time
         def fake_scan(_self, i, *_args, **_kwargs):
             return [{"entry_i": i, "exit_i": i + 1, "entry_px": 100.0, "exit_px": 100.3,
                      "dir": 1, "pnl_pct": 0.003, "reason": "tp"}]
@@ -497,7 +497,7 @@ def simulator_validates_at_entry_and_refreshes_at_the_boundary():
     finally:
         sg.gate_metrics, sg.gate_until, se.SetLane.scan = gate, until, scan
     entries = [r["t_in"] for r in rows if "t_in" in r]
-    want = [hour + 60.0, hour + 180.0]
+    want = [hour + 60.0, hour + 300.0]
     return entries == want and calls == want, f"entry times {entries}; gate times {calls}; expected {want}"
 
 

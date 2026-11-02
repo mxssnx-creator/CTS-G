@@ -971,7 +971,7 @@ def a_signal_needs_its_own_pack_to_hold_a_valid_set():
         def symbol_ok(self, sym):
             return True
 
-        def pick_any(self, pack):
+        def pick_any(self, pack, side=0):
             return ind if pack == "indications" else None
 
         def pack_open(self, pack):          # both packs hold a valid Set somewhere; only indications has one on a lane
@@ -1625,7 +1625,7 @@ def no_entry_on_a_symbol_that_failed_the_data_check():
     import types
     p = _bare_pulse()
     p.sets = types.SimpleNamespace(enabled=True, use_historic_gate=True, symbol_ok=lambda s: s != "BAD-USDT", entry_conf=0.5,
-                                   pick_any=lambda pack: types.SimpleNamespace(id="x"), pack_open=lambda pack: True)
+                                   pick_any=lambda pack, side=0: types.SimpleNamespace(id="x"), pack_open=lambda pack: True)
     p.strat_ind = False
     p.px = {"BAD-USDT": 1.0, "OK-USDT": 1.0}
     p.occupying = lambda *a, **k: False
@@ -1753,7 +1753,7 @@ def strongest_ready_symbol_can_take_the_first_slot():
         bar_t = {s: minute - 60 for s in names}
         def entry_signals(self, sym, _t):
             return [("general", 1, (names.index(sym) + 1) / 100, "signal")]
-        def pick_any(self, pack):
+        def pick_any(self, pack, side=0):
             return types.SimpleNamespace(last15_pf=2.0, last15_n=50, pack=pack)
         def pack_open(self, _pack):
             return True
@@ -1820,7 +1820,7 @@ def entry_selection_keeps_packs_and_axis_lanes_independent():
         bar_t = {sym: minute - 60}
         def entry_signals(self, _sym, _t):
             return [("strong", 1, .95, "strong-signal"), ("valid", -1, .8, "valid-signal")]
-        def pick_any(self, pack, allowed_lanes=None):
+        def pick_any(self, pack, allowed_lanes=None, side=0):
             row = choices[pack]
             return row if row is not None and (allowed_lanes is None or row.lane in allowed_lanes) else None
         def lane_of(self, row):
@@ -1848,7 +1848,7 @@ def entry_selection_keeps_packs_and_axis_lanes_independent():
     scope = (co.scope_allows("valid", "pos"), co.scope_allows("strong", "pos"))
     alternative = types.SimpleNamespace(lane="neg")
     class TwoLanes(Sets):
-        def pick_any(self, _pack, allowed_lanes=None):
+        def pick_any(self, _pack, allowed_lanes=None, side=0):
             if allowed_lanes is None or "pos" in allowed_lanes:
                 return types.SimpleNamespace(lane="pos")
             return alternative if "neg" in allowed_lanes else None
@@ -2170,7 +2170,7 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
             st.score_at = time.time()
             st.exe = [(st.score_at - 60 * j, .004) for j in range(12, 0, -1)]
             st.neg = [(st.score_at - 60 * j, -.004) for j in range(12, 0, -1)]
-            p.sets.pick_any = lambda pack, _st=st, predicate=None, allowed_lanes=None: _st if (
+            p.sets.pick_any = lambda pack, _st=st, predicate=None, allowed_lanes=None, side=0: _st if (
                 (allowed_lanes is None or p.sets.lane_of(_st) in allowed_lanes)
                 and (predicate is None or predicate(_st))) else None
             p.coord.scopes = {"lane:neg": {"allow": False}, "lane:pos": {"allow": True},
