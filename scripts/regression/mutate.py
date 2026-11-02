@@ -31,6 +31,18 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("pause: the choice reads results closed after the bar",
+     "set_engine.py", "return choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max,", "return choices[hold_choice_at(tapes, prefixes, base_ts + (exit_i + 90) * BAR_S, self.pause_auto_max,"),
+    ("pause: a loss rests like a win",
+     "set_engine.py", "    return max(cooldown, pause) if win and pause > 0 else cooldown", "    return max(cooldown, pause) if pause > 0 else cooldown"),
+    ("pause: the replay walk close ignores the pause",
+     "set_engine.py", "cool = rest_after(cooldown, int(select_pause(i)) if select_pause is not None else pause_fixed, net_pnl_pct(raw, cost_pct) > 0)", "cool = cooldown"),
+    ("pause: the replay lookup close ignores the pause",
+     "set_engine.py", "cool = rest_after(cooldown, int(select_pause(j)) if select_pause is not None else pause_fixed, net_pnl_pct(raw, cost_pct) > 0)", "cool = cooldown"),
+    ("pause: live rests after a loss too",
+     "pulse_trader.py", "            if pack and net > 0:\n                # the replay's rest after a WINNING close", "            if pack:\n                # the replay's rest after a WINNING close"),
+    ("pause: the manual pack value is ignored",
+     "set_engine.py", "        if pack in self.pause_pack:\n            return self.pause_pack[pack]\n        if self.pause_mode == \"fixed\":", "        if self.pause_mode == \"fixed\":"),
     ("stats: the per-entry PF counts every Set's row again",
      "set_engine.py", "                    k = (r.get(\"symbol\"), int(round(finite(r.get(\"t\")) - finite(r.get(\"hold_s\")))), x.pack, r.get(\"side\"))", "                    k = (x.id, finite(r.get(\"t\")))"),
     ("min PF by size: the Real window asks the one floor",

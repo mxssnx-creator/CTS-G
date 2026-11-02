@@ -119,6 +119,11 @@ export type PfBase = {
   base: PfPool;
   /** The pool of the Sets that pass the Base gate alone. */
   baseOnly?: PfPool;
+  /** The same pools with one Set per identical tape: Sets whose exits never differ trade the same orders, so `base` counts those orders once per copy. */
+  baseDistinct?: PfPool;
+  baseOnlyDistinct?: PfPool;
+  /** How many Sets traded, how many distinct tapes they make (`copies` are the rest), the largest group of identical Sets and the validated distinct share. */
+  distinct?: { traded: number; tapes: number; copies: number; largestGroup: number; valid: number; validPct: number; baseOnly: number };
   /** The same window orders, one result per entry (the best-ranked Set's): a pack's Sets share entries, the pool counts each once per Set. */
   baseEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
   baseOnlyEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
@@ -614,6 +619,23 @@ export type LiveStats = {
     setCount?: number;
     /** Every configured Set in compact form, with the gate-window fields that pool the PF of any selection. */
     index?: SetIndexRow[];
+    /** Pause after success: the mode and settings, and per indication (pack) the minutes the Auto Mode chose across symbols. */
+    pause?: {
+      mode?: string;
+      fixedMin?: number;
+      candidates?: number[];
+      autoMax?: number;
+      autoMin?: number;
+      packs?: Record<string, number>;
+      off?: string[];
+      chosen?: Record<string, { symbols: number; withPause: number; median: number; max: number }>;
+    };
+    /** The engine's expansion of `indicationConfigs`: names built per entry and the combinations it dropped (with the reason). */
+    indicationConfigs?: {
+      names?: number;
+      entries?: Array<{ label: string; names: number; stepMin: number; stepMax: number; ratios: number; types: string[]; steps: number }>;
+      dropped?: Array<{ entry: string; name: string; reason: string }>;
+    };
     /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
     pfBase?: PfBase;
     counts?: { valid: number; waiting?: number; pfValid?: number; invalid: number; locked: number; error: number; configured: number; retired?: number;

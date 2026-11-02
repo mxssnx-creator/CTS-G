@@ -116,6 +116,42 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
   return Math.round(Math.min(gmax, Math.max(gmin, g)) * 100) / 100;
 }
 
+export type PauseMode = "off" | "auto" | "fixed";
+export const PAUSE_MODES: PauseMode[] = ["off", "auto", "fixed"];
+export const PAUSE_CANDIDATES_DEFAULT = [2, 3, 5, 8, 12, 20, 30, 45, 60];
+export const PAUSE_MAX = 240;
+export const SET_TYPES = ["base", "exit", "trail"] as const;
+export const INDICATION_TIMEFRAMES = [1, 5, 15, 30] as const;
+/** One range configuration of the additional indications; mirrors server/pulse/indication_config.py (the engine expands and validates it). */
+export type IndicationConfig = {
+  label: string;
+  enabled: boolean;
+  families: string[]; // library families, e.g. "donch", "kelt"
+  names: string[]; // exact names (group votes, composites)
+  ranges: number[]; // _n<range>
+  timeframes: (number | "c" | "x")[]; // _t<tf>; "c" vote over 1/5/15, "x" over 1/5/15/30
+  relations: string[]; // "" = none, else name@relation
+  stepMin: number;
+  stepMax: number;
+  slRatios: number[];
+  types: string[];
+  pause: "auto" | number;
+};
+export const DEFAULT_INDICATION_CONFIG: IndicationConfig = {
+  label: "",
+  enabled: true,
+  families: [],
+  names: [],
+  ranges: [8, 14],
+  timeframes: [1, 5],
+  relations: [""],
+  stepMin: 3,
+  stepMax: 12,
+  slRatios: [1, 1.5, 2],
+  types: ["base", "exit", "trail"],
+  pause: "auto",
+};
+
 export type PulseOverlay = {
   targetNotional: number;
   volumeFactor: number;
@@ -327,6 +363,16 @@ export type PulseOverlay = {
   holdAuto: boolean;
   holdAutoMax: number;
   holdAutoMin: number;
+  // Pause after success: rest after a WINNING close of a Set lane, per indication (pack) and symbol. off / auto (chosen from reference Sets, only from
+  // earlier results) / fixed. pausePack fixes minutes for one pack and wins over the mode.
+  pauseMode: PauseMode;
+  pauseFixedMin: number;
+  pauseCandidates: number[];
+  pauseAutoMax: number;
+  pauseAutoMin: number;
+  pausePack: Record<string, number>;
+  // Indications by range: families x ranges x timeframes x relations, each entry with its own TP-step range, SL ratios, types and pause.
+  indicationConfigs: IndicationConfig[];
   stepHoldOn: boolean[];
   stepHoldMin: number[];
   setMinSamples: number;
@@ -550,6 +596,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAuto: true,
   holdAutoMax: 50,
   holdAutoMin: 10,
+  pauseMode: "off",
+  pauseFixedMin: 10,
+  pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
+  pauseAutoMax: 100,
+  pauseAutoMin: 30,
+  pausePack: {},
+  indicationConfigs: [],
   stepHoldOn: [false, false, false, false, false, false, false, false, false, false, false, false],
   stepHoldMin: [15, 15, 15, 15, 15, 120, 120, 120, 120, 120, 120, 120],
   setMinSamples: 12,
@@ -757,6 +810,13 @@ export type CtsSettings = {
   holdAuto?: boolean;
   holdAutoMax?: number;
   holdAutoMin?: number;
+  pauseMode?: string;
+  pauseFixedMin?: number;
+  pauseCandidates?: number[];
+  pauseAutoMax?: number;
+  pauseAutoMin?: number;
+  pausePack?: Record<string, number>;
+  indicationConfigs?: Partial<IndicationConfig>[];
   stepHoldOn?: boolean[];
   stepHoldMin?: number[];
   setMinSamples?: number;
@@ -840,6 +900,61 @@ const MIN_MODES: MinMode[] = ["positive", "negative", "both", "avgpositive", "av
 export function minMode(v: unknown): MinMode {
   const m = String(v ?? "positive").toLowerCase() as MinMode;
   return MIN_MODES.includes(m) ? m : "positive";
+}
+
+const pauseMinutes = (v: unknown, d: number) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.max(0, Math.min(PAUSE_MAX, n)) : d;
+};
+const pauseList = (v: unknown): number[] => {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : [];
+  const out = [...new Set(raw.map((x) => pauseMinutes(x, 0)).filter((x) => x > 0))].sort((a, b) => a - b);
+  return out.length ? out : [...PAUSE_CANDIDATES_DEFAULT];
+};
+const pausePackMap = (v: unknown): Record<string, number> => {
+  const out: Record<string, number> = {};
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, m] of Object.entries(v as Record<string, unknown>)) {
+      const n = pauseMinutes(m, 0);
+      if (k && n > 0) out[k] = n;
+    }
+  }
+  return out;
+};
+const strList = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;]/) : []).map((x) => String(x).trim()).filter((x) => x.length > 0);
+const numList = (v: unknown, lo: number, hi: number): number[] =>
+  [...new Set((Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : []).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= lo && x <= hi))];
+/** Normalise the saved range configurations; the engine expands and validates the names, so an unknown family is reported there, not silently kept here. */
+export function indicationConfigList(v: unknown): IndicationConfig[] {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, 24).map((raw, i) => {
+    const e = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const tfRaw: unknown[] = Array.isArray(e.timeframes) ? e.timeframes : typeof e.timeframes === "string" ? e.timeframes.split(/[,;\s]+/) : [];
+    const tfs = tfRaw
+      .map((x) => (x === "c" || x === "x" ? x : Math.round(Number(x))))
+      .filter((x) => x === "c" || x === "x" || (INDICATION_TIMEFRAMES as readonly number[]).includes(x as number)) as (number | "c" | "x")[];
+    const lo = Math.max(2, Math.min(30, Math.round(Number(e.stepMin) || DEFAULT_INDICATION_CONFIG.stepMin)));
+    const hi = Math.max(lo, Math.min(30, Math.round(Number(e.stepMax) || DEFAULT_INDICATION_CONFIG.stepMax)));
+    const types = strList(e.types).filter((t) => (SET_TYPES as readonly string[]).includes(t));
+    const relRaw: unknown[] = Array.isArray(e.relations) ? e.relations : typeof e.relations === "string" ? e.relations.split(/[,;]/) : [""];
+    const rel = relRaw.map((x) => String(x ?? "").trim());
+    const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.5 && x <= 3.5);
+    return {
+      label: String(e.label ?? `entry ${i + 1}`).slice(0, 60),
+      enabled: e.enabled !== false,
+      families: strList(e.families),
+      names: strList(e.names),
+      ranges: numList(e.ranges, 2, 60),
+      timeframes: [...new Set(tfs)],
+      relations: rel.length ? [...new Set(rel)] : [""],
+      stepMin: lo,
+      stepMax: hi,
+      slRatios: ratios.length ? [...new Set(ratios)] : [...DEFAULT_INDICATION_CONFIG.slRatios],
+      types: types.length ? types : [...DEFAULT_INDICATION_CONFIG.types],
+      pause: e.pause === "auto" || e.pause === undefined ? "auto" : pauseMinutes(e.pause, 0),
+    };
+  });
 }
 
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
@@ -1006,6 +1121,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     holdAuto: bool(cts.holdAuto, true),
     holdAutoMax: Math.max(10, Math.min(50, Math.round(num(cts.holdAutoMax, 50)))),
     holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
+    pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
+    pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
+    pauseCandidates: pauseList(cts.pauseCandidates),
+    pauseAutoMax: Math.max(10, Math.min(500, Math.round(num(cts.pauseAutoMax, 100)))),
+    pauseAutoMin: Math.max(8, Math.min(500, Math.round(num(cts.pauseAutoMin, 30)))),
+    pausePack: pausePackMap(cts.pausePack),
+    indicationConfigs: indicationConfigList(cts.indicationConfigs),
     stepHoldOn: Array.isArray(cts.stepHoldOn) ? cts.stepHoldOn.slice(0, 12).map(Boolean) : DEFAULT_OVERLAY.stepHoldOn,
     stepHoldMin: Array.isArray(cts.stepHoldMin) ? cts.stepHoldMin.slice(0, 12).map((x) => Math.round(Number(x) || 0)) : DEFAULT_OVERLAY.stepHoldMin,
     setMinSamples: num(cts.setMinSamples, 12),

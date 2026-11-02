@@ -84,10 +84,14 @@ def _symbol_job(args):
     cfg = lane_cfg(b)
     acc = se.BarIndex(bars)
     out = {}
+    cands = {p: [i for i in range(warm, len(bars)) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]] for p in b.packs}
+    # the rest after a winning close (pauseMode / pausePack in the overlay patch): the engine's own plan, chosen only from earlier results
+    plan = b._pause_plan(s, bars, float(t0), warm, len(bars), cfg, dirs, confs, cands, acc)
     for st in b.by_idx:
-        cand = [i for i in range(warm, len(bars)) if dirs[st.pack][i] != 0 and confs[st.pack][i] >= cfg["entry_conf"]]
+        cand = cands[st.pack]
         lane = se.SetLane(st, s)
-        trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand, acc)
+        sel_pause = b._lane_pause(lane, st.pack, plan)
+        trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand, acc, select_pause=sel_pause)
         ent = array("i", (t["entry_i"] for t in trades))
         ex = array("i", (t["exit_i"] for t in trades))
         pp = array("d", (t["pnl_pct"] for t in trades))

@@ -115,3 +115,54 @@ test("the Main minimal window is held to 0..3 and to a mode of positive or negat
   assert.equal(overlayFromCts(cts({ mainMinN: 3, mainMinMode: "avgboth" })).mainMinMode, "avgboth");
   assert.equal(overlayFromCts(cts({ mainMinN: 1, mainMinMode: "avgpositive" })).mainMinMode, "avgpositive");
 });
+
+test("pause after success: mode, minutes, candidates and per-indication minutes are bounded and survive a settings load", () => {
+  const loaded = overlayFromCts(
+    cts({ pauseMode: "auto", pauseFixedMin: 9999, pauseCandidates: "30, 5; 5, 0, -3, 9999", pauseAutoMax: 5, pauseAutoMin: 2, pausePack: { general: 15, bad: -4, z: "q" } }),
+  );
+  assert.equal(loaded.pauseMode, "auto");
+  assert.equal(loaded.pauseFixedMin, 240, "a fixed pause is at most four hours");
+  assert.deepEqual(loaded.pauseCandidates, [5, 30, 240], "candidates are unique whole minutes, ascending, 1-240");
+  assert.equal(loaded.pauseAutoMax, 10);
+  assert.equal(loaded.pauseAutoMin, 8, "the sample floor the engine applies (MIN_VALIDATION_N)");
+  assert.deepEqual(loaded.pausePack, { general: 15 });
+  assert.equal(overlayFromCts(cts({ pauseMode: "sideways" })).pauseMode, "off", "an unknown mode is off");
+  assert.deepEqual(overlayFromCts(cts()).pauseCandidates, [2, 3, 5, 8, 12, 20, 30, 45, 60]);
+});
+
+test("indication range configurations are normalised the way the engine expands them", () => {
+  const out = overlayFromCts(
+    cts({
+      indicationConfigs: [
+        { label: "fast", families: "donch, kelt", ranges: "8, 99, 14", timeframes: [1, 7, "c", "x"], relations: ["", "T5"], stepMin: 12, stepMax: 3, slRatios: [1, 9], types: ["base", "nope"], pause: 15 },
+        { enabled: false, pause: "auto" },
+        "junk",
+      ],
+    }),
+  ).indicationConfigs;
+  assert.equal(out.length, 3);
+  assert.deepEqual(out[0].families, ["donch", "kelt"]);
+  assert.deepEqual(out[0].ranges, [8, 14], "ranges outside 2-60 are dropped");
+  assert.deepEqual(out[0].timeframes, [1, "c", "x"], "only 1/5/15/30 minutes and the combined votes");
+  assert.deepEqual(out[0].relations, ["", "T5"]);
+  assert.ok(out[0].stepMax >= out[0].stepMin, "the step range is ordered");
+  assert.deepEqual(out[0].slRatios, [1], "SL ratios outside 0.5-3.5 are dropped");
+  assert.deepEqual(out[0].types, ["base"]);
+  assert.equal(out[0].pause, 15);
+  assert.equal(out[1].enabled, false);
+  assert.equal(out[1].pause, "auto");
+  assert.equal(out[2].label, "entry 3", "an unreadable entry becomes the default entry");
+  assert.deepEqual(overlayFromCts(cts()).indicationConfigs, []);
+});
+
+test("the desk pause defaults equal the engine's", () => {
+  const py = readFileSync(new URL("../../server/pulse/set_engine.py", import.meta.url), "utf8");
+  const cands = /PAUSE_CANDIDATES_DEFAULT = \(([0-9, ]+)\)/.exec(py)?.[1].split(",").map((x) => Number(x.trim()));
+  const max = Number(/PAUSE_MAX = (\d+)/.exec(py)?.[1]);
+  const o = overlayFromCts(cts());
+  assert.deepEqual(o.pauseCandidates, cands);
+  assert.equal(o.pauseFixedMin <= max, true);
+  assert.equal(overlayFromCts(cts({ pauseFixedMin: 1e6 })).pauseFixedMin, max);
+  assert.equal(Number(/PAUSE_AUTO_MAX_DEFAULT = (\d+)/.exec(py)?.[1]), o.pauseAutoMax);
+  assert.equal(Number(/PAUSE_AUTO_MIN_DEFAULT = (\d+)/.exec(py)?.[1]), o.pauseAutoMin);
+});

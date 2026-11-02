@@ -3799,7 +3799,7 @@ class Pulse:
                     self.cooldown["__book__"] = time.time() + 120
                     self.consec_loss = 4
                     log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id))
+        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id), pack=str(getattr(pos, "pack", "") or ""))
         if not pos.set_id:
             # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
             self.block.on_parent_close(pos.symbol, pos.side, pnl)
@@ -3813,7 +3813,7 @@ class Pulse:
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
 
-    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False) -> float:
+    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False, pack: str = "") -> float:
         """Seconds before this symbol may be entered again. A stop-out within 30 s of the entry (a book that moves faster
         than the strategy can act on) bans the symbol for SYM_BAN_S, whatever the lane: a venue safety. After a Set close
         the wait is the Set lane's own cooldown (setCooldownBars, as replayed), never a backoff from other closes. After an
@@ -3822,9 +3822,15 @@ class Pulse:
         if str(reason) == "sl" and float(hold_s) < 30.0:
             self.ignore_syms[sym] = max(self.ignore_syms.get(sym, 0.0), time.time() + SYM_BAN_S)
             log(f"SYMBOL BAN {sym} {int(SYM_BAN_S / 60)} min: stopped out after {hold_s:.0f}s")
-        if set_lane:
-            return float(getattr(self.sets, "cooldown_bars", 2)) * 60.0
         net = float(pnl_pct) - cost_as_frac(self.position_cost_pct)
+        if set_lane:
+            wait = float(getattr(self.sets, "cooldown_bars", 2)) * 60.0
+            if pack and net > 0:
+                # the replay's rest after a WINNING close (set_engine.rest_after): this indication's pause on the symbol, at least the cooldown
+                pause = getattr(self.sets, "pause_minutes", None)
+                if pause is not None:
+                    wait = max(wait, float(pause(pack, sym)) * 60.0)
+            return wait
         fails = getattr(self, "sym_fails", None)
         if fails is None:
             fails = self.sym_fails = {}

@@ -69,6 +69,7 @@ from indication_engine import (
 )
 from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
 from risk_variants import parse_trail, trail_grid
+from indication_config import expand as expand_indication_configs
 
 PACKS = ("indications", "general")
 EXTRA_INDICATOR_PREFIX = "extra."
@@ -981,6 +982,8 @@ class SetState:
     tp_pct: float = 0.0045
     hold_bars: int = 0              # this Set's own time exit in bars (minutes); 0 = the global time stop (stepHoldOn / stepHoldMin / auto)
     hold_auto: bool = False         # hold_bars was chosen by the Auto Mode from this Set's own last orders (holdAuto)
+    tape_sig: int = 0               # signature of the tape this Set was scored on (time, symbol, net of every order): Sets with the same non-zero signature traded the same orders
+    pause_bars: int = 0             # rest (minutes) after a WINNING close of this Set's lane, on top of the cooldown (pause fixed / manual); the Auto Mode chooses per indication and symbol, not here
     hold_auto_pf: float = 0.0       # cost PF of the chosen hold over the orders it was judged on
     hold_auto_n: int = 0            # how many orders (at most holdAutoMax) that judgement read
     idx: int = 0
@@ -1213,10 +1216,24 @@ def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = Non
     return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)
 
 
+PAUSE_KEY = "@p"                                      # _hist_rows key of a pause reference tape: "<reference set id>@p<minutes>"
+PAUSE_CANDIDATES_DEFAULT = (2, 3, 5, 8, 12, 20, 30, 45, 60)    # minutes of rest after a winning close an indication may choose
+PAUSE_MAX = 240                                       # the longest pause any setting can ask (minutes)
+PAUSE_AUTO_MAX_DEFAULT = 100                          # reference orders judged (pooled over the pack's reference Sets on the symbol)
+PAUSE_AUTO_MIN_DEFAULT = 30                           # reference orders a candidate needs before it can replace "no extra rest"
+PAUSE_MARGIN = 1.05                                   # a candidate must beat the no-extra-rest PF by 5 %
+PAUSE_MODES = ("off", "auto", "fixed")
+
+
+def rest_after(cooldown: int, pause: int, win: bool) -> int:
+    """Bars a lane rests after a close: the cooldown always, and after a WIN (net of PositionCost above zero) at least `pause` bars."""
+    return max(cooldown, pause) if win and pause > 0 else cooldown
+
+
 class SetLane:
     """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
     replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
-    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold", "honor")
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold", "honor", "pause")
 
     def __init__(self, st: "SetState", symbol: str) -> None:
         self.st = st
@@ -1234,6 +1251,7 @@ class SetLane:
         # strategy type), a trailing Set follows cfg["honor_tp"] (not exitIgnoreTp)
         self.honor = lane_honors_tp(st.kind)
         self.hold = int(getattr(st, "hold_bars", 0) or 0)      # the Set's own time exit (bars); 0 = the global one
+        self.pause = int(getattr(st, "pause_bars", 0) or 0)     # bars of rest after a WINNING close, on top of the cooldown
 
     def step(self, i: int, bar: Sequence[float], d: int, conf: float, allowed: bool, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Advance one bar. Returns the closed trade (a dict) or None.
@@ -1277,7 +1295,7 @@ class SetLane:
             if why:
                 raw = (px - entry) / entry * side
                 self.open = None
-                self.cool = cfg["cooldown"]
+                self.cool = rest_after(cfg["cooldown"], self.pause, net_pnl_pct(raw, cfg["cost_pct"]) > 0)
                 return {"set_id": self.sid, "symbol": self.symbol, "side": "LONG" if side > 0 else "SHORT",
                         "dir": side, "entry_i": int(o["i"]), "exit_i": i, "entry_px": entry, "exit_px": float(px),
                         "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cfg["cost_pct"]),
@@ -1311,6 +1329,7 @@ class SetLane:
         cand: Optional[Sequence[int]] = None,
         acc: Optional["BarIndex"] = None,
         select_hold: Optional[Callable[[int], int]] = None,
+        select_pause: Optional[Callable[[int], int]] = None,
     ) -> List[Dict[str, Any]]:
         """Advance over bars[i0:i1]. Same rules as step(), applied to the whole range in one loop.
         acc: the symbol's BarIndex; with it a base lane finds its exit by lookup (same result as the walk).
@@ -1327,6 +1346,7 @@ class SetLane:
         scratch_bars = cfg["scratch_bars"]
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
+        pause_fixed = self.pause
         cost_pct = cfg["cost_pct"]
         cost_frac = cost_as_frac(cost_pct)
         sl_floor = sl_floor_frac(cost_pct, cfg.get("sl_floor_steps"))
@@ -1424,7 +1444,7 @@ class SetLane:
                         "hold_s": held * BAR_S, "hold_bars": held,
                     })
                     o = None
-                    cool = cooldown
+                    cool = rest_after(cooldown, int(select_pause(j)) if select_pause is not None else pause_fixed, net_pnl_pct(raw, cost_pct) > 0)
                     i = j + 1
                     continue
             if o is not None:
@@ -1486,7 +1506,7 @@ class SetLane:
                             "hold_s": held * BAR_S, "hold_bars": held,
                         })
                         o = None
-                        cool = cooldown
+                        cool = rest_after(cooldown, int(select_pause(i)) if select_pause is not None else pause_fixed, net_pnl_pct(raw, cost_pct) > 0)
                         i += 1
                         break
                     i += 1
@@ -1646,6 +1666,16 @@ class SetBook:
         self.scratch_min = 0.0016
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
+        self.pause_mode = "off"                       # rest after a WINNING close: off / auto (per indication and symbol) / fixed
+        self.pause_fixed = 0
+        self.pause_candidates: Tuple[int, ...] = PAUSE_CANDIDATES_DEFAULT
+        self.pause_auto_max = PAUSE_AUTO_MAX_DEFAULT
+        self.pause_auto_min = PAUSE_AUTO_MIN_DEFAULT
+        self.pause_pack: Dict[str, int] = {}          # manual minutes per pack (indication); wins over auto and fixed
+        self.pause_off: set = set()                   # packs an indicationConfigs entry set to no pause (0)
+        self.pack_ranges: Dict[str, Dict[str, Any]] = {}      # pack -> {"lo", "hi", "ratios", "kinds"}: the Sets of an indication built from indicationConfigs
+        self.config_report: Dict[str, Any] = {"entries": [], "dropped": [], "names": 0}
+        self.pause_now: Dict[Tuple[str, str], int] = {}    # (pack, symbol) -> minutes the Auto Mode chose at the end of the last replay
         self.entry_conf = 0.58
         self.retry_s = 30.0
         self.ignore_tp = True
@@ -1704,6 +1734,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
+                              self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
             self._evaluation_config = signature
@@ -1900,6 +1931,12 @@ class SetBook:
         if not isinstance(extra_names, (list, tuple)):
             extra_names = []
         extra_names = sorted({str(x) for x in extra_names if extra_known(str(x))})
+        # indicationConfigs: families x ranges x timeframes x relations, each entry with its own step range, SL ratios, types and pause
+        expanded = expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
+        extra_names = sorted(set(extra_names) | set(expanded["names"]))
+        self.pack_ranges = {EXTRA_INDICATOR_PREFIX + n: r for n, r in expanded["ranges"].items()}
+        self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
+        self.config_report = {"entries": expanded["entries"], "dropped": expanded["dropped"][:200], "names": len(expanded["names"])}
         packs.extend(EXTRA_INDICATOR_PREFIX + name for name in extra_names)
         self.packs = packs       # an explicitly empty strategy selection stays empty
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
@@ -1955,6 +1992,27 @@ class SetBook:
             self.cooldown_bars = min(30, max(0, int(ov.get("setCooldownBars") if ov.get("setCooldownBars") is not None else 2)))
         except Exception:
             self.cooldown_bars = 2
+        mode = str(ov.get("pauseMode") or "off").lower()
+        self.pause_mode = mode if mode in PAUSE_MODES else "off"
+        self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
+        raw_c = ov.get("pauseCandidates")
+        if isinstance(raw_c, str):
+            raw_c = [x for x in raw_c.replace(";", ",").split(",") if x.strip()]
+        cands = sorted({m for m in (self._pause_minutes(x) for x in (raw_c or PAUSE_CANDIDATES_DEFAULT)) if m > 0})
+        self.pause_candidates = tuple(cands) or PAUSE_CANDIDATES_DEFAULT
+        self.pause_auto_max = int(max(10, min(500, num(ov, "pauseAutoMax", PAUSE_AUTO_MAX_DEFAULT))))
+        self.pause_auto_min = int(max(MIN_VALIDATION_N, min(self.pause_auto_max, num(ov, "pauseAutoMin", PAUSE_AUTO_MIN_DEFAULT))))
+        pp = ov.get("pausePack") if isinstance(ov.get("pausePack"), dict) else {}
+        self.pause_pack = {str(k): m for k, m in ((k, self._pause_minutes(v)) for k, v in pp.items()) if m > 0}
+        # an indicationConfigs entry may fix its indications' pause (minutes) or switch it off (0) whatever the book's mode; pausePack wins over it
+        self.pause_off = set()
+        for k, m in getattr(self, "_config_pause", {}).items():
+            if k in self.pause_pack:
+                continue
+            if m > 0:
+                self.pause_pack[k] = self._pause_minutes(m)
+            else:
+                self.pause_off.add(k)
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
         self.locks = {str(k): bool(v) for k, v in locks.items()}
         active_ranges = ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak")
@@ -2029,19 +2087,27 @@ class SetBook:
             idx += 1
         for pack_i, pack in enumerate(self.packs):
             pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
-            pack_trails = trails
+            pr = self.pack_ranges.get(pack)
+            pack_ratios = self.sl_ratios
+            pack_kinds = SET_KINDS
+            if pr:
+                # an indicationConfigs entry: its own TP-step range, SL ratios and Set types for this indication
+                pack_steps = list(range(int(pr["lo"]), int(pr["hi"]) + 1))
+                pack_ratios = list(pr["ratios"])
+                pack_kinds = tuple(pr["kinds"])
+            pack_trails = trails if "trail" in pack_kinds else []
             if pack == SHORT_PACK and self.hist_honor_tp:
                 short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
                 pack_trails = [t for t in self.trails if t[1] < short_mid - 1e-9]
-            if pack == SHORT_PACK and pack_steps:
-                # Short Range works with TP steps 2-6: no trailing arm beyond its largest step
+            if (pack == SHORT_PACK or pr) and pack_steps:
+                # Short Range works with TP steps 2-6, a configured indication with its own range: no trailing arm beyond the largest step
                 pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * self.cost_pct + 1e-9]
             mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
             trail_stop = max(sl_floor_frac(self.cost_pct, self.sl_min_steps),
                              step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
             if trail_stop > TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12:
                 pack_trails = []
-            for sl_i, sl in enumerate(self.sl_ratios):
+            for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):
                 for step_i, step in enumerate(pack_steps):
                     sid = make_set_id(pack, sl, "", step)
                     tp = step_tp_pct(step, self.cost_pct)
@@ -2068,9 +2134,9 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-            if self.exit_sets:
+            if self.exit_sets and "exit" in pack_kinds:
                 seen_stop: Dict[float, None] = {}
-                for sl_i, sl in enumerate(self.sl_ratios):
+                for sl_i, sl in enumerate(pack_ratios):
                     for step_i, step in enumerate(pack_steps):
                         dist = round(sl * step, 6)          # without a TP only the stop distance tells two Exit Sets apart
                         if dist in seen_stop:
@@ -2722,18 +2788,20 @@ class SetBook:
             confs[p] = [x[1] for x in sig]
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
         acc = BarIndex(bars)          # one index per symbol, shared by every lane
+        pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
         for st in self.by_idx:
             if st.pack not in self.packs:
                 continue
             holds = self.auto_holds(st)
             for h in (0,) + holds if holds else (None,):
                 lane = SetLane(st, symbol)
+                sel_pause = self._lane_pause(lane, st.pack, pause_plan)
                 key = st.id
                 if h is not None:
                     lane.hold = h                    # 0 = the global time stop; the Set's chosen hold never feeds its own judgement
                     key = st.id if h == 0 else f"{st.id}{HOLD_KEY}{h}"
                 out = hist.setdefault(key, [])
-                for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc):
+                for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc, select_pause=sel_pause):
                     out.append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
                                 "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
                                 "reason": done["reason"], "set_id": st.id})
@@ -2741,7 +2809,59 @@ class SetBook:
         # Candidate evidence must cover every entry being reconstructed, not just
         # the most recent 50 closes at the final scoring time.
         return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg,
-                "dirs": dirs, "confs": confs, "cand": cand, "acc": acc}
+                "dirs": dirs, "confs": confs, "cand": cand, "acc": acc, "pause": pause_plan}
+
+    def _pause_plan(self, symbol: str, bars: Sequence[Sequence[float]], base_ts: float, warmup: int, n: int, cfg: Dict[str, Any],
+                    dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex"
+                    ) -> Dict[str, Tuple[int, Optional[Callable[[int], int]]]]:
+        """Per pack the rest after a winning close this symbol's replay uses: (fixed minutes, choice function or None).
+        Manual (pausePack) and fixed values are constants. The Auto Mode replays the pack's reference Sets once per candidate pause
+        on this symbol and, at each exit bar, picks the pause whose pooled reference orders CLOSED BEFORE that bar read the best PF
+        (hold_choice_at: needs pauseAutoMin orders and a PAUSE_MARGIN lead over no extra rest). The choice never reads a result at or after
+        the bar it is made on, so a tape built with it is what the live engine would have traded. The latest choice is kept for live."""
+        plan: Dict[str, Tuple[int, Optional[Callable[[int], int]]]] = {}
+        for pack in self.packs:
+            if not self.pause_active(pack):
+                continue
+            if pack in self.pause_pack or self.pause_mode == "fixed":
+                plan[pack] = (self.pause_minutes(pack, symbol), None)
+                continue
+            refs = self.pause_refs(pack)
+            if not refs or not cand[pack]:
+                self.pause_now[(pack, symbol)] = 0
+                continue
+            tapes: List[Tuple[int, List[tuple]]] = []
+            for minutes in (0,) + self.pause_candidates:
+                rows: List[tuple] = []
+                for ref in refs:
+                    lane = SetLane(ref, symbol)
+                    lane.pause = minutes
+                    for done in lane.scan(warmup, n, bars, dirs[pack], confs[pack], True, cfg, cand[pack], acc):
+                        rows.append((base_ts + done["exit_i"] * BAR_S, done["pnl"]))
+                rows.sort(key=lambda r: r[0])
+                tapes.append((minutes, rows))
+            prefixes = []
+            for _m, rows in tapes:
+                gains, losses = prefix_sums([r[1] for r in rows])
+                prefixes.append(([r[0] for r in rows], gains, losses))
+            lookback_s = self.lookback * BAR_S
+            choices = [m for m, _ in tapes]
+
+            def choose(exit_i: int, prefixes=prefixes, tapes=tapes, choices=choices, lookback_s=lookback_s) -> int:
+                return choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max, self.pause_auto_min,
+                                              PAUSE_MARGIN, lookback_s)]
+            plan[pack] = (0, choose)
+            self.pause_now[(pack, symbol)] = choose(n)
+        return plan
+
+    @staticmethod
+    def _lane_pause(lane: "SetLane", pack: str, plan: Dict[str, Tuple[int, Optional[Callable[[int], int]]]]) -> Optional[Callable[[int], int]]:
+        """Give a lane its pack's pause: a constant on the lane, or the choice function for scan(select_pause=...)."""
+        ent = plan.get(pack)
+        if ent is None:
+            return None
+        lane.pause = int(ent[0])
+        return ent[1]
 
     def _adapt_lookback(self) -> None:
         """Grow collection history when too many scored Sets have sparse evidence.
@@ -2816,8 +2936,9 @@ class SetBook:
                                      HOLD_AUTO_MARGIN, self.lookback * BAR_S)
                 return cands[idx][0]
             lane = SetLane(st, symbol)
+            sel_pause = self._lane_pause(lane, st.pack, data.get("pause") or {})
             done = lane.scan(data["warmup"], len(bars), bars, data["dirs"][st.pack], data["confs"][st.pack],
-                             True, data["cfg"], data["cand"][st.pack], data["acc"], select_hold=choose)
+                             True, data["cfg"], data["cand"][st.pack], data["acc"], select_hold=choose, select_pause=sel_pause)
             for row in done:
                 t = base_ts + row["exit_i"] * BAR_S
                 if t >= cutoff and (until is None or t <= until):
@@ -3001,6 +3122,7 @@ class SetBook:
                 # and drawdown must use the same current round-trip cost as the PF gates.
                 tape[i] = {**row, "pnl": gross - cf}
         pnls = [finite(r.get("pnl")) for r in tape]
+        st.tape_sig = hash(tuple((round(finite(r.get("t")), 3), str(r.get("symbol")), round(pnls[k], 10)) for k, r in enumerate(tape))) if tape else 0
         st.wins = sum(1 for x in pnls if x > 0)
         gross_profit = sum(x for x in pnls if x > 0)
         gross_loss = -sum(x for x in pnls if x < 0)
@@ -3325,6 +3447,57 @@ class SetBook:
         """The TP step of a Set; a trailing Set takes the step of its arm (arm % over PositionCost)."""
         return int(st.step) if st.kind != "trail" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
 
+    @staticmethod
+    def _pause_minutes(raw: Any) -> int:
+        """A configured pause in whole minutes, 0 (none) to PAUSE_MAX; a broken value is none."""
+        try:
+            v = int(round(float(raw)))
+        except Exception:
+            return 0
+        return max(0, min(PAUSE_MAX, v)) if math.isfinite(v) else 0
+
+    def pause_refs(self, pack: str) -> List["SetState"]:
+        """The reference Sets of an indication's pause Auto Mode: base Sets (SL ratio 1.0 and 2.0, TP step 3 / 6 / 10 / 16, the nearest the grid has).
+        Pause is a property of the indication on a symbol, so it is judged on a few representative Sets pooled, never on one Set's own tape."""
+        cands = [st for st in self.by_idx if st.pack == pack and st.kind == "base"]
+        if not cands:
+            return []
+        out: List[SetState] = []
+        for ratio in (1.0, 2.0):
+            for step in (3, 6, 10, 16):
+                best = min(cands, key=lambda st: (abs(st.sl_ratio - ratio) + abs(self.step_of(st) - step) / 10.0, st.id))
+                if best not in out:
+                    out.append(best)
+        return out
+
+    def _pause_report(self) -> Dict[str, Any]:
+        """What the pause does now: the mode and settings, and per pack the minutes the Auto Mode chose (median over the symbols that have a choice)."""
+        by_pack: Dict[str, List[int]] = {}
+        for (pack, _sym), minutes in list(self.pause_now.items()):
+            by_pack.setdefault(pack, []).append(int(minutes))
+        chosen = {}
+        for pack, vals in by_pack.items():
+            vals.sort()
+            chosen[pack] = {"symbols": len(vals), "withPause": sum(1 for v in vals if v > 0), "median": vals[len(vals) // 2], "max": vals[-1]}
+        return {"mode": self.pause_mode, "fixedMin": self.pause_fixed, "candidates": list(self.pause_candidates), "autoMax": self.pause_auto_max,
+                "autoMin": self.pause_auto_min, "packs": dict(self.pause_pack), "off": sorted(self.pause_off), "chosen": chosen}
+
+    def pause_active(self, pack: str) -> bool:
+        return pack not in self.pause_off and (self.pause_mode != "off" or pack in self.pause_pack)
+
+    def pause_minutes(self, pack: str, symbol: str = "") -> int:
+        """Minutes a lane of this indication rests after a winning close on the symbol right now (what a new close would wait):
+        the manual pack value, else the fixed value, else the Auto Mode's latest choice for (pack, symbol); 0 = only the cooldown."""
+        if pack in self.pause_off:
+            return 0
+        if pack in self.pause_pack:
+            return self.pause_pack[pack]
+        if self.pause_mode == "fixed":
+            return self.pause_fixed
+        if self.pause_mode == "auto":
+            return int(self.pause_now.get((pack, symbol), 0))
+        return 0
+
     def hold_bars_for(self, st: "SetState") -> int:
         """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
         table = getattr(self, "step_hold", None) or {}
@@ -3558,6 +3731,18 @@ class SetBook:
             gp_, gl_ = sum(v for v in nets_ if v > 0), -sum(v for v in nets_ if v < 0)
             return {"pf": round(pf_of(gp_, gl_), 4), "entries": len(nets_), "orders": n_rows,
                     "setsPerEntry": round(n_rows / len(nets_), 2) if nets_ else 0.0}
+        def distinct(sts: List[SetState]) -> List[SetState]:
+            """One Set per identical tape. Sets whose exits never differ on the orders they took (a trailing arm the scratch exit always beats, say)
+            trade the same orders, so a pool counts those orders once per copy. The first Set (grid order) stands for its copies; a Set without
+            orders is never a copy of another. Chain figures follow the tape, so the pools stay exact."""
+            seen: set = set()
+            out_: List[SetState] = []
+            for x in sts:
+                if x.tape_sig and x.tape_sig in seen:
+                    continue
+                seen.add(x.tape_sig)
+                out_.append(x)
+            return out_
         allsets = list(self.by_idx)
         reasons = {x.id: self.validation_reason(x) for x in allsets}
         valid = [x for x in allsets if not reasons[x.id]]
@@ -3653,7 +3838,16 @@ class SetBook:
         # Base passed) of every Base-passing Set; `real` the Real Sets (orders opened while Base and Main passed) of the end Sets, which
         # the overall Real stage (the coordinator's real evaluation) reads
         # `baseEntry` / `baseOnlyEntry`: the same window orders, one result per entry from its best-ranked Set (per_entry)
+        traded = [x for x in allsets if x.tape_sig]
+        groups: Dict[int, int] = {}
+        for x in traded:
+            groups[x.tape_sig] = groups.get(x.tape_sig, 0) + 1
+        dv, db = distinct(valid), distinct(base_only)
+        distinct_view = {"traded": len(traded), "tapes": len(groups), "copies": len(traded) - len(groups), "largestGroup": max(groups.values(), default=0),
+                         "valid": len(dv), "validPct": round(100.0 * len(dv) / len(distinct(allsets)), 2) if allsets else 0.0,
+                         "baseOnly": len(db)}
         return {"base": pool(valid), "baseOnly": pool(base_only), "baseEntry": per_entry(valid), "baseOnlyEntry": per_entry(base_only),
+                "baseDistinct": pool(dv), "baseOnlyDistinct": pool(db), "distinct": distinct_view,
                 "main": main, "mainAllLanes": main_all_lanes, "processed": processed, "real": executable,
                 "realneg": realneg, "stageSets": stage_sets, "stages": stages, "windows": windows,
                 "unfiltered": pool(allsets),
@@ -3849,6 +4043,8 @@ class SetBook:
             "activeCount": sum(1 for s in self.sets.values() if self.is_eligible(s)),
             "counts": self.counts(),
             "pfBase": self._pf_split(),
+            "pause": self._pause_report(),
+            "indicationConfigs": dict(self.config_report),
             "coverage": cover,
             "index": index,
             "minStep": self.min_step,

@@ -29,7 +29,19 @@ import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
 import { CostEvidencePanel } from "@/components/evidence-panel";
 import { secureMinimalPreset } from "@/lib/presets";
-import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS, minMode } from "@/lib/config-model";
+import {
+  DEFAULT_INDICATION_CONFIG,
+  GATE_MIN_PF_DEFAULT,
+  INDICATION_TIMEFRAMES,
+  indicationConfigList,
+  MAX_SYMBOLS,
+  minMode,
+  PAUSE_MAX,
+  PAUSE_MODES,
+  SET_TYPES,
+  type IndicationConfig,
+  type PauseMode,
+} from "@/lib/config-model";
 import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
@@ -467,7 +479,93 @@ function SettingsPage() {
             </Card>
           )}
 
+          {section === "packs" && (
+            <Card
+              title="Indications by range"
+              hint="Each entry builds indications from library families x ranges x timeframes x relations; every name it makes is its own strategy with its own Sets and its own Base validation, with this entry's TP-step range, SL ratios, types and pause. Combinations the library does not know are dropped and listed below. A wide entry multiplies the Set count: keep ranges and steps narrow."
+            >
+              <IndicationConfigEditor
+                value={overlay.indicationConfigs}
+                onChange={(v) => patch("indicationConfigs", v)}
+                report={stats?.sets?.indicationConfigs}
+              />
+            </Card>
+          )}
+
           {section === "sets" && <SetsOverview stats={stats} />}
+          {section === "sets" && (
+            <Card
+              title="Pause after success"
+              hint="After a WINNING close (net of PositionCost above zero) a Set lane rests at least this long before its next entry, on top of the cooldown. Auto Mode picks the pause for every indication and symbol from a few reference Sets of that indication, using only results that closed before the moment of the choice; it needs enough orders and a clear lead over no extra rest, else the cooldown alone applies. A pause per indication below overrides the mode. Replay and live use the same rule."
+            >
+              <Grid>
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Mode</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.pauseMode}
+                    onChange={(e) => patch("pauseMode", (PAUSE_MODES as string[]).includes(e.target.value) ? (e.target.value as PauseMode) : "off")}
+                    data-testid="pause-mode"
+                  >
+                    <option value="off">off (cooldown only)</option>
+                    <option value="auto">auto (best pause per indication and symbol)</option>
+                    <option value="fixed">fixed (the same pause for every indication)</option>
+                  </select>
+                </label>
+                <Slider
+                  label="Fixed pause"
+                  value={overlay.pauseFixedMin}
+                  min={0}
+                  max={PAUSE_MAX}
+                  step={1}
+                  unit=" min"
+                  hint={overlay.pauseMode === "fixed" ? "rest after every winning close" : "used in fixed mode"}
+                  onChange={(v) => patch("pauseFixedMin", v)}
+                />
+                <Slider
+                  label="Auto: orders judged (max)"
+                  value={overlay.pauseAutoMax}
+                  min={10}
+                  max={500}
+                  step={5}
+                  hint="newest pooled reference orders read per candidate"
+                  onChange={(v) => patch("pauseAutoMax", v)}
+                />
+                <Slider
+                  label="Auto: orders needed (min)"
+                  value={overlay.pauseAutoMin}
+                  min={8}
+                  max={500}
+                  step={1}
+                  hint="below this a candidate cannot replace no extra rest"
+                  onChange={(v) => patch("pauseAutoMin", v)}
+                />
+              </Grid>
+              <Grid>
+                <CsvField
+                  label="Auto candidates (minutes)"
+                  value={overlay.pauseCandidates.join(", ")}
+                  hint={`whole minutes 1-${PAUSE_MAX}`}
+                  onCommit={(t) => patch("pauseCandidates", t.split(/[,;\s]+/).map((x) => Math.round(Number(x))).filter((x) => x >= 1 && x <= PAUSE_MAX))}
+                />
+                <CsvField
+                  label="Pause per indication (pack=minutes)"
+                  value={Object.entries(overlay.pausePack).map(([k, m]) => `${k}=${m}`).join(", ")}
+                  hint="e.g. general=15, extra.donch_n8_t5=30; wins over the mode"
+                  onCommit={(t) => {
+                    const out: Record<string, number> = {};
+                    for (const part of t.split(",")) {
+                      const [k, m] = part.split("=").map((x) => x.trim());
+                      const n = Math.round(Number(m));
+                      if (k && Number.isFinite(n) && n > 0) out[k] = Math.min(PAUSE_MAX, n);
+                    }
+                    patch("pausePack", out);
+                  }}
+                />
+              </Grid>
+              <PauseChosen stats={stats} />
+            </Card>
+          )}
           {section === "sets" && (
             <Card
               title="Hold time per step"
@@ -1826,6 +1924,154 @@ function PfWindowControls({
         onChange={(v) => patch("minPfSignals", v)}
       />
     </>
+  );
+}
+
+function CsvField({ label, value, hint, onCommit }: { label: string; value: string; hint?: string; onCommit: (v: string) => void }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  return (
+    <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+      <span className="font-mono text-xs text-muted">{label}</span>
+      <input
+        className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => onCommit(text)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onCommit(text);
+        }}
+      />
+      {hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
+    </label>
+  );
+}
+
+function PauseChosen({ stats }: { stats: LiveStats | null }) {
+  const chosen = stats?.sets?.pause?.chosen ?? {};
+  const rows = Object.entries(chosen).sort((a, b) => b[1].median - a[1].median).slice(0, 24);
+  if (!rows.length) return <p className="text-sm text-muted">No automatic choice yet: it appears after the next replay with the mode on auto.</p>;
+  return (
+    <div className="overflow-x-auto" data-testid="pause-chosen">
+      <table className="w-full text-left font-mono text-xs">
+        <thead className="text-muted">
+          <tr>
+            <th className="py-1">Indication</th>
+            <th>Symbols</th>
+            <th>With a pause</th>
+            <th>Median min</th>
+            <th>Max min</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([pack, r]) => (
+            <tr key={pack} className="border-t border-border">
+              <td className="py-1">{pack}</td>
+              <td>{r.symbols}</td>
+              <td>{r.withPause}</td>
+              <td>{r.median}</td>
+              <td>{r.max}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function IndicationConfigEditor({
+  value,
+  onChange,
+  report,
+}: {
+  value: IndicationConfig[];
+  onChange: (v: IndicationConfig[]) => void;
+  report?: NonNullable<NonNullable<LiveStats["sets"]>["indicationConfigs"]>;
+}) {
+  const set = (i: number, part: Partial<IndicationConfig>) => onChange(indicationConfigList(value.map((e, k) => (k === i ? { ...e, ...part } : e))));
+  const list = (t: string) => t.split(/[,;]/).map((x) => x.trim());
+  return (
+    <div className="space-y-3" data-testid="indication-configs">
+      {value.map((e, i) => (
+        <div key={i} className="space-y-2 rounded-lg border border-border bg-bg2 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Toggle label="On" on={e.enabled} onChange={(v) => set(i, { enabled: v })} />
+            <CsvField label="Label" value={e.label} onCommit={(t) => set(i, { label: t })} />
+            <button type="button" className="rounded border border-border px-2 py-1 font-mono text-xs" onClick={() => onChange(value.filter((_, k) => k !== i))}>
+              Remove
+            </button>
+          </div>
+          <Grid>
+            <CsvField label="Families" value={e.families.join(", ")} hint="e.g. donch, kelt, brk" onCommit={(t) => set(i, { families: list(t).filter(Boolean) })} />
+            <CsvField label="Exact names" value={e.names.join(", ")} hint="group votes or composites, e.g. g_trend_min" onCommit={(t) => set(i, { names: list(t).filter(Boolean) })} />
+            <CsvField label="Ranges" value={e.ranges.join(", ")} hint="2-60, e.g. 5, 8, 14, 21" onCommit={(t) => set(i, { ranges: t.split(/[,;\s]+/).map(Number).filter((x) => x >= 2 && x <= 60) })} />
+            <CsvField
+              label="Timeframes"
+              value={e.timeframes.join(", ")}
+              hint={`${INDICATION_TIMEFRAMES.join(" / ")} minutes; c = vote over 1/5/15, x = over 1/5/15/30`}
+              onCommit={(t) => set(i, { timeframes: t.split(/[,;\s]+/).filter(Boolean).map((x) => (x === "c" || x === "x" ? x : Number(x))) as IndicationConfig["timeframes"] })}
+            />
+            <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; e.g. , T5, B15 (see the relation list)" onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
+            <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.5-3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
+            <Slider label="TP step from" value={e.stepMin} min={2} max={30} step={1} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
+            <Slider label="TP step to" value={e.stepMax} min={2} max={30} step={1} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
+            <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+              <span className="font-mono text-xs text-muted">Pause after success</span>
+              <select
+                className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                value={e.pause === "auto" ? "auto" : String(e.pause)}
+                onChange={(ev) => set(i, { pause: ev.target.value === "auto" ? "auto" : Number(ev.target.value) })}
+              >
+                <option value="auto">follow the mode</option>
+                <option value="0">none</option>
+                {[5, 10, 15, 30, 60, 120].map((m) => (
+                  <option key={m} value={String(m)}>
+                    {m} min
+                  </option>
+                ))}
+              </select>
+            </label>
+          </Grid>
+          <div className="flex flex-wrap gap-3 font-mono text-xs">
+            {SET_TYPES.map((t) => (
+              <label key={t} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={e.types.includes(t)}
+                  onChange={(ev) => set(i, { types: ev.target.checked ? [...e.types, t] : e.types.filter((x) => x !== t) })}
+                />
+                {t}
+              </label>
+            ))}
+            {report?.entries?.[i] && (
+              <span className="text-muted">
+                engine: {report.entries[i].names} names x {report.entries[i].steps} steps
+              </span>
+            )}
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="rounded border border-border px-3 py-1.5 font-mono text-xs"
+        onClick={() => onChange([...value, { ...DEFAULT_INDICATION_CONFIG, label: `entry ${value.length + 1}` }])}
+        data-testid="add-indication-config"
+      >
+        Add entry
+      </button>
+      {report && (report.dropped?.length ?? 0) > 0 && (
+        <details className="text-xs text-muted">
+          <summary>{report.dropped?.length} combinations dropped by the engine</summary>
+          <ul className="mt-1 list-disc pl-5 font-mono">
+            {report.dropped?.slice(0, 40).map((d, k) => (
+              <li key={k}>
+                {d.entry}: {d.name} ({d.reason})
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
   );
 }
 
