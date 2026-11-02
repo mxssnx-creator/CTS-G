@@ -225,6 +225,47 @@ def last_n_configs(book) -> Dict[str, Dict[str, Any]]:
     return c
 
 
+BASE_OPTIONS = {"B50/25": dict(base_long=50, base_short=25, base_min_n=0), "B30/10": dict(base_long=30, base_short=10, base_min_n=0),
+                "B20/10": dict(base_long=20, base_short=10, base_min_n=0),
+                "B50/25 m-1": dict(base_long=50, base_short=25, base_min_n=1, base_min_positive=False, base_min_both=False),
+                "B30/10 m-1": dict(base_long=30, base_short=10, base_min_n=1, base_min_positive=False, base_min_both=False)}
+MAIN_OPTIONS = {"M25": dict(main_n=25, short_on=True, main_min_n=0), "M15": dict(main_n=15, short_on=True, main_min_n=0),
+                "M35": dict(main_n=35, short_on=True, main_min_n=0), "M25 noshort": dict(main_n=25, short_on=False, main_min_n=0),
+                "M25 k+1": dict(main_n=25, short_on=True, main_min_n=1, main_min_positive=True, main_min_both=False)}
+REAL_OPTIONS = (1, 5, 15, 25)
+
+
+def grid_of_set(idx: int) -> Dict[str, List[float]]:
+    """Every Base x Main x Real last-N combination on its own: a Base option builds its Main Set, a Main option builds its Real Set from that Main Set, a Real
+    N judges that Real Set at the entry. Positive lane (Real Set) and Negative lane (Real Negative Set) each. {lane|base|main|real: [gains, losses, orders, traded]}."""
+    st, rows, t0, book = G["sets"][idx], G["rows"][idx], G["t0"], G["book"]
+    cf = cost_as_frac(book.cost_pct)
+    ts, ents = [r[0] for r in rows], [r[1] for r in rows]
+    nets = [r[2] - cf for r in rows]
+    P0 = book.stage_params(st.pack, st)
+    out: Dict[str, List[float]] = {}
+    for bn, bkw in BASE_OPTIONS.items():
+        for mn_, mkw in MAIN_OPTIONS.items():
+            P = dataclasses.replace(P0, **bkw, **mkw)
+            ch = se.stage_chain(ts, ents, nets, P)
+            for lane, members in (("pos", ch["real"]), ("neg", ch["realneg"])):
+                lt, ln = [ts[k] for k in members], [nets[k] for k in members]
+                for rn_ in REAL_OPTIONS:
+                    Pr = dataclasses.replace(P, real_n=rn_)
+                    gp = gl = 0.0
+                    n = 0
+                    for k in members:
+                        if ents[k] < t0 or not real_window_ok(lt, ln, ents[k], Pr):
+                            continue
+                        n += 1
+                        if nets[k] > 0:
+                            gp += nets[k]
+                        else:
+                            gl -= nets[k]
+                    out[f"{lane}|{bn}|{mn_}|R{rn_}"] = [gp, gl, n, 1 if n else 0]
+    return out
+
+
 def pick_sets(book, per_group: int):
     groups: Dict[Tuple, List[Any]] = defaultdict(list)
     for st in book.by_idx:
@@ -250,6 +291,7 @@ def main() -> int:
     ap.add_argument("--cap", type=int, default=400, help="orders verified per (Set, symbol)")
     ap.add_argument("--per-group", type=int, default=6)
     ap.add_argument("--patch", default="")
+    ap.add_argument("--grid", action="store_true", help="also run every Base x Main x Real last-N combination (positive and Negative lane) on its own")
     a = ap.parse_args()
     t_start = time.time()
     patch = {"holdEnabled": False, "histLookbackBars": a.lookback, "histLookbackAuto": False, **(json.loads(a.patch) if a.patch else {})}
@@ -280,6 +322,15 @@ def main() -> int:
     G.update(sets={st.idx: st for st in book.by_idx}, rows=rows, t0=t0, book=book, configs=last_n_configs(book))
     with ProcessPoolExecutor(max_workers=a.jobs) as pool:
         per_set = list(pool.map(ladder_of_set, [st.idx for st in chosen], chunksize=4))
+    grid: Dict[str, List[float]] = {}
+    if a.grid:
+        with ProcessPoolExecutor(max_workers=a.jobs) as pool:
+            for r in pool.map(grid_of_set, [st.idx for st in chosen], chunksize=4):
+                for k, v in r.items():
+                    acc = grid.setdefault(k, [0.0, 0.0, 0, 0])
+                    for i in range(4):
+                        acc[i] += v[i]
+        print(f"grid: {len(grid)} combinations  [{time.time() - t_start:.0f}s]", flush=True)
     gates: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(lambda: [0.0] * 5 + [0]))
     configs: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(lambda: [0.0] * 5 + [0]))
     for st, r in zip(chosen, per_set):
@@ -294,7 +345,7 @@ def main() -> int:
     res = {"meta": {"symbols": names, "lookback_bars": a.lookback, "test_hours": a.hours, "test_start": int(t0), "sets_sampled": len(chosen), "sets_total": len(book.by_idx),
                     "cost_pct": book.cost_pct, "config": {"setGateWindow": book.gate_window, "setGateShortN": book.base_short, "mainGateN": book.main_n, "realGateN": book.realst_n,
                                                           "mainShortWindows": list(book.short_windows), "minPfByStep": book.pf_by_step}},
-           "market_truth": truth, "gates": {k: dict(v) for k, v in gates.items()}, "configs": {k: dict(v) for k, v in configs.items()}}
+           "market_truth": truth, "gates": {k: dict(v) for k, v in gates.items()}, "configs": {k: dict(v) for k, v in configs.items()}, "grid": grid}
     json.dump(res, open(a.out, "w"))
     txt = render(res)
     if a.txt:
