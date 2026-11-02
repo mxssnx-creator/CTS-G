@@ -172,7 +172,7 @@ def main() -> int:
     now = hours[a.hour]
     cf = cost_as_frac(book.cost_pct)
     rows = [r for r in rows if r[0] <= now]
-    tr = trace_set([r[0] for r in rows], [r[1] for r in rows], [r[2] - cf for r in rows], book.stage_params(st.pack))
+    tr = trace_set([r[0] for r in rows], [r[1] for r in rows], [r[2] - cf for r in rows], book.stage_params(st.pack, st))
     print(f"Set {st.id} (kind {st.kind}, TP {st.tp_pct * 100:.3f} %, SL ratio {st.sl_ratio}); verdict hour {int(now)}")
     print(render(tr, a.orders, book.cost_pct))
     print("trace consistent with the chain lists:", consistent(tr))

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { defaultOverlay, overlayFromCts, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { defaultOverlay, manualStepPf, overlayFromCts, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
@@ -167,4 +167,26 @@ test("the desk pause defaults equal the engine's", () => {
   assert.equal(overlayFromCts(cts({ pauseFixedMin: 1e6 })).pauseFixedMin, max);
   assert.equal(Number(/PAUSE_AUTO_MAX_DEFAULT = (\d+)/.exec(py)?.[1]), o.pauseAutoMax);
   assert.equal(Number(/PAUSE_AUTO_MIN_DEFAULT = (\d+)/.exec(py)?.[1]), o.pauseAutoMin);
+});
+
+test("the manual floor per TP step is 1 + TP% x ratio on the 0.1% grid rounded down, with the engine's numbers", () => {
+  // the same table as scripts/regression/step_pf.py
+  const table: Array<[number, number, number]> = [
+    [0.2, 0.2, 1.04], [0.25, 0.2, 1.04], [0.29, 0.2, 1.04], [0.3, 0.2, 1.06], [3.2, 0.2, 1.64], [3.5, 0.2, 1.7], [9.0, 0.2, 1.7],
+    [0.1, 0.2, 1.04], [0.2, 1.1, 1.22], [3.5, 1.1, 4.85], [1.0, 0.1, 1.1],
+  ];
+  for (const [tp, ratio, want] of table) assert.equal(manualStepPf(tp, ratio), want, `${tp}% at ratio ${ratio}`);
+  const snaps: Array<[unknown, number]> = [[0.05, 0.1], [0.1, 0.1], [0.2, 0.2], [0.33, 0.35], [1.1, 1.1], [1.5, 1.1], ["x", 0.2], [null, 0.2], [Number.NaN, 0.2], [Infinity, 0.2]];
+  for (const [raw, want] of snaps) assert.equal(stepPfRatio(raw), want, `ratio ${String(raw)}`);
+});
+
+test("the TP-step floor settings are on by default, bounded, and survive a settings load", () => {
+  const d = overlayFromCts(cts());
+  assert.deepEqual([d.minPfByStep, d.minPfStepAuto, d.minPfStepRatio, d.minPfStepAutoN, d.minPfStepAutoMin], [true, true, 0.2, 10, 300]);
+  const o = overlayFromCts(cts({ minPfByStep: false, minPfStepAuto: false, minPfStepRatio: 0.45, minPfStepAutoN: 12, minPfStepAutoMin: 500 }));
+  assert.deepEqual([o.minPfByStep, o.minPfStepAuto, o.minPfStepRatio, o.minPfStepAutoN, o.minPfStepAutoMin], [false, false, 0.45, 12, 500]);
+  const bad = overlayFromCts(cts({ minPfStepRatio: "x", minPfStepAutoN: 999, minPfStepAutoMin: 1 }));
+  assert.deepEqual([bad.minPfStepRatio, bad.minPfStepAutoN, bad.minPfStepAutoMin], [0.2, 50, 30]);
+  assert.equal(overlayFromCts(cts({ minPfStepRatio: 1.5 })).minPfStepRatio, 1.1, "the ratio ends at 1.1");
+  assert.equal(overlayFromCts(cts({ minPfStepRatio: 0.01 })).minPfStepRatio, 0.1, "and starts at 0.1");
 });

@@ -196,7 +196,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
             "risk_ok": not book.stop_cap_exceeded(st),
-            "floor": book.floor_for(book.gate_window, st.pack), "floor_short": book.floor_for(book.base_short, st.pack), "cf": cf}
+            "floor": book.floor_for(book.gate_window, st.pack, st), "floor_short": book.floor_for(book.base_short, st.pack, st), "cf": cf}
 
 
 def _long_ok(book, e: Dict[str, Any]) -> bool:
@@ -240,7 +240,7 @@ def validation_lane(book, tapes: Tapes, st, now: float) -> str:
         return "pos"
     ch, nets = chain_at(book, tapes, st, now)
     v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]],
-                          [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack))
+                          [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
     main_pf = not book.main_on or (v["main"] and (v["short"] or not book.short_on))
     if main_pf and (v["real"] if book.realst_on else True):
         return "pos"
@@ -269,7 +269,7 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
     if not base_pass or not (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
         return out
     ch, nets = chain_at(book, tapes, st, now)
-    P = book.stage_params(st.pack)
+    P = book.stage_params(st.pack, st)
     mn, rn, qn = [nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]]
     v = se.stage_verdicts(mn, rn, qn, ch["short_n"], P)
     if book.main_on:
@@ -302,14 +302,14 @@ def chain_at(book, tapes: Tapes, st, now: float):
     lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
     ts, ents = list(tx[lo:e]), list(te[lo:e])
     nets = [x - tapes.cf for x in pp[lo:e]]
-    return se.stage_chain(ts, ents, nets, book.stage_params(st.pack), window_start=now - lb), nets
+    return se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb), nets
 
 
 def stage_lane(book, tapes: Tapes, st, now: float) -> str:
     """The Set's stage verdicts (set_engine.stage_verdicts) on its chain: "pos" when Main and Real pass, "neg" when the Negative lane and Real
     Negative pass, else ""."""
     ch, nets = chain_at(book, tapes, st, now)
-    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack))
+    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
     return "pos" if v["pos"] else ("neg" if v["negl"] else "")
 
 
@@ -322,7 +322,7 @@ def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
     nets, gpre, lpre = source.prefix(st.idx)
     e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - lb)
-    floor = book.floor_for(book.gate_window, st.pack)
+    floor = book.floor_for(book.gate_window, st.pack, st)
     out: List[float] = []
     for k in range(e - 1, lo - 1, -1):
         if se.processed_flag(tx, nets, gpre, lpre, te[k], book.gate_window, book.gate_min, floor, book.max_dd_s, lb, lo,

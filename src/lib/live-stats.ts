@@ -619,6 +619,15 @@ export type LiveStats = {
     setCount?: number;
     /** Every configured Set in compact form, with the gate-window fields that pool the PF of any selection. */
     index?: SetIndexRow[];
+    /** Minimum PF per TP step: the settings and, per step 0.2-3.5 %, the manual floor, what Auto learned (null: the manual value stands) and the figures behind it. */
+    stepPf?: {
+      on?: boolean;
+      auto?: boolean;
+      ratio?: number;
+      autoN?: number;
+      autoMin?: number;
+      steps?: Array<{ step: number; tpPct: number; manual: number; auto: number | null; used: number; orders: number; admitted: number; pfAll: number; pfAdmitted: number }>;
+    };
     /** Pause after success: the mode and settings, and per indication (pack) the minutes the Auto Mode chose across symbols. */
     pause?: {
       mode?: string;

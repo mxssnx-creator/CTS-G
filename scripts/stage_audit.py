@@ -155,7 +155,7 @@ def main() -> int:
         ts = [x[0] for x in r]
         ents = [x[1] for x in r]
         nets = [x[2] - cf for x in r]
-        ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack))
+        ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st))
         member = {"base": range(len(r)), "main": ch["main"], "real": ch["real"], "realneg": ch["realneg"]}
         g = group_of(st)
         for lane, idxs in member.items():

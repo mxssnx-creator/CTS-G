@@ -113,7 +113,7 @@ def main():
         ts = [r[0] for r in tape]
         entries = [r[0] - r[5] for r in tape]
         nets = [r[4] - se.cost_as_frac(book.cost_pct) for r in tape]
-        decision = positive_decisions(ts, entries, nets, book.stage_params(st.pack))
+        decision = positive_decisions(ts, entries, nets, book.stage_params(st.pack, st))
         for original in (r for r in records if r["set"] == st.id):
             checkpoint = original["t"]
             lo = bisect.bisect_left(ts, checkpoint - book.lookback * se.BAR_S)

@@ -68,7 +68,7 @@ def main():
             ts = [row[0] for row in full]
             entries = [row[0] - row[5] for row in full]
             values = [row[4] - book.cost_pct / 100 for row in full]
-            legacy, records = reconstruct(ts, entries, values, asdict(book.stage_params(st.pack)), now)
+            legacy, records = reconstruct(ts, entries, values, asdict(book.stage_params(st.pack, st)), now)
             parity["sets"] += 1
             for key, actual in (("main", st.proc), ("real", st.exe), ("realneg", st.neg)):
                 expected = [(ts[i], values[i]) for i in legacy[key]][-se.PROC_KEEP:]

@@ -121,6 +121,23 @@ export const TP_UNIT_PCT = 0.1;
 export const TP_STEP_MIN = 2;
 export const TP_STEP_MAX = 32;
 export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
+/** Minimum PF per TP step (owner 2026-11-02), mirrors set_engine.py: 1 + TP% x ratio on the 0.1 % grid rounded DOWN, 0.2 % at ratio 0.2 = 1.04.
+ * The ratio runs 0.1 .. 1.1 in steps of 0.05 (default 0.2). Auto learns the floor per step from earlier orders and falls back to this value. */
+export const STEP_PF_RATIO_MIN = 0.1;
+export const STEP_PF_RATIO_MAX = 1.1;
+export const STEP_PF_RATIO_STEP = 0.05;
+export const STEP_PF_RATIO_DEFAULT = 0.2;
+export const STEP_PF_TP_MIN = 0.2;
+export const STEP_PF_TP_MAX = 3.5;
+export const stepPfRatio = (raw: unknown): number => {
+  const v = Number(raw);
+  if (raw === null || raw === undefined || raw === "" || !Number.isFinite(v)) return STEP_PF_RATIO_DEFAULT;
+  const snapped = Math.round(v / STEP_PF_RATIO_STEP) * STEP_PF_RATIO_STEP;
+  return Math.round(Math.max(STEP_PF_RATIO_MIN, Math.min(STEP_PF_RATIO_MAX, snapped)) * 100) / 100;
+};
+export const stepPfGridPct = (tpPct: number): number =>
+  Math.round(Math.max(STEP_PF_TP_MIN, Math.min(STEP_PF_TP_MAX, Math.floor(tpPct * 10 + 1e-9) / 10)) * 10) / 10;
+export const manualStepPf = (tpPct: number, ratio: number): number => Math.round((1 + stepPfGridPct(tpPct) * ratio) * 1e6) / 1e6;
 export type PauseMode = "off" | "auto" | "fixed";
 export const PAUSE_MODES: PauseMode[] = ["off", "auto", "fixed"];
 export const PAUSE_CANDIDATES_DEFAULT = [2, 3, 5, 8, 12, 20, 30, 45, 60];
@@ -370,6 +387,12 @@ export type PulseOverlay = {
   holdAutoMin: number;
   // Pause after success: rest after a WINNING close of a Set lane, per indication (pack) and symbol. off / auto (chosen from reference Sets, only from
   // earlier results) / fixed. pausePack fixes minutes for one pack and wins over the mode.
+  // Minimum PF by TP step: one floor per Set for every window and stage. Auto learns it per step from orders that closed before the evaluation window.
+  minPfByStep: boolean;
+  minPfStepAuto: boolean;
+  minPfStepRatio: number;
+  minPfStepAutoN: number;
+  minPfStepAutoMin: number;
   pauseMode: PauseMode;
   pauseFixedMin: number;
   pauseCandidates: number[];
@@ -601,6 +624,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAuto: true,
   holdAutoMax: 50,
   holdAutoMin: 10,
+  minPfByStep: true,
+  minPfStepAuto: true,
+  minPfStepRatio: STEP_PF_RATIO_DEFAULT,
+  minPfStepAutoN: 10,
+  minPfStepAutoMin: 300,
   pauseMode: "auto",
   pauseFixedMin: 10,
   pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
@@ -815,6 +843,11 @@ export type CtsSettings = {
   holdAuto?: boolean;
   holdAutoMax?: number;
   holdAutoMin?: number;
+  minPfByStep?: boolean;
+  minPfStepAuto?: boolean;
+  minPfStepRatio?: number;
+  minPfStepAutoN?: number;
+  minPfStepAutoMin?: number;
   pauseMode?: string;
   pauseFixedMin?: number;
   pauseCandidates?: number[];
@@ -1126,6 +1159,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     holdAuto: bool(cts.holdAuto, true),
     holdAutoMax: Math.max(10, Math.min(50, Math.round(num(cts.holdAutoMax, 50)))),
     holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
+    minPfByStep: bool(cts.minPfByStep, true),
+    minPfStepAuto: bool(cts.minPfStepAuto, true),
+    minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
+    minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),
+    minPfStepAutoMin: Math.max(30, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 300)))),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
     pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
     pauseCandidates: pauseList(cts.pauseCandidates),

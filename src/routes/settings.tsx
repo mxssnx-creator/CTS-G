@@ -39,6 +39,14 @@ import {
   PAUSE_MAX,
   PAUSE_MODES,
   SET_TYPES,
+  STEP_PF_RATIO_DEFAULT,
+  STEP_PF_RATIO_MAX,
+  STEP_PF_RATIO_MIN,
+  STEP_PF_RATIO_STEP,
+  STEP_PF_TP_MAX,
+  STEP_PF_TP_MIN,
+  manualStepPf,
+  stepPfRatio,
   TP_STEP_MAX,
   TP_STEP_MIN,
   TP_UNIT_PCT,
@@ -340,7 +348,7 @@ function SettingsPage() {
                   hint="Last N closed trades for the average Result-R."
                   onChange={(v) => patch("pfWindow", v)}
                 />
-                <PfWindowControls overlay={overlay} patch={patch} />
+                <PfWindowControls overlay={overlay} patch={patch} stats={stats} />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
                 <KV k="PF 1.00" v="Net gains equal net losses" />
@@ -756,7 +764,7 @@ function SettingsPage() {
                   on={overlay.stageFullWindow === true}
                   onChange={(v) => patch("stageFullWindow", v)}
                 />
-                <PfWindowControls overlay={overlay} patch={patch} />
+                <PfWindowControls overlay={overlay} patch={patch} stats={stats} />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
                 <Slider
                   label="Base · long window (last N orders)"
@@ -1863,17 +1871,110 @@ function SettingsPage() {
   );
 }
 
+function StepPfTable({ overlay, stats }: { overlay: PulseOverlay; stats: LiveStats | null }) {
+  const live = stats?.sets?.stepPf;
+  const learned = new Map((live?.steps ?? []).map((r) => [r.step, r]));
+  const rows: number[] = [];
+  for (let k = Math.round(STEP_PF_TP_MIN / TP_UNIT_PCT); k <= Math.round(STEP_PF_TP_MAX / TP_UNIT_PCT); k++) rows.push(k);
+  return (
+    <details className="col-span-full rounded-lg border border-border bg-bg2 px-3 py-2" data-testid="step-pf-table">
+      <summary className="cursor-pointer font-mono text-xs text-muted">
+        Floor per TP step ({rows.length} steps, 0.2-3.5%) · manual with the ratio above{live?.auto ? " and what Auto learned" : ""}
+      </summary>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-left font-mono text-xs">
+          <thead className="text-muted">
+            <tr>
+              <th className="py-1">TP</th>
+              <th>Manual</th>
+              <th>Auto</th>
+              <th>Used</th>
+              <th>Orders read</th>
+              <th>Admitted</th>
+              <th>PF admitted</th>
+              <th>PF all</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((k) => {
+              const tp = tpPctOfStep(k);
+              const manual = manualStepPf(tp, overlay.minPfStepRatio);
+              const r = learned.get(k);
+              return (
+                <tr key={k} className="border-t border-border">
+                  <td className="py-0.5">{tp.toFixed(1)}%</td>
+                  <td>{manual.toFixed(2)}</td>
+                  <td>{r?.auto != null ? r.auto.toFixed(2) : "–"}</td>
+                  <td>{(overlay.minPfStepAuto !== false && r?.auto != null ? r.auto : manual).toFixed(2)}</td>
+                  <td>{r?.orders ?? "–"}</td>
+                  <td>{r?.admitted ?? "–"}</td>
+                  <td>{r && r.orders ? r.pfAdmitted.toFixed(2) : "–"}</td>
+                  <td>{r && r.orders ? r.pfAll.toFixed(2) : "–"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
 function PfWindowControls({
   overlay,
   patch,
+  stats,
 }: {
   overlay: PulseOverlay;
   patch: <K extends keyof PulseOverlay>(key: K, value: PulseOverlay[K]) => void;
+  stats?: LiveStats | null;
 }) {
+  const byStep = overlay.minPfByStep !== false;
   return (
     <>
       <div className="col-span-full mt-1 font-mono text-[11px] text-muted">
-        Minimum PF by last-N window size · Base, Main and Real use the same controls
+        Minimum PF by TP step · one floor per Set for every window and every stage (Base, Main, Real), the same drawdown time everywhere
+      </div>
+      <Toggle
+        label="Minimum PF by TP step (on: replaces the window-size classes below)"
+        on={byStep}
+        onChange={(v) => patch("minPfByStep", v)}
+      />
+      <Toggle
+        label="Auto: learn the best floor for every step 0.2-3.5%"
+        on={byStep && overlay.minPfStepAuto !== false}
+        onChange={(v) => patch("minPfStepAuto", v)}
+      />
+      <Slider
+        label="Manual: ratio (floor = 1 + TP% × ratio)"
+        value={overlay.minPfStepRatio}
+        min={STEP_PF_RATIO_MIN}
+        max={STEP_PF_RATIO_MAX}
+        step={STEP_PF_RATIO_STEP}
+        hint={`0.2% → ${manualStepPf(0.2, overlay.minPfStepRatio).toFixed(2)} · 1.0% → ${manualStepPf(1, overlay.minPfStepRatio).toFixed(2)} · 3.5% → ${manualStepPf(3.5, overlay.minPfStepRatio).toFixed(2)}. A TP between two grid values uses the lower one. Default ${STEP_PF_RATIO_DEFAULT}; also the fallback of Auto`}
+        onChange={(v) => patch("minPfStepRatio", stepPfRatio(v))}
+      />
+      <Slider
+        label="Auto: last N orders selected on"
+        value={overlay.minPfStepAutoN}
+        min={3}
+        max={50}
+        step={1}
+        hint="the Set's PF over its last N closed orders at entry (default 10) is what a floor is tried on"
+        onChange={(v) => patch("minPfStepAutoN", v)}
+      />
+      <Slider
+        label="Auto: orders a floor needs"
+        value={overlay.minPfStepAutoMin}
+        min={30}
+        max={5000}
+        step={10}
+        hint="admitted orders (one per distinct Set tape) before a floor can replace the manual value; it must also beat it by 5%"
+        onChange={(v) => patch("minPfStepAutoMin", v)}
+      />
+      <StepPfTable overlay={overlay} stats={stats ?? null} />
+      <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
+        Minimum PF by last-N window size · used when the TP-step floor is off
       </div>
       <Toggle
         label="Minimum PF by window size (off = the one Set min PF for every window)"

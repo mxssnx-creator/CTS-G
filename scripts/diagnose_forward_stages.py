@@ -65,7 +65,7 @@ def main():
             pt = [row[0] for row in prior]
             pe = [row[0] - row[5] for row in prior]
             pn = [row[4] - se.cost_as_frac(book.cost_pct) for row in prior]
-            params = book.stage_params(st.pack)
+            params = book.stage_params(st.pack, st)
             full = se.stage_chain(pt, pe, pn, params)
             main_idx = full["main"]
             mt, me, mn = ([pt[k] for k in main_idx], [pe[k] for k in main_idx], [pn[k] for k in main_idx])

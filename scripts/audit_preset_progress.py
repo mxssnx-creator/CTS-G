@@ -93,7 +93,7 @@ def main():
                 ts = [r[0] for r in full]
                 entries = [r[0] - r[5] for r in full]
                 nets = [r[4] - cost_as_frac(book.cost_pct) for r in full]
-                params = book.stage_params(st.pack)
+                params = book.stage_params(st.pack, st)
                 expected = oracle.naive_chain(ts, entries, nets, params)
                 actual = stage_chain(ts, entries, nets, params)
                 counts_match = (st.proc_total, st.exe_total, st.neg_total) == tuple(len(expected[k]) for k in ("main", "real", "realneg"))

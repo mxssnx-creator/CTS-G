@@ -1227,6 +1227,42 @@ PAUSE_MARGIN = 1.05                                   # a candidate must beat th
 PAUSE_MODES = ("off", "auto", "fixed")
 
 
+# Minimum PF by TP step (owner 2026-11-02): the same floor for every window and every stage of a Set, from the Set's own TP distance.
+#   manual: 1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value); 0.2 % at ratio 0.2 = 1.04, 3.5 % = 1.70
+#   auto:   per step 0.2 .. 3.5 % the floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at entry --
+#           delivered the best PF, learned only from orders that closed before the evaluation window; the manual value stays unless a candidate has enough orders
+#           and beats it by STEP_PF_MARGIN
+STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.1, 0.05, 0.2
+STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 3.5             # percent: the table's range (the Set grid itself ends at 3.2 %)
+STEP_PF_AUTO_N_DEFAULT = 10                           # the Set's last N closed orders at entry that the Auto Mode selects on
+STEP_PF_AUTO_MIN_DEFAULT = 300                        # admitted orders (distinct tapes pooled over a step's Sets) a candidate needs
+STEP_PF_MARGIN = 1.05                                 # a candidate must beat the manual floor's delivered PF by 5 %
+STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1.00 .. 2.00
+
+
+def step_pf_ratio(raw: Any) -> float:
+    """The configured ratio snapped to its 0.05 grid and bounded to 0.1 .. 1.1; a broken value is the default."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return STEP_PF_RATIO_DEFAULT
+    if not math.isfinite(v):
+        return STEP_PF_RATIO_DEFAULT
+    v = round(v / STEP_PF_RATIO_STEP) * STEP_PF_RATIO_STEP
+    return round(max(STEP_PF_RATIO_MIN, min(STEP_PF_RATIO_MAX, v)), 2)
+
+
+def step_grid_pct(tp_pct: float) -> float:
+    """A TP distance (percent) on the 0.1 % grid rounded DOWN, bounded to the table's range: 0.25 -> 0.2, 3.2 -> 3.2, 9 -> 3.5."""
+    g = math.floor(float(tp_pct) * 10.0 + 1e-9) / 10.0
+    return round(max(STEP_PF_TP_MIN, min(STEP_PF_TP_MAX, g)), 1)
+
+
+def manual_step_floor(tp_pct: float, ratio: float) -> float:
+    """Neutral 1 + (TP step % x ratio): 1.04 at 0.2 % with the default ratio 0.2."""
+    return round(1.0 + step_grid_pct(tp_pct) * float(ratio), 6)
+
+
 def rest_after(cooldown: int, pause: int, win: bool) -> int:
     """Bars a lane rests after a close: the cooldown always, and after a WIN (net of PositionCost above zero) at least `pause` bars."""
     return max(cooldown, pause) if win and pause > 0 else cooldown
@@ -1668,6 +1704,13 @@ class SetBook:
         self.scratch_min = 0.0016
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
+        self.pf_by_step = True                        # one min PF per TP step for every window and stage (replaces the window-size classes)
+        self.pf_step_auto = True
+        self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
+        self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
+        self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
+        self.step_floor_auto: Dict[int, float] = {}   # TP step bucket (0.1 % units) -> the floor the Auto Mode learned (absent: the manual value)
+        self.step_floor_report: List[Dict[str, Any]] = []
         self.pause_mode = "auto"                      # rest after a WINNING close: off / auto (per indication and symbol, the default) / fixed
         self.pause_fixed = 0
         self.pause_candidates: Tuple[int, ...] = PAUSE_CANDIDATES_DEFAULT
@@ -1736,6 +1779,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
+                              self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -1998,6 +2042,11 @@ class SetBook:
             self.cooldown_bars = min(30, max(0, int(ov.get("setCooldownBars") if ov.get("setCooldownBars") is not None else 2)))
         except Exception:
             self.cooldown_bars = 2
+        self.pf_by_step = bool(ov.get("minPfByStep", True))
+        self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
+        self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
+        self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
+        self.pf_step_auto_min = int(max(30, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))
         mode = str(ov.get("pauseMode") or "auto").lower()
         self.pause_mode = mode if mode in PAUSE_MODES else "auto"
         self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
@@ -2663,6 +2712,12 @@ class SetBook:
                 # close stamped at the same instant as evidence.
                 decision_upper = math.nextafter(now, float("-inf"))
                 try:
+                    if not (stale or defer_score):
+                        try:
+                            self._learn_step_floors(tape_order, cutoff)       # the per-step minimum PF, learned before the window it will judge
+                        except Exception as exc:                              # never stops the scoring: the manual floors stand
+                            self.step_floor_auto, self.step_floor_report = {}, []
+                            errors.append(f"step floors: {type(exc).__name__}: {exc}"[:160])
                     for st in ([] if stale or defer_score else self.by_idx):
                         try:
                             full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
@@ -2894,6 +2949,70 @@ class SetBook:
             self._lookback_progress_key = None
             self._lookback_progress_count = 0
 
+    def _learn_step_floors(self, tape_order: Sequence[str], learn_before: float) -> None:
+        """The Auto Mode of the minimum PF per TP step (minPfByStep + minPfStepAuto), learned from orders that CLOSED BEFORE `learn_before` (the start of the
+        evaluation window): the floor of a step is never fitted on the orders it will judge. For each step bucket, pooled over the distinct tapes of its Sets,
+        every order is a pair (the Set's PF over its last minPfStepAutoN closed orders at that order's entry, the order's net result). A candidate floor F
+        admits the pairs with PF >= F; the floor with the best delivered PF wins if it admits at least minPfStepAutoMin orders and beats the manual floor's
+        delivered PF by STEP_PF_MARGIN, else the manual floor (1 + TP% x ratio) stands. Writes step_floor_auto and step_floor_report."""
+        if not (self.pf_by_step and self.pf_step_auto):
+            self.step_floor_auto, self.step_floor_report = {}, []
+            return
+        cf = cost_as_frac(self.cost_pct)
+        n_win = self.pf_step_auto_n
+        until = math.nextafter(float(learn_before), float("-inf"))
+        pairs: Dict[int, List[Tuple[float, float]]] = {}
+        seen: set = set()
+        for st in self.by_idx:
+            rows = self._tape_rows(st.id, tape_order, float("-inf"), until=until)
+            if len(rows) <= n_win:
+                continue
+            sig = hash(tuple((round(finite(r[0]), 3), r[1], round(finite(r[4]), 10)) for r in rows))
+            if sig in seen:
+                continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
+            seen.add(sig)
+            ts = [finite(r[0]) for r in rows]
+            nets = [finite(r[4]) - cf for r in rows]
+            gains, losses = prefix_sums(nets)
+            out = pairs.setdefault(self.step_bucket(st), [])
+            for k, r in enumerate(rows):
+                e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
+                if e < n_win:
+                    continue
+                gp, gl = gains[e] - gains[e - n_win], losses[e] - losses[e - n_win]
+                if gl > 0:
+                    out.append((gp / gl, nets[k]))
+                elif gp > 0:
+                    out.append((99.0, nets[k]))
+        learned: Dict[int, float] = {}
+        report: List[Dict[str, Any]] = []
+        for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
+            tp = round(bucket * TP_UNIT_PCT, 3)
+            manual = manual_step_floor(tp, self.pf_step_ratio)
+            prs = sorted(pairs.get(bucket, ()), key=lambda x: -x[0])
+            row: Dict[str, Any] = {"step": bucket, "tpPct": tp, "manual": manual, "auto": None, "used": manual, "orders": len(prs),
+                                   "admitted": 0, "pfAll": 0.0, "pfAdmitted": 0.0}
+            if prs:
+                negs = [-x[0] for x in prs]
+                g_, l_ = prefix_sums([x[1] for x in prs])
+                row["pfAll"] = round(pf_of(g_[-1], l_[-1]), 4)
+
+                def at(f: float) -> Tuple[float, int]:
+                    i = bisect.bisect_right(negs, -f + 1e-12)
+                    return pf_of(g_[i], l_[i]), i
+                ref_pf, ref_n = at(manual)
+                best_f, best_pf, best_n = manual, ref_pf, ref_n
+                for f in STEP_PF_CANDIDATES:
+                    pf_f, n_f = at(f)
+                    if n_f >= self.pf_step_auto_min and pf_f > best_pf + 1e-12 and pf_f >= ref_pf * STEP_PF_MARGIN and (ref_n >= self.pf_step_auto_min or best_f == manual):
+                        best_f, best_pf, best_n = f, pf_f, n_f
+                row["admitted"], row["pfAdmitted"] = best_n, round(best_pf, 4)
+                if best_f != manual:
+                    row["auto"] = row["used"] = best_f
+                    learned[bucket] = best_f
+            report.append(row)
+        self.step_floor_auto, self.step_floor_report = learned, report
+
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
         return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
 
@@ -2951,10 +3070,28 @@ class SetBook:
                     out.append((t, symbol, row["side"], row["pnl"], row["pnl_pct"], row["hold_s"], row["reason"], st.id))
         return sorted(out, key=_row_t)
 
-    def floor_for(self, n: int, pack: str) -> float:
-        """The minimum PF a window of n orders of this pack asks: its size class when minPfBySize is on, else the pack's floor."""
+    def step_bucket(self, st: "SetState") -> int:
+        """A Set's TP step bucket in 0.1 % units: its TP step (base and Exit Sets), or its arm (a trailing Set)."""
+        if st.kind == "trail":
+            return int(round(float(st.trail_arm) / TP_UNIT_PCT))
+        return int(st.step)
+
+    def step_floor(self, st: "SetState") -> float:
+        """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
+        bucket = self.step_bucket(st)
+        if self.pf_step_auto:
+            learned = self.step_floor_auto.get(bucket)
+            if learned is not None:
+                return float(learned)
+        return manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
+
+    def floor_for(self, n: int, pack: str, st: Optional["SetState"] = None) -> float:
+        """The minimum PF a window of n orders of this pack asks. With minPfByStep (default) a Set asks one floor from its TP step in every window and stage;
+        else its size class when minPfBySize is on, else the pack's floor. Signal packs keep their own."""
         if is_signal_pack(pack):
             return self.signal_min_pf
+        if self.pf_by_step and st is not None:
+            return self.step_floor(st)
         if self.pf_by_size:
             for lim, pf in self.size_floors:
                 if n <= lim:
@@ -2962,12 +3099,15 @@ class SetBook:
             return self.size_long_pf
         return self.pack_min_pf.get(pack, self.min_pf)
 
-    def stage_params(self, pack: str) -> StageParams:
-        """The chain's rules for a pack (its own minimum PF floor)."""
+    def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
+        """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
+        by_step = self.pf_by_step and st is not None and not is_signal_pack(pack)
+        step_floor = self.step_floor(st) if by_step else 0.0
         return StageParams(base_long=self.gate_window, base_short=self.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
                            gate_min=self.gate_min,
-                           floor=self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf), max_dd_s=self.max_dd_s, lookback_s=self._evidence_lookback() * BAR_S,
-                           size_floors=self.size_floors if self.pf_by_size and not is_signal_pack(pack) else (), long_floor=self.size_long_pf,
+                           floor=step_floor if by_step else (self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf)),
+                           max_dd_s=self.max_dd_s, lookback_s=self._evidence_lookback() * BAR_S,
+                           size_floors=self.size_floors if self.pf_by_size and not by_step and not is_signal_pack(pack) else (), long_floor=self.size_long_pf,
                            consistency=self.consistency_pf, main_on=self.main_on, main_n=self.main_n, short_on=self.short_on,
                            short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
                            neg_on=self.neg_on, neg_windows=tuple(self.neg_windows), real_on=self.realst_on, real_n=self.realst_n,
@@ -2983,7 +3123,7 @@ class SetBook:
         ents = [ts[k] - finite(full[k][5]) for k in range(len(full))]
         nets = [finite(r[4]) - cf for r in full]
         cutoff = finite(now) - self._evidence_lookback() * BAR_S if now is not None else None
-        ch = stage_chain(ts, ents, nets, self.stage_params(st.pack), window_start=cutoff)
+        ch = stage_chain(ts, ents, nets, self.stage_params(st.pack, st), window_start=cutoff)
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
         out["short_n"] = ch["short_n"]
         if capture_evidence:
@@ -3045,7 +3185,7 @@ class SetBook:
                 ts = [x[0] for x in records]
                 entries = [x[1] for x in records]
                 nets = [x[2] for x in records]
-                params = self.stage_params(st.pack)
+                params = self.stage_params(st.pack, st)
                 me, mlo, passes = _main_windows(ts, nets, entries, params)
                 short_n, _ = _main_short_choice(nets, me, mlo, params, passes, current_only=True,
                                                current_start=bisect.bisect_left(ts, cutoff))
@@ -3072,7 +3212,7 @@ class SetBook:
                        and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-self.realst_n:]
         nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
         gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
-        floor = self.floor_for(self.realst_n, st.pack)
+        floor = self.floor_for(self.realst_n, st.pack, st)
         enough = len(nets) >= self.realst_n
         pf = pf_of(gp, gl)
         sources: Dict[str, int] = {}
@@ -3173,7 +3313,7 @@ class SetBook:
         st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
                                                     and sign_ok(mw, self.base_min_positive, self.base_min_both, self.base_min_avg))
         m_, r_, q_, short_n = self._streams(st, now=anchor, before=before)  # paper stages use the same decision boundary
-        v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack))
+        v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack, st))
         st.stage = v
         st.main_short_win = short_n
         rw = m_[-self.main_n:]
@@ -3212,11 +3352,11 @@ class SetBook:
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
         # each Base window on its own (the stage verdict is their conjunction; the per-window figures count each separately)
-        floor_ = self.floor_for(self.gate_window, st.pack)                   # every window asks the minimum PF of its own size
+        floor_ = self.floor_for(self.gate_window, st.pack, st)                   # every window asks the minimum PF of its own size
         st.base_long_ok = (not self.stop_cap_exceeded(st) and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
                            and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
         st.base_short_ok = (bool(self.base_short) and st.base_short_n >= (self.base_short if self.stage_full else 1)
-                            and st.base_short_pf + 1e-9 >= self.floor_for(self.base_short, st.pack))
+                            and st.base_short_pf + 1e-9 >= self.floor_for(self.base_short, st.pack, st))
         st.source_n = len(tape)
         # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
         st.active = not st.locked
@@ -3254,13 +3394,13 @@ class SetBook:
                 return "stale"
         if st.gate_n < self.gate_min:
             return "n<min"
-        if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack):
+        if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack, st):
             return "pf<min"
         if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:
             return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
-        if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(self.base_short, st.pack)):
+        if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(self.base_short, st.pack, st)):
             return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
         if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
             return "stale"
@@ -3424,7 +3564,7 @@ class SetBook:
            than the same PF on 350;
         3. more orders;
         4. the better recent R, then the shorter drawdown time."""
-        floor = self.floor_for(self.gate_window, st.pack)
+        floor = self.floor_for(self.gate_window, st.pack, st)
         halves = min(st.gate_pf_old, st.gate_pf_new) if (st.gate_pf_old or st.gate_pf_new) else st.gate_pf
         n = max(0, int(st.n))
         shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
@@ -3764,7 +3904,8 @@ class SetBook:
             by_pack[pack] = {"base": pool(pv), "baseOnly": pool(pb), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv), "eligible": len(pe),
                              "validatedBasePct": round(100.0 * len(pb) / len(ps), 2) if ps else 0.0,
                              "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
-                             "minPf": self.floor_for(self.gate_window, pack)}
+                             "minPf": (sorted(self.step_floor(x) for x in ps)[len(ps) // 2] if (self.pf_by_step and ps and not is_signal_pack(pack))
+                                       else self.floor_for(self.gate_window, pack))}
         main_pass = [x for x in base_only if self._main_pf_pass(x)]
         rgp, rgl = sum(x.main_gp for x in main_pass), sum(x.main_gl for x in main_pass)
         main = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.main_n for x in main_pass), "sets": len(main_pass),
@@ -4050,6 +4191,8 @@ class SetBook:
             "counts": self.counts(),
             "pfBase": self._pf_split(),
             "pause": self._pause_report(),
+            "stepPf": {"on": self.pf_by_step, "auto": self.pf_step_auto, "ratio": self.pf_step_ratio, "autoN": self.pf_step_auto_n,
+                       "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
             "indicationConfigs": dict(self.config_report),
             "coverage": cover,
             "index": index,

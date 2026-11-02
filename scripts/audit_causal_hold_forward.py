@@ -152,7 +152,7 @@ def main():
             ts = [row[0] for row in context]
             entries = [row[0] - row[5] for row in context]
             nets = [row[4] - se.cost_as_frac(book.cost_pct) for row in context]
-            params = book.stage_params(st.pack)
+            params = book.stage_params(st.pack, st)
             expected = independent_visible_chain(ts, entries, nets, params, cutoff)
             actual = se.stage_chain(ts, entries, nets, params, window_start=cutoff)
             if expected != actual or (st.proc_total, st.exe_total, st.neg_total) != tuple(len(expected[k]) for k in ("main", "real", "realneg")):

@@ -57,6 +57,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov = json.load(open(os.path.join(PULSE, name)))
     # fixtures judge every window at one floor (setMinPf) unless they ask for the size classes (minPfBySize), which have their own checks
     ov["minPfBySize"] = False
+    ov["minPfByStep"] = False     # likewise the per-step floor: fixtures judge every window at setMinPf; the step_pf checks ask for the step floors
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov

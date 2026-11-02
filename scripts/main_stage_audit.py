@@ -265,7 +265,7 @@ def ladder(book, rows, t0: float, tot: Tot, tag: str, shuffle: Optional[random.R
         nets = [x[2] - cf for x in r]
         if shuffle is not None:
             shuffle.shuffle(nets)
-        P = book.stage_params(st.pack)
+        P = book.stage_params(st.pack, st)
         ch = se.stage_chain(ts, ents, nets, P)
         gpre, lpre = se.prefix_sums(nets)
         mt = [ts[k] for k in ch["main"]]
@@ -325,7 +325,7 @@ def check_accounting(book, rows, a, cf) -> Dict[str, Any]:
             continue
         r = r[-2500:]
         ts, ents, nets = [x[0] for x in r], [x[1] for x in r], [x[2] - cf for x in r]
-        P = book.stage_params(st.pack)
+        P = book.stage_params(st.pack, st)
         checked += len(r)
         if se.stage_chain(ts, ents, nets, P) != naive_chain(ts, ents, nets, P):
             mism.append(st.id)
@@ -334,7 +334,7 @@ def check_accounting(book, rows, a, cf) -> Dict[str, Any]:
         r = rows[st.idx]
         if not r:
             continue
-        ch = se.stage_chain([x[0] for x in r], [x[1] for x in r], [x[2] - cf for x in r], book.stage_params(st.pack))
+        ch = se.stage_chain([x[0] for x in r], [x[1] for x in r], [x[2] - cf for x in r], book.stage_params(st.pack, st))
         m_, r_, q_ = set(ch["main"]), set(ch["real"]), set(ch["realneg"])
         subset_bad += int(not (r_ <= m_ and q_ <= m_))
         n_main += bool(m_)
@@ -421,7 +421,7 @@ def collect(book, rows, hours, a, tot: Tot) -> Dict[str, Any]:
         if not r:
             continue
         ts, ents, nets = [x[0] for x in r], [x[1] for x in r], [x[2] - cf for x in r]
-        ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack))
+        ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st))
         en_sorted = sorted(ents)
         member = {"base": range(len(r)), "main": ch["main"], "real": ch["real"], "realneg": ch["realneg"]}
         for lane, idxs in member.items():
