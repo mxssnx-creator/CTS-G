@@ -32,7 +32,7 @@ This section supersedes older operational descriptions and historical measuremen
 ## Minimum PF per TP step, long/short independence (2026-11-02)
 
 - **Minimum PF per TP step** (`minPfByStep`, default on; replaces the window-size classes, which stay selectable with it off): a Set asks ONE floor, from its own
-  TP step, in every window of every stage (Base long / short / minimal, Main, Real, Negative) and the same drawdown time as Base. **Manual**: floor =
+  TP step, in every window of every stage (Base long / short / minimal, Main, Real, Negative). The drawdown time, the minimum order count and the consistency floor are Base-stage rules only (Main / Real windows have none; see "Execution reads the processed Sets"). **Manual**: floor =
   1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value), ratio 0.1 .. 1.1 in steps of 0.05, default 0.2 (`minPfStepRatio`):
   1.04 at 0.2 %, 1.06 at 0.3 %, 1.64 at 3.2 %, 1.70 at 3.5 % (`set_engine.manual_step_floor`, `config-model.manualStepPf`, one table held equal in both).
   **Auto** (`minPfStepAuto`, default on): for each step 0.2 .. 3.5 % the engine learns the floor (1.00 .. 2.00 in 0.02) whose admitted orders -- the orders
@@ -73,6 +73,40 @@ This section supersedes older operational descriptions and historical measuremen
   split about +15 % time and +47 % memory; the Low-Range state once per bar instead of four times (and only the bandwidths the rank reads) roughly halved a symbol's pass
   (profile: 72 % of the time was `pack_signals`, 83 % of that `low_range_state`), bit-identical on 1,155 window/parameter pairs. About 70 % of the default grid's Sets are copies of
   another Set's tape on real data (2,421 of 3,400): their columns are stored once; each Set keeps its own rows.
+
+## Execution reads the processed Sets (2026-11-02, owner: "min PF over all stages, post-Base Sets, not pooled or unfiltered")
+
+- **One floor over the whole chain (verified, unchanged).** `StageParams.floor_for` / `SetBook.floor_for` hand a Set the same floor (`minPfByStep`: its TP step) in the Base long / short
+  windows, the Main long / short windows, Real and Real Negative; `stage_chain` and `stage_verdicts` read nothing else. The Main Set holds the orders opened while Base passed, the Real Set
+  the Main orders opened while Main passed; each stage is judged on the Set the stage before built, never on the raw tape or a pool.
+- **Found and fixed, 1: the choice among valid Sets read the raw Base tape.** `rank_key` (PF of the Base window, its halves, its order count, the tape's recent R) picked which valid Set a
+  signal opens under. The Base tape holds every order the Set made, the ones the stages rejected too; the Set that executes is its Real Set. `rankByLane` (default on, desk Settings,
+  overlays) ranks the Sets valid on a lane by `lane_rank_stats` of that lane's own Set (Real Set on the positive lane, Real Negative Set on the negative lane: orders, PF, PF of both halves,
+  recent R over the newest `PROC_KEEP` results in the lookback) through `lane_rank_of` (stable halves at or above the Set's floor, PF shrunk toward 1 by its orders, order count, recent R, then
+  the Base tape's drawdown time). `SetBook.lane_rank_key` / `pick_any`; the walk-forward simulator uses the same two functions (`stage_eval.gate_metrics`), compared with the engine on 94 valid
+  (Set, hour) pairs (`lane_rank.simulator-and-engine-rank-valid-sets-the-same-way`). Off = the earlier Base-tape rank. Fixtures pin it off (`common.overlay`, `_SELFTEST_PIN`).
+- **Found and fixed, 2: Axis, Block and DCA-on-Axis judged one Set's stream at the pooled floor.** `Pulse.set_axis_floor(st)` hands `coord.judge(..., min_pf=)`, `coord.slot_cap(..., min_pf=)`
+  and `SetBlockBook.candidate(..., floor=)` the Set's own floor (1.04 at a 0.2 % target, 1.20 at 1.0 %, ratio 0.2) instead of the coordinator's 1.25; `minPfLinked` off keeps the coordinator's.
+  The scope record carries the floor it used (`minPf`). Check `lane_rank.the-axis-block-and-dca-gates-judge-a-sets-stream-at-that-sets-floor`; mutants `lane rank:` and `axis floor:`.
+- **Not done (open): the drawdown time, the minimum order count and the consistency floor apply to the Base stage only.** Main and Real windows are PF-only (at the Set's floor). An earlier note and the
+  Settings text said "the same drawdown time everywhere"; both are corrected. Adding it means a time series for the Main / Real streams in every consumer of `stage_verdicts` (engine, simulator,
+  `stage_debug`, the audit's plain chain, the selftest reference) and a decision whether the Real window's drawdown is measured to the decision clock; it was left out on purpose, not forgotten.
+- **Costs, audited again for a second deduction (none).** A tape row stores gross `pnl_pct` and net `pnl = pnl_pct - cost` once (`set_engine` scan); `_chain_of` computes `nets = gross - cf` once and
+  Main / Real / Real Negative are index lists into that one array; `_score_one` re-normalises a stored net to the current cost from the gross, never from a net; `row_net_pnl_pct` uses a recorded
+  `net_pnl_pct` unchanged and otherwise gross minus one PositionCost; executed closes carry the fee-based net and no PositionCost on top; Block's paper rows are gross (`price / entry - 1`) and
+  net once in `stats`, its executed rows carry their fee net; the Axis streams are rebuilt as `net + cf` so `last_n_cost_pf` returns the stored net; `src/lib/analytics.ts` has the same rule.
+  `scripts/regression/cost_accounting.py` and `stages.costs-are-applied-once-...` pin it.
+- **Defect in the evaluation tooling, fixed:** `scripts/window_grid.py` swapped `stage_eval.gate_base` for a memo wrapper without the `coordinate` argument `validation_lane` passes, so every grid
+  died on its first hour; the memo now keys on it (`report.window-grid-memo-wrappers-take-what-stage-eval-takes`). A surviving mutant (pause references of a direction taken from both directions) got
+  `direction.pause-references-are-of-their-own-direction`.
+- **Window grid on the current engine (2026-11-02, `scripts/window_grid.py`, 20 symbols, split + manual step floors, hold Auto off, Negative lane off, 24 h pre-history, two consecutive 24 h windows:
+  A 10-31 15:00 - 11-01 15:00, B 11-01 15:00 - 11-02 15:00; every figure is gains over losses of the pooled executed orders, a few hundred to 2,700 orders per row, so +-0.1 is noise).**
+  Base alone, long 30 / 50: A 0.399 / 0.383 (274 / 248 orders), B 0.369 / 0.434 (345 / 292). Stages on, by Base long 30 / 50: A 0.313 (578) / 0.350 (1,089), B 0.431 (1,233) / 0.444 (2,665); by Base
+  short 10 / 25: A 0.352 / 0.305, B 0.424 / 0.472; Main long 15 / 25: A 0.301 / 0.345, B 0.456 / 0.436; Real N 1 / 5 / 15 / 25: A 0.325 / 0.330 / 0.325 / 0.391, B 0.413 / 0.432 / 0.458 / 0.441.
+  Base minimal window (shipped cell long 50 / short 25 / Main 25 / Real 15): off A 0.345 (95) B 0.463 (276); newest result positive A 0.345 / B 0.415, positive 2 0.325 / 0.421, positive 3 0.301 / 0.376;
+  newest result negative A **0.576 on 66 orders** / B **0.328 on 179**, negative 2 B 0.104 on 29 (A 11 orders). Main minimal positive: identical to off in both windows; negative: 0 / 85 orders.
+  **No setting reaches 1 in either window; the best cell of window A (negative 1) is among the worst of window B; the stages do not lift the executed PF above Base alone (A 0.35 against 0.38-0.40, B 0.44
+  against 0.37-0.43).** Nothing here supports changing a default; it is consistent with the regime-dependent persistence found in the audit above.
 
 ## Audit of the new defaults (2026-11-02, `scripts/main_stage_audit.py`, 2 x 24 h, 20 symbols, 3,400 Sets, split + step floors + pause auto, hold Auto off)
 
