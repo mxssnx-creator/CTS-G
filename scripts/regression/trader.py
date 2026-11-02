@@ -566,6 +566,23 @@ def lost_entry_answer_is_remembered_for_adoption():
     return (not opened) and any(k.startswith("BTC-USDT:") for k in unk), f"in book={opened} unknown entries={list(unk)}"
 
 
+def _frozen_clock(fn):
+    """Run a check with ONE clock for the fake venue and the code under test. _PagedKlines stamps its candles from the wall clock when it is built and the
+    history code compares them with its own clock: a minute boundary in between (likely under load) made a fresh history look a minute stale and re-paged it,
+    which failed these checks about one run in a dozen (seen on the already-pushed 58af012 and again in a full run)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        clock, now = pt.time.time, pt.time.time()
+        pt.time.time = lambda: now
+        try:
+            return fn(*a, **k)
+        finally:
+            pt.time.time = clock
+    return wrapper
+
+
 class _PagedKlines:
     """A venue that serves 1m klines like the real one: at most 1000 bars per request (a larger limit is refused with code
     109400 and no data), oldest first, endTime inclusive. The series is 3000 minutes long and its closes count 0, 1, 2...
@@ -592,6 +609,7 @@ class _PagedKlines:
         return out
 
 
+@_frozen_clock
 def history_is_fetched_in_pages_within_the_venue_limit():
     """The Set history asks for 1920 bars, which the venue refuses in one request. The fetch pages backwards with
     endTime, so the series arrives whole, in order and without a gap; once a symbol holds its history, the next refresh
@@ -621,6 +639,7 @@ def history_is_fetched_in_pages_within_the_venue_limit():
     return ok, f"bars={have} contiguous={contiguous} first requests={len(first_requests)} refresh limits={refresh_limits}"
 
 
+@_frozen_clock
 def grown_history_fetches_the_full_target_up_to_three_days():
     """A growth step must fetch older bars even if the old history is 90% of the new target."""
     import set_engine as se
@@ -654,6 +673,7 @@ def grown_history_fetches_the_full_target_up_to_three_days():
     return ok, f"growth {got}; full-history refresh limits={refresh}"
 
 
+@_frozen_clock
 def history_growth_retries_failed_or_missing_pages():
     """A failed historical page cannot certify an old window as an expanded one."""
     import set_engine as se
@@ -737,6 +757,7 @@ def history_growth_retries_failed_or_missing_pages():
     return ok, f"failure/retry={cases}; valid short listing={available} {short_n} bars; stale gap={gap_first} -> {gap_second}"
 
 
+@_frozen_clock
 def short_history_backfill_is_temporarily_bounded():
     """An exhausted listing is refreshed cheaply, but gaps and expiry retry backfill."""
     import set_engine as se
@@ -781,6 +802,7 @@ def short_history_backfill_is_temporarily_bounded():
         pt.SYMBOLS[:], pt.time.sleep = saved, sleep
 
 
+@_frozen_clock
 def short_history_cache_rejects_failed_or_invalid_pages():
     import set_engine as se
 
@@ -830,6 +852,7 @@ def short_history_cache_rejects_failed_or_invalid_pages():
         pt.SYMBOLS[:], pt.time.sleep = saved, sleep
 
 
+@_frozen_clock
 def flat_candle_gap_cannot_preserve_short_history_cache():
     """Identical candle values must not hide a real timestamp gap."""
     import set_engine as se
@@ -1275,6 +1298,7 @@ def credentials_come_from_a_private_file_without_redis():
     return ok, f"private file read={private[0] == 'K1'} redis processes={spawned_private}; world-readable file ignored={open_file == ''}"
 
 
+@_frozen_clock
 def history_thread_fetches_at_start_and_never_replays_padding():
     """At start every symbol holds only padded live rows (flat seed rows, no real minutes). One pass of the history
     thread must fetch the real history at once (no wait for live minutes), keep the padding out of the Set bars, and
@@ -1353,6 +1377,7 @@ def a_symbol_that_left_the_universe_leaves_the_set_history():
     return ok, f"rows before={before}; bars after={after_bars}; rows after={after_rows}; replayed={replayed}; fetched={requested}"
 
 
+@_frozen_clock
 def history_thread_keeps_real_history_and_tops_up_a_partial_one():
     """Two states the start-up check does not reach. (a) Every symbol holds its full real history and the venue is
     offline: the seed padding must not replace it (no fetch can repair it). (b) Every symbol holds a partial real
