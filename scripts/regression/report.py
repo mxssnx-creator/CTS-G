@@ -236,7 +236,33 @@ def window_grid_runs_the_process_without_negative_windows_and_minimal_both():
                 f"both patch -> engine mode both={bb.base_min_both}, N {bb.base_min_n}, short {bb.base_short}")
 
 
+def window_grid_memo_wrappers_take_what_the_stage_eval_functions_take():
+    """window_grid swaps stage_eval's gate_base / chain_at / base_eval for memoised wrappers. A wrapper that takes fewer arguments than the function it replaces
+    crashes the whole grid when stage_eval calls it the new way (found 2026-11-02: validation_lane asks gate_base for coordinate=False, the wrapper had no such
+    argument, every grid died on its first hour), and a wrapper that ignores an argument serves one answer for two questions."""
+    import inspect
+    import window_grid as WGR
+    import stage_eval as sg
+    pairs = (("gate_base", WGR._gate_base_memo), ("chain_at", WGR._chain_at_memo), ("base_eval", WGR._base_eval_memo))
+    missing = {name: sorted(set(inspect.signature(getattr(sg, name)).parameters) - set(inspect.signature(wrap).parameters)) for name, wrap in pairs}
+    # the verdict with and without the minimal window's coordination are two answers, served from two memo entries
+    seen = []
+    real, WGR.MEMO["base"] = WGR._GATE_BASE, {}
+    WGR._GATE_BASE = lambda book, tapes, st, now, coordinate=True: seen.append(coordinate) or (coordinate, now)
+    try:
+        import types
+        st = types.SimpleNamespace(idx=3)
+        a, b = WGR._gate_base_memo(None, None, st, 100.0, coordinate=True), WGR._gate_base_memo(None, None, st, 100.0, coordinate=False)
+        again = WGR._gate_base_memo(None, None, st, 100.0, coordinate=False)
+    finally:
+        WGR._GATE_BASE = real
+        WGR.MEMO["base"].clear()
+    ok = not any(missing.values()) and a != b and again == b and seen == [True, False]
+    return ok, f"parameters the wrapper lacks: {missing}; coordinate True/False answered {a}/{b}, the repeat served from the memo={again == b and seen == [True, False]}"
+
+
 CHECKS = [
+    ("report.window-grid-memo-wrappers-take-what-stage-eval-takes", window_grid_memo_wrappers_take_what_the_stage_eval_functions_take),
     ("report.minimal-grid-reports-coordination-without-pf", minimal_grid_reports_coordination_without_pf),
     ("report.window-grid-html-has-heatmap-and-best-cell", window_grid_html_has_heatmap_and_best_cell),
     ("report.window-grid-files-merge-into-one-report", window_grid_files_of_one_window_merge_into_one_report),

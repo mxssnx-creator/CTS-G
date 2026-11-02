@@ -288,11 +288,11 @@ MEMO: Dict[str, Dict] = {"base": {}, "chain": {}, "eval": {}}
 _GATE_BASE, _CHAIN_AT, _BASE_EVAL = sg.gate_base, sg.chain_at, sg.base_eval
 
 
-def _gate_base_memo(book, tapes, st, now):
-    k = (st.idx, now)
+def _gate_base_memo(book, tapes, st, now, coordinate=True):
+    k = (st.idx, now, bool(coordinate))              # the verdict with and without the minimal window's entry coordination are two answers
     v = MEMO["base"].get(k)
     if v is None:
-        v = MEMO["base"][k] = _GATE_BASE(book, tapes, st, now)
+        v = MEMO["base"][k] = _GATE_BASE(book, tapes, st, now, coordinate=coordinate)
     return v
 
 
