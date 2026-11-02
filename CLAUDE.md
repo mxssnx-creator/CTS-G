@@ -74,6 +74,21 @@ This section supersedes older operational descriptions and historical measuremen
   (profile: 72 % of the time was `pack_signals`, 83 % of that `low_range_state`), bit-identical on 1,155 window/parameter pairs. About 70 % of the default grid's Sets are copies of
   another Set's tape on real data (2,421 of 3,400): their columns are stored once; each Set keeps its own rows.
 
+## Audit of the new defaults (2026-11-02, `scripts/main_stage_audit.py`, 2 x 24 h, 20 symbols, 3,400 Sets, split + step floors + pause auto, hold Auto off)
+
+- **Arithmetic is right.** The chain recomputed by a plain reading of the rules differs on 0 of 40 Sets (24,613 orders); Real and Real Negative lie inside Main for all 3,400 Sets;
+  223,998 stop exits sit at -SL and 89,194 target exits at +TP of the lane distances (deviation 2.2e-16); every order's net is its gross move minus one PositionCost, once.
+  Nothing in Sets, stages, costs, ratios or the last-N windows is mis-calculated.
+- **The stages are anti-selective on these three days.** Selection PF 3.49 at Main entry and 5.30 at Real entry; delivered 0.324 (Main Set) and 0.229 (Real Set) against 0.532 for
+  the unfiltered Base tape and 0.555 for the shuffled placebo (real minus placebo -0.23 and -0.33, negative in both windows). Real Negative 0.555 (-0.01 against its placebo).
+  No category (general / indications / short range x base / exit / trail) holds above 1 in either lane.
+- **Persistence has the opposite sign to the 26-window audit.** By decile of a Set's Base window PF at the hour start, the next 25 orders read 1.19 (window PF 0.16) falling to
+  0.35 (window PF 4.1); rank correlation -0.26 in both windows (the 2-28 Oct audit: +0.08). Past losers bounce (base Sets 1.39, Exit Sets 1.81 in the lowest decile), past winners
+  fade. **The sign of persistence depends on the market regime**, so a gate that selects "high recent PF" works in one regime and works against you in the next; no fixed gate
+  can hold a high PF through both. This is a LEAD, not a result: two windows of one regime, and the three-day limit on every run means a single run cannot span regimes.
+  Test it on later days, one regime at a time, before building anything on it (the existing Negative lane and the Auto floor, which can only raise a floor, would not
+  exploit it as they stand).
+
 ## Pause after success, indications by range, distinct tapes (2026-11-02)
 
 - **Pause after success** (`pauseMode` off / **auto (default, owner 2026-11-02)** / fixed, `pauseFixedMin`, `pauseCandidates` 2-60 min, `pauseAutoMax` 100,
