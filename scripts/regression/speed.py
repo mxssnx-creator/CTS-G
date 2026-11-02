@@ -79,14 +79,21 @@ def one_state_per_bar_for_all_four_tactics_and_never_a_stale_one():
         before = ie.low_range_state(rows)
         rows[-1] = [rows[-1][0], rows[-1][1] * 1.02, rows[-1][2], rows[-1][3] * 1.015, rows[-1][4]]
         after = ie.low_range_state(rows)
+        plain_after = _plain_low_range_state(rows)
         # and a caller that edits what it got cannot poison the memo
         got = ie.low_range_state(rows)
         got["bw_rank"] = -1.0
         again = ie.low_range_state(rows)
+        # the same row OBJECT with a changed value (a forming candle updated in place) is a new state too, not the memo's earlier answer
+        row = rows[-1]
+        in_place_before = ie.low_range_state(rows)
+        row[3] = row[3] * 0.97
+        in_place_after = ie.low_range_state(rows)
     finally:
         ie._low_range_state = real
-    ok = per_bar <= 3 and before != after and after == _plain_low_range_state(rows) and again == after and again["bw_rank"] != -1.0
-    return ok, f"the four tactics computed {per_bar} state(s) for one bar (distinct parameter sets); a replaced newest row gives a new state; an edited result does not reach the memo"
+    ok = (per_bar <= 3 and before != after and after == plain_after and again == after and again["bw_rank"] != -1.0
+          and in_place_before != in_place_after and in_place_after == _plain_low_range_state(rows))
+    return ok, f"the four tactics computed {per_bar} state(s) for one bar (distinct parameter sets); a replaced or edited-in-place newest row gives a new state; an edited result does not reach the memo"
 
 
 def sets_with_the_same_orders_store_their_columns_once():

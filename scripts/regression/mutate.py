@@ -76,7 +76,7 @@ MUTATIONS = [
     ("step floor: a candidate needs no lead over the manual floor",
      "set_engine.py", "pf_f >= ref_pf * STEP_PF_MARGIN and (ref_n", "True and (ref_n"),
     ("pause: the choice reads results closed after the bar",
-     "set_engine.py", "return choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max,", "return choices[hold_choice_at(tapes, prefixes, base_ts + (exit_i + 90) * BAR_S, self.pause_auto_max,"),
+     "set_engine.py", "got = chosen_at[exit_i] = choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S,", "got = chosen_at[exit_i] = choices[hold_choice_at(tapes, prefixes, base_ts + (exit_i + 90) * BAR_S,"),
     ("pause: a loss rests like a win",
      "set_engine.py", "    return max(cooldown, pause) if win and pause > 0 else cooldown", "    return max(cooldown, pause) if pause > 0 else cooldown"),
     ("pause: the replay walk close ignores the pause",
