@@ -66,10 +66,10 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
   "n<min", 152 on drawdown time at 12 h); read it there, next to the executed PF.
 
 - **Minimum PF by window size (owner, 2026-10-29)**: every last-N window asks the PF of its size class (`minPfBySize`, default on;
-  `SetBook.floor_for`, `StageParams.floor_for`, the simulator the same): **Micro** up to 5 orders **1.05**, **Minimal** up to 10 **1.08**,
-  **Short** up to 20 **1.12**, **Medium** (general / normal) up to 35 **1.25**, **Long** above **1.5** (`minPfMicro` / `minPfMinimal` / `minPfShort` /
+  `SetBook.floor_for`, `StageParams.floor_for`, the simulator the same): (single definition: `position_cost.PF_BY_SIZE_DEFAULTS`; where an older note and the table differ the higher value stands, 2026-10-30 `19e0361`) **Micro** up to 5 orders **1.05**, **Minimal** up to 10 **1.10**,
+  **Short** up to 20 **1.15**, **Medium** (general / normal) up to 35 **1.25**, **Long** above **1.5** (`minPfMicro` / `minPfMinimal` / `minPfShort` /
   `minPfMedium` / `minPfLong`, bounds `minPf*N`; overlays and desk Settings). With the defaults: Base long 50 asks 1.5, Base short 25 and Main
-  static 25 1.25, Real 15 1.12, the Main short windows 5 / 10 1.05 / 1.08. Off: `setMinPf` (and the Short Range floor) for every window. No
+  static 25 1.25, Real 15 1.15, the Main short windows 5 / 10 1.05 / 1.10. Off: `setMinPf` (and the Short Range floor) for every window. No
   class is under `MIN_PF_FLOOR` (**1.05**, lowered from 1.1 for the Micro class). The other gates (Exit, DCA, Block, coordinator) keep
   `setMinPf`. Check `gates.every-window-asks-the-minimum-pf-of-its-size`, `min PF by size:` mutants; test fixtures run one floor
   (`common.overlay` sets `minPfBySize` off unless a check asks for the classes).

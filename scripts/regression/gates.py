@@ -461,8 +461,10 @@ def pf_defaults_match_every_shipped_overlay():
     import os
     import re
     from common import ROOT, PULSE
-    want = {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15,
-            "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}
+    from position_cost import PF_BY_SIZE_DEFAULTS
+    want = dict(PF_BY_SIZE_DEFAULTS)      # the one table; the desk, overlays and presets must equal it
+    assert want == {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15,
+                    "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}, "owner values moved: update the docs and the desk with them"
     src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     block = src.split("export const PF_TYPE_DEFAULTS = {", 1)[1].split("} as const;", 1)[0]
     desk = {key: float(value) for key, value in re.findall(r"(minPf\w+):\s*([0-9.]+)", block)}

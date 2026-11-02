@@ -26,6 +26,8 @@ from config_num import num
 from modules import trailing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
+    PF_BY_SIZE_DEFAULTS,
+    PF_SIZE_BOUNDS_DEFAULT,
     base_min_pf,
     pf_floor,
     MIN_VALIDATION_N,
@@ -80,6 +82,8 @@ def is_signal_pack(pack: str) -> bool:
 
 SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
 SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
+_SIZE_N_KEYS = ("minPfMicroN", "minPfMinimalN", "minPfShortN", "minPfMediumN")      # window classes, shortest first, read from position_cost.PF_*_DEFAULT
+_SIZE_PF_KEYS = ("minPfMicro", "minPfMinimal", "minPfShort", "minPfMedium")
 SHORT_MIN_PF_DEFAULT = 1.1       # owner: the Short Range Base floor defined earlier (a770ec1), the other Sets 1.25
 SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
 TREND_PACK = "trend"                  # additional strategy: the Trend family (indication_extra), judged by Base on its own Sets
@@ -1619,9 +1623,9 @@ class SetBook:
         self.min_pf = GATE_MIN_PF_DEFAULT
         self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
         self.pf_by_size = True
-        self.size_floors: Tuple[Tuple[int, float], ...] = ((5, 1.05), (10, 1.10), (20, 1.15), (35, 1.25))
-        self.size_long_pf = 1.5
-        self.signal_min_pf = 2.2
+        self.size_floors: Tuple[Tuple[int, float], ...] = tuple(zip((PF_SIZE_BOUNDS_DEFAULT[k] for k in _SIZE_N_KEYS), (PF_BY_SIZE_DEFAULTS[k] for k in _SIZE_PF_KEYS)))
+        self.size_long_pf = PF_BY_SIZE_DEFAULTS["minPfLong"]
+        self.signal_min_pf = PF_BY_SIZE_DEFAULTS["minPfSignals"]
         self.max_modeled_stop_loss_pct = 0.0
         self.stop_cap_invalid = False
         self.consistency_pf = 0.0
@@ -1821,13 +1825,13 @@ class SetBook:
         # minimum PF by window size (owner, 2026-10-29): every last-N window asks the PF of its size class, Micro / Minimal / Short / Medium
         # up to their order bounds and Long above; minPfBySize off = the one floor (setMinPf, the Short Range floor) for every window
         self.pf_by_size = bool(ov.get("minPfBySize", True))
-        bounds = [max(1, int(num(ov, k, d))) for k, d in (("minPfMicroN", 5), ("minPfMinimalN", 10), ("minPfShortN", 20), ("minPfMediumN", 35))]
+        bounds = [max(1, int(num(ov, k, PF_SIZE_BOUNDS_DEFAULT[k]))) for k in _SIZE_N_KEYS]
         for i in range(1, len(bounds)):
             bounds[i] = max(bounds[i], bounds[i - 1])
-        pfs = [pf_floor(ov.get(k), d) for k, d in (("minPfMicro", 1.05), ("minPfMinimal", 1.10), ("minPfShort", 1.15), ("minPfMedium", 1.25))]
+        pfs = [pf_floor(ov.get(k), PF_BY_SIZE_DEFAULTS[k]) for k in _SIZE_PF_KEYS]
         self.size_floors = tuple(zip(bounds, pfs))
-        self.size_long_pf = pf_floor(ov.get("minPfLong"), 1.5)
-        self.signal_min_pf = max(2.2, pf_floor(ov.get("minPfSignals"), 2.2))
+        self.size_long_pf = pf_floor(ov.get("minPfLong"), PF_BY_SIZE_DEFAULTS["minPfLong"])
+        self.signal_min_pf = max(PF_BY_SIZE_DEFAULTS["minPfSignals"], pf_floor(ov.get("minPfSignals"), PF_BY_SIZE_DEFAULTS["minPfSignals"]))
         raw_stop_cap = ov.get("maxModeledStopLossPct")
         try:
             stop_cap = 0.0 if raw_stop_cap is None else float(raw_stop_cap)

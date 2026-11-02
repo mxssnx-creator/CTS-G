@@ -99,6 +99,12 @@ def snap_sl_ratio(value: Any) -> float:
 
 GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
 MIN_PF_FLOOR = 1.05          # no validation gate asks less than this net PF, whatever is configured (owner, 2026-10-29: Micro windows 1.05)
+# The one definition of the minimum PF by window size and of the Signals floor. SetBook (the engine's defaults and the overlay parse), the
+# regression pin and the docs read these; the desk (src/lib/config-model.ts PF_TYPE_DEFAULTS) and the shipped overlays/presets carry copies that
+# the check gates.pf-defaults-match-every-shipped-overlay holds equal to this table. Where an older note and this table disagree, the higher
+# value stands (Minimal 1.10, Short 1.15; the 2026-10-29 note said 1.08 / 1.12).
+PF_BY_SIZE_DEFAULTS = {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15, "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}
+PF_SIZE_BOUNDS_DEFAULT = {"minPfMicroN": 5, "minPfMinimalN": 10, "minPfShortN": 20, "minPfMediumN": 35}
 
 
 def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:
