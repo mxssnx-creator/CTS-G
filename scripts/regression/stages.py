@@ -455,7 +455,7 @@ def stage_entry_history_survives_window_boundary():
     book = SetBook()
     book.load(overlay(**SMALL))
     book.lookback, book.cost_pct, book.short_on = 100.0 / 60.0, 0.0, False
-    book.stage_params = lambda _pack: p
+    book.stage_params = lambda _pack, _st=None: p
     st = book.by_idx[0]
     tuples = [(t, 'S-USDT', 'LONG', x, x, t - e, 'test', st.id)
               for t, e, x in zip(ts, ent, wins)]
@@ -476,7 +476,7 @@ def replay_scores_visible_orders_using_entry_history():
     book = SetBook()
     book.load(overlay(**{**SMALL, 'holdEnabled': False, 'histLookbackAuto': False}))
     book.lookback, book.cost_pct, book.short_on, book.main_n, book.realst_n = 100, 0.0, False, 2, 2
-    book.stage_params = lambda _pack: p
+    book.stage_params = lambda _pack, _st=None: p
     st = book.by_idx[0]
     book.by_idx, book.sets = [st], {st.id: st}
     symbol = 'S-USDT'

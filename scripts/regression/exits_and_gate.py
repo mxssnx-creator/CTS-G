@@ -12,7 +12,7 @@ def _book_one(**extra):
     b = SetBook()
     b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
             "setStepMax": 5, "setSlRatios": [1.0], "trailVariants": ["0.3:0.1"], "mainGateEnabled": False, "stagesEnabled": False,
-            "minPfBySize": False, **extra})       # the one-floor rule (the size classes have their own check)
+            "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off", **extra})       # the one-floor rule (the size classes and the step floors have their own checks)
     return b
 
 

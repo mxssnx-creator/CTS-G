@@ -6,5 +6,10 @@
   "sets": 1700,
   "trades": 132810,
   "sha256": "1ca815a767701cad2d0441d6726c6efe56480df4ca4e2348af134c0a89af9f63"
+ },
+ "splitAuto": {
+  "sets": 3400,
+  "trades": 191992,
+  "sha256": "7b1dd2526ca4e401cd61547979f79425a59f05485166d90c46492b8841e4b4d1"
  }
 }

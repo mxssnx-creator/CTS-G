@@ -51,16 +51,28 @@ test("range edges are inclusive and All takes every step, even one outside the p
   assert.ok(!inRange(Number.NaN, r26), "a step that cannot be read is in no range but All");
 });
 
-test("a trailing Set is filtered by its arm in PositionCost steps, not by the step of a base Set", () => {
+test("a trailing Set is filtered by its arm in steps of 0.1 % (whatever PositionCost is), not by the step of a base Set", () => {
   assert.equal(trailArmPct("0.60:0.36"), 0.6);
   assert.ok(Number.isNaN(trailArmPct("")));
-  const t = trail("0.60:0.36", 1, 1, 1);
-  assert.equal(stepOf(t, COST), 5, "0.60 % arm at a 0.12 % cost is step 5");
+  const t = trail("0.60:0.40", 1, 1, 1);
+  assert.equal(stepOf(t, COST), 6, "a 0.60 % arm is step 6");
+  assert.equal(stepOf(t, 0.5), 6, "and the cost does not move it");
   assert.equal(stepOf(base(8, 1, 1, 1), COST), 8);
-  const rows = [t, trail("1.20:0.60", 1, 1, 1), trail("3.60:1.20", 1, 1, 1)];
-  assert.deepEqual(filterSets(rows, "trailing", "2-6", COST).map((r) => r.tr), ["0.60:0.36"]);
+  const rows = [t, trail("1.20:0.60", 1, 1, 1), trail("2.20:1.00", 1, 1, 1)];
+  assert.deepEqual(filterSets(rows, "trailing", "2-6", COST).map((r) => r.tr), ["0.60:0.40"]);
   assert.deepEqual(filterSets(rows, "trailing", "7-12", COST).map((r) => r.tr), ["1.20:0.60"]);
-  assert.deepEqual(filterSets(rows, "trailing", "21-30", COST).map((r) => r.tr), ["3.60:1.20"]);
+  assert.deepEqual(filterSets(rows, "trailing", "21-32", COST).map((r) => r.tr), ["2.20:1.00"]);
+});
+
+test("the direction filter shows the long Sets, the short Sets or both; a Set that trades both is in neither side's list", () => {
+  const long = base(3, 1, 1, 1, { sd: 1, id: "general:L:1m:sl1.00:st3" });
+  const short = base(3, 1, 1, 1, { sd: -1, id: "general:S:1m:sl1.00:st3" });
+  const both = base(3, 1, 1, 1);
+  const rows = [long, short, both];
+  assert.deepEqual(filterSets(rows, "normal", "all", COST).map((r) => r.id), [long.id, short.id, both.id], "no filter: every Set");
+  assert.deepEqual(filterSets(rows, "normal", "all", COST, 1).map((r) => r.id), [long.id]);
+  assert.deepEqual(filterSets(rows, "normal", "all", COST, -1).map((r) => r.id), [short.id]);
+  assert.deepEqual(filterSets(rows, "normal", "7-12", COST, 1), [], "the direction and the range filter together");
 });
 
 test("Normal shows base Sets only, Exit the no-TP Sets only, Trailing trailing only, Axis, Block and DCA select no Set", () => {

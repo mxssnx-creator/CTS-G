@@ -938,21 +938,30 @@ def hit_exit(
     return None, close
 
 
-def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> str:
+SIDE_TAGS = {1: "L", -1: "S"}          # a Set that trades one direction only carries it in its id, right after the pack: "<pack>:L:1m:..."
+
+
+def side_part(side: int) -> str:
+    tag = SIDE_TAGS.get(int(side or 0), "")
+    return f":{tag}" if tag else ""
+
+
+def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0, side: int = 0) -> str:
+    head = f"{pack}{side_part(side)}"
     if step:
-        return f"{pack}:1m:sl{sl_ratio:.2f}:st{int(step)}"
+        return f"{head}:1m:sl{sl_ratio:.2f}:st{int(step)}"
     if trail:
-        return f"{pack}:1m:tr{trail}"
-    return f"{pack}:1m:sl{sl_ratio:.2f}"
+        return f"{head}:1m:tr{trail}"
+    return f"{head}:1m:sl{sl_ratio:.2f}"
 
 
-def make_exit_id(pack: str, sl_ratio: float, step: int) -> str:
+def make_exit_id(pack: str, sl_ratio: float, step: int, side: int = 0) -> str:
     """An Exit Set: the base Set's stop (SL ratio x TP step) with no TP exit (exitIgnoreTp), its own lane and its own tape."""
-    return f"{pack}:1m:sl{sl_ratio:.2f}:st{int(step)}:{EXIT_TAG}"
+    return f"{pack}{side_part(side)}:1m:sl{sl_ratio:.2f}:st{int(step)}:{EXIT_TAG}"
 
 
-def make_trail_id(pack: str, trail: str) -> str:
-    return f"{pack}:1m:tr{trail}"
+def make_trail_id(pack: str, trail: str, side: int = 0) -> str:
+    return f"{pack}{side_part(side)}:1m:tr{trail}"
 
 
 @dataclass
@@ -988,6 +997,7 @@ class SetState:
     pause_bars: int = 0             # rest (minutes) after a WINNING close of this Set's lane, on top of the cooldown (pause fixed / manual); the Auto Mode chooses per indication and symbol, not here
     hold_auto_pf: float = 0.0       # cost PF of the chosen hold over the orders it was judged on
     hold_auto_n: int = 0            # how many orders (at most holdAutoMax) that judgement read
+    side: int = 0                   # 0 = trades both directions (directionMode both); +1 long only, -1 short only (directionMode split, the default): its own lane, tape, windows, stages, pause and floor
     idx: int = 0
     pack_i: int = 0
     sl_i: int = 0
@@ -1704,12 +1714,13 @@ class SetBook:
         self.scratch_min = 0.0016
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
+        self.direction_split = True                   # a Set per trade direction (long / short), each with its own lane, tape, stages, pause and floor
         self.pf_by_step = True                        # one min PF per TP step for every window and stage (replaces the window-size classes)
         self.pf_step_auto = True
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
         self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
-        self.step_floor_auto: Dict[int, float] = {}   # TP step bucket (0.1 % units) -> the floor the Auto Mode learned (absent: the manual value)
+        self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
         self.pause_mode = "auto"                      # rest after a WINNING close: off / auto (per indication and symbol, the default) / fixed
         self.pause_fixed = 0
@@ -1720,7 +1731,7 @@ class SetBook:
         self.pause_off: set = set()                   # packs an indicationConfigs entry set to no pause (0)
         self.pack_ranges: Dict[str, Dict[str, Any]] = {}      # pack -> {"lo", "hi", "ratios", "kinds"}: the Sets of an indication built from indicationConfigs
         self.config_report: Dict[str, Any] = {"entries": [], "dropped": [], "names": 0}
-        self.pause_now: Dict[Tuple[str, str], int] = {}    # (pack, symbol) -> minutes the Auto Mode chose at the end of the last replay
+        self.pause_now: Dict[Tuple[str, str, int], int] = {}    # (pack, symbol, side) -> minutes the Auto Mode chose at the end of the last replay
         self.entry_conf = 0.58
         self.retry_s = 30.0
         self.ignore_tp = True
@@ -1779,7 +1790,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
-                              self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min,
+                              self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -2042,6 +2053,7 @@ class SetBook:
             self.cooldown_bars = min(30, max(0, int(ov.get("setCooldownBars") if ov.get("setCooldownBars") is not None else 2)))
         except Exception:
             self.cooldown_bars = 2
+        self.direction_split = str(ov.get("directionMode") or "split").lower() != "both"
         self.pf_by_step = bool(ov.get("minPfByStep", True))
         self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
@@ -2140,7 +2152,9 @@ class SetBook:
             next_sets[st.id] = st
             by_idx.append(st)
             idx += 1
-        for pack_i, pack in enumerate(self.packs):
+        sides = (1, -1) if self.direction_split else (0,)
+        for pack, side in [(p, sd) for p in self.packs for sd in sides]:
+            pack_i = self.packs.index(pack)
             pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
             pr = self.pack_ranges.get(pack)
             pack_ratios = self.sl_ratios
@@ -2164,7 +2178,7 @@ class SetBook:
                 pack_trails = []
             for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):
                 for step_i, step in enumerate(pack_steps):
-                    sid = make_set_id(pack, sl, "", step)
+                    sid = make_set_id(pack, sl, "", step, side)
                     tp = step_tp_pct(step, self.cost_pct)
                     prev = keep.get(sid)
                     if prev:
@@ -2176,10 +2190,11 @@ class SetBook:
                         st.trail_arm = 0.0
                         st.trail_give = 0.0
                         st.kind = "base"
+                        st.side = side
                         st.locked = bool(self.locks.get(sid))
                     else:
                         st = SetState(
-                            id=sid, pack=pack, tf="1m", sl_ratio=sl,
+                            id=sid, pack=pack, tf="1m", sl_ratio=sl, side=side,
                             trail_key="", trail_arm=0.0, trail_give=0.0,
                             step=step, tp_pct=tp, kind="base",
                             locked=bool(self.locks.get(sid)),
@@ -2197,7 +2212,7 @@ class SetBook:
                         if dist in seen_stop:
                             continue
                         seen_stop[dist] = None
-                        sid = make_exit_id(pack, sl, step)
+                        sid = make_exit_id(pack, sl, step, side)
                         tp = step_tp_pct(step, self.cost_pct)
                         prev = keep.get(sid)
                         if prev:
@@ -2205,9 +2220,10 @@ class SetBook:
                             st.sl_ratio, st.step, st.tp_pct = sl, step, tp
                             st.trail_key, st.trail_arm, st.trail_give = "", 0.0, 0.0
                             st.kind = "exit"
+                            st.side = side
                             st.locked = bool(self.locks.get(sid))
                         else:
-                            st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, trail_key="", trail_arm=0.0, trail_give=0.0,
+                            st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, side=side, trail_key="", trail_arm=0.0, trail_give=0.0,
                                           step=step, tp_pct=tp, kind="exit", locked=bool(self.locks.get(sid)))
                         st.pack_i = pack_i
                         st.sl_i = sl_i
@@ -2215,7 +2231,7 @@ class SetBook:
                         st.step_i = step_i
                         _put(st)
             for tr_i, (tkey, arm, give) in enumerate(pack_trails):
-                sid = make_trail_id(pack, tkey)
+                sid = make_trail_id(pack, tkey, side)
                 prev = keep.get(sid)
                 mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
                 tp = step_tp_pct(mid_step, self.cost_pct)
@@ -2228,10 +2244,11 @@ class SetBook:
                     st.step = 0
                     st.tp_pct = tp
                     st.kind = "trail"
+                    st.side = side
                     st.locked = bool(self.locks.get(sid))
                 else:
                     st = SetState(
-                        id=sid, pack=pack, tf="1m", sl_ratio=TRAIL_SL_RATIO,
+                        id=sid, pack=pack, tf="1m", sl_ratio=TRAIL_SL_RATIO, side=side,
                         trail_key=tkey, trail_arm=arm, trail_give=give,
                         step=0, tp_pct=tp, kind="trail",
                         locked=bool(self.locks.get(sid)),
@@ -2849,6 +2866,7 @@ class SetBook:
             confs[p] = [x[1] for x in sig]
             cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
         acc = BarIndex(bars)          # one index per symbol, shared by every lane
+        cand_side = self._cand_by_side(cand, dirs)
         pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
         for st in self.by_idx:
             if st.pack not in self.packs:
@@ -2856,13 +2874,13 @@ class SetBook:
             holds = self.auto_holds(st)
             for h in (0,) + holds if holds else (None,):
                 lane = SetLane(st, symbol)
-                sel_pause = self._lane_pause(lane, st.pack, pause_plan)
+                sel_pause = self._lane_pause(lane, st.pack, pause_plan, st.side)
                 key = st.id
                 if h is not None:
                     lane.hold = h                    # 0 = the global time stop; the Set's chosen hold never feeds its own judgement
                     key = st.id if h == 0 else f"{st.id}{HOLD_KEY}{h}"
                 out = hist.setdefault(key, [])
-                for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack], acc, select_pause=sel_pause):
+                for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause):
                     out.append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
                                 "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
                                 "reason": done["reason"], "set_id": st.id})
@@ -2870,55 +2888,73 @@ class SetBook:
         # Candidate evidence must cover every entry being reconstructed, not just
         # the most recent 50 closes at the final scoring time.
         return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg,
-                "dirs": dirs, "confs": confs, "cand": cand, "acc": acc, "pause": pause_plan}
+                "dirs": dirs, "confs": confs, "cand": cand, "cand_side": cand_side, "acc": acc, "pause": pause_plan}
+
+    def _cand_by_side(self, cand: Dict[str, List[int]], dirs: Dict[str, List[int]]) -> Dict[Tuple[str, int], List[int]]:
+        """Entry bars per (pack, side): a Set that trades one direction scans only the bars whose signal points that way (side 0: every bar). Each bar
+        belongs to exactly one side, so the split costs one pass over the candidates, not two."""
+        out: Dict[Tuple[str, int], List[int]] = {}
+        for p, bars_ in cand.items():
+            out[(p, 0)] = bars_
+            d = dirs[p]
+            out[(p, 1)] = [i for i in bars_ if d[i] > 0]
+            out[(p, -1)] = [i for i in bars_ if d[i] < 0]
+        return out
 
     def _pause_plan(self, symbol: str, bars: Sequence[Sequence[float]], base_ts: float, warmup: int, n: int, cfg: Dict[str, Any],
                     dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex"
-                    ) -> Dict[str, Tuple[int, Optional[Callable[[int], int]]]]:
-        """Per pack the rest after a winning close this symbol's replay uses: (fixed minutes, choice function or None).
-        Manual (pausePack) and fixed values are constants. The Auto Mode replays the pack's reference Sets once per candidate pause
-        on this symbol and, at each exit bar, picks the pause whose pooled reference orders CLOSED BEFORE that bar read the best PF
-        (hold_choice_at: needs pauseAutoMin orders and a PAUSE_MARGIN lead over no extra rest). The choice never reads a result at or after
-        the bar it is made on, so a tape built with it is what the live engine would have traded. The latest choice is kept for live."""
-        plan: Dict[str, Tuple[int, Optional[Callable[[int], int]]]] = {}
+                    ) -> Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]]:
+        """Per (pack, side) the rest after a winning close this symbol's replay uses: (fixed minutes, choice function or None). A long Set and a short
+        Set of the same indication each learn their own pause from their own side's reference Sets (side 0: the one Set that trades both).
+        Manual (pausePack) and fixed values are constants. The Auto Mode replays the reference Sets once per candidate pause on this symbol and, at each
+        exit bar, picks the pause whose pooled reference orders CLOSED BEFORE that bar read the best PF (hold_choice_at: `pauseAutoMin` orders, a 5 %
+        lead over no extra rest, else the cooldown alone). The choice never reads a result at or after the bar it is made on, so a tape built with it
+        is what the live engine would have traded. The latest choice is kept for live."""
+        plan: Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]] = {}
+        sides = (1, -1) if self.direction_split else (0,)
+        cand_side = self._cand_by_side(cand, dirs)
         for pack in self.packs:
             if not self.pause_active(pack):
                 continue
-            if pack in self.pause_pack or self.pause_mode == "fixed":
-                plan[pack] = (self.pause_minutes(pack, symbol), None)
-                continue
-            refs = self.pause_refs(pack)
-            if not refs or not cand[pack]:
-                self.pause_now[(pack, symbol)] = 0
-                continue
-            tapes: List[Tuple[int, List[tuple]]] = []
-            for minutes in (0,) + self.pause_candidates:
-                rows: List[tuple] = []
-                for ref in refs:
-                    lane = SetLane(ref, symbol)
-                    lane.pause = minutes
-                    for done in lane.scan(warmup, n, bars, dirs[pack], confs[pack], True, cfg, cand[pack], acc):
-                        rows.append((base_ts + done["exit_i"] * BAR_S, done["pnl"]))
-                rows.sort(key=lambda r: r[0])
-                tapes.append((minutes, rows))
-            prefixes = []
-            for _m, rows in tapes:
-                gains, losses = prefix_sums([r[1] for r in rows])
-                prefixes.append(([r[0] for r in rows], gains, losses))
-            lookback_s = self.lookback * BAR_S
-            choices = [m for m, _ in tapes]
+            for side in sides:
+                key = (pack, side)
+                if pack in self.pause_pack or self.pause_mode == "fixed":
+                    plan[key] = (self.pause_minutes(pack, symbol, side), None)
+                    continue
+                refs = self.pause_refs(pack, side)
+                cs = cand_side[key]
+                if not refs or not cs:
+                    self.pause_now[(pack, symbol, side)] = 0
+                    continue
+                tapes: List[Tuple[int, List[tuple]]] = []
+                for minutes in (0,) + self.pause_candidates:
+                    rows: List[tuple] = []
+                    for ref in refs:
+                        lane = SetLane(ref, symbol)
+                        lane.pause = minutes
+                        for done in lane.scan(warmup, n, bars, dirs[pack], confs[pack], True, cfg, cs, acc):
+                            rows.append((base_ts + done["exit_i"] * BAR_S, done["pnl"]))
+                    rows.sort(key=lambda r: r[0])
+                    tapes.append((minutes, rows))
+                prefixes = []
+                for _m, rows in tapes:
+                    gains, losses = prefix_sums([r[1] for r in rows])
+                    prefixes.append(([r[0] for r in rows], gains, losses))
+                lookback_s = self.lookback * BAR_S
+                choices = [m for m, _ in tapes]
 
-            def choose(exit_i: int, prefixes=prefixes, tapes=tapes, choices=choices, lookback_s=lookback_s) -> int:
-                return choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max, self.pause_auto_min,
-                                              PAUSE_MARGIN, lookback_s)]
-            plan[pack] = (0, choose)
-            self.pause_now[(pack, symbol)] = choose(n)
+                def choose(exit_i: int, prefixes=prefixes, tapes=tapes, choices=choices, lookback_s=lookback_s) -> int:
+                    return choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max, self.pause_auto_min,
+                                                  PAUSE_MARGIN, lookback_s)]
+                plan[key] = (0, choose)
+                self.pause_now[(pack, symbol, side)] = choose(n)
         return plan
 
     @staticmethod
-    def _lane_pause(lane: "SetLane", pack: str, plan: Dict[str, Tuple[int, Optional[Callable[[int], int]]]]) -> Optional[Callable[[int], int]]:
-        """Give a lane its pack's pause: a constant on the lane, or the choice function for scan(select_pause=...)."""
-        ent = plan.get(pack)
+    def _lane_pause(lane: "SetLane", pack: str, plan: Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]], side: int = 0
+                    ) -> Optional[Callable[[int], int]]:
+        """Give a lane its pack's and side's pause: a constant on the lane, or the choice function for scan(select_pause=...)."""
+        ent = plan.get((pack, int(side or 0)))
         if ent is None:
             return None
         lane.pause = int(ent[0])
@@ -2961,7 +2997,7 @@ class SetBook:
         cf = cost_as_frac(self.cost_pct)
         n_win = self.pf_step_auto_n
         until = math.nextafter(float(learn_before), float("-inf"))
-        pairs: Dict[int, List[Tuple[float, float]]] = {}
+        pairs: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
         seen: set = set()
         for st in self.by_idx:
             rows = self._tape_rows(st.id, tape_order, float("-inf"), until=until)
@@ -2974,7 +3010,7 @@ class SetBook:
             ts = [finite(r[0]) for r in rows]
             nets = [finite(r[4]) - cf for r in rows]
             gains, losses = prefix_sums(nets)
-            out = pairs.setdefault(self.step_bucket(st), [])
+            out = pairs.setdefault((self.step_bucket(st), st.side), [])
             for k, r in enumerate(rows):
                 e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
                 if e < n_win:
@@ -2984,33 +3020,34 @@ class SetBook:
                     out.append((gp / gl, nets[k]))
                 elif gp > 0:
                     out.append((99.0, nets[k]))
-        learned: Dict[int, float] = {}
+        learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
-        for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
-            tp = round(bucket * TP_UNIT_PCT, 3)
-            manual = manual_step_floor(tp, self.pf_step_ratio)
-            prs = sorted(pairs.get(bucket, ()), key=lambda x: -x[0])
-            row: Dict[str, Any] = {"step": bucket, "tpPct": tp, "manual": manual, "auto": None, "used": manual, "orders": len(prs),
-                                   "admitted": 0, "pfAll": 0.0, "pfAdmitted": 0.0}
-            if prs:
-                negs = [-x[0] for x in prs]
-                g_, l_ = prefix_sums([x[1] for x in prs])
-                row["pfAll"] = round(pf_of(g_[-1], l_[-1]), 4)
+        for side in ((1, -1) if self.direction_split else (0,)):
+            for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
+                tp = round(bucket * TP_UNIT_PCT, 3)
+                manual = manual_step_floor(tp, self.pf_step_ratio)
+                prs = sorted(pairs.get((bucket, side), ()), key=lambda x: -x[0])
+                row: Dict[str, Any] = {"step": bucket, "side": side, "tpPct": tp, "manual": manual, "auto": None, "used": manual, "orders": len(prs),
+                                       "admitted": 0, "pfAll": 0.0, "pfAdmitted": 0.0}
+                if prs:
+                    negs = [-x[0] for x in prs]
+                    g_, l_ = prefix_sums([x[1] for x in prs])
+                    row["pfAll"] = round(pf_of(g_[-1], l_[-1]), 4)
 
-                def at(f: float) -> Tuple[float, int]:
-                    i = bisect.bisect_right(negs, -f + 1e-12)
-                    return pf_of(g_[i], l_[i]), i
-                ref_pf, ref_n = at(manual)
-                best_f, best_pf, best_n = manual, ref_pf, ref_n
-                for f in STEP_PF_CANDIDATES:
-                    pf_f, n_f = at(f)
-                    if n_f >= self.pf_step_auto_min and pf_f > best_pf + 1e-12 and pf_f >= ref_pf * STEP_PF_MARGIN and (ref_n >= self.pf_step_auto_min or best_f == manual):
-                        best_f, best_pf, best_n = f, pf_f, n_f
-                row["admitted"], row["pfAdmitted"] = best_n, round(best_pf, 4)
-                if best_f != manual:
-                    row["auto"] = row["used"] = best_f
-                    learned[bucket] = best_f
-            report.append(row)
+                    def at(f: float, negs=negs, g_=g_, l_=l_) -> Tuple[float, int]:
+                        i = bisect.bisect_right(negs, -f + 1e-12)
+                        return pf_of(g_[i], l_[i]), i
+                    ref_pf, ref_n = at(manual)
+                    best_f, best_pf, best_n = manual, ref_pf, ref_n
+                    for f in STEP_PF_CANDIDATES:
+                        pf_f, n_f = at(f)
+                        if n_f >= self.pf_step_auto_min and pf_f > best_pf + 1e-12 and pf_f >= ref_pf * STEP_PF_MARGIN and (ref_n >= self.pf_step_auto_min or best_f == manual):
+                            best_f, best_pf, best_n = f, pf_f, n_f
+                    row["admitted"], row["pfAdmitted"] = best_n, round(best_pf, 4)
+                    if best_f != manual:
+                        row["auto"] = row["used"] = best_f
+                        learned[(bucket, side)] = best_f
+                report.append(row)
         self.step_floor_auto, self.step_floor_report = learned, report
 
     def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
@@ -3061,9 +3098,10 @@ class SetBook:
                                      HOLD_AUTO_MARGIN, self.lookback * BAR_S)
                 return cands[idx][0]
             lane = SetLane(st, symbol)
-            sel_pause = self._lane_pause(lane, st.pack, data.get("pause") or {})
+            sel_pause = self._lane_pause(lane, st.pack, data.get("pause") or {}, st.side)
+            cand_side = data.get("cand_side") or self._cand_by_side(data["cand"], data["dirs"])      # inputs built before the direction split carry only `cand`
             done = lane.scan(data["warmup"], len(bars), bars, data["dirs"][st.pack], data["confs"][st.pack],
-                             True, data["cfg"], data["cand"][st.pack], data["acc"], select_hold=choose, select_pause=sel_pause)
+                             True, data["cfg"], cand_side[(st.pack, st.side)], data["acc"], select_hold=choose, select_pause=sel_pause)
             for row in done:
                 t = base_ts + row["exit_i"] * BAR_S
                 if t >= cutoff and (until is None or t <= until):
@@ -3080,7 +3118,7 @@ class SetBook:
         """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
         bucket = self.step_bucket(st)
         if self.pf_step_auto:
-            learned = self.step_floor_auto.get(bucket)
+            learned = self.step_floor_auto.get((bucket, st.side))
             if learned is not None:
                 return float(learned)
         return manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
@@ -3527,6 +3565,8 @@ class SetBook:
                 "step": len(self.steps),
             },
             "families": {"base": len(base_sets), "exit": len(exit_sets), "trail": len(trail_sets)},
+            "direction": {"mode": "split" if self.direction_split else "both", "long": sum(1 for st in self.by_idx if st.side > 0),
+                          "short": sum(1 for st in self.by_idx if st.side < 0), "both": sum(1 for st in self.by_idx if st.side == 0)},
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
@@ -3551,10 +3591,10 @@ class SetBook:
         with self._lock:
             return self._pick(pack, kind)
 
-    def valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
-        """Every valid Set of this pack and kind, best first. No global gate: each Set stands on its own tape."""
+    def valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
+        """Every valid Set of this pack and kind, best first (side: only the Sets that may trade that direction). No global gate: each Set stands on its own tape."""
         with self._lock:
-            return self._valid_for(pack, kind)
+            return self._valid_for(pack, kind, side)
 
     def rank_key(self, st: SetState) -> Tuple[Any, ...]:
         """Order of choice among the eligible Sets, best first (sort descending):
@@ -3570,17 +3610,17 @@ class SetBook:
         shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
         return (halves + 1e-9 >= floor, round(shrunk, 4), n, st.last25_avg_r, -st.max_dd_s)
 
-    def _valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and self.is_eligible(s)]
+    def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side)) and self.is_eligible(s)]
         rows.sort(key=self.rank_key, reverse=True)
         return rows
 
-    def _pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
+    def _pick(self, pack: str, kind: str = "base", side: int = 0) -> Optional[SetState]:
         if self.use_historic_gate:
-            ranked = self.valid_for(pack, kind)
+            ranked = self.valid_for(pack, kind, side)
             return ranked[0] if ranked else None
         # gate disabled (legacy): any active set of this pack and kind, ranked the same way
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side))]
         if not rows:
             return None
         rows = [s for s in rows if s.active] or rows
@@ -3602,10 +3642,10 @@ class SetBook:
             return 0
         return max(0, min(PAUSE_MAX, v)) if math.isfinite(v) else 0
 
-    def pause_refs(self, pack: str) -> List["SetState"]:
+    def pause_refs(self, pack: str, side: int = 0) -> List["SetState"]:
         """The reference Sets of an indication's pause Auto Mode: base Sets (SL ratio 1.0 and 2.0, TP step 3 / 6 / 10 / 16, the nearest the grid has).
         Pause is a property of the indication on a symbol, so it is judged on a few representative Sets pooled, never on one Set's own tape."""
-        cands = [st for st in self.by_idx if st.pack == pack and st.kind == "base"]
+        cands = [st for st in self.by_idx if st.pack == pack and st.kind == "base" and st.side == int(side or 0)]
         if not cands:
             return []
         out: List[SetState] = []
@@ -3617,10 +3657,10 @@ class SetBook:
         return out
 
     def _pause_report(self) -> Dict[str, Any]:
-        """What the pause does now: the mode and settings, and per pack the minutes the Auto Mode chose (median over the symbols that have a choice)."""
+        """What the pause does now: the mode and settings, and per pack (and direction, in a split book) the minutes the Auto Mode chose across symbols."""
         by_pack: Dict[str, List[int]] = {}
-        for (pack, _sym), minutes in list(self.pause_now.items()):
-            by_pack.setdefault(pack, []).append(int(minutes))
+        for (pack, _sym, side), minutes in list(self.pause_now.items()):
+            by_pack.setdefault(pack + side_part(side), []).append(int(minutes))
         chosen = {}
         for pack, vals in by_pack.items():
             vals.sort()
@@ -3631,9 +3671,10 @@ class SetBook:
     def pause_active(self, pack: str) -> bool:
         return pack not in self.pause_off and (self.pause_mode != "off" or pack in self.pause_pack)
 
-    def pause_minutes(self, pack: str, symbol: str = "") -> int:
+    def pause_minutes(self, pack: str, symbol: str = "", side: int = 0) -> int:
         """Minutes a lane of this indication rests after a winning close on the symbol right now (what a new close would wait):
-        the manual pack value, else the fixed value, else the Auto Mode's latest choice for (pack, symbol); 0 = only the cooldown."""
+        the manual pack value, else the fixed value, else the Auto Mode's latest choice for (pack, symbol, side); 0 = only the cooldown. side 0 asked of
+        a split book: the longest of the two directions (a display value; live asks with the closed position's side)."""
         if pack in self.pause_off:
             return 0
         if pack in self.pause_pack:
@@ -3641,7 +3682,10 @@ class SetBook:
         if self.pause_mode == "fixed":
             return self.pause_fixed
         if self.pause_mode == "auto":
-            return int(self.pause_now.get((pack, symbol), 0))
+            if side:
+                return int(self.pause_now.get((pack, symbol, int(side)), 0))
+            both = [self.pause_now.get((pack, symbol, sd)) for sd in (0, 1, -1)]
+            return max([int(v) for v in both if v is not None], default=0)
         return 0
 
     def hold_bars_for(self, st: "SetState") -> int:
@@ -3792,22 +3836,23 @@ class SetBook:
         return lanes[0] if lanes else ""
 
     def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None,
-                 predicate: Optional[Callable[[SetState], bool]] = None) -> Optional[SetState]:
+                 predicate: Optional[Callable[[SetState], bool]] = None, side: int = 0) -> Optional[SetState]:
         """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
-        rank_key: the same entries, each judged on its own exits), else the best valid trailing Set."""
+        rank_key: the same entries, each judged on its own exits), else the best valid trailing Set. `side` (+1 long, -1 short): only a Set that may trade
+        that direction; in a split book a long signal is never judged by a short Set's tape. 0: any (a display value)."""
         # one lock acquisition: a Set cannot change between the lookups
         # the positive lane (Base -> Main -> Real) first, then the Real Negative lane; within a lane by rank_key
         with self._lock:
             allowed = {"pos", "neg"} if allowed_lanes is None else set(allowed_lanes)
-            fixed = [x for x in (self._pick(pack, "base"), self._pick(pack, "exit")) if x is not None]
+            fixed = [x for x in (self._pick(pack, "base", side), self._pick(pack, "exit", side)) if x is not None]
             if not fixed and not (self.main_on or self.neg_on or self.realst_on):
-                rows = [x for x in self._valid_for(pack, "trail") if predicate is None or predicate(x)]
+                rows = [x for x in self._valid_for(pack, "trail", side) if predicate is None or predicate(x)]
                 return max(rows, key=self.rank_key) if rows and "pos" in allowed else None
             for lane in ("pos", "neg"):
                 if lane not in allowed:
                     continue
                 for kinds in (("base", "exit"), ("trail",)):
-                    rows = [x for k in kinds for x in self._valid_for(pack, k)
+                    rows = [x for k in kinds for x in self._valid_for(pack, k, side)
                             if lane in self._execution_lanes(x)]
                     for st in sorted(rows, key=self.rank_key, reverse=True):
                         if predicate is None or predicate(st):
@@ -4041,6 +4086,7 @@ class SetBook:
                     "trailGive": st.trail_give,
                     "trI": st.tr_i,
                     "step": st.step,
+                    "side": st.side,
                     "stepI": st.step_i,
                     "tpPct": round(st.tp_pct * 100, 4),
                     "n": st.n,
@@ -4140,6 +4186,7 @@ class SetBook:
                 "rk": rank.get(id(st), -1),
                 # the Set's lane chain: its processed Set (orders opened while Base passed) and its executable Set (opened
                 # while every gate passed), each with its orders and PF
+                "sd": st.side,
                 "mainId": st.id + MAIN_SUFFIX,
                 "mainN": int(st.proc_total),
                 "mainWindowN": int(st.main_n),
@@ -4243,6 +4290,11 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
     return bars
 
 
+# The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
+# direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
+_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off"}
+
+
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     # drawdown time: 3 down, recover, 2 down
@@ -4260,7 +4312,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # drawdown and gate state are derived from the tape: a Set with a long losing run is invalid, not deactivated
     book = SetBook()
     book.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True,
             "setDeactN": 25,
             "windowsLinked": False, "setPfWindow": 15,
@@ -4323,7 +4375,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # historic replay produces fills and scores
     book2 = SetBook()
     book2.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True, "stagesEnabled": False,       # the pick on the Base gate alone
             "histLookbackBars": 240,
             "histMinBars": 80,
@@ -4371,7 +4423,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # independent intern: different SL:TP / step must diverge on the same bars
     book3 = SetBook()
     book3.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True,
             "histLookbackBars": 240,
             "histMinBars": 80,
@@ -4412,7 +4464,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # full config grid: every pack × sl × trail × step indexed
     book4 = SetBook()
     book4.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True, "stagesEnabled": False,      # these checks are about the Base gate alone, on short fixture tapes
             "setMinStep": 8,
             "setStepMax": 12,
@@ -4456,7 +4508,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # two trails independent intern
     book5 = SetBook()
     book5.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True,
             "histLookbackBars": 240,
             "histMinBars": 80,
@@ -4488,7 +4540,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     clamped = book2.clamp_bars(80)
     out.append(("set-clamp-bars", clamped >= 1 and len(book2.bars["AAA-USDT"]) <= 80, f"n={len(book2.bars['AAA-USDT'])} c={clamped}"))
     book6 = SetBook()
-    book6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"]})
+    book6.load({**_SELFTEST_PIN, "histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"]})
     book6.ingest_bars("FFF-USDT", synth_trend(240, 55.0, 0.16, 0.04))
     book6.ingest_bars("GGG-USDT", synth_trend(240, 33.0, -0.12, 0.04))
     book6.replay_all(now=1_700_000_300, symbols=["FFF-USDT"])
@@ -4496,7 +4548,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # --- evaluation math: last-N window counts and PF averages, hand-computed ---
     w = SetBook()
     w.load(
-        {
+        {**_SELFTEST_PIN, 
             "positionCostPct": 0.15, "histEnabled": True, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
             "setMinSamples": 5, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5],
@@ -4523,7 +4575,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # --- positive-PF-only validation: gated pick and pack gate ---
     g2 = SetBook()
     g2.load(
-        {
+        {**_SELFTEST_PIN, 
             "positionCostPct": 0.15, "histEnabled": True, "stagesEnabled": False, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
             "setMinSamples": 8, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
@@ -4571,7 +4623,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-no-sticky-off", off1 and still_off and g2.is_eligible(neg_set), f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
     # cold start (no replay yet): ungated pick still returns a set
     g3 = SetBook()
-    g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "trailVariants": ["0.3:0.1"]})
+    g3.load({**_SELFTEST_PIN, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "trailVariants": ["0.3:0.1"]})
     pk3 = g3.pick("general")
     out.append(("set-pick-cold", pk3 is None and not g3.pack_open("general"), f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
     # error state: due() retries on the backoff, not on every pass
@@ -4580,14 +4632,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g3.last_run = time.time() - g3.retry_s - 1
     out.append(("set-due-retry", g3.due() is True, "after backoff"))
     # time-ordered tape: the last-40 window must be the most recent trades
-    g4 = SetBook(); g4.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3})
+    g4 = SetBook(); g4.load({**_SELFTEST_PIN, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3})
     st4 = next(iter(g4.by_idx))
     rows4 = [{"t": 1000 + k, "pnl": -0.001, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl", "set_id": st4.id} for k in range(60)]
     st4.hist = sorted(reversed(rows4), key=lambda r: r["t"])[-40:]
     out.append(("set-tape-recent", min(r["t"] for r in st4.hist) == 1020, f"first={min(r['t'] for r in st4.hist)}"))
     # entry threshold is configurable and defaults to the historical 0.58
     out.append(("set-entry-conf-default", SetBook().entry_conf == 0.58, f"{SetBook().entry_conf}"))
-    g5 = SetBook(); g5.load({"setEntryConf": 0.8, "setCooldownBars": 5})
+    g5 = SetBook(); g5.load({**_SELFTEST_PIN, "setEntryConf": 0.8, "setCooldownBars": 5})
     out.append(("set-entry-conf-wired", g5.entry_conf == 0.8 and g5.cooldown_bars == 5, f"conf={g5.entry_conf} cd={g5.cooldown_bars}"))
     # base gate = net PF over the last 50 orders, min 30 judged, boundary PF >= min_pf (no fallback tier)
     def _pf_rows(n: int, target: float) -> List[Dict[str, Any]]:
@@ -4600,7 +4652,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
         return rows
     gb = SetBook()
-    gb.load({"positionCostPct": 0.15, "setMinPf": 1.10, "minPfBySize": False, "stagesEnabled": False, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    gb.load({**_SELFTEST_PIN, "positionCostPct": 0.15, "setMinPf": 1.10, "minPfBySize": False, "stagesEnabled": False, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sg = next(iter(gb.by_idx))
     sg.active = True
     def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:
@@ -4619,7 +4671,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     gb.lookback_default_ok = (LOOKBACK_DEFAULT == 4320 and SetBook().lookback == 4320)
     out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
     # R1: a live close is stored on the replay unit (net fraction), not USDT
-    lv = SetBook(); lv.load({"positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    lv = SetBook(); lv.load({**_SELFTEST_PIN, "positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sl1 = next(iter(lv.by_idx))
     lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
     stored = sl1.live[-1] if sl1.live else {}
@@ -4667,7 +4719,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     _dirs = [_rnd.choice([0, 0, 1, -1]) for _ in _bars]
     _confs = [_rnd.random() for _ in _bars]
     _book = SetBook()
-    _book.load({"histEnabled": True, "stratGeneral": True, "stratIndications": True, "setMinStep": 2, "setStepMax": 30})
+    _book.load({**_SELFTEST_PIN, "histEnabled": True, "stratGeneral": True, "stratIndications": True, "setMinStep": 2, "setStepMax": 30})
     _sample = _book.by_idx[::max(1, len(_book.by_idx) // 40)]
     _scan_ok = True
     _checked = 0
@@ -4779,14 +4831,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # Exit Sets: exitIgnoreTp is its own strategy type. A base Set takes its TP; its Exit twin (same stop, no TP) does not,
     # each has its own id and tape, and the pick ranks the two kinds together.
     xb = SetBook()
-    xb.load({"exitIgnoreTp": True, "stagesEnabled": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
+    xb.load({**_SELFTEST_PIN, "exitIgnoreTp": True, "stagesEnabled": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
     kinds_x = {k: [x for x in xb.by_idx if x.kind == k] for k in SET_KINDS}
     dists = {round(x.sl_ratio * x.step, 6) for x in kinds_x["exit"] if x.pack == "general"}
     out.append(("set-exit-kind-built", len(kinds_x["exit"]) == len(xb.packs) * 5 and len(dists) == 5
                 and all(x.id.endswith(":" + EXIT_TAG) for x in kinds_x["exit"]),
                 f"exit={len(kinds_x['exit'])} distinct stops={sorted(dists)}"))
     xoff = SetBook()
-    xoff.load({"exitIgnoreTp": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
+    xoff.load({**_SELFTEST_PIN, "exitIgnoreTp": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
     out.append(("set-exit-kind-off", not any(x.kind == "exit" for x in xoff.by_idx), "exitIgnoreTp off builds no Exit Set"))
     up = [[100.0, 100.0, 100.0, 100.0, 1.0]] + [[100.0 + 0.05 * k, 100.06 + 0.05 * k, 99.99 + 0.05 * k, 100.05 + 0.05 * k, 1.0] for k in range(30)]
     cfg_x = {"entry_conf": 0.5, "time_bars": 200, "scratch_bars": 999, "scratch_min": 0.5, "cooldown": 0, "cost_pct": 0.12,
@@ -4814,15 +4866,15 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # last N: the hold Auto floor and the linked windows read at least MIN_VALIDATION_N orders; the Base gate's minimum order count has
     # no floor (0 = off, owner 2026-10-29): a value of 3 is taken as it is
     ln = SetBook()
-    ln.load({"setPfWindow": 3, "pfWindow": 3, "setGateMinTrades": 3, "setGateWindow": 20, "holdAutoMin": 3})
+    ln.load({**_SELFTEST_PIN, "setPfWindow": 3, "pfWindow": 3, "setGateMinTrades": 3, "setGateWindow": 20, "holdAutoMin": 3})
     out.append(("set-last-n-at-least-8", ln.pf_n >= MIN_VALIDATION_N and ln.gate_min == 3 and ln.hold_auto_min >= MIN_VALIDATION_N
                 and MIN_VALIDATION_N == 8, f"pf_n={ln.pf_n} gate_min={ln.gate_min} hold_auto_min={ln.hold_auto_min}"))
     try:
         from exit_engine import ExitBook
         from risk_variants import VariantBook
         e_, v_ = ExitBook(), VariantBook()
-        e_.load({"exitPfWindow": 3})
-        v_.load({"slToTpRecalcN": 3, "trailRecalcN": 3}, {})
+        e_.load({**_SELFTEST_PIN, "exitPfWindow": 3})
+        v_.load({**_SELFTEST_PIN, "slToTpRecalcN": 3, "trailRecalcN": 3}, {})
         # the floor applies to the Base gate minimum, the hold Auto floor and the linked validation windows; the other
         # counts (Block's own samples, the Exit lane minimum, the DCA window) keep their own ranges
         floors = {"exit_pf": e_.pf_n, "sl_recalc": v_.sl_recalc_n, "trail_recalc": v_.trail_recalc_n}
@@ -4834,7 +4886,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # times the size, then 12 wins opened while the Set was not valid. Base passes at the end (PF 1.33 over the last 30) and the
     # raw last 12 are all wins; the processed last 12 hold the losses (PF 1.0), so the Set fails the Main gate.
     pr = SetBook()
-    pr.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+    pr.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
              "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
     pst = next(x for x in pr.by_idx if x.kind == "base")
     cfp = cost_as_frac(pr.cost_pct)
@@ -4846,7 +4898,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pr._score_one(pst, now=rows_p[-1][0] + 60.0)
     raw12 = [r[3] for r in rows_p[-12:]]
     held = SetBook()
-    held.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+    held.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
                "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
     hst = next(x for x in held.by_idx if x.kind == "base")
     hst.active = True
@@ -4859,7 +4911,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # the stage chain: Base (long + short + minimal window) -> Main Set -> Main (long + short + minimal) -> Real Set -> Real (last realGateN); and
     # Main Negative (the last 5 / 10 Main orders average below zero) -> Real Negative Set -> Real on it. Each Set a subset of the one before.
     ch = SetBook()
-    ch.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "mainGateN": 8, "realGateN": 8, "setMinPf": 1.25,
+    ch.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "mainGateN": 8, "realGateN": 8, "setMinPf": 1.25,
              "setMaxDdtHours": 36, "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
     cst = next(x for x in ch.by_idx if x.kind == "base")
     cfc = cost_as_frac(ch.cost_pct)
@@ -5150,7 +5202,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 f"equal to the rules={same_a}; the default chain holds {wider} more Real orders than the strict one over 12 tapes; 14 orders: Real Set "
                 f"{len(avail_ch['real'])} (strict {len(strict_ch['real'])}); verdict pos {v_av['pos']} (strict {v_st['pos']})"))
     sb = SetBook()
-    sb.load({"setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "setMinPf": 1.25, "setMaxDdtHours": 36,
+    sb.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "setMinPf": 1.25, "setMaxDdtHours": 36,
              "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
     sst = next(x for x in sb.by_idx if x.kind == "base")
     sst.active = True
@@ -5160,8 +5212,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-base-needs-both-windows", sst.gate_pf >= 1.25 and sb.gate_reason(sst) == "short",
                 f"long PF {sst.gate_pf}, short PF {sst.base_short_pf} -> {sb.gate_reason(sst)}"))
     # the stage keys: mainGate* the Main static window, realGate* the Real stage, stagesEnabled off = the Base long window alone
-    lk = SetBook(); lk.load({"realGateN": 12, "realGateEnabled": False, "mainGateN": 9})
-    lo_ = SetBook(); lo_.load({"stagesEnabled": False})
+    lk = SetBook(); lk.load({**_SELFTEST_PIN, "realGateN": 12, "realGateEnabled": False, "mainGateN": 9})
+    lo_ = SetBook(); lo_.load({**_SELFTEST_PIN, "stagesEnabled": False})
     out.append(("set-main-stage-keys-and-legacy-names", lk.realst_n == 12 and lk.realst_on is False and lk.main_n == 10 and lk.main_on is True
                 and SetBook().main_n == MAIN_GATE_N_DEFAULT == 25 and SetBook().short_windows == (5, 10, 15) and SetBook().realst_n == REAL_GATE_N_DEFAULT == 15
                 and not (lo_.main_on or lo_.neg_on or lo_.realst_on or lo_.base_short),

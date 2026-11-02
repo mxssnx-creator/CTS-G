@@ -507,6 +507,20 @@ function SettingsPage() {
           {section === "sets" && <SetsOverview stats={stats} />}
           {section === "sets" && (
             <Card
+              title="Long and short are independent"
+              hint="Split (default): every Set exists once per trade direction. The long Set trades long signals only and the short Set short signals only, each with its own lane, tape, Base/Main/Real windows, pause after success and learned minimum PF, so one direction never moves the other's verdict. A signal is judged only by a Set of its direction. Both: one Set trades both directions and its single position couples them. Split doubles the Set count; the replay work grows far less, because every entry bar belongs to one side."
+            >
+              <Grid>
+                <Toggle
+                  label="Independent long and short Sets"
+                  on={overlay.directionMode !== "both"}
+                  onChange={(v) => patch("directionMode", v ? "split" : "both")}
+                />
+              </Grid>
+            </Card>
+          )}
+          {section === "sets" && (
+            <Card
               title="Pause after success"
               hint="After a WINNING close (net of PositionCost above zero) a Set lane rests at least this long before its next entry, on top of the cooldown. Auto Mode picks the pause for every indication and symbol from a few reference Sets of that indication, using only results that closed before the moment of the choice; it needs enough orders and a clear lead over no extra rest, else the cooldown alone applies. A pause per indication below overrides the mode. Replay and live use the same rule."
             >

@@ -131,7 +131,7 @@ def auto_choice_never_reads_the_future():
             d, c = dirs[:count], confs[:count]
             one = [i for i in range(count) if d[i] and c[i] >= cfg["entry_conf"]]
             plan = b._pause_plan("T", bars, T0, 0, count, cfg, {q: d for q in b.packs}, {q: c for q in b.packs}, {q: one for q in b.packs}, se.BarIndex(bars))
-            plans.append(plan[pack][1])
+            plans.append(plan[(pack, 0)][1])
         for j in range(60, cut, 11):
             if plans[0](j) != plans[1](j):
                 mismatch.append((seed, j, plans[0](j), plans[1](j)))

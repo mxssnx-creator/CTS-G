@@ -36,16 +36,19 @@ def _replay_fingerprint(**extra):
 def fingerprint_matches_golden():
     got = _replay_fingerprint()
     got_auto = _replay_fingerprint(pauseMode="auto")
+    got_default = _replay_fingerprint(pauseMode="auto", directionMode="split")        # the shipped defaults: a Set per direction, the pause on auto
     if os.environ.get("CTSG_UPDATE_GOLDEN") == "1":
-        json.dump({**got, "pauseAuto": got_auto}, open(GOLDEN, "w"), indent=1)
-        return True, f"golden updated: sets={got['sets']} trades={got['trades']} (pause auto {got_auto['trades']})"
+        json.dump({**got, "pauseAuto": got_auto, "splitAuto": got_default}, open(GOLDEN, "w"), indent=1)
+        return True, f"golden updated: sets={got['sets']} trades={got['trades']} (pause auto {got_auto['trades']}; split + auto {got_default['sets']} Sets {got_default['trades']})"
     if not os.path.exists(GOLDEN):
         return False, "golden.json missing: run  python3 scripts/regression/run.py --update-golden"
     want = json.load(open(GOLDEN))
     want_auto = want.pop("pauseAuto", None)
-    ok = got == want and got_auto == want_auto
-    return ok, f"sets={got['sets']} trades={got['trades']} sha={got['sha256'][:12]}; pause auto trades={got_auto['trades']} sha={got_auto['sha256'][:12]}" + (
-        "" if ok else f" != golden {want['sha256'][:12]} / auto {(want_auto or {}).get('sha256', 'missing')[:12]}: processing changed; update the golden if intended")
+    want_default = want.pop("splitAuto", None)
+    ok = got == want and got_auto == want_auto and got_default == want_default
+    return ok, (f"sets={got['sets']} trades={got['trades']} sha={got['sha256'][:12]}; pause auto trades={got_auto['trades']} sha={got_auto['sha256'][:12]}; "
+                f"split + auto sets={got_default['sets']} trades={got_default['trades']} sha={got_default['sha256'][:12]}") + (
+        "" if ok else " != golden: processing changed; update the golden if intended")
 
 
 CHECKS = [("golden.replay-fingerprint", fingerprint_matches_golden)]

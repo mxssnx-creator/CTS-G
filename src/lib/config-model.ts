@@ -138,6 +138,7 @@ export const stepPfRatio = (raw: unknown): number => {
 export const stepPfGridPct = (tpPct: number): number =>
   Math.round(Math.max(STEP_PF_TP_MIN, Math.min(STEP_PF_TP_MAX, Math.floor(tpPct * 10 + 1e-9) / 10)) * 10) / 10;
 export const manualStepPf = (tpPct: number, ratio: number): number => Math.round((1 + stepPfGridPct(tpPct) * ratio) * 1e6) / 1e6;
+export type DirectionMode = "split" | "both";
 export type PauseMode = "off" | "auto" | "fixed";
 export const PAUSE_MODES: PauseMode[] = ["off", "auto", "fixed"];
 export const PAUSE_CANDIDATES_DEFAULT = [2, 3, 5, 8, 12, 20, 30, 45, 60];
@@ -388,6 +389,8 @@ export type PulseOverlay = {
   // Pause after success: rest after a WINNING close of a Set lane, per indication (pack) and symbol. off / auto (chosen from reference Sets, only from
   // earlier results) / fixed. pausePack fixes minutes for one pack and wins over the mode.
   // Minimum PF by TP step: one floor per Set for every window and stage. Auto learns it per step from orders that closed before the evaluation window.
+  // split (default): every Set exists once per trade direction, each with its own lane, tape, windows, stages, pause and floor; both: one Set trades both.
+  directionMode: DirectionMode;
   minPfByStep: boolean;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
@@ -624,6 +627,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAuto: true,
   holdAutoMax: 50,
   holdAutoMin: 10,
+  directionMode: "split",
   minPfByStep: true,
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
@@ -843,6 +847,7 @@ export type CtsSettings = {
   holdAuto?: boolean;
   holdAutoMax?: number;
   holdAutoMin?: number;
+  directionMode?: string;
   minPfByStep?: boolean;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
@@ -1159,6 +1164,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     holdAuto: bool(cts.holdAuto, true),
     holdAutoMax: Math.max(10, Math.min(50, Math.round(num(cts.holdAutoMax, 50)))),
     holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
+    directionMode: cts.directionMode === "both" ? "both" : "split",
     minPfByStep: bool(cts.minPfByStep, true),
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),

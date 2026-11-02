@@ -1868,7 +1868,7 @@ def one_dynamic_set_axis_does_not_block_other_sets():
 
     book = SetBook()
     book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0,
-               "minPfBySize": False, "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 3,
+               "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off", "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 3,
                "setSlRatios": [0.5, 1.0], "trailVariants": ["0.3:0.1"],
                "stratGeneral": True, "stratIndications": False})
     rows = [st for st in book.by_idx if st.pack == "general" and st.kind == "base"]

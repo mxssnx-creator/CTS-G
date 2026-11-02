@@ -124,7 +124,7 @@ def dynamic_hold_with_stage_entry_context():
                      consistency=0.0, main_on=True, main_n=3, short_on=False,
                      neg_on=False, real_on=True, real_n=3, full_window=False,
                      base_min_n=0, main_min_n=0)
-    b.stage_params = lambda _pack: params
+    b.stage_params = lambda _pack, _st=None: params
     b.main_on, b.short_on = True, False
     ts = [r[0] for r in rows]
     entries = [r[0] - r[5] for r in rows]

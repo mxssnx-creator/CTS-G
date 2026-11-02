@@ -33,17 +33,17 @@ function num(v: unknown, d = 2): string {
 }
 
 /** The selection survives a reload; storage can be missing or blocked, so every access is guarded. */
-function loadSelection(): { type: StrategyType; range: string } {
+function loadSelection(): { type: StrategyType; range: string; side: string } {
   try {
     const raw = window.localStorage.getItem(STORE_KEY);
     if (raw) {
-      const j = JSON.parse(raw) as { type?: string; range?: string };
-      return { type: typeById(j.type), range: rangeById(j.range).id };
+      const j = JSON.parse(raw) as { type?: string; range?: string; side?: string };
+      return { type: typeById(j.type), range: rangeById(j.range).id, side: j.side === "long" || j.side === "short" ? j.side : "all" };
     }
   } catch {
     /* storage unavailable: the defaults apply */
   }
-  return { type: DEFAULT_TYPE, range: DEFAULT_RANGE_ID };
+  return { type: DEFAULT_TYPE, range: DEFAULT_RANGE_ID, side: "all" };
 }
 
 function Seg<T extends string>({
@@ -110,16 +110,16 @@ function Panel({ title, hint, children }: { title: string; hint?: string; childr
 }
 
 function setLabel(r: SetIndexRow): string {
-  const pack = PACK_LABEL[r.pack] ?? r.pack;
+  const pack = (PACK_LABEL[r.pack] ?? r.pack) + (r.sd ? (r.sd > 0 ? " L" : " S") : "");
   if (r.kind === "trail") return `${pack} trail ${r.tr}`;
   return `${pack} sl${num(r.sl)} st${r.st}${r.kind === "exit" ? " exit" : ""}`;
 }
 
-function SetsBody({ stats, type, rangeId }: { stats: LiveStats; type: "normal" | "exit" | "trailing"; rangeId: string }) {
+function SetsBody({ stats, type, rangeId, side }: { stats: LiveStats; type: "normal" | "exit" | "trailing"; rangeId: string; side: number }) {
   const cost = stats.pfCost?.costPct ?? POSITION_COST_PCT_DEFAULT;
   const minPf = stats.sets?.minPf ?? 1.1;
   const index = stats.sets?.index;
-  const rows = useMemo(() => filterSets(index, type, rangeId, cost), [index, type, rangeId, cost]);
+  const rows = useMemo(() => filterSets(index, type, rangeId, cost, side), [index, type, rangeId, cost, side]);
   const sum = useMemo(() => summarize(rows), [rows]);
   const packs = useMemo(() => Object.entries(summarizeByPack(rows)), [rows]);
   const hist = useMemo(() => stepHistogram(rows, cost), [rows, cost]);
@@ -435,14 +435,16 @@ function DcaBody({ stats }: { stats: LiveStats }) {
 export function SetsOverview({ stats, title = "Sets overview" }: { stats: LiveStats | null; title?: string }) {
   const [type, setType] = useState<StrategyType>(DEFAULT_TYPE);
   const [rangeId, setRangeId] = useState<string>(DEFAULT_RANGE_ID);
+  const [sideId, setSideId] = useState<string>("all");
   useEffect(() => {
     const s = loadSelection();
     setType(s.type);
     setRangeId(s.range);
+    setSideId(s.side);
   }, []);
-  const save = (t: StrategyType, r: string) => {
+  const save = (t: StrategyType, r: string, sd: string = sideId) => {
     try {
-      window.localStorage.setItem(STORE_KEY, JSON.stringify({ type: t, range: r }));
+      window.localStorage.setItem(STORE_KEY, JSON.stringify({ type: t, range: r, side: sd }));
     } catch {
       /* storage unavailable: the selection lasts for this view only */
     }
@@ -458,10 +460,26 @@ export function SetsOverview({ stats, title = "Sets overview" }: { stats: LiveSt
           value={rangeId}
           options={STEP_RANGES.map((r) => ({ id: r.id, label: r.label, hint: r.id === "2-6" ? "Short Range band" : undefined }))}
           disabled={!isSets}
-          note={isSets ? "TP steps of one PositionCost each" : "the range filters Sets (Normal, Exit, Trailing)"}
+          note={isSets ? "TP steps of 0.1% of price each (step 3 = 0.3%)" : "the range filters Sets (Normal, Exit, Trailing)"}
           onChange={(v) => {
             setRangeId(v);
             save(type, v);
+          }}
+        />
+        <Seg
+          label="Direction"
+          testid="sets-side"
+          value={sideId}
+          options={[
+            { id: "all", label: "Long + short", hint: "every Set" },
+            { id: "long", label: "Long", hint: "Sets that trade long only: own lane, tape, stages, pause and floor" },
+            { id: "short", label: "Short", hint: "Sets that trade short only" },
+          ]}
+          disabled={!isSets}
+          note={isSets ? "each direction is judged on its own orders" : "the direction filters Sets (Normal, Exit, Trailing)"}
+          onChange={(v) => {
+            setSideId(v);
+            save(type, rangeId, v);
           }}
         />
         <Seg
@@ -485,7 +503,7 @@ export function SetsOverview({ stats, title = "Sets overview" }: { stats: LiveSt
         ) : type === "dca" ? (
           <DcaBody stats={stats} />
         ) : (
-          <SetsBody stats={stats} type={type} rangeId={rangeId} />
+          <SetsBody stats={stats} type={type} rangeId={rangeId} side={sideId === "long" ? 1 : sideId === "short" ? -1 : 0} />
         )}
       </div>
     </section>

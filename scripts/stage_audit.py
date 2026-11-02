@@ -53,12 +53,12 @@ def _job(args):
     acc = se.BarIndex(bars)
     out = {}
     cands = {p: [i for i in range(warm, len(bars)) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]] for p in b.packs}
+    cand_side = b._cand_by_side(cands, dirs)
     plan = b._pause_plan(s, bars, float(t0), warm, len(bars), cfg, dirs, confs, cands, acc)     # rest after a winning close (overlay pauseMode / pausePack)
     for st in b.by_idx:
-        cand = cands[st.pack]
         lane = se.SetLane(st, s)
-        sel_pause = b._lane_pause(lane, st.pack, plan)
-        trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand, acc, select_pause=sel_pause)
+        sel_pause = b._lane_pause(lane, st.pack, plan, st.side)
+        trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
         out[st.idx] = [(t["entry_i"], t["exit_i"], t["pnl_pct"], t["reason"]) for t in trades]
     return s, out
 

@@ -120,7 +120,7 @@ def auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation():
     boundary = BOUNDARY
     _learn(b, tapes, boundary)
     want_f, want_n, want_pairs = _oracle(tapes.values(), boundary, 0.2, 3, b.pf_step_auto_n, 100)
-    got = b.step_floor_auto.get(3)
+    got = b.step_floor_auto.get((3, 0))
     row = next(r for r in b.step_floor_report if r["step"] == 3)
     manual = se.manual_step_floor(0.3, 0.2)
     ok = ((got if got is not None else manual) == want_f and want_f > manual and row["admitted"] == want_n and row["orders"] == want_pairs

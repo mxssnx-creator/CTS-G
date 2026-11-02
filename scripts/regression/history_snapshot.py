@@ -21,7 +21,7 @@ def _book(opt_in=True, live_clock=False, stages=False):
                "setGateShortN": 3, "setGateMinN": 0, "mainGateEnabled": True,
                "mainGateN": 10, "mainShortEnabled": True, "mainShortWindows": [3, 5],
                "mainShortMin": 3, "mainMinN": 0,
-               "setMinPf": 1.1, "minPfBySize": False, "positionCostPct": 0.12,
+               "setMinPf": 1.1, "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off", "positionCostPct": 0.12,
                "realGateN": 1})
     book.bars = {s: synth_bars(i + 1, 120) for i, s in enumerate(NAMES)}
     if live_clock:

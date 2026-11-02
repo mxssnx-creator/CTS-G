@@ -20,8 +20,10 @@ export type SetIndexRow = {
   sl: number;
   /** Trailing key "arm:give" in percent; "" for a base Set. */
   tr: string;
-  /** TP step (one step = one PositionCost); 0 for a trailing Set. */
+  /** TP step (one step = 0.1 % of price: step 3 = 0.3 %); 0 for a trailing Set. */
   st: number;
+  /** Trade direction: +1 long only, -1 short only (directionMode split), 0 or absent for a Set that trades both. */
+  sd?: number;
   /** 1 when the Set is ready for an entry. */
   on: number;
   /** PF/risk validation, independent of minimal coordination (older servers omit it). */
@@ -86,10 +88,10 @@ export type StepRange = { id: string; label: string; min: number; max: number };
 /** "All" first and the default. 2-6 is the Short Range band. */
 export const STEP_RANGES: StepRange[] = [
   { id: "all", label: "All", min: 0, max: Number.POSITIVE_INFINITY },
-  { id: "2-6", label: "2–6", min: 2, max: 6 },
-  { id: "7-12", label: "7–12", min: 7, max: 12 },
-  { id: "13-20", label: "13–20", min: 13, max: 20 },
-  { id: "21-30", label: "21–30", min: 21, max: 30 },
+  { id: "2-6", label: "2–6 · 0.2–0.6%", min: 2, max: 6 },
+  { id: "7-12", label: "7–12 · 0.7–1.2%", min: 7, max: 12 },
+  { id: "13-20", label: "13–20 · 1.3–2.0%", min: 13, max: 20 },
+  { id: "21-32", label: "21–32 · 2.1–3.2%", min: 21, max: 32 },
 ];
 
 export const DEFAULT_RANGE_ID = "all";
@@ -110,13 +112,13 @@ export function trailArmPct(key: string): number {
 }
 
 /**
- * The step a Set is filtered by: the TP step of a base Set, the arm in PositionCost units for a trailing Set (an arm of
- * 0.60 % at a cost of 0.12 % is step 5).
+ * The step a Set is filtered by: the TP step of a base Set, the arm in steps of 0.1 % for a trailing Set (an arm of 0.60 % is step 6). PositionCost
+ * no longer moves the grid; the parameter is kept for callers.
  */
-export function stepOf(row: SetIndexRow, costPct: number): number {
+export function stepOf(row: SetIndexRow, _costPct?: number): number {
   if (row.kind === "trail") {
     const arm = trailArmPct(row.tr);
-    return Number.isFinite(arm) && costPct > 0 ? Math.round(arm / costPct) : Number.NaN;
+    return Number.isFinite(arm) ? Math.round(arm / 0.1) : Number.NaN;
   }
   return row.st;
 }
@@ -132,11 +134,12 @@ export function filterSets(
   type: StrategyType,
   rangeId: string,
   costPct: number,
+  side = 0,
 ): SetIndexRow[] {
   const kind = SET_VIEW_KIND[type];
   if (!index || !kind) return [];
   const range = rangeById(rangeId);
-  return index.filter((r) => r.kind === kind && inRange(stepOf(r, costPct), range));
+  return index.filter((r) => r.kind === kind && inRange(stepOf(r, costPct), range) && (!side || Number(r.sd ?? 0) === side));
 }
 
 export type SetsSummary = {

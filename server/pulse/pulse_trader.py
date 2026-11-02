@@ -3076,7 +3076,7 @@ class Pulse:
             return "data-quality"          # the symbol's history failed the data check: no Set was validated on it
         chosen = None
         try:
-            chosen = self.sets.pick_any(pack) if self.sets.enabled else None   # a signal binds to its own pack only
+            chosen = self.sets.pick_any(pack, side=direction) if self.sets.enabled else None   # a signal binds to its own pack and direction only
         except Exception:
             chosen = None
         if chosen:
@@ -3093,8 +3093,9 @@ class Pulse:
         chosen, _lane, blocked = self._scope_choice(pack)
         return chosen, blocked
 
-    def _scope_choice(self, pack: str) -> Tuple[Any, str, str]:
-        """Pick within the pack's allowed lanes; another pack or a blocked positive lane cannot mask a valid alternative."""
+    def _scope_choice(self, pack: str, side: int = 0) -> Tuple[Any, str, str]:
+        """Pick within the pack's allowed lanes (and, with a side, the signal's direction: a long signal is only ever judged by a long Set);
+        another pack or a blocked positive lane cannot mask a valid alternative."""
         if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
             blocked = []
             def allows(st, lane):
@@ -3116,12 +3117,12 @@ class Pulse:
                     return False
                 return True
             for lane in ("pos", "neg"):
-                chosen = self.sets.pick_any(pack, allowed_lanes=(lane,), predicate=lambda st: allows(st, lane))
+                chosen = self.sets.pick_any(pack, allowed_lanes=(lane,), predicate=lambda st: allows(st, lane), side=side)
                 if chosen is not None:
                     return chosen, lane, ""
             return None, "", blocked[0] if blocked else ""
         try:
-            chosen = self.sets.pick_any(pack)
+            chosen = self.sets.pick_any(pack, side=side)
         except Exception:
             return None, "", ""
         coord = getattr(self, "coord", None)
@@ -3137,7 +3138,7 @@ class Pulse:
         allowed = [candidate for candidate in ("pos", "neg") if coord.scope_allows(pack, candidate)[0]]
         if allowed:
             try:
-                alternative = self.sets.pick_any(pack, allowed_lanes=allowed)
+                alternative = self.sets.pick_any(pack, allowed_lanes=allowed, side=side)
                 if alternative is not None and (self.sets.lane_of(alternative) or "pos") in allowed:
                     return alternative, self.sets.lane_of(alternative) or "pos", ""
             except (TypeError, AttributeError):
@@ -3187,7 +3188,7 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
-        chosen, chosen_lane, blocked_by = self._scope_choice(pack)   # keep the exact lane approved by its own Axis
+        chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction)   # keep the exact lane approved by its own Axis
         if chosen is None and blocked_by:
             self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
             if time.time() - self.skip_log.get("scope", 0) > 40:
@@ -3799,7 +3800,8 @@ class Pulse:
                     self.cooldown["__book__"] = time.time() + 120
                     self.consec_loss = 4
                     log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id), pack=str(getattr(pos, "pack", "") or ""))
+        self.cooldown[pos.symbol] = time.time() + self.symbol_backoff(pos.symbol, pnl_pct, hold, reason, set_lane=bool(pos.set_id), pack=str(getattr(pos, "pack", "") or ""),
+                                                                           side=1 if str(getattr(pos, "side", "")).upper() == "LONG" else -1)
         if not pos.set_id:
             # Block scores the parents it may stack on (positions without a Set); a Set close is its own lane's result
             self.block.on_parent_close(pos.symbol, pos.side, pnl)
@@ -3813,7 +3815,7 @@ class Pulse:
         log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self._stats_force = True
 
-    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False, pack: str = "") -> float:
+    def symbol_backoff(self, sym: str, pnl_pct: float, hold_s: float, reason: str, set_lane: bool = False, pack: str = "", side: int = 0) -> float:
         """Seconds before this symbol may be entered again. A stop-out within 30 s of the entry (a book that moves faster
         than the strategy can act on) bans the symbol for SYM_BAN_S, whatever the lane: a venue safety. After a Set close
         the wait is the Set lane's own cooldown (setCooldownBars, as replayed), never a backoff from other closes. After an
@@ -3829,7 +3831,7 @@ class Pulse:
                 # the replay's rest after a WINNING close (set_engine.rest_after): this indication's pause on the symbol, at least the cooldown
                 pause = getattr(self.sets, "pause_minutes", None)
                 if pause is not None:
-                    wait = max(wait, float(pause(pack, sym)) * 60.0)
+                    wait = max(wait, float(pause(pack, sym, side)) * 60.0)
             return wait
         fails = getattr(self, "sym_fails", None)
         if fails is None:

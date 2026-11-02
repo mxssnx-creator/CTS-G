@@ -85,17 +85,21 @@ def _symbol_job(args):
     acc = se.BarIndex(bars)
     out = {}
     cands = {p: [i for i in range(warm, len(bars)) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]] for p in b.packs}
-    # the rest after a winning close (pauseMode / pausePack in the overlay patch): the engine's own plan, chosen only from earlier results
+    cand_side = b._cand_by_side(cands, dirs)
+    # the rest after a winning close (overlay pauseMode / pausePack): the engine's own plan, chosen only from earlier results
     plan = b._pause_plan(s, bars, float(t0), warm, len(bars), cfg, dirs, confs, cands, acc)
     for st in b.by_idx:
-        cand = cands[st.pack]
         lane = se.SetLane(st, s)
-        sel_pause = b._lane_pause(lane, st.pack, plan)
-        trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand, acc, select_pause=sel_pause)
+        sel_pause = b._lane_pause(lane, st.pack, plan, st.side)
+        trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
         ent = array("i", (t["entry_i"] for t in trades))
         ex = array("i", (t["exit_i"] for t in trades))
         pp = array("d", (t["pnl_pct"] for t in trades))
         out[st.idx] = (ent, ex, pp)
+    pauses = {}
+    for key, (fixed, fn) in plan.items():
+        pauses[key] = array("H", (min(65535, int(fn(i))) for i in range(len(bars)))) if fn is not None else array("H", [min(65535, int(fixed))] * len(bars))
+    out[-1] = pauses            # (pack, side) -> the pause (minutes) the plan chooses at each exit bar: what an executed win waits
     return s, warm, dirs, confs, out
 
 
@@ -505,8 +509,11 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
                 pool, lane_pick = [], ""
                 for lane_ in ("pos", "neg"):
-                    fixed = sorted(ranked.get((pack, "base", lane_), []) + ranked.get((pack, "exit", lane_), []), key=lambda r: r[0], reverse=True)
-                    pool = [st for _, st in fixed] or [st for _, st in sorted(ranked.get((pack, "trail", lane_), []), key=lambda r: r[0], reverse=True)]
+                    # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...))
+                    fixed = sorted([r for r in ranked.get((pack, "base", lane_), []) + ranked.get((pack, "exit", lane_), []) if r[1].side in (0, d)],
+                                   key=lambda r: r[0], reverse=True)
+                    pool = [st for _, st in fixed] or [st for _, st in sorted([r for r in ranked.get((pack, "trail", lane_), []) if r[1].side in (0, d)],
+                                                                              key=lambda r: r[0], reverse=True)]
                     if pool:
                         lane_pick = lane_
                         break
@@ -548,7 +555,13 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                                              "mark_net": (mark / pos["entry"] - 1) * pos["side"] - cf})
                     continue
                 tr = tr[0]
-                busy[s] = tr["exit_i"]
+                # the symbol rests after the close as the lane and live do: the cooldown, and after a WIN at least the pause the plan chose at that exit bar
+                rest = int(cfg["cooldown"])
+                if tr["pnl"] > 0:
+                    pz = (shadow[s][3].get(-1) or {}).get((pack, st.side))
+                    if pz is not None:
+                        rest = max(rest, int(pz[tr["exit_i"]]))
+                busy[s] = tr["exit_i"] + rest
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
                        "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
