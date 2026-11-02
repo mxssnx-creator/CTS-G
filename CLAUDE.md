@@ -88,9 +88,8 @@ This section supersedes older operational descriptions and historical measuremen
 - **Found and fixed, 2: Axis, Block and DCA-on-Axis judged one Set's stream at the pooled floor.** `Pulse.set_axis_floor(st)` hands `coord.judge(..., min_pf=)`, `coord.slot_cap(..., min_pf=)`
   and `SetBlockBook.candidate(..., floor=)` the Set's own floor (1.04 at a 0.2 % target, 1.20 at 1.0 %, ratio 0.2) instead of the coordinator's 1.25; `minPfLinked` off keeps the coordinator's.
   The scope record carries the floor it used (`minPf`). Check `lane_rank.the-axis-block-and-dca-gates-judge-a-sets-stream-at-that-sets-floor`; mutants `lane rank:` and `axis floor:`.
-- **Not done (open): the drawdown time, the minimum order count and the consistency floor apply to the Base stage only.** Main and Real windows are PF-only (at the Set's floor). An earlier note and the
-  Settings text said "the same drawdown time everywhere"; both are corrected. Adding it means a time series for the Main / Real streams in every consumer of `stage_verdicts` (engine, simulator,
-  `stage_debug`, the audit's plain chain, the selftest reference) and a decision whether the Real window's drawdown is measured to the decision clock; it was left out on purpose, not forgotten.
+- **Owner decision 2026-11-02: the drawdown time, the minimum order count and the consistency floor stay Base-stage rules.** Main and Real windows are PF-only (at the Set's floor). An earlier note and the
+  Settings text said "the same drawdown time everywhere"; both are corrected. Main and Real are judged by their last-N PF windows at the same per-Set floor; nothing more is planned there.
 - **Measured, `rankByLane` on against off** (`scripts/trade_sim.py`, walk-forward, per-order validation, 20 symbols, 3 days of 1m history, development window 32 h, split + manual step floors + pause auto,
   hold Auto off): on **0.406 PF / 284 orders / net -43.7 %**, off (the earlier rank) **0.351 / 313 / -56.7 %**; the simulator's gate and rank match the engine on 60/60 sampled pairs in both arms. The
   gap (+0.055) is inside the noise of 280-310 orders (+-0.1) and both arms are under 1 with a negative net: the lane rank is a correctness change (execution reads the Set that was validated), not a

@@ -964,7 +964,7 @@ function SettingsPage() {
                   min={2}
                   max={6}
                   step={1}
-                  hint="Short Range (Low-Range signals) trades TP steps min..max, one step = one PositionCost. Default 2–6."
+                  hint="Short Range (Low-Range signals) trades TP steps min..max, one step = 0.1 % of price (steps 2–6 = 0.2–0.6 %). Default 2–6."
                   onChange={(v) => patch("shortRangeStepMin", Math.max(2, Math.min(overlay.shortRangeStepMax || 6, Math.round(v))))}
                 />
                 <Slider

@@ -11,7 +11,7 @@ the types) and, optionally, the rest after a winning close of those indications.
    "ranges": [5, 8, 14],                     -> _n5, _n8, _n14 (the range of the family)
    "timeframes": [1, 5, "c"],                -> _t1, _t5 (one series), "c" the vote over 1/5/15, "x" the vote over 1/5/15/30
    "relations": ["", "T5", "B15"],           "" = none; else name@relation (indication_rel), applied to every name above
-   "stepMin": 3, "stepMax": 10,              TP steps (one step = one PositionCost) of this entry's Sets
+   "stepMin": 3, "stepMax": 10,              TP steps (one step = 0.1 % of price) of this entry's Sets
    "slRatios": [1.0, 1.5],                   SL ratios of this entry's Sets (default: the global grid)
    "types": ["base", "exit", "trail"],       which Set types this entry builds (default all)
    "pause": "auto" | 0 | 15}                 rest after a winning close: the book's pause mode (default), none, or fixed minutes
