@@ -29,6 +29,30 @@ This section supersedes older operational descriptions and historical measuremen
 - Never clamp Main PF to Base PF, copy selected PF into execution PF, or remove a verified loss to make
   PF higher. Same data and rules must agree; different populations can have different PF.
 
+## Minimum PF per TP step, long/short independence (2026-11-02)
+
+- **Minimum PF per TP step** (`minPfByStep`, default on; replaces the window-size classes, which stay selectable with it off): a Set asks ONE floor, from its own
+  TP step, in every window of every stage (Base long / short / minimal, Main, Real, Negative) and the same drawdown time as Base. **Manual**: floor =
+  1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value), ratio 0.1 .. 1.1 in steps of 0.05, default 0.2 (`minPfStepRatio`):
+  1.04 at 0.2 %, 1.06 at 0.3 %, 1.64 at 3.2 %, 1.70 at 3.5 % (`set_engine.manual_step_floor`, `config-model.manualStepPf`, one table held equal in both).
+  **Auto** (`minPfStepAuto`, default on): for each step 0.2 .. 3.5 % the engine learns the floor (1.00 .. 2.00 in 0.02) whose admitted orders -- the orders
+  whose Set had that PF over its last `minPfStepAutoN` (10) closed orders at entry -- delivered the best PF, pooled over the step's distinct Set tapes, from
+  orders that CLOSED BEFORE the evaluation window only; it needs `minPfStepAutoMin` (300) admitted orders and a 5 % lead over the manual floor's delivered PF,
+  else the manual floor stands (`SetBook._learn_step_floors`; checks `step-pf.*`: a plain-loop reading, 1,448 results after the boundary flipped without
+  moving the floor, a copy counted once). A step floor needs history BEFORE the window: with a 3-day lookback the live engine has it (it keeps 3 x the lookback),
+  a replay of exactly the lookback has none and runs on the manual floors. The simulators (`stage_eval`, `trade_sim`) use the manual floors; Auto is engine-only.
+  The global `MIN_PF_FLOOR` (1.05) still governs Exit / DCA / Block / coordinator; the per-step table may go lower (1.04 at 0.2 % by owner decision).
+- **Long and short are independent** (`directionMode` split, default; fixtures run `both`): every Set exists once per direction (`SetState.side` +1 / -1, id
+  `<pack>:L:1m:...` / `<pack>:S:1m:...`), scans only its own side's entry bars (`_cand_by_side`, each bar belongs to exactly one side, so scan work is not
+  doubled), and so has its own lane, tape, windows, stage chain, pause (`pause_now[(pack, symbol, side)]`) and learned floor (`step_floor_auto[(step, side)]`).
+  A live signal is judged only by a Set that may trade its direction (`pick_any(side)`, `_scope_choice(pack, side)`), a close rests the symbol with the pause of ITS
+  direction. Independence is shown by removal (`direction.removing-one-direction-leaves-the-other-untouched`): without any short signal the long Sets' 1,668
+  orders are byte-identical, and the combined Set's long orders change (its one position couples the sides). Occupancy across Sets is as before: live opens one
+  position per symbol.
+- **Simulator rest after a close** (2026-11-02): `stage_eval`'s executed positions now rest the symbol as the lane and live do (the cooldown, and after a win the
+  pause chosen at that exit bar) and pick only Sets of the signal's direction. Executed figures measured before this change modelled the pause through the Set tapes
+  only, not the wait after an executed win; the pause numbers below were taken that way.
+
 ## Pause after success, indications by range, distinct tapes (2026-11-02)
 
 - **Pause after success** (`pauseMode` off / **auto (default, owner 2026-11-02)** / fixed, `pauseFixedMin`, `pauseCandidates` 2-60 min, `pauseAutoMax` 100,
@@ -117,9 +141,15 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
 ## Units and defaults
 
 - PositionCost is in percent, default 0.12 (`position_cost.POSITION_COST_PCT_DEFAULT`, both overlays, desk default).
-- One step = one PositionCost. TP = step x PositionCost; SL = SL ratio x TP with ratios 0.5..3.5 step 0.25.
+- **One TP step = 0.1 % of price (owner 2026-11-02)**: TP = step x 0.1 %, steps 2..32 = 0.2 % .. 3.2 % (`position_cost.TP_UNIT_PCT`, `TP_STEP_MIN/MAX`), whatever
+  PositionCost is; it was step x PositionCost. SL = SL ratio x TP with ratios 0.5..3.5 step 0.25. PositionCost still pays for every order and floors the lane's
+  TP at 1 x PositionCost (`TP_MIN_COSTS`, was 2). Trailing arms and gives use the same 0.1 % unit (arms 0.3 .. 2.2 %, `trail_grid`). Default grid: 1,700 Sets
+  (871 base, 443 Exit, 386 trailing; `grid.default-grid-follows-its-rules` derives them), 3,400 with the direction split.
 - Overall minimum stop = PositionCost + `slMinSteps` steps (default 1, so 2 x cost); minimum trailing distance =
-  PositionCost + `trailMinSteps` steps (default 2, so 3 x cost).
+  PositionCost + `trailMinSteps` steps (default 2, so 3 x cost). These two stay in PositionCost units (they are cost safety rules); a trailing pair under the
+  minimum distance is never built, so a high PositionCost can leave no trailing Set (found 2026-11-02: the floor had been clamped to the grid).
+- **Pre-history default 3 days** (`histLookbackBars` 4320 = `LOOKBACK_DEFAULT` = `LOOKBACK_MAX`, owner 2026-11-02; was 1920). The engine keeps up to
+  `history_bars()` = depth x lookback + warm-up + holds per symbol (about 13,000 bars at the default); read the latency note below before raising anything.
 - Short Range strategy (pack `shortrange`, overlay `stratShortRange`): the Low-Range signals, TP steps 2-6.
 
 ## Live entries = replay entries (standard)
