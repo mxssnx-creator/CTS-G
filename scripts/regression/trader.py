@@ -858,12 +858,16 @@ def flat_candle_gap_cannot_preserve_short_history_cache():
 def fifty_short_histories_refresh_without_full_repaging():
     """Bound request volume across a synthetic 50-symbol short-history universe."""
     import set_engine as se
-    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    saved, sleep, clock = list(pt.SYMBOLS), pt.time.sleep, pt.time.time
     try:
         pt.SYMBOLS[:] = [f"S{i:02d}-USDT" for i in range(50)]
         pt.time.sleep = lambda _s: None
+        # one frozen clock for the fake venue and the code under test: the venue stamps its candles from the clock, and a minute boundary between
+        # the two 50-symbol fetches (easy under load) made the stored history look a minute stale and re-paged it (found on the pushed 58af012 too)
+        now = clock()
+        pt.time.time = lambda: now
         p = _bare_pulse()
-        p.api, p.sets = _PagedKlines(n=2501), se.SetBook()
+        p.api, p.sets = _PagedKlines(n=2501, t_end=int(now // 60) * 60_000), se.SetBook()
         p.api.rows[0].update(open="0.1", high="0.2", low="0.05", close="0.1")
         p.sets.lookback = 2400
         first = p._hist_fetch()
@@ -874,7 +878,7 @@ def fifty_short_histories_refresh_without_full_repaging():
         return (len(first) == len(second) == 50 and first_requests == 150
                 and len(limits) == 50 and set(limits) == {120}), f"symbols={len(second)}; requests backfill/refresh={first_requests}/{len(limits)}; refresh limits={set(limits)}"
     finally:
-        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+        pt.SYMBOLS[:], pt.time.sleep, pt.time.time = saved, sleep, clock
 
 
 def history_chunks_rotate_even_when_many_positions_are_open():
