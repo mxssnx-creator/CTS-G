@@ -200,7 +200,24 @@ def client_order_ids_name_the_direction():
     return ok, f"{len(b.by_idx)} split ids round-trip (wrong {len(wrong)}); with the index pointing at the other direction's twin, wrong {len(swapped)}; direction marks {sorted(marks & {'L', 'S'})}, none on combined Sets"
 
 
+def pause_references_are_of_their_own_direction():
+    """The pause Auto Mode of a direction replays reference Sets of THAT direction: a long pause chosen on short Sets' tapes (or the reverse) is another
+    direction's answer. Found by the mutation run: references taken from both directions picked the nearest Set whichever side it traded."""
+    b = _book("split", stratTrend=True)
+    got = {}
+    for pack in {st.pack for st in b.by_idx}:
+        for side in (1, -1):
+            refs = b.pause_refs(pack, side)
+            got[(pack, side)] = (len(refs), {st.side for st in refs})
+    comb = _book("both")
+    comb_refs = {pack: comb.pause_refs(pack, 0) for pack in {st.pack for st in comb.by_idx}}
+    ok = (len(got) >= 4 and all(n >= 1 and sides == {side} for (pack, side), (n, sides) in got.items())
+          and all(refs and all(st.side == 0 for st in refs) for refs in comb_refs.values()))
+    return ok, f"(references, directions) per (pack, direction): {got}; the combined book's references all trade both: {all(all(st.side == 0 for st in r) for r in comb_refs.values())}"
+
+
 CHECKS = [("direction." + fn.__name__.replace("_", "-"), fn) for fn in (
     split_grid_is_the_combined_grid_twice, a_set_only_ever_trades_its_own_direction, removing_one_direction_leaves_the_other_untouched,
     pause_is_learned_per_direction, learned_floors_are_per_direction, a_signal_is_judged_only_by_a_set_of_its_direction,
-    live_rest_after_a_win_follows_the_closed_positions_direction, direction_mode_setting, client_order_ids_name_the_direction)]
+    live_rest_after_a_win_follows_the_closed_positions_direction, direction_mode_setting, client_order_ids_name_the_direction,
+    pause_references_are_of_their_own_direction)]
