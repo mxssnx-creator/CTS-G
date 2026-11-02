@@ -862,7 +862,10 @@ MUTATIONS = [
 ]
 
 
-def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subprocess.CompletedProcess:
+PIN_CHECKS = "logistics.deploy-pin-matches-engine"         # tripped by ANY edit of the pinned trader; a behaviour fault must be caught by a behaviour check
+
+
+def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "", skip: str = "") -> subprocess.CompletedProcess:
     """One suite run against a pulse copy. A mutant run is serial and stops at its first FAIL: a caught mutant
     needs only one failing check, and a survivor never fails, so it runs to the end either way.
     only: a suite prefix. Behaviour faults in the pinned trader run the trader suite alone, so the verdict comes from
@@ -870,6 +873,8 @@ def run_once(pulse_dir: str, fail_fast: bool = True, only: str = "") -> subproce
     alone for the same reason (their faults sit in bybit_fast.py, bybit_limits.py, conn_guard.py, pulse_http.py and the venue
     selection in the trader)."""
     env = dict(os.environ, CTSG_PULSE_DIR=pulse_dir, CTSG_JOBS="1" if fail_fast else (os.environ.get("CTSG_JOBS") or ""))
+    if skip:
+        env["CTSG_SKIP_CHECKS"] = skip
     args = [sys.executable, "-B", os.path.join(HERE, "run.py")] + (["--fail-fast"] if fail_fast else [])
     if only:
         args += ["--only", only]
@@ -895,12 +900,13 @@ def _mutant(item, use_cache: bool = True):
             text = text.replace(old, new)
         open(path, "w", encoding="utf-8").write(text)
         known = _catchers.get(name) if use_cache else None
+        skip = PIN_CHECKS if (fname == "pulse_trader.py" and old is not None) else ""        # only the "edited without re-pinning" mutant is meant to trip the pin
         if known:
-            out = run_once(copy, fail_fast=True, only=known)
+            out = run_once(copy, fail_fast=True, only=known, skip=skip)
             fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
             if out.returncode != 0 and fails:
                 return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]} (known catcher)"
-        out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "bybit." if name.startswith("bybit:") else "")
+        out = run_once(copy, fail_fast=True, only="trader" if name.startswith("trader:") else "bybit." if name.startswith("bybit:") else "", skip=skip)
     fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
     if out.returncode == 0:
         return name, "survived", ""

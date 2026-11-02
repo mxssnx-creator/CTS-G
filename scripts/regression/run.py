@@ -176,6 +176,9 @@ def main(argv=None):
     checks.extend(selftests())
     if args.only:
         checks = [c for c in checks if c[0].startswith(args.only)]
+    skip = {x.strip() for x in os.environ.get("CTSG_SKIP_CHECKS", "").split(",") if x.strip()}
+    if skip:                                   # mutate.py: a fault in the pinned trader must be judged by behaviour checks, not by the pin any edit of that file trips
+        checks = [c for c in checks if c[0] not in skip]
     if args.list:
         for cname, _ in checks:
             print(cname)
