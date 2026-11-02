@@ -1731,6 +1731,7 @@ class SetBook:
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
+        self._manual_floor_cache: Dict[Tuple[int, float], float] = {}
         self.pause_mode = "auto"                      # rest after a WINNING close: off / auto (per indication and symbol, the default) / fixed
         self.pause_fixed = 0
         self.pause_candidates: Tuple[int, ...] = PAUSE_CANDIDATES_DEFAULT
@@ -3157,7 +3158,11 @@ class SetBook:
             learned = self.step_floor_auto.get((bucket, st.side))
             if learned is not None:
                 return float(learned)
-        return manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
+        key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot
+        got = self._manual_floor_cache.get(key)
+        if got is None:
+            got = self._manual_floor_cache[key] = manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
+        return got
 
     def floor_for(self, n: int, pack: str, st: Optional["SetState"] = None) -> float:
         """The minimum PF a window of n orders of this pack asks. With minPfByStep (default) a Set asks one floor from its TP step in every window and stage;
