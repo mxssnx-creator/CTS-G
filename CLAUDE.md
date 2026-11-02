@@ -53,6 +53,27 @@ This section supersedes older operational descriptions and historical measuremen
   pause chosen at that exit bar) and pick only Sets of the signal's direction. Executed figures measured before this change modelled the pause through the Set tapes
   only, not the wait after an executed win; the pause numbers below were taken that way.
 
+## Measured on the new defaults (2026-11-02, 3 days of 1m history, 20 liquid USDT perpetuals, 2026-10-31 .. 11-02)
+
+- **Six arms, development window 32 h, `trade_sim.py` (validated per order, one position per symbol; the simulator now rests an executed symbol as live does; hold Auto
+  off because the simulator cannot model it; the per-step floors are the manual ones, Auto is engine-only).** Executed PF / orders / net: shipped defaults (split Sets,
+  step ratio 0.2, pause auto, stages on) **0.351 / 313 / -56.7 %**; combined Sets 0.416 / 232 / -37.2 %; window-size classes instead of step floors 0.427 / 297 / -42.1 %;
+  step ratio 0.5 **0.520** / 308 / -29.3 %; Base only (stages off) 0.408 / 363 / -55.4 %; **pause off 0.568 / 464 / -41.9 %**. In-sample effective PF 2.0-7.0 in every arm
+  against a next-50-orders PF of 0.24-0.46. **No arm is above 1 and every net is negative.** At 230-460 orders an arm's PF carries roughly +-0.1, so only the
+  larger gaps mean anything: (1) **pause auto was worse than off here (0.351 against 0.568, 313 against 464 orders)** -- the opposite of the earlier reading
+  (0.796 against 0.572), which used the old grid and a simulator that did not rest an executed symbol; the earlier figure is not evidence for the shipped default.
+  (2) A stricter floor executed better (ratio 0.5 above 0.2, 0.52 against 0.35), as did the lower validated share with it; the owner's default ratio 0.2 validates more Sets
+  and delivers less per order. (3) The stages did not lift the executed PF over Base alone (0.351 against 0.408) while cutting the validated share from 18.6 % to 4.6 %.
+  (4) The split gives independent verdicts at twice the Sets; it did not move the executed PF beyond the noise. The sealed 16 h window was read once earlier for the
+  pause and is not available for these choices. Defaults here (pause auto, ratio 0.2, split) are the OWNER's decisions of 2026-11-02, kept; this table is the evidence
+  to weigh them against, and `pauseMode off` / `minPfStepRatio 0.5` are one-line changes.
+- **Cycle timings, same machine and data, 3 symbols x 4,318 bars, separate processes.** Before this session (`f3b0824`, 1,654 Sets): 10.9 s per symbol, snapshot 71 ms, peak
+  114 MB. Now, shipped defaults (3,400 Sets): **7.6 s per symbol (-30 %)**, snapshot about 0.3-0.4 s (profiled 0.8 s with the profiler on; four verdict lookups per Set
+  across twice the Sets), peak 169 MB (+48 %); combined Sets with no pause (1,700 Sets): 6.3 s per symbol, 132 MB. What it cost and saved: the pause about +3 %, the direction
+  split about +15 % time and +47 % memory; the Low-Range state once per bar instead of four times (and only the bandwidths the rank reads) roughly halved a symbol's pass
+  (profile: 72 % of the time was `pack_signals`, 83 % of that `low_range_state`), bit-identical on 1,155 window/parameter pairs. About 70 % of the default grid's Sets are copies of
+  another Set's tape on real data (2,421 of 3,400): their columns are stored once; each Set keeps its own rows.
+
 ## Pause after success, indications by range, distinct tapes (2026-11-02)
 
 - **Pause after success** (`pauseMode` off / **auto (default, owner 2026-11-02)** / fixed, `pauseFixedMin`, `pauseCandidates` 2-60 min, `pauseAutoMax` 100,
