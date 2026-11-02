@@ -111,6 +111,38 @@ This section supersedes older operational descriptions and historical measuremen
   **No setting reaches 1 in either window; the best cell of window A (negative 1) is among the worst of window B; the stages do not lift the executed PF above Base alone (A 0.35 against 0.38-0.40, B 0.44
   against 0.37-0.43).** Nothing here supports changing a default; it is consistent with the regime-dependent persistence found in the audit above.
 
+## Independent progress audit, gate by gate (2026-11-02; `scripts/independent_progress_audit.py`, `grid_compare.py`, `coverage_census.py`)
+
+- **What is independent.** The engine supplies each Set's orders (entry bar, exit bar, gross, reason) and its per-Set floor; everything else is re-derived in plain code from the raw 1m bars and the written
+  rules. *Market truth*: every order of a sample of base and Exit Sets (both directions) is replayed from the bars (entry = close of the entry bar, stop and target at TP = step x 0.1 %, SL = ratio x TP never
+  under (1 + slMinSteps) x PositionCost, stop first when one bar touches both, then target, time exit, scratch exit): **156,613 orders in two windows (63,114 + 93,499), 0 differ** in exit bar, reason or gross
+  result, 0 start before the Set's previous order closed. *Gate ladder*: `main_stage_audit.naive_chain` (sums in loops) one gate at a time. *Last-N grid*: `--grid`, every Base x Main x Real combination as
+  its own lane (a Base option builds its Main Set, a Main option builds its Real Set from it, a Real N judges it at the entry). Trailing Sets are not replayed independently (their arm / give walk is the engine's).
+  The signals (which bar enters) are an input in all of this.
+- **The ladder, 20 symbols, 252 of 3,400 Sets sampled by (pack, kind, direction, step range), 24 h test windows after 24 h of pre-history, PF = gains / losses of the net results of the window's orders:**
+  window A (10-31 14:00 + 24 h) / window B (11-01 14:00 + 24 h): Base tape (every order) **0.447 / 0.451**; + Base long window 0.260 / 0.360 (selected at 2.06 / 2.85); + Base short window 0.255 / 0.351; + Main long
+  window 0.196 / 0.209 (selected at 6.0 / 7.0); the Real Set (Main short / minimal) 0.194 / 0.206; **executable (Real window at the entry) 0.224 on 101 orders / 0.185 on 2,890** (selected at 25.6 in B); the Real
+  Negative Set 0.316 / 0.563, at its Real window 0.408 / 0.447. Long Sets 0.357 -> 0.108, short Sets 0.594 -> 0.242 (B). **Every gate lowers the PF the orders then deliver while the PF of the window that admitted them
+  rises**: the stages select on a stretch that does not persist (the persistence sign of the audit below). The contrarian lane (Real Negative) delivers more than the positive lane in both windows. These pool every
+  Set's orders: one entry is counted once per Set that took it (about 50), and no one-position-per-symbol rule applies, so they are a map of the gates, not an executed PF.
+- **Single last-N changes, the executable gate (A / B):** shipped 0.224 / 0.185; Base long 30 / short 10 0.161 / 0.235; 20 / 10 0.125 / 0.304; Base short off 0.383 / 0.183; Base minimal +1 0.150 / 0.169, +2 0.134 /
+  0.168, +3 0.141 / 0.178; **Base minimal -1 0.470 (84 orders) / 0.882 (245)**; Main long 15 / 25 / 35 0.166 / 0.224 / 0.131 and 0.201 / 0.185 / 0.175; Main short off 0.248 / 0.192; Real N 1 / 5 / 15 / 25
+  0.208 / 0.244 / 0.224 / 0.224 and 0.197 / 0.200 / 0.185 / 0.177; stages off (Base long + short only) 0.187 / 0.238.
+- **The Base x Main x Real grid, walk-forward (200 combinations, window A ranks, window B reads; `grid_compare.py`).** Positive lane: rank correlation of the combinations' PFs between the two days **+0.64** (97
+  combinations with 30+ orders in both); none reaches 1 in A, 9 do in B. By Base setting (pooled over every combination that uses it, A / B): **Base minimal -1 with long 30 / short 10 0.39 / 1.07, with long 50 / short 25
+  0.47 / 0.88**, every other Base setting 0.15-0.29; by Main setting 0.19-0.21 / 0.22-0.27 and by Real N 0.18-0.21 / 0.23-0.26 (Main and Real windows do not move the result). The top eight combinations of A (all Base
+  30 / 10 with minimal -1) read 0.328 on 1,270 orders in A and 0.975 on 2,276 in B. Negative lane: rank correlation -0.33, top eight 0.418 -> 0.520.
+- **That lead did not survive execution.** The same setting through the walk-forward executed simulator (`trade_sim.py`, 32 h development window, per-order validation, one position per symbol; the default arm was
+  re-run and reproduced 0.406 / 284 / -43.7 % exactly): `setGateMinN 1`, `setGateMinMode negative` **0.431 PF on 216 orders, net -25.7 %** against **0.406 on 284, -43.7 %** (-0.12 % against -0.15 % per order). The
+  difference is inside the noise, both are under 1 and negative. The pooled ladder figure (up to 1.07) counts a winning entry once per Set; the executed figure is the one that counts. No default is changed.
+- **Against the earlier engine on the same data.** `f3b0824` (before this session's grid, floors and split) on the same three days and window: **0.496 PF on 377 orders, net -44.0 %**; the shipped defaults now
+  0.351-0.406 on 284-313 orders, net -43.7 % to -56.7 %. Not better and not distinguishable at this order count. The earlier positive figures (small caps 1.07 sealed, window-grid cell 1.07 on 1,629 orders, live x02
+  1.04 net) are of other days and a different universe; the three-day limit on every run means they cannot be reproduced on today's data, only compared in kind: they were single windows of one regime each, and the
+  audit above shows the sign of persistence flipping between consecutive days.
+- **Harness fixes found on the way.** Mutants in the pinned trader were "caught" by the deploy-pin check any edit of that file trips (four earlier mutants and the Axis-floor ones): `mutate.py` now skips that one check
+  for them (`CTSG_SKIP_CHECKS`), the recorded catchers for them were cleared, and they were re-run. A Low-Range memo mutant that survived (key without the newest row's values) got an in-place-edit case; a stale
+  anchor of the pause mutant was repaired.
+
 ## Audit of the new defaults (2026-11-02, `scripts/main_stage_audit.py`, 2 x 24 h, 20 symbols, 3,400 Sets, split + step floors + pause auto, hold Auto off)
 
 - **Arithmetic is right.** The chain recomputed by a plain reading of the rules differs on 0 of 40 Sets (24,613 orders); Real and Real Negative lie inside Main for all 3,400 Sets;
