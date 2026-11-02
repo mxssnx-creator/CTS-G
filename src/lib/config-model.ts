@@ -596,7 +596,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAuto: true,
   holdAutoMax: 50,
   holdAutoMin: 10,
-  pauseMode: "off",
+  pauseMode: "auto",
   pauseFixedMin: 10,
   pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
   pauseAutoMax: 100,

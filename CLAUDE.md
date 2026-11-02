@@ -29,6 +29,39 @@ This section supersedes older operational descriptions and historical measuremen
 - Never clamp Main PF to Base PF, copy selected PF into execution PF, or remove a verified loss to make
   PF higher. Same data and rules must agree; different populations can have different PF.
 
+## Pause after success, indications by range, distinct tapes (2026-11-02)
+
+- **Pause after success** (`pauseMode` off / **auto (default, owner 2026-11-02)** / fixed, `pauseFixedMin`, `pauseCandidates` 2-60 min, `pauseAutoMax` 100,
+  `pauseAutoMin` 30, `pausePack` minutes per pack): a Set lane rests at least `pause` bars after a WINNING close (net of PositionCost above zero) on top of
+  the cooldown (`set_engine.rest_after`). Auto chooses per indication (pack) and symbol: the pack's reference Sets (SL ratio 1.0 / 2.0 x TP step 3 / 6 / 10 /
+  16) are replayed once per candidate pause on that symbol, and at each exit bar the pause whose pooled reference orders CLOSED BEFORE that bar read the best PF
+  wins (`hold_choice_at`: `pauseAutoMin` orders, a 5 % lead over no extra rest, else the cooldown alone). Causal by construction (check
+  `pause.auto-choice-never-reads-the-future`, mutant "the choice reads results closed after the bar"); the latest choice per (pack, symbol) is what live waits
+  (`Pulse.symbol_backoff(pack=...)`, `SetBook.pause_minutes`). Fixtures pin `pauseMode` off (`common.overlay`) so pinned counts stay meaningful; the golden
+  has a second fingerprint for the auto default (`pauseAuto`). Cost: about 80 extra reference scans per pack and symbol (about 5 % of a replay).
+- **Measured, pause off against auto** (3 days of 1m history, 20 liquid USDT perpetuals, 2026-10-31 .. 11-02, hold Auto off for both arms because the simulator
+  cannot model it): main-stage audit, 2 x 24 h, pooled over all Sets' orders: Base tape 0.510 -> 0.511 (the pause adds no signal edge), Main Set 0.375 -> 1.118,
+  Real Set 0.266 -> 0.654, Real Negative 0.431 -> 1.498; the gain sits in `general` base / exit (Main 0.58 -> 1.29 / 0.54 -> 1.27), `indications` and
+  `shortrange` stay below 1. Walk-forward `trade_sim.py` (validated per order, one position per symbol), development window 32 h: executed PF 0.572 on 294
+  orders -> **0.796 on 151**, net -26.2 % -> -4.1 %; **sealed 16 h, read once**: 0.540 on 227 orders -> **0.848 on 102**, net -18.9 % -> -2.7 %. Auto is better in
+  both windows and **both arms are still under 1 with a negative net**: it removes losing orders, it does not create an edge. 100-300 orders per arm is inside
+  the noise; read the demo connection before the live one.
+- **Indications by range** (`indicationConfigs`, `server/pulse/indication_config.py`): entries of families x ranges x timeframes (1 / 5 / 15 / 30, `c` vote over
+  1/5/15, `x` over 1/5/15/30) x relations, each with its own TP-step range, SL ratios, Set types and pause (auto / none / minutes). Every name is its own pack
+  (`extra.<name>`) with its own Base validation; unknown or over-bound combinations (48 names per entry, 96 total) are dropped and listed
+  (`stats.sets.indicationConfigs`). A configured range also caps trailing arms at its largest step. A narrow entry (steps 3-6) builds 99 Sets, not 1,654.
+- **Distinct tapes**: Sets whose exits never differ trade the same orders (a trailing arm the scratch exit always beats): on the 3-day data 210 `general`
+  trailing Sets made 42 distinct tapes (one group of 147) and their Main orders were 67 distinct entries counted about 76 times each, the source of the
+  "PF 261" trailing lane in earlier pooled audits. `pfBase.distinct`, `baseDistinct`, `baseOnlyDistinct` count one Set per tape (`SetState.tape_sig`); the
+  plain pooled figures keep their meaning but must be read next to these.
+- **Audit of the same data** (`scripts/main_stage_audit.py`, 2 x 24 h, pause off): the plain re-derivation of the chain differs on 0 Sets, Real/Real Negative
+  lie inside Main, stops and targets sit exactly at the lane distances; selection PF 2.0-2.4 against a realised 0.27-0.43 (placebo 0.62): the window PF
+  predicts nothing here (rank correlation -0.13). No accounting defect; the stages do not create an edge on these signals.
+- **Deploy pin**: `python3 scripts/update_restore_pin.py` after every edit of `pulse_trader.py` (regenerates `restore/pulse_trader.py.patch` and the hash in
+  `logistics.py` and `deploy/linux-common.sh`).
+- **Minimum PF by window size** is defined once, `position_cost.PF_BY_SIZE_DEFAULTS` (Minimal 1.10, Short 1.15; the 2026-10-29 note said 1.08 / 1.12, the higher
+  value stands).
+
 ## Post-Base evaluation is the standard
 
 A Set (one grid configuration: pack x SL ratio x TP step, or pack x trailing pair) is judged on its own tape by the Base

@@ -1,5 +1,10 @@
 {
  "sets": 1654,
  "trades": 158689,
- "sha256": "078ef5da332ce95cf81d39e4e53b7f89ee21113c5adf8e3be7787b5fe95a2aac"
+ "sha256": "078ef5da332ce95cf81d39e4e53b7f89ee21113c5adf8e3be7787b5fe95a2aac",
+ "pauseAuto": {
+  "sets": 1654,
+  "trades": 119345,
+  "sha256": "82ed208690628250acf46b8c7f44237a096e559d45943467982d4b58e19f6fb8"
+ }
 }

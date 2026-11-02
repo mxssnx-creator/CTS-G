@@ -15,9 +15,9 @@ from set_engine import SetBook
 GOLDEN = os.path.join(HERE, "golden.json")
 
 
-def _replay_fingerprint():
+def _replay_fingerprint(**extra):
     b = SetBook()
-    b.load(overlay())
+    b.load(overlay(**extra))
     for i in range(3):
         b.bars[f"G{i}-USDT"] = synth_bars(101 + i, 1200, drift=0.0005 if i else -0.0005)
     hist = {st.id: [] for st in b.by_idx}
@@ -35,15 +35,17 @@ def _replay_fingerprint():
 
 def fingerprint_matches_golden():
     got = _replay_fingerprint()
+    got_auto = _replay_fingerprint(pauseMode="auto")
     if os.environ.get("CTSG_UPDATE_GOLDEN") == "1":
-        json.dump(got, open(GOLDEN, "w"), indent=1)
-        return True, f"golden updated: sets={got['sets']} trades={got['trades']}"
+        json.dump({**got, "pauseAuto": got_auto}, open(GOLDEN, "w"), indent=1)
+        return True, f"golden updated: sets={got['sets']} trades={got['trades']} (pause auto {got_auto['trades']})"
     if not os.path.exists(GOLDEN):
         return False, "golden.json missing: run  python3 scripts/regression/run.py --update-golden"
     want = json.load(open(GOLDEN))
-    ok = got == want
-    return ok, f"sets={got['sets']} trades={got['trades']} sha={got['sha256'][:12]}" + (
-        "" if ok else f" != golden {want['sha256'][:12]} (trades {want['trades']}): processing changed; update the golden if intended")
+    want_auto = want.pop("pauseAuto", None)
+    ok = got == want and got_auto == want_auto
+    return ok, f"sets={got['sets']} trades={got['trades']} sha={got['sha256'][:12]}; pause auto trades={got_auto['trades']} sha={got_auto['sha256'][:12]}" + (
+        "" if ok else f" != golden {want['sha256'][:12]} / auto {(want_auto or {}).get('sha256', 'missing')[:12]}: processing changed; update the golden if intended")
 
 
 CHECKS = [("golden.replay-fingerprint", fingerprint_matches_golden)]

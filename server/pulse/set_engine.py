@@ -1666,7 +1666,7 @@ class SetBook:
         self.scratch_min = 0.0016
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
-        self.pause_mode = "off"                       # rest after a WINNING close: off / auto (per indication and symbol) / fixed
+        self.pause_mode = "auto"                      # rest after a WINNING close: off / auto (per indication and symbol, the default) / fixed
         self.pause_fixed = 0
         self.pause_candidates: Tuple[int, ...] = PAUSE_CANDIDATES_DEFAULT
         self.pause_auto_max = PAUSE_AUTO_MAX_DEFAULT
@@ -1992,8 +1992,8 @@ class SetBook:
             self.cooldown_bars = min(30, max(0, int(ov.get("setCooldownBars") if ov.get("setCooldownBars") is not None else 2)))
         except Exception:
             self.cooldown_bars = 2
-        mode = str(ov.get("pauseMode") or "off").lower()
-        self.pause_mode = mode if mode in PAUSE_MODES else "off"
+        mode = str(ov.get("pauseMode") or "auto").lower()
+        self.pause_mode = mode if mode in PAUSE_MODES else "auto"
         self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
         raw_c = ov.get("pauseCandidates")
         if isinstance(raw_c, str):

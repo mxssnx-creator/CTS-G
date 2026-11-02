@@ -126,7 +126,9 @@ test("pause after success: mode, minutes, candidates and per-indication minutes 
   assert.equal(loaded.pauseAutoMax, 10);
   assert.equal(loaded.pauseAutoMin, 8, "the sample floor the engine applies (MIN_VALIDATION_N)");
   assert.deepEqual(loaded.pausePack, { general: 15 });
-  assert.equal(overlayFromCts(cts({ pauseMode: "sideways" })).pauseMode, "off", "an unknown mode is off");
+  assert.equal(overlayFromCts(cts({ pauseMode: "sideways" })).pauseMode, "auto", "an unknown mode falls back to the default, auto");
+  assert.equal(overlayFromCts(cts()).pauseMode, "auto", "auto is the default");
+  assert.equal(overlayFromCts(cts({ pauseMode: "off" })).pauseMode, "off", "off stays selectable");
   assert.deepEqual(overlayFromCts(cts()).pauseCandidates, [2, 3, 5, 8, 12, 20, 30, 45, 60]);
 });
 

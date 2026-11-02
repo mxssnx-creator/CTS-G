@@ -156,16 +156,25 @@ def live_rest_equals_the_replay_rule():
 
 
 def settings_reach_the_engine_and_the_replay_key():
+    bare = se.SetBook()
+    bare.load({})
     off = _book()
     auto = _book(pauseMode="auto", pauseCandidates="3, 9;12,0,-4,9999", pauseAutoMin=40, pauseAutoMax=120)
     bad = _book(pauseMode="sideways", pauseFixedMin="x", pausePack={"general": 7, "indications": -3, "z": "q"})
     def key(book):
         return book.pause_mode, book.pause_candidates, book.pause_auto_min, book.pause_auto_max
-    ok = (off.pause_mode == "off" and off.pause_minutes("general", "A") == 0
+    import glob
+    import json
+    import os
+    from common import PULSE, ROOT
+    shipped = {os.path.basename(f): json.load(open(f)).get("pauseMode") for f in glob.glob(os.path.join(PULSE, "overlay-*.json"))
+               + glob.glob(os.path.join(ROOT, "presets", "secure-minimal*.json"))}
+    ok = (bare.pause_mode == "auto" and set(shipped.values()) == {"auto"}      # the default is auto: in the engine, every overlay and both presets
+          and off.pause_mode == "off" and off.pause_minutes("general", "A") == 0
           and auto.pause_mode == "auto" and auto.pause_candidates == (3, 9, 12, se.PAUSE_MAX) and auto.pause_auto_min == 40 and auto.pause_auto_max == 120
-          and bad.pause_mode == "off" and bad.pause_fixed == 0 and bad.pause_pack == {"general": 7} and bad.pause_minutes("general") == 7)
+          and bad.pause_mode == "auto" and bad.pause_fixed == 0 and bad.pause_pack == {"general": 7} and bad.pause_minutes("general") == 7)
     sig_a, sig_b = off._evaluation_config, auto._evaluation_config
-    return ok and sig_a != sig_b, f"off={key(off)} auto={key(auto)} bad={bad.pause_mode, bad.pause_pack}; replay key differs={sig_a != sig_b}"
+    return ok and sig_a != sig_b, f"engine default={bare.pause_mode}, shipped files={sorted(set(shipped.values()))}; off={key(off)} auto={key(auto)} bad={bad.pause_mode, bad.pause_pack}; replay key differs={sig_a != sig_b}"
 
 
 CHECKS = [("pause." + fn.__name__.replace("_", "-"), fn) for fn in (
