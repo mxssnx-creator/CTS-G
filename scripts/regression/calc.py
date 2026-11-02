@@ -117,7 +117,7 @@ def cost_inputs_are_percent_everywhere():
         ("normalize(0) -> default", normalize_cost_pct(0) == 0.12),
         ("normalize(nan) -> default", normalize_cost_pct(float("nan")) == 0.12),
         ("cost_as_frac(3.0)=0.03", abs(cost_as_frac(3.0) - 0.03) < 1e-12),
-        ("step_tp_pct(2,0.15)=0.30%", abs(step_tp_pct(2, 0.15) - 0.003) < 1e-12),
+        ("step_tp_pct(2,0.15)=0.20%", abs(step_tp_pct(2, 0.15) - 0.002) < 1e-12 and abs(step_tp_pct(2, 0.04) - 0.002) < 1e-12),
     ]
     bad = [k for k, v in pairs if not v]
     return not bad, f"bad={bad}" if bad else f"{len(pairs)} unit cases"
@@ -156,22 +156,26 @@ def gate_default_is_one_constant():
 
 
 def set_floors_follow_the_configured_cost():
-    b = SetBook()
-    b.load(overlay(positionCostPct=0.04, setMinStep=2, setStepMax=2, setSlRatios=[0.5], trailVariants=["0.3:0.1"],
-                   stratIndications=False))
-    st = next(s for s in b.by_idx if s.kind == "base")
-    lane = SetLane(st, "X")
-    cfg = {"entry_conf": 0.5, "time_bars": 10, "scratch_bars": 5, "scratch_min": 0.001,
-           "cooldown": 2, "cost_pct": 0.04, "honor_tp": True}
-    bars = [[100.0] * 4 + [1.0], [100.0] * 4 + [1.0]]
-    lane.scan(0, 2, bars, [1, 0], [0.9, 0.0], True, cfg, [0])
-    o = lane.open
-    cost = 0.0004
-    tp_frac = 2 * cost                                   # k = 2 TP at 0.04% cost = 0.08%
-    sl_frac = max(2 * cost, st.tp_pct * st.sl_ratio)     # overall minimum stop: PositionCost + one step = 2 x cost
-    ok = (o is not None and abs(o["tp"] - 100.0 * (1 + tp_frac)) < 1e-9
-          and abs(o["sl"] - 100.0 * (1 - sl_frac)) < 1e-9)
-    return ok, f"cost=0.04 entry sl={o['sl']:.5f} tp={o['tp']:.5f}" if o else "no entry"
+    """A Set's TP is its step (k x 0.1 %), lifted to PositionCost when the cost is higher; its stop is the ratio x TP, never under PositionCost + one step."""
+    ok_all, detail = True, []
+    for cost in (0.04, 0.3):
+        b = SetBook()
+        b.load(overlay(positionCostPct=cost, setMinStep=2, setStepMax=2, setSlRatios=[0.5], trailVariants=["0.3:0.1"],
+                       stratIndications=False))
+        st = next(s for s in b.by_idx if s.kind == "base")
+        lane = SetLane(st, "X")
+        cfg = {"entry_conf": 0.5, "time_bars": 10, "scratch_bars": 5, "scratch_min": 0.001,
+               "cooldown": 2, "cost_pct": cost, "honor_tp": True}
+        bars = [[100.0] * 4 + [1.0], [100.0] * 4 + [1.0]]
+        lane.scan(0, 2, bars, [1, 0], [0.9, 0.0], True, cfg, [0])
+        o = lane.open
+        c = cost / 100.0
+        tp_frac = max(c, 0.002)                          # step 2 = 0.2 %; a PositionCost above that lifts the lane's TP to the cost
+        sl_frac = max(2 * c, 0.002 * 0.5)                # ratio 0.5 x TP, never under PositionCost + one step = 2 x cost
+        ok = (o is not None and abs(o["tp"] - 100.0 * (1 + tp_frac)) < 1e-9 and abs(o["sl"] - 100.0 * (1 - sl_frac)) < 1e-9)
+        ok_all = ok_all and ok
+        detail.append(f"cost={cost}: sl={o['sl']:.5f} tp={o['tp']:.5f}" if o else f"cost={cost}: no entry")
+    return ok_all, "; ".join(detail)
 
 
 def trail_sets_use_the_named_stop_ratio():

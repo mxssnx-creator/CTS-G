@@ -116,6 +116,11 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
   return Math.round(Math.min(gmax, Math.max(gmin, g)) * 100) / 100;
 }
 
+/** TP grid, owner 2026-11-02: one TP step is an absolute 0.1 % of price (steps 2..32 = 0.2 % .. 3.2 %), not a multiple of PositionCost. Mirrors position_cost.py. */
+export const TP_UNIT_PCT = 0.1;
+export const TP_STEP_MIN = 2;
+export const TP_STEP_MAX = 32;
+export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
 export type PauseMode = "off" | "auto" | "fixed";
 export const PAUSE_MODES: PauseMode[] = ["off", "auto", "fixed"];
 export const PAUSE_CANDIDATES_DEFAULT = [2, 3, 5, 8, 12, 20, 30, 45, 60];
@@ -551,7 +556,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 1920,
+  histLookbackBars: 4320,
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 120,
@@ -607,7 +612,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stepHoldMin: [15, 15, 15, 15, 15, 120, 120, 120, 120, 120, 120, 120],
   setMinSamples: 12,
   setMinStep: 2,
-  setStepMax: 30,
+  setStepMax: TP_STEP_MAX,
   setStepAdapt: true,
   trailMinStep: 3,
   exitEnabled: true,
@@ -934,8 +939,8 @@ export function indicationConfigList(v: unknown): IndicationConfig[] {
     const tfs = tfRaw
       .map((x) => (x === "c" || x === "x" ? x : Math.round(Number(x))))
       .filter((x) => x === "c" || x === "x" || (INDICATION_TIMEFRAMES as readonly number[]).includes(x as number)) as (number | "c" | "x")[];
-    const lo = Math.max(2, Math.min(30, Math.round(Number(e.stepMin) || DEFAULT_INDICATION_CONFIG.stepMin)));
-    const hi = Math.max(lo, Math.min(30, Math.round(Number(e.stepMax) || DEFAULT_INDICATION_CONFIG.stepMax)));
+    const lo = Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMin) || DEFAULT_INDICATION_CONFIG.stepMin)));
+    const hi = Math.max(lo, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMax) || DEFAULT_INDICATION_CONFIG.stepMax)));
     const types = strList(e.types).filter((t) => (SET_TYPES as readonly string[]).includes(t));
     const relRaw: unknown[] = Array.isArray(e.relations) ? e.relations : typeof e.relations === "string" ? e.relations.split(/[,;]/) : [""];
     const rel = relRaw.map((x) => String(x ?? "").trim());
@@ -1071,7 +1076,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),
     histEnabled: bool(cts.histEnabled, true),
-    histLookbackBars: Math.max(120, Math.min(4320, Math.round(num(cts.histLookbackBars, 1920)))),
+    histLookbackBars: Math.max(120, Math.min(4320, Math.round(num(cts.histLookbackBars, 4320)))),
     histMinBars: num(cts.histMinBars, 120),
     histWarmup: num(cts.histWarmup, 30),
     histRefreshS: num(cts.histRefreshS, 90),
@@ -1132,7 +1137,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stepHoldMin: Array.isArray(cts.stepHoldMin) ? cts.stepHoldMin.slice(0, 12).map((x) => Math.round(Number(x) || 0)) : DEFAULT_OVERLAY.stepHoldMin,
     setMinSamples: num(cts.setMinSamples, 12),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
-    setStepMax: num(cts.setStepMax, 30),
+    setStepMax: num(cts.setStepMax, TP_STEP_MAX),
     setStepAdapt: bool(cts.setStepAdapt, true),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
@@ -1155,7 +1160,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
-  out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 1920))));
+  out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
     out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
   }

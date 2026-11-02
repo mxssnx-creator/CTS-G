@@ -62,7 +62,7 @@ test("PF defaults, saved overrides and an independent reset agree", () => {
 
 test("pre-history settings retain three days and a separate collection target", () => {
   const defaults = overlayFromCts(cts());
-  assert.equal(defaults.histLookbackBars, 1920);
+  assert.equal(defaults.histLookbackBars, 4320, "three days of pre-history by default");
   assert.equal(defaults.histLookbackMax, 4320);
   assert.equal(defaults.histLookbackTargetN, 12);
   assert.equal(defaults.setGateMinTrades, 0, "collection must not add an admission gate");

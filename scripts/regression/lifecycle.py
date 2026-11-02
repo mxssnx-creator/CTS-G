@@ -51,10 +51,14 @@ def coverage_counts_sum_to_grid():
     ig = _book(exitIgnoreTp=True)
     hn = _book(exitIgnoreTp=False)
     ci, ch = ig.counts(), hn.counts()
-    # Short Range is enabled in x01: 819 base + 405 Exit + 430 trail; honour-TP removes Exit and unreachable trails.
-    ok = (len(ig.by_idx) == 1654 and len(hn.by_idx) == 1002
-          and ci["sum"] == ci["configured"] == 1654 and ch["sum"] == ch["configured"] == 1002
-          and ci["total"] == 1654 + len(ig.retired) and ch["total"] == 1002 + len(hn.retired))
+    # Short Range is enabled in x01; honour-TP removes the Exit Sets and the trails a TP would pre-empt. The two books are counted
+    # against their own kinds (the grid rules themselves are grid.default-grid-follows-its-rules).
+    kinds_ig = {k: sum(1 for st in ig.by_idx if st.kind == k) for k in ("base", "exit", "trail")}
+    kinds_hn = {k: sum(1 for st in hn.by_idx if st.kind == k) for k in ("base", "exit", "trail")}
+    ok = (len(ig.by_idx) == sum(kinds_ig.values()) > 1000 and kinds_hn["exit"] == 0 and kinds_hn["base"] == kinds_ig["base"]
+          and 0 < kinds_hn["trail"] < kinds_ig["trail"] and len(hn.by_idx) == sum(kinds_hn.values()) < len(ig.by_idx)
+          and ci["sum"] == ci["configured"] == len(ig.by_idx) and ch["sum"] == ch["configured"] == len(hn.by_idx)
+          and ci["total"] == len(ig.by_idx) + len(ig.retired) and ch["total"] == len(hn.by_idx) + len(hn.retired))
     return ok, f"ignore configured={ci['configured']} sum={ci['sum']} | honour configured={ch['configured']} sum={ch['sum']}"
 
 

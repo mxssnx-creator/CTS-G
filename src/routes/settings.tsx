@@ -39,6 +39,10 @@ import {
   PAUSE_MAX,
   PAUSE_MODES,
   SET_TYPES,
+  TP_STEP_MAX,
+  TP_STEP_MIN,
+  TP_UNIT_PCT,
+  tpPctOfStep,
   type IndicationConfig,
   type PauseMode,
 } from "@/lib/config-model";
@@ -363,7 +367,7 @@ function SettingsPage() {
                 ))}
               </div>
               <p className="font-mono text-xs text-muted">
-                TP = k × PositionCost for k = {overlay.setMinStep}–{overlay.setStepMax}; the net at TP is (k − 1) × PositionCost.
+                TP = k × {TP_UNIT_PCT}% of price for k = {overlay.setMinStep}–{overlay.setStepMax} ({tpPctOfStep(overlay.setMinStep)}–{tpPctOfStep(overlay.setStepMax)}%); the net at TP is the step minus PositionCost ({overlay.positionCostPct}%), which never lifts or lowers the step. The TP never sits under PositionCost.
               </p>
             </Card>
           )}
@@ -702,19 +706,19 @@ function SettingsPage() {
                   label="Min TP step"
                   value={overlay.setMinStep}
                   min={2}
-                  max={30}
+                  max={TP_STEP_MAX}
                   step={1}
-                  hint={`TP = k × PositionCost (${overlay.positionCostPct}%). Default 2 (grid start). k = ${overlay.setMinStep} → TP ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Losing live fills raise min step.`}
-                  onChange={(v) => patch("setMinStep", Math.max(2, Math.min(30, Math.round(v))))}
+                  hint={`TP = k × ${TP_UNIT_PCT}% of price, whatever PositionCost is. Default 2 (grid start 0.2%). k = ${overlay.setMinStep} → TP ${tpPctOfStep(overlay.setMinStep).toFixed(1)}%. Losing live fills raise min step.`}
+                  onChange={(v) => patch("setMinStep", Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
                   min={2}
-                  max={30}
+                  max={TP_STEP_MAX}
                   step={1}
-                  hint="Upper TP step k. Default 30. Range 2–30."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 2, Math.min(30, Math.round(v))))}
+                  hint={`Upper TP step k. Default ${TP_STEP_MAX} (${tpPctOfStep(TP_STEP_MAX).toFixed(1)}%). Range ${TP_STEP_MIN}–${TP_STEP_MAX}.`}
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
@@ -2013,8 +2017,8 @@ function IndicationConfigEditor({
             />
             <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; e.g. , T5, B15 (see the relation list)" onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
             <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.5-3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
-            <Slider label="TP step from" value={e.stepMin} min={2} max={30} step={1} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
-            <Slider label="TP step to" value={e.stepMax} min={2} max={30} step={1} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
+            <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
+            <Slider label="TP step to" value={e.stepMax} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMax).toFixed(1)}%`} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
             <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
               <span className="font-mono text-xs text-muted">Pause after success</span>
               <select

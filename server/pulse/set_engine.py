@@ -39,8 +39,10 @@ from position_cost import (
     last_n_cost_pf,
     signed_result_r,
     SL_RATIOS,
+    TP_MIN_COSTS,
     TP_STEP_MAX,
     TP_STEP_MIN,
+    TP_UNIT_PCT,
     TRAIL_STEP_DEFAULT,
     TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN,
@@ -104,7 +106,7 @@ GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
 IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 = 16 h)
+LOOKBACK_DEFAULT = 4320          # 72 h of 1m bars: three days of pre-history (owner 2026-11-02; was 1920 = 32 h, before that 960)
 LOOKBACK_MAX = 4320              # three days of completed 1m bars
 LOOKBACK_SAMPLE_TARGET = 12      # collection target, not an extra admission gate
 # dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
@@ -158,10 +160,10 @@ def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
     return max(lo, min(hi, n))
 
 
-def step_tp_pct(step: int, cost_pct: float) -> float:
-    """TP fraction = step × position cost. Cost 0.15 means 0.15% → step 3 = 0.45%."""
-    c = max(1e-9, float(cost_pct)) / 100.0  # cost is always percent (0.15 = 0.15%)
-    return max(c, clamp_step(step) * c)
+def step_tp_pct(step: int, cost_pct: float = 0.0) -> float:
+    """TP fraction of a TP step: step x TP_UNIT_PCT of price (step 3 = 0.3 %), whatever PositionCost is (owner 2026-11-02; it was step x PositionCost).
+    The lane never sits under TP_MIN_COSTS x PositionCost (lane_fracs); cost_pct is kept for callers and does not move the step."""
+    return clamp_step(step) * TP_UNIT_PCT / 100.0
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
@@ -1210,10 +1212,10 @@ def lane_honors_tp(kind: str) -> Optional[bool]:
 
 def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None) -> Tuple[float, float]:
     """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
-    ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under 2 x PositionCost.
+    ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under TP_MIN_COSTS x PositionCost.
     The live trader takes a Set position's levels from here, so live and replay share one formula."""
     sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == "trail" else st.sl_ratio)
-    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(2 * cost_as_frac(cost_pct), st.tp_pct)
+    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
 
 
 PAUSE_KEY = "@p"                                      # _hist_rows key of a pause reference tape: "<reference set id>@p<minutes>"
@@ -1309,7 +1311,7 @@ class SetLane:
         close = float(bar[3])
         cost_frac = cost_as_frac(cfg["cost_pct"])
         sl_frac = max(sl_floor_frac(cfg["cost_pct"], cfg.get("sl_floor_steps")), self.sl_base)   # never under PositionCost + steps
-        tp_frac = max(2 * cost_frac, self.tp_frac)       # TP grid starts at 2 x PositionCost
+        tp_frac = max(TP_MIN_COSTS * cost_frac, self.tp_frac)       # a TP never under TP_MIN_COSTS x PositionCost
         if d > 0:
             sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
         else:
@@ -1529,7 +1531,7 @@ class SetLane:
                 d = int(dirs[j])
                 close = float(bars[j][3])
                 sl_frac = max(sl_floor, sl_base)
-                tp_use = max(2 * cost_frac, tp_frac)
+                tp_use = max(TP_MIN_COSTS * cost_frac, tp_frac)
                 if d > 0:
                     sl, tp = close * (1 - sl_frac), close * (1 + tp_use)
                 else:
@@ -1958,10 +1960,10 @@ class SetBook:
             except Exception:
                 continue
         self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
-        # Trailing grid: every (arm, give) from trailMinStep up, in PositionCost units (trail_grid).
+        # Trailing grid: every (arm, give) from trailMinStep up, in steps of TP_UNIT_PCT (trail_grid).
         # An explicit trailVariants list ("arm:give" in percent) still overrides the grid.
         self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))),
-                                  min(TRAIL_STEP_SETTING_MAX, trail_floor_steps(self.trail_min_steps)))
+                                  min(TRAIL_STEP_SETTING_MAX, math.ceil(trail_floor_steps(self.trail_min_steps) * self.cost_pct / TP_UNIT_PCT - 1e-9)))     # the minimum trailing distance (PositionCost + n steps, in percent) in grid units
         raw_tr = ov.get("trailVariants")
         if raw_tr:
             if isinstance(raw_tr, str):
@@ -1979,9 +1981,13 @@ class SetBook:
             self.trails = trail_grid(self.trail_min_step, self.cost_pct)
         # Do not synthesize a fallback when the cost-based minimum is above the
         # limit: that would silently bring an inadmissible trailing Set back.
+        # The overall minimum trailing distance (PositionCost + n steps, in percent) is a floor on every give, whatever the grid unit: a grid that
+        # cannot reach it (a high PositionCost) leaves no trailing Set instead of inventing a closer one.
+        give_floor = trail_floor_steps(self.trail_min_steps) * self.cost_pct
         self.trails = [t for t in self.trails
                        if math.isfinite(t[1]) and math.isfinite(t[2])
-                       and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9]
+                       and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9
+                       and t[2] + 1e-9 >= give_floor]
         if not trailing_enabled(ov):
             self.trails = []
         try:
@@ -2070,7 +2076,7 @@ class SetBook:
         trails = list(self.trails)
         # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
         # not built in honour-TP mode (119 of 210 per pack on the default grid). Ignore-TP keeps every trail Set.
-        mid_tp_pct = (self.steps[len(self.steps) // 2] if self.steps else 8) * self.cost_pct
+        mid_tp_pct = (self.steps[len(self.steps) // 2] if self.steps else 8) * TP_UNIT_PCT
         if self.hist_honor_tp:
             trails = [t for t in trails if t[1] < mid_tp_pct - 1e-9]
         self.trails_built = list(trails)   # the trail keys this grid actually builds (coverage checks this list)
@@ -2097,11 +2103,11 @@ class SetBook:
                 pack_kinds = tuple(pr["kinds"])
             pack_trails = trails if "trail" in pack_kinds else []
             if pack == SHORT_PACK and self.hist_honor_tp:
-                short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * self.cost_pct
+                short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * TP_UNIT_PCT
                 pack_trails = [t for t in self.trails if t[1] < short_mid - 1e-9]
             if (pack == SHORT_PACK or pr) and pack_steps:
                 # Short Range works with TP steps 2-6, a configured indication with its own range: no trailing arm beyond the largest step
-                pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * self.cost_pct + 1e-9]
+                pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * TP_UNIT_PCT + 1e-9]
             mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
             trail_stop = max(sl_floor_frac(self.cost_pct, self.sl_min_steps),
                              step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
@@ -4131,7 +4137,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     )
     book.gate_window, book.gate_min = 15, 12  # these fixtures carry 15 trades
     out.append(("set-count", len(book.sets) >= 2, f"n={len(book.sets)}"))
-    out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.0045) < 1e-9, f"{step_tp_pct(3, 0.15)}"))
+    out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.003) < 1e-9 and abs(step_tp_pct(3, 0.5) - 0.003) < 1e-9, f"{step_tp_pct(3, 0.15)} {step_tp_pct(3, 0.5)} (3 x 0.1 % whatever PositionCost is)"))
     base_only = [s for s in book.sets.values() if s.kind == "base"]
     trail_only = [s for s in book.sets.values() if s.kind == "trail"]
     out.append(("set-step-floor", bool(base_only) and all(s.step >= 3 for s in base_only) and min(s.step for s in base_only) == 3, f"steps={sorted({s.step for s in base_only})} trails={len(trail_only)}"))
@@ -4467,7 +4473,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("gate-boundary-1.10", okb and abs(pfb - 1.10) < 1e-6, f"pf={pfb} eligible={okb}"))
     okf, pff, nf = _gate(_pf_rows(29, 1.50))
     out.append(("gate-min-30-orders", (not okf) and nf == 29, f"pf={pff} n={nf} eligible={okf}"))
-    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 1920 and SetBook().lookback == 1920)
+    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 4320 and SetBook().lookback == 4320)
     out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
     # R1: a live close is stored on the replay unit (net fraction), not USDT
     lv = SetBook(); lv.load({"positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})

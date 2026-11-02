@@ -1,10 +1,10 @@
 {
- "sets": 1654,
- "trades": 158689,
- "sha256": "078ef5da332ce95cf81d39e4e53b7f89ee21113c5adf8e3be7787b5fe95a2aac",
+ "sets": 1700,
+ "trades": 173952,
+ "sha256": "1b88476bbaeb50b8f764018ee7f9ec8858a95499fff95360cc204930b02bdd50",
  "pauseAuto": {
-  "sets": 1654,
-  "trades": 119345,
-  "sha256": "82ed208690628250acf46b8c7f44237a096e559d45943467982d4b58e19f6fb8"
+  "sets": 1700,
+  "trades": 132810,
+  "sha256": "1ca815a767701cad2d0441d6726c6efe56480df4ca4e2348af134c0a89af9f63"
  }
 }

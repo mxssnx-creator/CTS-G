@@ -37,7 +37,7 @@ def every_set_processed_full_grid():
     b.replay_all(now=T0)
     p = b.progress
     unscored = [st.id for st in b.by_idx if st.last_error or st.gate_n < 0]
-    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1654 and not unscored and p.errors == 0
+    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1700 and not unscored and p.errors == 0
     return ok, f"phase={p.phase} sets={len(b.by_idx)} sets_done={p.sets_done} unscored={len(unscored)} errors={p.errors}"
 
 
@@ -826,7 +826,8 @@ def stage_figures_average_the_valid_sets_and_report_the_validated_share():
     """pfBase.stages gives, per stage (Base, Main, Real, Real Negative, every valid Set), how many Sets pass it, their share of ALL configured Sets,
     the pooled PF of those Sets' own window orders and the mean of their own PFs. Rebuilt here from each Set's own gross profit and loss: a figure
     taken over all Sets (the overall average) or over the wrong stage's Sets fails."""
-    b = _book(n_syms=3, bars=900, **SMALL)
+    # TP steps up to 6 (0.6 %) and seed 11: on this synthetic tape, with the absolute 0.1 % step grid, Sets reach every stage so the figures can be rebuilt
+    b = _book(n_syms=3, bars=900, seed=11, **{**SMALL, "setStepMax": 6})
     b.replay_all(now=T0)
     b.min_pf = 0.3                                   # a low floor so that Sets pass each stage on this synthetic tape
     for st in b.by_idx:

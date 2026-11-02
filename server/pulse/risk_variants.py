@@ -17,6 +17,7 @@ from position_cost import (
     POSITION_COST_PCT_DEFAULT,
     window_n,
     TRAIL_STEP_MAX,
+    TP_UNIT_PCT,
     TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN,
     last_n_cost_pf,
@@ -117,20 +118,19 @@ class LaneScore:
     in_range: bool = True
 
 
-def trail_grid(min_step: int, cost_pct: float, max_step: int = TRAIL_STEP_MAX) -> List[Tuple[str, float, float]]:
-    """Every trailing config for the Set grid, in PositionCost units.
+def trail_grid(min_step: int, cost_pct: float = 0.0, max_step: int = TRAIL_STEP_MAX) -> List[Tuple[str, float, float]]:
+    """Every trailing config for the Set grid, in absolute steps of TP_UNIT_PCT (0.1 % of price).
 
-    arm = k x cost and give = j x cost with min_step <= j <= k <= max_step. The give never exceeds the
+    arm = k x 0.1 % and give = j x 0.1 % with min_step <= j <= k <= max_step. The give never exceeds the
     arm, so an activated stop never sits below entry. min_step (trailMinStep) is clamped to 2..8.
-    Returns (key, arm %, give %), the same units as trail_candidates.
+    Returns (key, arm %, give %), the same units as trail_candidates. cost_pct is kept for callers; the grid no longer moves with it.
     """
     m = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(min_step)))
-    c = max(1e-9, float(cost_pct))
     out: List[Tuple[str, float, float]] = []
     for k in range(m, int(max_step) + 1):
         for j in range(m, k + 1):
-            arm = round(k * c, 4)
-            give = round(j * c, 4)
+            arm = round(k * TP_UNIT_PCT, 4)
+            give = round(j * TP_UNIT_PCT, 4)
             out.append((f"{arm:.2f}:{give:.2f}", arm, give))
     return out
 

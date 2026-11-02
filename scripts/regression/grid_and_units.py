@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from common import COST, Skip, overlay, lane_cfg, PULSE  # noqa: F401  (PULSE sets sys.path)
 from position_cost import (
-    SL_RATIOS, TP_STEP_MAX, TP_STEP_MIN, TRAIL_STEP_DEFAULT, TRAIL_STEP_SETTING_MAX,
-    TRAIL_STEP_SETTING_MIN, cost_as_frac, net_pnl_pct, snap_sl_ratio,
+    SL_RATIOS, TP_STEP_MAX, TP_STEP_MIN, TP_UNIT_PCT, TRAIL_STEP_DEFAULT, TRAIL_STEP_MAX, TRAIL_STEP_SETTING_MAX,
+    TRAIL_STEP_SETTING_MIN, cost_as_frac, net_pnl_pct, snap_sl_ratio, trail_floor_steps,
 )
 from risk_variants import trail_grid
 from set_engine import SetBook, SetLane, make_set_id, step_tp_pct
@@ -18,8 +18,10 @@ def _book(**extra):
 
 def tp_steps():
     steps = list(range(TP_STEP_MIN, TP_STEP_MAX + 1))
-    ok = steps[0] == 2 and steps[-1] == 30 and len(steps) == 29
-    return ok, f"steps={steps[0]}..{steps[-1]} n={len(steps)}"
+    tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
+    ok = steps[0] == 2 and steps[-1] == 32 and len(steps) == 31 and tp[0] == 0.2 and tp[-1] == 3.2
+    ok = ok and all(abs((tp[i + 1] - tp[i]) - 0.1) < 1e-9 for i in range(len(tp) - 1))
+    return ok, f"steps={steps[0]}..{steps[-1]} n={len(steps)}; TP {tp[0]}%..{tp[-1]}% in 0.1% steps (absolute, not PositionCost multiples)"
 
 
 def sl_ratios():
@@ -29,14 +31,24 @@ def sl_ratios():
 
 
 def default_grid_counts():
+    """The default grid against the rules that build it, not against a remembered number: every ratio x every step for each full pack, the distinct stop
+    distances for the Exit Sets, the trailing pairs above the minimum trailing distance, and Short Range's own steps 2-6."""
     sb = _book()
     kinds = {}
     for st in sb.by_idx:
         kinds[st.kind] = kinds.get(st.kind, 0) + 1
-    # Two full-range packs plus Short Range (65 base, 41 distinct Exit stops, 10 trails).
-    ok = (len(sb.packs) == 3 and kinds.get("base") == 819 and kinds.get("exit") == 405 and kinds.get("trail") == 430
-          and len(sb.by_idx) == 1654 and sb.steps == list(range(2, 31)) and len(sb.sl_ratios) == 13)
-    return ok, f"sets={len(sb.by_idx)} base={kinds.get('base')} exit={kinds.get('exit')} trail={kinds.get('trail')} packs={len(sb.packs)}"
+    steps, ratios = list(range(TP_STEP_MIN, TP_STEP_MAX + 1)), list(SL_RATIOS)
+    short = list(range(2, 7))
+    give_floor = trail_floor_steps() * sb.cost_pct
+    m = sb.trail_min_step
+    pairs = [(k, j) for k in range(m, TRAIL_STEP_MAX + 1) for j in range(m, k + 1) if j * TP_UNIT_PCT + 1e-9 >= give_floor]
+    short_pairs = [1 for k, j in pairs if k * TP_UNIT_PCT <= short[-1] * TP_UNIT_PCT + 1e-9]
+    full_base, full_exit = len(ratios) * len(steps), len({round(r * k, 6) for r in ratios for k in steps})
+    short_base, short_exit = len(ratios) * len(short), len({round(r * k, 6) for r in ratios for k in short})
+    want = {"base": 2 * full_base + short_base, "exit": 2 * full_exit + short_exit, "trail": 2 * len(pairs) + len(short_pairs)}
+    ok = (len(sb.packs) == 3 and all(kinds.get(k) == v for k, v in want.items()) and len(sb.by_idx) == sum(want.values())
+          and sb.steps == steps and len(sb.sl_ratios) == 13)
+    return ok, f"sets={len(sb.by_idx)} base={kinds.get('base')} exit={kinds.get('exit')} trail={kinds.get('trail')} packs={len(sb.packs)}; rules want {want}"
 
 
 def ids_unique():
@@ -50,45 +62,51 @@ def ids_unique():
 def trail_rules_default():
     sb = _book()
     trails = [st for st in sb.by_idx if st.kind == "trail"]
+    give_floor = trail_floor_steps() * COST
     min_arm = min(st.trail_arm for st in trails)
     bad_give = [st.id for st in trails if st.trail_give > st.trail_arm + 1e-9]
-    ok = not bad_give and min_arm >= 3 * COST - 1e-9 and abs(max(st.trail_arm for st in trails) - 22 * COST) < 1e-9
-    return ok, f"min_arm={min_arm:.3f}% max_arm={max(st.trail_arm for st in trails):.2f}% give_over_arm={len(bad_give)}"
+    under_floor = [st.id for st in trails if st.trail_give + 1e-9 < give_floor]
+    ok = (not bad_give and not under_floor and min_arm >= give_floor - 1e-9
+          and abs(max(st.trail_arm for st in trails) - TRAIL_STEP_MAX * TP_UNIT_PCT) < 1e-9)
+    return ok, f"min_arm={min_arm:.3f}% (floor {give_floor:.2f}%) max_arm={max(st.trail_arm for st in trails):.2f}% give_over_arm={len(bad_give)} under_floor={len(under_floor)}"
 
 
 def trail_min_step_clamp():
-    lo = _book(trailMinStep=1, trailMinSteps=1)       # one step over PositionCost: the setting floor of 2
-    floored = _book(trailMinStep=1)                   # default trailMinSteps=2: the overall minimum is PositionCost + 2 steps
+    """trailMinStep is in grid steps of 0.1 %; the overall minimum trailing distance (PositionCost + trailMinSteps steps, in percent) lifts it."""
+    import math
+    lo = _book(trailMinStep=1, trailMinSteps=1)       # setting floor 2, but PositionCost + 1 step = 0.24 % = 3 grid steps
+    floored = _book(trailMinStep=1)                   # default trailMinSteps=2: PositionCost + 2 steps = 0.36 % = 4 grid steps
     hi = _book(trailMinStep=99)
-    ok = (lo.trail_min_step == TRAIL_STEP_SETTING_MIN and floored.trail_min_step == 3 and hi.trail_min_step == TRAIL_STEP_SETTING_MAX
-          and abs(min(st.trail_arm for st in lo.by_idx if st.kind == "trail") - 2 * COST) < 1e-9
-          and abs(min(st.trail_arm for st in floored.by_idx if st.kind == "trail") - 3 * COST) < 1e-9)
-    return ok, f"clamp(1)={lo.trail_min_step} default floor={floored.trail_min_step} clamp(99)={hi.trail_min_step} default={TRAIL_STEP_DEFAULT}"
+    want_lo = max(TRAIL_STEP_SETTING_MIN, math.ceil(trail_floor_steps(1) * COST / TP_UNIT_PCT - 1e-9))
+    want_fl = max(TRAIL_STEP_SETTING_MIN, math.ceil(trail_floor_steps() * COST / TP_UNIT_PCT - 1e-9))
+    ok = (lo.trail_min_step == want_lo and floored.trail_min_step == want_fl and hi.trail_min_step == TRAIL_STEP_SETTING_MAX
+          and abs(min(st.trail_arm for st in lo.by_idx if st.kind == "trail") - want_lo * TP_UNIT_PCT) < 1e-9
+          and abs(min(st.trail_arm for st in floored.by_idx if st.kind == "trail") - want_fl * TP_UNIT_PCT) < 1e-9)
+    return ok, f"clamp(1, 1 step)={lo.trail_min_step} default floor={floored.trail_min_step} clamp(99)={hi.trail_min_step} default setting={TRAIL_STEP_DEFAULT}"
 
 
 def trail_grid_pure():
     g = trail_grid(3, COST)
-    ok = len(g) == 210 and all(give <= arm + 1e-9 and give >= 3 * COST - 1e-9 for _, arm, give in g)
+    ok = len(g) == 210 and all(give <= arm + 1e-9 and give >= 3 * TP_UNIT_PCT - 1e-9 for _, arm, give in g)
     ok = ok and len({k for k, _, _ in g}) == 210
-    return ok, f"n={len(g)} unique_keys={len({k for k, _, _ in g})}"
+    ok = ok and trail_grid(3, 0.5) == g                  # the grid is absolute: PositionCost does not move it
+    return ok, f"n={len(g)} unique_keys={len({k for k, _, _ in g})}; the same at another PositionCost"
 
 
 def trail_distance_limit():
-    """The built Set's arm, give and initial stop must fit the 3% price-distance limit."""
+    """Every built Set's arm, give and initial stop fits the 3% price-distance limit (the grid's arms end at 2.2 %, so the stop is what binds)."""
     sb = _book(positionCostPct=0.15)
     trails = [st for st in sb.by_idx if st.kind == "trail"]
-    raw = trail_grid(sb.trail_min_step, sb.cost_pct)
-    ok = bool(trails) and max(t[1] for t in raw) > 3.0
-    ok = ok and all(st.trail_arm <= 3.0 + 1e-9 and st.trail_give <= 3.0 + 1e-9
-                    and sb.lane_fracs(st)[0] <= 0.03 + 1e-12 for st in trails)
-    return ok, f"trails={len(trails)} max_arm={max(st.trail_arm for st in trails):.2f}% raw_max={max(t[1] for t in raw):.2f}%"
+    ok = bool(trails) and all(st.trail_arm <= 3.0 + 1e-9 and st.trail_give <= 3.0 + 1e-9
+                              and sb.lane_fracs(st)[0] <= 0.03 + 1e-12 for st in trails)
+    return ok, f"trails={len(trails)} max_arm={max(st.trail_arm for st in trails):.2f}%"
 
 
 def trail_limit_has_no_unsafe_fallback():
     """An impossible cost floor or initial stop removes trailing Sets instead of inventing a fallback."""
-    floor = _book(positionCostPct=1.1, trailMinSteps=2)
-    stop = _book(positionCostPct=0.3, setMinStep=29, setStepMax=30,
-                 stratShortRange=False, trailVariants=["0.6:0.3"])
+    floor = _book(positionCostPct=1.1, trailMinSteps=2)      # minimum trailing distance 3.3 % > the 3 % limit: nothing can trail
+    stop = _book(positionCostPct=0.8, slMinSteps=3, trailMinSteps=1, stratShortRange=False,
+                 trailVariants=["2.0:1.9"])                   # give floor 1.6 % is met, but the minimum stop (1 + 3) x 0.8 = 3.2 % is over the limit
     edge = _book(positionCostPct=1.0, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
                  setMinStep=2, setStepMax=2, stratShortRange=False)
     above = _book(positionCostPct=1.00001, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
@@ -121,15 +139,18 @@ def setstep_clamp():
     lo = _book(setMinStep=0)
     hi = _book(setStepMax=99)
     small = _book(setMinStep=9, setStepMax=3)
-    ok = lo.steps[0] == 2 and hi.steps[-1] == 30 and small.steps and small.steps[0] <= small.steps[-1]
+    ok = lo.steps[0] == 2 and hi.steps[-1] == TP_STEP_MAX == 32 and small.steps and small.steps[0] <= small.steps[-1]
     return ok, f"min0->{lo.steps[0]} max99->{hi.steps[-1]} min9max3->{small.steps}"
 
 
-def tp_is_k_times_cost():
-    bad = [k for k in range(2, 31) if abs(step_tp_pct(k, COST) - k * COST / 100.0) > 1e-12]
-    net_min = (2 - 1) * COST
-    ok = not bad and net_min > 0
-    return ok, f"k=2..30 bad={bad} net_at_min_tp={net_min:.2f}%"
+def tp_is_k_tenths_of_a_percent():
+    """TP = k x 0.1 % of price whatever PositionCost is; the lane lifts it to PositionCost, never above the step by a multiple."""
+    bad = [k for k in range(2, 33) if abs(step_tp_pct(k, COST) - k * 0.001) > 1e-12 or abs(step_tp_pct(k, 0.5) - k * 0.001) > 1e-12]
+    b = _book(positionCostPct=0.3, setMinStep=2, setStepMax=3, setSlRatios=[1.0], stratShortRange=False, stratGeneral=False)
+    st = next(x for x in b.by_idx if x.kind == "base" and x.step == 2)
+    sl_f, tp_f = b.lane_fracs(st)
+    ok = not bad and abs(st.tp_pct - 0.002) < 1e-12 and abs(tp_f - 0.003) < 1e-12      # 0.2 % step, PositionCost 0.3 % lifts the lane's TP to 0.3 %
+    return ok, f"k=2..32 bad={bad}; step 2 at PositionCost 0.3: set TP {st.tp_pct * 100:.2f}%, lane TP {tp_f * 100:.2f}%"
 
 
 def cost_units():
@@ -155,18 +176,18 @@ def set_id_format():
 
 
 CHECKS = [
-    ("grid.tp-steps-2-30", tp_steps),
+    ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.5-3.5", sl_ratios),
-    ("grid.default-1654-sets", default_grid_counts),
+    ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),
-    ("grid.trail-give-le-arm-min3", trail_rules_default),
+    ("grid.trail-give-le-arm-and-floor", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),
     ("grid.trail-grid-pure", trail_grid_pure),
     ("grid.trail-distance-limit", trail_distance_limit),
     ("grid.trail-limit-no-unsafe-fallback", trail_limit_has_no_unsafe_fallback),
     ("grid.trail-limit-replay-levels", trail_limit_matches_replay_levels),
     ("grid.setstep-clamp", setstep_clamp),
-    ("units.tp-equals-k-times-cost", tp_is_k_times_cost),
+    ("units.tp-is-k-tenths-of-a-percent", tp_is_k_tenths_of_a_percent),
     ("units.cost-and-net", cost_units),
     ("units.sl-snap", sl_snap),
     ("units.set-id-format", set_id_format),
