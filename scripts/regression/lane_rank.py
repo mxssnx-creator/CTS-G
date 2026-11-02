@@ -245,7 +245,50 @@ def the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor():
                 f"(coordinator {out['unlinked'][1]}); Block candidate at the default / the Set's 1.04 / 1.20 floor {out['block']}; DCA on Axis (low-floor Set, high-floor Set) {out['dca']}")
 
 
+def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
+    """Pulse.maybe_set_block_adds end to end: the parent's own Real Set reads PF 1.10, the parent's floor is 1.04, the coordinator's is 1.25 (Axis on). The add
+    is judged at the parent's floor; with the coordinator's floor it would be refused, and a stream under the parent's floor is refused too."""
+    import json
+    import time
+    from dataclasses import replace
+    from lanes import _Env, SYM
+    from coord_engine import Coordinator
+    res = {}
+    for label, stream_pf_ok, floor in (("at the Set's floor 1.04", True, 1.04), ("floor 1.20 above the stream's PF", True, 1.20)):
+        with _Env() as env:
+            p, pos = env.p, env.pos
+            p.equity = 1000
+            st = p.sets.by_idx[0]
+            pos.set_id, pos.lane, pos.pack = st.id, "pos", st.pack
+            pos.base_entry, pos.base_qty, pos.set_hold_bars = pos.entry, pos.qty, 10
+            p.sets.gate_reason = lambda st_: ""
+            p.sets.main_on = p.sets.neg_on = p.sets.realst_on = True
+            st.stage = {"pos": True, "negl": False}
+            p.ensure_controls = lambda pos_: None
+            p.block.min_samples, p.block.pause_ratio, p.block.volume_ratio = 3, 0, 1
+            co = Coordinator()
+            co.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": True,
+                         "setMinPf": 1.25, "minPf": 1.25})
+            p.coord = co
+            p.set_axis_floor = lambda st_: floor
+            now = time.time()
+            pattern = [0.0011, -0.0010] * 8
+            st.exe = [(now - 60 * i, v) for i, v in zip(range(len(pattern), 0, -1), pattern)]
+            for i in range(3):
+                old = replace(pos, client_id=f"history{i}", block_fills=[], block_pending={})
+                p.set_block.observe(old, 100.15, now - 300 + i * 60, p.block, .12, 86400)
+                p.set_block.close(old, 101, now - 270 + i * 60, p.block, .12)
+            p.px[SYM] = 100.15
+            p.maybe_set_block_adds()
+            res[label] = len(pos.block_fills)
+            res[label + " pooled"] = co.judge([{"pnl_pct": v + 0.0012} for v in pattern], 0)["allow"]
+    keys = list(res)
+    ok = res[keys[0]] == 1 and res[keys[2]] == 0 and res[keys[1]] is False and res[keys[3]] is False
+    return ok, f"adds made by the parent: at floor 1.04 {res[keys[0]]} (want 1), at floor 1.20 {res[keys[2]]} (want 0); the coordinator's own floor would have refused the 1.10 stream: {not res[keys[1]]}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
+    a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,
     the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor,
     lane_rank_stats_equal_the_plain_reading, the_choice_among_valid_sets_reads_the_lanes_own_set,
     a_lane_set_without_orders_ranks_below_one_with_orders_and_the_key_follows_the_floor, simulator_and_engine_rank_valid_sets_the_same_way)]
