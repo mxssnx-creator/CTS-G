@@ -90,7 +90,7 @@ class SetBlockBook:
         values = [r[2] if source == "executed" and len(r) > 2 else r[1] - cost_as_frac(cost_pct) for r in rows]
         return {"pf": _pf(values), "n": len(values), "source": source}
 
-    def candidate(self, pos, price: float, now: float, block, cost_pct: float, lookback_s: float) -> Optional[Dict]:
+    def candidate(self, pos, price: float, now: float, block, cost_pct: float, lookback_s: float, floor: Optional[float] = None) -> Optional[Dict]:
         lane = self.observe(pos, price, now, block, cost_pct, lookback_s)
         if lane is None:
             return None
@@ -108,8 +108,9 @@ class SetBlockBook:
                 continue
             paper = self.stats(lane, n, "paper", now, block, cost_pct, lookback_s)
             live = self.stats(lane, n, "executed", now, block, cost_pct, lookback_s)
-            threshold = max(block.default_min_pf, calculate_block_minimum_profit_factor(
-                block.default_min_pf, block.pf_ratio, (rank + int(n not in filled)) * block.volume_ratio))
+            base_pf = block.default_min_pf if floor is None else float(floor)       # the parent Set's own floor (the one its stages ask) unless the gates are unlinked
+            threshold = max(base_pf, calculate_block_minimum_profit_factor(
+                base_pf, block.pf_ratio, (rank + int(n not in filled)) * block.volume_ratio))
             # A cold group has no proof. Paused/rejected groups keep collecting paper
             # results on new parents, so their gate can recover without real adds.
             if paper["n"] < block.min_samples or paper["pf"] + 1e-9 < threshold:

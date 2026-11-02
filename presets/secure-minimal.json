@@ -207,6 +207,7 @@
   "holdAutoMin": 10,
   "directionMode": "split",
   "minPfByStep": true,
+  "rankByLane": true,
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,

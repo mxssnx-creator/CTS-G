@@ -185,6 +185,8 @@ test("the TP-step floor settings are on by default, bounded, and survive a setti
   assert.deepEqual([d.minPfByStep, d.minPfStepAuto, d.minPfStepRatio, d.minPfStepAutoN, d.minPfStepAutoMin], [true, true, 0.2, 10, 300]);
   const o = overlayFromCts(cts({ minPfByStep: false, minPfStepAuto: false, minPfStepRatio: 0.45, minPfStepAutoN: 12, minPfStepAutoMin: 500 }));
   assert.deepEqual([o.minPfByStep, o.minPfStepAuto, o.minPfStepRatio, o.minPfStepAutoN, o.minPfStepAutoMin], [false, false, 0.45, 12, 500]);
+  assert.equal(d.rankByLane, true);
+  assert.equal(overlayFromCts(cts({ rankByLane: false })).rankByLane, false);
   const bad = overlayFromCts(cts({ minPfStepRatio: "x", minPfStepAutoN: 999, minPfStepAutoMin: 1 }));
   assert.deepEqual([bad.minPfStepRatio, bad.minPfStepAutoN, bad.minPfStepAutoMin], [0.2, 50, 30]);
   assert.equal(overlayFromCts(cts({ minPfStepRatio: 1.5 })).minPfStepRatio, 1.1, "the ratio ends at 1.1");

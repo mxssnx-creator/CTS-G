@@ -3104,6 +3104,18 @@ class Pulse:
         chosen, _lane, blocked = self._scope_choice(pack)
         return chosen, blocked
 
+    def set_axis_floor(self, st: Any) -> Optional[float]:
+        """The minimum PF the Axis, Block and DCA-on-Axis gates ask of ONE Set's own stream: that Set's floor, the one its Base, Main and Real windows ask
+        (minPfByStep: its TP step), so a stage after Real does not re-judge the Set at a pooled floor. None (the coordinator's own floor) when the gates are
+        unlinked (minPfLinked off), for a position without a Set, or when the book cannot say."""
+        coord = getattr(self, "coord", None)
+        if st is None or coord is None or not getattr(coord, "min_pf_linked", True) or not isinstance(self.sets, SetBook):
+            return None
+        try:
+            return float(self.sets.floor_for(self.sets.realst_n, st.pack, st))
+        except Exception:
+            return None
+
     def _scope_choice(self, pack: str, side: int = 0) -> Tuple[Any, str, str]:
         """Pick within the pack's allowed lanes (and, with a side, the signal's direction: a long signal is only ever judged by a long Set);
         another pack or a blocked positive lane cannot mask a valid alternative."""
@@ -3116,12 +3128,13 @@ class Pulse:
                 cf = cost_as_frac(self.position_cost_pct)
                 rows = [{"t": t, "pnl_pct": value + cf} for t, value in source
                         if cutoff <= t <= now]
-                result = self.coord.judge(rows, self.coord.net_streak(rows))
+                floor = self.set_axis_floor(st)
+                result = self.coord.judge(rows, self.coord.net_streak(rows), min_pf=floor)
                 key = f"set:{st.id}:{lane}"
                 scope = {"allow": result["allow"], "reasons": result["reasons"], "orders": len(rows),
-                         "pf": result["metrics"]["last15Pf"], "source": "paper"}
+                         "pf": result["metrics"]["last15Pf"], "source": "paper", "minPf": result["metrics"]["minPf"]}
                 self.coord.scopes[key] = scope
-                cap = self.coord.slot_cap(0, scope["pf"])
+                cap = self.coord.slot_cap(0, scope["pf"], min_pf=floor)
                 opened = sum(p.set_id == st.id and (p.lane or "pos") == lane for p in self.open.values())
                 if not result["allow"] or opened >= cap:
                     blocked.append(key)
@@ -4939,9 +4952,10 @@ class Pulse:
             src = st.neg if lane == "neg" else st.exe
             cf = cost_as_frac(self.position_cost_pct)
             evidence = [{"pnl_pct": net + cf} for t, net in src if now - lookback <= t <= now]
-            if not self.coord.judge(evidence, self.coord.net_streak(evidence))["allow"]:
+            floor = self.set_axis_floor(st)
+            if not self.coord.judge(evidence, self.coord.net_streak(evidence), min_pf=floor)["allow"]:
                 continue
-            row = self.set_block.candidate(pos, px, now, self.block, self.position_cost_pct, lookback)
+            row = self.set_block.candidate(pos, px, now, self.block, self.position_cost_pct, lookback, floor=floor)
             if row is None:
                 continue
             room = max(0.0, min(self.max_book_notional() - pos.qty * px, self.avail_notional(c)))
@@ -5023,7 +5037,7 @@ class Pulse:
             source = st.neg if lane == "neg" else st.exe
             rows = [{"pnl_pct": value + cf} for t, value in source
                     if now - self.sets.lookback * 60 <= t <= now]
-            return bool(self.coord.judge(rows, self.coord.net_streak(rows))["allow"])
+            return bool(self.coord.judge(rows, self.coord.net_streak(rows), min_pf=self.set_axis_floor(st))["allow"])
         return False
 
     def maybe_dca_adds(self) -> None:

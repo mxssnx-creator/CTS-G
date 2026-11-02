@@ -59,6 +59,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["minPfBySize"] = False
     ov["directionMode"] = "both"  # fixtures run the combined Sets (pinned counts, golden); the direction checks and the split golden ask for "split"
     ov["minPfByStep"] = False     # likewise the per-step floor: fixtures judge every window at setMinPf; the step_pf checks ask for the step floors
+    ov["rankByLane"] = False      # the choice among valid Sets reads the Base tape in fixtures (pinned picks, golden); the lane-rank checks ask for the lane's own Set
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov

@@ -392,6 +392,7 @@ export type PulseOverlay = {
   // split (default): every Set exists once per trade direction, each with its own lane, tape, windows, stages, pause and floor; both: one Set trades both.
   directionMode: DirectionMode;
   minPfByStep: boolean;
+  rankByLane: boolean;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
@@ -629,6 +630,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAutoMin: 10,
   directionMode: "split",
   minPfByStep: true,
+  rankByLane: true,
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
@@ -849,6 +851,7 @@ export type CtsSettings = {
   holdAutoMin?: number;
   directionMode?: string;
   minPfByStep?: boolean;
+  rankByLane?: boolean;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
@@ -1166,6 +1169,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
     directionMode: cts.directionMode === "both" ? "both" : "split",
     minPfByStep: bool(cts.minPfByStep, true),
+    rankByLane: bool(cts.rankByLane, true),
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),

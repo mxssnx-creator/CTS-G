@@ -154,7 +154,10 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
     rank_key compute them (self_check compares both with the engine). The Base windows first (gate_base), then the stages after Base."""
     valid, rank, n, pf = gate_base(book, tapes, st, now)
     if valid and (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
-        valid = stage_lane(book, tapes, st, now)          # "pos" / "neg": the lane the Set passes Real on; "" when none
+        valid, lane_stats = stage_lane_stats(book, tapes, st, now)          # "pos" / "neg": the lane the Set passes Real on; "" when none
+        if valid and getattr(book, "rank_by_lane", False):
+            # the choice among the Sets valid on a lane reads the lane's own Set (SetBook.lane_rank_key), not the raw Base tape
+            rank = se.lane_rank_of(lane_stats, book.floor_for(book.realst_n, st.pack, st), -rank[4])
     return valid, rank, n, pf
 
 
@@ -309,12 +312,19 @@ def chain_at(book, tapes: Tapes, st, now: float):
     return se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb), nets
 
 
-def stage_lane(book, tapes: Tapes, st, now: float) -> str:
-    """The Set's stage verdicts (set_engine.stage_verdicts) on its chain: "pos" when Main and Real pass, "neg" when the Negative lane and Real
-    Negative pass, else ""."""
+def stage_lane_stats(book, tapes: Tapes, st, now: float):
+    """(lane, lane_rank_stats of that lane's own Set): the Set's stage verdicts (set_engine.stage_verdicts) on its chain -- "pos" when Main and Real pass, "neg"
+    when the Negative lane and Real Negative pass, else "" -- and what the choice among valid Sets reads from the Real Set / Real Negative Set."""
     ch, nets = chain_at(book, tapes, st, now)
     v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
-    return "pos" if v["pos"] else ("neg" if v["negl"] else "")
+    lane = "pos" if v["pos"] else ("neg" if v["negl"] else "")
+    key = "realneg" if lane == "neg" else "real"
+    return lane, se.lane_rank_stats([nets[k] for k in ch[key]], tapes.cf)
+
+
+def stage_lane(book, tapes: Tapes, st, now: float) -> str:
+    """The lane the Set passes the stages on: "pos", "neg" or ""."""
+    return stage_lane_stats(book, tapes, st, now)[0]
 
 
 def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
@@ -425,7 +435,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
         if (valid or "") not in ("", True) and str(valid) != eng_lane:
             bad += 1
         valid = bool(valid)
-        ek = book.rank_key(st)
+        ek = book.lane_rank_key(st, eng_lane) if eng_lane else book.rank_key(st)       # a valid Set is ranked on its lane's own Set, any other on the Base tape
         if valid != eng_valid or n != st.gate_n or abs(pf - st.gate_pf) > 1e-6 or key[:3] != ek[:3] or abs(key[3] - ek[3]) > 1e-9 \
                 or abs(key[4] - ek[4]) > 1e-6:
             bad += 1

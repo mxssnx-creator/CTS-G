@@ -280,6 +280,32 @@ def pf_of(g: float, l_: float) -> float:
     return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
 
 
+def lane_rank_stats(nets: Sequence[float], cf: float) -> Tuple[int, float, float, float, float]:
+    """What the choice among the Sets valid on a lane reads: the lane's OWN Set (the Real Set on the positive lane, the Real Negative Set on the negative one),
+    not the raw Base tape the Set was first validated on. (orders, PF, PF of the older half, PF of the newer half, average R of the newest 25) over the newest
+    PROC_KEEP net results of that Set within the evidence lookback. An empty Set is (0, 0, 0, 0, 0)."""
+    w = list(nets[-PROC_KEEP:])
+    n = len(w)
+    if not n:
+        return (0, 0.0, 0.0, 0.0, 0.0)
+
+    def pf(v: Sequence[float]) -> float:
+        return pf_of(sum(x for x in v if x > 0), -sum(x for x in v if x < 0))
+    half = n // 2
+    old, new = (pf(w[:half]), pf(w[half:])) if n >= 4 else (pf(w), pf(w))
+    tail = w[-25:]
+    return (n, pf(w), old, new, (sum(tail) / len(tail)) / cf if cf > 0 else 0.0)
+
+
+def lane_rank_of(stats: Sequence[float], floor: float, max_dd_s: float) -> Tuple[Any, ...]:
+    """The rank key of a Set on its lane, best first (same shape and meaning as SetBook.rank_key, read from the lane's own Set): both halves of the lane Set's
+    orders at or above the Set's floor, then its PF shrunk toward 1 by the orders behind it, then more orders, the better recent R, the shorter drawdown time."""
+    n, pf, old, new, r25 = stats
+    halves = min(old, new) if n >= 4 else pf
+    shrunk = 1.0 + (min(float(pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
+    return (halves + 1e-9 >= floor, round(shrunk, 4), int(n), r25, -max_dd_s)
+
+
 @dataclass
 class StageParams:
     """Every rule of the Base -> Main -> Real chain for one pack (SetBook.stage_params)."""
@@ -1034,6 +1060,8 @@ class SetState:
     neg_gl: float = 0.0
     exe_gp: float = 0.0
     exe_gl: float = 0.0
+    rank_pos: Tuple[int, float, float, float, float] = (0, 0.0, 0.0, 0.0, 0.0)   # lane_rank_stats of the Real Set / Real Negative Set (the choice among valid Sets)
+    rank_neg: Tuple[int, float, float, float, float] = (0, 0.0, 0.0, 0.0, 0.0)
     base_short_n: int = 0           # Base short window (setGateShortN): orders and PF
     base_short_pf: float = 0.0
     base_min_n: int = 0             # Base minimal window (setGateMinN): the results it holds and whether they are all positive / negative as asked
@@ -1724,6 +1752,7 @@ class SetBook:
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
         self.direction_split = True                   # a Set per trade direction (long / short), each with its own lane, tape, stages, pause and floor
+        self.rank_by_lane = True                      # the choice among valid Sets reads the lane's own (Real / Real Negative) Set, not the raw Base tape
         self.pf_by_step = True                        # one min PF per TP step for every window and stage (replaces the window-size classes)
         self.pf_step_auto = True
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
@@ -1827,6 +1856,7 @@ class SetBook:
                     st.gate_pf = st.main_pf = st.exe_pf = st.neg_pf = 0.0
                     st.gate_gp = st.gate_gl = st.main_gp = st.main_gl = 0.0
                     st.exe_gp = st.exe_gl = st.neg_gp = st.neg_gl = 0.0
+                    st.rank_pos = st.rank_neg = (0, 0.0, 0.0, 0.0, 0.0)
                     st.base_short_n = st.base_min_n = st.main_short_n = st.main_min_have = 0
                     st.base_short_pf = st.main_short_pf = 0.0
                     st.base_short_gp = st.base_short_gl = st.main_short_gp = st.main_short_gl = 0.0
@@ -2064,6 +2094,7 @@ class SetBook:
         except Exception:
             self.cooldown_bars = 2
         self.direction_split = str(ov.get("directionMode") or "split").lower() != "both"
+        self.rank_by_lane = bool(ov.get("rankByLane", True))
         self.pf_by_step = bool(ov.get("minPfByStep", True))
         self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
@@ -3414,6 +3445,8 @@ class SetBook:
         ew = r_[-self.realst_n:]
         st.exe_n, st.exe_pf = len(ew), round(pf_of(sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)), 4)
         st.exe_gp, st.exe_gl = sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)
+        cf_rank = cost_as_frac(self.cost_pct)
+        st.rank_pos, st.rank_neg = lane_rank_stats(r_, cf_rank), lane_rank_stats(q_, cf_rank)
         qw = q_[-self.realst_n:]
         st.neg_n, st.neg_pf = len(qw), round(pf_of(sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)), 4)
         st.neg_gp, st.neg_gl = sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)
@@ -3650,6 +3683,15 @@ class SetBook:
         n = max(0, int(st.n))
         shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
         return (halves + 1e-9 >= floor, round(shrunk, 4), n, st.last25_avg_r, -st.max_dd_s)
+
+    def lane_rank_key(self, st: SetState, lane: str = "pos") -> Tuple[Any, ...]:
+        """The choice among the Sets valid on `lane`, best first. With stages on (rankByLane, default) it reads the lane's own Set -- the Real Set on the
+        positive lane, the Real Negative Set on the negative one: its PF over its orders, the halves, the count, its recent R -- because that is the Set that
+        was validated and executes, not the raw Base tape (which holds every order, the ones the stages rejected too). Without stages, or with rankByLane off,
+        the Base tape's rank_key."""
+        if not (self.rank_by_lane and (self.main_on or self.neg_on or self.realst_on)):
+            return self.rank_key(st)
+        return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(self.realst_n, st.pack, st), st.max_dd_s)
 
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side)) and self.is_eligible(s)]
@@ -3895,7 +3937,7 @@ class SetBook:
                 for kinds in (("base", "exit"), ("trail",)):
                     rows = [x for k in kinds for x in self._valid_for(pack, k, side)
                             if lane in self._execution_lanes(x)]
-                    for st in sorted(rows, key=self.rank_key, reverse=True):
+                    for st in sorted(rows, key=lambda x: self.lane_rank_key(x, lane), reverse=True):
                         if predicate is None or predicate(st):
                             return st
             return None
@@ -4333,7 +4375,7 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 # The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
 # direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
-_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off"}
+_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:

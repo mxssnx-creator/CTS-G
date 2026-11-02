@@ -1947,12 +1947,17 @@ function PfWindowControls({
   return (
     <>
       <div className="col-span-full mt-1 font-mono text-[11px] text-muted">
-        Minimum PF by TP step · one floor per Set for every window and every stage (Base, Main, Real), the same drawdown time everywhere
+        Minimum PF by TP step · one floor per Set for every window of every stage (Base, Main, Real, Real Negative) and for the Axis / Block / DCA gates on that Set's own stream. The drawdown time and the minimum order count are Base-stage rules
       </div>
       <Toggle
         label="Minimum PF by TP step (on: replaces the window-size classes below)"
         on={byStep}
         onChange={(v) => patch("minPfByStep", v)}
+      />
+      <Toggle
+        label="Choose among valid Sets by the lane's own Set (Real / Real Negative orders), not the raw Base tape"
+        on={overlay.rankByLane !== false}
+        onChange={(v) => patch("rankByLane", v)}
       />
       <Toggle
         label="Auto: learn the best floor for every step 0.2-3.5%"

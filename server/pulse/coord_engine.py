@@ -103,7 +103,8 @@ class Coordinator:
         except Exception:
             self.min_pf = float(ov.get("minPf") or GATE_MIN_PF_DEFAULT)
         self.min_pf = pf_floor(self.min_pf)
-        if ov.get("minPfLinked", True):
+        self.min_pf_linked = bool(ov.get("minPfLinked", True))
+        if self.min_pf_linked:
             self.min_pf = base_min_pf(ov)        # every validation gate asks the Base gate's PF
         self.pf_window = window_n(ov, "pfWindow", fallback=LAST_N_DEFAULT)
         self.min_samples = int(ov.get("setMinSamples") or 12)
@@ -216,8 +217,12 @@ class Coordinator:
         closed_rows: Sequence[Any],
         consec: int,
         intern: Optional[Dict[str, Any]] = None,
+        min_pf: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """One stream's verdict, pure (no state): the axes (last, prev, pause) against the minimum PF, and the stage figures."""
+        """One stream's verdict, pure (no state): the axes (last, prev, pause) against the minimum PF, and the stage figures.
+        min_pf: the floor for THIS stream. A stream that is one Set's own Real Set is judged at that Set's floor (the one its Base, Main and Real windows ask), not
+        at the pooled floor; omitted, the coordinator's own."""
+        mp = self.min_pf if min_pf is None else float(min_pf)
         reasons: List[str] = []
         consec = max(int(consec), self.net_streak(closed_rows))
         last_w = self.axes["last"].max_window
@@ -240,7 +245,7 @@ class Coordinator:
             "last15R": cost["avgR"],
             "last15N": cost["count"],
             "costPct": cost["costPct"],
-            "minPf": self.min_pf,
+            "minPf": mp,
             "pfNeutral": 1.0,
             "pfPlus1x": 1.1,
             "internPf": round(intern_pf, 4) if intern_pf else 0.0,
@@ -257,13 +262,13 @@ class Coordinator:
             metrics["internOpen"] = 1.0
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
-            if last_cost["pf"] + 1e-9 < self.min_pf:
+            if last_cost["pf"] + 1e-9 < mp:
                 allow = False
                 reasons.append(
-                    f"last {int(last_cost['count'])} PF {last_cost['pf']:.2f}<{self.min_pf:.2f}"
+                    f"last {int(last_cost['count'])} PF {last_cost['pf']:.2f}<{mp:.2f}"
                 )
         if self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
-            floor = self.min_pf * 0.85
+            floor = mp * 0.85
             if prev_cost["pf"] + 1e-9 < floor and cost["pf"] + 1e-9 < floor:
                 allow = False
                 reasons.append(f"prev PF {prev_cost['pf']:.2f}<{floor:.2f}")
@@ -286,11 +291,11 @@ class Coordinator:
         }
         return {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
 
-    def slot_cap(self, max_open: int, last_pf: float) -> int:
+    def slot_cap(self, max_open: int, last_pf: float, min_pf: Optional[float] = None) -> int:
         cap = max_open if 0 < max_open < 10**8 else 10**9
         if self.axes["cont"].enabled:
             extra = self.axes["cont"].max_window
-            if last_pf >= self.min_pf:
+            if last_pf >= (self.min_pf if min_pf is None else float(min_pf)):
                 cap = min(cap, extra)
             else:
                 cap = min(cap, max(1, extra // 2))
