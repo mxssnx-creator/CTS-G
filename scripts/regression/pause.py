@@ -32,11 +32,11 @@ def _base_set(b, step=3):
     return next(x for x in b.by_idx if x.kind == "base" and b.step_of(x) == step)
 
 
-def _run_scan(st, bars, dirs, confs, cfg, pause=0, select=None):
+def _run_scan(st, bars, dirs, confs, cfg, pause=0, select=None, indexed=True):
     lane = se.SetLane(st, "T")
     lane.pause = pause
     cand = [i for i in range(len(bars)) if dirs[i] and confs[i] >= cfg["entry_conf"]]
-    return lane.scan(0, len(bars), bars, dirs, confs, True, cfg, cand, se.BarIndex(bars), select_pause=select)
+    return lane.scan(0, len(bars), bars, dirs, confs, True, cfg, cand, se.BarIndex(bars) if indexed else None, select_pause=select)
 
 
 def _run_step(st, bars, dirs, confs, cfg, pause=0):
@@ -72,10 +72,21 @@ def scan_and_step_agree_for_every_pause():
         kc = [(t["entry_i"], t["exit_i"], t["reason"]) for t in c]
         rows[pause] = len(ka)
         ok = ok and ka == kc and len(ka) > 20
+    # the walk (no index: a trailing lane once armed, any lane without a BarIndex) closes through its own code path: trailing Set and un-indexed scan too
+    trail = next(x for x in b.by_idx if x.kind == "trail")
+    walks = {}
+    for label, lane_st, indexed in (("trail+index", trail, True), ("base no index", st, False), ("trail no index", trail, False)):
+        for pause in (0, 25):
+            a = _run_scan(lane_st, bars, dirs, confs, cfg, pause, indexed=indexed)
+            c = _run_step(lane_st, bars, dirs, confs, cfg, pause)
+            same = [(t["entry_i"], t["exit_i"], t["reason"]) for t in a] == [(t["entry_i"], t["exit_i"], t["reason"]) for t in c]
+            walks[(label, pause)] = len(a)
+            ok = ok and same and len(a) > 20
+    ok = ok and all(walks[(lab, 25)] < walks[(lab, 0)] for lab in ("trail+index", "base no index", "trail no index"))
     sel = _run_scan(st, bars, dirs, confs, cfg, 0, select=lambda j: 25)
     fixed = _run_scan(st, bars, dirs, confs, cfg, 25)
     ok = ok and [(t["entry_i"], t["exit_i"]) for t in sel] == [(t["entry_i"], t["exit_i"]) for t in fixed]
-    return ok and rows[25] < rows[0], f"orders by pause (scan == step): {rows}; select_pause == fixed pause"
+    return ok and rows[25] < rows[0], f"orders by pause (scan == step): {rows}; trailing and un-indexed lanes agree too {sorted(walks.items())}; select_pause == fixed pause"
 
 
 def pause_follows_wins_only():
