@@ -31,6 +31,14 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("speed: the Low-Range memo ignores the lag",
+     "indication_extra.py", 'key = ("lrs", n, bw_len, rank_len, lag, id(r[0])', 'key = ("lrs", n, bw_len, rank_len, id(r[0])'),
+    ("speed: the Low-Range memo ignores the newest row's values",
+     "indication_extra.py", "len(r), tuple(r[-1][:5]))\n    got = memo.get(key)", "len(r))\n    got = memo.get(key)"),
+    ("speed: shared columns keep the first Set's id",
+     "set_engine.py", "        other.set_id = str(set_id)", "        other.set_id = self.set_id"),
+    ("speed: the rank reads fewer windows than the plain series",
+     "indication_extra.py", "first = max(bw_len - 1, last - rank_len + 1)", "first = max(bw_len - 1, last - rank_len + 2)"),
     ("direction: a long Set scans the short signals too",
      "set_engine.py", "            out[(p, 1)] = [i for i in bars_ if d[i] > 0]", "            out[(p, 1)] = list(bars_)"),
     ("direction: the pick ignores the signal's direction",

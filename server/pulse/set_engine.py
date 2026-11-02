@@ -1152,6 +1152,15 @@ class RowCols:
             self.side.append(_code(str(r["side"])))
             self.reason.append(_code(str(r["reason"])))
 
+    def share(self, set_id: str) -> "RowCols":
+        """The same columns under another Set's id: Sets that traded exactly the same orders store them once. The columns are never written after
+        construction, so sharing them is safe; only the id differs."""
+        other = RowCols.__new__(RowCols)
+        other.t, other.pnl, other.pct, other.hold = self.t, self.pnl, self.pct, self.hold
+        other.side, other.reason, other.symbol = self.side, self.reason, self.symbol
+        other.set_id = str(set_id)
+        return other
+
     def __len__(self) -> int:
         return len(self.t)
 
@@ -2663,7 +2672,17 @@ class SetBook:
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
                     continue
-                packed = {sid: RowCols(rows) for sid, rows in per_set.items() if rows}
+                packed: Dict[str, RowCols] = {}
+                alias = (inputs.get("tape_alias") if isinstance(inputs, dict) else None) or {}      # a stub or an older producer returns nothing: no sharing
+                for sid, rows in per_set.items():
+                    if rows and sid not in alias:
+                        packed[sid] = RowCols(rows)
+                for sid, first in alias.items():
+                    # exactly another key's orders: the same columns under this Set's id (rows carry their Set's id, also on a hold-candidate tape "<id>@h<m>")
+                    if per_set.get(sid) and first in packed and len(per_set[sid]) == len(packed[first]):
+                        packed[sid] = packed[first].share(sid.split(HOLD_KEY, 1)[0])
+                    elif per_set.get(sid):
+                        packed[sid] = RowCols(per_set[sid])
                 per_set = {}                          # rows are kept as columns (RowCols): about a sixth of the memory of tuples
                 with self._lock:
                     if self._topo_gen != gen0:
@@ -2868,6 +2887,10 @@ class SetBook:
         acc = BarIndex(bars)          # one index per symbol, shared by every lane
         cand_side = self._cand_by_side(cand, dirs)
         pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
+        # Keys that traded exactly the same orders in this pass (Sets whose stops and targets never decide a trade differently) are noted in `tape_alias`
+        # so the packing step stores their columns once. Every list in `hist` and every row stays its own: a Set's rows always name that Set.
+        same_tape: Dict[tuple, Tuple[str, bool]] = {}
+        tape_alias: Dict[str, str] = {}
         for st in self.by_idx:
             if st.pack not in self.packs:
                 continue
@@ -2879,16 +2902,24 @@ class SetBook:
                 if h is not None:
                     lane.hold = h                    # 0 = the global time stop; the Set's chosen hold never feeds its own judgement
                     key = st.id if h == 0 else f"{st.id}{HOLD_KEY}{h}"
+                trades = lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+                sig = tuple((d["entry_i"], d["exit_i"], d["reason"], d["pnl_pct"], d["side"]) for d in trades)
                 out = hist.setdefault(key, [])
-                for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause):
-                    out.append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
-                                "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
-                                "reason": done["reason"], "set_id": st.id})
+                fresh = not out
+                # every Set builds its OWN rows (each names its own Set id and pack); only the bookkeeping notes which keys traded exactly the same orders
+                out.extend({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
+                            "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
+                            "reason": done["reason"], "set_id": st.id} for done in trades)
+                prior = same_tape.get(sig)
+                if prior is None:
+                    same_tape[sig] = (key, fresh)
+                elif fresh and prior[1] and trades:
+                    tape_alias[key] = prior[0]
             self.progress.set_id = st.id
         # Candidate evidence must cover every entry being reconstructed, not just
         # the most recent 50 closes at the final scoring time.
         return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg,
-                "dirs": dirs, "confs": confs, "cand": cand, "cand_side": cand_side, "acc": acc, "pause": pause_plan}
+                "dirs": dirs, "confs": confs, "cand": cand, "cand_side": cand_side, "acc": acc, "pause": pause_plan, "tape_alias": tape_alias}
 
     def _cand_by_side(self, cand: Dict[str, List[int]], dirs: Dict[str, List[int]]) -> Dict[Tuple[str, int], List[int]]:
         """Entry bars per (pack, side): a Set that trades one direction scans only the bars whose signal points that way (side 0: every bar). Each bar
@@ -2943,9 +2974,14 @@ class SetBook:
                 lookback_s = self.lookback * BAR_S
                 choices = [m for m, _ in tapes]
 
-                def choose(exit_i: int, prefixes=prefixes, tapes=tapes, choices=choices, lookback_s=lookback_s) -> int:
-                    return choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max, self.pause_auto_min,
-                                                  PAUSE_MARGIN, lookback_s)]
+                chosen_at: Dict[int, int] = {}          # the choice is a function of the exit bar alone and many Sets close on the same bars
+
+                def choose(exit_i: int, prefixes=prefixes, tapes=tapes, choices=choices, lookback_s=lookback_s, chosen_at=chosen_at) -> int:
+                    got = chosen_at.get(exit_i)
+                    if got is None:
+                        got = chosen_at[exit_i] = choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max, self.pause_auto_min,
+                                                                         PAUSE_MARGIN, lookback_s)]
+                    return got
                 plan[key] = (0, choose)
                 self.pause_now[(pack, symbol, side)] = choose(n)
         return plan

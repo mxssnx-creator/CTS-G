@@ -470,10 +470,27 @@ def low_range_state(rows: Sequence[Row], n: int = 24, bw_len: int = 20, rank_len
     """Measures of the current range: box width in percent and in ATR, the close's position in the box, the
     percentile rank of the Bollinger bandwidth over `rank_len` bars (0 = the narrowest seen), and the slope of EMA50
     in percent over 10 bars. `lag` reads the bandwidth rank `lag` bars back: a break reads the regime BEFORE the bar
-    that breaks it, because that bar widens the bandwidth itself. None when there are not enough bars."""
+    that breaks it, because that bar widens the bandwidth itself. None when there are not enough bars.
+
+    The four Low-Range tactics ask for the same state of the same bars, so the answer is memoised per bar in the indicator memo
+    (indication_lib._memo: bounded, per thread, keyed by the first and newest row objects, the count and the newest row's values, the entry
+    holds both rows so their ids are not reused). Only the bandwidths the rank reads are computed (each depends on its own window alone), so the
+    values are exactly those of the full series."""
     r = _tail(rows)
     if len(r) < max(n, rank_len // 2) + 12:
         return None
+    from indication_lib import _memo
+    memo = _memo()
+    key = ("lrs", n, bw_len, rank_len, lag, id(r[0]), id(r[-1]), len(r), tuple(r[-1][:5]))
+    got = memo.get(key)
+    if got is not None:
+        return None if got[2] is None else dict(got[2])
+    out = _low_range_state(r, n, bw_len, rank_len, lag)
+    memo[key] = (r[0], r[-1], out)
+    return None if out is None else dict(out)
+
+
+def _low_range_state(r: Sequence[Row], n: int, bw_len: int, rank_len: int, lag: int) -> Optional[Dict[str, float]]:
     box = r[-n - 1 : -1]            # the box is the n bars BEFORE the current bar: a break is outside it
     hi = max(float(b[1]) for b in box)
     lo = min(float(b[2]) for b in box)
@@ -482,14 +499,17 @@ def low_range_state(rows: Sequence[Row], n: int = 24, bw_len: int = 20, rank_len
         return None
     atr = _atr(r)
     closes = [float(b[3]) for b in r]
+    # window i (the bar it ends on) is closes[i - bw_len + 1 : i + 1] for i = bw_len - 1 .. len - 1; the rank reads the last rank_len of the first
+    # len - bw_len + 1 - lag of them, i.e. the windows ending on i in [first, last]
+    last = len(closes) - 1 - lag
+    first = max(bw_len - 1, last - rank_len + 1)
     widths: List[float] = []
-    for i in range(bw_len - 1, len(closes)):
+    for i in range(first, last + 1):
         w = closes[i - bw_len + 1 : i + 1]
         m = sum(w) / bw_len
         sd = math.sqrt(sum((x - m) ** 2 for x in w) / bw_len)
         widths.append(4.0 * sd / m if m > 0 else 0.0)
-    used = widths[: len(widths) - lag] if lag else widths
-    hist = used[-rank_len:]
+    hist = widths
     rank = sum(1 for x in hist if x <= hist[-1]) / len(hist)
     e50 = _ema_list(closes, 50)
     slope = (e50[-1] - e50[-11]) / e50[-11] * 100.0 if e50[-11] > 0 else 0.0
