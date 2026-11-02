@@ -2085,7 +2085,12 @@ def a_set_close_waits_only_its_own_lane_and_never_pauses_other_lanes():
     p.ignore_syms = {}
     p.sets = types.SimpleNamespace(cooldown_bars=2)
     set_waits = [p.symbol_backoff("A-USDT", -0.01, 300.0, "sl", set_lane=True) for _ in range(5)]
-    exit_waits = [p.symbol_backoff("B-USDT", -0.01, 300.0, "sl") for _ in range(3)]
+    # the Exit lane's first wait is the module's COOLDOWN_S, which any check that applies a real overlay leaves at that overlay's value: state its own
+    old_cooldown, pt.COOLDOWN_S = pt.COOLDOWN_S, 9.0
+    try:
+        exit_waits = [p.symbol_backoff("B-USDT", -0.01, 300.0, "sl") for _ in range(3)]
+    finally:
+        pt.COOLDOWN_S = old_cooldown
     p.symbol_backoff("C-USDT", -0.1, 3.0, "sl", set_lane=True)
     fast_ban = p.ignore_syms.get("C-USDT", 0.0) - time.time() > 1700
 
