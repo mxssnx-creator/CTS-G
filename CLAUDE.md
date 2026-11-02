@@ -91,6 +91,10 @@ This section supersedes older operational descriptions and historical measuremen
 - **Not done (open): the drawdown time, the minimum order count and the consistency floor apply to the Base stage only.** Main and Real windows are PF-only (at the Set's floor). An earlier note and the
   Settings text said "the same drawdown time everywhere"; both are corrected. Adding it means a time series for the Main / Real streams in every consumer of `stage_verdicts` (engine, simulator,
   `stage_debug`, the audit's plain chain, the selftest reference) and a decision whether the Real window's drawdown is measured to the decision clock; it was left out on purpose, not forgotten.
+- **Measured, `rankByLane` on against off** (`scripts/trade_sim.py`, walk-forward, per-order validation, 20 symbols, 3 days of 1m history, development window 32 h, split + manual step floors + pause auto,
+  hold Auto off): on **0.406 PF / 284 orders / net -43.7 %**, off (the earlier rank) **0.351 / 313 / -56.7 %**; the simulator's gate and rank match the engine on 60/60 sampled pairs in both arms. The
+  gap (+0.055) is inside the noise of 280-310 orders (+-0.1) and both arms are under 1 with a negative net: the lane rank is a correctness change (execution reads the Set that was validated), not a
+  measured edge. The sealed window was not read. Indications base carried the change (0.381 on 230 orders -> 0.464 on 211).
 - **Costs, audited again for a second deduction (none).** A tape row stores gross `pnl_pct` and net `pnl = pnl_pct - cost` once (`set_engine` scan); `_chain_of` computes `nets = gross - cf` once and
   Main / Real / Real Negative are index lists into that one array; `_score_one` re-normalises a stored net to the current cost from the gross, never from a net; `row_net_pnl_pct` uses a recorded
   `net_pnl_pct` unchanged and otherwise gross minus one PositionCost; executed closes carry the fee-based net and no PositionCost on top; Block's paper rows are gross (`price / entry - 1`) and
