@@ -2949,7 +2949,7 @@ class Pulse:
                      if is_sl else abs(want-price) > max(abs(price)*.0008, 1e-12))
             replace = not old or not covered or (can_replace and (not legal or moved))
             verified = bool(selected) and covered
-            if replace and is_sl and old and covered and legal and moved and hasattr(self.api, "cancel_replace"):
+            if replace and is_sl and old and covered and legal and moved and hasattr(self.api, "cancel_replace") and getattr(self.api, "cancel_replace_ok", True):
                 # moving an existing, covering stop: the venue's atomic cancel-replace. Posting the new stop first is refused (110406: the position's
                 # SL already exists) and was re-sent every pass until BingX banned the order path (x02 2026-11-03)
                 if self.replace_sl(pos, want):
@@ -3013,7 +3013,7 @@ class Pulse:
             return True
         old_oid = real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))
         replaced = False
-        if old_oid and hasattr(self.api, "cancel_replace"):
+        if old_oid and hasattr(self.api, "cancel_replace") and getattr(self.api, "cancel_replace_ok", True):
             body = ctrl_payload(
                 pos.symbol, pos.side, "sl", self.fmt_px(c, new_sl), self.fmt_qty(c, pos.qty),
                 self.cid("u", pos=pos), close_pos=True, with_qty=False,

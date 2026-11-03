@@ -478,8 +478,15 @@ class FastBingX:
         chunk = [_batch_numbers(o) for o in orders[:5]]
         return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
 
+    cancel_replace_ok = True        # False once the venue answered that the endpoint does not exist (BingX mainnet, x01 2026-11-03: 76 refusals in 12 minutes)
+
     def cancel_replace(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.post("/openApi/swap/v2/trade/order/cancelReplace", extra or {})
+        if not self.cancel_replace_ok:
+            return {"code": 100400, "msg": "cancelReplace unsupported on this venue", "error": True, "unsupported": True}
+        r = self.post("/openApi/swap/v2/trade/order/cancelReplace", extra or {})
+        if str(r.get("code")) == "100400" and "not exist" in str(r.get("msg") or "").lower():
+            self.cancel_replace_ok = False            # never asked again this session: the callers move a stop by placing the new one and cancelling the old
+        return r
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
         if not getattr(getattr(self, "bridge", None), "ok", False):

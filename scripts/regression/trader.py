@@ -541,10 +541,37 @@ def a_moved_stop_never_storms_the_order_path():
         finally:
             pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
     src = open(os.path.join(PULSE, "pulse_trader.py")).read()
-    sync_ok = "if replace and is_sl and old and covered and legal and moved and hasattr(self.api, \"cancel_replace\"):" in src and "self.replace_sl(pos, want)" in src
+    sync_ok = ("if replace and is_sl and old and covered and legal and moved and hasattr(self.api, \"cancel_replace\") and getattr(self.api, \"cancel_replace_ok\", True):" in src
+               and "self.replace_sl(pos, want)" in src)
     ok = (out["own"] == ("778", "778", 1, 1) and out["budget"] == (True, 0) and out["cleared"] and sync_ok
           and pt.CTRL_EXISTS_BUDGET < 20 and pt.CTRL_EXISTS_WINDOW_S >= 480)
     return ok, f"own stop (id, second call, refusals after first, after second) {out['own']}; budget spent / posts {out['budget']}; window clears {out['cleared']}; sync moves by cancel-replace {sync_ok}"
+
+
+def an_unsupported_cancel_replace_is_asked_once():
+    """Found live on x01 (BingX mainnet, 2026-11-03): POST /trade/order/cancelReplace answered 100400 "this api is not exist" 76 times in 12 minutes (the demo
+    accepts it). After the first such answer the client never sends it again (cancel_replace_ok False, answered locally), and replace_sl moves a stop the
+    other way: the new stop placed, the old one cancelled."""
+    import bingx_fast as bf
+    posts = []
+
+    class Fx(bf.FastBingX):
+        def __init__(self):
+            self.cancel_replace_ok = True
+
+        def post(self, path, extra=None):
+            posts.append(path)
+            return {"code": 100400, "msg": "this api is not exist,please refer to the API docs https://bingx-api.github.io/docs", "error": True}
+    c = Fx()
+    first = c.cancel_replace({"symbol": "A-USDT"})
+    second = c.cancel_replace({"symbol": "A-USDT"})
+    other = Fx()
+    other.post = lambda path, extra=None: {"code": 80012, "msg": "some other refusal", "error": True}
+    other.cancel_replace({})
+    src = open(os.path.join(PULSE, "pulse_trader.py")).read()
+    guards = src.count('getattr(self.api, "cancel_replace_ok", True)')
+    ok = len(posts) == 1 and first["code"] == 100400 and second.get("unsupported") is True and not c.cancel_replace_ok and other.cancel_replace_ok and guards >= 2
+    return ok, f"posts sent {len(posts)} for two calls; second answered locally {second.get('unsupported')}; an unrelated refusal keeps it on {other.cancel_replace_ok}; guarded call sites {guards}"
 
 
 def unanswered_close_that_never_existed_is_sent_again():
@@ -2666,6 +2693,7 @@ CHECKS = [
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
     ("trader.leverage-is-always-the-exchange-maximum-by-default", leverage_is_always_the_exchange_maximum_by_default),
     ("trader.a-moved-stop-never-storms-the-order-path", a_moved_stop_never_storms_the_order_path),
+    ("trader.an-unsupported-cancel-replace-is-asked-once", an_unsupported_cancel_replace_is_asked_once),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.indications-trailing-volume-is-three-times", indications_trailing_volume_is_three_times),
