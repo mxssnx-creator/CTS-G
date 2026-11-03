@@ -24,6 +24,16 @@ direction, the lower-case letter AGAINST it:
   G            tactic: the newest 1m close moved in the direction (a go candle)
   DD<n>        moderate price drawdown against the signal, 0.5..2.5 ATR over n closes
   LP<n>        the last n closes move in the signal direction (n=1..60)
+  RS<tf>       RSI(14) of the tf-minute series (1 / 5 / 15 / 30) in the with-direction regime: 50..70 for a long, 30..50 for a short;
+  rs<tf>       against it: a dip (RSI under 35 for a long, over 65 for a short)
+  DR<n>        deep drawdown: the close is at least 3 ATR from the n-bar extreme against the direction (n 30..1440); dr<n> at the extreme (under 1 ATR)
+  RC<n>        recovery: the close sits 0.4..0.8 up the n-bar range for a long (0.2..0.6 for a short), recovering off the low; rc<n> at the dip low
+               (under 0.2 of the range for a long, over 0.8 for a short)
+  VW<n>        market price against the n-bar VWAP (n 30..1440): above it by 0..3 ATR for a long (below for a short); vw<n> the other side by 0.5..3 ATR
+  PR<n>        activity against the past: the last 30 bars' mean true range at least 1.2 x that of the n bars before (n 60..1440); pr<n> at most 0.8 x
+  YD<n>        the past: the close against the close n minutes ago (n 240..2880, a day is 1440) moved the signal's way; yd<n> the other way
+  MA<n>        price against its n-bar average (n 20..480): above a rising average for a long (below a falling one for a short); ma<n> stretched the
+               other side by at least 1 ATR (a mean-reversion entry)
 
 `resolve(name)` compiles a composite once (cached); an unknown base or relation gives None, so a misspelt name is never a silent
 always-off vote but an unknown name. `window_of(name)` is the most 1m rows the composite reads.
@@ -149,6 +159,119 @@ def _contraction(rows) -> float:
     return _atr1(rows, 14, n) / prev if prev > 0 else float("nan")
 
 
+_BOUNDS = {"RS": (1, 30), "DR": (30, 1440), "RC": (30, 1440), "VW": (30, 1440), "PR": (60, 1440), "YD": (240, 2880), "MA": (20, 480)}
+
+
+def _rsi_of(rows, tf) -> float:
+    """RSI(14) of the tf-minute series (indication_lib._rsi on the aggregated closes); nan when the series is too short."""
+    from indication_lib import _agg, _rsi, rows_for
+    b = _agg(rows[-rows_for(tf):] if len(rows) > rows_for(tf) else rows, tf)
+    if len(b) < 20:
+        return float("nan")
+    return float(_rsi([float(x[3]) for x in b], 14)[-1])
+
+
+def _market_relation(kind: str, n: int) -> Optional[Tuple[Callable, int]]:
+    """RS / DR / RC / VW / PR / YD / MA: relations on the market's own price, volume and past (see the module docstring); None when n is out of bounds."""
+    up = kind.upper()
+    lo, hi = _BOUNDS[up]
+    if not lo <= n <= hi or (up == "RS" and n not in (1, 5, 15, 30)):
+        return None
+    with_dir = kind == up                    # upper case: with the direction / the regime; lower case: against it (a dip, a mean reversion, the other side)
+    from indication_lib import rows_for
+    if up == "RS":
+        def p(rows, d, base, d0):
+            r = _feat(rows, f"RS{n}", lambda: _rsi_of(rows, n))
+            if r != r:
+                return False, d
+            if with_dir:
+                return (50.0 <= r <= 70.0 if d > 0 else 30.0 <= r <= 50.0), d
+            return (r <= 35.0 if d > 0 else r >= 65.0), d
+        return p, rows_for(n)
+    if up == "DR":
+        def p(rows, d, base, d0):
+            def depth():
+                atr = _atr1(rows, 14, len(rows))
+                if atr <= 0 or len(rows) < n + 2:
+                    return float("nan")
+                w = rows[-n:]
+                c = float(rows[-1][3])
+                return (max(float(x[1]) for x in w) - c) / atr if d > 0 else (c - min(float(x[2]) for x in w)) / atr
+            x = _feat(rows, f"DR{n}:{d}", depth)
+            if x != x:
+                return False, d
+            return (x >= 3.0 if with_dir else x < 1.0), d
+        return p, n + 16
+    if up == "RC":
+        def p(rows, d, base, d0):
+            def pos():
+                if len(rows) < n + 2:
+                    return float("nan")
+                w = rows[-n:]
+                top, bot = max(float(x[1]) for x in w), min(float(x[2]) for x in w)
+                return (float(rows[-1][3]) - bot) / (top - bot) if top > bot else float("nan")
+            x = _feat(rows, f"RC{n}", pos)
+            if x != x:
+                return False, d
+            if with_dir:
+                return (0.4 <= x <= 0.8 if d > 0 else 0.2 <= x <= 0.6), d
+            return (x < 0.2 if d > 0 else x > 0.8), d
+        return p, n + 2
+    if up == "VW":
+        def p(rows, d, base, d0):
+            def dist():
+                if len(rows) < n + 2:
+                    return float("nan")
+                w = rows[-n:]
+                vol = sum(float(x[4]) for x in w)
+                atr = _atr1(rows, 14, len(rows))
+                if vol <= 0 or atr <= 0:
+                    return float("nan")
+                vwap = sum((float(x[1]) + float(x[2]) + float(x[3])) / 3.0 * float(x[4]) for x in w) / vol
+                return (float(rows[-1][3]) - vwap) / atr
+            x = _feat(rows, f"VW{n}", dist) * d
+            if x != x:
+                return False, d
+            return (0.0 <= x <= 3.0 if with_dir else -3.0 <= x <= -0.5), d
+        return p, n + 16
+    if up == "PR":
+        def p(rows, d, base, d0):
+            def ratio():
+                if len(rows) < n + 34:
+                    return float("nan")
+                past = _atr1(rows, n, len(rows) - 30)
+                return _atr1(rows, 30, len(rows)) / past if past > 0 else float("nan")
+            x = _feat(rows, f"PR{n}", ratio)
+            if x != x:
+                return False, d
+            return (x >= 1.2 if with_dir else x <= 0.8), d
+        return p, n + 34
+    if up == "YD":
+        def p(rows, d, base, d0):
+            if len(rows) < n + 2:
+                return False, d
+            mv = (float(rows[-1][3]) - float(rows[-1 - n][3])) * d
+            return (mv > 0 if with_dir else mv < 0), d
+        return p, n + 2
+    # MA
+    def p(rows, d, base, d0):
+        def state():
+            if len(rows) < n + 12:
+                return (float("nan"), float("nan"), float("nan"))
+            c = float(rows[-1][3])
+            now = sum(float(x[3]) for x in rows[-n:]) / n
+            before = sum(float(x[3]) for x in rows[-n - 10:-10]) / n
+            atr = _atr1(rows, 14, len(rows))
+            return (c - now, now - before, atr)
+        dist, slope, atr = _feat(rows, f"MA{n}", state)
+        if dist != dist or atr <= 0:
+            return False, d
+        if with_dir:
+            return (dist * d > 0 and slope * d > 0), d
+        return (dist * d <= -atr), d
+    return p, n + 12
+
+
 def _relation(tok: str) -> Optional[Tuple[Callable, int]]:
     """(predicate(rows, d, base, d0) -> (keep, new_d), 1m rows it reads) for one token, or None when the token is unknown."""
     from indication_lib import rows_for
@@ -168,6 +291,9 @@ def _relation(tok: str) -> Optional[Tuple[Callable, int]]:
                 return 0.5 <= pullback <= 2.5, d
             return p, max(2 * n - 1, 16)
         return None
+    mkt = re.fullmatch(r"(RS|rs|DR|dr|RC|rc|VW|vw|PR|pr|YD|yd|MA|ma)(\d+)", tok)
+    if mkt:
+        return _market_relation(mkt.group(1), int(mkt.group(2)))
     m = _TOKEN.match(tok)
     if not m:
         return None
@@ -291,4 +417,5 @@ def window_of(name: str) -> int:
 
 
 RELATION_TOKENS = ("T5", "T15", "T30", "t5", "t15", "t30", "N15", "B5", "B15", "b15", "M30", "m30", "M60", "m60",
-                   "A", "a", "V", "v", "D", "d", "X", "C", "c", "I", "K", "F", "G")
+                   "A", "a", "V", "v", "D", "d", "X", "C", "c", "I", "K", "F", "G",
+                   "RS5", "rs5", "RS15", "DR240", "dr240", "RC240", "rc240", "VW240", "vw240", "PR480", "pr480", "YD1440", "yd1440", "MA60", "ma60")

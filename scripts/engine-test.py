@@ -103,7 +103,8 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-30-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 30, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-120-symbol-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 120 and abs(float(x01.get("volumeFactor") or 0) - 0.4) < 1e-9,
+        f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')} volumeFactor={x01.get('volumeFactor')} (owner 2026-11-03: x01 runs 120 symbols at volume factor 0.4)")
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-cap", int(x01.get("blockMaxStack") or 0) == 6, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))

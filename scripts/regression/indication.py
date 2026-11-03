@@ -521,6 +521,81 @@ def new_common_families_fire_at_every_range_and_invert():
     return ok, f"names built={built}; fired {fired}; invert flips every signal={inv_ok}"
 
 
+def market_relations_judge_by_their_rules():
+    """RS / DR / RC / VW / PR / YD / MA (owner 2026-11-03: RSI, drawdown, market price and past relations): each token keeps or drops a signal by its written
+    rule on rows built to sit on one side of it; the upper case asks the condition WITH the direction, the lower case against it; the same rows judged
+    for a long and then a short give the matching answers (the feature memo never serves one direction's value to the other); unknown tokens and
+    out-of-range windows are unknown names; a composite's window covers its longest relation; new families fire in both directions."""
+    import indication_rel as rel
+    import indication_extra as ix
+
+    def rows_of(closes, spread=0.5, vol=100.0):
+        return [[c, c + spread, c - spread, c, vol] for c in closes]
+
+    def judge(tok, rows, d):
+        r = rel._relation(tok)
+        return None if r is None else bool(r[0](rows, d, lambda x: None, d)[0])
+
+    flat = [100.0] * 400
+    top_then_drop = [100.0 + 0.5 * i for i in range(100)] + [150.0 - 1.0 * i for i in range(60)] + [90.0] * 100       # far under the 240-bar high
+    at_high = [100.0 + 0.1 * i for i in range(400)]
+    mid_range = [100.0] * 100 + [110.0] * 100 + [100.0] * 100 + [105.0 + (i % 2) * 0.01 for i in range(100)]            # close ~ 0.5 up a 100..110 range
+    at_low = [100.0] * 100 + [110.0] * 100 + [100.2] * 200                                                              # a 100..110 range, the close at its bottom
+    rise = [100.0 + 0.2 * i for i in range(400)]
+    fall = [180.0 - 0.2 * i for i in range(400)]
+    wavy_up = [100.0 + 0.05 * i + (0.6 if i % 2 else -0.5) for i in range(400)]
+    wavy_down = [140.0 - 0.25 * i + (0.3 if i % 2 else -0.3) for i in range(400)]
+    slow_rise = [100.0 + 0.01 * i for i in range(400)]                                                                  # about 1.2 ATR above its VWAP
+    got = {
+        "DR deep long": judge("DR240", rows_of(top_then_drop), 1), "DR at high long": judge("DR240", rows_of(at_high), 1), "dr at high long": judge("dr240", rows_of(at_high), 1),
+        "DR deep short": judge("DR240", rows_of(top_then_drop), -1),                                   # no 240-bar low under the close: not a deep short drawdown
+        "RC mid long": judge("RC240", rows_of(mid_range), 1), "rc low long": judge("rc240", rows_of(at_low), 1), "RC low long": judge("RC240", rows_of(at_low), 1),
+        "VW above long": judge("VW240", rows_of(slow_rise), 1), "VW above short": judge("VW240", rows_of(slow_rise), -1), "vw above short": judge("vw240", rows_of(slow_rise), -1),
+        "vw above long": judge("vw240", rows_of(slow_rise), 1), "VW far long": judge("VW240", rows_of(rise), 1),
+        "YD up long": judge("YD240", rows_of(rise), 1), "yd up long": judge("yd240", rows_of(rise), 1), "YD up short": judge("YD240", rows_of(rise), -1), "yd up short": judge("yd240", rows_of(rise), -1),
+        "MA rising long": judge("MA60", rows_of(rise), 1), "MA rising short": judge("MA60", rows_of(rise), -1), "ma stretched long": judge("ma60", rows_of(fall[:-1] + [fall[-1] - 6.0]), 1),
+        "RS rising long": judge("RS1", rows_of(wavy_up), 1), "rs falling long": judge("rs1", rows_of(wavy_down), 1), "rs rising long": judge("rs1", rows_of(wavy_up), 1),
+    }
+    # PR: the last 30 bars wide against a quiet past (active), and quiet against a wide past
+    quiet = [100.0] * 300
+    wide_tail = rows_of(quiet, 0.2) [:-30] + rows_of(quiet, 3.0)[-30:]
+    wide_past = rows_of(quiet, 3.0)[:-30] + rows_of(quiet, 0.2)[-30:]
+    got["PR active"], got["pr active"] = judge("PR200", wide_tail, 1), judge("pr200", wide_tail, 1)
+    got["PR quiet"], got["pr quiet"] = judge("PR200", wide_past, 1), judge("pr200", wide_past, 1)
+    want = {"DR deep long": True, "DR at high long": False, "dr at high long": True, "DR deep short": False,
+            "RC mid long": True, "rc low long": True, "RC low long": False,
+            "VW above long": True, "VW above short": False, "vw above short": True, "vw above long": False, "VW far long": False,
+            "YD up long": True, "yd up long": False, "YD up short": False, "yd up short": True,
+            "MA rising long": True, "MA rising short": False, "ma stretched long": True,
+            "RS rising long": True, "rs falling long": True, "rs rising long": False,
+            "PR active": True, "pr active": False, "PR quiet": False, "pr quiet": True}
+    bad = {k: (got[k], want[k]) for k in want if got[k] != want[k]}
+    unknown = [t for t in ("RS7", "DR10", "YD100", "MA5", "PR10", "XX5", "VW5000") if rel._relation(t) is not None]
+    win = rel.window_of("rsidiv_n21_t5@RS15@DR240@YD1440")
+    both = {}
+    import random as _random
+    rnd = _random.Random(3)
+    price, syn = 100.0, []
+    for _ in range(3000):
+        o_ = price
+        price *= 1.0 + rnd.gauss(0.0, 0.004)
+        syn.append([o_, max(o_, price) * (1 + abs(rnd.gauss(0, 0.002))), min(o_, price) * (1 - abs(rnd.gauss(0, 0.002))), price, 100.0 + rnd.random() * 50.0])
+    for fam in ("rsidiv", "rsishort", "rsireg", "ibs"):
+        up = dn = 0
+        for n in (5, 14, 34, 55):
+            f = ix.INDICATORS[f"{fam}_n{n}_t1"]
+            w = ix.window_of(f"{fam}_n{n}_t1")
+            for i in range(w, len(syn), 9):
+                sig = f(syn[i - w + 1:i + 1])
+                if sig:
+                    up += sig[0] > 0
+                    dn += sig[0] < 0
+        both[fam] = (up, dn)
+    fam_ok = all(u > 0 and d_ > 0 for u, d_ in both.values())
+    ok = not bad and not unknown and win >= 1442 and fam_ok
+    return ok, f"{len(want) - len(bad)}/{len(want)} relation cases as written{(' bad ' + str(bad)) if bad else ''}; unknown tokens accepted {unknown}; composite window {win}; families long/short {both}"
+
+
 CHECKS = [
     ("indication.active-and-common-reach-replay-and-live-signal", active_and_common_reach_replay_and_live_signal),
     ("indication.ranges-forwarded-to-set-signal", indication_ranges_are_forwarded_to_the_set_signal),
@@ -535,6 +610,7 @@ CHECKS = [
     ("indication.relations-compose-by-their-rules", relations_compose_any_indicator_causally_and_by_their_rules),
     ("indication.thirty-minute-names-fire", thirty_minute_names_fire_and_read_their_history),
     ("indication.new-common-families-fire-at-every-range-and-invert", new_common_families_fire_at_every_range_and_invert),
+    ("indication.market-relations-judge-by-their-rules", market_relations_judge_by_their_rules),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

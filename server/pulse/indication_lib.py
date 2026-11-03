@@ -1026,6 +1026,75 @@ def f_emax(b, n):
     return None
 
 
+def _sma_at(c: Sequence[float], i: int, n: int) -> float:
+    w = c[max(0, i - n + 1): i + 1]
+    return sum(w) / len(w) if w else 0.0
+
+
+def f_rsidiv(b, n):
+    """RSI(14) divergence over n bars: the close makes a lower low than the previous half of the window while the RSI makes a higher low (long); a
+    higher high with a lower RSI high (short). Confirmed by the newest close moving the signal's way."""
+    if len(b) < max(2 * n, 30):
+        return None
+    c = _cl(b)
+    r = _rsi(c, 14)
+    h = n // 2
+    cur_c, old_c = c[-h:], c[-n:-h]
+    cur_r, old_r = r[-h:], r[-n:-h]
+    if min(cur_c) < min(old_c) and min(cur_r) > min(old_r) and c[-1] > c[-2]:
+        return 1, _conf(0.6, min(0.2, (min(cur_r) - min(old_r)) / 100.0))
+    if max(cur_c) > max(old_c) and max(cur_r) < max(old_r) and c[-1] < c[-2]:
+        return -1, _conf(0.6, min(0.2, (max(old_r) - max(cur_r)) / 100.0))
+    return None
+
+
+def f_rsi2(b, n):
+    """Short-term RSI(2) pullback inside the trend of an n-bar average: RSI(2) under 10 with the close above the average (long), over 90 with the
+    close below it (short)."""
+    if len(b) < n + 5:
+        return None
+    c = _cl(b)
+    r2 = _rsi(c, 2)[-1]
+    m = _sma_at(c, len(c) - 1, n)
+    if r2 < 10.0 and c[-1] > m:
+        return 1, _conf(0.6, min(0.2, (10.0 - r2) / 50.0))
+    if r2 > 90.0 and c[-1] < m:
+        return -1, _conf(0.6, min(0.2, (r2 - 90.0) / 50.0))
+    return None
+
+
+def f_rsireg(b, n):
+    """RSI(n) range shift: it crosses up through 60 after holding above 40 for the n bars before (a bull regime starts: long); down through 40 after holding
+    under 60 (bear regime: short)."""
+    if len(b) < 2 * n + 4:
+        return None
+    r = _rsi(_cl(b), n)
+    hold = r[-n - 1:-1]
+    if r[-2] < 60.0 <= r[-1] and min(hold) > 40.0:
+        return 1, _conf(0.6, min(0.2, (r[-1] - 60.0) / 40.0))
+    if r[-2] > 40.0 >= r[-1] and max(hold) < 60.0:
+        return -1, _conf(0.6, min(0.2, (40.0 - r[-1]) / 40.0))
+    return None
+
+
+def f_ibs(b, n):
+    """Internal bar strength: the close in the bar's range under 0.2 in an up-trend (above the n-bar average) is a pullback long; over 0.8 in a down-trend
+    a pullback short."""
+    if len(b) < n + 2:
+        return None
+    c = _cl(b)
+    h, lo = float(b[-1][1]), float(b[-1][2])
+    if h <= lo:
+        return None
+    ibs = (c[-1] - lo) / (h - lo)
+    m = _sma_at(c, len(c) - 1, n)
+    if ibs < 0.2 and c[-1] > m:
+        return 1, _conf(0.6, min(0.2, (0.2 - ibs)))
+    if ibs > 0.8 and c[-1] < m:
+        return -1, _conf(0.6, min(0.2, (ibs - 0.8)))
+    return None
+
+
 FAMILIES: Dict[str, Tuple[str, Callable]] = {
     # name: (group, function)
     "ker": ("trend", f_ker), "chop": ("trend", f_chop), "aroon": ("trend", f_aroon), "vortex": ("trend", f_vortex),
@@ -1042,6 +1111,7 @@ FAMILIES: Dict[str, Tuple[str, Callable]] = {
     "obv": ("volume", f_obv), "cmf": ("volume", f_cmf), "udvol": ("volume", f_udvol), "closeloc": ("volume", f_closeloc),
     "supertrend": ("trend", f_supertrend), "trix": ("trend", f_trix), "tsi": ("trend", f_tsi), "elder": ("trend", f_elder), "emax": ("trend", f_emax),
     "squeeze": ("break", f_squeeze), "willr": ("revert", f_willr), "stochrsi": ("revert", f_stochrsi),
+    "rsidiv": ("revert", f_rsidiv), "rsishort": ("revert", f_rsi2), "rsireg": ("trend", f_rsireg), "ibs": ("revert", f_ibs),
 }
 
 
