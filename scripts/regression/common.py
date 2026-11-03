@@ -63,6 +63,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["holdAuto"] = True         # fixtures keep the hold Auto Mode (pinned counts, golden, the hold checks); the shipped default is off
     ov["setScratchEnabled"] = True  # fixtures keep the Set-lane scratch exit (pinned counts, golden); the scratch checks ask for it off
     ov["exitSetsByPack"] = {}     # fixtures keep every pack's Exit Sets (pinned counts, golden); the shipped overlays switch the indications pack's off
+    ov["tpRanges"] = {"wide": False}  # fixtures keep the earlier grid (shipped grid ends at 3.2 %); the range checks switch Wide on themselves
     ov["slMaxByRange"] = {}       # fixtures keep every SL ratio in every TP range (pinned counts, golden); the shipped overlays cap Long / Wide at 1.0
     ov["volumeByPackKind"] = {}   # fixtures size every Set at the volume factor (the shipped overlays: indications trailing x 3)
     ov["setStepAdapt"] = True     # fixtures keep the step-adapt behaviour their checks pin; the shipped default is off

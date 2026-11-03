@@ -5,7 +5,7 @@ import { evidencePfText, feeRateText, feeRows } from "./evidence-view.ts";
 test("finite high PF is distinct from no loss, flat, missing and empty", () => {
   assert.equal(evidencePfText({ pfState: "finite", pfFinite: 1000 }, 2), "1000.0000");
   assert.equal(evidencePfText({ pf: 99, pfState: "no-loss" }, 5), "No observed losses");
-  assert.equal(evidencePfText({ pf: 0, pfState: "flat" }, 5), "Flat (PF undefined)");
+  assert.equal(evidencePfText({ pf: 0, pfState: "flat" }, 5), "1.00 (neutral: every close nets zero)");
   assert.equal(evidencePfText({ pf: 99 }, 0), "— (no sample)");
   assert.equal(evidencePfText({ pf: 99 }, 5), "— (evidence unavailable)");
   assert.equal(evidencePfText({ pf: 1000 }, 5), "1000.0000 (legacy)");

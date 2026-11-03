@@ -8,7 +8,7 @@ test("browser calculations preserve finite high PF, no-loss, flat and empty evid
   for (const [nets, state, display] of [
     [[1, -.001], "finite", "1000.0000"],
     [[.1, .2], "no-loss", "No observed losses"],
-    [[0, 0], "flat", "Flat (PF undefined)"],
+    [[0, 0], "flat", "1.00 (neutral: every close nets zero)"],
     [[], "empty", "— (no sample)"],
   ] as const) {
     const result = calculate([...nets]);
@@ -72,4 +72,16 @@ test("last-N cost PF: PF above 1 exactly when the net is positive", () => {
     assert.equal(m.pf > 1, positive);
     assert.equal(m.netPct > 0, positive);
   }
+});
+
+test("PF is neutral at 1 and the cost ratio 1.10 is an average of +1 PositionCost", () => {
+  const cost = 0.12;
+  const cf = cost / 100;
+  const rows = (gross: number[]) => gross.map((g, t) => ({ t, pnl: g, pnl_pct: g }));
+  assert.equal(lastNCostPf(rows([cf, cf, cf]), 3, cost).pf, 1); // every close nets exactly zero
+  assert.equal(lastNCostPf(rows([cf + 0.004, cf - 0.004]), 2, cost).pf, 1); // gains equal losses
+  assert.equal(lastNCostPf([], 3, cost).pf, 0); // empty window
+  assert.equal(lastNCostPf(rows([2 * cf, 2 * cf]), 2, cost).ratio, 1.1); // +1 PositionCost each
+  assert.equal(lastNCostPf(rows([3 * cf, cf]), 2, cost).ratio, 1.1); // +2 and 0: average +1
+  assert.equal(lastNCostPf(rows([0, 0]), 2, cost).ratio, 0.9); // -1 PositionCost each
 });

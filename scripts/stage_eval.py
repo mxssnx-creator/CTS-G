@@ -205,7 +205,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     gp = sum(x - cf for x in w if x - cf > 0)
     gl = -sum(x - cf for x in w if x - cf < 0)
     n = len(w)
-    pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)     # rounded as last_n_cost_pf does
+    pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else (1.0 if n else 0.0))     # rounded as last_n_cost_pf does (neutral 1.0 on all-zero results)
     # drawdown time over the last gate_window closes, open drawdown measured to now (se.drawdown_time)
     eq = peak = 0.0
     peak_t = wt[0] if n else now
@@ -229,7 +229,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     def _pf(v):
         g = sum(x - cf for x in v if x - cf > 0)
         l_ = -sum(x - cf for x in v if x - cf < 0)
-        return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
+        return g / l_ if l_ > 0 else (99.0 if g > 0 else (1.0 if len(v) else 0.0))
     h = n // 2
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,

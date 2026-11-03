@@ -19,7 +19,7 @@ from position_cost import cost_as_frac
 def _pf(values):
     gp = sum(x for x in values if x > 0)
     gl = -sum(x for x in values if x < 0)
-    return gp / gl if gl else (99.0 if gp else 0.0)
+    return gp / gl if gl else (99.0 if gp else (1.0 if len(values) else 0.0))     # neutral 1.0 on results that all net zero
 
 
 class SetBlockBook:

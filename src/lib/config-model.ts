@@ -89,12 +89,12 @@ export function capSymbols(list: string[]): string[] {
 }
 // Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
 export const GATE_MIN_PF_DEFAULT = 1.25;
-// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.05).
-export const MIN_PF_FLOOR = 1.05;
+// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.02, owner 2026-11-03; was 1.05).
+export const MIN_PF_FLOOR = 1.02;
 const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
 /** Defaults for the last-N window classes and the separate Signal source. */
 export const PF_TYPE_DEFAULTS = {
-  minPfMicro: 1.05,
+  minPfMicro: 1.02,
   minPfMinimal: 1.1,
   minPfShort: 1.15,
   minPfMedium: 1.25,

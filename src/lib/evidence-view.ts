@@ -3,7 +3,7 @@ import type { CostModel, PfEvidence } from "./live-stats.ts";
 export function evidencePfText(value: (PfEvidence & { pf?: number | null }) | null | undefined, count?: number) {
   if (!value || count === 0 || value.pfState === "empty") return "— (no sample)";
   if (value.pfState === "no-loss") return "No observed losses";
-  if (value.pfState === "flat") return "Flat (PF undefined)";
+  if (value.pfState === "flat") return "1.00 (neutral: every close nets zero)";
   if (value.pfState === "finite" && value.pfFinite != null && Number.isFinite(value.pfFinite)) return value.pfFinite.toFixed(4);
   if (value.pf != null && Number.isFinite(value.pf) && value.pf >= 0 && value.pf !== 99 && count != null && count > 0) return `${value.pf.toFixed(4)} (legacy)`;
   return "— (evidence unavailable)";

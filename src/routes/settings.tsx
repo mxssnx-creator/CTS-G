@@ -2,6 +2,7 @@ import { SetsOverview } from "@/components/sets-overview";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  MIN_PF_FLOOR,
   blockTable,
   bool,
   DEFAULT_OVERLAY,
@@ -334,7 +335,7 @@ function SettingsPage() {
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
-                  min={1.05}
+                  min={MIN_PF_FLOOR}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.minPf, overlay.positionCostPct)}
@@ -786,7 +787,7 @@ function SettingsPage() {
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
-                  min={1.05}
+                  min={MIN_PF_FLOOR}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
@@ -1014,7 +1015,7 @@ function SettingsPage() {
                 <Slider
                   label="Short Range · min PF"
                   value={overlay.shortRangeMinPf}
-                  min={1.05}
+                  min={MIN_PF_FLOOR}
                   max={2.3}
                   step={0.02}
                   hint={overlay.minPfBySize !== false ? "The window-size PF controls currently take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
@@ -1107,7 +1108,7 @@ function SettingsPage() {
                 <Slider
                   label="Exit min PF"
                   value={overlay.exitMinPf}
-                  min={1.05}
+                  min={MIN_PF_FLOOR}
                   max={2.3}
                   step={0.02}
                   hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
@@ -1585,7 +1586,7 @@ function SettingsPage() {
                 <Num
                   label="Min PF"
                   value={overlay.dcaMinPf}
-                  min={1.05}
+                  min={MIN_PF_FLOOR}
                   max={1.5}
                   step={0.05}
                   onChange={(v) => patch("dcaMinPf", v)}
@@ -2179,7 +2180,7 @@ function PfWindowControls({
           <Slider
             label={`${name} · min PF`}
             value={overlay[pfKey]}
-            min={1.05}
+            min={MIN_PF_FLOOR}
             max={2.5}
             step={0.01}
             hint={`default ${PF_TYPE_DEFAULTS[pfKey].toFixed(2)} · windows of up to ${overlay[nKey]} orders`}
@@ -2199,7 +2200,7 @@ function PfWindowControls({
       <Slider
         label="Long · min PF"
         value={overlay.minPfLong}
-        min={1.05}
+        min={MIN_PF_FLOOR}
         max={3}
         step={0.01}
         hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders`}

@@ -334,6 +334,48 @@ def a_set_verdict_ignores_every_other_set():
     return before == after, f"{len(probe)} probe Sets; fields equal after {len(b.by_idx) - len(probe)} other Sets were replaced by noise: {before == after}"
 
 
+def every_tp_range_builds_replays_and_exits_at_its_own_target():
+    """Owner 2026-11-03: every TP step range works. With Micro .. Wide on (Long / Wide at SL ratio 1.0 at most, as shipped), both packs build base Sets in every
+    range; the replay gives every range orders, the base Sets of every range leave by their own target, and every target exit sits exactly at +TP =
+    step x 0.1 % (every stop at -SL), Wide included (3.3 .. 5.0 %); the shipped overlays switch every range on."""
+    import json as _j, os as _o
+    from position_cost import cost_as_frac, tp_range_of
+    from common import PULSE
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "stagesEnabled": True, "setGateWindow": 20, "setMaxDdtHours": 36, "setStepMax": 50, "setMinStep": 2,
+                      "tpRanges": {"micro": True, "minimal": True, "short": True, "normal": True, "long": True, "wide": True},
+                      "slMaxByRange": {"long": 1.0, "wide": 1.0}, "stratIndications": True, "stratGeneral": True, "setSlRatios": [0.5, 1.0, 2.0]}))
+    for i in range(4):
+        b.bars[f"S{i}-USDT"] = synth_bars(31 + i, 1500, drift=0.0012 if i % 2 == 0 else -0.0012, vol=0.006)
+    b.replay_all(now=T0)
+    built, orders, tps, worst_tp, worst_sl = {}, {}, {}, 0.0, 0.0
+    for st in b.by_idx:
+        if st.kind != "base":
+            continue
+        rng = tp_range_of(st.step)
+        built.setdefault((st.pack, rng), 0)
+        built[(st.pack, rng)] += 1
+        sl_f, tp_f = se.lane_fracs(st, b.cost_pct, b.sl_min_steps)
+        assert abs(tp_f - st.step * 0.001) < 1e-12, st.id
+        for r in st.hist:
+            orders[rng] = orders.get(rng, 0) + 1
+            why = str(r.get("reason") or "").split(":")[0]
+            if why == "tp":
+                tps[rng] = tps.get(rng, 0) + 1
+                worst_tp = max(worst_tp, abs(float(r["pnl_pct"]) - tp_f))
+            elif why == "sl":
+                worst_sl = max(worst_sl, abs(float(r["pnl_pct"]) + sl_f))
+    ranges = ("micro", "minimal", "short", "normal", "long", "wide")
+    every_built = all(built.get((p, r), 0) > 0 for p in ("general", "indications") for r in ranges)
+    every_order = all(orders.get(r, 0) > 0 for r in ranges)
+    every_tp = all(tps.get(r, 0) > 0 for r in ranges)
+    files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")]
+    shipped = all(all((_j.load(open(f)).get("tpRanges") or {}).get(r, True) for r in ranges) for f in files)
+    ok = every_built and every_order and every_tp and worst_tp < 1e-9 and worst_sl < 1e-9 and shipped
+    return ok, (f"base Sets per (pack, range) {dict(sorted(built.items()))}; orders {orders}; target exits {tps}; target at +TP (max deviation {worst_tp:.1e}), "
+                f"stop at -SL ({worst_sl:.1e}); shipped overlays switch every range on: {shipped}")
+
+
 def costs_are_applied_once_and_lanes_sit_at_their_distances():
     """The replay's rows: net = gross move minus one PositionCost; a stop exit sits at -SL and a target exit at +TP of the Set's lane distances
     (set_engine.lane_fracs); the chain reads the net; a live close and a replay row of the same gross move land on the same net result."""
@@ -715,4 +757,5 @@ CHECKS = [
     ("stages.the-statistics-relations-hold", the_statistics_relations_hold),
     ("stages.set-and-lane-ids-never-collide", set_and_lane_ids_never_collide),
     ("stages.costs-are-applied-once-and-lanes-sit-at-their-distances", costs_are_applied_once_and_lanes_sit_at_their_distances),
+    ("stages.every-tp-range-builds-replays-and-exits-at-its-own-target", every_tp_range_builds_replays_and_exits_at_its_own_target),
 ]

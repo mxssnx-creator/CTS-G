@@ -45,6 +45,8 @@ def pf(gp, gl):
 
 
 def acc_pf(vals):
+    if vals and not any(vals):
+        return 1.0                      # every result nets exactly zero: neutral
     return pf(sum(v for v in vals if v > 0), -sum(v for v in vals if v < 0))
 
 

@@ -6602,7 +6602,7 @@ class Pulse:
                 "wins": sum(1 for x in pnls if x > 0),
                 "losses": sum(1 for x in pnls if x < 0),
                 "net": round(sum(pnls), 6),
-                "pf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0), 4),
+                "pf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else (1.0 if pnls else 0.0)), 4),     # neutral 1.0 on results that all net zero
                 "maxDdS": d.get("maxS"),
                 "avgDdS": d.get("avgS"),
             })

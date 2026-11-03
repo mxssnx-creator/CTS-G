@@ -324,7 +324,7 @@ def processed_flag(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[fl
     if e - s0 < gate_min:
         return False
     g, l_ = gpre[e] - gpre[s0], lpre[e] - lpre[s0]
-    pf = round(g / l_, 4) if l_ > 0 else (99.0 if g > 0 else 0.0)
+    pf = round(pf_of(g, l_, e - s0), 4)
     if pf + 1e-9 < floor:
         return False
     return _base_tail_ok(ts, nets, gpre, lpre, entry_t, e, s0, max_dd_s, consistency)
@@ -349,8 +349,10 @@ def parse_windows(raw: Any, default: Tuple[int, ...]) -> Tuple[int, ...]:
     return tuple(sorted(out)) or tuple(default)
 
 
-def pf_of(g: float, l_: float) -> float:
-    return g / l_ if l_ > 0 else (99.0 if g > 0 else 0.0)
+def pf_of(g: float, l_: float, n: int = 0) -> float:
+    """Gains over losses of net results. No loss: 99 (the no-loss sentinel) with a gain; with neither, 1.0 (neutral) when n > 0 results were read, else 0
+    (an empty window)."""
+    return g / l_ if l_ > 0 else (99.0 if g > 0 else (1.0 if n > 0 else 0.0))
 
 
 def lane_rank_stats(nets: Sequence[float], cf: float) -> Tuple[int, float, float, float, float]:
@@ -363,7 +365,7 @@ def lane_rank_stats(nets: Sequence[float], cf: float) -> Tuple[int, float, float
         return (0, 0.0, 0.0, 0.0, 0.0)
 
     def pf(v: Sequence[float]) -> float:
-        return pf_of(sum(x for x in v if x > 0), -sum(x for x in v if x < 0))
+        return pf_of(sum(x for x in v if x > 0), -sum(x for x in v if x < 0), len(v))
     half = n // 2
     old, new = (pf(w[:half]), pf(w[half:])) if n >= 4 else (pf(w), pf(w))
     tail = w[-25:]
@@ -434,7 +436,7 @@ def _base_tail_ok(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[flo
 
         def _pf(a: int, b: int) -> float:
             g_, l2 = gpre[b] - gpre[a], lpre[b] - lpre[a]
-            return g_ / l2 if l2 > 0 else (99.0 if g_ > 0 else 0.0)
+            return pf_of(g_, l2, b - a)
         if min(_pf(s0, h), _pf(h, e)) + 1e-9 < consistency:
             return False
     if e <= s0 or entry_t - ts[s0] < max_dd_s:
@@ -469,7 +471,7 @@ def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequenc
         if lookback_s is not None:
             s0 = max(s0, bisect.bisect_left(ts, t - lookback_s))
         gp, gl = g[e] - g[s0], l_[e] - l_[s0]
-        return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), e - s0
+        return pf_of(gp, gl, e - s0), e - s0
     ref_pf, _ = pf_n(0)
     best, best_pf = 0, ref_pf
     for c in range(1, len(cands)):
@@ -3382,7 +3384,7 @@ class SetBook:
             visible = [r for r in rows if scoring_cutoff is None or finite(r[0]) >= scoring_cutoff]
             w = [finite(r[4]) - cf for r in visible[-self.hold_auto_max:]]
             gp_, gl_ = sum(x for x in w if x > 0), -sum(x for x in w if x < 0)
-            return (gp_ / gl_ if gl_ > 0 else (99.0 if gp_ > 0 else 0.0)), len(w)
+            return pf_of(gp_, gl_, len(w)), len(w)
 
         ref_pf, ref_n = judge(base)
         best = (ref_pf, 0, base, ref_n)
@@ -3654,7 +3656,7 @@ class SetBook:
         if half >= 1:
             def _pf(v: List[float]) -> float:
                 gp_, gl_ = sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
-                return gp_ / gl_ if gl_ > 0 else (99.0 if gp_ > 0 else 0.0)
+                return pf_of(gp_, gl_, len(v))
             st.gate_pf_old, st.gate_pf_new = round(_pf(win[:half]), 4), round(_pf(win[half:]), 4)
         else:
             st.gate_pf_old = st.gate_pf_new = 0.0
@@ -4265,8 +4267,8 @@ class SetBook:
         def pool(sts: List[SetState]) -> Dict[str, Any]:
             gp = sum(x.gate_gp for x in sts)
             gl = sum(x.gate_gl for x in sts)
-            pf = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
             n = sum(x.gate_n for x in sts)
+            pf = round(pf_of(gp, gl, n), 4)
             return {"pf": pf, "n": n, "sets": len(sts), **pf_evidence(gp, gl, n)}
         cf_ = cost_as_frac(self.cost_pct)
 
@@ -4320,12 +4322,12 @@ class SetBook:
                                        else self.floor_for(self.gate_window, pack))}
         main_pass = [x for x in base_only if self._main_pf_pass(x)]
         rgp, rgl = sum(x.main_gp for x in main_pass), sum(x.main_gl for x in main_pass)
-        main = {"pf": round(rgp / rgl, 4) if rgl > 0 else (99.0 if rgp > 0 else 0.0), "n": sum(x.main_n for x in main_pass), "sets": len(main_pass),
+        main = {"pf": round(pf_of(rgp, rgl, sum(x.main_n for x in main_pass)), 4), "n": sum(x.main_n for x in main_pass), "sets": len(main_pass),
                 "on": self.main_on, "lastN": self.main_n}
         agp, agl = sum(x.main_gp for x in valid), sum(x.main_gl for x in valid)
-        main_all_lanes = {"pf": round(pf_of(agp, agl), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": self.main_n}
+        main_all_lanes = {"pf": round(pf_of(agp, agl, sum(x.main_n for x in valid)), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": self.main_n}
         pgp, pgl = sum(x.main_gp for x in base_only), sum(x.main_gl for x in base_only)
-        processed = {"pf": round(pgp / pgl, 4) if pgl > 0 else (99.0 if pgp > 0 else 0.0), "n": sum(x.main_n for x in base_only),
+        processed = {"pf": round(pf_of(pgp, pgl, sum(x.main_n for x in base_only)), 4), "n": sum(x.main_n for x in base_only),
                      "sets": len(base_only), "orders": sum(int(x.proc_total) for x in base_only), "lastN": self.main_n, "source": "paper"}
         pos = [x for x in valid if self.validation_lane(x) == "pos"]
         neg = [x for x in valid if self.validation_lane(x) == "neg"]

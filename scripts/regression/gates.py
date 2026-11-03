@@ -378,14 +378,14 @@ def default_max_drawdown_time_is_24_hours():
 
 
 def every_window_asks_the_minimum_pf_of_its_size():
-    """Minimum PF by window size (minPfBySize, default on): up to 5 orders Micro 1.05, up to 10 Minimal 1.10, up to 20 Short 1.15, up to
+    """Minimum PF by window size (minPfBySize, default on): up to 5 orders Micro 1.02 (owner 2026-11-03, was 1.05), up to 10 Minimal 1.10, up to 20 Short 1.15, up to
     35 Medium 1.25, above Long 1.5; the Base long window (50) asks 1.5, the Base short (25) and Main static (25) 1.25, the Real window (15)
-    1.15, the Main short windows 5 / 10 1.05 / 1.10. Off: setMinPf for every window. A class is never under MIN_PF_FLOOR (1.05)."""
+    1.15, the Main short windows 5 / 10 1.05 / 1.10. Off: setMinPf for every window. A class is never under MIN_PF_FLOOR (1.02)."""
     import set_engine as se
     from position_cost import MIN_PF_FLOOR
     b = SetBook(); b.load(overlay(minPfBySize=True))
     got = {n: b.floor_for(n, "indications") for n in (1, 5, 6, 10, 15, 20, 25, 35, 36, 50)}
-    want = {1: 1.05, 5: 1.05, 6: 1.10, 10: 1.10, 15: 1.15, 20: 1.15, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}
+    want = {1: 1.02, 5: 1.02, 6: 1.10, 10: 1.10, 15: 1.15, 20: 1.15, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}
     off = SetBook(); off.load(overlay(minPfBySize=False, setMinPf=1.3))
     low = SetBook(); low.load(overlay(minPfBySize=True, minPfMicro=0.9))
     P = b.stage_params("indications")
@@ -452,7 +452,7 @@ def signal_floor_is_separate_from_window_classes():
     ordinary = [b.floor_for(n, "indications") for n in (5, 15, 25, 50)]
     b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=2.7))
     changed = [b.floor_for(5, "signals"), b.stage_params("signal.indicator").floor_for(50)]
-    ok = values == [2.2] * 4 and stage == values and ordinary == [1.05, 1.15, 1.25, 1.5] and changed == [2.7, 2.7]
+    ok = values == [2.2] * 4 and stage == values and ordinary == [1.02, 1.15, 1.25, 1.5] and changed == [2.7, 2.7]
     return ok, f"signals={values}, stage={stage}, ordinary={ordinary}, changed={changed}"
 
 
@@ -464,7 +464,7 @@ def pf_defaults_match_every_shipped_overlay():
     from common import ROOT, PULSE
     from position_cost import PF_BY_SIZE_DEFAULTS
     want = dict(PF_BY_SIZE_DEFAULTS)      # the one table; the desk, overlays and presets must equal it
-    assert want == {"minPfMicro": 1.05, "minPfMinimal": 1.10, "minPfShort": 1.15,
+    assert want == {"minPfMicro": 1.02, "minPfMinimal": 1.10, "minPfShort": 1.15,
                     "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}, "owner values moved: update the docs and the desk with them"
     src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     block = src.split("export const PF_TYPE_DEFAULTS = {", 1)[1].split("} as const;", 1)[0]

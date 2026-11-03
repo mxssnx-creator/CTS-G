@@ -108,8 +108,8 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
             gl_net += abs(net)
         holds.append(_f(r.get("hold_s")))
     cost = last_n_cost_pf(src, len(src) or 1, cost_pct) if src else last_n_cost_pf([], 1, cost_pct)
-    classic = 99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0)
-    classic_net = 99.0 if gp_net > 0 and gl_net <= 0 else (gp_net / gl_net if gl_net else 0.0)
+    classic = 99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else (1.0 if src else 0.0))           # neutral 1.0 when every close nets zero
+    classic_net = 99.0 if gp_net > 0 and gl_net <= 0 else (gp_net / gl_net if gl_net else (1.0 if src else 0.0))
     return {
         "n": len(src),
         "wins": wins,

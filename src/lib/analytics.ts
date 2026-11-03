@@ -193,7 +193,8 @@ export function lastNCostPf(
   const avgR = count ? rs.reduce((a, b) => a + b, 0) / count : 0;
   const ratio = count ? ratioFromR(avgR) : 1;
   // pf is the decision metric; ratio = 1 + 0.10 x avgR is display only
-  const pf = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
+  // PF neutral = 1: closes that all net exactly zero read 1.0 (server: position_cost.last_n_cost_pf); an empty window 0
+  const pf = gl > 0 ? gp / gl : gp > 0 ? 99 : count ? 1 : 0;
   return {
     n,
     count,

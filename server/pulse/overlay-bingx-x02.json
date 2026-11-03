@@ -186,7 +186,7 @@
     "short": true,
     "normal": true,
     "long": true,
-    "wide": false
+    "wide": true
   },
   "setSlLow": false,
   "trailStepMax": 22,
@@ -258,7 +258,7 @@
   "realStagePaper": true,
   "ddHaltBasis": "session",
   "minPfBySize": true,
-  "minPfMicro": 1.05,
+  "minPfMicro": 1.02,
   "minPfMinimal": 1.1,
   "minPfShort": 1.15,
   "minPfMedium": 1.25,

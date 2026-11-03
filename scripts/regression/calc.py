@@ -98,9 +98,48 @@ def pf_edge_cases():
     be = last_n_cost_pf([{"pnl_pct": 0.0025}, {"pnl_pct": 0.0}], 2, COST)   # nets +0.10% and -0.15%
     neutral = last_n_cost_pf([{"pnl_pct": COST / 100.0}] * 4, 4, COST)     # every trade nets exactly 0
     even = last_n_cost_pf([{"pnl_pct": 0.0030}, {"pnl_pct": 0.0}], 2, COST)  # nets +0.15% and -0.15%
-    ok = (abs(neutral["ratio"] - 1.0) < 1e-9 and neutral["pf"] == 0.0
+    ok = (abs(neutral["ratio"] - 1.0) < 1e-9 and neutral["pf"] == 1.0
           and abs(even["pf"] - 1.0) < 1e-9 and abs(be["pf"] - (0.001 / 0.0015)) < 1e-3)
     return ok, f"neutral.ratio={neutral['ratio']} neutral.pf={neutral['pf']} even.pf={even['pf']}"
+
+
+def pf_is_neutral_at_one_and_ratio_1_1_is_one_positioncost_everywhere():
+    """Owner 2026-11-03: PF neutral = 1, ratio 1.1 = an average of +1 PositionCost. Every PF implementation (position_cost.last_n_cost_pf, set_engine.pf_of /
+    lane_rank_stats / the gate window, set_block, trade_sim, the simulator's gate) reads 1.0 on net results whose gains equal their losses and on results that
+    all net exactly zero (a gross move of exactly one PositionCost), 0 on an empty window, 99 with gains and no loss; the cost ratio is 1.0 at zero net,
+    1.10 at +1 PositionCost on average, 0.90 at -1; no gate floor is under MIN_PF_FLOOR 1.02."""
+    import os as _o, sys as _s
+    import set_engine as se, set_block as sb, position_cost as pc
+    from common import ROOT
+    _s.path.insert(0, _o.path.join(ROOT, "scripts"))
+    import trade_sim as ts
+    cf = COST / 100.0
+    even = [0.004, -0.004, 0.001, -0.001]          # nets: gains = losses
+    flat = [0.0, 0.0, 0.0]
+    got = {
+        "last_n even": last_n_cost_pf([{"pnl_pct": x + cf} for x in even], 4, COST)["pf"],
+        "last_n flat": last_n_cost_pf([{"pnl_pct": cf}] * 3, 3, COST)["pf"],
+        "last_n empty": last_n_cost_pf([], 3, COST)["pf"],
+        "pf_of even": se.pf_of(0.005, 0.005, 4), "pf_of flat": se.pf_of(0.0, 0.0, 3), "pf_of empty": se.pf_of(0.0, 0.0, 0), "pf_of no loss": se.pf_of(0.01, 0.0, 1),
+        "lane_rank even": se.lane_rank_stats(even, cf)[1], "lane_rank flat": se.lane_rank_stats(flat, cf)[1],
+        "set_block even": sb._pf(even), "set_block flat": sb._pf(flat), "set_block empty": sb._pf([]),
+        "trade_sim even": ts.acc_pf(even), "trade_sim flat": ts.acc_pf(flat),
+    }
+    want = {"last_n even": 1.0, "last_n flat": 1.0, "last_n empty": 0.0, "pf_of even": 1.0, "pf_of flat": 1.0, "pf_of empty": 0.0, "pf_of no loss": 99.0,
+            "lane_rank even": 1.0, "lane_rank flat": 1.0, "set_block even": 1.0, "set_block flat": 1.0, "set_block empty": 0.0, "trade_sim even": 1.0, "trade_sim flat": 1.0}
+    bad = {k: v for k, v in got.items() if abs(float(v) - want[k]) > 1e-9}
+    # the gate window on prefix sums: all-zero nets -> PF 1.0, so it fails any floor (>= 1.02) but is never read as a loss-only window
+    ts_ = [1.0, 2.0, 3.0]
+    gpre, lpre = [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]
+    gate_flat = se.gate_ok_at(ts_, [0.0, 0.0, 0.0], gpre, lpre, 10.0, 50, 1, 1.0, 1e9, 1e9, 0.0, 0) if hasattr(se, "gate_ok_at") else None
+    one = last_n_cost_pf([{"pnl_pct": 2 * cf}] * 5, 5, COST)                   # every close nets exactly +1 PositionCost
+    mixed = last_n_cost_pf([{"pnl_pct": 3 * cf}, {"pnl_pct": cf}], 2, COST)   # +2 and 0 PositionCost: average +1
+    neg = last_n_cost_pf([{"pnl_pct": 0.0}] * 2, 2, COST)                      # every close nets -1 PositionCost
+    ratio_ok = abs(one["ratio"] - 1.10) < 1e-9 and abs(mixed["ratio"] - 1.10) < 1e-9 and abs(neg["ratio"] - 0.90) < 1e-9 and abs(ratio_from_r(0.0) - 1.0) < 1e-12
+    floor_ok = pc.MIN_PF_FLOOR == 1.02 and pc.pf_floor(1.0) == 1.02 and pc.PF_BY_SIZE_DEFAULTS["minPfMicro"] == 1.02
+    ok = not bad and ratio_ok and floor_ok and gate_flat in (None, True, False)
+    return ok, (f"every PF reads its rule: {not bad} {bad if bad else ''}; ratio +1 PositionCost {one['ratio']} (mixed {mixed['ratio']}), -1 {neg['ratio']}, "
+                f"zero {ratio_from_r(0.0)}; floor {pc.MIN_PF_FLOOR}, a configured 1.0 asks {pc.pf_floor(1.0)}, Micro {pc.PF_BY_SIZE_DEFAULTS['minPfMicro']}")
 
 
 def one_positioncost_is_neutral_gross():
@@ -368,6 +407,7 @@ CHECKS = [
     ("calc.pf-matches-reference", pf_matches_reference),
     ("calc.pf-edge-cases", pf_edge_cases),
     ("calc.one-positioncost-is-neutral", one_positioncost_is_neutral_gross),
+    ("calc.pf-is-neutral-at-one-and-ratio-1-1-is-one-positioncost-everywhere", pf_is_neutral_at_one_and_ratio_1_1_is_one_positioncost_everywhere),
     ("calc.cost-inputs-are-percent", cost_inputs_are_percent_everywhere),
     ("calc.exit-and-dca-settings-percent", exit_and_dca_settings_are_percent),
     ("calc.gate-default-single-constant", gate_default_is_one_constant),
