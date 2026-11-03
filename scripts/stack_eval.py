@@ -72,6 +72,7 @@ def main() -> int:
     ap.add_argument("--part", default="axis,block,dca")
     ap.add_argument("--sealed", action="store_true")
     ap.add_argument("--axis-arms", default="", help="JSON list of Axis arms to run instead of the built-in grid")
+    ap.add_argument("--block-candidates", default="", help="part block2: JSON file, a list of {label, cfg} (cfg = Block v2 overlay keys, block_rules.clean_cfg)")
     a = ap.parse_args()
     os.environ["STAGE_OVERLAY_PATCH"] = a.patch or "{}"
     import stage_eval as sg  # noqa: E402  (reads STAGE_OVERLAY_PATCH)
@@ -107,7 +108,7 @@ def main() -> int:
     by_id = {st.id: st for st in book.by_idx}
     auto = sg.AutoFloors(book, tapes)
     out: Dict[str, Any] = {"window": "sealed" if a.sealed else "development", "data": a.data, "hours": len(run_hours), "patch": json.loads(a.patch or "{}"),
-                           "axis": {}, "block": {}, "dca": {}, "combined": {}}
+                           "axis": {}, "block": {}, "block2": {}, "dca": {}, "combined": {}}
     print(f"symbols={len(names)} Sets={len(book.by_idx)} hours={len(run_hours)} [{time.time() - t0:.0f}s]", flush=True)
 
     def coord_for(axes: Dict[str, Tuple[bool, int]], linked: bool = True):
@@ -377,6 +378,104 @@ def main() -> int:
             out["block"][label] = {**summarize(ev, len(base), n_add, run_hours), "adds_pf": pf(nets), "adds_net_pct": round(100 * sum(nets) * cfg["vol"], 2), "cfg": cfg}
             print(f"{'Block ' + label:44s} {json.dumps({k: v for k, v in out['block'][label].items() if k != 'cfg'})}  [{time.time() - t1:.0f}s]", flush=True)
             json.dump(out, open(a.out, "w"), indent=1)
+
+    # ---- Block v2 (block_rules): per-count steps and ratios, cumulative evidence, relations, Additive / Shared, lifecycle ------------------------------
+    def block_sim2(parents, cfg):
+        """The engine's rules (block_rules, the same module SetBlockBook runs) over the executed parents, in time order: a parent's close (its observations
+        enter the ledgers, its lifecycle updates) comes before an open at the same moment, an open before a decision. Returns (events, adds, add nets)."""
+        import heapq
+        import block_rules as br
+        levels = cfg.levels()
+        ps = sorted(parents, key=lambda x: x["t_in"])
+        ev: List[Tuple[float, int, int, int]] = []          # (t, order 0 close / 1 open / 2 decide, parent index, count)
+        meta: List[Dict[str, Any]] = []
+        for i, r in enumerate(ps):
+            st = by_id[r["set"]]
+            tr = r["tr"]
+            s_, side = r["symbol"], int(tr["dir"])
+            entry, exit_px = float(tr["entry_px"]), float(tr["exit_px"])
+            e_i, x_i = int(tr["entry_i"]), int(tr["exit_i"])
+            hits = []
+            for n, lv in enumerate(levels, start=1):
+                lvl = entry * (1 + side * lv * cf)
+                j = first_hit(s_, e_i + 1, x_i, lvl, side)
+                if j < 0:
+                    break
+                hits.append((n, float(times[s_][j]), lvl))
+            rk = br.relation_keys(cfg, st.id, r["lane"], "LONG" if side > 0 else "SHORT", s_, st.pack, int(st.step))
+            meta.append({"r": r, "st": st, "side": side, "entry": entry, "exit": exit_px, "hits": hits, "rk": rk, "fired": {}, "scale": 1.0})
+            ev.append((float(r["t"]), 0, i, 0))
+            ev.append((float(r["t_in"]), 1, i, 0))
+            for n, now_t, _lvl in hits:
+                ev.append((now_t, 2, i, n))
+        ev.sort()
+        ledgers: Dict[str, Dict[str, Any]] = {}
+
+        def led(k):
+            return ledgers.setdefault(k, {"paper": {}, "executed": {}, "life": br.new_life()})
+        events: List[Tuple[float, float, float]] = []
+        add_nets: List[float] = []
+        adds = 0
+        for t, order, i, n in ev:
+            m = meta[i]
+            r = m["r"]
+            if order == 1:
+                if cfg.carry:
+                    m["scale"] = max([br.carried_scale(cfg, led(k)["life"]) for k in m["rk"]] or [1.0])
+                continue
+            if order == 2:
+                if not cfg.active(n):
+                    continue
+                books = [led(k) for k in m["rk"]]
+                if any(int(b["life"].get("pause", 0)) > 0 for b in books):
+                    continue
+                if not parent_ok(r, t, no_axis_coord):
+                    continue
+                auto.apply(book, float(int(t // 3600) * 3600))
+                floor = float(book.floor_for(book.realst_n, m["st"].pack, m["st"]))
+                fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
+                if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):
+                    continue
+                lvl = m["hits"][n - 1][2]
+                net = (m["exit"] - lvl) / lvl * m["side"] - cf
+                m["fired"][n] = net
+                continue
+            # close
+            add_part = 0.0
+            for n, net in m["fired"].items():
+                ratio = cfg.target_ratio(n)
+                events.append((float(r["t"]), net, ratio * m["scale"]))
+                add_nets.append(net)
+                adds += 1
+                add_part += ratio * net
+            events.append((float(r["t"]), float(r["net"]), m["scale"]))
+            parent_net = float(r["net"]) + add_part
+            highest = max(m["fired"]) if m["fired"] else 0
+            for k in m["rk"]:
+                b = led(k)
+                for hn, _now, lvl in m["hits"]:
+                    br.add_obs(b["paper"].setdefault(str(hn), br.new_record()), (m["exit"] / lvl - 1) * m["side"] - cf)
+                for hn, net in m["fired"].items():
+                    br.add_obs(b["executed"].setdefault(str(hn), br.new_record()), net)
+                b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
+        return events, adds, add_nets
+
+    if "block2" in a.part:
+        import block_rules as br
+        cands = json.load(open(a.block_candidates)) if a.block_candidates else [{"label": "default", "cfg": {}}]
+        out["block2"] = {"baseline": summarize(parent_events(base), len(base), 0, run_hours), "results": {}}
+        t1 = time.time()
+        for k, c in enumerate(cands):
+            cfg = br.clean_cfg(c.get("cfg") or {})
+            ev, n_add, nets = block_sim2(base, cfg)
+            res = summarize(ev, len(base), n_add, run_hours)
+            res["adds_pf"] = pf(nets)
+            res["adds_net_pct"] = round(100 * sum(n_ * cfg.target_ratio(1) for n_ in nets), 2) if nets else 0.0
+            out["block2"]["results"][c["label"]] = res
+            if k % 500 == 499:
+                print(f"block2 {k + 1}/{len(cands)} [{time.time() - t1:.0f}s]", flush=True)
+        json.dump(out, open(a.out, "w"), indent=1)
+        print(f"block2 done {len(cands)} candidates [{time.time() - t1:.0f}s]; baseline {json.dumps(out['block2']['baseline'])}", flush=True)
 
     # ---- DCA -----------------------------------------------------------------------------------------------------------------------------------------
     dca_min_pf = gate_min_pf(overlay, "dcaMinPf", "minPf")

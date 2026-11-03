@@ -109,7 +109,13 @@ def pf_is_neutral_at_one_and_ratio_1_1_is_one_positioncost_everywhere():
     all net exactly zero (a gross move of exactly one PositionCost), 0 on an empty window, 99 with gains and no loss; the cost ratio is 1.0 at zero net,
     1.10 at +1 PositionCost on average, 0.90 at -1; no gate floor is under MIN_PF_FLOOR 1.02."""
     import os as _o, sys as _s
-    import set_engine as se, set_block as sb, position_cost as pc
+    import set_engine as se, block_rules as br, position_cost as pc
+
+    def block_pf(vals):
+        rec = br.new_record()
+        for v in vals:
+            br.add_obs(rec, v)
+        return br.record_pf(rec)
     from common import ROOT
     _s.path.insert(0, _o.path.join(ROOT, "scripts"))
     import trade_sim as ts
@@ -122,7 +128,7 @@ def pf_is_neutral_at_one_and_ratio_1_1_is_one_positioncost_everywhere():
         "last_n empty": last_n_cost_pf([], 3, COST)["pf"],
         "pf_of even": se.pf_of(0.005, 0.005, 4), "pf_of flat": se.pf_of(0.0, 0.0, 3), "pf_of empty": se.pf_of(0.0, 0.0, 0), "pf_of no loss": se.pf_of(0.01, 0.0, 1),
         "lane_rank even": se.lane_rank_stats(even, cf)[1], "lane_rank flat": se.lane_rank_stats(flat, cf)[1],
-        "set_block even": sb._pf(even), "set_block flat": sb._pf(flat), "set_block empty": sb._pf([]),
+        "set_block even": block_pf(even), "set_block flat": block_pf(flat), "set_block empty": block_pf([]),
         "trade_sim even": ts.acc_pf(even), "trade_sim flat": ts.acc_pf(flat),
     }
     want = {"last_n even": 1.0, "last_n flat": 1.0, "last_n empty": 0.0, "pf_of even": 1.0, "pf_of flat": 1.0, "pf_of empty": 0.0, "pf_of no loss": 99.0,

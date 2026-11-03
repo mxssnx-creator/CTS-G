@@ -1,52 +1,90 @@
-"""Independent Block evidence and orders for Set parents.
+"""Independent Block evidence and orders for Set parents (Block v2, owner 2026-11-03).
 
-The parent keeps its original entry, stops and hold. Group n observes the first
-price n PositionCosts in profit, then measures that add to the parent's exit.
-Paper observations continue when an add is rejected; actual fills are a separate
-sample. No inherited Set PF, parent PnL or other group's result can validate it.
+The parent keeps its original entry, stops and hold. Count n observes the price n steps in profit (its own step from the count before; steps are in
+PositionCosts), then measures that add to the parent's exit. Paper observations continue when an add is rejected; actual fills are a separate record. No
+inherited Set PF, parent PnL or other count's result can validate a count. There is NO window: every record is the cumulative sum of all its observations
+since the book started (block_rules). The rules themselves (counts, steps, ratios, Additive / Shared, relations, lifecycle) live in block_rules and are shared
+with the simulator (scripts/stack_eval.py).
 
-Evidence scope (blockEvidenceScope): "symbol" keeps one evidence record per (Set, lane, symbol, side), the strictest reading: with many symbols a record
-never reaches blockMinSamples and Block never adds (x01 / x02, 2026-11-03). "set" (the engine default via blockEvidenceScope, owner 2026-11-03: "make Block fully work") pools the
-observations of every parent of the SAME Set, lane and side over all symbols, still independent per group n and never borrowing another Set's or group's
-result. The per-symbol state (the open parent and its group entries) stays per position either way.
+State file version 2: `parents` (the open parent's count entries per Set / lane / symbol / side) and `ledgers` (the cumulative records and the lifecycle per
+relation key). Version 1 (per-lane windows of rows) migrates: its paper rows are summed into the "set" relation's ledger, its executed rows too.
 """
 from __future__ import annotations
 
 import json
 import math
 import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
-from block_engine import calculate_block_minimum_profit_factor
+import block_rules as br
 from position_cost import cost_as_frac
 
+STATE_VERSION = 2
 
-def _pf(values):
-    gp = sum(x for x in values if x > 0)
-    gl = -sum(x for x in values if x < 0)
-    return gp / gl if gl else (99.0 if gp else (1.0 if len(values) else 0.0))     # neutral 1.0 on results that all net zero
+
+def _pack_step(set_id: str):
+    pack = str(set_id or "").split(":", 1)[0]
+    m = re.search(r":st(\d+)", str(set_id or ""))
+    return pack, int(m.group(1)) if m else 0
 
 
 class SetBlockBook:
     def __init__(self, path: str) -> None:
         self.path = path
-        self.lanes: Dict[str, Any] = {}
-        self.evidence: Dict[str, Dict[str, Any]] = {}       # pooled scope: "<set>|<lane>|<side>" -> {"paper": {n: rows}, "executed": {n: rows}, "updated": t}
-        self.scope = "symbol"                                # the book itself defaults to the strict reading; Pulse sets blockEvidenceScope (default "set")
+        self.parents: Dict[str, Any] = {}       # "<set>|<lane>|<symbol>|<side>" -> {"parent", "entries": {n: [t, price]}, "closed", "updated"}
+        self.ledgers: Dict[str, Any] = {}       # relation key -> {"paper": {n: [obs, gains, losses]}, "executed": {...}, "life": {...}, "updated": t}
+        self.cfg: Optional[br.BlockCfg] = None   # set by Pulse from the overlay (clean_cfg); None = the legacy table built from the BlockBook's own numbers
+        self.scope = "set"                       # kept for callers that still set it; the relations (cfg.relations) decide the evidence keys now
         self.error = ""
         self._prune_at = 0.0
         if os.path.exists(path):
             try:
                 with open(path) as f:
                     data = json.load(f)
-                if data.get("version") != 1 or not isinstance(data.get("lanes"), dict):
-                    raise ValueError("unsupported Block state")
-                self.lanes = data["lanes"]
-                ev = data.get("evidence")
-                self.evidence = ev if isinstance(ev, dict) else {}
-            except (OSError, ValueError, TypeError, AttributeError):
+                self._load(data)
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
                 self.error = "Block state unreadable; adds disabled"
 
+    # ---- state -------------------------------------------------------------------------------------------------------------------------------------
+    def _load(self, data: Dict[str, Any]) -> None:
+        ver = data.get("version")
+        if ver == STATE_VERSION and isinstance(data.get("parents"), dict) and isinstance(data.get("ledgers"), dict):
+            self.parents, self.ledgers = data["parents"], data["ledgers"]
+            return
+        if ver == 1 and isinstance(data.get("lanes"), dict):
+            for key, lane in data["lanes"].items():
+                self.parents[key] = {"parent": lane.get("parent", ""), "entries": lane.get("entries", {}), "closed": lane.get("closed", ""),
+                                     "updated": lane.get("updated", 0.0)}
+                set_id, lane_id, _symbol, side = (key.split("|") + ["", "", "", ""])[:4]
+                led = self.ledgers.setdefault(f"set|{set_id}|{lane_id}|{side}", {"paper": {}, "executed": {}, "life": br.new_life(), "updated": lane.get("updated", 0.0)})
+                cost = cost_as_frac(lane.get("cost", 0.12))
+                for source, scale in (("paper", True), ("executed", False)):
+                    for n, rows in (lane.get(source) or {}).items():
+                        rec = led[source].setdefault(str(n), br.new_record())
+                        for r in rows:
+                            br.add_obs(rec, (float(r[1]) - cost) if scale else float(r[2] if len(r) > 2 else float(r[1]) - cost))
+            return
+        raise ValueError("unsupported Block state")
+
+    def save(self) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"version": STATE_VERSION, "parents": self.parents, "ledgers": self.ledgers}, f)
+        os.replace(tmp, self.path)
+
+    # ---- configuration -----------------------------------------------------------------------------------------------------------------------------
+    def config(self, block) -> br.BlockCfg:
+        """The cfg the rules run on: the one Pulse set from the overlay, else a table built from the BlockBook's own numbers (max_stack counts of one step,
+        volume_ratio each, min_samples observations) so a book without an overlay behaves as the earlier Block did, minus its window."""
+        if self.cfg is not None:
+            return self.cfg
+        cfg = br.clean_cfg({}, max_stack=int(getattr(block, "max_stack", 0) or 3), volume_ratio=float(getattr(block, "volume_ratio", 0.5) or 0.5))
+        cfg.min_obs = max(1, int(getattr(block, "min_samples", 3) or 3))
+        cfg.pf_ratio = float(getattr(block, "pf_ratio", 0.8) or 0.8)
+        return cfg
+
+    # ---- keys --------------------------------------------------------------------------------------------------------------------------------------
     @staticmethod
     def key(pos) -> str:
         return "|".join((pos.set_id, pos.lane or "pos", pos.symbol, pos.side))
@@ -55,36 +93,27 @@ class SetBlockBook:
     def parent_id(pos) -> str:
         return str(pos.client_id or f"{pos.opened_at:.6f}")
 
-    @staticmethod
-    def evidence_key(pos) -> str:
-        return "|".join((pos.set_id, pos.lane or "pos", pos.side))
+    def rel_keys(self, cfg: br.BlockCfg, pos) -> List[str]:
+        pack, step = _pack_step(pos.set_id)
+        return br.relation_keys(cfg, pos.set_id, pos.lane or "pos", pos.side, pos.symbol, pack, step)
 
-    def book_of(self, pos, lane: Dict) -> Dict:
-        """The record the samples of this parent's Set are read from and written to: its own lane record (scope "symbol") or the Set-wide pooled record."""
-        if self.scope != "set":
-            return lane
-        return self.evidence.setdefault(self.evidence_key(pos), {"paper": {}, "executed": {}, "updated": 0.0})
+    def ledger(self, rkey: str, create: bool = False) -> Optional[Dict[str, Any]]:
+        got = self.ledgers.get(rkey)
+        if got is None and create:
+            got = self.ledgers[rkey] = {"paper": {}, "executed": {}, "life": br.new_life(), "updated": 0.0}
+        return got
 
-    def save(self) -> None:
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"version": 1, "lanes": self.lanes, "evidence": self.evidence}, f)
-        os.replace(tmp, self.path)
-
+    # ---- observation -------------------------------------------------------------------------------------------------------------------------------
     def observe(self, pos, price: float, now: float, block, cost_pct: float, lookback_s: float) -> Optional[Dict]:
         if self.error or not pos.set_id or not math.isfinite(price) or price <= 0 or pos.base_entry <= 0 or pos.base_qty <= 0:
             return None
+        cfg = self.config(block)
         key, parent = self.key(pos), self.parent_id(pos)
-        # Bound inactive history by the same lookback, while retaining open parents.
-        if now >= self._prune_at:
-            for old in [k for k, v in self.lanes.items() if not v.get("parent") and v.get("updated", 0) < now - lookback_s]:
-                self.lanes.pop(old)
-            for old in [k for k, v in self.evidence.items() if v.get("updated", 0) < now - lookback_s]:
-                self.evidence.pop(old)
+        if now >= self._prune_at:                 # only inactive per-parent entries are pruned; the cumulative ledgers are the evidence and stay
+            for old in [k for k, v in self.parents.items() if not v.get("parent") and v.get("updated", 0) < now - max(lookback_s, 3600.0)]:
+                self.parents.pop(old)
             self._prune_at = now + 60
-        lane = self.lanes.setdefault(key, {"paper": {}, "executed": {}, "updated": now, "cost": cost_pct})
-        if lane.get("cost") != cost_pct:
-            lane = self.lanes[key] = {"paper": {}, "executed": lane.get("executed", {}), "updated": now, "cost": cost_pct}
+        lane = self.parents.setdefault(key, {"parent": "", "entries": {}, "closed": "", "updated": now})
         if lane.get("closed") == parent:
             return None
         dirty = False
@@ -93,11 +122,8 @@ class SetBlockBook:
             dirty = True
         cf = cost_as_frac(cost_pct)
         move = (price / pos.base_entry - 1) * (1 if pos.side == "LONG" else -1)
-        # Unlimited walks only the next few groups, just as the ordinary Block book.
-        limit = int(block.max_stack) if block.max_stack > 0 else max([int(x) for x in lane["entries"]] or [0]) + 4
-        limit = min(limit, max(0, int((move + 1e-12) / cf))) if cf > 0 else 0
-        for n in range(1, limit + 1):
-            if move + 1e-12 >= n * cf and str(n) not in lane["entries"]:
+        for n, level in enumerate(cfg.levels(), start=1):
+            if cf > 0 and move + 1e-12 >= level * cf and str(n) not in lane["entries"]:
                 lane["entries"][str(n)] = [now, price]
                 dirty = True
         lane["updated"] = now
@@ -105,90 +131,114 @@ class SetBlockBook:
             self.save()
         return lane
 
-    def stats(self, lane: Dict, n: int, source: str, now: float, block, cost_pct: float, lookback_s: float) -> Dict:
-        records = lane[source].get(str(n), [])
-        rows = [r for r in records if now - lookback_s <= r[0] <= now][-block.window:]
-        values = [r[2] if source == "executed" and len(r) > 2 else r[1] - cost_as_frac(cost_pct) for r in rows]
-        return {"pf": _pf(values), "n": len(values), "source": source}
+    @staticmethod
+    def stats(rec: Optional[Any], *_a, **_k) -> Dict:
+        """{pf, n} of one cumulative record ([obs, gains, losses]); empty when there is none."""
+        if not rec:
+            return {"pf": 0.0, "n": 0}
+        return {"pf": br.record_pf(rec), "n": int(rec[0])}
 
     def candidate(self, pos, price: float, now: float, block, cost_pct: float, lookback_s: float, floor: Optional[float] = None) -> Optional[Dict]:
         lane = self.observe(pos, price, now, block, cost_pct, lookback_s)
         if lane is None:
             return None
-        # One partial per group, including partial fills: never compound on grown size.
-        filled = {}
+        cfg = self.config(block)
+        rkeys = self.rel_keys(cfg, pos)
+        books = [self.ledger(k) or {"paper": {}, "executed": {}, "life": br.new_life()} for k in rkeys]
+        if any(int(b["life"].get("pause", 0)) > 0 for b in books):        # a relation in its pause adds nothing; its evidence still collects
+            return None
+        filled: Dict[int, float] = {}
         for item in pos.block_fills:
             filled[int(item["group"])] = filled.get(int(item["group"]), 0.0) + float(item["qty"])
-        rank = len([q for q in filled.values() if q > 0])
-        book = self.book_of(pos, lane)
+        fired_ratio = sum(cfg.target_ratio(n) for n, q in filled.items() if q > 0)
+        base_pf = float(floor) if floor is not None else float(getattr(block, "default_min_pf", 1.1) or 1.1)
+        cf = cost_as_frac(cost_pct)
+        levels = cfg.levels()
         for n in sorted(int(x) for x in lane["entries"]):
-            if block.max_stack > 0 and n > block.max_stack:
+            if not cfg.active(n):
                 continue
-            target = block.volume_ratio * pos.base_qty
+            target = cfg.target_ratio(n) * pos.base_qty
             remaining = target - filled.get(n, 0.0)
             if remaining <= max(1e-12, target * 1e-9):
                 continue
-            paper = self.stats(book, n, "paper", now, block, cost_pct, lookback_s)
-            live = self.stats(book, n, "executed", now, block, cost_pct, lookback_s)
-            base_pf = block.default_min_pf if floor is None else float(floor)       # the parent Set's own floor (the one its stages ask) unless the gates are unlinked
-            threshold = max(base_pf, calculate_block_minimum_profit_factor(
-                base_pf, block.pf_ratio, (rank + int(n not in filled)) * block.volume_ratio))
-            # A cold group has no proof. Paused/rejected groups keep collecting paper
-            # results on new parents, so their gate can recover without real adds.
-            if paper["n"] < block.min_samples or paper["pf"] + 1e-9 < threshold:
-                continue
-            if live["n"] >= block.min_samples and live["pf"] + 1e-9 < threshold:
-                continue
-            recent = [r for r in book["paper"].get(str(n), []) if now - lookback_s <= r[0] <= now]
-            if block.pause_ratio and any(r[1] - cost_as_frac(cost_pct) < 0 for r in recent[-block.pause_ratio:]):
-                continue
-            # Current price must still satisfy the group's strength condition.
             move = (price / pos.base_entry - 1) * (1 if pos.side == "LONG" else -1)
-            if move + 1e-12 < n * cost_as_frac(cost_pct):
+            if move + 1e-12 < levels[n - 1] * cf:
+                continue                       # the current price must still satisfy the count's own step
+            recs = [b["paper"].get(str(n)) for b in books]
+            execs = [b["executed"].get(str(n)) for b in books]
+            if not br.count_passes(cfg, n, recs, execs, base_pf, fired_ratio):
                 continue
-            return {"group": n, "qty": remaining, "minPf": threshold, "paper": paper, "executed": live}
+            return {"group": n, "qty": remaining, "minPf": br.threshold(cfg, base_pf, fired_ratio + cfg.target_ratio(n)),
+                    "paper": self.stats(recs[0]), "executed": self.stats(execs[0])}
         return None
 
+    # ---- close -------------------------------------------------------------------------------------------------------------------------------------
     def close(self, pos, price: float, now: float, block, cost_pct: float, score: bool = True) -> None:
-        lane = self.lanes.get(self.key(pos))
+        lane = self.parents.get(self.key(pos))
         parent = self.parent_id(pos)
         if not lane or lane.get("parent") != parent or lane.get("closed") == parent:
             return
+        cfg = self.config(block)
         side = 1 if pos.side == "LONG" else -1
-        book = self.book_of(pos, lane)
-        book["updated"] = now
+        cf = cost_as_frac(cost_pct)
+        rkeys = self.rel_keys(cfg, pos)
+        books = [self.ledger(k, create=True) for k in rkeys]
+        add_part, highest = 0.0, 0
+        groups: Dict[str, List[Any]] = {}
+        for item in pos.block_fills:
+            groups.setdefault(str(item["group"]), []).append(item)
         if score and math.isfinite(price) and price > 0:
             for n, (entry_t, entry) in lane["entries"].items():
                 if entry_t >= now or entry <= 0:
                     continue
-                rows = book["paper"].setdefault(n, [])
-                rows.append([now, (price / entry - 1) * side])
-                del rows[:-block.window]
-            groups = {}
-            for item in pos.block_fills:
-                groups.setdefault(str(item["group"]), []).append(item)
+                net = (price / entry - 1) * side - cf
+                for b in books:
+                    br.add_obs(b["paper"].setdefault(n, br.new_record()), net)
             for n, items in groups.items():
                 notional = sum(float(x["qty"]) * float(x["price"]) for x in items)
                 gross = sum(float(x["qty"]) * (price - float(x["price"])) * side for x in items)
                 if notional > 0:
-                    rows = book["executed"].setdefault(n, [])
-                    record = [now, gross / notional]
+                    net_add = gross / notional - cf
                     if all(x.get("fee_usdt") is not None for x in items) and pos.exit_fee_qty >= pos.qty > 0:
                         entry_fee = sum(float(x["fee_usdt"]) for x in items)
                         exit_fee = pos.exit_fee_usdt * sum(float(x["qty"]) for x in items) / pos.qty
-                        record.append((gross - entry_fee - exit_fee) / notional)
-                    rows.append(record)
-                    del rows[:-block.window]
+                        net_add = (gross - entry_fee - exit_fee) / notional
+                    for b in books:
+                        br.add_obs(b["executed"].setdefault(n, br.new_record()), net_add)
+                    add_part += (sum(float(x["qty"]) for x in items) / pos.base_qty) * net_add
+                    highest = max(highest, int(n))
+        parent_net = ((price / pos.base_entry - 1) * side - cf if pos.base_entry > 0 and math.isfinite(price) and price > 0 else 0.0) + add_part
+        for b in books:
+            b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
+            b["updated"] = now
         lane.update(parent="", closed=parent, entries={}, updated=now)
         self.save()
 
+    # ---- carried size ------------------------------------------------------------------------------------------------------------------------------
+    def entry_scale(self, set_id: str, lane: str, side: str, symbol: str, block) -> float:
+        """The multiple of V0 a new parent of this Set opens at: 1.0 unless the carry is on and a relation holds a raised level (the largest of them)."""
+        cfg = self.config(block)
+        if not cfg.carry or self.error:
+            return 1.0
+        pack, step = _pack_step(set_id)
+        scale = 1.0
+        for k in br.relation_keys(cfg, set_id, lane or "pos", side, symbol, pack, step):
+            b = self.ledgers.get(k)
+            if b:
+                scale = max(scale, br.carried_scale(cfg, b["life"]))
+        return scale
+
+    # ---- snapshot ----------------------------------------------------------------------------------------------------------------------------------
     def snapshot(self, now: float, block, cost_pct: float, lookback_s: float) -> Dict:
         rows = []
-        books = self.evidence.items() if self.scope == "set" else self.lanes.items()
-        for key, lane in books:
-            for n in sorted(set(lane["paper"]) | set(lane["executed"]), key=int):
-                paper = self.stats(lane, int(n), "paper", now, block, cost_pct, lookback_s)
-                live = self.stats(lane, int(n), "executed", now, block, cost_pct, lookback_s)
+        for key, led in self.ledgers.items():
+            for n in sorted(set(led["paper"]) | set(led["executed"]), key=int):
+                paper = self.stats(led["paper"].get(n))
+                live = self.stats(led["executed"].get(n))
                 if paper["n"] or live["n"]:
-                    rows.append({"lane": key, "group": int(n), "paper": paper, "executed": live})
-        return {"lanes": rows, "minSamples": block.min_samples, "window": block.window, "scope": self.scope, "error": self.error}
+                    rows.append({"lane": key, "group": int(n), "paper": paper, "executed": live, "level": int(led["life"].get("level", 0)),
+                                 "pause": int(led["life"].get("pause", 0)), "net": round(float(led["life"].get("net", 0.0)), 6)})
+        cfg = self.config(block)
+        return {"lanes": rows, "minObservations": cfg.min_obs, "stackType": cfg.stack_type, "relations": list(cfg.relations),
+                "counts": [{"n": i + 1, "step": c["step"], "ratio": c["ratio"], "on": c.get("on", True)} for i, c in enumerate(cfg.counts)],
+                "carry": cfg.carry, "pauseSteps": cfg.pause_steps, "skipFirst": cfg.skip_first, "error": self.error}

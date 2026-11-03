@@ -232,8 +232,11 @@ def the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor():
         cfg = _block_cfg()
         cfg.pause_ratio, cfg.min_samples = 0, 8
         pos = _parent(4)
-        lane = sb.observe(pos, 100.4, T0 + 10, cfg, .12, 86400)
-        lane["paper"]["1"] = [[T0 - 100 + i, g] for i, g in enumerate([0.0023, 0.0002] * 4)]        # nets +0.11 % / -0.10 %: PF 1.10 on 8 results
+        import block_rules as brr
+        sb.observe(pos, 100.4, T0 + 10, cfg, .12, 86400)
+        led = sb.ledger(sb.rel_keys(sb.config(cfg), pos)[0], create=True)
+        for g in [0.0023, 0.0002] * 4:                                                              # gross -> nets +0.11 % / -0.10 %: PF 1.10 on 8 results
+            brr.add_obs(led["paper"].setdefault("1", brr.new_record()), g - 0.0012)
         at_default = sb.candidate(pos, 100.4, T0 + 11, cfg, .12, 86400)
         at_floor = sb.candidate(pos, 100.4, T0 + 12, cfg, .12, 86400, floor=1.04)
         at_high = sb.candidate(pos, 100.4, T0 + 13, cfg, .12, 86400, floor=1.20)

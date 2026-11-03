@@ -122,6 +122,9 @@ def _parent(i=0, side="LONG"):
 
 
 def block_independent_evidence_and_restart():
+    """Block v2: every count keeps its OWN cumulative record, so one count's results never move another's. Three parents close; count 1 is observed in profit
+    each time, count 2 at a loss: count 1 is admitted for a fourth parent (also after a restart from the state file), count 2 is not, another Set stays
+    isolated, and the same parent is never counted twice (a duplicate close)."""
     with tempfile.TemporaryDirectory() as d:
         book = SetBlockBook(os.path.join(d, "b.json"))
         cfg = _block_cfg()
@@ -138,43 +141,15 @@ def block_independent_evidence_and_restart():
         second = book.candidate(pos, 100.4, pos.opened_at + 11, cfg, .12, 86400)
         other = replace(pos, set_id="other", block_fills=[])
         isolated = book.candidate(other, 100.4, pos.opened_at + 11, cfg, .12, 86400)
-        lane = book.lanes[book.key(pos)]
-        counts = [len(lane["paper"][str(n)]) for n in (1, 2)]
-        return bool(first and first["group"] == 1) and second is None and isolated is None and counts == [3, 3], f"first={first}; group2/other blocked={second is None}/{isolated is None}; samples={counts}"
-
-
-def block_evidence_pools_over_symbols_per_set_and_group():
-    """blockEvidenceScope "set" (owner 2026-11-03: Block never added because one record per (Set, lane, symbol, side) never reached blockMinSamples): the
-    observations of every parent of the SAME Set, lane and side pool over symbols. Three parents on three symbols give a group three samples, so a fourth
-    parent on a FOURTH symbol is admitted (scope "set") where the per-symbol scope has none; another Set, the other side and another group stay isolated; the
-    pooled record survives a restart; the legacy per-symbol scope is unchanged."""
-    out = {}
-    for scope in ("symbol", "set"):
-        with tempfile.TemporaryDirectory() as d:
-            book = SetBlockBook(os.path.join(d, "b.json"))
-            book.scope = scope
-            cfg = _block_cfg()
-            cfg.min_samples = 3
-            for i, sym in enumerate(("AAA-USDT", "BBB-USDT", "CCC-USDT")):
-                pos = replace(_parent(i), symbol=sym)
-                book.observe(pos, 100.15, pos.opened_at + 10, cfg, .12, 86400)
-                book.observe(pos, 100.4, pos.opened_at + 20, cfg, .12, 86400)
-                book.close(pos, 100.35, pos.opened_at + 60, cfg, .12)
-            book = SetBlockBook(book.path)
-            book.scope = scope
-            fresh = replace(_parent(5), symbol="DDD-USDT")
-            cand = book.candidate(fresh, 100.4, fresh.opened_at + 10, cfg, .12, 86400)
-            other_set = replace(fresh, set_id="other:1m:sl1:st4", block_fills=[])
-            other_side = replace(fresh, side="SHORT", block_fills=[], base_entry=100)
-            iso_set = book.candidate(other_set, 100.4, fresh.opened_at + 11, cfg, .12, 86400)
-            iso_side = book.candidate(other_side, 99.6, fresh.opened_at + 12, cfg, .12, 86400)
-            snap = book.snapshot(fresh.opened_at + 20, cfg, .12, 86400)
-            out[scope] = (bool(cand and cand["group"] == 1), iso_set is None, iso_side is None, snap["scope"], len(snap["lanes"]))
-    ok = out["symbol"][:3] == (False, True, True) and out["set"][:3] == (True, True, True) and out["set"][3] == "set" and out["set"][4] >= 2
-    return ok, f"(admitted on a fourth symbol, other Set isolated, other side isolated, scope, evidence rows) per scope: {out}"
+        led = book.ledgers["set|pack:1m:sl1:st4|pos|LONG"]
+        counts = [int(led["paper"][str(n)][0]) for n in (1, 2)]
+        pf1, pf2 = SetBlockBook.stats(led["paper"]["1"])["pf"], SetBlockBook.stats(led["paper"]["2"])["pf"]
+        return (bool(first and first["group"] == 1) and second is None and isolated is None and counts == [3, 3] and pf1 >= 99 and pf2 < 1.0,
+                f"first={first and first['group']}; count 2 blocked={second is None}; other Set blocked={isolated is None}; observations per count={counts}; PF count 1 / 2 = {pf1:.2f} / {pf2:.2f}")
 
 
 def block_actual_and_paper_costs():
+    """An executed add's record holds its NET result (notional weighted gross move less one PositionCost), once, as one observation."""
     with tempfile.TemporaryDirectory() as d:
         b = SetBlockBook(os.path.join(d, "b.json"))
         cfg = _block_cfg()
@@ -182,29 +157,183 @@ def block_actual_and_paper_costs():
         pos.block_fills = [{"group": 1, "qty": 1, "price": 100.2}, {"group": 1, "qty": 2, "price": 100.5}]
         b.observe(pos, 100.15, T0 + 1, cfg, .12, 86400)
         b.close(pos, 101, T0 + 60, cfg, .12)
-        lane = b.lanes[b.key(pos)]
-        actual = lane["executed"]["1"][0][1]
-        oracle = ((101 - 100.2) + 2 * (101 - 100.5)) / (100.2 + 2 * 100.5)
-        stats = b.stats(lane, 1, "executed", T0 + 60, cfg, .12, 86400)
-        return abs(actual - oracle) < 1e-12 and stats["n"] == 1 and stats["pf"] == 99, f"notional-weighted gross={actual:.9f} oracle={oracle:.9f}; one sample"
+        rec = b.ledgers["set|pack:1m:sl1:st4|pos|LONG"]["executed"]["1"]
+        oracle = ((101 - 100.2) + 2 * (101 - 100.5)) / (100.2 + 2 * 100.5) - 0.0012
+        return int(rec[0]) == 1 and abs(rec[1] - oracle) < 1e-12 and rec[2] == 0, f"one executed observation, net {rec[1]:.9f} oracle {oracle:.9f}"
 
 
-def block_pause_count_and_zero_are_respected():
-    from block_engine import BlockBook
+def block_has_no_window_and_counts_do_not_borrow():
+    """No window (owner 2026-11-03): a record is the cumulative sum of EVERY observation. 600 losses followed by 700 gains read PF = all gains / all losses (an
+    old 25-row window would read 99); PF 1.0 neutral on all-zero results, 0 empty; a count's record is its own, and the legacy windows are not read."""
+    import block_rules as br
+    rec = br.new_record()
+    for i in range(600):
+        br.add_obs(rec, -0.001)
+    for i in range(700):
+        br.add_obs(rec, 0.001)
+    flat, empty = br.new_record(), br.new_record()
+    for i in range(5):
+        br.add_obs(flat, 0.0)
+    recent_only = br.new_record()
+    for i in range(25):
+        br.add_obs(recent_only, 0.001)
+    src = open(os.path.join(os.path.dirname(pt.__file__), "set_block.py")).read()
+    ok = (int(rec[0]) == 1300 and abs(br.record_pf(rec) - 700 / 600) < 1e-9 and br.record_pf(recent_only) == 99.0 and br.record_pf(flat) == 1.0 and br.record_pf(empty) == 0.0
+          and "lookback_s <=" not in src and "block.window" not in src and "[-block.window" not in src)
+    return ok, f"1,300 observations -> PF {br.record_pf(rec):.4f} (all gains / all losses {700 / 600:.4f}); 25 wins {br.record_pf(recent_only)}; all-zero {br.record_pf(flat)}; empty {br.record_pf(empty)}"
+
+
+def block_engine_matches_a_plain_reading_of_the_rules():
+    """Eight scripted parents of one Set (every count reached at +0.15 % and +0.40 %, exits from a fixed list): SetBlockBook (observe / candidate / close, fills
+    recorded as the trader does) fires exactly the counts a plain-loop reading of the written rules fires - cumulative records, min observations 2, the PF
+    threshold of the stack each count creates, one add per count, Additive volumes (ratios 0.3 / 0.6 / 0.9 of V0). No window: the 8th parent still reads
+    every earlier parent."""
+    from block_engine import calculate_block_minimum_profit_factor
+    import block_rules as br
+    exits = [100.9, 100.0, 101.2, 100.3, 100.8, 100.1, 101.0, 100.6]
+    cf = 0.0012
+    ratios = [0.3, 0.6, 0.9]
     with tempfile.TemporaryDirectory() as d:
-        b = SetBlockBook(os.path.join(d, "sets.json"))
-        cfg, pos = _block_cfg(), _parent()
-        cfg.pause_ratio = 2
-        lane = b.observe(pos, 100.4, T0 + 10, cfg, .12, 86400)
-        lane["paper"]["1"] = [[T0 - 100 + i, .01] for i in range(5)] + [[T0 - 10, -.001], [T0 - 5, .01]]
-        paused = b.candidate(pos, 100.4, T0 + 11, cfg, .12, 86400) is None
-        lane["paper"]["1"].append([T0, .01])
-        resumed = b.candidate(pos, 100.4, T0 + 12, cfg, .12, 86400) is not None
-        loaded = BlockBook(os.path.join(d, "legacy.json"), {"blockPauseCountRatio": 0}).pause_ratio
-        cfg.pause_ratio = loaded
-        lane["paper"]["1"].append([T0 + 1, -.001])
-        disabled = b.candidate(pos, 100.4, T0 + 13, cfg, .12, 86400) is not None
-        return paused and resumed and disabled and loaded == 0, f"two-observation pause={paused}; resumed={resumed}; zero disables={disabled}"
+        book = SetBlockBook(os.path.join(d, "b.json"))
+        book.cfg = br.clean_cfg({"blockCounts": [{"step": 1, "ratio": r} for r in ratios], "blockMinObservations": 2, "blockProfitFactorRatio": 0.8})
+        blk = _block_cfg()
+        got, qtys = [], []
+        for i, ex in enumerate(exits):
+            pos = _parent(i)
+            t0 = pos.opened_at
+            fired = []
+            for step, px in enumerate((100.15, 100.4)):
+                book.observe(pos, px, t0 + 10 + step * 10, blk, .12, 86400)
+                while True:
+                    cand = book.candidate(pos, px, t0 + 11 + step * 10, blk, .12, 86400)
+                    if cand is None:
+                        break
+                    pos.block_fills.append({"group": cand["group"], "qty": cand["qty"], "price": px})
+                    fired.append(cand["group"])
+                    qtys.append(round(cand["qty"], 6))
+            book.close(pos, ex, t0 + 60, blk, .12)
+            got.append(sorted(fired))
+    # the plain reading
+    rec = {n: [0, 0.0, 0.0] for n in (1, 2, 3)}
+    done = {n: [0, 0.0, 0.0] for n in (1, 2, 3)}          # the executed adds' own records
+    want, wq = [], []
+    entry_px = {1: 100.15, 2: 100.4, 3: 100.4}
+
+    def plain_pf(r_):
+        return r_[1] / r_[2] if r_[2] > 0 else (99.0 if r_[1] > 0 else (1.0 if r_[0] else 0.0))
+
+    def put(r_, net):
+        r_[0] += 1
+        if net > 0:
+            r_[1] += net
+        elif net < 0:
+            r_[2] += -net
+    for ex in exits:
+        fired = []
+        for n in (1, 2, 3):
+            thr = max(1.25, calculate_block_minimum_profit_factor(1.25, 0.8, sum(ratios[k - 1] for k in fired) + ratios[n - 1]))
+            if rec[n][0] >= 2 and plain_pf(rec[n]) + 1e-9 >= thr and not (done[n][0] >= 2 and plain_pf(done[n]) + 1e-9 < thr):
+                fired.append(n)
+                wq.append(round(ratios[n - 1] * 1.0, 6))
+        want.append(sorted(fired))
+        for n in (1, 2, 3):
+            net = (ex / entry_px[n] - 1) - cf
+            put(rec[n], net)
+            if n in fired:
+                put(done[n], net)
+    return got == want and qtys == wq and any(want), f"counts fired per parent: engine {got}, plain reading {want}; add volumes {qtys}"
+
+
+def block_carry_sizes_the_next_parent_of_the_relation():
+    """With blockCarry on, a parent that fired count 2 and closed at a net loss raises its relation's level: the NEXT parent of that Set opens at V0 x (1 + r1 +
+    r2) (SetBlockBook.entry_scale, used by Pulse.place), another Set at 1.0, carry off at 1.0; after a parent whose net brings the relation back to or above zero
+    the scale returns to 1.0 and the relation pauses (no add) for `blockPauseSteps` parents."""
+    import block_rules as br
+    out = {}
+    for carry in (True, False):
+        with tempfile.TemporaryDirectory() as d:
+            book = SetBlockBook(os.path.join(d, "b.json"))
+            book.cfg = br.clean_cfg({"blockCarry": carry, "blockPauseSteps": 1, "blockMinObservations": 1,
+                                     "blockCounts": [{"step": 1, "ratio": 0.3}, {"step": 1, "ratio": 0.4}, {"step": 1, "ratio": 0.5}]})
+            blk = _block_cfg()
+            pos = _parent(0)
+            book.observe(pos, 100.15, pos.opened_at + 10, blk, .12, 86400)
+            book.observe(pos, 100.3, pos.opened_at + 20, blk, .12, 86400)
+            pos.block_fills = [{"group": 1, "qty": 0.3, "price": 100.15}, {"group": 2, "qty": 0.4, "price": 100.3}]
+            book.close(pos, 99.0, pos.opened_at + 60, blk, .12)                      # a net loss with count 2 fired
+            lost = (round(book.entry_scale(pos.set_id, "pos", "LONG", "X", blk), 4), round(book.entry_scale("other", "pos", "LONG", "X", blk), 4))
+            big = _parent(1)
+            book.observe(big, 100.15, big.opened_at + 10, blk, .12, 86400)
+            book.close(big, 103.0, big.opened_at + 60, blk, .12)                     # a large gain: the net is back above zero
+            back = round(book.entry_scale(pos.set_id, "pos", "LONG", "X", blk), 4)
+            nxt = _parent(2)
+            book.observe(nxt, 100.4, nxt.opened_at + 10, blk, .12, 86400)
+            book.candidate(nxt, 100.4, nxt.opened_at + 11, blk, .12, 86400)
+            paused = max(int(led["life"].get("pause", 0)) for led in book.ledgers.values())    # the relation's pause counter (parents left)
+            out[carry] = (lost, back, paused)
+    ok = out[True] == ((1.7, 1.0), 1.0, 1) and out[False] == ((1.0, 1.0), 1.0, 0)
+    return ok, f"carry on: (scale after a loss, other Set), back at zero, paused {out[True]}; carry off {out[False]}"
+
+
+def block_stack_types_and_per_count_ratios():
+    """Additive: each count adds its OWN ratio x V0 (0.2, 0.5, 1.0 here, bounded 0.1 .. 1.0); Shared: one budget R x V0 split equally over the enabled counts
+    (R 1.0 over three -> 1/3 each, over two (one off) -> 1/2 each); a count that is off adds nothing; the first `skip_first` counts are never added; the steps
+    are cumulative (2 + 3 + 1 = triggers at 2, 5 and 6 PositionCosts); out-of-range inputs are bounded and unreadable entries dropped."""
+    import block_rules as br
+    raw = {"blockCounts": [{"step": 2, "ratio": 0.2}, {"step": 3, "ratio": 0.5}, {"step": 1, "ratio": 9.0}, {"step": "x", "ratio": 0.3}]}
+    add = br.clean_cfg(raw)
+    sh = br.clean_cfg({**raw, "blockStackType": "shared", "blockSharedTotal": 1.0})
+    off = br.clean_cfg({**raw, "blockStackType": "shared", "blockCounts": [{"step": 2, "ratio": .2}, {"step": 3, "ratio": .5, "on": False}, {"step": 1, "ratio": .9}]})
+    skip = br.clean_cfg({**raw, "blockSkipFirst": 1})
+    ok = (len(add.counts) == 3 and [add.target_ratio(n) for n in (1, 2, 3)] == [0.2, 0.5, 1.0] and add.levels() == [2.0, 5.0, 6.0]
+          and all(abs(sh.target_ratio(n) - 1 / 3) < 1e-9 for n in (1, 2, 3)) and abs(off.target_ratio(1) - 0.5) < 1e-9 and off.target_ratio(2) == 0.0
+          and not off.active(2) and skip.active(2) and not skip.active(1) and add.target_ratio(9) == 0.0)
+    return ok, f"additive {[add.target_ratio(n) for n in (1, 2, 3)]}, levels {add.levels()}; shared {[round(sh.target_ratio(n), 4) for n in (1, 2, 3)]}; one off {[off.target_ratio(n) for n in (1, 2, 3)]}"
+
+
+def block_relations_are_independent_and_all_must_agree():
+    """Relations (symbol / indication / set / step) hold their own ledgers: a record under one relation never reads another's. With two relations enabled a
+    count adds only when BOTH pass; the key of the step relation carries the pack and TP step, the set relation the Set, lane and side."""
+    import block_rules as br
+    with tempfile.TemporaryDirectory() as d:
+        book = SetBlockBook(os.path.join(d, "b.json"))
+        cfg = _block_cfg()
+        book.cfg = br.clean_cfg({"blockRelations": ["set", "step"], "blockMinObservations": 3, "blockCounts": [{"step": 1, "ratio": 0.5}] * 2})
+        pos = _parent(1)
+        keys = book.rel_keys(book.cfg, pos)
+        for k in keys:
+            book.ledger(k, create=True)
+        for _ in range(4):
+            br.add_obs(book.ledgers[keys[0]]["paper"].setdefault("1", br.new_record()), 0.01)          # only the set relation has proof
+        one = book.candidate(replace(pos, client_id="a"), 100.15, T0 + 700, cfg, .12, 86400)
+        for _ in range(4):
+            br.add_obs(book.ledgers[keys[1]]["paper"].setdefault("1", br.new_record()), 0.01)          # now the step relation too
+        both = book.candidate(replace(pos, client_id="b"), 100.15, T0 + 701, cfg, .12, 86400)
+        sym = br.relation_keys(br.clean_cfg({"blockRelations": ["symbol", "indication"]}), "pack:1m:sl1:st4", "pos", "LONG", "X", "pack", 4)
+        ok = one is None and both is not None and both["group"] == 1 and keys == ["set|pack:1m:sl1:st4|pos|LONG", "step|pack|4|pos|LONG"] and sym == ["symbol|X|LONG", "indication|pack|pos|LONG"]
+        return ok, f"one relation proven -> {one and one['group']}; both -> {both and both['group']}; keys {keys + sym}"
+
+
+def block_lifecycle_carries_until_net_is_positive_then_pauses():
+    """The opt-in lifecycle per relation: a net-losing parent that fired count 2 raises the relation's level to 2 (the next parent opens at V0 x (1 + r1 + r2));
+    the level holds while the relation's net stays negative; when the net is back at or above zero the level resets and the relation pauses `pause_steps`
+    parents (no add, evidence keeps collecting), counting one parent down at each close; without carry nothing is inherited (scale 1.0)."""
+    import block_rules as br
+    cfg = br.clean_cfg({"blockCarry": True, "blockPauseSteps": 2, "blockCounts": [{"step": 1, "ratio": 0.3}, {"step": 1, "ratio": 0.4}, {"step": 1, "ratio": 0.5}]})
+    life = br.new_life()
+    life = br.life_after_close(cfg, life, -0.02, 2)
+    after_loss = (life["level"], round(br.carried_scale(cfg, life), 4))
+    life = br.life_after_close(cfg, life, -0.005, 0)
+    still = (life["level"], life["pause"])
+    life = br.life_after_close(cfg, life, +0.03, 0)
+    reset = (life["level"], life["pause"], life["net"])
+    life = br.life_after_close(cfg, life, +0.01, 0)
+    one_down = life["pause"]
+    life = br.life_after_close(cfg, life, +0.01, 0)
+    none = br.clean_cfg({"blockCarry": False})
+    ok = (after_loss == (2, 1.7) and still == (2, 0) and reset == (0, 2, 0.0) and one_down == 1 and life["pause"] == 0
+          and br.carried_scale(none, {"level": 2}) == 1.0)
+    return ok, f"after a loss firing 2: level/scale {after_loss}; a second loss keeps it {still}; net back positive {reset}; pause counts down {one_down} -> {life['pause']}; no carry scale {br.carried_scale(none, {'level': 2})}"
 
 
 def block_parent_unchanged_end_to_end():
@@ -334,6 +463,7 @@ def frozen_hold_and_block_intent_failure():
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     paper_actual_isolation, config_change_invalidates_old_evidence, executed_restart_and_base_attribution,
     axis_continuation_and_set_isolation, block_independent_evidence_and_restart, block_actual_and_paper_costs,
-    block_pause_count_and_zero_are_respected, block_evidence_pools_over_symbols_per_set_and_group,
+    block_has_no_window_and_counts_do_not_borrow, block_engine_matches_a_plain_reading_of_the_rules, block_carry_sizes_the_next_parent_of_the_relation, block_stack_types_and_per_count_ratios, block_relations_are_independent_and_all_must_agree,
+    block_lifecycle_carries_until_net_is_positive_then_pauses,
     block_parent_unchanged_end_to_end, drawdown_plain_oracle, flat_rsi_and_relation_names,
     fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure)]

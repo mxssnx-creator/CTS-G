@@ -24,6 +24,7 @@ from dataclasses import dataclass, asdict, field, replace as dc_replace
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
 from set_block import SetBlockBook
+from block_rules import clean_cfg as clean_block_cfg
 from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
@@ -3454,6 +3455,19 @@ class Pulse:
             # balance carries; the venue minimum lot still applies
             vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}),
                                  getattr(self, "volume_by_pack_kind", {}))
+            # Block v2 carry (blockCarry, off by default): a Set parent opens at V0 x (1 + the ratios up to the level its relation carries), never above the book
+            # room or the hard size ceiling; its adds stay fractions of that parent's own (original) volume
+            sb_ = getattr(self, "set_block", None)
+            if sb_ is not None and self.block.enabled and self.strat_block and getattr(self, "block_cfg", None) is not None and self.block_cfg.carry:
+                bscale = sb_.entry_scale(chosen.id, lane, "LONG" if direction > 0 else "SHORT", sym, self.block)
+                if bscale > 1.0 + 1e-9:
+                    cap_b = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+                    q3 = self.cap_order_qty(c, px, qty * bscale, cap_b)
+                    if q3 > qty:
+                        log(f"BLOCK carry {sym} {chosen.id} x{bscale:.2f} qty {qty} -> {q3}", every=30.0, key=f"bcarry2:{sym}")
+                        qty = q3
+                        notional = qty * px
+                        margin = notional / max(1, lev)
             if abs(vm - 1.0) > 1e-9:
                 cap_n = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
                 q2 = self.cap_order_qty(c, px, qty * vm, cap_n)
@@ -4690,9 +4704,10 @@ class Pulse:
         self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else max(MIN_PF_FLOOR, float(real_pf))     # the Base gate's PF unless unlinked
         self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
         self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
-        self.block_scope = "symbol" if str(ov.get("blockEvidenceScope") or "set").lower() == "symbol" else "set"
+        # Block v2 (block_rules): per-count steps and ratios, Additive / Shared, relations, lifecycle; no window
+        self.block_cfg = clean_block_cfg(ov, max_stack=int(self.block.max_stack or 3), volume_ratio=float(self.block.volume_ratio or 0.5))
         if getattr(self, "set_block", None) is not None:
-            self.set_block.scope = self.block_scope
+            self.set_block.cfg = self.block_cfg
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
         self.coord.load(cts, ov)
         self.indications.load(ov)
@@ -5164,7 +5179,7 @@ class Pulse:
             return
         if getattr(self, "set_block", None) is None:
             self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
-            self.set_block.scope = getattr(self, "block_scope", "set")
+            self.set_block.cfg = getattr(self, "block_cfg", None)
         now = time.time()
         lookback = self.sets.lookback * 60.0
         for pos in parents:

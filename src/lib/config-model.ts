@@ -217,8 +217,15 @@ export type PulseOverlay = {
   useMaxLeverage: boolean;
   /** Lower the leverage to 1 / (2 x stop + 0.5 %) so the venue never liquidates before a Set's stop; off (default, owner 2026-11-03): always the maximum. */
   leverageStopCap: boolean;
-  /** Block evidence: "set" pools the observations of a Set / lane / side over all symbols (Block can reach its sample count); "symbol" keeps one record per symbol. */
-  blockEvidenceScope: "set" | "symbol";
+  /** Block v2 (server: block_rules): one entry per block count, each with its own step (PositionCosts after the count before), volume ratio (0.1 .. 1.0 of the parent's original volume) and switch. */
+  blockCounts: BlockCount[];
+  blockStackType: "additive" | "shared";
+  blockSharedTotal: number;
+  blockMinObservations: number;
+  blockRelations: BlockRelation[];
+  blockCarry: boolean;
+  blockPauseSteps: number;
+  blockSkipFirst: number;
   maxOpen: number;
   maxPerGroup: number;
   symbolsAll: boolean;
@@ -495,7 +502,14 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   leverage: 150,
   useMaxLeverage: true,
   leverageStopCap: false,
-  blockEvidenceScope: "set",
+  blockCounts: [{ step: 2, ratio: 0.5, on: true }, { step: 2, ratio: 0.5, on: true }, { step: 2, ratio: 0.5, on: true }],
+  blockStackType: "additive",
+  blockSharedTotal: 1,
+  blockMinObservations: 3,
+  blockRelations: ["set"],
+  blockCarry: false,
+  blockPauseSteps: 1,
+  blockSkipFirst: 0,
   maxOpen: 0,
   maxPerGroup: 0,
   symbolsAll: false,
@@ -768,7 +782,14 @@ export type CtsSettings = {
   variant_block?: boolean;
   blockMaxStack?: number;
   blockMinSamples?: number;
-  blockEvidenceScope?: string;
+  blockCounts?: Partial<BlockCount>[];
+  blockStackType?: string;
+  blockSharedTotal?: number;
+  blockMinObservations?: number;
+  blockRelations?: string[];
+  blockCarry?: boolean;
+  blockPauseSteps?: number;
+  blockSkipFirst?: number;
   blockWindow?: number;
   exitMinSamples?: number;
   blockVolumeRatio?: number;
@@ -1121,6 +1142,33 @@ function slMaxByRangeOf(raw: unknown): Record<string, number> {
 export const TRAIL_PICKS = ["after", "together", "first", "first-any"] as const;
 export type TrailPick = (typeof TRAIL_PICKS)[number];
 
+export type BlockCount = { step: number; ratio: number; on: boolean };
+export const BLOCK_RELATIONS = ["symbol", "indication", "set", "step"] as const;
+export type BlockRelation = (typeof BLOCK_RELATIONS)[number];
+export const BLOCK_RATIO_MIN = 0.1;
+export const BLOCK_RATIO_MAX = 1;
+export const BLOCK_COUNTS_MAX = 12;
+
+/** The block count table from an overlay value (server: block_rules.clean_cfg): each ratio 0.1 .. 1.0, each step 0.5 .. 20 PositionCosts, at most 12 counts; an unreadable entry is dropped. */
+export function blockCountsOf(raw: unknown): BlockCount[] {
+  const out: BlockCount[] = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    const e = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    const step = Number(e.step ?? 2);
+    const ratio = Number(e.ratio ?? 0.5);
+    if (!Number.isFinite(step) || !Number.isFinite(ratio)) continue;
+    out.push({ step: Math.max(0.5, Math.min(20, step)), ratio: Math.round(Math.max(BLOCK_RATIO_MIN, Math.min(BLOCK_RATIO_MAX, ratio)) * 100) / 100, on: e.on !== false });
+  }
+  return out.length ? out.slice(0, BLOCK_COUNTS_MAX) : DEFAULT_OVERLAY.blockCounts.map((c) => ({ ...c }));
+}
+
+/** The enabled Block relations (symbol, indication, set, step): unknown names dropped, none left means the Set relation. */
+export function blockRelationsOf(raw: unknown): BlockRelation[] {
+  const names = (Array.isArray(raw) ? raw : []).map((x) => String(x).toLowerCase());
+  const out = BLOCK_RELATIONS.filter((r) => names.includes(r));
+  return out.length ? [...out] : ["set"];
+}
+
 /** The range switches from an overlay value: unknown names ignored, missing names at their default (server: position_cost.tp_ranges_on). */
 export function tpRangesOf(raw: unknown): Record<TpRangeId, boolean> {
   const out: Record<TpRangeId, boolean> = { ...TP_RANGES_DEFAULT };
@@ -1175,7 +1223,14 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
     blockMinSamples: Math.max(1, Math.round(num(cts.blockMinSamples, 8))),
-    blockEvidenceScope: cts.blockEvidenceScope === "symbol" ? "symbol" : "set",
+    blockCounts: blockCountsOf(cts.blockCounts),
+    blockStackType: cts.blockStackType === "shared" ? "shared" : "additive",
+    blockSharedTotal: Math.max(0.1, Math.min(3, num(cts.blockSharedTotal, 1))),
+    blockMinObservations: Math.max(1, Math.min(200, Math.round(num(cts.blockMinObservations, 3)))),
+    blockRelations: blockRelationsOf(cts.blockRelations),
+    blockCarry: bool(cts.blockCarry, false),
+    blockPauseSteps: Math.max(0, Math.min(20, Math.round(num(cts.blockPauseSteps, 1)))),
+    blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 0)))),
     blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
     mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 20))),
     realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 15))),

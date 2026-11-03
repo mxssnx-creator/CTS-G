@@ -3,6 +3,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MIN_PF_FLOOR,
+  BLOCK_COUNTS_MAX,
+  BLOCK_RATIO_MAX,
+  BLOCK_RATIO_MIN,
+  BLOCK_RELATIONS,
   blockTable,
   bool,
   DEFAULT_OVERLAY,
@@ -1183,11 +1187,65 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
-                <Toggle
-                  label="Block evidence pooled over all symbols of a Set / lane / side (off: one record per symbol, which never reaches the sample count on many symbols)"
-                  on={overlay.blockEvidenceScope !== "symbol"}
-                  onChange={(v) => patch("blockEvidenceScope", v ? "set" : "symbol")}
-                />
+                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Block v2 · each block count on its own (no windows)</div>
+                <p className="col-span-full text-xs text-muted">
+                  Every count has its own step (PositionCosts after the count before: 2 + 2 + 2 = three counts at 2, 4 and 6), its own volume ratio of the parent's original
+                  volume and its own cumulative evidence (all observations since the start, no last-N). Additive: each count adds its ratio. Shared: one budget (R × original
+                  volume) split equally over the counts that are on. A count adds only when every selected relation shows enough observations at a PF above its threshold.
+                </p>
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Stack type</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.blockStackType}
+                    onChange={(ev) => patch("blockStackType", ev.target.value === "shared" ? "shared" : "additive")}
+                  >
+                    <option value="additive">Additive · each count adds its own ratio × original volume</option>
+                    <option value="shared">Shared · one total budget split over the counts that are on</option>
+                  </select>
+                </label>
+                {overlay.blockStackType === "shared" ? (
+                  <Slider label="Shared budget R (× original volume)" value={overlay.blockSharedTotal} min={0.1} max={3} step={0.1}
+                    hint="The whole add budget of one parent; each count that is on adds R / counts." onChange={(v) => patch("blockSharedTotal", Math.round(v * 10) / 10)} />
+                ) : null}
+                {overlay.blockCounts.map((c, i) => (
+                  <div key={`bc-${i}`} className="col-span-full grid gap-2 rounded-lg border border-border bg-bg2 px-3 py-2 sm:grid-cols-[3rem_1fr_1fr_auto]">
+                    <span className="self-center font-mono text-xs text-muted">count {i + 1}</span>
+                    <Slider label="Step (PositionCosts)" value={c.step} min={0.5} max={10} step={0.5} hint={`trigger ${overlay.blockCounts.slice(0, i + 1).reduce((a, x) => a + x.step, 0)} PositionCosts in profit`}
+                      onChange={(v) => patch("blockCounts", overlay.blockCounts.map((x, j) => (j === i ? { ...x, step: v } : x)))} />
+                    <Slider label="Volume ratio" value={c.ratio} min={BLOCK_RATIO_MIN} max={BLOCK_RATIO_MAX} step={0.1} hint="× the parent's original volume (additive)"
+                      onChange={(v) => patch("blockCounts", overlay.blockCounts.map((x, j) => (j === i ? { ...x, ratio: Math.round(v * 10) / 10 } : x)))} />
+                    <div className="flex items-center gap-2">
+                      <Toggle label="on" on={c.on} onChange={(v) => patch("blockCounts", overlay.blockCounts.map((x, j) => (j === i ? { ...x, on: v } : x)))} />
+                      <button type="button" className="rounded border border-border px-2 py-1 font-mono text-xs" disabled={overlay.blockCounts.length <= 1}
+                        onClick={() => patch("blockCounts", overlay.blockCounts.filter((_, j) => j !== i))}>remove</button>
+                    </div>
+                  </div>
+                ))}
+                <button type="button" className="col-span-full rounded border border-border px-3 py-1 text-left font-mono text-xs" disabled={overlay.blockCounts.length >= BLOCK_COUNTS_MAX}
+                  onClick={() => patch("blockCounts", [...overlay.blockCounts, { ...(overlay.blockCounts[overlay.blockCounts.length - 1] ?? { step: 2, ratio: 0.5, on: true }) }])}>
+                  + add a block count
+                </button>
+                <div className="col-span-full flex flex-wrap gap-2">
+                  {BLOCK_RELATIONS.map((r) => (
+                    <Toggle
+                      key={`br-${r}`}
+                      label={`relation ${r}${r === "set" ? " (Ordinary · Main Set parents)" : r === "step" ? " (Overall · Real, per TP step)" : ""}`}
+                      on={overlay.blockRelations.includes(r)}
+                      onChange={(v) => {
+                        const next = v ? [...new Set([...overlay.blockRelations, r])] : overlay.blockRelations.filter((x) => x !== r);
+                        patch("blockRelations", next.length ? next : ["set"]);
+                      }}
+                    />
+                  ))}
+                </div>
+                <Num label="Min observations per count" value={overlay.blockMinObservations} min={1} max={200} step={1}
+                  hint="A count adds only after its own record holds this many observations (a count, not a window)." onChange={(v) => patch("blockMinObservations", Math.max(1, Math.round(v)))} />
+                <Toggle label="Carry: keep the stack of a losing parent until the relation's net is back positive, then pause" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
+                <Num label="Pause after the reset (parents)" value={overlay.blockPauseSteps} min={0} max={20} step={1} hint="Parents of the relation without adds after the net is back positive."
+                  onChange={(v) => patch("blockPauseSteps", Math.max(0, Math.round(v)))} />
+                <Num label="Skip the first x counts" value={overlay.blockSkipFirst} min={0} max={12} step={1} hint="Those counts never add; they still collect evidence."
+                  onChange={(v) => patch("blockSkipFirst", Math.max(0, Math.round(v)))} />
                 <Num
                   label="Block min samples"
                   value={overlay.blockMinSamples}
