@@ -131,6 +131,7 @@ STEP_MAX = TP_STEP_MAX                       # the ceiling
 STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
 HIST_CAP = 80
 ROTATION_FRESH_X = 1.5
+STEP_PF_AUTO_LOW_DEFAULT = 1.0
 LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("neg",), "pos": ("pos",)}
 ROTATION_CAP_S = 1800.0         # a symbol that stopped replaying cannot stretch the freshness limit beyond 1.5 x this
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
@@ -1794,6 +1795,7 @@ class SetBook:
         self.use_historic_gate = True
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
         self.rotation_s = 0.0
+        self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
         self.lane_order: Tuple[str, ...] = ("pos", "neg")           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
@@ -1838,6 +1840,7 @@ class SetBook:
         self.hist_honor_tp = True
         self.normal_entries = True
         self.exit_sets = True
+        self.exit_by_pack: Dict[str, bool] = {}
         self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
@@ -2056,6 +2059,10 @@ class SetBook:
         # is its own strategy type: with exitIgnoreTp on, every base stop (SL ratio x step, one Set per distinct distance)
         # also runs as an Exit Set, its own lane with no TP exit, its own tape and its own Base validation.
         self.exit_sets = bool(ov.get("exitIgnoreTp", True))
+        # Exit Sets per indication pack (exitSetsByPack {pack: bool}, missing = on): measured 2026-11-03, the indications pack's Exit Sets executed at
+        # PF 0.32 / 0.45 on two windows while its base Sets made 1.19 / 1.59, so a pack can run its Exit Sets or not on its own
+        raw_xp = ov.get("exitSetsByPack")
+        self.exit_by_pack = {str(k): bool(v) for k, v in raw_xp.items()} if isinstance(raw_xp, dict) else {}
         # per-step hold times: stepHoldOn[i] / stepHoldMin[i] belong to step i + 1 (steps 1..12); an "on" step leaves on its own
         # time exit after that many minutes, an "off" step keeps the global time stop. Replay and live read the same table.
         # holdEnabled is the master switch (off: no per-step and no auto hold, only the global time stop); holdAuto lets every Set
@@ -2185,6 +2192,8 @@ class SetBook:
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(30, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
+        # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
+        self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
         mode = str(ov.get("pauseMode") or "auto").lower()
         self.pause_mode = mode if mode in PAUSE_MODES else "auto"
         self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
@@ -2247,6 +2256,11 @@ class SetBook:
         }
         with self._lock:
             self._rebuild_sets()
+
+    def step_auto_candidates(self) -> List[float]:
+        """The floors Auto may choose: STEP_PF_CANDIDATES from minPfStepAutoLow up."""
+        low = float(getattr(self, "pf_step_auto_low", STEP_PF_AUTO_LOW_DEFAULT))
+        return [c for c in STEP_PF_CANDIDATES if c + 1e-9 >= low] or [STEP_PF_CANDIDATES[-1]]
 
     def _step_span(self) -> Tuple[int, int]:
         """(first, last) TP step the general packs' grid spans before the range switches: setMinStep (or the step-adapt minimum) .. setStepMax, and
@@ -2364,7 +2378,7 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-            if self.exit_sets and "exit" in pack_kinds:
+            if self.exit_sets and "exit" in pack_kinds and self.exit_by_pack.get(pack, True):
                 seen_stop: Dict[float, None] = {}
                 # The Exit Set of a stop distance belongs to the first cell (SL ratio, step) that makes it, over the pack's whole grid in a fixed order (the
                 # shipped steps first, then Wide), whether or not that cell's TP range is on: switching a range off removes the Exit Sets its cells own and
@@ -3240,11 +3254,12 @@ class SetBook:
         learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
         for side in ((1, -1) if self.direction_split else (0,)):
-            pooled = learn_step_floor([x for (bk, sd), v in pairs.items() if sd == side for x in v], self.pf_step_auto_min, self.pf_step_auto_tol)
+            pooled = learn_step_floor([x for (bk, sd), v in pairs.items() if sd == side for x in v], self.pf_step_auto_min, self.pf_step_auto_tol,
+                                      self.step_auto_candidates())
             for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
                 tp = round(bucket * TP_UNIT_PCT, 3)
                 manual = manual_step_floor(tp, self.pf_step_ratio)
-                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol)
+                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
                 source = "step" if got else ("pooled" if pooled else "manual")
                 use = got or pooled
                 floor = use["floor"] if use else manual

@@ -574,10 +574,10 @@ class AutoFloors:
         sides = (1, -1) if getattr(book, "direction_split", False) else (0,)
         for side in sides:
             before = {k: [(p, n) for (t, p, n) in v[:bisect.bisect_left(v, (hour, -1.0, -1.0))]] for k, v in self.by_key.items() if k[1] == side}
-            pooled = se.learn_step_floor([x for v in before.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol)
+            pooled = se.learn_step_floor([x for v in before.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates())
             lo, hi = int(round(se.STEP_PF_TP_MIN / se.TP_UNIT_PCT)), int(round(se.STEP_PF_TP_MAX / se.TP_UNIT_PCT))
             for bucket in range(lo, hi + 1):
-                got = se.learn_step_floor(before.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol) or pooled
+                got = se.learn_step_floor(before.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates()) or pooled
                 if got:
                     learned[(bucket, side)] = got["floor"]
         book.step_floor_auto = learned

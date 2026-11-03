@@ -187,6 +187,7 @@
   "volumeByPack": {},
   "volumeByKind": {},
   "volumeByRange": {},
+  "exitSetsByPack": {},
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,

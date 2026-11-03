@@ -260,6 +260,19 @@ def trailing_families_are_their_own_sets():
                 f"{lane_ok}; ids {id_ok}; stop within the 3 % limit {limit_ok}; trailStepMax 30 -> largest arm {arms} %")
 
 
+def exit_sets_switch_per_pack():
+    """exitSetsByPack {pack: false} removes exactly that pack's Exit Sets (no-TP Sets) and nothing else; missing packs keep theirs; exitIgnoreTp off still
+    removes every Exit Set."""
+    kw = dict(setStepMax=32, stratShortRange=True)
+    ref, off, none_ = _book(**kw), _book(exitSetsByPack={"indications": False}, **kw), _book(exitIgnoreTp=False, **kw)
+    r_sig, o_sig = _sig(ref), _sig(off)
+    gone = set(r_sig) - set(o_sig)
+    ok = (bool(gone) and all(ref.sets[i].kind == "exit" and ref.sets[i].pack == "indications" for i in gone) and not (set(o_sig) - set(r_sig))
+          and all(o_sig[i] == r_sig[i] for i in o_sig) and any(st.kind == "exit" and st.pack == "general" for st in off.by_idx)
+          and not any(st.kind == "exit" for st in none_.by_idx))
+    return ok, f"indications Exit off removes {len(gone)} Sets (all its Exit Sets), the other {len(o_sig)} unchanged; exitIgnoreTp off leaves no Exit Set"
+
+
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.5-3.5", sl_ratios),
@@ -279,4 +292,5 @@ CHECKS = [
     ("grid.tp-ranges-switch-only-their-own-steps", tp_ranges_switch_only_their_own_steps),
     ("grid.low-sl-ratios-build-only-distinct-stops", low_sl_ratios_build_only_distinct_stops),
     ("grid.trailing-families-are-their-own-sets", trailing_families_are_their_own_sets),
+    ("grid.exit-sets-switch-per-pack", exit_sets_switch_per_pack),
 ]

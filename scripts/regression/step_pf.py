@@ -289,8 +289,23 @@ def the_simulator_learns_the_engines_floors():
     diff = {k: (sim.get(k), eng.get(k)) for k in set(sim) | set(eng) if sim.get(k) != eng.get(k)}
     return ok, f"{len(sim)} (step, direction) floors learned by the simulator, {len(eng)} by the engine at the same hour; differences {diff or 'none'}; values {sorted(set(sim.values()))}"
 
+def auto_floor_never_under_its_lower_bound():
+    """minPfStepAutoLow bounds the Auto floor from below: on pairs where every floor delivers the same PF the rule picks its lowest candidate, which is
+    1.00 by default and the first candidate at or above the bound otherwise (live x02 2026-11-03: Auto sat at 1.00, under MIN_PF_FLOOR, for most steps)."""
+    rnd = random.Random(5)
+    pairs = [(1.0 + rnd.random(), rnd.choice((0.01, -0.01))) for _ in range(2000)]
+    got = {}
+    for low in (None, 1.05, 1.10):
+        b = se.SetBook()
+        b.load(overlay(**SMALL, **({} if low is None else {"minPfStepAutoLow": low})))
+        r = se.learn_step_floor(pairs, 300, 0.05, b.step_auto_candidates())
+        got[low] = r["floor"] if r else None
+    ok = got[None] is not None and got[None] <= got[1.05] and got[1.05] is not None and got[1.05] >= 1.05 and got[1.10] is not None and got[1.10] >= 1.10
+    return ok, f"Auto floor by lower bound: {got}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
-    manual_floor_is_one_plus_step_times_ratio, one_floor_for_every_window_and_stage,
+    manual_floor_is_one_plus_step_times_ratio, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,

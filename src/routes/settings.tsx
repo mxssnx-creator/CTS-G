@@ -1037,6 +1037,14 @@ function SettingsPage() {
               <Grid>
                 <Toggle label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
                 <Toggle label="Ignore TP (SL takes profit)" on={overlay.exitIgnoreTp} onChange={(v) => patch("exitIgnoreTp", v)} />
+                {["indications", "general", "shortrange"].map((pk) => (
+                  <Toggle
+                    key={pk}
+                    label={`Exit Sets for ${pk} (no-TP Sets of this pack, their own lanes)`}
+                    on={overlay.exitIgnoreTp !== false && (overlay.exitSetsByPack ?? {})[pk] !== false}
+                    onChange={(v) => patch("exitSetsByPack", { ...(overlay.exitSetsByPack ?? {}), [pk]: v })}
+                  />
+                ))}
                 <Toggle label="Best-of last-15 PF" on={overlay.exitBestOf} onChange={(v) => patch("exitBestOf", v)} />
                 <Toggle label="Auto-deactivate lanes" on={overlay.exitAutoDeact} onChange={(v) => patch("exitAutoDeact", v)} />
                 <Toggle label="Lock to breakeven" on={overlay.exitLockOn} onChange={(v) => patch("exitLockOn", v)} />
@@ -2065,6 +2073,15 @@ function PfWindowControls({
         step={1}
         hint="Auto takes the LOWEST floor whose delivered PF is within this much of the best one: the most valid Sets and orders at nearly the best PF. It does not use the manual ratio."
         onChange={(v) => patch("minPfStepAutoTol", v)}
+      />
+      <Slider
+        label="Auto: lowest floor it may choose"
+        value={overlay.minPfStepAutoLow ?? 1}
+        min={1}
+        max={2}
+        step={0.01}
+        hint="Auto never chooses a floor under this. At 1.00 it can admit break-even Sets after costs (x02 showed 1.00 for most steps above 1.6 %)."
+        onChange={(v) => patch("minPfStepAutoLow", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
       />
       <StepPfTable overlay={overlay} stats={stats ?? null} />
       <div className="col-span-full mt-2 font-mono text-[11px] text-muted">

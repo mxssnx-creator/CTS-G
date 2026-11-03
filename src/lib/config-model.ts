@@ -420,11 +420,15 @@ export type PulseOverlay = {
   volumeByPack: Record<string, number>;
   volumeByKind: Record<string, number>;
   volumeByRange: Record<string, number>;
+  /** Exit Sets (no-TP Sets) per indication pack: missing = on. */
+  exitSetsByPack: Record<string, boolean>;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
   minPfStepAutoMin: number;
   minPfStepAutoTol: number;
+  /** The lowest floor Auto may choose (1.00 .. 2.00). */
+  minPfStepAutoLow: number;
   pauseMode: PauseMode;
   pauseFixedMin: number;
   pauseCandidates: number[];
@@ -667,11 +671,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeByPack: {},
   volumeByKind: {},
   volumeByRange: {},
+  exitSetsByPack: {},
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
   minPfStepAutoMin: 300,
   minPfStepAutoTol: 5,
+  minPfStepAutoLow: 1,
   pauseMode: "auto",
   pauseFixedMin: 10,
   pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
@@ -897,11 +903,13 @@ export type CtsSettings = {
   volumeByPack?: Record<string, number>;
   volumeByKind?: Record<string, number>;
   volumeByRange?: Record<string, number>;
+  exitSetsByPack?: Record<string, boolean>;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
   minPfStepAutoMin?: number;
   minPfStepAutoTol?: number;
+  minPfStepAutoLow?: number;
   pauseMode?: string;
   pauseFixedMin?: number;
   pauseCandidates?: number[];
@@ -1260,11 +1268,15 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     volumeByPack: volumeMultsOf(cts.volumeByPack),
     volumeByKind: volumeMultsOf(cts.volumeByKind),
     volumeByRange: volumeMultsOf(cts.volumeByRange),
+    exitSetsByPack: Object.fromEntries(
+      Object.entries(cts.exitSetsByPack && typeof cts.exitSetsByPack === "object" ? cts.exitSetsByPack : {}).filter(([, v]) => typeof v === "boolean"),
+    ) as Record<string, boolean>,
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),
     minPfStepAutoMin: Math.max(30, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 300)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
+    minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1) * 100) / 100)),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
     pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
     pauseCandidates: pauseList(cts.pauseCandidates),
