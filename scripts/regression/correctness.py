@@ -143,6 +143,37 @@ def block_independent_evidence_and_restart():
         return bool(first and first["group"] == 1) and second is None and isolated is None and counts == [3, 3], f"first={first}; group2/other blocked={second is None}/{isolated is None}; samples={counts}"
 
 
+def block_evidence_pools_over_symbols_per_set_and_group():
+    """blockEvidenceScope "set" (owner 2026-11-03: Block never added because one record per (Set, lane, symbol, side) never reached blockMinSamples): the
+    observations of every parent of the SAME Set, lane and side pool over symbols. Three parents on three symbols give a group three samples, so a fourth
+    parent on a FOURTH symbol is admitted (scope "set") where the per-symbol scope has none; another Set, the other side and another group stay isolated; the
+    pooled record survives a restart; the legacy per-symbol scope is unchanged."""
+    out = {}
+    for scope in ("symbol", "set"):
+        with tempfile.TemporaryDirectory() as d:
+            book = SetBlockBook(os.path.join(d, "b.json"))
+            book.scope = scope
+            cfg = _block_cfg()
+            cfg.min_samples = 3
+            for i, sym in enumerate(("AAA-USDT", "BBB-USDT", "CCC-USDT")):
+                pos = replace(_parent(i), symbol=sym)
+                book.observe(pos, 100.15, pos.opened_at + 10, cfg, .12, 86400)
+                book.observe(pos, 100.4, pos.opened_at + 20, cfg, .12, 86400)
+                book.close(pos, 100.35, pos.opened_at + 60, cfg, .12)
+            book = SetBlockBook(book.path)
+            book.scope = scope
+            fresh = replace(_parent(5), symbol="DDD-USDT")
+            cand = book.candidate(fresh, 100.4, fresh.opened_at + 10, cfg, .12, 86400)
+            other_set = replace(fresh, set_id="other:1m:sl1:st4", block_fills=[])
+            other_side = replace(fresh, side="SHORT", block_fills=[], base_entry=100)
+            iso_set = book.candidate(other_set, 100.4, fresh.opened_at + 11, cfg, .12, 86400)
+            iso_side = book.candidate(other_side, 99.6, fresh.opened_at + 12, cfg, .12, 86400)
+            snap = book.snapshot(fresh.opened_at + 20, cfg, .12, 86400)
+            out[scope] = (bool(cand and cand["group"] == 1), iso_set is None, iso_side is None, snap["scope"], len(snap["lanes"]))
+    ok = out["symbol"][:3] == (False, True, True) and out["set"][:3] == (True, True, True) and out["set"][3] == "set" and out["set"][4] >= 2
+    return ok, f"(admitted on a fourth symbol, other Set isolated, other side isolated, scope, evidence rows) per scope: {out}"
+
+
 def block_actual_and_paper_costs():
     with tempfile.TemporaryDirectory() as d:
         b = SetBlockBook(os.path.join(d, "b.json"))
@@ -303,6 +334,6 @@ def frozen_hold_and_block_intent_failure():
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     paper_actual_isolation, config_change_invalidates_old_evidence, executed_restart_and_base_attribution,
     axis_continuation_and_set_isolation, block_independent_evidence_and_restart, block_actual_and_paper_costs,
-    block_pause_count_and_zero_are_respected,
+    block_pause_count_and_zero_are_respected, block_evidence_pools_over_symbols_per_set_and_group,
     block_parent_unchanged_end_to_end, drawdown_plain_oracle, flat_rsi_and_relation_names,
     fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure)]

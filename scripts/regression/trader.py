@@ -397,6 +397,7 @@ def leverage_keeps_liquidation_beyond_the_stop():
             contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
             p = pt.Pulse(api, contracts)
             p.boot_ts = 0.0
+            p.lev_stop_cap = True            # the stop cap is a setting (leverageStopCap, off by default since 2026-11-03)
             p.px[sym] = 100.0
             p.available = 50.0
             p.halted = False
@@ -415,6 +416,45 @@ def leverage_keeps_liquidation_beyond_the_stop():
     math_ok = all((1.0 / pt.stop_leverage_cap(x)) >= pt.LIQ_SAFETY * x + pt.LIQ_MAINT - 1e-12 for x in (0.0024, 0.0045, 0.0102, 0.02, 0.08))
     ok = pos is not None and 0 < applied <= cap < 150 and target == applied and bool(lev_posts) and math_ok and pt.stop_leverage_cap(0) == 0
     return ok, f"stop {sl * 100:.2f}% -> cap {cap}x, applied {applied}x (target {target}x, leverage posts {len(lev_posts)}); cap math {math_ok}"
+
+
+def leverage_is_always_the_exchange_maximum_by_default():
+    """Owner 2026-11-03: every entry runs at its contract's exchange maximum leverage. leverageStopCap (default off) is the earlier safety that lowered it to
+    1 / (2 x stop + 0.5 %). Off: a position at a 1 % stop opens at the contract's maximum (150x), a symbol left at a lowered leverage by an earlier capped entry
+    is raised back, and the leverage posts name the maximum; on: the cap applies again. Every shipped overlay and preset has useMaxLeverage on and no cap."""
+    import json as _j
+    from common import ROOT
+    sym = "BTC-USDT"
+    out = {}
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    for label, capped, start_lev in (("default", False, 150), ("lowered before", False, 40), ("cap on", True, 150)):
+        with tempfile.TemporaryDirectory() as td:
+            for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+                setattr(pt, name, os.path.join(td, f"{label}-{name.lower()}.json"))
+            pt.dump_cts_settings = lambda: {}
+            try:
+                api = _BookVenue({"askPrice": 100.02, "askQty": 50, "bidPrice": 99.98, "bidQty": 50})
+                contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+                p = pt.Pulse(api, contracts)
+                p.boot_ts, p.halted, p.available = 0.0, False, 50.0
+                p.px[sym] = 100.0
+                p.entry_sense = lambda *a, **k: None
+                p.sets.use_historic_gate = False
+                p.lev_stop_cap = capped
+                p.lev_max[sym], p.lev_map[sym] = 150, start_lev
+                if start_lev < 150:
+                    p.__dict__.setdefault("lev_cap", {})[sym] = start_lev
+                p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+                out[label] = (bool(p.open.get(sym)), int(p.lev_map.get(sym) or 0), p.target_leverage(150, sym))
+            finally:
+                pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    files = [os.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
+            [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
+    ship = {os.path.basename(f): (_j.load(open(f)).get("useMaxLeverage"), _j.load(open(f)).get("leverageStopCap")) for f in files}
+    default_off = pt.Pulse.__init__ is not None and not getattr(pt.Pulse(_BookVenue({}), {}), "lev_stop_cap", True)
+    ok = (out["default"] == (True, 150, 150) and out["lowered before"] == (True, 150, 150) and out["cap on"][0] and out["cap on"][1] < 150
+          and default_off and all(v[0] is not False and not v[1] for k, v in ship.items() if k.startswith("overlay-bingx")))
+    return ok, f"(opened, leverage applied, target) {out}; the engine default is no cap: {default_off}; shipped (useMaxLeverage, leverageStopCap) {sorted(set(map(str, ship.values())))}"
 
 
 class _ExistsVenue(_StubExchange):
@@ -2620,6 +2660,7 @@ CHECKS = [
     ("trader.thin-book-entry-is-never-sent", thin_book_entry_is_never_sent),
     ("trader.leverage-keeps-liquidation-beyond-the-stop", leverage_keeps_liquidation_beyond_the_stop),
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
+    ("trader.leverage-is-always-the-exchange-maximum-by-default", leverage_is_always_the_exchange_maximum_by_default),
     ("trader.a-moved-stop-never-storms-the-order-path", a_moved_stop_never_storms_the_order_path),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),

@@ -321,5 +321,6 @@
   "slMaxByRange": {
     "long": 1.0,
     "wide": 1.0
-  }
+  },
+  "leverageStopCap": false
 }

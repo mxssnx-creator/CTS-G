@@ -864,6 +864,7 @@ class Pulse:
         self.lev_map: Dict[str, int] = {}
         self.lev_max: Dict[str, int] = {}
         self.use_max_leverage = True
+        self.lev_stop_cap = False
         self.last_scan_ms = 0.0
         self.cycle_busy = False
         self.cycle_wait_ms = 0.0
@@ -3475,8 +3476,9 @@ class Pulse:
             sl_check = float(self.sets.lane_fracs(chosen)[0]) if chosen else float(sl_pct_a)
         except Exception:
             sl_check = float(sl_pct_a)
-        # leverage: never so high that the venue liquidates before the Set's stop
-        cap = stop_leverage_cap(sl_check)
+        # leverage: always the contract's exchange maximum (owner 2026-11-03, leverageStopCap off by default). With leverageStopCap on, never so high that the
+        # venue liquidates before the Set's stop (found live on x02: at 150x a short liquidated at +0.23 % with its stop at +0.45 %)
+        cap = stop_leverage_cap(sl_check) if bool(getattr(self, "lev_stop_cap", False)) else 0
         if cap > 0:
             self.__dict__.setdefault("lev_cap", {})[sym] = cap
             if int(self.lev_map.get(sym) or 0) > cap:
@@ -3484,10 +3486,14 @@ class Pulse:
             if int(self.lev_map.get(sym) or 0) > cap:
                 log(f"SKIP {sym} leverage {self.lev_map.get(sym)} above the stop cap {cap}", every=30.0, key=f"levcap:{sym}")
                 return
-            lev = self.leverage_for(c)
-            margin = notional / max(1, lev)
-            if margin > float(self.available or 0) * 0.95:
-                return
+        else:
+            self.__dict__.setdefault("lev_cap", {}).pop(sym, None)
+            if int(self.lev_map.get(sym) or 0) < int(self.lev_max.get(sym) or 0):
+                self.ensure_max_leverage(sym, force=True)     # an earlier capped entry left the symbol below its maximum: back to the maximum
+        lev = self.leverage_for(c)
+        margin = notional / max(1, lev)
+        if margin > float(self.available or 0) * 0.95:
+            return
         book_ok, book_why = self.book_allows(sym, direction, qty, px, sl_check)
         if not book_ok:
             # the venue's book would fill this entry far from the decision price: send nothing, rest the symbol
@@ -4551,6 +4557,7 @@ class Pulse:
         self.strict_size_cap = bool(ov.get("strictSizeCap", False))
         self.use_max_leverage, LEVERAGE = leverage_settings(ov)
         USE_MAX_LEVERAGE = self.use_max_leverage
+        self.lev_stop_cap = bool(ov.get("leverageStopCap", False))      # off (default): always the exchange maximum; on: never above 1 / (2 x stop + 0.5 %)
         if ov.get("maxOpen") is not None:
             MAX_OPEN = int(ov["maxOpen"])
         if ov.get("maxPerGroup") is not None:
@@ -4683,6 +4690,9 @@ class Pulse:
         self.block.default_min_pf = base_min_pf(ov) if ov.get("minPfLinked", True) else max(MIN_PF_FLOOR, float(real_pf))     # the Base gate's PF unless unlinked
         self.block.min_samples = max(1, int(ov.get("blockMinSamples") or 8))     # Block's own counts, not the coordinator's prevPos* nor the validation windows
         self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
+        self.block_scope = "symbol" if str(ov.get("blockEvidenceScope") or "set").lower() == "symbol" else "set"
+        if getattr(self, "set_block", None) is not None:
+            self.set_block.scope = self.block_scope
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
         self.coord.load(cts, ov)
         self.indications.load(ov)
@@ -5154,6 +5164,7 @@ class Pulse:
             return
         if getattr(self, "set_block", None) is None:
             self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
+            self.set_block.scope = getattr(self, "block_scope", "set")
         now = time.time()
         lookback = self.sets.lookback * 60.0
         for pos in parents:

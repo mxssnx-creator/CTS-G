@@ -10,6 +10,7 @@
   "ddHaltBasis": "session",
   "leverage": 1,
   "useMaxLeverage": false,
+  "leverageStopCap": false,
   "maxOpen": 2,
   "maxPerGroup": 1,
   "symbolsAll": true,

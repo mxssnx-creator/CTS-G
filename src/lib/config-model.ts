@@ -215,6 +215,10 @@ export type PulseOverlay = {
   ddHaltBasis: "session" | "start";
   leverage: number;
   useMaxLeverage: boolean;
+  /** Lower the leverage to 1 / (2 x stop + 0.5 %) so the venue never liquidates before a Set's stop; off (default, owner 2026-11-03): always the maximum. */
+  leverageStopCap: boolean;
+  /** Block evidence: "set" pools the observations of a Set / lane / side over all symbols (Block can reach its sample count); "symbol" keeps one record per symbol. */
+  blockEvidenceScope: "set" | "symbol";
   maxOpen: number;
   maxPerGroup: number;
   symbolsAll: boolean;
@@ -490,6 +494,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   ddHaltBasis: "session",
   leverage: 150,
   useMaxLeverage: true,
+  leverageStopCap: false,
+  blockEvidenceScope: "set",
   maxOpen: 0,
   maxPerGroup: 0,
   symbolsAll: false,
@@ -762,6 +768,7 @@ export type CtsSettings = {
   variant_block?: boolean;
   blockMaxStack?: number;
   blockMinSamples?: number;
+  blockEvidenceScope?: string;
   blockWindow?: number;
   exitMinSamples?: number;
   blockVolumeRatio?: number;
@@ -1168,6 +1175,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
     blockMinSamples: Math.max(1, Math.round(num(cts.blockMinSamples, 8))),
+    blockEvidenceScope: cts.blockEvidenceScope === "symbol" ? "symbol" : "set",
     blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
     mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 20))),
     realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 15))),

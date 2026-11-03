@@ -1183,6 +1183,11 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
+                <Toggle
+                  label="Block evidence pooled over all symbols of a Set / lane / side (off: one record per symbol, which never reaches the sample count on many symbols)"
+                  on={overlay.blockEvidenceScope !== "symbol"}
+                  onChange={(v) => patch("blockEvidenceScope", v ? "set" : "symbol")}
+                />
                 <Num
                   label="Block min samples"
                   value={overlay.blockMinSamples}
@@ -1841,6 +1846,11 @@ function SettingsPage() {
                   label="Always max leverage"
                   on={overlay.useMaxLeverage !== false}
                   onChange={(v) => patch("useMaxLeverage", v)}
+                />
+                <Toggle
+                  label="Lower the leverage to keep liquidation beyond the Set's stop (off, default: always the exchange maximum; on: 1 / (2 × stop + 0.5 %))"
+                  on={overlay.leverageStopCap === true}
+                  onChange={(v) => patch("leverageStopCap", v)}
                 />
                 <Num
                   label={overlay.useMaxLeverage !== false ? "Fallback leverage" : "Pulse leverage"}
