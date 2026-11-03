@@ -295,7 +295,7 @@ function SettingsPage() {
                 <KV k="Updated" v={String(cts?.updated_at ?? "—")} />
                 <KV k="Pulse running" v={stats?.paused ? "paused" : stats?.running && !stats?.halted ? "yes" : stats?.haltReason || "halted"} />
                 <KV k="Scan" v={`${fmtNum(stats?.scanMs, 1)} ms · cycle ${stats?.cycle ?? "—"}`} />
-                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 1))} />
+                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.05))} />
                 <KV k="Unit" v={String(stats?.unit ?? (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED"))} />
               </Grid>
               <p className="text-sm text-muted">
@@ -1612,11 +1612,11 @@ function SettingsPage() {
                 <KV k="Exchange position cost" v={String(overlay.positionCostPct)} />
                 <Slider
                   label="Volume factor"
-                  value={overlay.volumeFactor ?? 1}
-                  min={0.1}
+                  value={overlay.volumeFactor ?? 0.05}
+                  min={0.05}
                   max={5}
-                  step={0.1}
-                  hint="Scales pulse notional. 1 = base. Independent per Live / VST."
+                  step={0.05}
+                  hint="Scales pulse notional (0.05 = the minimum and the default). Independent per Live / VST."
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
@@ -1687,8 +1687,8 @@ function SettingsPage() {
                   v={
                     Math.min(
                       (overlay.sizePctOfBalance ?? 0) > 0 && Number(stats?.equity) > 0
-                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor || 1)
-                        : overlay.targetNotional * (overlay.volumeFactor || 1),
+                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor || 0.05)
+                        : overlay.targetNotional * (overlay.volumeFactor || 0.05),
                       overlay.sizeMaxNotional ?? 25,
                     ).toFixed(2)
                   }

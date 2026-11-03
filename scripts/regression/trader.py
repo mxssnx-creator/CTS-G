@@ -2229,7 +2229,23 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
     return ok, f"rows per pack {pack_rows}; verdicts {verdicts}; scope_allows pos/neg {allows}; place {placed}"
 
 
+
+def volume_factor_is_bounded_and_defaults_to_the_minimum():
+    """volumeFactor (owner: default and minimum 0.05): an overlay without it, with 0, a negative or an unreadable value sizes at 0.05, never at 1.0 (the
+    earlier fallback, 20 x the default); a valid value is kept inside 0.05 .. 10; the sized notional follows it."""
+    got = {repr(raw): pt.volume_factor_of(raw) for raw in (None, 0, -1, "x", float("nan"), 0.05, 0.3, 3, 99)}
+    want = {"None": 0.05, "0": 0.05, "-1": 0.05, "'x'": 0.05, "nan": 0.05, "0.05": 0.05, "0.3": 0.3, "3": 3.0, "99": 10.0}
+    p = _bare_pulse()
+    p.equity, p.size_pct, p.size_max = 1000.0, 1.0, 1e9
+    sizes = {}
+    for raw in (None, 0, 2):
+        p.volume_factor = pt.volume_factor_of(raw)
+        sizes[repr(raw)] = round(p.sized_notional(), 6)
+    ok = got == want and sizes == {"None": 0.5, "0": 0.5, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05
+    return ok, f"factors {got}; notional at 1 % of 1,000 USDT: {sizes}"
+
 CHECKS = [
+    ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
     ("trader.thirty-ready-symbols-compete-in-one-bounded-batch", thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch),
     ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),

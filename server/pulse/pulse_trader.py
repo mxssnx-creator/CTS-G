@@ -144,6 +144,19 @@ def rank_self_test() -> Tuple[bool, str]:
     return ok, f"got={got}"
 
 TARGET_NOTIONAL = 2.15
+VOLUME_FACTOR_MIN = 0.05        # the volume factor's floor and its default (owner 2026-10-28): a missing, zero or broken value never sizes above it
+VOLUME_FACTOR_MAX = 10.0
+
+
+def volume_factor_of(raw) -> float:
+    """The overlay's volumeFactor bounded to [VOLUME_FACTOR_MIN, VOLUME_FACTOR_MAX]; absent, zero, negative or unreadable -> the minimum, never 1.0."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return VOLUME_FACTOR_MIN
+    if not math.isfinite(v) or v <= 0:
+        return VOLUME_FACTOR_MIN
+    return max(VOLUME_FACTOR_MIN, min(VOLUME_FACTOR_MAX, v))
 LEVERAGE = 150
 USE_MAX_LEVERAGE = True
 MAX_OPEN = 0  # 0 = unlimited
@@ -773,7 +786,7 @@ class Pulse:
         self.halted = False
         self.halt_reason: Optional[str] = None
         self._pre_pause_halt: Optional[str] = None
-        self.volume_factor = 1.0
+        self.volume_factor = VOLUME_FACTOR_MIN
         self.size_pct = 1.0           # % of the balance per position (x volumeFactor); 0 = fixed targetNotional
         self.strict_size_cap = False  # when on, never round an entry above its balance-relative budget
         self.dd_halt = DD_HALT        # drawdown from the session's start equity that halts entries (fraction); 0 = off (ddHaltPct)
@@ -1158,7 +1171,7 @@ class Pulse:
         """One position's notional: the balance x sizePctOfBalance % x volumeFactor, so the size follows the account both
         ways. Without a balance read yet (or with sizePctOfBalance 0) the fixed targetNotional x volumeFactor applies.
         size_qty raises it to the venue's minimum order."""
-        vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
+        vf = volume_factor_of(getattr(self, "volume_factor", VOLUME_FACTOR_MIN))
         pct = float(getattr(self, "size_pct", 0.0) or 0.0)
         bal = float(getattr(self, "equity", 0.0) or 0.0)
         if pct > 0 and bal > 0:
@@ -1251,7 +1264,7 @@ class Pulse:
             # entry-notional cap, not a guarantee of execution price or loss.
             equity = float(getattr(self, "equity", 0.0) or 0.0)
             pct = float(getattr(self, "size_pct", 0.0) or 0.0)
-            factor = float(getattr(self, "volume_factor", 1.0) or 1.0)
+            factor = volume_factor_of(getattr(self, "volume_factor", VOLUME_FACTOR_MIN))
             limit = min(equity * pct / 100.0 * factor, float(getattr(self, "size_max", 0.0) or 0.0))
             if not math.isfinite(limit) or equity <= 0 or pct <= 0 or factor <= 0 or limit <= 0 or floor_n > limit + 1e-9:
                 return 0.0
@@ -4295,10 +4308,7 @@ class Pulse:
             # Clamp desk-supplied target notional: a corrupt or absurd overlay
             # value must never translate into impossible order volume.
             TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
-        try:
-            self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
-        except Exception:
-            self.volume_factor = 1.0
+        self.volume_factor = volume_factor_of(ov.get("volumeFactor"))
         try:
             self.size_max = max(0.2, float(ov.get("sizeMaxNotional") if ov.get("sizeMaxNotional") is not None else 25.0))
         except Exception:
@@ -4542,7 +4552,7 @@ class Pulse:
     def pulse_snapshot(self) -> Dict[str, Any]:
         return {
             "targetNotional": TARGET_NOTIONAL,
-            "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            "volumeFactor": volume_factor_of(getattr(self, "volume_factor", VOLUME_FACTOR_MIN)),
             "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
             "strictSizeCap": bool(getattr(self, "strict_size_cap", False)),
             "leverage": LEVERAGE,
@@ -5974,7 +5984,7 @@ class Pulse:
             "slPct": SL_PCT * 100,
             "tpPct": TP_PCT * 100,
             "targetNotional": TARGET_NOTIONAL,
-            "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
+            "volumeFactor": volume_factor_of(getattr(self, "volume_factor", VOLUME_FACTOR_MIN)),
             "sizePctOfBalance": float(getattr(self, "size_pct", 0.0) or 0.0),
             "sizeMaxNotional": float(getattr(self, "size_max", 25.0) or 25.0),
             "strictSizeCap": bool(getattr(self, "strict_size_cap", False)),

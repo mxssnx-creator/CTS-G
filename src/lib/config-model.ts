@@ -1055,7 +1055,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: pfFloor(num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT)),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 0.05),
+    volumeFactor: Math.max(0.05, Math.min(10, num(cts.volumeFactor, 0.05) || 0.05)),     // 0.05 = the minimum and the default; never 1 for a missing or zero value
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),

@@ -1160,8 +1160,13 @@ def position_size_has_a_hard_ceiling():
     p.size_max = 1e9
     p.size_pct, p.volume_factor = 1.0, 1.0
     free = round(p.sized_notional(), 6)
-    ok = capped == 25.0 and capped_fixed == 25.0 and abs(free - 4748.49) < 1e-6
-    return ok, f"capped={capped}; fixed target x20 capped={capped_fixed}; without the cap={free}"
+    p.size_pct, p.volume_factor, p.size_max = 0.0, 20.0, 10.0
+    capped_fixed_low = round(p.sized_notional(), 6)
+    p.size_max = 1e9
+    p.size_pct, p.volume_factor = 1.0, 1.0
+    # a factor of 20 is read as the factor ceiling 10 (pulse_trader.volume_factor_of): 2.15 x 10 = 21.5 under the 25 cap, 10 under a 10 cap
+    ok = capped == 25.0 and capped_fixed == 21.5 and capped_fixed_low == 10.0 and abs(free - 4748.49) < 1e-6
+    return ok, f"capped={capped}; fixed target x20 (factor ceiling 10)={capped_fixed}, under a 10 cap={capped_fixed_low}; without the cap={free}"
 
 
 def _eligible_set(b, idx, **fields):
