@@ -1284,6 +1284,27 @@ function SettingsPage() {
                 hint={`Every arm up to ${((overlay.trailStepMax ?? TRAIL_STEP_MAX_DEFAULT) * TP_UNIT_PCT).toFixed(1)}% runs as a trailing Set. Default ${TRAIL_STEP_MAX_DEFAULT} (2.2%), at most ${TRAIL_STEP_CEIL} (3.0%).`}
                 onChange={(v) => patch("trailStepMax", Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(v))))}
               />
+              <p className="font-mono text-xs text-muted">Own volume multiples · size = volume factor size × pack × type × range (each 0.1–5, under the size ceiling)</p>
+              {(
+                [
+                  ["volumeByPack", ["indications", "general", "shortrange"]],
+                  ["volumeByKind", ["base", "exit", "trail"]],
+                  ["volumeByRange", ["micro", "minimal", "short", "normal", "long", "wide", "trail"]],
+                ] as const
+              ).map(([key, names]) =>
+                names.map((n) => (
+                  <Slider
+                    key={`${key}:${n}`}
+                    label={`${key === "volumeByPack" ? "Pack" : key === "volumeByKind" ? "Type" : "Range"} ${n} · volume ×`}
+                    value={(overlay[key] ?? {})[n] ?? 1}
+                    min={0.1}
+                    max={5}
+                    step={0.1}
+                    hint="1 = the volume factor's size; the hard size ceiling and the venue minimum lot still apply."
+                    onChange={(v) => patch(key, { ...(overlay[key] ?? {}), [n]: Math.max(0.1, Math.min(5, Math.round(v * 10) / 10)) })}
+                  />
+                )),
+              )}
               <p className="font-mono text-xs text-muted">Trailing stop families · each builds every arm / give pair again with the initial stop at r × the arm</p>
               <div className="flex flex-wrap gap-2">
                 {TRAIL_SL_RATIOS.map((r) => (

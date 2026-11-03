@@ -233,6 +233,31 @@ def pack_of_reason(reason: Any) -> str:
 
 
 CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
+VOLUME_MULT_MIN, VOLUME_MULT_MAX = 0.1, 5.0
+
+
+def volume_mults_of(raw: Any) -> Dict[str, float]:
+    """{name: multiple} from an overlay value; each multiple bounded VOLUME_MULT_MIN .. VOLUME_MULT_MAX, unreadable entries dropped (= 1)."""
+    out: Dict[str, float] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(x) and x > 0:
+                out[str(k)] = max(VOLUME_MULT_MIN, min(VOLUME_MULT_MAX, x))
+    return out
+
+
+def set_volume_mult(st: Any, by_pack: Dict[str, float], by_kind: Dict[str, float], by_range: Dict[str, float]) -> float:
+    """The volume multiple of a Set position: its pack's x its type's (base / exit / trail) x its TP range's (micro .. wide; "trail" for trailing Sets)."""
+    from position_cost import tp_range_of
+    kind = str(getattr(st, "kind", "base") or "base")
+    rng = "trail" if kind == "trail" else tp_range_of(int(getattr(st, "step", 0) or 0))
+    return (by_pack.get(str(getattr(st, "pack", "")), 1.0) * by_kind.get(kind, 1.0) * by_range.get(rng, 1.0))
+
+
 LIQ_SAFETY = 2.0          # liquidation (about 1 / leverage away, less maintenance) must sit at least this many stop distances out
 LIQ_MAINT = 0.005         # maintenance margin and fees allowance (fraction of price)
 
@@ -3377,6 +3402,20 @@ class Pulse:
                     qty = scaled
                     notional = qty * px
                     margin = notional / max(1, lev)
+        if chosen:
+            # own volume per indication, type and range: the volume factor's size x that multiple, never over the hard size ceiling or what the
+            # balance carries; the venue minimum lot still applies
+            vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}))
+            if abs(vm - 1.0) > 1e-9:
+                cap_n = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+                q2 = self.cap_order_qty(c, px, qty * vm, cap_n)
+                if q2 <= 0:
+                    return
+                qty = q2
+                notional = qty * px
+                margin = notional / max(1, lev)
+                if margin > float(self.available or 0) * 0.95:
+                    return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -4434,6 +4473,10 @@ class Pulse:
             # value must never translate into impossible order volume.
             TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
         self.volume_factor = volume_factor_of(ov.get("volumeFactor"))
+        # own volume multiples per indication (pack), Set type and TP range (owner 2026-11-03), on top of the volume factor; 1 = as before
+        self.volume_by_pack = volume_mults_of(ov.get("volumeByPack"))
+        self.volume_by_kind = volume_mults_of(ov.get("volumeByKind"))
+        self.volume_by_range = volume_mults_of(ov.get("volumeByRange"))
         try:
             self.size_max = max(0.2, float(ov.get("sizeMaxNotional") if ov.get("sizeMaxNotional") is not None else 25.0))
         except Exception:

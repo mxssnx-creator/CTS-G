@@ -416,6 +416,10 @@ export type PulseOverlay = {
   setSlLow: boolean;
   trailStepMax: number;
   trailSlRatios: number[];
+  // own volume multiples (0.1 .. 5, missing = 1) per indication pack, Set type (base / exit / trail) and TP range (micro .. wide, trail)
+  volumeByPack: Record<string, number>;
+  volumeByKind: Record<string, number>;
+  volumeByRange: Record<string, number>;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
@@ -660,6 +664,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setSlLow: false,
   trailStepMax: TRAIL_STEP_MAX_DEFAULT,
   trailSlRatios: [],
+  volumeByPack: {},
+  volumeByKind: {},
+  volumeByRange: {},
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
@@ -887,6 +894,9 @@ export type CtsSettings = {
   setSlLow?: boolean;
   trailStepMax?: number;
   trailSlRatios?: number[];
+  volumeByPack?: Record<string, number>;
+  volumeByKind?: Record<string, number>;
+  volumeByRange?: Record<string, number>;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
@@ -1046,6 +1056,18 @@ export function tpRangesOf(raw: unknown): Record<TpRangeId, boolean> {
     for (const r of TP_RANGES) {
       const v = (raw as Record<string, unknown>)[r.id];
       if (typeof v === "boolean") out[r.id] = v;
+    }
+  }
+  return out;
+}
+
+/** {name: multiple}, each bounded 0.1 .. 5, unreadable entries dropped (server: pulse_trader.volume_mults_of). */
+export function volumeMultsOf(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) out[k] = Math.max(0.1, Math.min(5, n));
     }
   }
   return out;
@@ -1235,6 +1257,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setSlLow: bool(cts.setSlLow, false),
     trailStepMax: Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(num(cts.trailStepMax, TRAIL_STEP_MAX_DEFAULT)))),
     trailSlRatios: trailSlRatiosOf(cts.trailSlRatios),
+    volumeByPack: volumeMultsOf(cts.volumeByPack),
+    volumeByKind: volumeMultsOf(cts.volumeByKind),
+    volumeByRange: volumeMultsOf(cts.volumeByRange),
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),

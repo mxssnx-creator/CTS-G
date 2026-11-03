@@ -497,6 +497,43 @@ def unanswered_close_that_never_existed_is_sent_again():
     return ok, f"pending after each read (25 s apart): {out}"
 
 
+def set_volume_multiples_size_by_pack_type_and_range():
+    """volumeByPack / volumeByKind / volumeByRange (owner 2026-11-03): a Set position's size is the volume factor's size x its pack's x its type's x
+    its TP range's multiple (each 0.1 .. 5, missing = 1), never over sizeMaxNotional; with no multiple set the size is unchanged."""
+    import types
+    sym = "BTC-USDT"
+    st = types.SimpleNamespace(id="indications:L:1m:sl1.00:st15", pack="indications", kind="base", step=15, idx=0, sl_ratio=1.0, trail_key="",
+                               trail_arm=0.0, trail_give=0.0, hold_bars=0)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    out = {}
+    with tempfile.TemporaryDirectory() as td:
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for label, mults in (("plain", ({}, {}, {})), ("x3", ({"indications": 1.5}, {"base": 2.0}, {"normal": 1.0})),
+                                 ("over", ({"indications": 5}, {"base": 5}, {"normal": 5})), ("other range", ({}, {}, {"long": 3.0}))):
+                for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+                    setattr(pt, name, os.path.join(td, f"{label}-{name.lower()}.json"))
+                api = _BookVenue({"askPrice": 100.0, "askQty": 1e6, "bidPrice": 99.99, "bidQty": 1e6})
+                contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=0.1, max_lev=150)}
+                p = pt.Pulse(api, contracts)
+                p.boot_ts, p.halted, p.available = 0.0, False, 1e6
+                p.px[sym] = 100.0
+                p.entry_sense = lambda *a, **k: None
+                p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
+                p.volume_by_pack, p.volume_by_kind, p.volume_by_range = (pt.volume_mults_of(m) for m in mults)
+                p._scope_choice = lambda pack, side=0: (st, "pos", "")
+                p.sets.lane_fracs = lambda s_: (0.01, 0.015)
+                p.place(sym, 1, "set:indications:x", 0.9)
+                orders = [b for path, b in api.posts if path.endswith("/trade/order") and str(b.get("type")) == "MARKET"]
+                out[label] = round(float(orders[0]["quantity"]) * 100.0, 4) if orders else None
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    base = out["plain"]
+    ok = (base is not None and out["x3"] is not None and abs(out["x3"] - 3 * base) < 0.11 and out["over"] is not None and out["over"] <= 25.0 + 1e-9
+          and out["other range"] == base and pt.volume_mults_of({"a": 99, "b": "x", "c": 0.01}) == {"a": 5.0, "c": 0.1})
+    return ok, f"entry notional (USDT) by setting: {out}"
+
+
 class _PartialCloseVenue(_StubExchange):
     """Entry fills fully; the first close order fills 40% of its quantity, the next close is accepted in full unless
     fail_rest is set, in which case it is refused."""
@@ -2492,6 +2529,7 @@ CHECKS = [
     ("trader.leverage-keeps-liquidation-beyond-the-stop", leverage_keeps_liquidation_beyond_the_stop),
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
+    ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),
