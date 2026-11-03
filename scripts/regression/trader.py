@@ -330,6 +330,93 @@ def entry_lifecycle_with_a_stub_exchange():
                 f"protective batches={len(api.batches) if api else 0}")
 
 
+class _BookVenue(_StubExchange):
+    """The stub venue with a ticker: best bid / ask and their quantities as given (None = no ticker row)."""
+
+    def __init__(self, book):
+        super().__init__(executed="1", requested="1")
+        self.book = book
+
+    def public(self, path, extra=None):
+        if path.endswith("/quote/ticker") and self.book is not None:
+            return {"code": 0, "data": {"symbol": (extra or {}).get("symbol"), "lastPrice": "100", **{k: str(v) for k, v in self.book.items()}}}
+        return super().public(path, extra)
+
+
+def thin_book_entry_is_never_sent():
+    """Pre-trade book check (found live on x02 2026-11-03: 9 of 11 VST entries filled 0.7-24 % away on thin books and were closed at once as bad
+    fills): an entry whose best price on its side sits beyond the bad-fill limit from the decision price, or whose top quantity cannot fill the order,
+    sends no order and rests the symbol; a sane book sends it; a book that cannot be read lets it go (the post-fill guard still applies)."""
+    sym = "BTC-USDT"
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    out = {}
+    with tempfile.TemporaryDirectory() as td:
+        pt.BLOCK_PATH = os.path.join(td, "block.json")
+        pt.LEV_PATH = os.path.join(td, "lev.json")
+        pt.OPEN_PATH = os.path.join(td, "open.json")
+        pt.TRADES_PATH = os.path.join(td, "trades.jsonl")
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for label, book in (("far", {"askPrice": 110.0, "askQty": 50, "bidPrice": 109.9, "bidQty": 50}),
+                                ("thin", {"askPrice": 100.02, "askQty": 0.0001, "bidPrice": 99.98, "bidQty": 0.0001}),
+                                ("sane", {"askPrice": 100.02, "askQty": 50, "bidPrice": 99.98, "bidQty": 50}),
+                                ("unread", None)):
+                api = _BookVenue(book)
+                for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):     # each case its own state files: no position carries over
+                    setattr(pt, name, os.path.join(td, f"{label}-{name.lower()}.json"))
+                contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+                p = pt.Pulse(api, contracts)
+                p.boot_ts = 0.0
+                p.px[sym] = 100.0
+                p.available = 50.0
+                p.halted = False
+                p.entry_sense = lambda *a, **k: None
+                p.sets.use_historic_gate = False
+                p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+                sent = len([b for path, b in api.posts if path.endswith("/trade/order")])
+                out[label] = (sent, int(p.__dict__.get("exec_n", {}).get("skippedThinBook", 0)), p.cooldown.get(sym, 0) > pt.time.time())
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    ok = (out["far"] == (0, 1, True) and out["thin"] == (0, 1, True) and out["sane"][0] == 1 and out["sane"][1] == 0
+          and out["unread"][0] == 1 and out["unread"][1] == 0)
+    return ok, f"(orders sent, thin-book skips, symbol resting): {out}"
+
+
+def leverage_keeps_liquidation_beyond_the_stop():
+    """At the venue's maximum leverage (150x) the liquidation can sit inside the Set's own stop: found live on x02 (2026-11-03), a short liquidated
+    at +0.23 % with its stop at +0.45 %, positions vanished from the venue before their stop. An entry now sets the symbol's leverage to at most
+    stop_leverage_cap(stop): 1 / leverage stays at least LIQ_SAFETY stops (plus the maintenance allowance) away; the reconciliation keeps that cap."""
+    sym = "BTC-USDT"
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    with tempfile.TemporaryDirectory() as td:
+        for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+            setattr(pt, name, os.path.join(td, f"{name.lower()}.json"))
+        pt.dump_cts_settings = lambda: {}
+        try:
+            api = _BookVenue({"askPrice": 100.02, "askQty": 50, "bidPrice": 99.98, "bidQty": 50})
+            contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=5.0, max_lev=150)}
+            p = pt.Pulse(api, contracts)
+            p.boot_ts = 0.0
+            p.px[sym] = 100.0
+            p.available = 50.0
+            p.halted = False
+            p.entry_sense = lambda *a, **k: None
+            p.sets.use_historic_gate = False
+            p.lev_max[sym], p.lev_map[sym] = 150, 150
+            p.place(sym, 1, "ind:state:tf_combined:0.60:a2:src", 0.7)
+            pos = p.open.get(sym)
+            sl = float(pos.sl_pct) if pos else 0.0
+            cap = pt.stop_leverage_cap(sl)
+            lev_posts = [b for path, b in api.posts if path.endswith("/trade/leverage")]
+            applied = int(p.lev_map.get(sym) or 0)
+            target = p.target_leverage(150, sym)
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    math_ok = all((1.0 / pt.stop_leverage_cap(x)) >= pt.LIQ_SAFETY * x + pt.LIQ_MAINT - 1e-12 for x in (0.0024, 0.0045, 0.0102, 0.02, 0.08))
+    ok = pos is not None and 0 < applied <= cap < 150 and target == applied and bool(lev_posts) and math_ok and pt.stop_leverage_cap(0) == 0
+    return ok, f"stop {sl * 100:.2f}% -> cap {cap}x, applied {applied}x (target {target}x, leverage posts {len(lev_posts)}); cap math {math_ok}"
+
+
 class _PartialCloseVenue(_StubExchange):
     """Entry fills fully; the first close order fills 40% of its quantity, the next close is accepted in full unless
     fail_rest is set, in which case it is refused."""
@@ -918,6 +1005,32 @@ def history_chunks_rotate_even_when_many_positions_are_open():
     full, reset = g.history_window(names, 6, cursor)
     ok = len(seen) == 50 and sizes == [6] * 9 and full == names and reset == 0
     return ok, f"covered={len(seen)}/50 after {len(sizes)} passes; unique chunk sizes={sizes}; partial off returns all={full == names}"
+
+
+def load_governor_keeps_the_set_replay_running_at_the_books_footprint():
+    """The Set replay must run at the memory the Set book itself needs. Found live on x02 (2026-11-03): 30 symbols x 3 days of 1m history x 3,176 Sets
+    held about 250 MB before the first replay; the fixed limits (hard 156 MB at 30 symbols, critical 236 MB) made the governor critical, it shed the replay
+    for good and no Set was ever validated or traded. The limits now take a share of the machine's memory; with no machine figure they keep the formula."""
+    import load_engine as le
+    saved = dict(le._MACHINE)
+    try:
+        le._MACHINE["mb"] = 1024.0                         # a small 1 GB host
+        g = le.LoadGovernor()
+        b = g.observe(n_sym=30, n_open=0, rss_mb=250.0)
+        small_ok = b.hist_run and b.level in ("idle", "normal", "busy")
+        b_big = g.observe(n_sym=30, n_open=0, rss_mb=900.0)        # far above the machine share: still sheds
+        le._MACHINE["mb"] = 0.0                            # unknown machine: the per-symbol formula as before
+        g2 = le.LoadGovernor()
+        b0 = g2.observe(n_sym=30, n_open=0, rss_mb=250.0)
+        g3 = le.LoadGovernor()
+        g3.configure({"rssHardMb": 120})                   # an explicit setting still wins
+        explicit = g3.hard_limit(30) == 120.0
+    finally:
+        le._MACHINE.clear()
+        le._MACHINE.update(saved)
+    ok = small_ok and not b_big.hist_run and b0.level == "critical" and not b0.hist_run and explicit
+    return ok, (f"1 GB host at 250 MB: level={b.level} replay={b.hist_run}; at 900 MB: {b_big.level} replay={b_big.hist_run}; unknown host at 250 MB: "
+                f"{b0.level} replay={b0.hist_run}; rssHardMb wins={explicit}")
 
 
 def _book_with_three_packs(**extra):
@@ -2294,6 +2407,9 @@ CHECKS = [
     ("trader.flat-candle-gap-invalidates-short-cache", flat_candle_gap_cannot_preserve_short_history_cache),
     ("trader.fifty-short-histories-bound-refresh", fifty_short_histories_refresh_without_full_repaging),
     ("trader.history-chunks-rotate-fairly", history_chunks_rotate_even_when_many_positions_are_open),
+    ("trader.load-governor-keeps-the-set-replay-running-at-the-books-footprint", load_governor_keeps_the_set_replay_running_at_the_books_footprint),
+    ("trader.thin-book-entry-is-never-sent", thin_book_entry_is_never_sent),
+    ("trader.leverage-keeps-liquidation-beyond-the-stop", leverage_keeps_liquidation_beyond_the_stop),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),

@@ -213,7 +213,7 @@ def set_kind_of(set_id: str) -> str:
     sid = str(set_id or "")
     if sid.endswith(":" + EXIT_TAG):
         return "exit"
-    if re.search(r":tr[0-9.]+:[0-9.]+$", sid):
+    if re.search(r":tr[0-9.]+:[0-9.]+(:ts[0-9.]+)?$", sid):
         return "trail"
     return "base"
 
@@ -233,6 +233,21 @@ def pack_of_reason(reason: Any) -> str:
 
 
 CID_NEG_MARK = "z"         # first nonce character of an order of the Real Negative lane (no other nonce starts with it)
+LIQ_SAFETY = 2.0          # liquidation (about 1 / leverage away, less maintenance) must sit at least this many stop distances out
+LIQ_MAINT = 0.005         # maintenance margin and fees allowance (fraction of price)
+
+
+def stop_leverage_cap(sl_frac: float) -> int:
+    """The highest leverage whose liquidation stays LIQ_SAFETY stops beyond a stop sl_frac away: 1 / (LIQ_SAFETY x sl + LIQ_MAINT). Found live on x02
+    (2026-11-03): at the venue's 150x a short liquidated at +0.23 % while its Set stop sat at +0.45 %, so positions vanished from the venue
+    (book-only, unscored) before their own stop."""
+    sl = float(sl_frac or 0.0)
+    if not (sl > 0 and math.isfinite(sl)):
+        return 0
+    return max(1, int(1.0 / (LIQ_SAFETY * sl + LIQ_MAINT)))
+
+
+THIN_BOOK_REST_S = 300.0   # a symbol whose book failed the pre-trade check rests this long before the next entry is tried
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
 ENTRY_SIG_BUDGET = 30     # one full x01 universe competes; larger universes continue in later cycles
@@ -1002,19 +1017,23 @@ class Pulse:
         need = max(float(c.min_qty or 0), (float(c.min_usdt or 0) / px) if c.min_usdt else 0.0)
         return self.round_qty_up(c, need)
 
-    def target_leverage(self, mx: int) -> int:
+    def target_leverage(self, mx: int, symbol: str = "") -> int:
         """The leverage a contract runs at. Max leverage on: its exchange max. Off: the pulse leverage, capped by the
-        exchange max. With no known max, the pulse leverage."""
+        exchange max. With no known max, the pulse leverage. Either way never above the symbol's stop cap (lev_cap, set at each entry from the
+        Set's stop): the venue must not liquidate a position before its own stop."""
         mx = int(mx or 0)
         pulse = max(1, int(LEVERAGE or 150))
         if mx <= 0:
-            return pulse
-        return mx if self.use_max_leverage else max(1, min(mx, pulse))
+            lev = pulse
+        else:
+            lev = mx if self.use_max_leverage else max(1, min(mx, pulse))
+        cap = int((self.__dict__.get("lev_cap") or {}).get(symbol) or 0) if symbol else 0
+        return max(1, min(lev, cap)) if cap > 0 else lev
 
     def leverage_for(self, c: Optional[Contract]) -> int:
         sym = getattr(c, "symbol", "") if c is not None else ""
         mx = int(self.lev_max.get(sym) or getattr(c, "max_lev", 0) or 0)
-        return self.target_leverage(mx)
+        return self.target_leverage(mx, sym)
 
     def _persist_lev(self) -> None:
         try:
@@ -1056,7 +1075,7 @@ class Pulse:
         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
         c = self.contracts.get(symbol)
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
-        tgt = self.target_leverage(mx)
+        tgt = self.target_leverage(mx, symbol)
         applied = int(self.lev_map.get(symbol) or 0)
         if not force and mx > 0 and applied >= tgt:
             if c is not None:
@@ -1071,7 +1090,7 @@ class Pulse:
                 self.lev_max[symbol] = mx
                 if c is not None:
                     c.max_lev = mx
-                tgt = self.target_leverage(mx)
+                tgt = self.target_leverage(mx, symbol)
                 if cur_l == tgt and cur_s == tgt:
                     self.lev_map[symbol] = tgt
                     self._persist_lev()
@@ -1094,7 +1113,7 @@ class Pulse:
                     self.lev_max[symbol] = mx
                     if c is not None:
                         c.max_lev = mx
-                    want = self.target_leverage(mx)
+                    want = self.target_leverage(mx, symbol)
                     r2 = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
                     if not self.ok(r2):
                         return applied or cur_l or want
@@ -1361,7 +1380,7 @@ class Pulse:
         extra_pack = bool(set_id) and pk not in ("indications", "general", "shortrange")
         p = "x" if extra_pack else "i" if pk.startswith("ind") else "s" if pk.startswith("shortrange") else "g"
         sl, tr, st = "06", "03", "08"
-        m = re.search(r":sl([0-9.]+)", set_id or "")
+        m = re.search(r":sl([0-9.]+)", set_id or "") or re.search(r":ts([0-9.]+)$", set_id or "")    # a trailing stop family carries its stop ratio here
         if m:
             try:
                 sl = f"{int(round(float(m.group(1)) * 10)):02d}"
@@ -1476,7 +1495,10 @@ class Pulse:
                 elif str(getattr(st_obj, "pack", "")) != pack or int(getattr(st_obj, "side", 0) or 0) != side:
                     return False
                 if st_obj.kind == "trail":
-                    return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06
+                    # the SL field holds a trailing stop family's ratio (r x 10) and "06" for the shipped trailing Sets: a family never decodes to its twin
+                    ts = float(getattr(st_obj, "trail_sl", 0.0) or 0.0)
+                    want_sl = int(round((ts if ts > 0 else 0.6) * 10))
+                    return step == 0 and not is_exit and abs(float(st_obj.trail_arm) - arm) < 0.06 and int(round(sl * 10)) == want_sl
                 if (st_obj.kind == "exit") != is_exit:
                     return False
                 return step == int(st_obj.step) and abs(float(st_obj.sl_ratio) - float(sl)) < 0.15
@@ -3182,6 +3204,36 @@ class Pulse:
                 pass
         return None, "", blocked_by
 
+    def entry_slip_limit(self, sl_frac: float) -> float:
+        """How far an entry's price may sit from the decision price: at least 2 x PositionCost, at most maxEntrySlipPct and half the stop distance."""
+        return max(2.0 * cost_as_frac(self.position_cost_pct), min(float(getattr(self, "max_entry_slip", 0.0075)), 0.5 * float(sl_frac or 0.0)))
+
+    def book_allows(self, sym: str, direction: int, qty: float, ref_px: float, sl_frac: float) -> Tuple[bool, str]:
+        """Pre-trade check of the venue's own top of book (the ticker's bidPrice / askPrice and their quantities, on both venues): a market entry whose
+        best price on its side sits beyond the bad-fill limit from the decision price, or whose top quantity cannot fill the order, is never sent.
+        Found live on x02 (2026-11-03): 9 of 11 VST entries filled 0.7-24 % from the VST price on thin small-cap books and were closed at once as bad
+        fills (a loss each); two more were closed by the venue at once. A book that cannot be read lets the order go (the post-fill guard still applies)."""
+        limit = self.entry_slip_limit(sl_frac)
+        key_p, key_q = ("askPrice", "askQty") if direction > 0 else ("bidPrice", "bidQty")
+        try:
+            r = self.api.public("/openApi/swap/v2/quote/ticker", {"symbol": sym})
+            data = r.get("data") if isinstance(r, dict) else None
+            row = data[0] if isinstance(data, list) and data else data
+            if not isinstance(row, dict):
+                return True, "no book"
+            best = float(row.get(key_p) or 0)
+            top_q = float(row.get(key_q) or 0)
+        except Exception:
+            return True, "no book"
+        if not (math.isfinite(best) and best > 0 and ref_px > 0):
+            return True, "no book"
+        gap = abs(best - ref_px) / ref_px
+        if gap > limit:
+            return False, f"{key_p} {best} is {gap * 100:.2f}% from {ref_px} (limit {limit * 100:.2f}%)"
+        if math.isfinite(top_q) and top_q > 0 and top_q + 1e-12 < float(qty):
+            return False, f"top {key_q} {top_q} under the order {qty}"
+        return True, ""
+
     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
         if self.entries_blocked():
             return
@@ -3287,6 +3339,31 @@ class Pulse:
         )
         sl_a = px * (1 - sl_pct_a) if direction > 0 else px * (1 + sl_pct_a)
         tp_a = px * (1 + tp_pct_a) if direction > 0 else px * (1 - tp_pct_a)
+        try:
+            sl_check = float(self.sets.lane_fracs(chosen)[0]) if chosen else float(sl_pct_a)
+        except Exception:
+            sl_check = float(sl_pct_a)
+        # leverage: never so high that the venue liquidates before the Set's stop
+        cap = stop_leverage_cap(sl_check)
+        if cap > 0:
+            self.__dict__.setdefault("lev_cap", {})[sym] = cap
+            if int(self.lev_map.get(sym) or 0) > cap:
+                self.ensure_max_leverage(sym, force=True)
+            if int(self.lev_map.get(sym) or 0) > cap:
+                log(f"SKIP {sym} leverage {self.lev_map.get(sym)} above the stop cap {cap}", every=30.0, key=f"levcap:{sym}")
+                return
+            lev = self.leverage_for(c)
+            margin = notional / max(1, lev)
+            if margin > float(self.available or 0) * 0.95:
+                return
+        book_ok, book_why = self.book_allows(sym, direction, qty, px, sl_check)
+        if not book_ok:
+            # the venue's book would fill this entry far from the decision price: send nothing, rest the symbol
+            n_ = self.__dict__.setdefault("exec_n", {})
+            n_["skippedThinBook"] = int(n_.get("skippedThinBook", 0)) + 1
+            self.cooldown[sym] = time.time() + THIN_BOOK_REST_S
+            log(f"SKIP {sym} thin book: {book_why}", every=20.0, key=f"thin:{sym}")
+            return
         # Entry is market-only. Nested SL/TP JSON on the same POST makes BingX
         # report "signature mismatch". Security SL/TP go on via control orders.
         attach: Dict[str, str] = {}
@@ -3448,7 +3525,7 @@ class Pulse:
         if cid:
             self.seen_fill_cids.add(cid)
         slip = abs(avg - px) / px if px > 0 else 0.0
-        slip_limit = max(2.0 * cost_as_frac(self.position_cost_pct), min(self.max_entry_slip, 0.5 * float(sl_pct or 0.0)))
+        slip_limit = self.entry_slip_limit(sl_pct)
         if slip > slip_limit:
             # the fill is far from the price the decision was made at (a broken or empty book): the stop and target would
             # be measured from a price the market never gave. Leave at once, do not score the Set, and keep off the symbol.
@@ -4198,6 +4275,8 @@ class Pulse:
                        "blockAddFills": int(n.get("blockAddFills", 0)),
                        "wins": int(n.get("wins", 0)), "losses": int(n.get("losses", 0)), "skippedNotScored": int(n.get("skipped", 0)), "droppedNoRecord": int(n.get("dropped", 0)),
                        "setsThatTraded": len(self.__dict__.get("exec_sets", {}))},
+            # entries never sent: the venue's book was too far from the decision price or too thin (book_allows), or a Real scope blocked
+            "entriesSkipped": {"thinBook": int(n.get("skippedThinBook", 0)), "scopeBlocked": int(n.get("scopeBlocked", 0))},
         }
 
     def _load_trade_history(self) -> None:
@@ -5578,7 +5657,7 @@ class Pulse:
                 foreign.add(f"{sym}:{side}")
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
-            if live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0)):
+            if live_lev and live_lev != self.target_leverage(int(self.lev_max.get(sym) or 0), sym):
                 self.ensure_max_leverage(sym, force=True)
             try:
                 liq = float(p.get("liquidationPrice") or p.get("liqPrice") or p.get("avgLiquidationPrice") or 0)
@@ -5795,7 +5874,7 @@ class Pulse:
         self._load_lev_file()
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
             return
-        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0)) or s not in self.lev_max]
+        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < self.target_leverage(int(self.lev_max.get(s) or 0), s) or s not in self.lev_max]
         if not need:
             now = time.time()
             if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
@@ -6335,7 +6414,9 @@ class Pulse:
         self.record_test("qa-trail-indep", self.variants.trail_arm >= 0.3, f"{self.variants.trail_key}")
         self.record_test("qa-hot-budget", self.last_scan_ms <= (SCAN_S * 1000.0 + 40.0) or self.last_scan_io or self.hist_busy or self.cycle < 40, f"{self.last_scan_ms:.0f}ms budget={SCAN_S*1000:.0f} io={int(self.last_scan_io)} hist={int(self.hist_busy)}")
         rss = rss_mb()
-        self.record_test("qa-rss", rss < (110 if len(SYMBOLS) <= 80 else 520), f"{rss:.1f}MB n={len(SYMBOLS)}")
+        # the governor's own hard limit (machine-scaled): a fixed 110 MB was under the Set book's working set and failed on every healthy run
+        hard = self.load.hard_limit(len(SYMBOLS)) if hasattr(self, "load") else 520.0
+        self.record_test("qa-rss", rss < hard, f"{rss:.1f}MB n={len(SYMBOLS)} hard={hard:.0f}MB")
         self.record_test(
             "qa-load",
             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),

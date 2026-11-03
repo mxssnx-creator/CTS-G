@@ -47,10 +47,14 @@ import {
   STEP_PF_TP_MIN,
   manualStepPf,
   stepPfRatio,
+  TP_RANGES,
   TP_STEP_MAX,
   TP_STEP_DEFAULT_MAX,
   TP_STEP_MIN,
   TP_UNIT_PCT,
+  TRAIL_SL_RATIOS,
+  TRAIL_STEP_CEIL,
+  TRAIL_STEP_MAX_DEFAULT,
   tpPctOfStep,
   type IndicationConfig,
   type PauseMode,
@@ -748,6 +752,19 @@ function SettingsPage() {
                   on={overlay.setStepAdapt !== false}
                   onChange={(v) => patch("setStepAdapt", v)}
                 />
+                {TP_RANGES.map((r) => (
+                  <Toggle
+                    key={r.id}
+                    label={`${r.label} range · TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}%${r.id === "wide" ? " (on extends the grid past Step max to 5.0 %)" : ""}`}
+                    on={(overlay.tpRanges ?? {})[r.id] ?? r.id !== "wide"}
+                    onChange={(v) => patch("tpRanges", { ...overlay.tpRanges, [r.id]: v })}
+                  />
+                ))}
+                <Toggle
+                  label="Tight stops: SL ratios 0.2 / 0.3 / 0.4 × TP (only where the floored stop differs from every other ratio's)"
+                  on={overlay.setSlLow === true}
+                  onChange={(v) => patch("setSlLow", v)}
+                />
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
@@ -1258,6 +1275,28 @@ function SettingsPage() {
                 hint="Smallest arm and give of a trail Set, in PositionCost units. Default 3, range 2–8. Every arm k and give j from this step up to 22 runs as a Set, with j ≤ k."
                 onChange={(v) => patch("trailMinStep", Math.max(2, Math.min(8, Math.round(v))))}
               />
+              <Slider
+                label="Largest trailing arm (steps of 0.1 %)"
+                value={overlay.trailStepMax ?? TRAIL_STEP_MAX_DEFAULT}
+                min={2}
+                max={TRAIL_STEP_CEIL}
+                step={1}
+                hint={`Every arm up to ${((overlay.trailStepMax ?? TRAIL_STEP_MAX_DEFAULT) * TP_UNIT_PCT).toFixed(1)}% runs as a trailing Set. Default ${TRAIL_STEP_MAX_DEFAULT} (2.2%), at most ${TRAIL_STEP_CEIL} (3.0%).`}
+                onChange={(v) => patch("trailStepMax", Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(v))))}
+              />
+              <p className="font-mono text-xs text-muted">Trailing stop families · each builds every arm / give pair again with the initial stop at r × the arm</p>
+              <div className="flex flex-wrap gap-2">
+                {TRAIL_SL_RATIOS.map((r) => (
+                  <Toggle
+                    key={r}
+                    label={`stop ${r} × arm`}
+                    on={(overlay.trailSlRatios ?? []).includes(r)}
+                    onChange={(v) =>
+                      patch("trailSlRatios", v ? [...new Set([...(overlay.trailSlRatios ?? []), r])].sort((a, b) => a - b) : (overlay.trailSlRatios ?? []).filter((x) => x !== r))
+                    }
+                  />
+                ))}
+              </div>
               <p className="font-mono text-xs text-muted">Live CTS variants · arm:give · filtered by optimal range</p>
               <div className="flex flex-wrap gap-2">
                 {(Array.isArray(cts?.strategyBaseTrailingVariants) ? cts!.strategyBaseTrailingVariants : [...TRAIL_VARIANTS]).map((t) => {

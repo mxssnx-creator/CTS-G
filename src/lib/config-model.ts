@@ -121,6 +121,22 @@ export const TP_UNIT_PCT = 0.1;
 export const TP_STEP_MIN = 2;
 export const TP_STEP_MAX = 50;
 export const TP_STEP_DEFAULT_MAX = 32;
+/** Named TP ranges (server: position_cost.TP_RANGES): each a band of TP steps switched on or off on its own (overlay tpRanges). Wide (3.3-5.0 %) is off by default. */
+export const TP_RANGES = [
+  { id: "micro", label: "Micro", lo: 2, hi: 3 },
+  { id: "minimal", label: "Minimal", lo: 4, hi: 6 },
+  { id: "short", label: "Short", lo: 7, hi: 12 },
+  { id: "normal", label: "Normal", lo: 13, hi: 20 },
+  { id: "long", label: "Long", lo: 21, hi: 32 },
+  { id: "wide", label: "Wide", lo: 33, hi: 50 },
+] as const;
+export type TpRangeId = (typeof TP_RANGES)[number]["id"];
+export const TP_RANGES_DEFAULT: Record<TpRangeId, boolean> = { micro: true, minimal: true, short: true, normal: true, long: true, wide: false };
+/** Trailing grid ceiling: arms up to trailStepMax steps (default 22 = 2.2 %, at most 30 = 3.0 %). */
+export const TRAIL_STEP_MAX_DEFAULT = 22;
+export const TRAIL_STEP_CEIL = 30;
+/** Trailing stop families (server: position_cost.TRAIL_SL_RATIOS): each ratio r builds the arm / give pairs again with the initial stop at r x the arm. */
+export const TRAIL_SL_RATIOS = [0.5, 1.0, 1.5, 2.0, 3.0] as const;
 export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
 /** Minimum PF per TP step (owner 2026-11-02), mirrors set_engine.py: 1 + TP% x ratio on the 0.1 % grid rounded DOWN, 0.2 % at ratio 0.2 = 1.04.
  * The ratio runs 0.1 .. 1.5 in steps of 0.05 (default 0.2). Auto learns the floor per step from earlier orders and falls back to this value. */
@@ -395,6 +411,11 @@ export type PulseOverlay = {
   minPfByStep: boolean;
   rankByLane: boolean;
   setScratchEnabled: boolean;
+  // Set grid extensions (2026-11-03): named TP ranges on / off, SL ratios 0.2 / 0.3 / 0.4 x TP, trailing arms up to 3.0 %, trailing stop families.
+  tpRanges: Record<TpRangeId, boolean>;
+  setSlLow: boolean;
+  trailStepMax: number;
+  trailSlRatios: number[];
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
@@ -635,6 +656,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfByStep: true,
   rankByLane: true,
   setScratchEnabled: false,
+  tpRanges: { ...TP_RANGES_DEFAULT },
+  setSlLow: false,
+  trailStepMax: TRAIL_STEP_MAX_DEFAULT,
+  trailSlRatios: [],
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
@@ -858,6 +883,10 @@ export type CtsSettings = {
   minPfByStep?: boolean;
   rankByLane?: boolean;
   setScratchEnabled?: boolean;
+  tpRanges?: Partial<Record<string, boolean>>;
+  setSlLow?: boolean;
+  trailStepMax?: number;
+  trailSlRatios?: number[];
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
@@ -1008,6 +1037,30 @@ export function indicationConfigList(v: unknown): IndicationConfig[] {
       pause: e.pause === "auto" || e.pause === undefined ? "auto" : pauseMinutes(e.pause, 0),
     };
   });
+}
+
+/** The range switches from an overlay value: unknown names ignored, missing names at their default (server: position_cost.tp_ranges_on). */
+export function tpRangesOf(raw: unknown): Record<TpRangeId, boolean> {
+  const out: Record<TpRangeId, boolean> = { ...TP_RANGES_DEFAULT };
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const r of TP_RANGES) {
+      const v = (raw as Record<string, unknown>)[r.id];
+      if (typeof v === "boolean") out[r.id] = v;
+    }
+  }
+  return out;
+}
+
+/** Only the listed trailing stop families: an unknown ratio is dropped, never snapped (server: SetBook.load). */
+export function trailSlRatiosOf(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  const ok = new Set<number>();
+  for (const x of raw) {
+    const n = Number(x);
+    const hit = TRAIL_SL_RATIOS.find((r) => Math.abs(r - n) < 1e-9);
+    if (hit !== undefined) ok.add(hit);
+  }
+  return [...ok].sort((a, b) => a - b);
 }
 
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
@@ -1178,6 +1231,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfByStep: bool(cts.minPfByStep, true),
     rankByLane: bool(cts.rankByLane, true),
     setScratchEnabled: bool(cts.setScratchEnabled, false),
+    tpRanges: tpRangesOf(cts.tpRanges),
+    setSlLow: bool(cts.setSlLow, false),
+    trailStepMax: Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(num(cts.trailStepMax, TRAIL_STEP_MAX_DEFAULT)))),
+    trailSlRatios: trailSlRatiosOf(cts.trailSlRatios),
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),

@@ -30,6 +30,11 @@ SL_RATIO_MIN = 0.5
 SL_RATIO_MAX = 3.5
 SL_RATIO_STEP = 0.25
 SL_RATIOS = tuple(round(SL_RATIO_MIN + i * SL_RATIO_STEP, 2) for i in range(int(round((SL_RATIO_MAX - SL_RATIO_MIN) / SL_RATIO_STEP)) + 1))
+# Tight stops (owner 2026-11-03: "SL ratios from 0.2 of TP away"): 0.2 / 0.3 / 0.4 x TP, added to the grid by setSlLow. The overall minimum stop
+# (PositionCost + slMinSteps steps) still floors every stop, so a low ratio only builds a Set where its floored stop differs from every other ratio's at that step.
+SL_RATIOS_LOW = (0.2, 0.3, 0.4)
+SL_RATIO_FLOOR = SL_RATIOS_LOW[0]
+SL_RATIOS_ALL = SL_RATIOS_LOW + SL_RATIOS
 # TP grid (base Sets), owner 2026-11-02: the step is an ABSOLUTE distance, TP = k x TP_UNIT_PCT of price with k = 2..32, i.e. 0.2 % .. 3.2 % in 0.1 %
 # steps. It was k x PositionCost (a distance that moves with the venue's fees); PositionCost still pays for every order and floors the TP (TP_MIN_COSTS).
 TP_UNIT_PCT = 0.1
@@ -37,11 +42,42 @@ TP_STEP_MIN = 2
 TP_STEP_MAX = 50                # the ceiling a setting can reach: 5.0 % (owner 2026-11-03: limits raised; was 32)
 TP_STEP_DEFAULT_MAX = 32        # the shipped grid's last step (3.2 %), unchanged
 TP_MIN_COSTS = 1.0              # a TP never sits under this many PositionCosts (was 2): the net at the TP stays positive
+# Named TP ranges (owner 2026-11-03: "Ranges Micro, Minimal, Short, Normal, Long, Wide"), each a band of TP steps switched on or off on its own
+# (overlay tpRanges {name: bool}). Micro .. Long cover the shipped grid 0.2 .. 3.2 %; Wide adds 3.3 .. 5.0 %. A switched-off range builds none of its Sets;
+# the other ranges' Sets are unchanged (every Set is its own step, lane and tape).
+TP_RANGES = (("micro", 2, 3), ("minimal", 4, 6), ("short", 7, 12), ("normal", 13, 20), ("long", 21, 32), ("wide", 33, 50))
+TP_RANGES_DEFAULT = {"micro": True, "minimal": True, "short": True, "normal": True, "long": True, "wide": False}
+
+
+def tp_range_of(step: int) -> str:
+    """The named TP range a TP step belongs to (TP_RANGES); a step outside every band (never on the grid) is "wide" above and "micro" below."""
+    k = int(step)
+    for name, lo, hi in TP_RANGES:
+        if lo <= k <= hi:
+            return name
+    return "micro" if k < TP_RANGES[0][1] else "wide"
+
+
+def tp_ranges_on(raw: Any) -> Dict[str, bool]:
+    """The range switches from an overlay value: a dict {name: bool} (unknown names ignored, missing names at their default) or a list of the names on."""
+    out = dict(TP_RANGES_DEFAULT)
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if str(k).lower() in out:
+                out[str(k).lower()] = bool(v)
+    elif isinstance(raw, (list, tuple)):
+        names = {str(x).lower() for x in raw}
+        out = {k: k in names for k in out}
+    return out
 # Trailing grid (trail Sets): arm = k x TP_UNIT_PCT and give = j x TP_UNIT_PCT, trailMinStep <= j <= k <= TRAIL_STEP_MAX (arms up to 2.2 %).
 TRAIL_STEP_SETTING_MIN = 2
 TRAIL_STEP_SETTING_MAX = 8
 TRAIL_STEP_DEFAULT = 3
 TRAIL_STEP_MAX = 22
+TRAIL_STEP_CEIL = 30            # trailStepMax may raise the largest arm to 3.0 % (the trailing distance limit); more trailing arms (owner 2026-11-03)
+# Trailing stop families (owner 2026-11-03: "more Trailing additionally"): besides the shipped trailing Sets (initial stop TRAIL_SL_RATIO x the mid-step
+# TP), each ratio r in trailSlRatios builds the same arm / give pairs again with the initial stop at r x the arm, as their own Sets (id suffix ":ts<r>").
+TRAIL_SL_RATIOS = (0.5, 1.0, 1.5, 2.0, 3.0)
 # Overall minimum distances, in PositionCost units, counted as "PositionCost + n steps" (one step = one PositionCost):
 # a stop is never tighter than PositionCost + SL_MIN_STEPS steps, and a trailing stop never trails closer than
 # PositionCost + TRAIL_MIN_STEPS steps. Defaults: 1 and 2, i.e. 2 x and 3 x PositionCost.
@@ -90,10 +126,12 @@ def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: f
 
 
 def snap_sl_ratio(value: Any) -> float:
-    """Snap an SL-to-TP ratio onto the Set grid (SL_RATIOS, 0.5..3.5 step 0.25)."""
+    """Snap an SL-to-TP ratio onto the Set grid: 0.2 / 0.3 / 0.4 (SL_RATIOS_LOW) below 0.45, else SL_RATIOS (0.5..3.5 step 0.25)."""
     x = finite(value, 0.6)
     if x <= 0:
         x = 0.6
+    if x < 0.45:
+        return min(SL_RATIOS_LOW, key=lambda r: (abs(r - max(SL_RATIO_FLOOR, x)), r))
     x = max(SL_RATIO_MIN, min(SL_RATIO_MAX, x))
     n = int((x - SL_RATIO_MIN) / SL_RATIO_STEP + 0.5 + 1e-12)
     nmax = int(round((SL_RATIO_MAX - SL_RATIO_MIN) / SL_RATIO_STEP))

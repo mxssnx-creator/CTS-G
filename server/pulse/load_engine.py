@@ -34,6 +34,41 @@ def rss_mb() -> float:
         return 0.0
 
 
+# The memory limits scale with the machine (2026-11-03): the fixed 140 + 0.55 MB per symbol hard limit (156 MB at 30 symbols) sat below the Set book's own
+# working set (3,176 Sets, 3 days of 1m history: about 250 MB before the first replay), so the governor shed the Set replay for good and no Set was ever
+# validated -- the engine ran and never traded. A share of the machine's memory (the cgroup limit, else MemTotal) now sets the floor of each limit.
+MACHINE_SOFT_SHARE = 0.25
+MACHINE_HARD_SHARE = 0.40
+MACHINE_CRIT_SHARE = 0.10        # the critical level sits this share of the machine above the hard limit (at least 80 MB)
+_MACHINE: Dict[str, float] = {}
+
+
+def machine_mb() -> float:
+    """The memory this process may use, in MB: the cgroup limit (v2 memory.max, v1 memory.limit_in_bytes) when one is set, else MemTotal; 0 when
+    nothing can be read (the limits then keep their per-symbol formula). Read once."""
+    if "mb" in _MACHINE:
+        return _MACHINE["mb"]
+    vals: List[float] = []
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as f:
+                raw = f.read().strip()
+            if raw.isdigit() and int(raw) < (1 << 60):
+                vals.append(int(raw) / 1048576.0)
+        except Exception:
+            pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    vals.append(int(line.split()[1]) / 1024.0)
+                    break
+    except Exception:
+        pass
+    _MACHINE["mb"] = min(vals) if vals else 0.0
+    return _MACHINE["mb"]
+
+
 def malloc_trim() -> bool:
     """Give freed heap pages back to the OS. Python GC alone will not."""
     try:
@@ -185,12 +220,16 @@ class LoadGovernor:
     def soft_limit(self, n_sym: int) -> float:
         if self.soft_mb > 0:
             return self.soft_mb
-        return 90.0 + max(0, n_sym) * 0.35
+        return max(90.0 + max(0, n_sym) * 0.35, MACHINE_SOFT_SHARE * machine_mb())
 
     def hard_limit(self, n_sym: int) -> float:
         if self.hard_mb > 0:
             return self.hard_mb
-        return 140.0 + max(0, n_sym) * 0.55
+        return max(140.0 + max(0, n_sym) * 0.55, MACHINE_HARD_SHARE * machine_mb())
+
+    def crit_limit(self, n_sym: int) -> float:
+        """The RSS at which the governor turns critical (and sheds the Set replay): above the hard limit by 80 MB or MACHINE_CRIT_SHARE of the machine."""
+        return self.hard_limit(n_sym) + max(80.0, MACHINE_CRIT_SHARE * machine_mb())
 
     def observe(
         self,
@@ -231,7 +270,7 @@ class LoadGovernor:
         rss = self.rss
         soft = self.soft_limit(n)
         hard = self.hard_limit(n)
-        crit = hard + 80.0
+        crit = self.crit_limit(n)
         shed: List[str] = []
 
         if not self.partial:

@@ -1152,18 +1152,21 @@ def position_size_has_a_hard_ceiling():
     """sizeMaxNotional caps one position's notional whatever the balance or the factor. x02's demo balance (474,849 USDT)
     at 1 % once sized a position at 4,748 USDT, 2,000 times the 2.15 USDT it was validated at."""
     p = pt.Pulse.__new__(pt.Pulse)
-    p.volume_factor, p.size_pct, p.equity = 1.0, 1.0, 474849.0
-    p.size_max = 25.0
-    capped = round(p.sized_notional(), 6)
-    p.size_pct, p.volume_factor = 0.0, 20.0
-    capped_fixed = round(p.sized_notional(), 6)
-    p.size_max = 1e9
-    p.size_pct, p.volume_factor = 1.0, 1.0
-    free = round(p.sized_notional(), 6)
-    p.size_pct, p.volume_factor, p.size_max = 0.0, 20.0, 10.0
-    capped_fixed_low = round(p.sized_notional(), 6)
-    p.size_max = 1e9
-    p.size_pct, p.volume_factor = 1.0, 1.0
+    saved_target = pt.TARGET_NOTIONAL
+    pt.TARGET_NOTIONAL = 2.15          # its own target: another check in the same worker may have left the module's target elsewhere (0.2 seen)
+    try:
+        p.volume_factor, p.size_pct, p.equity = 1.0, 1.0, 474849.0
+        p.size_max = 25.0
+        capped = round(p.sized_notional(), 6)
+        p.size_pct, p.volume_factor = 0.0, 20.0
+        capped_fixed = round(p.sized_notional(), 6)
+        p.size_max = 1e9
+        p.size_pct, p.volume_factor = 1.0, 1.0
+        free = round(p.sized_notional(), 6)
+        p.size_pct, p.volume_factor, p.size_max = 0.0, 20.0, 10.0
+        capped_fixed_low = round(p.sized_notional(), 6)
+    finally:
+        pt.TARGET_NOTIONAL = saved_target
     # a factor of 20 is read as the factor ceiling 10 (pulse_trader.volume_factor_of): 2.15 x 10 = 21.5 under the 25 cap, 10 under a 10 cap
     ok = capped == 25.0 and capped_fixed == 21.5 and capped_fixed_low == 10.0 and abs(free - 4748.49) < 1e-6
     return ok, f"capped={capped}; fixed target x20 (factor ceiling 10)={capped_fixed}, under a 10 cap={capped_fixed_low}; without the cap={free}"

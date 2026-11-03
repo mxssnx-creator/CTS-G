@@ -353,6 +353,37 @@ def stage_lane_stats(book, tapes: Tapes, st, now: float):
     return lane, se.lane_rank_stats([nets[k] for k in ch[key]], tapes.cf)
 
 
+def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float]]:
+    """(exit t, net) of the Set's Real Set ("pos") or Real Negative Set ("neg") orders closed before now inside the lookback: the stream the engine's
+    Axis judges for one Set and lane (Pulse._scope_choice reads st.exe / st.neg in [score_at - lookback, score_at])."""
+    lb = book.lookback * 60.0
+    tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
+    e = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
+    ts, ents = list(tx[lo:e]), list(te[lo:e])
+    nets = [x - tapes.cf for x in pp[lo:e]]
+    ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb)
+    key = "realneg" if lane == "neg" else "real"
+    return [(ts[k], nets[k]) for k in ch[key] if ts[k] >= now - lb]
+
+
+def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Optional[Dict] = None):
+    """The engine's Axis verdict on one Set and lane (Pulse._scope_choice.allows without the open-position cap): coord.judge on the lane's own stream at
+    that Set's floor (minPfLinked) or the coordinator's. Returns (allow, last15 PF, floor)."""
+    key = (st.idx, lane)
+    if cache is not None:
+        c = cache.get(key)
+        if c is not None and c[0] <= now < c[1]:
+            return c[2]
+    rows = [{"t": t, "pnl_pct": v + tapes.cf} for t, v in lane_stream(book, tapes, st, now, lane)]
+    floor = float(book.floor_for(book.realst_n, st.pack, st)) if getattr(coord, "min_pf_linked", True) else None
+    r = coord.judge(rows, coord.net_streak(rows), min_pf=floor)
+    out = (bool(r["allow"]), float(r["metrics"]["last15Pf"]), floor)
+    if cache is not None:
+        cache[key] = (now, gate_until(book, tapes, st, now), out)
+    return out
+
+
 def stage_lane(book, tapes: Tapes, st, now: float) -> str:
     """The lane the Set passes the stages on: "pos", "neg" or ""."""
     return stage_lane_stats(book, tapes, st, now)[0]
@@ -537,7 +568,7 @@ class AutoFloors:
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
-            refresh_s: int = 3600, include_open: bool = False) -> List[Dict[str, Any]]:
+            refresh_s: int = 3600, include_open: bool = False, axis_coord=None) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
     this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
@@ -553,6 +584,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     every = max(1, int(refresh_s) // 60) if refresh_s else 1
     cache: Dict[int, Tuple[float, bool, Any]] = {}       # refresh_s 0: per order, each Set re-read only when its verdict can change
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
+    axis_cache: Dict[Tuple[int, str], Any] = {}
+    opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
 
     def verdict(st, now: float):
         if not refresh_s:
@@ -583,6 +616,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     for h in hours:
         if auto.apply(book, float(h)):
             cache.clear()                                # a verdict cached under the previous hour's floors is not this hour's
+            axis_cache.clear()
         ranked, valid_n = rank_at(float(h) + 60.0)
         executed.append({"hour": h, "valid": valid_n, "total": len(book.by_idx)})
         ranked_t = float(h) + 60.0
@@ -610,7 +644,26 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     ranked, ranked_t = rank_at(entry_t)[0], entry_t      # completed signal candle's close is the entry time
                 # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
                 pool, lane_pick = [], ""
-                for lane_ in ("pos", "neg"):
+                if axis_coord is not None:
+                    # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
+                    # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
+                    chosen = None
+                    for lane_ in ("pos", "neg"):
+                        for kinds in (("base", "exit"), ("trail",)):
+                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                            for _key, st_c in cands:
+                                ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
+                                cap = axis_coord.slot_cap(0, pf_a, min_pf=floor_a)
+                                n_open = sum(1 for x_t, sid_, ln_ in opened if x_t > entry_t and sid_ == st_c.id and ln_ == lane_)
+                                if ok_a and n_open < cap:
+                                    chosen = st_c
+                                    break
+                            if chosen is not None:
+                                break
+                        if chosen is not None:
+                            pool, lane_pick = [chosen], lane_
+                            break
+                for lane_ in (() if axis_coord is not None else ("pos", "neg")):
                     # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...))
                     fixed = sorted([r for r in ranked.get((pack, "base", lane_), []) + ranked.get((pack, "exit", lane_), []) if r[1].side in (0, d)],
                                    key=lambda r: r[0], reverse=True)
@@ -670,6 +723,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                        "tr": tr, "fracs": se.lane_fracs(st, book.cost_pct, book.sl_min_steps)}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
+                opened.append((rec["t"], st.id, lane_pick))
     return executed
 
 

@@ -50,8 +50,16 @@ def acc_pf(vals):
 
 def range_of(st):
     if st.kind == "trail":
-        return f"trail {st.trail_key}"
+        return f"trail {st.trail_key}" + (f" ts{st.trail_sl:.2f}" if getattr(st, "trail_sl", 0) else "")
     return f"step {st.step:02d}"
+
+
+def tp_range_name(st):
+    """The named TP range of a base / Exit Set (Micro .. Wide), or the trailing family of a trailing Set (shipped, or ts<r> of trailSlRatios)."""
+    from position_cost import tp_range_of
+    if st.kind == "trail":
+        return f"trail ts{st.trail_sl:.2f}" if getattr(st, "trail_sl", 0) else "trail shipped"
+    return tp_range_of(st.step)
 
 
 def main() -> int:
@@ -122,7 +130,9 @@ def main() -> int:
     groups = {}            # key -> stats
     by_set_group = {}
     for st in book.by_idx:
-        keys = [("type", f"{st.pack}/{st.kind}"), ("range", f"{st.pack}/{st.kind}/{range_of(st)}"), ("all", "all")]
+        keys = [("type", f"{st.pack}/{st.kind}"), ("range", f"{st.pack}/{st.kind}/{range_of(st)}"), ("all", "all"),
+                ("tprange", f"{st.pack}/{st.kind}/{tp_range_name(st)}"), ("tprange_all", f"{st.kind}/{tp_range_name(st)}"),
+                ("side", f"{st.pack}/{'long' if st.side > 0 else 'short' if st.side < 0 else 'both'}")]
         if st.kind != "trail":
             keys.append(("sl", f"{st.pack}/{st.kind}/sl {st.sl_ratio:.2f}"))
         by_set_group[st.idx] = keys
@@ -231,6 +241,9 @@ def main() -> int:
            "types": [summary(k) for k in sorted(groups) if k[0] == "type"],
            "ranges": [summary(k) for k in sorted(groups) if k[0] == "range"],
            "sl": [summary(k) for k in sorted(groups) if k[0] == "sl"],
+           "tpranges": [summary(k) for k in sorted(groups) if k[0] == "tprange"],
+           "tpranges_all": [summary(k) for k in sorted(groups) if k[0] == "tprange_all"],
+           "sides": [summary(k) for k in sorted(groups) if k[0] == "side"],
            "evaluations": evals,
            "hourly": hourly(),
            "open_at_end": [{**{k: r[k] for k in ("t_in", "t_mark", "symbol", "set", "pack", "kind", "lane", "side", "entry", "mark")},
@@ -238,7 +251,9 @@ def main() -> int:
            "closed_and_marked_pf": acc_pf([r["net"] for r in trades] + [r["mark_net"] for r in open_at_end]),
            "exits": dict(collections.Counter(r["reason"] for r in trades)),
            "trades": [{"t_in": r["t_in"], "t_out": r["t"], "symbol": r["symbol"], "set": r["set"], "pack": r["pack"],
-                       "kind": r["kind"], "reason": r["reason"], "net_pct": round(100 * r["net"], 4)} for r in trades]}
+                       "kind": r["kind"], "reason": r["reason"], "net_pct": round(100 * r["net"], 4), "lane": r.get("lane", ""),
+                       "step": by_id[r["set"]].step, "sl_ratio": by_id[r["set"]].sl_ratio, "trail": by_id[r["set"]].trail_key,
+                       "tp_range": tp_range_name(by_id[r["set"]]), "side": by_id[r["set"]].side} for r in trades]}
     hdr = (f"{'group':40s} {'sets':>5s} {'valid%':>7s} {'effPF':>6s} {'next8PF':>7s} {'next50PF':>8s} {'execPF':>6s} {'orders':>6s} "
            f"{'net%':>8s} {'win%':>5s} {'blk50>=1':>8s} {'minN':>4s}")
 
@@ -253,6 +268,9 @@ def main() -> int:
     for r in out["ranges"]:
         if r["orders"] or r["valid_pct"]:
             print(line(r))
+    print("-- TP ranges (all packs)")
+    for r in out["tpranges_all"]:
+        print(line(r))
     print("-- exits", out["exits"])
     if a.trades:
         print("-- trades (entry UTC, symbol, Set, kind, exit reason, net %)")

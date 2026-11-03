@@ -39,7 +39,15 @@ from position_cost import (
     last_n_cost_pf,
     signed_result_r,
     SL_RATIOS,
+    SL_RATIO_MIN,
+    SL_RATIOS_LOW,
     TP_MIN_COSTS,
+    TP_RANGES_DEFAULT,
+    TRAIL_SL_RATIOS,
+    TRAIL_STEP_CEIL,
+    TRAIL_STEP_MAX,
+    tp_range_of,
+    tp_ranges_on,
     TP_STEP_MAX,
     TP_STEP_DEFAULT_MAX,
     TP_STEP_MIN,
@@ -988,8 +996,10 @@ def make_exit_id(pack: str, sl_ratio: float, step: int, side: int = 0) -> str:
     return f"{pack}{side_part(side)}:1m:sl{sl_ratio:.2f}:st{int(step)}:{EXIT_TAG}"
 
 
-def make_trail_id(pack: str, trail: str, side: int = 0) -> str:
-    return f"{pack}{side_part(side)}:1m:tr{trail}"
+def make_trail_id(pack: str, trail: str, side: int = 0, trail_sl: float = 0.0) -> str:
+    """A trailing Set: "<pack>[:L|:S]:1m:tr<arm>:<give>", and ":ts<r>" for a trailing stop family (initial stop r x the arm)."""
+    tail = f":ts{float(trail_sl):.2f}" if trail_sl and float(trail_sl) > 0 else ""
+    return f"{pack}{side_part(side)}:1m:tr{trail}{tail}"
 
 
 @dataclass
@@ -1017,6 +1027,7 @@ class SetState:
     trail_key: str
     trail_arm: float
     trail_give: float
+    trail_sl: float = 0.0           # a trailing Set of a trailing stop family (trailSlRatios): initial stop = trail_sl x its arm; 0 = the shipped family (TRAIL_SL_RATIO x the mid-step TP)
     step: int = 3
     tp_pct: float = 0.0045
     hold_bars: int = 0              # this Set's own time exit in bars (minutes); 0 = the global time stop (stepHoldOn / stepHoldMin / auto)
@@ -1263,8 +1274,16 @@ def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = Non
     """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
     ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under TP_MIN_COSTS x PositionCost.
     The live trader takes a Set position's levels from here, so live and replay share one formula."""
-    sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == "trail" else st.sl_ratio)
-    return max(sl_floor_frac(cost_pct, floor_steps), sl_base), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
+    return max(sl_floor_frac(cost_pct, floor_steps), set_stop_base(st)), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
+
+
+def set_stop_base(st: "SetState") -> float:
+    """A Set's stop distance before the overall minimum stop: SL ratio x TP (base and Exit Sets), TRAIL_SL_RATIO x the mid-step TP (the shipped
+    trailing Sets) or trail_sl x the arm (a trailing stop family, trailSlRatios). The one formula lane_fracs and SetLane read."""
+    if st.kind == "trail":
+        ts = float(getattr(st, "trail_sl", 0.0) or 0.0)
+        return st.trail_arm / 100.0 * ts if ts > 0 else st.tp_pct * TRAIL_SL_RATIO
+    return st.tp_pct * st.sl_ratio
 
 
 PAUSE_KEY = "@p"                                      # _hist_rows key of a pause reference tape: "<reference set id>@p<minutes>"
@@ -1356,7 +1375,7 @@ class SetLane:
         # trail values are percent of price on every path (trail_grid, parse_trail): no magnitude guessing
         self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
         self.give = st.trail_give / 100.0 if self.use_trail else 0.0
-        self.sl_base = st.tp_pct * (TRAIL_SL_RATIO if st.kind == "trail" else st.sl_ratio)
+        self.sl_base = set_stop_base(st)
         self.tp_frac = st.tp_pct
         # TP by kind: a base Set takes its TP (the step is its target), an Exit Set never does (exitIgnoreTp is its own
         # strategy type), a trailing Set follows cfg["honor_tp"] (not exitIgnoreTp)
@@ -1817,6 +1836,10 @@ class SetBook:
         self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
+        self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
+        self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
+        self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
+        self.trail_sl_ratios: List[float] = []                # trailSlRatios: trailing stop families (initial stop r x the arm), each its own Sets
         self.trails: List[Tuple[str, float, float]] = []
         self.trails_built: List[Tuple[str, float, float]] = []
         self.sets: Dict[str, SetState] = {}
@@ -2085,7 +2108,28 @@ class SetBook:
                 ratios.append(snap_sl_ratio(float(x)))
             except Exception:
                 continue
+        self.sl_low = bool(ov.get("setSlLow", False))
+        if self.sl_low:
+            ratios.extend(SL_RATIOS_LOW)
         self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
+        self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
+        try:
+            self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
+        except (TypeError, ValueError):
+            self.trail_step_max = TRAIL_STEP_MAX
+        raw_ts = ov.get("trailSlRatios") or []
+        if not isinstance(raw_ts, (list, tuple)):
+            raw_ts = [raw_ts]
+        ts_ok: List[float] = []
+        for x in raw_ts:
+            try:
+                fx = float(x)
+            except (TypeError, ValueError):
+                continue
+            hit = [r for r in TRAIL_SL_RATIOS if abs(r - fx) < 1e-9]       # only the listed families: an unknown ratio is dropped, never snapped
+            if hit:
+                ts_ok.append(hit[0])
+        self.trail_sl_ratios = sorted(set(ts_ok))
         # Trailing grid: every (arm, give) from trailMinStep up, in steps of TP_UNIT_PCT (trail_grid).
         # An explicit trailVariants list ("arm:give" in percent) still overrides the grid.
         self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))),
@@ -2104,7 +2148,7 @@ class SetBook:
                 seen_tr.setdefault(key, (key, a2, g2))
             self.trails = list(seen_tr.values())
         else:
-            self.trails = trail_grid(self.trail_min_step, self.cost_pct)
+            self.trails = trail_grid(self.trail_min_step, self.cost_pct, max_step=self.trail_step_max)
         # Do not synthesize a fallback when the cost-based minimum is above the
         # limit: that would silently bring an inadmissible trailing Set back.
         # The overall minimum trailing distance (PositionCost + n steps, in percent) is a floor on every give, whatever the grid unit: a grid that
@@ -2195,10 +2239,28 @@ class SetBook:
         with self._lock:
             self._rebuild_sets()
 
-    def _step_grid(self) -> List[int]:
+    def _step_span(self) -> Tuple[int, int]:
+        """(first, last) TP step the general packs' grid spans before the range switches: setMinStep (or the step-adapt minimum) .. setStepMax, and
+        .. TP_STEP_MAX (5.0 %) when Wide is on."""
         lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
-        hi = clamp_step(self.step_max, lo, STEP_MAX)
-        return list(range(lo, hi + 1))
+        on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
+        top = STEP_MAX if on.get("wide") else self.step_max
+        return lo, clamp_step(top, lo, STEP_MAX)
+
+    def _step_grid(self) -> List[int]:
+        """The TP steps of the general packs: the span (_step_span) without the steps of every named TP range switched off (tpRanges). Wide off ends the
+        grid at 3.2 % whatever setStepMax says (the steps above belong to Wide)."""
+        lo, hi = self._step_span()
+        on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
+        return [k for k in range(lo, hi + 1) if on.get(tp_range_of(k), True)]
+
+    def _trail_mid_step(self) -> int:
+        """The mid step whose TP sets the shipped trailing Sets' stop (TRAIL_SL_RATIO x that TP): the middle of setMinStep .. setStepMax within the shipped
+        grid, so switching a TP range on or off never moves a trailing Set's stop."""
+        lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
+        hi = max(lo, min(self.step_max, STEP_DEFAULT_MAX))
+        base = list(range(lo, hi + 1))
+        return base[len(base) // 2] if base else 8
 
     def _rebuild_sets(self) -> None:
         # The score snapshot is tied to the exact Set topology and rules.
@@ -2210,7 +2272,7 @@ class SetBook:
         trails = list(self.trails)
         # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
         # not built in honour-TP mode (119 of 210 per pack on the default grid). Ignore-TP keeps every trail Set.
-        mid_tp_pct = (self.steps[len(self.steps) // 2] if self.steps else 8) * TP_UNIT_PCT
+        mid_tp_pct = self._trail_mid_step() * TP_UNIT_PCT
         if self.hist_honor_tp:
             trails = [t for t in trails if t[1] < mid_tp_pct - 1e-9]
         self.trails_built = list(trails)   # the trail keys this grid actually builds (coverage checks this list)
@@ -2244,13 +2306,29 @@ class SetBook:
             if (pack == SHORT_PACK or pr) and pack_steps:
                 # Short Range works with TP steps 2-6, a configured indication with its own range: no trailing arm beyond the largest step
                 pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * TP_UNIT_PCT + 1e-9]
-            mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
+            # the shipped trailing Sets' stop: TRAIL_SL_RATIO x the mid-step TP of the pack's own grid (the general packs: of the shipped grid, so a TP range
+            # switch never moves it)
+            mid_step = (pack_steps[len(pack_steps) // 2] if pack_steps else 8) if (pack == SHORT_PACK or pr) else self._trail_mid_step()
             trail_stop = max(sl_floor_frac(self.cost_pct, self.sl_min_steps),
                              step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
-            if trail_stop > TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12:
-                pack_trails = []
+            legacy_trails = pack_trails if trail_stop <= TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12 else []
+            floor_sl = sl_floor_frac(self.cost_pct, self.sl_min_steps)
+
+            def eff_stop(r: float, k: int) -> float:
+                return round(max(floor_sl, step_tp_pct(k, self.cost_pct) * r), 12)
+
+            def low_ok(r: float, k: int) -> bool:
+                """A low SL ratio (0.2 / 0.3 / 0.4) builds a Set at step k only when its floored stop differs from every other ratio's there:
+                the overall minimum stop would otherwise make it a copy of another Set."""
+                if r + 1e-9 >= SL_RATIO_MIN:
+                    return True
+                mine = eff_stop(r, k)
+                return all(eff_stop(o, k) != mine for o in pack_ratios if o + 1e-9 >= SL_RATIO_MIN or o < r - 1e-9)
+
             for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):
                 for step_i, step in enumerate(pack_steps):
+                    if not low_ok(sl, step):
+                        continue
                     sid = make_set_id(pack, sl, "", step, side)
                     tp = step_tp_pct(step, self.cost_pct)
                     prev = keep.get(sid)
@@ -2279,12 +2357,30 @@ class SetBook:
                     _put(st)
             if self.exit_sets and "exit" in pack_kinds:
                 seen_stop: Dict[float, None] = {}
-                for sl_i, sl in enumerate(pack_ratios):
-                    for step_i, step in enumerate(pack_steps):
+                # The Exit Set of a stop distance belongs to the first cell (SL ratio, step) that makes it, over the pack's whole grid in a fixed order (the
+                # shipped steps first, then Wide), whether or not that cell's TP range is on: switching a range off removes the Exit Sets its cells own and
+                # never renames another range's Exit Set. A low SL ratio's Exit Set only where its floored stop is not the stop of an Exit Set already.
+                if pack == SHORT_PACK or pr:
+                    cell_steps = list(pack_steps)
+                else:
+                    lo_, hi_ = self._step_span()
+                    cell_steps = list(range(lo_, min(hi_, STEP_DEFAULT_MAX) + 1)) + list(range(max(lo_, STEP_DEFAULT_MAX + 1), hi_ + 1))
+                built_steps = {k: i for i, k in enumerate(pack_steps)}
+                cells = ([(sl_i, sl, k) for sl_i, sl in enumerate(pack_ratios) for k in cell_steps if k <= STEP_DEFAULT_MAX]
+                         + [(sl_i, sl, k) for sl_i, sl in enumerate(pack_ratios) for k in cell_steps if k > STEP_DEFAULT_MAX])
+                taken = {eff_stop(o, k) for _i, o, k in cells if o + 1e-9 >= SL_RATIO_MIN}
+                for sl_i, sl, step in cells:
                         dist = round(sl * step, 6)          # without a TP only the stop distance tells two Exit Sets apart
                         if dist in seen_stop:
                             continue
+                        if sl + 1e-9 < SL_RATIO_MIN:
+                            if eff_stop(sl, step) in taken:
+                                continue
+                            taken.add(eff_stop(sl, step))
                         seen_stop[dist] = None
+                        if step not in built_steps:
+                            continue                         # the cell's TP range is off: the Exit Set it owns is not built
+                        step_i = built_steps[step]
                         sid = make_exit_id(pack, sl, step, side)
                         tp = step_tp_pct(step, self.cost_pct)
                         prev = keep.get(sid)
@@ -2303,34 +2399,39 @@ class SetBook:
                         st.tr_i = -1
                         st.step_i = step_i
                         _put(st)
-            for tr_i, (tkey, arm, give) in enumerate(pack_trails):
-                sid = make_trail_id(pack, tkey, side)
-                prev = keep.get(sid)
-                mid_step = pack_steps[len(pack_steps) // 2] if pack_steps else 8
-                tp = step_tp_pct(mid_step, self.cost_pct)
-                if prev:
-                    st = prev
-                    st.trail_key = tkey
-                    st.trail_arm = arm
-                    st.trail_give = give
-                    st.sl_ratio = TRAIL_SL_RATIO
-                    st.step = 0
-                    st.tp_pct = tp
-                    st.kind = "trail"
-                    st.side = side
-                    st.locked = bool(self.locks.get(sid))
-                else:
-                    st = SetState(
-                        id=sid, pack=pack, tf="1m", sl_ratio=TRAIL_SL_RATIO, side=side,
-                        trail_key=tkey, trail_arm=arm, trail_give=give,
-                        step=0, tp_pct=tp, kind="trail",
-                        locked=bool(self.locks.get(sid)),
-                    )
-                st.pack_i = pack_i
-                st.sl_i = -1
-                st.tr_i = tr_i
-                st.step_i = -1
-                _put(st)
+            # the shipped trailing Sets (initial stop TRAIL_SL_RATIO x the mid-step TP), then each trailing stop family (initial stop r x the arm, trailSlRatios)
+            families = [(0.0, legacy_trails)] + [(r, [t for t in pack_trails if t[1] * r <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9]) for r in self.trail_sl_ratios]
+            tr_i = -1
+            for ts, fam in families:
+                for (tkey, arm, give) in fam:
+                    tr_i += 1
+                    sid = make_trail_id(pack, tkey, side, ts)
+                    prev = keep.get(sid)
+                    tp = step_tp_pct(mid_step, self.cost_pct)
+                    if prev:
+                        st = prev
+                        st.trail_key = tkey
+                        st.trail_arm = arm
+                        st.trail_give = give
+                        st.trail_sl = ts
+                        st.sl_ratio = TRAIL_SL_RATIO
+                        st.step = 0
+                        st.tp_pct = tp
+                        st.kind = "trail"
+                        st.side = side
+                        st.locked = bool(self.locks.get(sid))
+                    else:
+                        st = SetState(
+                            id=sid, pack=pack, tf="1m", sl_ratio=TRAIL_SL_RATIO, side=side,
+                            trail_key=tkey, trail_arm=arm, trail_give=give, trail_sl=ts,
+                            step=0, tp_pct=tp, kind="trail",
+                            locked=bool(self.locks.get(sid)),
+                        )
+                    st.pack_i = pack_i
+                    st.sl_i = -1
+                    st.tr_i = tr_i
+                    st.step_i = -1
+                    _put(st)
         built_trail_keys = {st.trail_key for st in by_idx if st.kind == "trail"}
         self.trails_built = [t for t in self.trails if t[0] in built_trail_keys]
         gone = {sid: st for sid, st in keep.items() if sid not in next_sets}

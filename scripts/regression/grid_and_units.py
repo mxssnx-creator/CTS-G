@@ -7,7 +7,7 @@ from position_cost import (
     TRAIL_STEP_SETTING_MIN, cost_as_frac, net_pnl_pct, snap_sl_ratio, trail_floor_steps,
 )
 from risk_variants import trail_grid
-from set_engine import SetBook, SetLane, make_set_id, step_tp_pct
+from set_engine import SetBook, SetLane, lane_fracs, make_set_id, make_trail_id, sl_floor_frac, step_tp_pct
 
 
 def _book(**extra):
@@ -137,10 +137,12 @@ def trail_limit_matches_replay_levels():
 
 def setstep_clamp():
     lo = _book(setMinStep=0)
-    hi = _book(setStepMax=99)
+    hi = _book(setStepMax=99)                              # Wide off (the default): the steps above 3.2 % belong to Wide, so the grid ends at 32
+    hi_wide = _book(setStepMax=99, tpRanges={"wide": True})   # Wide on: up to the ceiling, 5.0 %
     small = _book(setMinStep=9, setStepMax=3)
-    ok = lo.steps[0] == 2 and hi.steps[-1] == TP_STEP_MAX == 50 and small.steps and small.steps[0] <= small.steps[-1]
-    return ok, f"min0->{lo.steps[0]} max99->{hi.steps[-1]} min9max3->{small.steps}"
+    ok = (lo.steps[0] == 2 and hi.steps[-1] == TP_STEP_DEFAULT_MAX == 32 and hi_wide.steps[-1] == TP_STEP_MAX == 50
+          and small.steps and small.steps[0] <= small.steps[-1])
+    return ok, f"min0->{lo.steps[0]} max99->{hi.steps[-1]} (Wide on {hi_wide.steps[-1]}) min9max3->{small.steps}"
 
 
 def tp_is_k_tenths_of_a_percent():
@@ -175,6 +177,89 @@ def set_id_format():
     return ok, make_set_id("general", 0.75, "", 2)
 
 
+def _sig(b, pred=lambda st: True):
+    """(id, kind, stop, target, arm, give) of every Set the predicate keeps: a Set's whole identity and its exits."""
+    return {st.id: (st.kind, round(lane_fracs(st, b.cost_pct)[0], 12), round(lane_fracs(st, b.cost_pct)[1], 12), st.trail_arm, st.trail_give)
+            for st in b.by_idx if pred(st)}
+
+
+def tp_ranges_switch_only_their_own_steps():
+    """Named TP ranges (Micro 2-3, Minimal 4-6, Short 7-12, Normal 13-20, Long 21-32, Wide 33-50): switching one range off removes exactly its
+    base and Exit Sets of the general packs and leaves every other Set (other steps, trailing Sets, Short Range) byte-identical; Wide on adds steps
+    33..50 and nothing else; the default is Micro .. Long (the shipped grid 2..32)."""
+    from position_cost import tp_range_of
+    kw = dict(setStepMax=32, stratShortRange=True)
+    ref = _book(**kw)
+    off = _book(tpRanges={"short": False}, **kw)
+    wide = _book(tpRanges={"wide": True}, **kw)
+    general = lambda st: st.pack != "shortrange" and st.kind in ("base", "exit")
+    r_sig, o_sig, w_sig = _sig(ref), _sig(off), _sig(wide)
+    gone = set(r_sig) - set(o_sig)
+    gone_ok = bool(gone) and all(general(ref.sets[i]) and tp_range_of(ref.sets[i].step) == "short" for i in gone) and not (set(o_sig) - set(r_sig))
+    rest_ok = all(o_sig[i] == r_sig[i] for i in o_sig)
+    added = set(w_sig) - set(r_sig)
+    wide_ok = (bool(added) and all(general(wide.sets[i]) and 33 <= wide.sets[i].step <= 50 for i in added) and not (set(r_sig) - set(w_sig))
+               and all(w_sig[i] == r_sig[i] for i in r_sig))
+    default_ok = ref.steps == list(range(2, 33)) and wide.steps == list(range(2, 51)) and 7 not in off.steps and 12 not in off.steps and 13 in off.steps
+    names = [tp_range_of(k) for k in (2, 3, 4, 6, 7, 12, 13, 20, 21, 32, 33, 50)]
+    names_ok = names == ["micro", "micro", "minimal", "minimal", "short", "short", "normal", "normal", "long", "long", "wide", "wide"]
+    ok = gone_ok and rest_ok and wide_ok and default_ok and names_ok
+    return ok, (f"Short off removes {len(gone)} Sets (all Short-range base/Exit: {gone_ok}), the other {len(o_sig)} unchanged: {rest_ok}; Wide on adds {len(added)} "
+                f"(steps 33-50 only, the rest unchanged: {wide_ok}); default steps 2..32: {default_ok}; names {names_ok}")
+
+
+def low_sl_ratios_build_only_distinct_stops():
+    """setSlLow adds SL ratios 0.2 / 0.3 / 0.4 x TP. Every low-ratio Set's stop is max(minimum stop, r x TP) and differs from the stop of every other Set
+    at its pack, direction and step (a floored copy is never built); every Set of the shipped grid is unchanged; each low ratio builds Sets; ratios snap
+    0.2 / 0.3 / 0.4 below 0.45."""
+    kw = dict(setStepMax=32, stratShortRange=True)
+    ref = _book(**kw)
+    low = _book(setSlLow=True, **kw)
+    r_sig, l_sig = _sig(ref), _sig(low)
+    same = not (set(r_sig) - set(l_sig)) and all(l_sig[i] == r_sig[i] for i in r_sig)
+    floor = sl_floor_frac(low.cost_pct, low.sl_min_steps)
+    lows = [st for st in low.by_idx if st.kind == "base" and st.sl_ratio < 0.5]
+    stop_ok = all(abs(lane_fracs(st, low.cost_pct)[0] - max(floor, step_tp_pct(st.step, low.cost_pct) * st.sl_ratio)) < 1e-12 for st in lows)
+    by_cell = {}
+    for st in low.by_idx:
+        if st.kind == "base":
+            by_cell.setdefault((st.pack, st.side, st.step), []).append((round(lane_fracs(st, low.cost_pct)[0], 12), st.sl_ratio))
+    copies = [(k, v) for k, v in by_cell.items() for stop, r in v if r < 0.5 and sum(1 for s2, _ in v if s2 == stop) > 1]
+    lows_x = [st for st in low.by_idx if st.kind == "exit" and st.sl_ratio < 0.5]
+    exit_stops = [round(lane_fracs(st, low.cost_pct)[0], 12) for st in low.by_idx if st.kind == "exit" and st.pack == "general" and st.side == 0]
+    exit_dup = len(exit_stops) - len(set(exit_stops))
+    ref_exit = [round(lane_fracs(st, ref.cost_pct)[0], 12) for st in ref.by_idx if st.kind == "exit" and st.pack == "general" and st.side == 0]
+    exit_ok = exit_dup == len(ref_exit) - len(set(ref_exit))     # low ratios add no Exit Set whose stop another Exit Set already has
+    each = {r: sum(1 for st in lows if abs(st.sl_ratio - r) < 1e-9) for r in (0.2, 0.3, 0.4)}
+    snap_ok = [snap_sl_ratio(x) for x in (0.2, 0.33, 0.36, 0.44, 0.45, 0.1)] == [0.2, 0.3, 0.4, 0.4, 0.5, 0.2]
+    ok = same and stop_ok and not copies and all(each.values()) and exit_ok and bool(lows_x) and snap_ok
+    return ok, (f"shipped Sets unchanged={same}; {len(lows)} low-ratio base Sets {each}, stops = max(floor, r x TP): {stop_ok}; floored copies {len(copies)}; "
+                f"{len(lows_x)} low-ratio Exit Sets, no repeated stop added: {exit_ok}; snap {snap_ok}")
+
+
+def trailing_families_are_their_own_sets():
+    """trailSlRatios builds each arm / give pair again per ratio r with the initial stop at max(minimum stop, r x arm), as its own Set (":ts<r>"), and
+    leaves the shipped trailing Sets (stop TRAIL_SL_RATIO x the mid-step TP) unchanged; trailStepMax raises the largest arm (3.0 % at 30); an unknown
+    ratio is dropped; a family Set's lane uses the same stop in the replay lane (SetLane) and in lane_fracs (live)."""
+    kw = dict(setStepMax=32)
+    ref = _book(**kw)
+    fam = _book(trailSlRatios=[1.0, 2.0, 0.77], **kw)
+    wide = _book(trailStepMax=30, **kw)
+    r_sig, f_sig = _sig(ref), _sig(fam)
+    same = all(f_sig.get(i) == r_sig[i] for i in r_sig)
+    floor = sl_floor_frac(fam.cost_pct, fam.sl_min_steps)
+    fams = [st for st in fam.by_idx if st.kind == "trail" and st.trail_sl > 0]
+    ratios = sorted({st.trail_sl for st in fams})
+    stop_ok = all(abs(lane_fracs(st, fam.cost_pct)[0] - max(floor, st.trail_arm / 100.0 * st.trail_sl)) < 1e-12 for st in fams)
+    lane_ok = all(abs(SetLane(st, "X").sl_base - st.trail_arm / 100.0 * st.trail_sl) < 1e-15 for st in fams)
+    id_ok = all(st.id == make_trail_id(st.pack, st.trail_key, st.side, st.trail_sl) and st.id.endswith(f":ts{st.trail_sl:.2f}") for st in fams)
+    limit_ok = all(st.trail_arm * st.trail_sl <= 3.0 + 1e-9 for st in fams)
+    arms = max(st.trail_arm for st in wide.by_idx if st.kind == "trail")
+    ok = same and ratios == [1.0, 2.0] and stop_ok and lane_ok and id_ok and limit_ok and abs(arms - 3.0) < 1e-9 and len(fams) > 0
+    return ok, (f"shipped Sets unchanged={same}; families {ratios} ({len(fams)} Sets; 0.77 dropped), stop = max(floor, r x arm): {stop_ok}, replay lane the same: "
+                f"{lane_ok}; ids {id_ok}; stop within the 3 % limit {limit_ok}; trailStepMax 30 -> largest arm {arms} %")
+
+
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.5-3.5", sl_ratios),
@@ -191,4 +276,7 @@ CHECKS = [
     ("units.cost-and-net", cost_units),
     ("units.sl-snap", sl_snap),
     ("units.set-id-format", set_id_format),
+    ("grid.tp-ranges-switch-only-their-own-steps", tp_ranges_switch_only_their_own_steps),
+    ("grid.low-sl-ratios-build-only-distinct-stops", low_sl_ratios_build_only_distinct_stops),
+    ("grid.trailing-families-are-their-own-sets", trailing_families_are_their_own_sets),
 ]
