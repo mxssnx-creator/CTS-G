@@ -73,6 +73,8 @@ MUTATIONS = [
      "set_engine.py", "g = math.floor(float(tp_pct) * 10.0 + 1e-9) / 10.0", "g = round(float(tp_pct) * 10.0) / 10.0"),
     ("step floor: the stages keep the window-size classes",
      "set_engine.py", "floor=step_floor if by_step else (self.signal_min_pf", "floor=(self.signal_min_pf"),
+    ("hold auto: trailing Sets get Auto hold candidates again",
+     "set_engine.py", "or self.hold_bars_for(st) or st.kind == \"trail\":", "or self.hold_bars_for(st):"),
     ("step floor: Auto takes the single best floor, not the lowest near it",
      "set_engine.py", "pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])", "pick = max(rows, key=lambda r: r[1])"),
     ("step floor: a step without its own orders falls back to the manual floor",

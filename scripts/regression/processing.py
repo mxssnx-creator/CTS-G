@@ -1208,7 +1208,7 @@ def hold_auto_picks_each_sets_own_best_hold_from_its_last_orders():
     s5 = next(x for x in b.by_idx if x.kind == "base" and x.step == 5)
     s6 = next(x for x in b.by_idx if x.kind == "base" and x.step == 6)
     tr = next(x for x in b.by_idx if x.kind == "trail" and b.step_of(x) >= 6)
-    ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == HOLD_AUTO_HIGH
+    ranges_ok = b.auto_holds(s5) == HOLD_AUTO_LOW and b.auto_holds(s6) == HOLD_AUTO_HIGH and b.auto_holds(tr) == ()      # trailing Sets: no Auto hold (owner 2026-11-03)
     ok = (ranges_ok and got["best"][0] == 20 and got["best"][1] == 50
           and got["cap"][0] == 0 and got["cap_good"][0] == 30 and got["cap_good"][1] == 50
           and got["few"][0] == 0 and got["tie"][0] == 0 and got["inside margin"][0] == 0 and got["outside margin"][0] == 15 and got["better"][0] == 15 and got["high"][0] == 120
@@ -1228,6 +1228,10 @@ def hold_auto_replay_assigns_holds_and_judges_the_chosen_tape():
     first = {st.id: st.hold_bars for st in b.by_idx}
     bad, chosen = [], 0
     for st in b.by_idx:
+        if st.kind == "trail":                           # no Auto hold on a trailing Set (owner 2026-11-03): the global time stop, never a candidate
+            if st.hold_bars != 0 or b.auto_holds(st):
+                bad.append((st.id, "trailing Set with an Auto hold", st.hold_bars))
+            continue
         allowed = {0, *(HOLD_AUTO_LOW if b.step_of(st) <= 5 else HOLD_AUTO_HIGH)}
         if st.hold_bars not in allowed or not st.hold_auto:
             bad.append((st.id, st.hold_bars))

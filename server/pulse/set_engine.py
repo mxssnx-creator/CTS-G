@@ -3802,8 +3802,8 @@ class SetBook:
     def auto_holds(self, st: "SetState") -> Tuple[int, ...]:
         """The hold candidates (minutes) the Auto Mode tries on this Set; empty when auto is off or its step has a manual hold.
         Each Set (pack x range x step, or trailing pair) is judged alone: the candidates change only its own exit."""
-        if not getattr(self, "hold_auto", False) or self.hold_bars_for(st):
-            return ()
+        if not getattr(self, "hold_auto", False) or self.hold_bars_for(st) or st.kind == "trail":
+            return ()                # a trailing Set leaves by its own trail, stop and the global time stop: no Auto hold (owner 2026-11-03)
         return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
 
     @property
