@@ -464,6 +464,49 @@ def control_already_exists_never_loops():
     return ok, f"(returned id, second call, refusals after the first call, after the second, back-off s): {out}"
 
 
+def a_moved_stop_never_storms_the_order_path():
+    """Found live on x02 (2026-11-03): the sync pass moved a stop by posting the new one first; BingX refused it (110406, the position's SL exists),
+    place_ctrl returned our own old stop and the next pass, ~9 s later, posted again -- over 20 refusals in 480 s, the order path banned for ~7 minutes
+    and a trailing Set's close held 90 s (stop 1.26 %, closed at -3.71 %). Now: (1) a refusal that ends in adopting OUR OWN stop backs that control off
+    CTRL_EXISTS_BACKOFF_S, so a second call sends nothing; (2) from CTRL_EXISTS_BUDGET refusals within CTRL_EXISTS_WINDOW_S account-wide no control is
+    posted at all (closes keep the path); (3) the sync pass moves an existing, covering stop with the venue's atomic cancel-replace."""
+    own = [{"orderId": "778", "type": "STOP_MARKET", "positionSide": "LONG", "closePosition": "true", "stopPrice": "96", "clientOrderID": pt.TAG + "uLX"}]
+    venue = _ExistsVenue(own)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    out = {}
+    with tempfile.TemporaryDirectory() as td:
+        for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+            setattr(pt, name, os.path.join(td, f"{name.lower()}.json"))
+        pt.dump_cts_settings = lambda: {}
+        try:
+            p, sym = _enter(_StubExchange(executed="1", requested="1"))
+            pos = p.open.get(sym)
+            p.api = venue
+            p.list_orders = lambda symbol=None: list(venue.listed)
+            p.ctrl_skip = {}
+            p.ctrl_exists_at = []
+            pos.sl_oid = pos.sec_sl_oid = "778"
+            got = p.place_ctrl(pos, "sec-sl", 95.0)
+            first = venue.refused
+            got2 = p.place_ctrl(pos, "sec-sl", 94.0)
+            out["own"] = (got, got2, first, venue.refused)
+            # the account-wide budget: CTRL_EXISTS_BUDGET refusals -> a fresh symbol's stop is not posted either
+            p.ctrl_exists_at = [pt.time.time()] * pt.CTRL_EXISTS_BUDGET
+            p.ctrl_exists_until = {}
+            before = venue.refused
+            p.place_ctrl(pos, "tp", 120.0)
+            out["budget"] = (p.ctrl_exists_budget_spent(), venue.refused - before)
+            p.ctrl_exists_at = [pt.time.time() - pt.CTRL_EXISTS_WINDOW_S - 1] * pt.CTRL_EXISTS_BUDGET
+            out["cleared"] = not p.ctrl_exists_budget_spent()
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    src = open(os.path.join(PULSE, "pulse_trader.py")).read()
+    sync_ok = "if replace and is_sl and old and covered and legal and moved and hasattr(self.api, \"cancel_replace\"):" in src and "self.replace_sl(pos, want)" in src
+    ok = (out["own"] == ("778", "778", 1, 1) and out["budget"] == (True, 0) and out["cleared"] and sync_ok
+          and pt.CTRL_EXISTS_BUDGET < 20 and pt.CTRL_EXISTS_WINDOW_S >= 480)
+    return ok, f"own stop (id, second call, refusals after first, after second) {out['own']}; budget spent / posts {out['budget']}; window clears {out['cleared']}; sync moves by cancel-replace {sync_ok}"
+
+
 def unanswered_close_that_never_existed_is_sent_again():
     """A close whose POST got no answer stays pending while the venue might still fill it, but a close the venue keeps reporting as "order not exist"
     was never accepted: found live on x02 (2026-11-03), polled for minutes while the position went unmanaged. After CLOSE_MISS_N such reads over
@@ -2577,6 +2620,7 @@ CHECKS = [
     ("trader.thin-book-entry-is-never-sent", thin_book_entry_is_never_sent),
     ("trader.leverage-keeps-liquidation-beyond-the-stop", leverage_keeps_liquidation_beyond_the_stop),
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
+    ("trader.a-moved-stop-never-storms-the-order-path", a_moved_stop_never_storms_the_order_path),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.indications-trailing-volume-is-three-times", indications_trailing_volume_is_three_times),

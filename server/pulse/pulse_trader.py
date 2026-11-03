@@ -281,6 +281,11 @@ def stop_leverage_cap(sl_frac: float) -> int:
 
 THIN_BOOK_REST_S = 300.0
 CTRL_EXISTS_BACKOFF_S = 300.0
+# BingX bans the order path for ~7 minutes after 20 "already exists" refusals (110406) within 480 s, closes included. Found live on x02 (2026-11-03): the
+# sync pass re-posted a moved stop every ~9 s and a trailing Set's close waited 90 s for the ban (BATON stop 1.26 % -> closed at -3.71 %). From
+# CTRL_EXISTS_BUDGET refusals within CTRL_EXISTS_WINDOW_S no control is posted until the window clears; closes keep the path.
+CTRL_EXISTS_BUDGET = 10
+CTRL_EXISTS_WINDOW_S = 480.0
 CLOSE_MISS_N = 3                # reads of "order not exist" (spread over CLOSE_MISS_S seconds) before an unanswered close is sent again
 CLOSE_MISS_S = 60.0   # after an "already exists" refusal with nothing to adopt: BingX bans an order path after 20 such errors in 8 minutes   # a symbol whose book failed the pre-trade check rests this long before the next entry is tried
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
@@ -2527,11 +2532,30 @@ class Pulse:
                 price = self.round_px(c, price)
         return price
 
+    def note_ctrl_exists(self) -> None:
+        """Count one "already exists" refusal of the order path (BingX counts them account-wide)."""
+        now = time.time()
+        q = self.__dict__.setdefault("ctrl_exists_at", [])
+        q.append(now)
+        while q and q[0] < now - CTRL_EXISTS_WINDOW_S:
+            q.pop(0)
+        if len(q) == CTRL_EXISTS_BUDGET:
+            log(f"CTRL exists budget: {len(q)} refusals in {CTRL_EXISTS_WINDOW_S:.0f}s, no control is posted until the window clears", every=60.0, key="exists-budget")
+
+    def ctrl_exists_budget_spent(self) -> bool:
+        now = time.time()
+        q = self.__dict__.setdefault("ctrl_exists_at", [])
+        while q and q[0] < now - CTRL_EXISTS_WINDOW_S:
+            q.pop(0)
+        return len(q) >= CTRL_EXISTS_BUDGET
+
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
+            return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
+        if self.ctrl_exists_budget_spent():
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         exists_key = f"{pos.symbol}:{pos.side}:{'sl' if is_sl else 'tp'}"
@@ -2591,6 +2615,8 @@ class Pulse:
                         break
                     continue
                 if kind_err == "exists":
+                    self.note_ctrl_exists()
+                    self.__dict__.setdefault("ctrl_exists_until", {})[exists_key] = time.time() + CTRL_EXISTS_BACKOFF_S
                     for o in self.our_orders(pos.symbol):
                         typ = str(o.get("type") or "")
                         side = str(o.get("positionSide") or "").upper()
@@ -2922,6 +2948,13 @@ class Pulse:
                      if is_sl else abs(want-price) > max(abs(price)*.0008, 1e-12))
             replace = not old or not covered or (can_replace and (not legal or moved))
             verified = bool(selected) and covered
+            if replace and is_sl and old and covered and legal and moved and hasattr(self.api, "cancel_replace"):
+                # moving an existing, covering stop: the venue's atomic cancel-replace. Posting the new stop first is refused (110406: the position's
+                # SL already exists) and was re-sent every pass until BingX banned the order path (x02 2026-11-03)
+                if self.replace_sl(pos, want):
+                    old, price, covered, verified = real_oid(pos.sl_oid) or old, pos.sl or want, True, True
+                    self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
+                replace = False
             if replace:
                 # First obtain the new protection. A failed post must never
                 # strand the position or return a cancelled ID as protected.
