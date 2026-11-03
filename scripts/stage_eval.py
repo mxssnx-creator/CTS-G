@@ -530,37 +530,39 @@ class AutoFloors:
     """The engine's Auto minimum PF per TP step (minPfByStep + minPfStepAuto) in the simulator: the same pairs (a Set's PF over its last minPfStepAutoN
     closes at an order's entry, that order's net; one Set per distinct tape) and the same pure rule (set_engine.learn_step_floor: the lowest floor within
     minPfStepAutoTol of the best delivered PF; step -> pooled direction -> manual), re-learned at every test hour from the orders CLOSED BEFORE that hour,
-    so no hour is judged with a floor that read it. Copies are recognised on the whole tape (the engine compares the rows before its boundary)."""
+    so no hour is judged with a floor that read it. Copies are recognised on the orders closed before the hour, as the engine compares its rows."""
 
     def __init__(self, book, tapes: "Tapes"):
         self.on = bool(getattr(book, "pf_by_step", False) and getattr(book, "pf_step_auto", False))
-        self.by_key: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = {}
+        # per Set, in the engine's order: (bucket key, exit times, running signature of its first k orders, its pairs (exit t, PF at entry, net))
+        self.sets: List[Tuple[Tuple[int, int], List[float], List[int], List[Tuple[float, float, float]]]] = []
         self.last = None
         if not self.on:
             return
-        n_win, cf, seen = int(book.pf_step_auto_n), tapes.cf, set()
+        n_win, cf = int(book.pf_step_auto_n), tapes.cf
         for st in book.by_idx:
             tx, te, pp = tapes.by_set[st.idx]
             if len(tx) <= n_win:
                 continue
-            sig = hash((tuple(round(x, 3) for x in tx), tuple(round(x, 10) for x in pp)))
-            if sig in seen:
-                continue
-            seen.add(sig)
             nets = [x - cf for x in pp]
             g, l_ = se.prefix_sums(nets)
-            out = self.by_key.setdefault((book.step_bucket(st), st.side), [])
+            pairs: List[Tuple[float, float, float]] = []
             for k in range(len(tx)):
                 e = bisect.bisect_left(tx, te[k])
                 if e < n_win:
                     continue
                 gp, gl = g[e] - g[e - n_win], l_[e] - l_[e - n_win]
                 if gl > 0:
-                    out.append((tx[k], gp / gl, nets[k]))
+                    pairs.append((tx[k], gp / gl, nets[k]))
                 elif gp > 0:
-                    out.append((tx[k], 99.0, nets[k]))
-        for v in self.by_key.values():
-            v.sort()
+                    pairs.append((tx[k], 99.0, nets[k]))
+            # the signature of the first k orders, built once: a copy is judged on the orders closed before each hour, as the engine compares its rows
+            # before the boundary (a Wide base Set and an Exit Set with the same stop trade the same orders until the Wide target is first reached)
+            sig, run = [], 0
+            for t_, x_ in zip(tx, pp):
+                run = hash((run, round(t_, 3), round(x_, 10)))
+                sig.append(run)
+            self.sets.append(((book.step_bucket(st), st.side), list(tx), sig, pairs))
 
     def apply(self, book, now: float) -> bool:
         """Learn the floors from the orders closed before the hour of `now` and hand them to the book; True when they were (re)learned."""
@@ -570,14 +572,26 @@ class AutoFloors:
         if hour == self.last:
             return False
         self.last = hour
+        n_win = int(book.pf_step_auto_n)
+        before: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+        seen: set = set()
+        for key, tx, sig, pairs in self.sets:
+            cut = bisect.bisect_left(tx, hour)            # orders closed before the hour
+            if cut <= n_win:
+                continue
+            if sig[cut - 1] in seen:
+                continue                                  # a copy of a Set already read, on the orders the engine can see at this hour
+            seen.add(sig[cut - 1])
+            out = before.setdefault(key, [])
+            out.extend((p_, n_) for (t_, p_, n_) in pairs if t_ < hour)
         learned: Dict[Tuple[int, int], float] = {}
         sides = (1, -1) if getattr(book, "direction_split", False) else (0,)
         for side in sides:
-            before = {k: [(p, n) for (t, p, n) in v[:bisect.bisect_left(v, (hour, -1.0, -1.0))]] for k, v in self.by_key.items() if k[1] == side}
-            pooled = se.learn_step_floor([x for v in before.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates())
+            mine = {k: v for k, v in before.items() if k[1] == side}
+            pooled = se.learn_step_floor([x for v in mine.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates())
             lo, hi = int(round(se.STEP_PF_TP_MIN / se.TP_UNIT_PCT)), int(round(se.STEP_PF_TP_MAX / se.TP_UNIT_PCT))
             for bucket in range(lo, hi + 1):
-                got = se.learn_step_floor(before.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates()) or pooled
+                got = se.learn_step_floor(mine.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol, book.step_auto_candidates()) or pooled
                 if got:
                     learned[(bucket, side)] = got["floor"]
         book.step_floor_auto = learned

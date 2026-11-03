@@ -216,7 +216,10 @@ class PriceHub:
             if isinstance(data, dict) and data.get("ping") is not None:
                 try:
                     ping = data.get("ping")
-                    ws.send(dumps({"pong": ping if ping not in (True, False) else int(time.time() * 1000)}))
+                    # BingX's heartbeat is a gzip-compressed "Ping" (decoded to {"ping": True}) and wants the text "Pong" back; answering JSON left it
+                    # unanswered and the venue dropped the session every ~30 s (x02, 2026-11-03: about 100 "connection lost" an hour). A JSON ping with an
+                    # id gets its id back as JSON.
+                    ws.send("Pong" if ping is True or ping is False else dumps({"pong": ping}))
                 except Exception:
                     break
                 self.last_msg = time.time()

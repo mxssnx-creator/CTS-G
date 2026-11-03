@@ -1349,13 +1349,14 @@ def block_stack_is_capped_at_six_groups():
 
 def block_threshold_rises_with_the_valid_group_count():
     """The k-th valid group must clear the PF threshold of the stack it creates, so each valid group asks at least as much as the one
-    before, never under the 1.05 floor (MIN_PF_FLOOR)."""
+    before, never under the floor (MIN_PF_FLOOR, 1.02 since 2026-11-03)."""
     b = _block()
     lane = b.register_parent("X-USDT", "LONG", 10.0, 100.0)
     rows = [r for r in b.evaluate_counts(lane, live_n=1, intern_pf=9.0) if r["kind"] == "regular"]
     mins = [round(r["blockMinPF"], 4) for r in rows]
     inc = [round(r["cumulativeRatio"], 4) for r in rows]
-    ok = mins == sorted(mins) and min(mins) >= 1.05 and len(set(mins)) == 6 and mins[-1] > mins[0] and inc == [round(0.5 * k, 4) for k in range(1, 7)]
+    from position_cost import MIN_PF_FLOOR
+    ok = mins == sorted(mins) and min(mins) >= MIN_PF_FLOOR and len(set(mins)) == 6 and mins[-1] > mins[0] and inc == [round(0.5 * k, 4) for k in range(1, 7)]
     return ok, f"min PF by valid rank={mins}; cumulative ratio={inc}"
 
 

@@ -41,7 +41,7 @@ def one_floor_for_every_window_and_stage():
     classes = [off.floor_for(n, "indications", next(iter(off.by_idx))) for n in (5, 15, 25, 50)]
     ratio = _book(minPfStepRatio=0.5)
     r_floor = ratio.floor_for(50, "indications", next(s for s in ratio.by_idx if s.kind == "base" and s.step == 2))
-    ok = floors == want and same and params_same and classes == [1.05, 1.15, 1.25, 1.5] and abs(r_floor - 1.1) < 1e-9
+    ok = floors == want and same and params_same and classes == [1.02, 1.15, 1.25, 1.5] and abs(r_floor - 1.1) < 1e-9
     return ok, f"floors by step {floors}; one value over windows 1..200 and in StageParams; size classes back when off {classes}; ratio 0.5 at 0.2 % = {r_floor}"
 
 

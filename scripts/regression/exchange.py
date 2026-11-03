@@ -195,7 +195,53 @@ def gather_without_the_async_bridge_runs_in_parallel_threads():
     return ok, f"rows={[r[2].get('data') for r in rows]} took {dt:.2f}s"
 
 
+def price_socket_answers_the_gzip_ping_with_pong():
+    """BingX's price socket heartbeat is a gzip-compressed "Ping"; the answer must be the text "Pong" (found live on x02 2026-11-03: the client answered
+    JSON, the venue dropped the session every ~30 s, about 100 "connection lost" an hour). A plain text ping gets "Pong" too, a JSON ping with an id gets
+    {"pong": id}, and a price message after it still reaches on_px."""
+    import gzip, json as _j, bingx_fast as bf
+    sent, seen = [], []
+    frames = [gzip.compress(b"Ping"), "Ping", _j.dumps({"ping": "abc"}),
+              gzip.compress(_j.dumps({"dataType": "BTC-USDT@ticker", "data": {"s": "BTC-USDT", "c": "100.5"}}).encode())]
+
+    class FakeWs:
+        def __init__(self):
+            self.q = list(frames)
+
+        def send(self, m):
+            sent.append(m)
+
+        def settimeout(self, t):
+            pass
+
+        def recv(self):
+            if not self.q:
+                hub.stop = True
+                return None
+            return self.q.pop(0)
+
+        def close(self):
+            pass
+
+    class FakeMod:
+        @staticmethod
+        def create_connection(*a, **k):
+            return FakeWs()
+    saved = bf._ws
+    try:
+        bf._ws = FakeMod
+        hub = bf.PriceHub(lambda s_, px: seen.append((s_, px)), bf.ErrorLog("/dev/null") if hasattr(bf, "ErrorLog") else None)
+        hub.symbols = ["BTC-USDT"]
+        hub._session()
+    finally:
+        bf._ws = saved
+    replies = [m for m in sent if "reqType" not in str(m)]
+    ok = replies == ["Pong", "Pong", bf.dumps({"pong": "abc"})] and seen and seen[-1][0] == "BTC-USDT"
+    return ok, f"replies to (gzip Ping, text Ping, JSON ping) {replies}; price after them {seen[-1:] }"
+
+
 CHECKS = [
+    ("exchange.price-socket-answers-the-gzip-ping-with-pong", price_socket_answers_the_gzip_ping_with_pong),
     ("exchange.gather-without-bridge-uses-threads", gather_without_the_async_bridge_runs_in_parallel_threads),
     ("exchange.batch-orders-carry-numbers", batch_orders_carry_numbers_not_numeric_strings),
     ("exchange.signature-raw-values-encoded-query", signature_covers_raw_values_and_the_query_is_encoded),
