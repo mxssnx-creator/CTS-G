@@ -745,8 +745,10 @@ def symbol_cap_applies_under_a_wildcard():
     p.symbols_dynamic = True
     p.overlay_wild = True
     p.open = {}
-    p.universe = [{"symbol": f"S{i:02d}-USDT", "vol1h": float(100 - i), "maxLeverage": 50, "quoteVolume": 1.0,
-                   "vol24h": 0.0, "changePct": 0.0} for i in range(60)]
+    x01_cap = int(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"])      # x01's own cap (120 since 2026-11-03)
+    n_names = x01_cap + 40
+    p.universe = [{"symbol": f"S{i:03d}-USDT", "vol1h": float(1000 - i), "maxLeverage": 50, "quoteVolume": 1.0,
+                   "vol24h": 0.0, "changePct": 0.0} for i in range(n_names)]
     p.last_dyn_sel = 0.0
     p.contracts = {}
     p.sets = types.SimpleNamespace(set_symbols=lambda *a, **k: None, enabled=False)
@@ -759,21 +761,22 @@ def symbol_cap_applies_under_a_wildcard():
         p.apply_dynamic_symbols(force=True)
         out["uncapped"] = len(pt.SYMBOLS)
         p.symbol_cap = 50
-        p.open = {"S59-USDT": types.SimpleNamespace(symbol="S59-USDT")}
+        last = f"S{n_names - 1:03d}-USDT"
+        p.open = {last: types.SimpleNamespace(symbol=last)}
         p.apply_dynamic_symbols(force=True)
-        out["with_open"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
-        p.symbol_cap = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"]
+        out["with_open"] = (len(pt.SYMBOLS), last in pt.SYMBOLS)
+        p.symbol_cap = x01_cap
         p.apply_dynamic_symbols(force=True)
-        out["x01"] = (len(pt.SYMBOLS), "S59-USDT" in pt.SYMBOLS)
-        p.open = {f"S{i:02d}-USDT": types.SimpleNamespace(symbol=f"S{i:02d}-USDT") for i in range(31)}
+        out["x01"] = (len(pt.SYMBOLS), last in pt.SYMBOLS)
+        p.open = {f"S{i:03d}-USDT": types.SimpleNamespace(symbol=f"S{i:03d}-USDT") for i in range(x01_cap + 1)}
         p.apply_dynamic_symbols(force=True)
         out["protect_more_than_cap"] = (len(pt.SYMBOLS), all(s in pt.SYMBOLS for s in p.open))
     except Exception as exc:  # noqa: BLE001
         return False, f"raised {type(exc).__name__}: {exc}"
     finally:
         pt.SYMBOLS[:] = saved_syms
-    ok = (out.get("capped") == 50 and out.get("uncapped") == 60 and out.get("with_open") == (50, True)
-          and out.get("x01") == (30, True) and out.get("protect_more_than_cap") == (31, True))
+    ok = (out.get("capped") == 50 and out.get("uncapped") == n_names and out.get("with_open") == (50, True)
+          and out.get("x01") == (x01_cap, True) and out.get("protect_more_than_cap") == (x01_cap + 1, True))
     return ok, (f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; "
                 f"cap 50 + one open -> {out.get('with_open')}; x01 -> {out.get('x01')}; "
                 f"31 open positions -> {out.get('protect_more_than_cap')}")
@@ -783,7 +786,8 @@ def x01_bootstrap_honors_cap_before_ranked_tickers():
     """A real Pulse initialization with an offline fake cannot begin with an unbounded wildcard."""
     saved_syms, saved_loader, saved_overlay = list(pt.SYMBOLS), pt.load_contracts, pt.OVERLAY_PATH
     saved_open_loader = pt.Pulse._load_open_book
-    names = [f"S{i:02d}-USDT" for i in range(60)]
+    cap = int(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"])      # x01's own cap (120 since 2026-11-03)
+    names = [f"S{i:03d}-USDT" for i in range(cap + 30)]
     contracts = {s: pt.Contract(symbol=s, min_qty=0.001, step=0.001, qprec=3, pprec=6,
                                 min_usdt=5.0, max_lev=50) for s in names}
 
@@ -801,7 +805,7 @@ def x01_bootstrap_honors_cap_before_ranked_tickers():
         finally:
             p.pool.shutdown(wait=True)
         pt.Pulse._load_open_book = lambda self: self.open.update(
-            {s: types.SimpleNamespace(symbol=s) for s in names[:31]})
+            {s: types.SimpleNamespace(symbol=s) for s in names[:cap + 1]})
         q = pt.Pulse(_StubExchange(), dict(contracts))
         try:
             restored = list(pt.SYMBOLS)
@@ -811,18 +815,18 @@ def x01_bootstrap_honors_cap_before_ranked_tickers():
 
     try:
         initial, no_rank, ranked, restored = _isolated(run)
-        held = pt.bootstrap_symbols(names, ["S59-USDT"], 30)
-        many_held = pt.bootstrap_symbols(names, names[:31], 30)
+        held = pt.bootstrap_symbols(names, [names[-1]], cap)
+        many_held = pt.bootstrap_symbols(names, names[:cap + 1], cap)
         unlimited = pt.bootstrap_symbols(names, ["OUTSIDE-USDT"], 0)
     finally:
         pt.SYMBOLS[:] = saved_syms
         pt.load_contracts, pt.OVERLAY_PATH = saved_loader, saved_overlay
         pt.Pulse._load_open_book = saved_open_loader
-    ok = (no_rank and len(initial) == 30 and initial == names[:30]
-          and len(ranked) == 30 and ranked[0] == "S59-USDT"
-          and len(held) == 30 and "S59-USDT" in held
-          and len(many_held) == 31 and len(restored) == 31 and set(restored) == set(names[:31])
-          and len(unlimited) == 61 and "OUTSIDE-USDT" in unlimited)
+    ok = (no_rank and len(initial) == cap and initial == names[:cap]
+          and len(ranked) == cap and ranked[0] == names[-1]
+          and len(held) == cap and names[-1] in held
+          and len(many_held) == cap + 1 and len(restored) == cap + 1 and set(restored) == set(names[:cap + 1])
+          and len(unlimited) == len(names) + 1 and "OUTSIDE-USDT" in unlimited)
     return ok, (f"before ticker={len(initial)}; ranked={len(ranked)} first={ranked[0] if ranked else None}; "
                 f"held={len(held)}; 31 restored={len(restored)}; unlimited={len(unlimited)}")
 
