@@ -479,18 +479,46 @@ def relations_compose_any_indicator_causally_and_by_their_rules():
 
 def thirty_minute_names_fire_and_read_their_history():
     """The 30m series: <family>_n<range>_t30 for the library, AO and Trend / Break families and the combined votes over 1 / 5 / 15 / 30
-    (<family>_x<range>); each reads 64 bars of 30m (rows_for(30) = 1920 rows, the Set history's default lookback); the existing
+    (<family>_x<range>); each reads 128 bars of 30m (rows_for(30) = ROWS_CAP = 3840 rows, inside the 3-day Set history); the existing
     _c<range> votes stay over 1 / 5 / 15."""
     import indication_extra as ix
     from indication_lib import rows_for
     t30 = [k for k in ix.INDICATORS if k.endswith("_t30")]
     x = [k for k in ix.INDICATORS if k.rsplit("_", 1)[-1][:1] == "x" and k.rsplit("_", 1)[-1][1:].isdigit()]
     wins = {ix.window_of(k) for k in t30 + x}
-    bars = _regime_bars(5, 4320)
+    bars = _regime_bars(5, 6400)       # the window is 3,840 rows: as many probe positions after it as the 1,920-row window had before
     probe = ("adx_n14_t30", "trend_n20_t30", "brk_n10_t30", "ao_cfltrend_n8_t30", "macdh_x8", "trend_x10")
-    fired = {k: sum(1 for i in range(2000, len(bars), 5) if ix.resolve(k)(bars[i + 1 - ix.window_of(k):i + 1])) for k in probe}
-    ok = len(t30) >= 200 and len(x) >= 200 and wins == {rows_for(30)} and rows_for(30) == 1920 and all(fired.values()) and ix.window_of("adx_c14") == rows_for(15)
+    from indication_lib import ROWS_CAP
+    fired = {k: sum(1 for i in range(ix.window_of(k) - 1, len(bars), 3) if ix.resolve(k)(bars[i + 1 - ix.window_of(k):i + 1])) for k in probe}
+    ok = (len(t30) >= 200 and len(x) >= 200 and wins == {rows_for(30)} and rows_for(30) == ROWS_CAP == 3840 and all(fired.values())
+          and ix.window_of("adx_c14") == rows_for(15))
     return ok, f"{len(t30)} _t30 and {len(x)} _x names; windows {sorted(wins)}; fired {fired}"
+
+
+def new_common_families_fire_at_every_range_and_invert():
+    """Added 2026-11-03: willr, stochrsi, supertrend, squeeze, trix, tsi, elder, emax. Every family builds names at the min / med / long ranges
+    (5, 8, 14, 21, 34, 55) on 1 / 5 / 15 / 30m with votes; each family fires on a regime series at a short and at a long range, and "<name>@I" gives
+    the opposite direction on every bar the name fires."""
+    import indication_extra as ix
+    import indication_lib as L
+    fams = ("willr", "stochrsi", "supertrend", "squeeze", "trix", "tsi", "elder", "emax")
+    bars = _regime_bars(7, 6400)
+    built = all(f"{f}_n{n}_t{tf}" in ix.INDICATORS for f in fams for n in (5, 8, 14, 21, 34, 55) for tf in (1, 5, 15, 30))
+    fired, inv_ok = {}, True
+    for f in fams:
+        for name in (f"{f}_n8_t1", f"{f}_n34_t5"):
+            w = ix.window_of(name)
+            hits = 0
+            for i in range(w - 1, len(bars), 4):
+                rows = bars[i + 1 - w:i + 1]
+                a = ix.resolve(name)(rows)
+                if a:
+                    hits += 1
+                    b = ix.resolve(name + "@I")(rows)
+                    inv_ok = inv_ok and bool(b) and b[0] == -a[0]
+            fired[name] = hits
+    ok = built and all(fired.values()) and inv_ok and L.RANGES["long"] == (34, 55)
+    return ok, f"names built={built}; fired {fired}; invert flips every signal={inv_ok}"
 
 
 CHECKS = [
@@ -506,6 +534,7 @@ CHECKS = [
     ("indication.signal-memo-key-covers-the-window", the_signal_memo_key_covers_every_bar_a_pack_reads),
     ("indication.relations-compose-by-their-rules", relations_compose_any_indicator_causally_and_by_their_rules),
     ("indication.thirty-minute-names-fire", thirty_minute_names_fire_and_read_their_history),
+    ("indication.new-common-families-fire-at-every-range-and-invert", new_common_families_fire_at_every_range_and_invert),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

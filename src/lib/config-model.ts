@@ -176,6 +176,9 @@ export type IndicationConfig = {
   slRatios: number[];
   types: string[];
   pause: "auto" | number;
+  /** The entry's own (thin) trailing arm range in steps of 0.1 %; 0 = every arm up to stepMax (server: indication_config trailStepMin / trailStepMax). */
+  trailStepMin: number;
+  trailStepMax: number;
 };
 export const DEFAULT_INDICATION_CONFIG: IndicationConfig = {
   label: "",
@@ -190,6 +193,8 @@ export const DEFAULT_INDICATION_CONFIG: IndicationConfig = {
   slRatios: [1, 1.5, 2],
   types: ["base", "exit", "trail"],
   pause: "auto",
+  trailStepMin: 0,
+  trailStepMax: 0,
 };
 
 export type PulseOverlay = {
@@ -422,6 +427,9 @@ export type PulseOverlay = {
   volumeByRange: Record<string, number>;
   /** Exit Sets (no-TP Sets) per indication pack: missing = on. */
   exitSetsByPack: Record<string, boolean>;
+  /** Named trailing ranges by the arm's step (Micro .. Wide): missing = on. */
+  trailRanges: Record<TpRangeId, boolean>;
+  trailPick: TrailPick;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
@@ -672,6 +680,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeByKind: {},
   volumeByRange: {},
   exitSetsByPack: {},
+  trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
+  trailPick: "after",
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
@@ -904,6 +914,8 @@ export type CtsSettings = {
   volumeByKind?: Record<string, number>;
   volumeByRange?: Record<string, number>;
   exitSetsByPack?: Record<string, boolean>;
+  trailRanges?: Partial<Record<string, boolean>>;
+  trailPick?: string;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
@@ -1053,9 +1065,30 @@ export function indicationConfigList(v: unknown): IndicationConfig[] {
       slRatios: ratios.length ? [...new Set(ratios)] : [...DEFAULT_INDICATION_CONFIG.slRatios],
       types: types.length ? types : [...DEFAULT_INDICATION_CONFIG.types],
       pause: e.pause === "auto" || e.pause === undefined ? "auto" : pauseMinutes(e.pause, 0),
+      ...trailSpan(e.trailStepMin, e.trailStepMax),
     };
   });
 }
+
+/** An entry's trailing arm range: 0 = not set (every arm up to the entry's stepMax); else 2..50 steps, max >= min. */
+function trailSpan(lo: unknown, hi: unknown): { trailStepMin: number; trailStepMax: number } {
+  const l = Math.round(Number(lo) || 0);
+  const h = Math.round(Number(hi) || 0);
+  const tl = l >= 2 ? Math.min(TP_STEP_MAX, l) : 0;
+  const th = h >= 2 ? Math.max(tl, Math.min(TP_STEP_MAX, h)) : 0;
+  return { trailStepMin: tl, trailStepMax: th };
+}
+
+/** Trailing range switches: only explicit booleans of known names (missing = on). */
+function trailRangesOf(raw: unknown): Partial<Record<TpRangeId, boolean>> {
+  if (!raw || typeof raw !== "object") return {};
+  const ids = TP_RANGES.map((r) => r.id) as string[];
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([k, v]) => ids.includes(k) && typeof v === "boolean")) as Partial<Record<TpRangeId, boolean>>;
+}
+
+/** How a lane's trailing Sets compete with its base and Exit Sets (server: set_engine.KIND_ORDERS). */
+export const TRAIL_PICKS = ["after", "together", "first"] as const;
+export type TrailPick = (typeof TRAIL_PICKS)[number];
 
 /** The range switches from an overlay value: unknown names ignored, missing names at their default (server: position_cost.tp_ranges_on). */
 export function tpRangesOf(raw: unknown): Record<TpRangeId, boolean> {
@@ -1271,6 +1304,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitSetsByPack: Object.fromEntries(
       Object.entries(cts.exitSetsByPack && typeof cts.exitSetsByPack === "object" ? cts.exitSetsByPack : {}).filter(([, v]) => typeof v === "boolean"),
     ) as Record<string, boolean>,
+    trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true, ...trailRangesOf(cts.trailRanges) },
+    trailPick: (TRAIL_PICKS as readonly string[]).includes(String(cts.trailPick)) ? (cts.trailPick as TrailPick) : "after",
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),

@@ -14,6 +14,7 @@ the types) and, optionally, the rest after a winning close of those indications.
    "stepMin": 3, "stepMax": 10,              TP steps (one step = 0.1 % of price) of this entry's Sets
    "slRatios": [1.0, 1.5],                   SL ratios of this entry's Sets (default: the global grid)
    "types": ["base", "exit", "trail"],       which Set types this entry builds (default all)
+   "trailStepMin": 4, "trailStepMax": 8,     the trailing arms of this entry's trailing Sets (steps of 0.1 %; default: every arm up to stepMax)
    "pause": "auto" | 0 | 15}                 rest after a winning close: the book's pause mode (default), none, or fixed minutes
 
 Nothing here relaxes a gate: the packs are judged by the same Base -> Main -> Real chain as every other pack. The expansion is bounded
@@ -121,6 +122,10 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
             if math.isfinite(v) and v not in ratios:
                 ratios.append(v)
         kinds = [k for k in KINDS if k in (_words(raw.get("types")) or list(KINDS))] or list(KINDS)
+        t_lo = _ints([raw.get("trailStepMin")], 2, 50) if raw.get("trailStepMin") not in (None, "") else []
+        t_hi = _ints([raw.get("trailStepMax")], 2, 50) if raw.get("trailStepMax") not in (None, "") else []
+        trail_lo = t_lo[0] if t_lo else 0
+        trail_hi = max(trail_lo, t_hi[0]) if t_hi else 0
         pz = raw.get("pause", "auto")
         made = 0
         for base in base_names:
@@ -135,12 +140,13 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
                     dropped.append({"entry": label, "name": name, "reason": "unknown to the library"})
                     continue
                 names[name] = None
-                ranges[name] = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds, "entry": e_i}
+                ranges[name] = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds, "entry": e_i,
+                               "trailLo": trail_lo, "trailHi": trail_hi}
                 if isinstance(pz, (int, float)) and not isinstance(pz, bool):
                     pause[name] = max(0, int(pz))
                 else:
                     pause.pop(name, None)
                 made += 1
         entries.append({"label": label, "names": made, "stepMin": lo, "stepMax": hi, "ratios": len(ratios), "types": kinds,
-                        "steps": hi - lo + 1})
+                        "steps": hi - lo + 1, "trailStepMin": trail_lo or None, "trailStepMax": trail_hi or None})
     return {"names": sorted(names), "ranges": ranges, "pause": pause, "dropped": dropped, "entries": entries}

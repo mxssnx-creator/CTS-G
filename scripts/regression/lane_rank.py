@@ -351,8 +351,34 @@ def lane_order_decides_which_lane_a_signal_tries_first():
     return ok, f"opens under: {got}; live entry walks the book's lane order: {live}"
 
 
+def trail_pick_decides_how_trailing_sets_compete():
+    """trailPick: B (a base Set) and T (a trailing Set) are both valid on the positive lane, T ranks higher on its lane's Set, B lower. "after" (the
+    shipped rule) opens under B (trailing only when no fixed-exit Set is valid), "together" under T (every kind by rank), "first" under T even when it
+    ranks lower; with B invalid every order opens under T; an unknown value keeps "after". The simulator walks the same order (stage_eval reads
+    book.kind_order), and the live entry goes through pick_any."""
+    got = {}
+    for order, t_better in (("after", True), ("together", True), ("together", False), ("first", False), ("bogus", True), ("after-alone", True)):
+        b = _book(trailPick=order.replace("-alone", ""), rankByLane=True)      # fixtures pin the Base-tape rank off
+        base = next(s for s in b.by_idx if s.kind == "base" and s.pack == "general")
+        tr = next(s for s in b.by_idx if s.kind == "trail" and s.pack == "general")
+        for st in b.by_idx:
+            st.active, st.last_error = False, "off"
+        hi, lo = (60, 3.0, 3.0, 3.0, 0.5), (60, 1.5, 1.5, 1.5, 0.1)
+        if order != "after-alone":
+            _force_valid(b, base, 2.0, 100, lo if t_better else hi)
+        _force_valid(b, tr, 2.0, 100, hi if t_better else lo)
+        pick = b.pick_any("general")
+        got[f"{order}{'' if t_better else ' (T lower)'}"] = "B" if pick is base else "T" if pick is tr else None
+    from common import ROOT
+    sim = open(_os.path.join(ROOT, "scripts", "stage_eval.py")).read()
+    sim_ok = sim.count('getattr(book, "kind_order"') >= 3 and 'for kinds in (("base", "exit"), ("trail",))' not in sim
+    want = {"after": "B", "together": "T", "together (T lower)": "B", "first (T lower)": "T", "bogus": "B", "after-alone": "T"}
+    ok = got == want and sim_ok and se.KIND_ORDER_DEFAULT == "after"
+    return ok, f"opens under: {got}; simulator walks book.kind_order: {sim_ok}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
-    lane_order_decides_which_lane_a_signal_tries_first,
+    lane_order_decides_which_lane_a_signal_tries_first, trail_pick_decides_how_trailing_sets_compete,
     hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,

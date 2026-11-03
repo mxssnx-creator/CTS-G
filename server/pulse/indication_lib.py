@@ -22,10 +22,10 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 Row = Sequence[float]
 Signal = Optional[Tuple[int, float]]
 WINDOW = 300
-TF_BARS = 96                    # bars of a higher timeframe the library reads (the longest family, htfpb, needs 96): 480 rows for 5m, 1440 for 15m
+TF_BARS = 128                   # bars of a higher timeframe the library reads (2026-11-03: 128 so the long ranges, up to 2 x 55 + 6 bars for stochrsi, fit): 640 rows for 5m, 1920 for 15m
 
 
-ROWS_CAP = 1920                 # the most 1m rows any series reads: the Set history's default lookback (32 h; 64 bars of 30m)
+ROWS_CAP = 3840                 # the most 1m rows any series reads (64 h, inside the 3-day Set history; 128 bars of 30m for the long ranges)
 
 
 def rows_for(tf: int) -> int:
@@ -34,7 +34,7 @@ def rows_for(tf: int) -> int:
     return min(ROWS_CAP, max(WINDOW, TF_BARS * int(tf)))
 
 
-RANGES = {"min": (5, 8), "med": (14, 21)}
+RANGES = {"min": (5, 8), "med": (14, 21), "long": (34, 55)}   # long ranges (owner 2026-11-03): 34 / 55 bars of each series
 TFS = (1, 5, 15)                # the timeframes of the single names and of the combined vote _c<n> (and the group votes)
 TFS_EXT = (1, 5, 15, 30)        # the extended set: single names on 30m (_t30) and the combined vote over all four (_x<n>)
 HISTORY = rows_for(max(TFS_EXT))   # the most 1m rows any library name reads (its 30m series)
@@ -876,6 +876,156 @@ def f_ddpressure(b, n):
     return None
 
 
+# ---- common indicators added 2026-11-03 (owner: "more indications, common ones, thin multi configs"; Williams %R, Stochastic RSI, Supertrend, TTM squeeze,
+# TRIX, TSI, Elder ray, EMA cross). Each reads only closed bars of its series and returns None without enough bars; every one composes with the relations
+# (e.g. "<name>@I" inverts it) and runs at every range (min / med / long) and timeframe like the others.
+
+def f_willr(b, n):
+    """Williams %R over n bars: back up through -80 (out of oversold) long, back down through -20 short."""
+    if len(b) < n + 2:
+        return None
+    h, lo, c = _hi(b), _lo(b), _cl(b)
+
+    def wr(i):
+        a, z = max(h[i - n + 1 : i + 1]), min(lo[i - n + 1 : i + 1])
+        return -100.0 * (a - c[i]) / (a - z) if a > z else -50.0
+    cur, prev = wr(len(b) - 1), wr(len(b) - 2)
+    if prev < -80.0 <= cur:
+        return 1, _conf(0.6, min(0.2, (cur + 80.0) / 100.0))
+    if prev > -20.0 >= cur:
+        return -1, _conf(0.6, min(0.2, (-20.0 - cur) / 100.0))
+    return None
+
+
+def f_stochrsi(b, n):
+    """Stochastic of the RSI (n), %K smoothed by 3 into %D: %K crossing %D upward under 30 long, downward over 70 short."""
+    if len(b) < 2 * n + 6:
+        return None
+    r = _rsi(_cl(b), n)[n:]
+    if len(r) < n + 5:
+        return None
+
+    def k(i):
+        w = r[i - n + 1 : i + 1]
+        a, z = max(w), min(w)
+        return 100.0 * (r[i] - z) / (a - z) if a > z else 50.0
+    ks = [k(i) for i in range(len(r) - 5, len(r))]
+    d, dp = sum(ks[-3:]) / 3.0, sum(ks[-4:-1]) / 3.0
+    if ks[-2] <= dp and ks[-1] > d and ks[-1] < 30:
+        return 1, _conf(0.6, (30 - ks[-1]) / 150.0)
+    if ks[-2] >= dp and ks[-1] < d and ks[-1] > 70:
+        return -1, _conf(0.6, (ks[-1] - 70) / 150.0)
+    return None
+
+
+def f_supertrend(b, n):
+    """Supertrend (ATR n, multiple 3): the bar the trend flips is the signal, in the new trend's direction."""
+    if len(b) < n + 3:
+        return None
+    tr = _tr(b)
+    up = dn = None
+    trend = 0
+    prev_trend = 0
+    for i in range(n, len(b)):
+        atr = sum(tr[i - n + 1 : i + 1]) / n
+        mid = (float(b[i][1]) + float(b[i][2])) / 2.0
+        bu, bl = mid + 3.0 * atr, mid - 3.0 * atr
+        pc = float(b[i - 1][3])
+        up = bu if up is None or bu < up or pc > up else up
+        dn = bl if dn is None or bl > dn or pc < dn else dn
+        c = float(b[i][3])
+        prev_trend = trend
+        if trend >= 0 and c < dn:
+            trend = -1
+        elif trend <= 0 and c > up:
+            trend = 1
+    if prev_trend and trend != prev_trend:
+        return trend, _conf(0.62, 0.0)
+    return None
+
+
+def f_squeeze(b, n):
+    """TTM squeeze: Bollinger bands (n, 2 sd) inside the Keltner channel (n, 1.5 ATR) on the bar before, outside on this one; the close
+    against its n-bar mean gives the direction."""
+    if len(b) < n + 3:
+        return None
+    c = _cl(b)
+
+    def inside(i):
+        w = c[i - n + 1 : i + 1]
+        m = sum(w) / n
+        sd = math.sqrt(sum((v - m) ** 2 for v in w) / n)
+        atr = _atr(b[: i + 1], n)
+        return 2.0 * sd < 1.5 * atr, m
+    was, _m0 = inside(len(b) - 2)
+    now, m = inside(len(b) - 1)
+    if was and not now:
+        d = 1 if c[-1] > m else -1 if c[-1] < m else 0
+        return (d, _conf(0.62, 0.0)) if d else None
+    return None
+
+
+def f_trix(b, n):
+    """TRIX: the rate of change of the triple-smoothed EMA (n) crossing zero."""
+    if len(b) < n + 3:
+        return None
+    e3 = _ema(_ema(_ema(_cl(b), n), n), n)
+    a = (e3[-1] - e3[-2]) / e3[-2] if e3[-2] else 0.0
+    p = (e3[-2] - e3[-3]) / e3[-3] if e3[-3] else 0.0
+    if p <= 0.0 < a:
+        return 1, _conf(0.6, 0.0)
+    if p >= 0.0 > a:
+        return -1, _conf(0.6, 0.0)
+    return None
+
+
+def f_tsi(b, n):
+    """True strength index (Blau): double-smoothed momentum over double-smoothed absolute momentum (long n, short n // 2), crossing its signal
+    line (n // 3) upward below zero long, downward above zero short."""
+    if len(b) < n + 5:
+        return None
+    c = _cl(b)
+    m = [0.0] + [c[i] - c[i - 1] for i in range(1, len(c))]
+    s = max(2, n // 2)
+    ds = _ema(_ema(m, n), s)
+    da = _ema(_ema([abs(x) for x in m], n), s)
+    t = [100.0 * x / y if y > 0 else 0.0 for x, y in zip(ds, da)]
+    sig = _ema(t, max(2, n // 3))
+    if t[-2] <= sig[-2] and t[-1] > sig[-1] and t[-1] < 0:
+        return 1, _conf(0.6, min(0.2, -t[-1] / 200.0))
+    if t[-2] >= sig[-2] and t[-1] < sig[-1] and t[-1] > 0:
+        return -1, _conf(0.6, min(0.2, t[-1] / 200.0))
+    return None
+
+
+def f_elder(b, n):
+    """Elder ray: with the EMA (n) rising, bear power (low - EMA) below zero and rising long; with it falling, bull power (high - EMA) above zero
+    and falling short."""
+    if len(b) < n + 3:
+        return None
+    e = _ema(_cl(b), n)
+    bear = [float(b[i][2]) - e[i] for i in (-2, -1)]
+    bull = [float(b[i][1]) - e[i] for i in (-2, -1)]
+    if e[-1] > e[-2] and bear[1] < 0 and bear[1] > bear[0]:
+        return 1, _conf(0.58, 0.0)
+    if e[-1] < e[-2] and bull[1] > 0 and bull[1] < bull[0]:
+        return -1, _conf(0.58, 0.0)
+    return None
+
+
+def f_emax(b, n):
+    """EMA cross: the fast EMA (n // 2) crossing the slow EMA (n)."""
+    if len(b) < n + 2:
+        return None
+    c = _cl(b)
+    f, sl = _ema(c, max(2, n // 2)), _ema(c, n)
+    if f[-2] <= sl[-2] and f[-1] > sl[-1]:
+        return 1, _conf(0.6, 0.0)
+    if f[-2] >= sl[-2] and f[-1] < sl[-1]:
+        return -1, _conf(0.6, 0.0)
+    return None
+
+
 FAMILIES: Dict[str, Tuple[str, Callable]] = {
     # name: (group, function)
     "ker": ("trend", f_ker), "chop": ("trend", f_chop), "aroon": ("trend", f_aroon), "vortex": ("trend", f_vortex),
@@ -890,6 +1040,8 @@ FAMILIES: Dict[str, Tuple[str, Callable]] = {
     "rsirev": ("revert", f_rsirev), "stoch": ("revert", f_stoch), "bbrev": ("revert", f_bbrev), "mfi": ("revert", f_mfi),
     "vwapz": ("revert", f_vwapz), "zrev": ("revert", f_zrev),
     "obv": ("volume", f_obv), "cmf": ("volume", f_cmf), "udvol": ("volume", f_udvol), "closeloc": ("volume", f_closeloc),
+    "supertrend": ("trend", f_supertrend), "trix": ("trend", f_trix), "tsi": ("trend", f_tsi), "elder": ("trend", f_elder), "emax": ("trend", f_emax),
+    "squeeze": ("break", f_squeeze), "willr": ("revert", f_willr), "stochrsi": ("revert", f_stochrsi),
 }
 
 

@@ -57,6 +57,7 @@ import {
   TRAIL_STEP_MAX_DEFAULT,
   tpPctOfStep,
   type IndicationConfig,
+  type TrailPick,
   type PauseMode,
 } from "@/lib/config-model";
 import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
@@ -1292,6 +1293,26 @@ function SettingsPage() {
                 hint={`Every arm up to ${((overlay.trailStepMax ?? TRAIL_STEP_MAX_DEFAULT) * TP_UNIT_PCT).toFixed(1)}% runs as a trailing Set. Default ${TRAIL_STEP_MAX_DEFAULT} (2.2%), at most ${TRAIL_STEP_CEIL} (3.0%).`}
                 onChange={(v) => patch("trailStepMax", Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(v))))}
               />
+              {TP_RANGES.map((r) => (
+                <Toggle
+                  key={`tr-${r.id}`}
+                  label={`Trailing ${r.label} range · arms ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}%`}
+                  on={(overlay.trailRanges ?? {})[r.id] !== false}
+                  onChange={(v) => patch("trailRanges", { ...overlay.trailRanges, [r.id]: v })}
+                />
+              ))}
+              <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                <span className="font-mono text-xs text-muted">Trailing Sets compete with base / Exit Sets</span>
+                <select
+                  className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                  value={overlay.trailPick ?? "after"}
+                  onChange={(ev) => patch("trailPick", ev.target.value as TrailPick)}
+                >
+                  <option value="after">after: only when no base / Exit Set of the pack is valid (default)</option>
+                  <option value="together">together: every valid Set of the lane by rank</option>
+                  <option value="first">first: trailing Sets before base / Exit Sets</option>
+                </select>
+              </label>
               <p className="font-mono text-xs text-muted">Own volume multiples · size = volume factor size × pack × type × range (each 0.1–5, under the size ceiling)</p>
               {(
                 [
@@ -2231,6 +2252,8 @@ function IndicationConfigEditor({
             <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.5-3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
             <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
             <Slider label="TP step to" value={e.stepMax} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMax).toFixed(1)}%`} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
+            <Slider label="Trailing arm from (0 = every arm)" value={e.trailStepMin ?? 0} min={0} max={TP_STEP_MAX} step={1} hint={e.trailStepMin ? `${tpPctOfStep(e.trailStepMin).toFixed(1)}%` : "every arm up to the TP step to"} onChange={(v) => set(i, { trailStepMin: v < 2 ? 0 : v, trailStepMax: v < 2 ? e.trailStepMax : Math.max(v, e.trailStepMax ?? 0) })} />
+            <Slider label="Trailing arm to (0 = TP step to)" value={e.trailStepMax ?? 0} min={0} max={TP_STEP_MAX} step={1} hint={e.trailStepMax ? `${tpPctOfStep(e.trailStepMax).toFixed(1)}%` : "up to the TP step to"} onChange={(v) => set(i, { trailStepMax: v < 2 ? 0 : v, trailStepMin: v < 2 ? e.trailStepMin : Math.min(v, e.trailStepMin || v) })} />
             <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
               <span className="font-mono text-xs text-muted">Pause after success</span>
               <select

@@ -133,6 +133,11 @@ HIST_CAP = 80
 ROTATION_FRESH_X = 1.5
 STEP_PF_AUTO_LOW_DEFAULT = 1.0
 LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("neg",), "pos": ("pos",)}
+# How a lane's trailing Sets compete with its fixed-exit (base and Exit) Sets for a signal (overlay trailPick, owner 2026-11-03: "make trailing fully work"):
+# after = the trailing Sets only when no fixed-exit Set of the pack is valid on that lane (the earlier rule: a valid trailing Set almost never executed),
+# together = every valid Set of the lane ranked by lane_rank_key whatever its kind, first = the trailing Sets first, then the fixed-exit Sets.
+KIND_ORDERS = {"after": (("base", "exit"), ("trail",)), "together": (("base", "exit", "trail"),), "first": (("trail",), ("base", "exit"))}
+KIND_ORDER_DEFAULT = "after"
 ROTATION_CAP_S = 1800.0         # a symbol that stopped replaying cannot stretch the freshness limit beyond 1.5 x this
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
@@ -1796,7 +1801,9 @@ class SetBook:
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
         self.rotation_s = 0.0
         self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
-        self.lane_order: Tuple[str, ...] = ("pos", "neg")           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
+        self.lane_order: Tuple[str, ...] = ("pos", "neg")
+        self.trail_pick: str = KIND_ORDER_DEFAULT
+        self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
@@ -2170,6 +2177,10 @@ class SetBook:
                        if math.isfinite(t[1]) and math.isfinite(t[2])
                        and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9
                        and t[2] + 1e-9 >= give_floor]
+        # named trailing ranges (trailRanges, owner 2026-11-03 "extend trailing with thin ranges"): the arm's step in the TP bands Micro .. Wide, each switched
+        # on or off on its own; a range off builds none of its trailing Sets, the other ranges' Sets are unchanged (their ids carry arm and give only)
+        self.trail_ranges = tp_ranges_on(ov.get("trailRanges")) if ov.get("trailRanges") is not None else {k: True for k in TP_RANGES_DEFAULT}
+        self.trails = [t for t in self.trails if self.trail_ranges.get(tp_range_of(int(round(t[1] / TP_UNIT_PCT))), True)]
         if not trailing_enabled(ov):
             self.trails = []
         try:
@@ -2186,6 +2197,10 @@ class SetBook:
         # Negative only), "pos" (positive only). Measured 2026-11-03: the positive Main / Real stages cut the post-Base PF on three consecutive days
         # while the Real Negative lane kept it (see CLAUDE.md).
         self.lane_order = LANE_ORDERS.get(str(ov.get("laneOrder") or "pos-neg").lower(), LANE_ORDERS["pos-neg"])
+        self.trail_pick = str(ov.get("trailPick") or KIND_ORDER_DEFAULT).lower()
+        if self.trail_pick not in KIND_ORDERS:
+            self.trail_pick = KIND_ORDER_DEFAULT
+        self.kind_order = KIND_ORDERS[self.trail_pick]
         self.pf_by_step = bool(ov.get("minPfByStep", True))
         self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
@@ -2329,6 +2344,10 @@ class SetBook:
             if (pack == SHORT_PACK or pr) and pack_steps:
                 # Short Range works with TP steps 2-6, a configured indication with its own range: no trailing arm beyond the largest step
                 pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * TP_UNIT_PCT + 1e-9]
+            if pr and (pr.get("trailLo") or pr.get("trailHi")):
+                # an indicationConfigs entry's own (thin) trailing range: arms from trailStepMin to trailStepMax steps only
+                t_lo, t_hi = int(pr.get("trailLo") or 0), int(pr.get("trailHi") or (pack_steps[-1] if pack_steps else STEP_MAX))
+                pack_trails = [t for t in (trails if "trail" in pack_kinds else []) if t_lo * TP_UNIT_PCT - 1e-9 <= t[1] <= t_hi * TP_UNIT_PCT + 1e-9]
             # the shipped trailing Sets' stop: TRAIL_SL_RATIO x the mid-step TP of the pack's own grid (the general packs: of the shipped grid, so a TP range
             # switch never moves it)
             mid_step = (pack_steps[len(pack_steps) // 2] if pack_steps else 8) if (pack == SHORT_PACK or pr) else self._trail_mid_step()
@@ -4099,7 +4118,7 @@ class SetBook:
             for lane in self.lane_order:
                 if lane not in allowed:
                     continue
-                for kinds in (("base", "exit"), ("trail",)):
+                for kinds in self.kind_order:
                     rows = [x for k in kinds for x in self._valid_for(pack, k, side)
                             if lane in self._execution_lanes(x)]
                     for st in sorted(rows, key=lambda x: self.lane_rank_key(x, lane), reverse=True):

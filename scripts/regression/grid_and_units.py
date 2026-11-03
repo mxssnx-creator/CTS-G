@@ -260,6 +260,36 @@ def trailing_families_are_their_own_sets():
                 f"{lane_ok}; ids {id_ok}; stop within the 3 % limit {limit_ok}; trailStepMax 30 -> largest arm {arms} %")
 
 
+def trailing_ranges_and_an_entrys_thin_trailing_range():
+    """trailRanges (the arm's step in the TP bands Micro .. Wide) removes only the trailing Sets of a range switched off; every other Set keeps its id and
+    figures. An indicationConfigs entry's trailStepMin / trailStepMax builds only those arms for its packs (a thin trailing range), the other packs keep the
+    whole grid; every trailing Set of every category (general, indications, Short Range, an extra pack, a config entry) is built in both directions."""
+    from position_cost import tp_range_of
+    kw = dict(setStepMax=32, stratShortRange=True, stratTrend=True)
+    ref = _book(**kw)
+    cut = _book(trailRanges={"long": False, "micro": False}, **kw)
+    r_sig, c_sig = _sig(ref), _sig(cut)
+    gone = [i for i in r_sig if i not in c_sig]
+    gone_ok = bool(gone) and all(ref.sets[i].kind == "trail" and tp_range_of(round(ref.sets[i].trail_arm / TP_UNIT_PCT)) in ("long", "micro") for i in gone)
+    kept_ok = all(c_sig[i] == r_sig[i] for i in c_sig)
+    left = {tp_range_of(round(st.trail_arm / TP_UNIT_PCT)) for st in cut.by_idx if st.kind == "trail"}
+    ent = _book(indicationConfigs=[{"families": ["donch"], "ranges": [8], "timeframes": [1], "stepMin": 3, "stepMax": 10, "trailStepMin": 4, "trailStepMax": 6}], **kw)
+    xp = [p for p in ent.packs if p.startswith("extra.")]
+    x_arms = sorted({st.trail_arm for st in ent.by_idx if st.kind == "trail" and st.pack in xp})
+    g_arms = sorted({st.trail_arm for st in ent.by_idx if st.kind == "trail" and st.pack == "general"})
+    plain = _book(indicationConfigs=[{"families": ["donch"], "ranges": [8], "timeframes": [1], "stepMin": 3, "stepMax": 10}], **kw)
+    p_arms = sorted({st.trail_arm for st in plain.by_idx if st.kind == "trail" and st.pack in xp})
+    cats = {}
+    for st in ent.by_idx:
+        if st.kind == "trail":
+            cats.setdefault(st.pack, set()).add(st.side)
+    every = all(cats.get(p) == ({1, -1} if ent.direction_split else {0}) for p in ent.packs)
+    ok = (gone_ok and kept_ok and "long" not in left and "micro" not in left and x_arms == [0.4, 0.5, 0.6] and max(g_arms) >= 2.2
+          and max(p_arms) == 1.0 and every)
+    return ok, (f"ranges long+micro off: {len(gone)} trailing Sets removed, all of those ranges {gone_ok}, the rest unchanged {kept_ok}, left {sorted(left)}; "
+                f"entry arms {x_arms} (general up to {max(g_arms)}, entry without a trailing range up to {max(p_arms)}); trailing in every pack and direction {every} ({len(cats)} packs)")
+
+
 def shipped_overlays_switch_off_the_indications_exit_sets():
     """Measured 2026-11-03 (executed PF, three windows): indications Exit Sets off 1.529 / 0.908 / 0.983 against 1.36 / 0.879 / 0.953 shipped; every
     shipped overlay and preset carries exitSetsByPack {"indications": false} and keeps the other packs' Exit Sets."""
@@ -304,6 +334,7 @@ CHECKS = [
     ("grid.tp-ranges-switch-only-their-own-steps", tp_ranges_switch_only_their_own_steps),
     ("grid.low-sl-ratios-build-only-distinct-stops", low_sl_ratios_build_only_distinct_stops),
     ("grid.trailing-families-are-their-own-sets", trailing_families_are_their_own_sets),
+    ("grid.trailing-ranges-and-an-entrys-thin-trailing-range", trailing_ranges_and_an_entrys_thin_trailing_range),
     ("grid.exit-sets-switch-per-pack", exit_sets_switch_per_pack),
     ("grid.shipped-overlays-switch-off-the-indications-exit-sets", shipped_overlays_switch_off_the_indications_exit_sets),
 ]
