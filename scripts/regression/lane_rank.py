@@ -377,8 +377,33 @@ def trail_pick_decides_how_trailing_sets_compete():
     return ok, f"opens under: {got}; simulator walks book.kind_order: {sim_ok}"
 
 
+def trail_pick_by_pack_reaches_only_its_packs():
+    """trailPickByPack: {"general": "first"} opens a general signal under the lower-ranked trailing Set while trailPick stays "after"; a group key
+    ("group:trend") moves the trend packs (the trend extra pack, an extra.<trend family> pack, a trend group vote) and leaves general, breakout and a
+    reversion family alone; the exact pack name wins over its group; an unknown order is ignored."""
+    got = {}
+    for name, by in (("general first", {"general": "first"}), ("group trend", {"group:trend": "first"}), ("bad", {"general": "sideways"})):
+        b = _book(trailPick="after", trailPickByPack=by, rankByLane=True)
+        base = next(s for s in b.by_idx if s.kind == "base" and s.pack == "general")
+        tr = next(s for s in b.by_idx if s.kind == "trail" and s.pack == "general")
+        for st in b.by_idx:
+            st.active, st.last_error = False, "off"
+        _force_valid(b, base, 2.0, 100, (60, 3.0, 3.0, 3.0, 0.5))
+        _force_valid(b, tr, 2.0, 100, (60, 1.5, 1.5, 1.5, 0.1))
+        pick = b.pick_any("general")
+        got[name] = "T" if pick is tr else "B" if pick is base else None
+    b = _book(trailPickByPack={"group:trend": "first", "group:break": "together", "extra.donch_c21": "after"})
+    first, tog, after = se.KIND_ORDERS["first"], se.KIND_ORDERS["together"], se.KIND_ORDERS["after"]
+    groups = {p: b.kind_order_for(p) for p in ("trend", "extra.supertrend_n14_t5", "extra.g_trend_min", "breakout", "extra.donch_n8_t1@T5",
+                                                "extra.donch_c21", "general", "extra.willr_n8_t1")}
+    want = {"trend": first, "extra.supertrend_n14_t5": first, "extra.g_trend_min": first, "breakout": tog, "extra.donch_n8_t1@T5": tog,
+            "extra.donch_c21": after, "general": after, "extra.willr_n8_t1": after}
+    ok = got == {"general first": "T", "group trend": "B", "bad": "B"} and groups == want
+    return ok, f"general signal opens under: {got}; orders by pack equal the rule: {groups == want}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
-    lane_order_decides_which_lane_a_signal_tries_first, trail_pick_decides_how_trailing_sets_compete,
+    lane_order_decides_which_lane_a_signal_tries_first, trail_pick_decides_how_trailing_sets_compete, trail_pick_by_pack_reaches_only_its_packs,
     hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,

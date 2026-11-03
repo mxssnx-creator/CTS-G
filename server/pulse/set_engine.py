@@ -10,6 +10,7 @@ keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
 
+import re
 import bisect
 import heapq
 import json
@@ -138,6 +139,26 @@ LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("ne
 # together = every valid Set of the lane ranked by lane_rank_key whatever its kind, first = the trailing Sets first, then the fixed-exit Sets.
 KIND_ORDERS = {"after": (("base", "exit"), ("trail",)), "together": (("base", "exit", "trail"),), "first": (("trail",), ("base", "exit"))}
 KIND_ORDER_DEFAULT = "after"
+
+
+def pack_group(pack: str) -> str:
+    """The library group (trend, break, revert, volume, price) of a pack's signals: the extra packs trend / breakout / reversion / flow by their role,
+    an extra.<name> pack by its family (the part before _n / _c / _x, or g_<group>_ of a group vote, before any @relation); "" for the rest."""
+    fixed = {"trend": "trend", "breakout": "break", "reversion": "revert", "flow": "volume"}
+    if pack in fixed:
+        return fixed[pack]
+    if not pack.startswith("extra."):
+        return ""
+    name = pack[len("extra."):].split("@", 1)[0]
+    m = re.match(r"g_([a-z]+)_", name)
+    if m:
+        return m.group(1)
+    fam = re.split(r"_(?:n\d+_t\d+|c\d+|x\d+)$", name)[0]
+    try:
+        import indication_lib as _lib
+        return str(_lib.FAMILIES.get(fam, ("",))[0])
+    except Exception:
+        return ""
 ROTATION_CAP_S = 1800.0         # a symbol that stopped replaying cannot stretch the freshness limit beyond 1.5 x this
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
@@ -1803,7 +1824,9 @@ class SetBook:
         self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
         self.lane_order: Tuple[str, ...] = ("pos", "neg")
         self.trail_pick: str = KIND_ORDER_DEFAULT
-        self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
+        self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]
+        self.trail_pick_by: Dict[str, str] = {}
+        self._kind_order_memo: Dict[str, Tuple[Tuple[str, ...], ...]] = {}           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
@@ -2201,6 +2224,11 @@ class SetBook:
         if self.trail_pick not in KIND_ORDERS:
             self.trail_pick = KIND_ORDER_DEFAULT
         self.kind_order = KIND_ORDERS[self.trail_pick]
+        # per pack (trailPickByPack, owner 2026-11-03 "make trailing work, especially with trend and break indications"): a pack name, or "group:<g>" for every
+        # pack whose signals come from the library group g (trend, break, revert, volume, price); the exact name wins over its group, then trailPick
+        raw_tp = ov.get("trailPickByPack") if isinstance(ov.get("trailPickByPack"), dict) else {}
+        self.trail_pick_by = {str(k): str(v).lower() for k, v in raw_tp.items() if str(v).lower() in KIND_ORDERS}
+        self._kind_order_memo = {}
         self.pf_by_step = bool(ov.get("minPfByStep", True))
         self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
@@ -4102,6 +4130,18 @@ class SetBook:
         lanes = self._execution_lanes(st)
         return lanes[0] if lanes else ""
 
+    def kind_order_for(self, pack: str) -> Tuple[Tuple[str, ...], ...]:
+        """The kind order (KIND_ORDERS) of a pack: trailPickByPack by the exact pack name, else by its library group ("group:trend"), else trailPick."""
+        got = self._kind_order_memo.get(pack)
+        if got is None:
+            by = self.trail_pick_by
+            name = by.get(pack)
+            if name is None and by:
+                g = pack_group(pack)
+                name = by.get(f"group:{g}") if g else None
+            got = self._kind_order_memo[pack] = KIND_ORDERS.get(name or "", self.kind_order)
+        return got
+
     def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None,
                  predicate: Optional[Callable[[SetState], bool]] = None, side: int = 0) -> Optional[SetState]:
         """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
@@ -4118,7 +4158,7 @@ class SetBook:
             for lane in self.lane_order:
                 if lane not in allowed:
                     continue
-                for kinds in self.kind_order:
+                for kinds in self.kind_order_for(pack):
                     rows = [x for k in kinds for x in self._valid_for(pack, k, side)
                             if lane in self._execution_lanes(x)]
                     for st in sorted(rows, key=lambda x: self.lane_rank_key(x, lane), reverse=True):

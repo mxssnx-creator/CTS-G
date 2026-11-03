@@ -668,7 +668,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
                     chosen = None
                     for lane_ in getattr(book, "lane_order", ("pos", "neg")):
-                        for kinds in getattr(book, "kind_order", (("base", "exit"), ("trail",))):
+                        for kinds in (book.kind_order_for(pack) if hasattr(book, "kind_order_for") else getattr(book, "kind_order", (("base", "exit"), ("trail",)))):
                             cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
                                 ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
@@ -685,7 +685,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
                     chosen = None
                     for lane_ in getattr(book, "lane_order", ("pos", "neg")):
-                        for kinds in getattr(book, "kind_order", (("base", "exit"), ("trail",))):
+                        for kinds in (book.kind_order_for(pack) if hasattr(book, "kind_order_for") else getattr(book, "kind_order", (("base", "exit"), ("trail",)))):
                             cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
                                 ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
@@ -703,7 +703,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...))
                     # SetBook.kind_order (trailPick): after = base and Exit Sets together, else trailing; together = every kind by rank; first = trailing first
                     pool = []
-                    for kinds_ in getattr(book, "kind_order", (("base", "exit"), ("trail",))):
+                    for kinds_ in (book.kind_order_for(pack) if hasattr(book, "kind_order_for") else getattr(book, "kind_order", (("base", "exit"), ("trail",)))):
                         pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
                                                        key=lambda r: r[0], reverse=True)]
                         if pool:

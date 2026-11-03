@@ -430,6 +430,8 @@ export type PulseOverlay = {
   /** Named trailing ranges by the arm's step (Micro .. Wide): missing = on. */
   trailRanges: Record<TpRangeId, boolean>;
   trailPick: TrailPick;
+  /** Per pack or library group ("group:trend", "group:break", ...): the kind order for that pack's signals (server: SetBook.kind_order_for). */
+  trailPickByPack: Record<string, TrailPick>;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
@@ -682,6 +684,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitSetsByPack: {},
   trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
   trailPick: "after",
+  trailPickByPack: {},
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
@@ -916,6 +919,7 @@ export type CtsSettings = {
   exitSetsByPack?: Record<string, boolean>;
   trailRanges?: Partial<Record<string, boolean>>;
   trailPick?: string;
+  trailPickByPack?: Record<string, string>;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
@@ -1306,6 +1310,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ) as Record<string, boolean>,
     trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true, ...trailRangesOf(cts.trailRanges) },
     trailPick: (TRAIL_PICKS as readonly string[]).includes(String(cts.trailPick)) ? (cts.trailPick as TrailPick) : "after",
+    trailPickByPack: Object.fromEntries(
+      Object.entries(cts.trailPickByPack && typeof cts.trailPickByPack === "object" ? cts.trailPickByPack : {}).filter(([, v]) =>
+        (TRAIL_PICKS as readonly string[]).includes(String(v)),
+      ),
+    ) as Record<string, TrailPick>,
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),

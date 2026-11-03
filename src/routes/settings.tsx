@@ -1313,6 +1313,32 @@ function SettingsPage() {
                   <option value="first">first: trailing Sets before base / Exit Sets</option>
                 </select>
               </label>
+              {(
+                [
+                  ["group:trend", "Trend signals (trend pack, trend families)"],
+                  ["group:break", "Break signals (breakout pack, break families)"],
+                  ["group:revert", "Reversion signals"],
+                ] as const
+              ).map(([key, label]) => (
+                <label key={key} className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">{label} · trailing order</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={(overlay.trailPickByPack ?? {})[key] ?? ""}
+                    onChange={(ev) => {
+                      const next = { ...(overlay.trailPickByPack ?? {}) };
+                      if (ev.target.value) next[key] = ev.target.value as TrailPick;
+                      else delete next[key];
+                      patch("trailPickByPack", next);
+                    }}
+                  >
+                    <option value="">as above</option>
+                    <option value="after">after</option>
+                    <option value="together">together</option>
+                    <option value="first">first</option>
+                  </select>
+                </label>
+              ))}
               <p className="font-mono text-xs text-muted">Own volume multiples · size = volume factor size × pack × type × range (each 0.1–5, under the size ceiling)</p>
               {(
                 [
