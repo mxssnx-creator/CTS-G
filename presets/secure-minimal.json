@@ -223,14 +223,32 @@
   "volumeByPack": {},
   "volumeByKind": {},
   "volumeByRange": {},
+  "volumeByPackKind": {
+    "indications:trail": 3
+  },
+  "slMaxByRange": {
+    "long": 1,
+    "wide": 1
+  },
   "exitSetsByPack": {
     "indications": false
   },
+  "trailRanges": {
+    "micro": true,
+    "minimal": true,
+    "short": true,
+    "normal": true,
+    "long": true,
+    "wide": true
+  },
+  "trailPick": "after",
+  "trailPickByPack": {},
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 300,
   "minPfStepAutoTol": 5,
+  "minPfStepAutoLow": 1,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
   "pauseCandidates": [
@@ -315,12 +333,5 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  },
-  "volumeByPackKind": {
-    "indications:trail": 3
-  },
-  "slMaxByRange": {
-    "long": 1.0,
-    "wide": 1.0
   }
 }

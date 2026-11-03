@@ -1497,7 +1497,7 @@ def scratch_setting_reloads_and_invalidates_prior_history():
 
 
 def no_gate_asks_less_than_pf_1_1():
-    """MIN_PF_FLOOR (1.05): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
+    """MIN_PF_FLOOR (1.02, owner 2026-11-03; was 1.05): whatever is configured (setMinPf 1.0, a Short Range floor of 0.9, unlinked Exit / DCA / coordinator values of
     1.0 or 0.5, Block at a small volume ratio), no validation gate asks less than a net PF of 1.1; the desk parses with the same floor."""
     import os, re, tempfile
     from block_engine import BlockBook, calculate_block_minimum_profit_factor
@@ -1516,7 +1516,7 @@ def no_gate_asks_less_than_pf_1_1():
     root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     desk = open(os.path.join(root, "src", "lib", "config-model.ts"), encoding="utf-8").read()
     m = re.search(r"export const MIN_PF_FLOOR = ([0-9.]+);", desk)
-    ok = MIN_PF_FLOOR == 1.05 and all(v is not None and v + 1e-12 >= 1.05 for v in got.values()) and bool(m) and float(m.group(1)) == MIN_PF_FLOOR
+    ok = MIN_PF_FLOOR == 1.02 and all(v is not None and v + 1e-12 >= 1.02 for v in got.values()) and bool(m) and float(m.group(1)) == MIN_PF_FLOOR
     return ok, f"{got}; desk floor {m and m.group(1)}"
 
 

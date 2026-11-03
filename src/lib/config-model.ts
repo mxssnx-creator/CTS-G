@@ -678,7 +678,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfByStep: true,
   rankByLane: true,
   setScratchEnabled: false,
-  tpRanges: { ...TP_RANGES_DEFAULT },
+  tpRanges: { ...TP_RANGES_DEFAULT, wide: true }, // shipped overlays: every range on, Wide included (owner 2026-11-03)
   setSlLow: false,
   trailStepMax: TRAIL_STEP_MAX_DEFAULT,
   trailSlRatios: [],
@@ -687,7 +687,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeByRange: {},
   volumeByPackKind: { "indications:trail": 3 },
   slMaxByRange: { long: 1, wide: 1 },
-  exitSetsByPack: {},
+  exitSetsByPack: { indications: false }, // shipped: the indications pack's Exit Sets off (measured 2026-11-03)
   trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
   trailPick: "after",
   trailPickByPack: {},
