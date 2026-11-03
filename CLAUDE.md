@@ -111,6 +111,21 @@ This section supersedes older operational descriptions and historical measuremen
   **No setting reaches 1 in either window; the best cell of window A (negative 1) is among the worst of window B; the stages do not lift the executed PF above Base alone (A 0.35 against 0.38-0.40, B 0.44
   against 0.37-0.43).** Nothing here supports changing a default; it is consistent with the regime-dependent persistence found in the audit above.
 
+## Hold Auto off by default, measured (2026-11-03); volume factor bounded; x02 at 30 symbols
+
+- **trade_sim models hold Auto** (`stage_eval.build_hold_auto`): each Set's tape is the engine's own single lane whose time exit at an entry is the hold chosen from the
+  candidates' orders closed before it (`SetBook._choose_hold`, pooled over all symbols as live). Where no hold is chosen the tapes equal the plain replay's (2,316 of 2,316
+  Set/symbol pairs). Trailing Sets never get an Auto hold (owner); every other Set (pack x TP step x SL ratio, base and Exit) chooses on its own orders.
+- **Measured against no hold** (development windows, Auto floor, scratch off; executed PF / orders): no hold **0.879 / 165** (3-day) and **0.953 / 81** (A); hold Auto as shipped
+  before 0.412 / 168 and 0.323 / 84; only with 30 own orders and a 10 % lead over the global stop (`holdAutoMin` 30, `holdAutoMarginPct` 10) 0.649 / 166 and 0.568 / 82; with 50 and 20 %
+  0.665 / 171 and 0.513 / 89. Every variant cuts targets (time exits 28-56 of the orders) and is worse than no hold on both windows, so `holdAuto` is **off** in the overlays,
+  presets, desk and engine default (fixtures keep it on for their pinned counts; `lane_rank.hold-auto-is-off-by-default-and-never-on-trailing-sets`).
+- **Volume factor** (owner default and minimum 0.05): a missing, zero, negative or unreadable `volumeFactor` sized at 1.0 in the engine (20 x the default); now
+  `pulse_trader.volume_factor_of` (0.05 .. 10, else 0.05) for the overlay, `sized_notional` and the strict cap; desk slider from 0.05, displays and preview fall back to 0.05,
+  the settings load clamps. Check `trader.volume-factor-is-bounded-and-defaults-to-the-minimum`. `presets.ts` keeps its explicit 1 (a preset's own choice).
+- **Rejected with the new Auto floor** (both windows, executed PF): pause off 0.70 / 0.535 (pause auto 0.879 / 0.953 stays), Base long 30 / short 15 0.735 / 0.607 (50 / 25 stays).
+- x02 overlay `symbolCap` 30 (owner).
+
 ## Auto minimum PF without the manual ratio (2026-11-03, `learn_step_floor`, `minPfStepAutoTol` 5 %)
 
 - **Objective (owner: high PF with as many valid Sets as possible, not tied to the ratio).** Per (TP step, direction), from the causal pairs (the Set's PF over its last
