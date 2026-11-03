@@ -2859,13 +2859,13 @@ class SetBook:
                     self._hist_rows[symbol] = packed
                     self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
+                    prev_at = self._hist_replay_at.get(symbol)
                     self._hist_replay_at[symbol] = time.time()
-                    stamps = [v for k, v in self._hist_replay_at.items() if k in self.bars]
-                    if len(stamps) >= 2:
-                        # the span over which every symbol was last replayed: one full rotation of the chunked passes (only grows to the real figure)
-                        span = max(stamps) - min(stamps)
-                        span = min(span, ROTATION_CAP_S)
-                        self.rotation_s = span if span > self.rotation_s else 0.9 * self.rotation_s + 0.1 * span
+                    if prev_at:
+                        # one full rotation = the time between two replays of the same symbol (a symbol that stopped replaying adds no interval, so it can
+                        # never stretch the freshness limit; capped)
+                        span = min(max(0.0, self._hist_replay_at[symbol] - prev_at), ROTATION_CAP_S)
+                        self.rotation_s = span if span > self.rotation_s else 0.8 * self.rotation_s + 0.2 * span
                     self._hist_replay_bar_at[symbol] = replay_bar_at
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
