@@ -209,14 +209,23 @@
   "minPfByStep": true,
   "rankByLane": true,
   "setScratchEnabled": false,
-  "tpRanges": {"micro": true, "minimal": true, "short": true, "normal": true, "long": true, "wide": false},
+  "tpRanges": {
+    "micro": true,
+    "minimal": true,
+    "short": true,
+    "normal": true,
+    "long": true,
+    "wide": false
+  },
   "setSlLow": false,
   "trailStepMax": 22,
   "trailSlRatios": [],
   "volumeByPack": {},
   "volumeByKind": {},
   "volumeByRange": {},
-  "exitSetsByPack": {"indications": false},
+  "exitSetsByPack": {
+    "indications": false
+  },
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
@@ -224,7 +233,17 @@
   "minPfStepAutoTol": 5,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
-  "pauseCandidates": [2, 3, 5, 8, 12, 20, 30, 45, 60],
+  "pauseCandidates": [
+    2,
+    3,
+    5,
+    8,
+    12,
+    20,
+    30,
+    45,
+    60
+  ],
   "pauseAutoMax": 100,
   "pauseAutoMin": 30,
   "pausePack": {},
@@ -296,5 +315,12 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
+  },
+  "volumeByPackKind": {
+    "indications:trail": 3
+  },
+  "slMaxByRange": {
+    "long": 1.0,
+    "wide": 1.0
   }
 }

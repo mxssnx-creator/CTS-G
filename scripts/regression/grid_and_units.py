@@ -290,6 +290,33 @@ def trailing_ranges_and_an_entrys_thin_trailing_range():
                 f"entry arms {x_arms} (general up to {max(g_arms)}, entry without a trailing range up to {max(p_arms)}); trailing in every pack and direction {every} ({len(cats)} packs)")
 
 
+def long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two():
+    """slMaxByRange (owner 2026-11-03): the shipped overlays build no base or Exit Set of the Long or Wide TP range above SL ratio 1.0, every other range
+    and every trailing Set is unchanged, and {} builds every ratio again; the minimum TP step is 2 and step-adapt is off in every shipped overlay (on x02
+    it had raised the minimum to 11), so losing live fills never move it."""
+    import json as _j, os as _o
+    from common import ROOT
+    from position_cost import tp_range_of
+    kw = dict(setStepMax=32, tpRanges={"wide": True})
+    cap = _book(slMaxByRange={"long": 1.0, "wide": 1.0}, **kw)
+    free = _book(**kw)          # the fixture pins {}
+    over = [st.id for st in cap.by_idx if st.kind in ("base", "exit") and tp_range_of(st.step) in ("long", "wide") and st.sl_ratio > 1.0 + 1e-9]
+    c_sig, f_sig = _sig(cap), _sig(free)
+    gone = [i for i in f_sig if i not in c_sig]
+    gone_ok = bool(gone) and all(free.sets[i].kind in ("base", "exit") and tp_range_of(free.sets[i].step) in ("long", "wide") and free.sets[i].sl_ratio > 1.0 for i in gone)
+    kept_ok = all(c_sig[i] == f_sig[i] for i in c_sig)
+    files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
+            [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
+    ship = {_o.path.basename(f): (lambda d: (d.get("slMaxByRange"), d.get("setMinStep"), d.get("setStepAdapt")))(_j.load(open(f))) for f in files}
+    ship_ok = all(v == ({"long": 1.0, "wide": 1.0}, 2, False) for v in ship.values())
+    plain = SetBook()
+    plain.load({"histEnabled": True})
+    eng_ok = plain.step_adapt is False and plain.sl_max_by_range == {"long": 1.0, "wide": 1.0} and plain.min_step == 2
+    ok = not over and gone_ok and kept_ok and ship_ok and eng_ok
+    return ok, (f"capped grid: {len(over)} Long/Wide Sets over 1.0, {len(gone)} removed (all of them Long/Wide over 1.0 {gone_ok}), the rest unchanged {kept_ok}; "
+                f"shipped (slMaxByRange, setMinStep, setStepAdapt) {set(map(str, ship.values()))}; engine default adapt {plain.step_adapt} min step {plain.min_step}")
+
+
 def shipped_overlays_switch_off_the_indications_exit_sets():
     """Measured 2026-11-03 (executed PF, three windows): indications Exit Sets off 1.529 / 0.908 / 0.983 against 1.36 / 0.879 / 0.953 shipped; every
     shipped overlay and preset carries exitSetsByPack {"indications": false} and keeps the other packs' Exit Sets."""
@@ -335,6 +362,7 @@ CHECKS = [
     ("grid.low-sl-ratios-build-only-distinct-stops", low_sl_ratios_build_only_distinct_stops),
     ("grid.trailing-families-are-their-own-sets", trailing_families_are_their_own_sets),
     ("grid.trailing-ranges-and-an-entrys-thin-trailing-range", trailing_ranges_and_an_entrys_thin_trailing_range),
+    ("grid.long-and-wide-ranges-stop-at-sl-ratio-one-and-the-minimum-step-stays-two", long_and_wide_ranges_stop_at_sl_ratio_one_and_the_minimum_step_stays_two),
     ("grid.exit-sets-switch-per-pack", exit_sets_switch_per_pack),
     ("grid.shipped-overlays-switch-off-the-indications-exit-sets", shipped_overlays_switch_off_the_indications_exit_sets),
 ]

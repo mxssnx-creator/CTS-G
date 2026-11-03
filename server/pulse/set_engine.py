@@ -43,6 +43,7 @@ from position_cost import (
     SL_RATIO_MIN,
     SL_RATIOS_LOW,
     TP_MIN_COSTS,
+    TP_RANGES,
     TP_RANGES_DEFAULT,
     TRAIL_SL_RATIOS,
     TRAIL_STEP_CEIL,
@@ -150,6 +151,27 @@ def pick_sequence(lane_order: Sequence[str], kind_order: Tuple[Tuple[str, ...], 
         return [(lane, kinds) for kinds in kind_order for lane in lane_order]
     return [(lane, kinds) for lane in lane_order for kinds in kind_order]
 KIND_ORDER_DEFAULT = "after"
+# The largest SL ratio a Set of a TP range may have (owner 2026-11-03: "max SL ratio for Long, Wide 1"): a Set of step k with SL ratio r is built only when
+# r <= the limit of k's TP range (position_cost.tp_range_of); a range without a limit keeps every ratio. Applies to base and Exit Sets of every pack.
+SL_MAX_BY_RANGE_DEFAULT = {"long": 1.0, "wide": 1.0}
+
+
+def sl_max_by_range_of(raw: Any) -> Dict[str, float]:
+    """{range: largest SL ratio} from an overlay value: None = the shipped limits, {} = no limit; unknown ranges and unreadable values dropped,
+    a limit bounded to 0.2 .. 3.5."""
+    if raw is None:
+        return dict(SL_MAX_BY_RANGE_DEFAULT)
+    out: Dict[str, float] = {}
+    if isinstance(raw, dict):
+        names = {n for n, _lo, _hi in TP_RANGES}
+        for k, v in raw.items():
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                continue
+            if str(k).lower() in names and math.isfinite(x) and x > 0:
+                out[str(k).lower()] = max(0.2, min(3.5, x))
+    return out
 
 
 def pack_group(pack: str) -> str:
@@ -1874,7 +1896,8 @@ class SetBook:
         self.min_step_cfg = STEP_MIN
         self.min_step = STEP_MIN
         self.step_max = STEP_DEFAULT_MAX
-        self.step_adapt = True
+        self.step_adapt = False
+        self.sl_max_by_range: Dict[str, float] = dict(SL_MAX_BY_RANGE_DEFAULT)
         self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
@@ -2118,7 +2141,10 @@ class SetBook:
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
-        self.step_adapt = bool(ov.get("setStepAdapt", True))
+        # owner 2026-11-03: the minimum TP step is 2 and stays there; step-adapt (raise it after losing live fills) is off by default -- on x02 it had
+        # raised the minimum to 11 and removed every Set from 0.2 % to 1.0 %
+        self.step_adapt = bool(ov.get("setStepAdapt", False))
+        self.sl_max_by_range = sl_max_by_range_of(ov.get("slMaxByRange"))
         self.min_step = self.min_step_cfg
         self.steps = list(range(self.min_step, self.step_max + 1))
         packs = []
@@ -2406,9 +2432,15 @@ class SetBook:
                 mine = eff_stop(r, k)
                 return all(eff_stop(o, k) != mine for o in pack_ratios if o + 1e-9 >= SL_RATIO_MIN or o < r - 1e-9)
 
+            sl_cap = self.sl_max_by_range
+
+            def sl_allowed(r: float, k: int) -> bool:
+                lim = sl_cap.get(tp_range_of(k))
+                return lim is None or r <= lim + 1e-9
+
             for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):
                 for step_i, step in enumerate(pack_steps):
-                    if not low_ok(sl, step):
+                    if not low_ok(sl, step) or not sl_allowed(sl, step):
                         continue
                     sid = make_set_id(pack, sl, "", step, side)
                     tp = step_tp_pct(step, self.cost_pct)
@@ -2459,8 +2491,10 @@ class SetBook:
                                 continue
                             taken.add(eff_stop(sl, step))
                         seen_stop[dist] = None
-                        if step not in built_steps:
-                            continue                         # the cell's TP range is off: the Exit Set it owns is not built
+                        if step not in built_steps or not sl_allowed(sl, step):
+                            # the cell's TP range is off, or its SL ratio is over the range's largest (slMaxByRange): the Exit Set it owns is not built, and no
+                            # other cell takes its stop distance (a limit never renames another range's Exit Set)
+                            continue
                         step_i = built_steps[step]
                         sid = make_exit_id(pack, sl, step, side)
                         tp = step_tp_pct(step, self.cost_pct)
@@ -4626,7 +4660,7 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 # The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
 # direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
-_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True, "exitSetsByPack": {}}
+_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True, "exitSetsByPack": {}, "slMaxByRange": {}, "setStepAdapt": True}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:

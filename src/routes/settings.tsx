@@ -750,7 +750,7 @@ function SettingsPage() {
                 />
                 <Toggle
                   label="Adapt min step from live"
-                  on={overlay.setStepAdapt !== false}
+                  on={overlay.setStepAdapt === true}
                   onChange={(v) => patch("setStepAdapt", v)}
                 />
                 {TP_RANGES.map((r) => (
@@ -759,6 +759,23 @@ function SettingsPage() {
                     label={`${r.label} range · TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}%${r.id === "wide" ? " (on extends the grid past Step max to 5.0 %)" : ""}`}
                     on={(overlay.tpRanges ?? {})[r.id] ?? r.id !== "wide"}
                     onChange={(v) => patch("tpRanges", { ...overlay.tpRanges, [r.id]: v })}
+                  />
+                ))}
+                {TP_RANGES.filter((r) => r.id === "normal" || r.id === "long" || r.id === "wide").map((r) => (
+                  <Slider
+                    key={`slmax-${r.id}`}
+                    label={`${r.label} range · largest SL ratio (0 = no limit)`}
+                    value={(overlay.slMaxByRange ?? {})[r.id] ?? 0}
+                    min={0}
+                    max={3.5}
+                    step={0.25}
+                    hint={`Sets of TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}% are built only with SL ratio up to this. Default: Long and Wide 1.0, Normal none.`}
+                    onChange={(v) => {
+                      const next = { ...(overlay.slMaxByRange ?? {}) };
+                      if (v < 0.2) delete next[r.id];
+                      else next[r.id] = Math.round(v * 4) / 4;
+                      patch("slMaxByRange", next);
+                    }}
                   />
                 ))}
                 <Toggle
@@ -1362,6 +1379,15 @@ function SettingsPage() {
                   />
                 )),
               )}
+              <Slider
+                label="Indications trailing · volume × (on top of the multiples above)"
+                value={(overlay.volumeByPackKind ?? {})["indications:trail"] ?? 1}
+                min={0.1}
+                max={5}
+                step={0.1}
+                hint="Default 3 (owner 2026-11-03): an indications trailing Set opens at 3 × the volume factor's size; the hard size ceiling and the venue minimum lot still apply."
+                onChange={(v) => patch("volumeByPackKind", { ...(overlay.volumeByPackKind ?? {}), "indications:trail": Math.max(0.1, Math.min(5, Math.round(v * 10) / 10)) })}
+              />
               <p className="font-mono text-xs text-muted">Trailing stop families · each builds every arm / give pair again with the initial stop at r × the arm</p>
               <div className="flex flex-wrap gap-2">
                 {TRAIL_SL_RATIOS.map((r) => (

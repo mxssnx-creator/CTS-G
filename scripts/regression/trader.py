@@ -497,6 +497,27 @@ def unanswered_close_that_never_existed_is_sent_again():
     return ok, f"pending after each read (25 s apart): {out}"
 
 
+def indications_trailing_volume_is_three_times():
+    """volumeByPackKind (owner 2026-11-03): an indications trailing Set's multiple is 3 x on top of the pack / type / range multiples, every other Set's
+    (an indications base Set, a general trailing Set) is unchanged; every shipped overlay and preset carries it; an overlay without the key gets the
+    default, {} switches it off, a value over the bound is capped at 5."""
+    import types, json as _j
+    from common import ROOT
+    tr = types.SimpleNamespace(pack="indications", kind="trail", step=0)
+    base = types.SimpleNamespace(pack="indications", kind="base", step=15)
+    gtr = types.SimpleNamespace(pack="general", kind="trail", step=0)
+    pk = pt.volume_mults_of(pt.VOLUME_BY_PACK_KIND_DEFAULT)
+    got = {n: pt.set_volume_mult(x, {}, {}, {}, pk) for n, x in (("ind trail", tr), ("ind base", base), ("gen trail", gtr))}
+    stacked = pt.set_volume_mult(tr, {"indications": 1.5}, {"trail": 1.0}, {"trail": 1.0}, pk)
+    capped = pt.volume_mults_of({"indications:trail": 9})["indications:trail"]
+    files = [os.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
+            [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
+    shipped = {os.path.basename(f): _j.load(open(f)).get("volumeByPackKind") for f in files}
+    ok = (got == {"ind trail": 3.0, "ind base": 1.0, "gen trail": 1.0} and abs(stacked - 4.5) < 1e-12 and capped == pt.VOLUME_MULT_MAX
+          and all(v == {"indications:trail": 3} for v in shipped.values()) and pt.set_volume_mult(tr, {}, {}, {}, {}) == 1.0)
+    return ok, f"multiples {got}, with pack 1.5 {stacked}, 9 capped to {capped}; shipped {set(map(str, shipped.values()))}"
+
+
 def set_volume_multiples_size_by_pack_type_and_range():
     """volumeByPack / volumeByKind / volumeByRange (owner 2026-11-03): a Set position's size is the volume factor's size x its pack's x its type's x
     its TP range's multiple (each 0.1 .. 5, missing = 1), never over sizeMaxNotional; with no multiple set the size is unchanged."""
@@ -2558,6 +2579,7 @@ CHECKS = [
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
+    ("trader.indications-trailing-volume-is-three-times", indications_trailing_volume_is_three_times),
     ("trader.start-records-whether-the-previous-run-crashed", start_records_whether_the_previous_run_crashed),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),

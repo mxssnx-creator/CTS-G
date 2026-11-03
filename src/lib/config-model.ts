@@ -425,6 +425,10 @@ export type PulseOverlay = {
   volumeByPack: Record<string, number>;
   volumeByKind: Record<string, number>;
   volumeByRange: Record<string, number>;
+  /** Volume multiple per pack and type, "<pack>:<type>" (server: pulse_trader.VOLUME_BY_PACK_KIND_DEFAULT, indications trailing x 3). */
+  volumeByPackKind: Record<string, number>;
+  /** Largest SL ratio per TP range (server: set_engine.SL_MAX_BY_RANGE_DEFAULT: Long and Wide 1.0). */
+  slMaxByRange: Record<string, number>;
   /** Exit Sets (no-TP Sets) per indication pack: missing = on. */
   exitSetsByPack: Record<string, boolean>;
   /** Named trailing ranges by the arm's step (Micro .. Wide): missing = on. */
@@ -681,6 +685,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeByPack: {},
   volumeByKind: {},
   volumeByRange: {},
+  volumeByPackKind: { "indications:trail": 3 },
+  slMaxByRange: { long: 1, wide: 1 },
   exitSetsByPack: {},
   trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
   trailPick: "after",
@@ -703,7 +709,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinSamples: 12,
   setMinStep: 2,
   setStepMax: TP_STEP_DEFAULT_MAX,
-  setStepAdapt: true,
+  setStepAdapt: false,
   trailMinStep: 3,
   exitEnabled: true,
   exitIgnoreTp: true,
@@ -916,6 +922,8 @@ export type CtsSettings = {
   volumeByPack?: Record<string, number>;
   volumeByKind?: Record<string, number>;
   volumeByRange?: Record<string, number>;
+  volumeByPackKind?: Record<string, number>;
+  slMaxByRange?: Record<string, number>;
   exitSetsByPack?: Record<string, boolean>;
   trailRanges?: Partial<Record<string, boolean>>;
   trailPick?: string;
@@ -1088,6 +1096,18 @@ function trailRangesOf(raw: unknown): Partial<Record<TpRangeId, boolean>> {
   if (!raw || typeof raw !== "object") return {};
   const ids = TP_RANGES.map((r) => r.id) as string[];
   return Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([k, v]) => ids.includes(k) && typeof v === "boolean")) as Partial<Record<TpRangeId, boolean>>;
+}
+
+/** Largest SL ratio per TP range: missing = the shipped limits (Long, Wide 1.0); {} = none; each 0.2 .. 3.5 (server: set_engine.sl_max_by_range_of). */
+function slMaxByRangeOf(raw: unknown): Record<string, number> {
+  if (raw === undefined || raw === null) return { long: 1, wide: 1 };
+  if (typeof raw !== "object") return {};
+  const ids = TP_RANGES.map((r) => r.id) as string[];
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([k, v]) => ids.includes(k) && Number.isFinite(Number(v)) && Number(v) > 0)
+      .map(([k, v]) => [k, Math.max(0.2, Math.min(3.5, Number(v)))]),
+  );
 }
 
 /** How a lane's trailing Sets compete with its base and Exit Sets (server: set_engine.KIND_ORDERS). */
@@ -1305,6 +1325,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     volumeByPack: volumeMultsOf(cts.volumeByPack),
     volumeByKind: volumeMultsOf(cts.volumeByKind),
     volumeByRange: volumeMultsOf(cts.volumeByRange),
+    volumeByPackKind: cts.volumeByPackKind && typeof cts.volumeByPackKind === "object" ? volumeMultsOf(cts.volumeByPackKind) : { "indications:trail": 3 },
+    slMaxByRange: slMaxByRangeOf(cts.slMaxByRange),
     exitSetsByPack: Object.fromEntries(
       Object.entries(cts.exitSetsByPack && typeof cts.exitSetsByPack === "object" ? cts.exitSetsByPack : {}).filter(([, v]) => typeof v === "boolean"),
     ) as Record<string, boolean>,
@@ -1333,7 +1355,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinSamples: num(cts.setMinSamples, 12),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
     setStepMax: num(cts.setStepMax, TP_STEP_DEFAULT_MAX),
-    setStepAdapt: bool(cts.setStepAdapt, true),
+    setStepAdapt: bool(cts.setStepAdapt, false),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
     exitBestOf: bool(cts.exitBestOf, true),

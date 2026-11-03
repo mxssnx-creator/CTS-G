@@ -250,12 +250,19 @@ def volume_mults_of(raw: Any) -> Dict[str, float]:
     return out
 
 
-def set_volume_mult(st: Any, by_pack: Dict[str, float], by_kind: Dict[str, float], by_range: Dict[str, float]) -> float:
-    """The volume multiple of a Set position: its pack's x its type's (base / exit / trail) x its TP range's (micro .. wide; "trail" for trailing Sets)."""
+# The shipped pack x type multiple (owner 2026-11-03: "increase the indications trailing volume ratio by 3 times"): overlay volumeByPackKind {"<pack>:<type>": x}
+VOLUME_BY_PACK_KIND_DEFAULT = {"indications:trail": 3.0}
+
+
+def set_volume_mult(st: Any, by_pack: Dict[str, float], by_kind: Dict[str, float], by_range: Dict[str, float],
+                    by_pack_kind: Optional[Dict[str, float]] = None) -> float:
+    """The volume multiple of a Set position: its pack's x its type's (base / exit / trail) x its TP range's (micro .. wide; "trail" for trailing Sets)
+    x its pack-and-type multiple ("indications:trail"), each on the volume factor's size."""
     from position_cost import tp_range_of
     kind = str(getattr(st, "kind", "base") or "base")
+    pack = str(getattr(st, "pack", ""))
     rng = "trail" if kind == "trail" else tp_range_of(int(getattr(st, "step", 0) or 0))
-    return (by_pack.get(str(getattr(st, "pack", "")), 1.0) * by_kind.get(kind, 1.0) * by_range.get(rng, 1.0))
+    return (by_pack.get(pack, 1.0) * by_kind.get(kind, 1.0) * by_range.get(rng, 1.0) * (by_pack_kind or {}).get(f"{pack}:{kind}", 1.0))
 
 
 LIQ_SAFETY = 2.0          # liquidation (about 1 / leverage away, less maintenance) must sit at least this many stop distances out
@@ -3411,7 +3418,8 @@ class Pulse:
         if chosen:
             # own volume per indication, type and range: the volume factor's size x that multiple, never over the hard size ceiling or what the
             # balance carries; the venue minimum lot still applies
-            vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}))
+            vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}),
+                                 getattr(self, "volume_by_pack_kind", {}))
             if abs(vm - 1.0) > 1e-9:
                 cap_n = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
                 q2 = self.cap_order_qty(c, px, qty * vm, cap_n)
@@ -4486,6 +4494,8 @@ class Pulse:
         self.volume_by_pack = volume_mults_of(ov.get("volumeByPack"))
         self.volume_by_kind = volume_mults_of(ov.get("volumeByKind"))
         self.volume_by_range = volume_mults_of(ov.get("volumeByRange"))
+        raw_pk = ov.get("volumeByPackKind")
+        self.volume_by_pack_kind = volume_mults_of(VOLUME_BY_PACK_KIND_DEFAULT if raw_pk is None else raw_pk)
         try:
             self.size_max = max(0.2, float(ov.get("sizeMaxNotional") if ov.get("sizeMaxNotional") is not None else 25.0))
         except Exception:
