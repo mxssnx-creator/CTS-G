@@ -139,6 +139,13 @@ This section supersedes older operational descriptions and historical measuremen
   0.351-0.406 on 284-313 orders, net -43.7 % to -56.7 %. Not better and not distinguishable at this order count. The earlier positive figures (small caps 1.07 sealed, window-grid cell 1.07 on 1,629 orders, live x02
   1.04 net) are of other days and a different universe; the three-day limit on every run means they cannot be reproduced on today's data, only compared in kind: they were single windows of one regime each, and the
   audit above shows the sign of persistence flipping between consecutive days.
+- **Coverage census (`scripts/coverage_census.py`, everything switched on: general, indications, Short Range, the five extra packs and five `indicationConfigs` entries over families x ranges x timeframes
+  x relations, split directions; 19,608 Sets in 39 packs and 452 groups of pack x type x direction x TP-step range; 8 symbols, one 24 h window after 24 h; the engine's chain, which the plain reading above equals).**
+  **Every one of the 19,608 Sets processed**: each produced orders (1,884,564 tape orders), so no strategy, type, range, direction or configured indication entry is dead. Past each gate: Base 116,823 orders on 7,389 Sets
+  (37.7 %), Main 65,976 on 5,228, executable 45,777 on 4,337 Sets (22.1 %); 166 of the 452 groups reach execution, 286 stop at a gate on this data (mostly at Base: a signal in one direction that did not persist that
+  day; the census prints the gate per group). Pooled PF of those orders (one entry counted once per Set, so a map, not an executed PF): tape 0.489, Base 0.369, Main 0.346, executable 0.309; by direction tape /
+  executable long 0.352 / 0.113 (1,598 orders), short 0.702 / 0.320 (44,179); by type executable base 0.308, Exit 0.313, trailing 0.302; by TP-step range 2-6 0.375, 7-12 0.296, 13-20 0.305, 21-32 0.282. The day's
+  market moved down (short tape 0.70 against long 0.35): the direction split shows the regime, and the gates do not turn either direction above 1.
 - **Harness fixes found on the way.** Mutants in the pinned trader were "caught" by the deploy-pin check any edit of that file trips (four earlier mutants and the Axis-floor ones): `mutate.py` now skips that one check
   for them (`CTSG_SKIP_CHECKS`), the recorded catchers for them were cleared, and they were re-run. A Low-Range memo mutant that survived (key without the newest row's values) got an in-place-edit case; a stale
   anchor of the pause mutant was repaired.
