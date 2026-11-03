@@ -527,8 +527,8 @@ def lib_is_registered_for_every_family_range_and_timeframe():
         for r in lib.RANGES:
             if f"g_{g}_{r}" not in ix.INDICATORS:
                 missing.append(f"g_{g}_{r}")
-    ok = not missing and lib.RANGES == {"min": (5, 8), "med": (14, 21)} and lib.TFS == (1, 5, 15) and len(lib.FAMILIES) >= 35
-    return ok, f"{len(lib.FAMILIES)} families x 4 ranges x (3 timeframes + combined) + 10 group votes; missing: {missing[:5]}"
+    ok = not missing and lib.RANGES == {"min": (5, 8), "med": (14, 21), "long": (34, 55)} and lib.TFS == (1, 5, 15) and len(lib.FAMILIES) >= 35
+    return ok, f"{len(lib.FAMILIES)} families x 6 ranges x (3 timeframes + combined) + {5 * len(lib.RANGES)} group votes; missing: {missing[:5]}"
 
 
 def lib_trend_families_follow_a_trend_both_ways():
