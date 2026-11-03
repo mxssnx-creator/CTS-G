@@ -4541,7 +4541,7 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 # The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
 # direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
-_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True}
+_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True, "exitSetsByPack": {}}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:

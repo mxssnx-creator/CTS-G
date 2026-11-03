@@ -62,6 +62,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["rankByLane"] = False      # the choice among valid Sets reads the Base tape in fixtures (pinned picks, golden); the lane-rank checks ask for the lane's own Set
     ov["holdAuto"] = True         # fixtures keep the hold Auto Mode (pinned counts, golden, the hold checks); the shipped default is off
     ov["setScratchEnabled"] = True  # fixtures keep the Set-lane scratch exit (pinned counts, golden); the scratch checks ask for it off
+    ov["exitSetsByPack"] = {}     # fixtures keep every pack's Exit Sets (pinned counts, golden); the shipped overlays switch the indications pack's off
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov

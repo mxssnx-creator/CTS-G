@@ -2219,7 +2219,8 @@ def an_exit_set_position_never_takes_its_tp_and_a_base_set_always_does():
     b, se = _signal_book()
     p = _bare_pulse()
     p.sets = b
-    base = next(x for x in b.by_idx if x.kind == "base")
+    exits = {(x.pack, x.step, round(x.sl_ratio, 9)) for x in b.by_idx if x.kind == "exit"}
+    base = next(x for x in b.by_idx if x.kind == "base" and (x.pack, x.step, round(x.sl_ratio, 9)) in exits)   # a pack that runs Exit Sets (indications' are off)
     twin = next(x for x in b.by_idx if x.kind == "exit")
     trail = next(x for x in b.by_idx if x.kind == "trail")
     honor = {k: p.lane_honors_tp(types.SimpleNamespace(set_id=st.id)) for k, st in (("base", base), ("exit", twin), ("trail", trail))}

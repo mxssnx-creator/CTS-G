@@ -260,6 +260,18 @@ def trailing_families_are_their_own_sets():
                 f"{lane_ok}; ids {id_ok}; stop within the 3 % limit {limit_ok}; trailStepMax 30 -> largest arm {arms} %")
 
 
+def shipped_overlays_switch_off_the_indications_exit_sets():
+    """Measured 2026-11-03 (executed PF, three windows): indications Exit Sets off 1.529 / 0.908 / 0.983 against 1.36 / 0.879 / 0.953 shipped; every
+    shipped overlay and preset carries exitSetsByPack {"indications": false} and keeps the other packs' Exit Sets."""
+    import json as _j, os as _o
+    from common import ROOT
+    files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")] + \
+            [_o.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
+    got = {_o.path.basename(f): _j.load(open(f)).get("exitSetsByPack") for f in files}
+    ok = all(v == {"indications": False} for v in got.values())
+    return ok, f"{got}"
+
+
 def exit_sets_switch_per_pack():
     """exitSetsByPack {pack: false} removes exactly that pack's Exit Sets (no-TP Sets) and nothing else; missing packs keep theirs; exitIgnoreTp off still
     removes every Exit Set."""
@@ -293,4 +305,5 @@ CHECKS = [
     ("grid.low-sl-ratios-build-only-distinct-stops", low_sl_ratios_build_only_distinct_stops),
     ("grid.trailing-families-are-their-own-sets", trailing_families_are_their_own_sets),
     ("grid.exit-sets-switch-per-pack", exit_sets_switch_per_pack),
+    ("grid.shipped-overlays-switch-off-the-indications-exit-sets", shipped_overlays_switch_off_the_indications_exit_sets),
 ]
