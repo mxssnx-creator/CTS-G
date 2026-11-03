@@ -77,9 +77,7 @@ def main() -> int:
     from position_cost import MIN_VALIDATION_N, cost_as_frac  # noqa: E402
     t0 = time.time()
     book = sg.make_book()
-    if book.hold_auto and any(book.auto_holds(st) for st in book.by_idx):
-        print("Automatic hold selection is not modeled by this simulator; use the actual SetBook replay or explicitly disable auto holds for a separate study.")
-        return 2
+    # hold Auto is modelled: stage_eval.build_hold_auto takes each Set's tape from the engine's own lane with the hold chosen from earlier orders
     names = sorted(f[:-5] for f in os.listdir(a.data) if f.endswith("-USDT.json"))[:a.symbols]
     if not names:
         print("No market data found")
@@ -98,6 +96,7 @@ def main() -> int:
         if replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
             raise ValueError("replay inputs changed during cache generation")
         replay_cache.save(a.cache, shadow, manifest)
+    shadow = sg.build_hold_auto(names, bars, times, shadow)      # hold Auto on: each Set's tape is the engine's own lane with the causally chosen hold
     held = sum(1 for k in shadow[names[0]][3] if isinstance(k, int) and k >= 0)       # Set entries only: key -1 holds the per-bar pause arrays, not a Set
     if held != len(book.by_idx):
         print(f"cache holds {held} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")

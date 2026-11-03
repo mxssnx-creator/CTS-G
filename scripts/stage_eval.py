@@ -109,6 +109,37 @@ def build(names, bars, times, jobs: int):
     return {s: (w, d, c, o) for s, w, d, c, o in res}
 
 
+def build_hold_auto(names, bars, times, shadow):
+    """Hold Auto in the simulator: when the book replays with holdEnabled + holdAuto, every Set's tape is the engine's own single lane whose time exit
+    at each entry is the hold chosen from the candidates' orders closed before it (SetBook._choose_hold over all symbols, the live rule), replacing the
+    fixed-hold tapes of `shadow` (signals and pause arrays stay). Returns shadow unchanged when hold Auto is off. One process: the choice pools every
+    symbol's candidate orders, so the replay cannot be split per symbol."""
+    book = make_book()
+    if not (getattr(book, "hold_on", False) and getattr(book, "hold_auto", False)):
+        return shadow
+    for s in names:
+        book.bars[s] = bars[s]
+        book.bar_t[s] = times[s][-1]
+    now = max(times[s][-1] for s in names) + 60.0
+    book.replay_all(now=now)
+    out = {s: dict(shadow[s][3]) for s in names}
+    for st in book.by_idx:
+        base = book._tape_rows(st.id, names, float("-inf"))
+        rows = book._choose_hold(st, base, names, float("-inf")) if book.auto_holds(st) else base
+        per: Dict[str, Tuple[List[int], List[int], List[float]]] = {s: ([], [], []) for s in names}
+        for r in rows:
+            s = r[1]
+            t0 = times[s][-1] + 60.0 - (len(bars[s]) - 1) * 60.0          # the engine's base_ts: its bar i closes at t0 + i minutes
+            xi = int(round((float(r[0]) - t0) / 60.0))
+            ei = xi - int(round(float(r[5]) / 60.0))
+            per[s][0].append(ei)
+            per[s][1].append(xi)
+            per[s][2].append(float(r[4]))
+        for s in names:
+            out[s][st.idx] = (array("i", per[s][0]), array("i", per[s][1]), array("d", per[s][2]))
+    return {s: (shadow[s][0], shadow[s][1], shadow[s][2], out[s]) for s in names}
+
+
 # ---- phase 2: the engine's gate, computed directly ----------------------------------------------------------------------
 
 class Tapes:
