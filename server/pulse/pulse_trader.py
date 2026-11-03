@@ -3252,7 +3252,7 @@ class Pulse:
                     blocked.append(key)
                     return False
                 return True
-            for lane in ("pos", "neg"):
+            for lane in getattr(self.sets, "lane_order", ("pos", "neg")):
                 chosen = self.sets.pick_any(pack, allowed_lanes=(lane,), predicate=lambda st: allows(st, lane), side=side)
                 if chosen is not None:
                     return chosen, lane, ""

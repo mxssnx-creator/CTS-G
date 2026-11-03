@@ -131,6 +131,7 @@ STEP_MAX = TP_STEP_MAX                       # the ceiling
 STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
 HIST_CAP = 80
 ROTATION_FRESH_X = 1.5
+LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("neg",), "pos": ("pos",)}
 ROTATION_CAP_S = 1800.0         # a symbol that stopped replaying cannot stretch the freshness limit beyond 1.5 x this
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
@@ -1792,7 +1793,8 @@ class SetBook:
         self.max_dd_s = 420.0
         self.use_historic_gate = True
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
-        self.rotation_s = 0.0           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
+        self.rotation_s = 0.0
+        self.lane_order: Tuple[str, ...] = ("pos", "neg")           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
@@ -2173,6 +2175,10 @@ class SetBook:
             self.cooldown_bars = 2
         self.direction_split = str(ov.get("directionMode") or "split").lower() != "both"
         self.rank_by_lane = bool(ov.get("rankByLane", True))
+        # which execution lanes a signal tries, in order (laneOrder): "pos-neg" (the positive lane first, the shipped behaviour), "neg-pos", "neg" (Real
+        # Negative only), "pos" (positive only). Measured 2026-11-03: the positive Main / Real stages cut the post-Base PF on three consecutive days
+        # while the Real Negative lane kept it (see CLAUDE.md).
+        self.lane_order = LANE_ORDERS.get(str(ov.get("laneOrder") or "pos-neg").lower(), LANE_ORDERS["pos-neg"])
         self.pf_by_step = bool(ov.get("minPfByStep", True))
         self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
@@ -4075,7 +4081,7 @@ class SetBook:
             if not fixed and not (self.main_on or self.neg_on or self.realst_on):
                 rows = [x for x in self._valid_for(pack, "trail", side) if predicate is None or predicate(x)]
                 return max(rows, key=self.rank_key) if rows and "pos" in allowed else None
-            for lane in ("pos", "neg"):
+            for lane in self.lane_order:
                 if lane not in allowed:
                     continue
                 for kinds in (("base", "exit"), ("trail",)):

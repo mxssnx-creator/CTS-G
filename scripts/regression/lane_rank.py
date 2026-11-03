@@ -329,7 +329,30 @@ def hold_auto_is_off_by_default_and_never_on_trailing_sets():
     return ok, f"shipped holdAuto {shipped}; engine default {bare.hold_auto}; switched on: trailing candidates {set(on.auto_holds(st) for st in trail_on)}, base Sets have candidates {all(on.auto_holds(st) for st in base_on)}"
 
 
+def lane_order_decides_which_lane_a_signal_tries_first():
+    """laneOrder: X is valid on the positive lane only, Y on the Real Negative lane only. "pos-neg" (the shipped order) opens under X, "neg-pos" under Y,
+    "neg" never under X (positive lane closed) and "pos" never under Y; an unknown value keeps the shipped order. The live entry path (Pulse._scope_choice
+    with an Axis) walks the same order."""
+    got = {}
+    for order in ("pos-neg", "neg-pos", "neg", "pos", "bogus"):
+        b = _book(laneOrder=order)
+        base = [s for s in b.by_idx if s.kind == "base" and s.pack == "general"]
+        x, y = base[0], base[1]
+        for st in b.by_idx:
+            st.active, st.last_error = False, "off"
+        _force_valid(b, x, 2.0, 100, (60, 2.0, 2.0, 2.0, 0.3), lane="pos")
+        _force_valid(b, y, 2.0, 100, (60, 2.0, 2.0, 2.0, 0.3), lane="neg")
+        pick = b.pick_any("general")
+        got[order] = "X" if pick is x else "Y" if pick is y else None
+    from common import PULSE
+    src = open(_os.path.join(PULSE, "pulse_trader.py")).read()
+    live = 'for lane in getattr(self.sets, "lane_order", ("pos", "neg")):' in src
+    ok = got == {"pos-neg": "X", "neg-pos": "Y", "neg": "Y", "pos": "X", "bogus": "X"} and live
+    return ok, f"opens under: {got}; live entry walks the book's lane order: {live}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
+    lane_order_decides_which_lane_a_signal_tries_first,
     hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,

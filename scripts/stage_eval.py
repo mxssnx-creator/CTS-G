@@ -348,7 +348,11 @@ def stage_lane_stats(book, tapes: Tapes, st, now: float):
     when the Negative lane and Real Negative pass, else "" -- and what the choice among valid Sets reads from the Real Set / Real Negative Set."""
     ch, nets = chain_at(book, tapes, st, now)
     v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
-    lane = "pos" if v["pos"] else ("neg" if v["negl"] else "")
+    lane = ""
+    for l_ in getattr(book, "lane_order", ("pos", "neg")):          # the lane a Set executes on: the first of the book's lane order it passes
+        if (l_ == "pos" and v["pos"]) or (l_ == "neg" and v["negl"]):
+            lane = l_
+            break
     key = "realneg" if lane == "neg" else "real"
     return lane, se.lane_rank_stats([nets[k] for k in ch[key]], tapes.cf)
 
@@ -661,7 +665,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if axis_pick is not None:
                     # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
                     chosen = None
-                    for lane_ in ("pos", "neg"):
+                    for lane_ in getattr(book, "lane_order", ("pos", "neg")):
                         for kinds in (("base", "exit"), ("trail",)):
                             cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
@@ -678,7 +682,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
                     # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
                     chosen = None
-                    for lane_ in ("pos", "neg"):
+                    for lane_ in getattr(book, "lane_order", ("pos", "neg")):
                         for kinds in (("base", "exit"), ("trail",)):
                             cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                             for _key, st_c in cands:
@@ -693,7 +697,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         if chosen is not None:
                             pool, lane_pick = [chosen], lane_
                             break
-                for lane_ in (() if (axis_coord is not None or axis_pick is not None) else ("pos", "neg")):
+                for lane_ in (() if (axis_coord is not None or axis_pick is not None) else getattr(book, "lane_order", ("pos", "neg"))):
                     # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...))
                     fixed = sorted([r for r in ranked.get((pack, "base", lane_), []) + ranked.get((pack, "exit", lane_), []) if r[1].side in (0, d)],
                                    key=lambda r: r[0], reverse=True)
