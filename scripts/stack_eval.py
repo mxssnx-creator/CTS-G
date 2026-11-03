@@ -161,6 +161,82 @@ def main() -> int:
             print(f"{'Axis ' + label:44s} {json.dumps(out['axis'][label])}  [{time.time() - t1:.0f}s]", flush=True)
             json.dump(out, open(a.out, "w"), indent=1)
 
+    # ---- Axis Sets: each Axis setting a derived Set of the parent's Real (or Real Negative) Set: the orders that setting admitted, each judged on the
+    # orders closed before its entry; per parent the best setting is chosen from closed orders only; an entry goes only where the chosen setting admits it
+    AX_CONFIGS = [("last", w) for w in (1, 2, 3, 4)] + [("prev", w) for w in (4, 6, 8, 12)] + [("pause", w) for w in (1, 2, 3, 4, 6, 8)]
+
+    def rule_ok(kind: str, w: int, nets: List[float], floor: float) -> bool:
+        n = len(nets)
+        if kind == "last":
+            if n < min(3, w):
+                return True
+            return (pf(nets[-w:]) or 0.0) + 1e-9 >= floor
+        if kind == "prev":
+            pw = min(25, 2 * w)
+            if n < 8 or len(nets[-pw:]) < 8:
+                return True
+            lim = 0.85 * floor
+            return not ((pf(nets[-pw:]) or 0.0) + 1e-9 < lim and (pf(nets[-50:]) or 0.0) + 1e-9 < lim)
+        k = 0
+        for x in reversed(nets):
+            if x < 0:
+                k += 1
+            else:
+                break
+        return k < w
+
+    ax_cache: Dict[Tuple[int, str, float], Any] = {}
+
+    def axis_set_pick(cfg):
+        def pick(st, lane, now):
+            key = (st.idx, lane, now)
+            if key not in ax_cache:
+                auto.apply(book, float(int(now // 3600) * 3600))
+                floor = float(book.floor_for(book.realst_n, st.pack, st))
+                rows = sg.lane_stream_entries(book, tapes, st, now, lane)
+                exits = [r[0] for r in rows]
+                nets = [r[2] for r in rows]
+                best = (None, pf(nets[-cfg["n"]:]) or 0.0, len(nets))
+                base_pf = best[1]
+                for kind, w in AX_CONFIGS:
+                    adm = [nets[j] for j in range(len(rows)) if rule_ok(kind, w, nets[:bisect.bisect_left(exits, rows[j][1])], floor)]
+                    if len(adm) < cfg["min_n"]:
+                        continue
+                    p_ = pf(adm[-cfg["n"]:]) or 0.0
+                    if p_ > best[1] and p_ >= base_pf * cfg["margin"]:
+                        best = ((kind, w), p_, len(adm))
+                chosen, p_c, _n = best
+                allow = True if chosen is None else rule_ok(chosen[0], chosen[1], nets, floor)
+                if cfg.get("strict") and p_c + 1e-9 < floor:
+                    allow = False
+                vol = 1.0
+                if cfg.get("vol") == "pf":
+                    vol = max(0.5, min(float(cfg.get("vmax", 2.0)), p_c / floor)) if floor > 0 else 1.0
+                ax_cache[key] = (allow, vol, chosen)
+            a_, v_, _c = ax_cache[key]
+            return a_, v_
+        return pick
+
+    if "axissets" in a.part:
+        arms_as = [("choose per Set (14 settings), flat volume", {"n": 25, "min_n": 8, "margin": 1.05}),
+                   ("choose per Set, the Axis Set must reach its floor", {"n": 25, "min_n": 8, "margin": 1.05, "strict": True}),
+                   ("choose per Set, volume by Axis-Set PF", {"n": 25, "min_n": 8, "margin": 1.05, "vol": "pf"}),
+                   ("choose per Set, floor + volume by PF", {"n": 25, "min_n": 8, "margin": 1.05, "strict": True, "vol": "pf"}),
+                   ("choose per Set, 15 orders, 5 minimum", {"n": 15, "min_n": 5, "margin": 1.05}),
+                   ("choose per Set, floor + volume by PF up to 3x", {"n": 25, "min_n": 8, "margin": 1.05, "strict": True, "vol": "pf", "vmax": 3.0}),
+                   ("choose per Set, volume by PF up to 3x", {"n": 25, "min_n": 8, "margin": 1.05, "vol": "pf", "vmax": 3.0})]
+        out["axissets"] = {}
+        for label, cfg in arms_as:
+            t1 = time.time()
+            ax_cache.clear()
+            ps = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=0, axis_pick=axis_set_pick(cfg))
+            ps = [r for r in ps if "net" in r and lo <= r["t_in"] < hi]
+            ev = [(r["t"], r["net"], float(r.get("vol", 1.0))) for r in ps]
+            out["axissets"][label] = {**summarize(ev, len(ps), 0, run_hours), "by_lane": {ln: len([r for r in ps if r["lane"] == ln]) for ln in ("pos", "neg")},
+                                      "chosen": {str(k): v for k, v in __import__("collections").Counter(str(c[2]) for c in ax_cache.values()).most_common(8)}}
+            print(f"{'Axis Sets ' + label:58s} {json.dumps({k: v for k, v in out['axissets'][label].items() if k != 'chosen'})}  [{time.time() - t1:.0f}s]", flush=True)
+            json.dump(out, open(a.out, "w"), indent=1)
+
     # ---- helpers shared by Block and DCA: the parent's Set still valid on its lane, its Axis allowing, at a moment inside the parent ------------------
     allow_coord = coord_for({k: (True, v[1]) for k, v in {"last": (True, 4), "prev": (True, 12), "cont": (True, 8), "pause": (True, 8)}.items()}, True)
     no_axis_coord = coord_for(off, True)

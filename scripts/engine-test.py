@@ -108,7 +108,7 @@ def overlay_test() -> None:
     rec("x01-block-cap", int(x01.get("blockMaxStack") or 0) == 6, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))
     rec("x01-set-unlim", "setMaxActive" not in x01, "the set count is never limited (setMaxActive removed)")
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 30, f"cap={x02.get('symbolCap')} (owner 2026-11-03: x02 runs 30 symbols)")
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 70, f"cap={x02.get('symbolCap')} (owner 2026-11-03: x02 runs 70 symbols)")
     rec("unlimited-position-cap", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-block-cap-and-unlimited-dca", int(x02.get("blockMaxStack") or 0) == 6 and int(x02.get("dcaMaxSteps") or 0) == 0)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")

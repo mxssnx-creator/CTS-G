@@ -367,6 +367,19 @@ def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[flo
     return [(ts[k], nets[k]) for k in ch[key] if ts[k] >= now - lb]
 
 
+def lane_stream_entries(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float, float]]:
+    """lane_stream with each order's entry time: (exit t, entry t, net), oldest exit first."""
+    lb = book.lookback * 60.0
+    tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
+    e = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
+    ts, ents = list(tx[lo:e]), list(te[lo:e])
+    nets = [x - tapes.cf for x in pp[lo:e]]
+    ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb)
+    key = "realneg" if lane == "neg" else "real"
+    return [(ts[k], ents[k], nets[k]) for k in ch[key] if ts[k] >= now - lb]
+
+
 def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Optional[Dict] = None):
     """The engine's Axis verdict on one Set and lane (Pulse._scope_choice.allows without the open-position cap): coord.judge on the lane's own stream at
     that Set's floor (minPfLinked) or the coordinator's. Returns (allow, last15 PF, floor)."""
@@ -568,7 +581,7 @@ class AutoFloors:
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
-            refresh_s: int = 3600, include_open: bool = False, axis_coord=None) -> List[Dict[str, Any]]:
+            refresh_s: int = 3600, include_open: bool = False, axis_coord=None, axis_pick=None) -> List[Dict[str, Any]]:
     """pick(pool, key) chooses the Set among the ranked valid ones (default: the top rank); control='all' ranks every Set whether it passed
     the gate or not (a control: does validation carry information out of sample?). refresh_s: the gate and the ranking are recomputed
     this often inside the hour (the live engine refreshes every histRefreshS, 120 s)."""
@@ -644,6 +657,23 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     ranked, ranked_t = rank_at(entry_t)[0], entry_t      # completed signal candle's close is the entry time
                 # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
                 pool, lane_pick = [], ""
+                vol_pick = 1.0
+                if axis_pick is not None:
+                    # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
+                    chosen = None
+                    for lane_ in ("pos", "neg"):
+                        for kinds in (("base", "exit"), ("trail",)):
+                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                            for _key, st_c in cands:
+                                ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
+                                if ok_a:
+                                    chosen, vol_pick = st_c, vol_a
+                                    break
+                            if chosen is not None:
+                                break
+                        if chosen is not None:
+                            pool, lane_pick = [chosen], lane_
+                            break
                 if axis_coord is not None:
                     # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
                     # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
@@ -663,7 +693,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         if chosen is not None:
                             pool, lane_pick = [chosen], lane_
                             break
-                for lane_ in (() if axis_coord is not None else ("pos", "neg")):
+                for lane_ in (() if (axis_coord is not None or axis_pick is not None) else ("pos", "neg")):
                     # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...))
                     fixed = sorted([r for r in ranked.get((pack, "base", lane_), []) + ranked.get((pack, "exit", lane_), []) if r[1].side in (0, d)],
                                    key=lambda r: r[0], reverse=True)
@@ -720,7 +750,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
                        "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
-                       "tr": tr, "fracs": se.lane_fracs(st, book.cost_pct, book.sl_min_steps)}
+                       "tr": tr, "fracs": se.lane_fracs(st, book.cost_pct, book.sl_min_steps), "vol": vol_pick}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))
