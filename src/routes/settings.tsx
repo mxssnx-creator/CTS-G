@@ -2303,7 +2303,7 @@ function IndicationConfigEditor({
               hint={`${INDICATION_TIMEFRAMES.join(" / ")} minutes; c = vote over 1/5/15, x = over 1/5/15/30`}
               onCommit={(t) => set(i, { timeframes: t.split(/[,;\s]+/).filter(Boolean).map((x) => (x === "c" || x === "x" ? x : Number(x))) as IndicationConfig["timeframes"] })}
             />
-            <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; e.g. , T5, B15 (see the relation list)" onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
+            <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; trend T5 / B15 / M30; RSI regime RS5 / rs5 (dip); drawdown DR240 / dr240; recovery RC240 / rc240; VWAP VW240 / vw240; past PR480 / YD1440; average MA60 / ma60; I inverts. Upper case with the direction, lower case against it." onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
             <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.5-3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
             <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
             <Slider label="TP step to" value={e.stepMax} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMax).toFixed(1)}%`} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
