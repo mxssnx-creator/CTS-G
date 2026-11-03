@@ -539,7 +539,28 @@ def minimal_coordination_is_not_pf_validation():
     return not errors, f"{cases} Base/Main coordination cases (N 1–3, six modes, positive, negative, mixed and zero); mismatches {errors[:3] or 0}"
 
 
+
+def base_long_ten_is_judged_on_its_own_windows():
+    """Base long from 10 (owner 2026-11-03): with setGateWindow 10 the short window is at most 5, and nothing else blocks -- no minimum order count,
+    no full-window rule, no fixed sample floor in the chain: the first order after one winning close is in the Main Set, the first after one Main
+    close is in the Real Set, and a Set with two closes at the floor is valid on its lane."""
+    import set_engine as se
+    b = _book(setGateWindow=10, setGateShortN=10, mainGateN=10, realGateN=1, setGateMinTrades=0, stagesEnabled=True, mainGateEnabled=True, setMinPf=1.05)
+    st = next(x for x in b.by_idx if x.kind == "base")
+    P = b.stage_params(st.pack, st)
+    ts = [600.0 * i for i in range(1, 41)]
+    ents = [t - 60.0 for t in ts]
+    nets = [0.002] * 40
+    ch = se.stage_chain(ts, ents, nets, P)
+    v = se.stage_verdicts([0.002, 0.002], [0.002], [], P.main_n, P)
+    low = _book(setGateWindow=5)
+    ok = (b.gate_window == 10 and b.base_short == 5 and b.gate_min <= 1 and not P.full_window and ch["main"][:1] == [1] and ch["real"][:1] == [2]
+          and v["pos"] and low.gate_window == 10)
+    return ok, (f"long {b.gate_window} short {b.base_short} (asked 10, capped at half) minimum orders {b.gate_min}; first Main order #{ch['main'][:1]}, first Real "
+                f"order #{ch['real'][:1]}; two closes valid on the lane={v['pos']}; long 5 asked -> {low.gate_window}")
+
 CHECKS = [
+    ("gates.base-long-ten-is-judged-on-its-own-windows", base_long_ten_is_judged_on_its_own_windows),
     ("gates.modeled-stop-cap", modeled_stop_cap_rejects_unsafe_sets),
     ("gates.pf-defaults-match-shipped-overlays", pf_defaults_match_every_shipped_overlay),
     ("gates.signal-floor-independent-of-window-class", signal_floor_is_separate_from_window_classes),
