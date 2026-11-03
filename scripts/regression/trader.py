@@ -417,6 +417,86 @@ def leverage_keeps_liquidation_beyond_the_stop():
     return ok, f"stop {sl * 100:.2f}% -> cap {cap}x, applied {applied}x (target {target}x, leverage posts {len(lev_posts)}); cap math {math_ok}"
 
 
+class _ExistsVenue(_StubExchange):
+    """Every protective order is refused with 110406 "Position SL order already exists"; open orders listed as given."""
+
+    def __init__(self, listed):
+        super().__init__(executed="1", requested="1")
+        self.listed = listed
+        self.refused = 0
+
+    def post(self, path, body):
+        if path.endswith("/trade/order") and str(body.get("type") or "") in pt.SL_TYPES | pt.TP_TYPES:
+            self.refused += 1
+            return {"code": 110406, "msg": "Position SL order already exists"}
+        return super().post(path, body)
+
+
+def control_already_exists_never_loops():
+    """A protective order refused as "already exists" must not be retried every few seconds: found live on x02 (2026-11-03), 110406 every ~10 s until
+    BingX banned the order path. A close-position control on the venue for that side is adopted; with nothing to adopt the symbol backs off
+    CTRL_EXISTS_BACKOFF_S and a second call inside it sends nothing."""
+    out = {}
+    for label, listed in (("adopt", [{"orderId": "777", "type": "STOP_MARKET", "positionSide": "LONG", "closePosition": "true", "stopPrice": "95",
+                                       "clientOrderID": "foreign"}]), ("none", [])):
+        venue = _ExistsVenue(listed)
+        saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+        with tempfile.TemporaryDirectory() as td:
+            for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+                setattr(pt, name, os.path.join(td, f"{name.lower()}.json"))
+            pt.dump_cts_settings = lambda: {}
+            try:
+                p, sym = _enter(_StubExchange(executed="1", requested="1"))
+                pos = p.open.get(sym)
+                p.api = venue
+                p.list_orders = lambda symbol=None: list(venue.listed)
+                p.ctrl_skip = {}
+                pos.sl_oid = pos.sec_sl_oid = ""
+                got = p.place_ctrl(pos, "sl", 95.0)
+                pos.sl_oid = got                       # the caller keeps what place_ctrl returns
+                first = venue.refused
+                got2 = p.place_ctrl(pos, "sl", 95.0)
+                out[label] = (got, got2, first, venue.refused, round(p.ctrl_skip.get(sym, 0) - pt.time.time()))
+            finally:
+                pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    a, n = out["adopt"], out["none"]
+    ok = a[0] == "777" and a[1] == "777" and a[2] == 1 and n[0] == "" and n[2] == 1 and n[3] == 1 and n[4] >= pt.CTRL_EXISTS_BACKOFF_S - 2
+    return ok, f"(returned id, second call, refusals after the first call, after the second, back-off s): {out}"
+
+
+def unanswered_close_that_never_existed_is_sent_again():
+    """A close whose POST got no answer stays pending while the venue might still fill it, but a close the venue keeps reporting as "order not exist"
+    was never accepted: found live on x02 (2026-11-03), polled for minutes while the position went unmanaged. After CLOSE_MISS_N such reads over
+    CLOSE_MISS_S the pending close is cleared (the next close goes out); a read that is merely unknown keeps waiting."""
+    clock = [1000.0]
+    saved_time = pt.time.time
+    out = {}
+    try:
+        pt.time.time = lambda: clock[0]
+        for label, reply in (("not-exist", {"code": 109421, "msg": "order not exist"}), ("unknown", {"code": -1, "error": True, "msg": "timeout"})):
+            p = _bare_pulse()
+            p.seen_fill_cids = set()
+            p.px = {"A-USDT": 10.0}
+            p.save_open_book = lambda: True
+
+            class Api:
+                def get(self, path, extra=None, _r=reply):
+                    return dict(_r)
+            p.api = Api()
+            pos = pt.Position(symbol="A-USDT", side="LONG", qty=1.0, entry=10.0, opened_at=1.0, sl=9.0, tp=11.0, peak=10.0)
+            pos.close_pending = {"client_id": "Gx02cX"}
+            seen = []
+            for k in range(4):
+                clock[0] = 1000.0 + 25.0 * k
+                p.market_close(pos)
+                seen.append(bool(pos.close_pending))
+            out[label] = seen
+    finally:
+        pt.time.time = saved_time
+    ok = out["not-exist"] == [True, True, True, False] and out["unknown"] == [True, True, True, True]
+    return ok, f"pending after each read (25 s apart): {out}"
+
+
 class _PartialCloseVenue(_StubExchange):
     """Entry fills fully; the first close order fills 40% of its quantity, the next close is accepted in full unless
     fail_rest is set, in which case it is refused."""
@@ -2410,6 +2490,8 @@ CHECKS = [
     ("trader.load-governor-keeps-the-set-replay-running-at-the-books-footprint", load_governor_keeps_the_set_replay_running_at_the_books_footprint),
     ("trader.thin-book-entry-is-never-sent", thin_book_entry_is_never_sent),
     ("trader.leverage-keeps-liquidation-beyond-the-stop", leverage_keeps_liquidation_beyond_the_stop),
+    ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
+    ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),

@@ -247,7 +247,10 @@ def stop_leverage_cap(sl_frac: float) -> int:
     return max(1, int(1.0 / (LIQ_SAFETY * sl + LIQ_MAINT)))
 
 
-THIN_BOOK_REST_S = 300.0   # a symbol whose book failed the pre-trade check rests this long before the next entry is tried
+THIN_BOOK_REST_S = 300.0
+CTRL_EXISTS_BACKOFF_S = 300.0
+CLOSE_MISS_N = 3                # reads of "order not exist" (spread over CLOSE_MISS_S seconds) before an unanswered close is sent again
+CLOSE_MISS_S = 60.0   # after an "already exists" refusal with nothing to adopt: BingX bans an order path after 20 such errors in 8 minutes   # a symbol whose book failed the pre-trade check rests this long before the next entry is tried
 CID_EXIT_TR = "99"         # the client id's trail field of an Exit Set (no trailing arm reaches 9.9 %)
 ENTRY_FRESH_S = 30.0      # a Set entry is taken within this many seconds of its signal minute's close (the replay enters at it)
 ENTRY_SIG_BUDGET = 30     # one full x01 universe competes; larger universes continue in later cycles
@@ -987,6 +990,8 @@ class Pulse:
             row = row.get("order") or row if isinstance(row, dict) else {}
             if self.ok(reply) and str(row.get("symbol") or symbol) == symbol and known(row):
                 return row
+            if str(reply.get("code")) == "109421" or "order not exist" in str(reply.get("msg") or "").lower():
+                return {**data, "executedQty": None, "avgPrice": None, "fillUnconfirmed": True, "notExist": True}
         except Exception:
             pass
         return {**data, "executedQty": None, "avgPrice": None, "fillUnconfirmed": True}
@@ -2497,6 +2502,9 @@ class Pulse:
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
+        exists_key = f"{pos.symbol}:{pos.side}:{'sl' if is_sl else 'tp'}"
+        if time.time() < self.__dict__.setdefault("ctrl_exists_until", {}).get(exists_key, 0):
+            return have_this                  # the venue said this control already exists: no repeat inside the back-off
         if have_this and time.time() < self.ctrl_skip.get(pos.symbol, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
@@ -2574,7 +2582,34 @@ class Pulse:
                             else:
                                 pos.sec_tp = actual
                             return live
-                    continue
+                    # The venue already holds a close-position control on this side that is not one of ours by id (an earlier entry's, or written
+                    # under another id): adopt it when it covers the position. Otherwise every further form and retry repeats the same refusal; found
+                    # live on x02 (2026-11-03): 110406 every ~10 s until BingX banned the order path ("over 20 error code 110406 within 480000 ms").
+                    for o in self.list_orders(pos.symbol):
+                        typ = str(o.get("type") or "")
+                        if str(o.get("positionSide") or "").upper() != pos.side or str(o.get("closePosition")).lower() not in ("true", "1"):
+                            continue
+                        if not ((typ in SL_TYPES) if is_sl else (typ in TP_TYPES)):
+                            continue
+                        live = real_oid(o.get("orderId") or o.get("orderID"))
+                        try:
+                            actual = float(o.get("stopPrice") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if live and math.isfinite(actual) and actual > 0:
+                            pos.close_position = True
+                            pos.ctrl_qty = pos.qty
+                            if is_sl:
+                                pos.sec_sl = actual
+                            else:
+                                pos.sec_tp = actual
+                            log(f"CTRL adopt {pos.symbol} {pos.side} {'sl' if is_sl else 'tp'} {live} @{actual}", every=30.0, key=f"adopt:{pos.symbol}")
+                            return live
+                    self.ctrl_skip[pos.symbol] = time.time() + CTRL_EXISTS_BACKOFF_S
+                    self.ctrl_exists_until[exists_key] = time.time() + CTRL_EXISTS_BACKOFF_S
+                    log(f"CTRL exists {pos.symbol} {pos.side} {'sl' if is_sl else 'tp'}: no control to adopt, backing off {CTRL_EXISTS_BACKOFF_S:.0f}s",
+                        every=60.0, key=f"exists:{pos.symbol}")
+                    return have_this
                 if kind_err == "qty_close":
                     continue
                 if kind_err == "cap":
@@ -2964,6 +2999,17 @@ class Pulse:
             if pending.get("client_id"):
                 self.seen_fill_cids.add(pending["client_id"])
             data = self.confirmed_order({"orderId": pending.get("order_id")}, pos.symbol, pending.get("client_id", ""))
+            if data.get("notExist") and not pending.get("order_id"):
+                # a close whose POST got no answer and that the venue keeps calling non-existent was never accepted: after CLOSE_MISS_N reads over
+                # CLOSE_MISS_S, send a fresh close (found live on x02 2026-11-03: "order not exist" polled for minutes, the position left unmanaged)
+                now_ = time.time()
+                pending["miss"] = int(pending.get("miss", 0)) + 1
+                pending.setdefault("miss_t0", now_)
+                if pending["miss"] >= CLOSE_MISS_N and now_ - float(pending["miss_t0"]) >= CLOSE_MISS_S:
+                    log(f"CLOSE {pos.symbol} {pos.side}: the pending close {pending.get('client_id')} never reached the venue; sending a new one")
+                    pos.close_pending = {}
+                    self.save_open_book()
+                    return False, self.px.get(pos.symbol) or pos.entry
             if data.get("fillUnconfirmed"):
                 self.last_error = f"close {pos.symbol} fill unconfirmed; awaiting same order"
                 return False, self.px.get(pos.symbol) or pos.entry
