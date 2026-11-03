@@ -667,15 +667,12 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if axis_pick is not None:
                     # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
                     chosen = None
-                    for lane_ in getattr(book, "lane_order", ("pos", "neg")):
-                        for kinds in (book.kind_order_for(pack) if hasattr(book, "kind_order_for") else getattr(book, "kind_order", (("base", "exit"), ("trail",)))):
-                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
-                            for _key, st_c in cands:
-                                ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
-                                if ok_a:
-                                    chosen, vol_pick = st_c, vol_a
-                                    break
-                            if chosen is not None:
+                    for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
+                        cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                        for _key, st_c in cands:
+                            ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
+                            if ok_a:
+                                chosen, vol_pick = st_c, vol_a
                                 break
                         if chosen is not None:
                             pool, lane_pick = [chosen], lane_
@@ -684,30 +681,23 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
                     # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
                     chosen = None
-                    for lane_ in getattr(book, "lane_order", ("pos", "neg")):
-                        for kinds in (book.kind_order_for(pack) if hasattr(book, "kind_order_for") else getattr(book, "kind_order", (("base", "exit"), ("trail",)))):
-                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
-                            for _key, st_c in cands:
-                                ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
-                                cap = axis_coord.slot_cap(0, pf_a, min_pf=floor_a)
-                                n_open = sum(1 for x_t, sid_, ln_ in opened if x_t > entry_t and sid_ == st_c.id and ln_ == lane_)
-                                if ok_a and n_open < cap:
-                                    chosen = st_c
-                                    break
-                            if chosen is not None:
+                    for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
+                        cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                        for _key, st_c in cands:
+                            ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
+                            cap = axis_coord.slot_cap(0, pf_a, min_pf=floor_a)
+                            n_open = sum(1 for x_t, sid_, ln_ in opened if x_t > entry_t and sid_ == st_c.id and ln_ == lane_)
+                            if ok_a and n_open < cap:
+                                chosen = st_c
                                 break
                         if chosen is not None:
                             pool, lane_pick = [chosen], lane_
                             break
-                for lane_ in (() if (axis_coord is not None or axis_pick is not None) else getattr(book, "lane_order", ("pos", "neg"))):
-                    # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...))
-                    # SetBook.kind_order (trailPick): after = base and Exit Sets together, else trailing; together = every kind by rank; first = trailing first
-                    pool = []
-                    for kinds_ in (book.kind_order_for(pack) if hasattr(book, "kind_order_for") else getattr(book, "kind_order", (("base", "exit"), ("trail",)))):
-                        pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
-                                                       key=lambda r: r[0], reverse=True)]
-                        if pool:
-                            break
+                for lane_, kinds_ in (() if (axis_coord is not None or axis_pick is not None) else (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))])):
+                    # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...)); the (lane, kinds) walk is the engine's
+                    # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
+                    pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
+                                                   key=lambda r: r[0], reverse=True)]
                     if pool:
                         lane_pick = lane_
                         break

@@ -137,7 +137,18 @@ LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("ne
 # How a lane's trailing Sets compete with its fixed-exit (base and Exit) Sets for a signal (overlay trailPick, owner 2026-11-03: "make trailing fully work"):
 # after = the trailing Sets only when no fixed-exit Set of the pack is valid on that lane (the earlier rule: a valid trailing Set almost never executed),
 # together = every valid Set of the lane ranked by lane_rank_key whatever its kind, first = the trailing Sets first, then the fixed-exit Sets.
-KIND_ORDERS = {"after": (("base", "exit"), ("trail",)), "together": (("base", "exit", "trail"),), "first": (("trail",), ("base", "exit"))}
+KIND_ORDERS = {"after": (("base", "exit"), ("trail",)), "together": (("base", "exit", "trail"),), "first": (("trail",), ("base", "exit")),
+               "first-any": (("trail",), ("base", "exit"))}
+# first-any: the kinds are walked OUTSIDE the lanes -- a trailing Set valid on any lane (in laneOrder) before a fixed-exit Set of any lane. The other orders walk
+# the lanes outside: a lane with any valid Set ends the search, so a trailing Set valid only on the Real Negative lane never opens while a positive-lane Set is valid.
+KINDS_OUTSIDE = ("first-any",)
+
+
+def pick_sequence(lane_order: Sequence[str], kind_order: Tuple[Tuple[str, ...], ...], kinds_outside: bool) -> List[Tuple[str, Tuple[str, ...]]]:
+    """The (lane, kinds) pairs a signal walks, in order: lanes outside (the default) or kinds outside (first-any)."""
+    if kinds_outside:
+        return [(lane, kinds) for kinds in kind_order for lane in lane_order]
+    return [(lane, kinds) for lane in lane_order for kinds in kind_order]
 KIND_ORDER_DEFAULT = "after"
 
 
@@ -4142,6 +4153,14 @@ class SetBook:
             got = self._kind_order_memo[pack] = KIND_ORDERS.get(name or "", self.kind_order)
         return got
 
+    def pick_sequence_for(self, pack: str) -> List[Tuple[str, Tuple[str, ...]]]:
+        """The (lane, kinds) pairs a signal of this pack walks (pick_sequence with the pack's order)."""
+        name = self.trail_pick_by.get(pack)
+        if name is None and self.trail_pick_by:
+            g = pack_group(pack)
+            name = self.trail_pick_by.get(f"group:{g}") if g else None
+        return pick_sequence(self.lane_order, self.kind_order_for(pack), (name or self.trail_pick) in KINDS_OUTSIDE)
+
     def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None,
                  predicate: Optional[Callable[[SetState], bool]] = None, side: int = 0) -> Optional[SetState]:
         """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
@@ -4155,15 +4174,14 @@ class SetBook:
             if not fixed and not (self.main_on or self.neg_on or self.realst_on):
                 rows = [x for x in self._valid_for(pack, "trail", side) if predicate is None or predicate(x)]
                 return max(rows, key=self.rank_key) if rows and "pos" in allowed else None
-            for lane in self.lane_order:
+            for lane, kinds in self.pick_sequence_for(pack):
                 if lane not in allowed:
                     continue
-                for kinds in self.kind_order_for(pack):
-                    rows = [x for k in kinds for x in self._valid_for(pack, k, side)
-                            if lane in self._execution_lanes(x)]
-                    for st in sorted(rows, key=lambda x: self.lane_rank_key(x, lane), reverse=True):
-                        if predicate is None or predicate(st):
-                            return st
+                rows = [x for k in kinds for x in self._valid_for(pack, k, side)
+                        if lane in self._execution_lanes(x)]
+                for st in sorted(rows, key=lambda x: self.lane_rank_key(x, lane), reverse=True):
+                    if predicate is None or predicate(st):
+                        return st
             return None
 
     def pack_open(self, pack: str) -> bool:

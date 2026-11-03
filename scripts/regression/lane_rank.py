@@ -369,10 +369,22 @@ def trail_pick_decides_how_trailing_sets_compete():
         _force_valid(b, tr, 2.0, 100, hi if t_better else lo)
         pick = b.pick_any("general")
         got[f"{order}{'' if t_better else ' (T lower)'}"] = "B" if pick is base else "T" if pick is tr else None
+    for order in ("first", "first-any"):
+        # T valid only on the Real Negative lane, B on the positive lane: lanes outside ("first") open under B, kinds outside ("first-any") under T
+        b = _book(trailPick=order, rankByLane=True)
+        base = next(s for s in b.by_idx if s.kind == "base" and s.pack == "general")
+        tr = next(s for s in b.by_idx if s.kind == "trail" and s.pack == "general")
+        for st in b.by_idx:
+            st.active, st.last_error = False, "off"
+        _force_valid(b, base, 2.0, 100, (60, 3.0, 3.0, 3.0, 0.5), lane="pos")
+        _force_valid(b, tr, 2.0, 100, (60, 3.0, 3.0, 3.0, 0.5), lane="neg")
+        pick = b.pick_any("general")
+        got[f"{order} (T neg only)"] = "B" if pick is base else "T" if pick is tr else None
     from common import ROOT
     sim = open(_os.path.join(ROOT, "scripts", "stage_eval.py")).read()
-    sim_ok = sim.count('getattr(book, "kind_order"') >= 3 and 'for kinds in (("base", "exit"), ("trail",))' not in sim
-    want = {"after": "B", "together": "T", "together (T lower)": "B", "first (T lower)": "T", "bogus": "B", "after-alone": "T"}
+    sim_ok = sim.count("book.pick_sequence_for(pack)") >= 3 and 'for kinds in (("base", "exit"), ("trail",))' not in sim
+    want = {"after": "B", "together": "T", "together (T lower)": "B", "first (T lower)": "T", "bogus": "B", "after-alone": "T",
+            "first (T neg only)": "B", "first-any (T neg only)": "T"}
     ok = got == want and sim_ok and se.KIND_ORDER_DEFAULT == "after"
     return ok, f"opens under: {got}; simulator walks book.kind_order: {sim_ok}"
 

@@ -1091,7 +1091,7 @@ function trailRangesOf(raw: unknown): Partial<Record<TpRangeId, boolean>> {
 }
 
 /** How a lane's trailing Sets compete with its base and Exit Sets (server: set_engine.KIND_ORDERS). */
-export const TRAIL_PICKS = ["after", "together", "first"] as const;
+export const TRAIL_PICKS = ["after", "together", "first", "first-any"] as const;
 export type TrailPick = (typeof TRAIL_PICKS)[number];
 
 /** The range switches from an overlay value: unknown names ignored, missing names at their default (server: position_cost.tp_ranges_on). */

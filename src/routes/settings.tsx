@@ -1310,7 +1310,8 @@ function SettingsPage() {
                 >
                   <option value="after">after: only when no base / Exit Set of the pack is valid (default)</option>
                   <option value="together">together: every valid Set of the lane by rank</option>
-                  <option value="first">first: trailing Sets before base / Exit Sets</option>
+                  <option value="first">first: trailing Sets before base / Exit Sets (per lane)</option>
+                  <option value="first-any">first-any: a trailing Set valid on any lane before base / Exit Sets</option>
                 </select>
               </label>
               {(
@@ -1336,6 +1337,7 @@ function SettingsPage() {
                     <option value="after">after</option>
                     <option value="together">together</option>
                     <option value="first">first</option>
+                    <option value="first-any">first-any</option>
                   </select>
                 </label>
               ))}
