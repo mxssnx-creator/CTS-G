@@ -29,6 +29,32 @@ This section supersedes older operational descriptions and historical measuremen
 - Never clamp Main PF to Base PF, copy selected PF into execution PF, or remove a verified loss to make
   PF higher. Same data and rules must agree; different populations can have different PF.
 
+## Live fixes, lane order, Axis / Block / DCA and grid options measured (2026-11-03)
+
+- **Live defects found on local x02 and fixed (each with a check):** the load governor's fixed 156 MB hard limit was under the Set book's footprint and
+  shed the Set replay for good (no Set ever validated): limits now scale with the machine (`load_engine.machine_mb`). 9 of 11 VST entries filled 0.7-24 %
+  away on thin books and closed as `bad-fill`: `Pulse.book_allows` checks the venue's own best price and top quantity before sending (`skippedThinBook`).
+  At 150x the venue liquidated before the Set's own stop (positions vanished book-only): `stop_leverage_cap` keeps 1 / leverage >= 2 x stop + 0.5 %.
+  "Position SL order already exists" (110406) retried every ~10 s into a BingX ban: an existing control is adopted, else 300 s back-off. A close whose
+  POST got no answer and that the venue calls non-existent is sent again after 3 reads / 60 s; a locally cooled close is retried, not awaited. Verdict
+  freshness follows the measured replay rotation (`fresh_limit`, 1.5 x the time between two replays of one symbol, capped 30 min): a 12-minute
+  rotation had left every Base-passing Set "stale". Crash detection (`run-state-<conn>.json`), `system_info` (CPU, memory, request rates, restore
+  events, errors) for the desk footer. x02 runs 70 symbols (owner).
+- **Lane order (`laneOrder`, shipped `pos-neg`)**, executed PF (orders) on the development part of three windows, C = 10-31 12:06 .. 11-03 12:15
+  (the newest day), B = 3-day data, A = its first 16 h: shipped **1.36 (167) / 0.879 (165) / 0.953 (81)**; Negative lane first 1.223 / 0.785 / 0.850;
+  Base only (stages off) 0.944 / 0.479 / 0.440; Main long 15 1.795 / 0.648 / 0.709. The stages raise the executed PF over Base alone on all three
+  windows and the shipped order is the best of these: nothing changed. The independent audit's pooled ladder (C: Base long 1.13, Real window 0.32,
+  Real Negative 1.14-1.24) counts one entry once per Set (~50 x) without one-position-per-symbol, so it is a map of the gates, not what executes.
+- **Axis / Block / DCA** (`scripts/stack_eval.py`: the engine's per-Set Axis via `stage_eval.execute(axis_coord=)`, SetBlockBook and DcaBook rules on
+  executed parents; B / A, baseline 0.879 / 0.953): Axis x01 all four 0.949 / 0.786; prev 4 0.935 / 1.048; cont 8 0.919 / 1.029; prev 4 + cont 8
+  0.914 / 1.022; cont 4 0.958 / 0.953 (all inside the noise of 70-165 orders; A is part of B). Block as built never adds (its evidence per Set and
+  symbol from executed parents never reaches 8 samples); evidence from the Set's own paper tape per symbol 0.772 / 1.027 (worse on B). DCA auto
+  0.891 / 0.970 (+0.01-0.02, noise). No default changed.
+- **Grid options** (off by default, shipped grid byte-identical; desk settings): named TP ranges Micro / Minimal / Short / Normal / Long / Wide
+  (`tpRanges`), SL ratios 0.2 / 0.3 / 0.4 (`setSlLow`, only where the floored stop is new), trailing arms to 3.0 % (`trailStepMax`), trailing stop
+  families (`trailSlRatios`, stop r x arm); own volume multiples per pack / type / range (`volumeByPack` / `volumeByKind` / `volumeByRange`). Executed
+  B / A against 0.879 / 0.953: low SL 0.763 / 0.965, Wide 0.879 / 0.953 (no Wide Set executed), arms to 3.0 % 0.847 / 0.953, families 0.744 / 0.636.
+
 ## Minimum PF per TP step, long/short independence (2026-11-02)
 
 - **Minimum PF per TP step** (`minPfByStep`, default on; replaces the window-size classes, which stay selectable with it off): a Set asks ONE floor, from its own

@@ -353,6 +353,8 @@ def stage_lane_stats(book, tapes: Tapes, st, now: float):
         if (l_ == "pos" and v["pos"]) or (l_ == "neg" and v["negl"]):
             lane = l_
             break
+    if not lane and (v["pos"] or v["negl"]):
+        lane = "pos" if v["pos"] else "neg"      # valid as the engine says; a lane outside the book's order is listed but never executed
     key = "realneg" if lane == "neg" else "real"
     return lane, se.lane_rank_stats([nets[k] for k in ch[key]], tapes.cf)
 
