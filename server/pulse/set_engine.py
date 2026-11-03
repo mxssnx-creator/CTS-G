@@ -1648,6 +1648,7 @@ REAL_SUFFIX = ":real"              # a Base Set's Real Set (the last of the chai
 REALNEG_SUFFIX = ":realneg"        # a Base Set's Real Negative Set (Main orders opened in a dip): "<id>:realneg"
 MAIN_SUFFIX = ":main"              # a Base Set's Main Set (opened while Base passed; the Main gate's last N reads it): "<id>:main"
 EXEC_SUFFIX, PROC_SUFFIX = REAL_SUFFIX, MAIN_SUFFIX
+SCRATCH_NEVER = 10 ** 9            # scratch_bars when the Set lanes do not scratch (setScratchEnabled off)
 PROC_KEEP = 200                   # processed orders kept per Set (the Main gate reads the newest mainGateN of them)
 LOOKBACK_GROW_STEP = 240          # bars added to the pre-history per growth step
 LOOKBACK_SHORT_SHARE = 0.25       # grow when this share of the Sets that traded has fewer orders than the gate minimum
@@ -1751,6 +1752,7 @@ class SetBook:
         self.hist_time_bars = 45
         self.scratch_s = 90.0
         self.scratch_min = 0.0016
+        self.set_scratch = False                       # setScratchEnabled: the global scratch exit on Set lanes (off: a Set exits only by its own stop, target and time)
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
         self.direction_split = True                   # a Set per trade direction (long / short), each with its own lane, tape, stages, pause and floor
@@ -1988,6 +1990,7 @@ class SetBook:
         # The desk and ExitBook express this setting in percent. The Set's
         # replay and its live lane both read a fraction from this field.
         self.scratch_min = finite(num(ov, ("scratchMin", "scratchMinPct"), 0.16), 0.16) / 100.0
+        self.set_scratch = bool(ov.get("setScratchEnabled", False))
         tp = num(ov, "tpPct", 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
@@ -3787,7 +3790,11 @@ class SetBook:
 
     @property
     def scratch_bars(self) -> int:
-        """Bars after the entry before the scratch exit may fire; the replay and the live Set lane both read this."""
+        """Bars after the entry before the scratch exit may fire; the replay and the live Set lane both read this. With setScratchEnabled off (the
+        default, 2026-11-03) the scratch exit never fires on a Set lane: it is one global rule (+0.16 % gross after 10 minutes) that cut every Set's
+        winners at about +0.04 % net whatever its own TP range, while its stops stayed full size; a Set now leaves by its own stop, target and time."""
+        if not getattr(self, "set_scratch", True):
+            return SCRATCH_NEVER
         return max(8, int(self.scratch_s / BAR_S))
 
     def lane_fracs(self, st: SetState) -> Tuple[float, float]:
@@ -4377,7 +4384,7 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 # The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
 # direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
-_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False}
+_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:

@@ -394,6 +394,7 @@ export type PulseOverlay = {
   directionMode: DirectionMode;
   minPfByStep: boolean;
   rankByLane: boolean;
+  setScratchEnabled: boolean;
   minPfStepAuto: boolean;
   minPfStepRatio: number;
   minPfStepAutoN: number;
@@ -632,6 +633,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   directionMode: "split",
   minPfByStep: true,
   rankByLane: true,
+  setScratchEnabled: false,
   minPfStepAuto: true,
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
@@ -853,6 +855,7 @@ export type CtsSettings = {
   directionMode?: string;
   minPfByStep?: boolean;
   rankByLane?: boolean;
+  setScratchEnabled?: boolean;
   minPfStepAuto?: boolean;
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
@@ -1171,6 +1174,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     directionMode: cts.directionMode === "both" ? "both" : "split",
     minPfByStep: bool(cts.minPfByStep, true),
     rankByLane: bool(cts.rankByLane, true),
+    setScratchEnabled: bool(cts.setScratchEnabled, false),
     minPfStepAuto: bool(cts.minPfStepAuto, true),
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),

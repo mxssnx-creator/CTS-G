@@ -1158,11 +1158,20 @@ def a_set_lane_scratch_and_time_follow_the_replay_rules():
         for tick, close, name in ((0.0003, 0.0003, "below scratch"), (0.0030, 0.0030, "above scratch"),
                                   (0.0030, 0.0003, "tick above, close below")):
             p, sym, pos = _lane_pulse()
+            p.sets.set_scratch = True                      # the scratch exit is a Set-lane option (setScratchEnabled); this check reads it on
             p.exits.enabled = False
             p.px[sym] = pos.entry * (1 + tick)
             p.last_closed_1m = {sym: (int(time.time() // 60) - 1, pos.entry * (1 + close))}
             p.manage()
             out[name] = (sym in p.open, [c.reason for c in p.closed])
+        # off (the default): the same close above the scratch level leaves the Set position open; only its own stop, target and time close it
+        p, sym, pos = _lane_pulse()
+        p.sets.set_scratch = False
+        p.exits.enabled = False
+        p.px[sym] = pos.entry * 1.003
+        p.last_closed_1m = {sym: (int(time.time() // 60) - 1, pos.entry * 1.003)}
+        p.manage()
+        out["above scratch, scratch off"] = (sym in p.open, [c.reason for c in p.closed])
         p, sym, pos = _lane_pulse()
         pos.opened_at = time.time() - (p.sets.hist_time_bars * 60.0 + 5.0)
         pos.entry = 100.0
@@ -1172,7 +1181,7 @@ def a_set_lane_scratch_and_time_follow_the_replay_rules():
         return out
     out = _isolated(run)
     ok = out["below scratch"][0] and out["above scratch"] == (False, ["scratch+"]) and out["tick above, close below"][0] \
-        and out["time"] == (False, ["time"])
+        and out["time"] == (False, ["time"]) and out["above scratch, scratch off"] == (True, [])
     return ok, f"{out}"
 
 

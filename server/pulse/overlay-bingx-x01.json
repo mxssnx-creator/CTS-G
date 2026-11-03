@@ -179,6 +179,7 @@
   "directionMode": "split",
   "minPfByStep": true,
   "rankByLane": true,
+  "setScratchEnabled": false,
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,

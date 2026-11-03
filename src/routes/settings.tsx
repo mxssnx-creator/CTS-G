@@ -1961,6 +1961,11 @@ function PfWindowControls({
         onChange={(v) => patch("rankByLane", v)}
       />
       <Toggle
+        label="Scratch exit on Set lanes (off: a Set leaves only by its own stop, target and time; the global +0.16 % scratch cut every range's winners)"
+        on={overlay.setScratchEnabled === true}
+        onChange={(v) => patch("setScratchEnabled", v)}
+      />
+      <Toggle
         label="Auto: learn the best floor for every step 0.2-5.0%"
         on={byStep && overlay.minPfStepAuto !== false}
         onChange={(v) => patch("minPfStepAuto", v)}

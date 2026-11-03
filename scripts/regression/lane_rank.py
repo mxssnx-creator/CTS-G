@@ -287,7 +287,29 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
     return ok, f"adds made by the parent: at floor 1.04 {res[keys[0]]} (want 1), at floor 1.20 {res[keys[2]]} (want 0); the coordinator's own floor would have refused the 1.10 stream: {not res[keys[1]]}"
 
 
+def set_lanes_do_not_scratch_unless_asked():
+    """The scratch exit (one global rule: close at +0.16 % gross after 10 minutes) cut every Set's winners at about +0.04 % net whatever its own TP range.
+    With setScratchEnabled off (the default) a Set lane leaves only by its own stop, target and time, in the replay and in the live lane alike; on, the scratch
+    exit is back. Measured: executed PF 0.406 -> 0.584, next 50 orders 0.27 -> 0.56 (trade_sim, 3 days, 20 symbols, development window)."""
+    out = {}
+    for flag in (False, True):
+        b = se.SetBook()
+        b.load(overlay(**{**SMALL, "setStepMax": 8, "stratIndications": False, "stratShortRange": False, "stratGeneral": True, "pauseMode": "off",
+                          "setScratchEnabled": flag}))
+        b.bars["S0-USDT"] = synth_bars(93, 900, vol=0.003)
+        hist = {st.id: [] for st in b.by_idx}
+        b._replay_symbol("S0-USDT", hist, T0, None)
+        reasons = {}
+        for rows in hist.values():
+            for r in rows:
+                reasons[r["reason"]] = reasons.get(r["reason"], 0) + 1
+        out[flag] = (reasons.get("scratch+", 0), sum(reasons.values()), b.scratch_bars)
+    ok = out[False][0] == 0 and out[False][1] > 100 and out[True][0] > 0 and out[False][2] >= se.SCRATCH_NEVER and out[True][2] < 1000
+    return ok, f"scratch exits / orders / scratch bars: off {out[False]}, on {out[True]}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
+    set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,
     the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor,
     lane_rank_stats_equal_the_plain_reading, the_choice_among_valid_sets_reads_the_lanes_own_set,
