@@ -232,6 +232,7 @@ def main():
     top = sorted(elig, key=lambda r: -r["A"]["pf"])[:60]
     variants = _variants()
     by_variant = []
+    by_variant_halves = []
     for v in variants:
         tot = [[0, 0.0, 0, 0.0, 0.0] for _ in H]
         for k, o in out.items():
@@ -239,7 +240,15 @@ def main():
                 for j in range(len(H)):
                     for q in range(5):
                         tot[j][q] += o[0][j][q] + o[1][j][q]
+        halves = [[[0, 0.0, 0, 0.0, 0.0] for _ in H] for _ in (0, 1)]
+        for k, o in out.items():
+            if k.split("|", 1)[1] == v:
+                for hh in (0, 1):
+                    for j in range(len(H)):
+                        for q in range(5):
+                            halves[hh][j][q] += o[hh][j][q]
         by_variant.append((v, [stat(t) for t in tot]))
+        by_variant_halves.append((v, [stat(halves[0][2]), stat(halves[1][2])]))       # the 30-bar figure in half A and in half B, each on its own
     busiest = sorted(alone.values(), key=lambda r: -(r["A"]["n"] + r["B"]["n"]))[:45]
     grid = {k: both(o, 2) for k, o in out.items()}
     res = {"top": top, "rel_cols": variants, "heat_rows": [r["base"] for r in busiest], "grid": grid, "by_variant": by_variant}
@@ -248,11 +257,12 @@ def main():
             "variants": len(variants), "step": a.step, "cost": a.cost, "min_fires": a.min_fires}
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     html_report(res, meta, a.out + ".html")
-    json.dump({"meta": meta, "top": top, "by_variant": by_variant, "held_on_B": held}, open(a.out + ".json", "w"), indent=1)
+    json.dump({"meta": meta, "top": top, "by_variant": by_variant, "by_variant_halves": by_variant_halves, "held_on_B": held}, open(a.out + ".json", "w"), indent=1)
     print(f"variants with {a.min_fires}+ fires in both halves: {len(elig)}; top 60 on A, of which {len(held)} hold PF30 >= 1 on B")
     for r in top[:25]:
         print(f"  {r['name']:42s} A {r['A']['n']:>5} PF {r['A']['pf']!s:>6}  B {r['B']['n']:>5} PF {r['B']['pf']!s:>6} move {r['B']['mv']}  alone B {r['alone_B']['pf']}")
     print("pooled by variant (PF30, fires):", [(v or "alone", s[2]["pf"], s[2]["n"]) for v, s in by_variant])
+    print("pooled by variant, half A / half B (PF30, fires):", [(v or "alone", s[0]["pf"], s[0]["n"], s[1]["pf"], s[1]["n"]) for v, s in by_variant_halves])
     print(f"done [{time.time() - t0:.0f}s]")
 
 
