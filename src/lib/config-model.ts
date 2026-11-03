@@ -119,7 +119,8 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 /** TP grid, owner 2026-11-02: one TP step is an absolute 0.1 % of price (steps 2..32 = 0.2 % .. 3.2 %), not a multiple of PositionCost. Mirrors position_cost.py. */
 export const TP_UNIT_PCT = 0.1;
 export const TP_STEP_MIN = 2;
-export const TP_STEP_MAX = 32;
+export const TP_STEP_MAX = 50;
+export const TP_STEP_DEFAULT_MAX = 32;
 export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
 /** Minimum PF per TP step (owner 2026-11-02), mirrors set_engine.py: 1 + TP% x ratio on the 0.1 % grid rounded DOWN, 0.2 % at ratio 0.2 = 1.04.
  * The ratio runs 0.1 .. 1.1 in steps of 0.05 (default 0.2). Auto learns the floor per step from earlier orders and falls back to this value. */
@@ -128,7 +129,7 @@ export const STEP_PF_RATIO_MAX = 1.1;
 export const STEP_PF_RATIO_STEP = 0.05;
 export const STEP_PF_RATIO_DEFAULT = 0.2;
 export const STEP_PF_TP_MIN = 0.2;
-export const STEP_PF_TP_MAX = 3.5;
+export const STEP_PF_TP_MAX = 5.0;
 export const stepPfRatio = (raw: unknown): number => {
   const v = Number(raw);
   if (raw === null || raw === undefined || raw === "" || !Number.isFinite(v)) return STEP_PF_RATIO_DEFAULT;
@@ -646,7 +647,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stepHoldMin: [15, 15, 15, 15, 15, 120, 120, 120, 120, 120, 120, 120],
   setMinSamples: 12,
   setMinStep: 2,
-  setStepMax: TP_STEP_MAX,
+  setStepMax: TP_STEP_DEFAULT_MAX,
   setStepAdapt: true,
   trailMinStep: 3,
   exitEnabled: true,
@@ -974,7 +975,7 @@ const numList = (v: unknown, lo: number, hi: number): number[] =>
 /** Normalise the saved range configurations; the engine expands and validates the names, so an unknown family is reported there, not silently kept here. */
 export function indicationConfigList(v: unknown): IndicationConfig[] {
   if (!Array.isArray(v)) return [];
-  return v.slice(0, 24).map((raw, i) => {
+  return v.slice(0, 64).map((raw, i) => {
     const e = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
     const tfRaw: unknown[] = Array.isArray(e.timeframes) ? e.timeframes : typeof e.timeframes === "string" ? e.timeframes.split(/[,;\s]+/) : [];
     const tfs = tfRaw
@@ -1185,7 +1186,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stepHoldMin: Array.isArray(cts.stepHoldMin) ? cts.stepHoldMin.slice(0, 12).map((x) => Math.round(Number(x) || 0)) : DEFAULT_OVERLAY.stepHoldMin,
     setMinSamples: num(cts.setMinSamples, 12),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
-    setStepMax: num(cts.setStepMax, TP_STEP_MAX),
+    setStepMax: num(cts.setStepMax, TP_STEP_DEFAULT_MAX),
     setStepAdapt: bool(cts.setStepAdapt, true),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),

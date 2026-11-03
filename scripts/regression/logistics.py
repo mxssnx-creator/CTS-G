@@ -35,7 +35,7 @@ def overlays_share_grid_contract():
 
 def desk_defaults_match_engine():
     src = open(CONFIG_MODEL, encoding="utf-8").read()
-    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_MAX,", r"export const TP_STEP_MAX = 32;", r"trailMinStep: 3,", r"histLookbackBars: 4320",
+    need = [r"setMinStep: 2,", r"setStepMax: TP_STEP_DEFAULT_MAX,", r"export const TP_STEP_DEFAULT_MAX = 32;", r"export const TP_STEP_MAX = 50;", r"trailMinStep: 3,", r"histLookbackBars: 4320",
             r"setMinPf: GATE_MIN_PF_DEFAULT,", r"export const SL_SET_RATIOS"]
     missing = [p for p in need if not re.search(p, src)]
     # the desk fallback and the engine gate default are one number kept in two files

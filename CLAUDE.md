@@ -184,7 +184,7 @@ This section supersedes older operational descriptions and historical measuremen
   the noise; read the demo connection before the live one.
 - **Indications by range** (`indicationConfigs`, `server/pulse/indication_config.py`): entries of families x ranges x timeframes (1 / 5 / 15 / 30, `c` vote over
   1/5/15, `x` over 1/5/15/30) x relations, each with its own TP-step range, SL ratios, Set types and pause (auto / none / minutes). Every name is its own pack
-  (`extra.<name>`) with its own Base validation; unknown or over-bound combinations (48 names per entry, 96 total) are dropped and listed
+  (`extra.<name>`) with its own Base validation; unknown or over-bound combinations (128 names per entry, 384 total, 64 entries; raised 2026-11-03 from 48 / 96 / 24) are dropped and listed
   (`stats.sets.indicationConfigs`). A configured range also caps trailing arms at its largest step. A narrow entry (steps 3-6) builds 99 Sets, not 1,654.
 - **Distinct tapes**: Sets whose exits never differ trade the same orders (a trailing arm the scratch exit always beats): on the 3-day data 210 `general`
   trailing Sets made 42 distinct tapes (one group of 147) and their Main orders were 67 distinct entries counted about 76 times each, the source of the
@@ -253,6 +253,7 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
 ## Units and defaults
 
 - PositionCost is in percent, default 0.12 (`position_cost.POSITION_COST_PCT_DEFAULT`, both overlays, desk default).
+- **Ceilings raised (owner 2026-11-03)**: a TP step can be set up to 50 (5.0 %, `TP_STEP_MAX`; the shipped grid still ends at 32 = 3.2 %, `TP_STEP_DEFAULT_MAX`); the per-step floor table covers 0.2-5.0 % (manual and Auto); `indicationConfigs` 128 names per entry, 384 in all, 64 entries.
 - **One TP step = 0.1 % of price (owner 2026-11-02)**: TP = step x 0.1 %, steps 2..32 = 0.2 % .. 3.2 % (`position_cost.TP_UNIT_PCT`, `TP_STEP_MIN/MAX`), whatever
   PositionCost is; it was step x PositionCost. SL = SL ratio x TP with ratios 0.5..3.5 step 0.25. PositionCost still pays for every order and floors the lane's
   TP at 1 x PositionCost (`TP_MIN_COSTS`, was 2). Trailing arms and gives use the same 0.1 % unit (arms 0.3 .. 2.2 %, `trail_grid`). Default grid: 1,700 Sets

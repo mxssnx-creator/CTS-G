@@ -34,7 +34,8 @@ SL_RATIOS = tuple(round(SL_RATIO_MIN + i * SL_RATIO_STEP, 2) for i in range(int(
 # steps. It was k x PositionCost (a distance that moves with the venue's fees); PositionCost still pays for every order and floors the TP (TP_MIN_COSTS).
 TP_UNIT_PCT = 0.1
 TP_STEP_MIN = 2
-TP_STEP_MAX = 32
+TP_STEP_MAX = 50                # the ceiling a setting can reach: 5.0 % (owner 2026-11-03: limits raised; was 32)
+TP_STEP_DEFAULT_MAX = 32        # the shipped grid's last step (3.2 %), unchanged
 TP_MIN_COSTS = 1.0              # a TP never sits under this many PositionCosts (was 2): the net at the TP stays positive
 # Trailing grid (trail Sets): arm = k x TP_UNIT_PCT and give = j x TP_UNIT_PCT, trailMinStep <= j <= k <= TRAIL_STEP_MAX (arms up to 2.2 %).
 TRAIL_STEP_SETTING_MIN = 2

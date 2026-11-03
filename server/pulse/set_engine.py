@@ -41,6 +41,7 @@ from position_cost import (
     SL_RATIOS,
     TP_MIN_COSTS,
     TP_STEP_MAX,
+    TP_STEP_DEFAULT_MAX,
     TP_STEP_MIN,
     TP_UNIT_PCT,
     TRAIL_STEP_DEFAULT,
@@ -118,7 +119,8 @@ WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = TP_STEP_MIN
-STEP_MAX = TP_STEP_MAX
+STEP_MAX = TP_STEP_MAX                       # the ceiling
+STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
@@ -1276,11 +1278,11 @@ PAUSE_MODES = ("off", "auto", "fixed")
 
 # Minimum PF by TP step (owner 2026-11-02): the same floor for every window and every stage of a Set, from the Set's own TP distance.
 #   manual: 1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value); 0.2 % at ratio 0.2 = 1.04, 3.5 % = 1.70
-#   auto:   per step 0.2 .. 3.5 % the floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at entry --
+#   auto:   per step 0.2 .. 5.0 % the floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at entry --
 #           delivered the best PF, learned only from orders that closed before the evaluation window; the manual value stays unless a candidate has enough orders
 #           and beats it by STEP_PF_MARGIN
 STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.1, 0.05, 0.2
-STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 3.5             # percent: the table's range (the Set grid itself ends at 3.2 %)
+STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 5.0             # percent: the table's range, the TP ceiling (5.0 %; was 3.5, owner 2026-11-03; the shipped grid ends at 3.2 %)
 STEP_PF_AUTO_N_DEFAULT = 10                           # the Set's last N closed orders at entry that the Auto Mode selects on
 STEP_PF_AUTO_MIN_DEFAULT = 300                        # admitted orders (distinct tapes pooled over a step's Sets) a candidate needs
 STEP_PF_MARGIN = 1.05                                 # a candidate must beat the manual floor's delivered PF by 5 %
@@ -1777,7 +1779,7 @@ class SetBook:
         self.opt_sl = 0.0030
         self.min_step_cfg = STEP_MIN
         self.min_step = STEP_MIN
-        self.step_max = STEP_MAX
+        self.step_max = STEP_DEFAULT_MAX
         self.step_adapt = True
         self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT
@@ -1785,7 +1787,7 @@ class SetBook:
         self.hist_honor_tp = True
         self.normal_entries = True
         self.exit_sets = True
-        self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
+        self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
         self.trails: List[Tuple[str, float, float]] = []
@@ -2010,7 +2012,7 @@ class SetBook:
         opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
-        self.step_max = clamp_step(ov.get("setStepMax") or STEP_MAX, self.min_step_cfg, STEP_MAX)
+        self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
         self.step_adapt = bool(ov.get("setStepAdapt", True))
         self.min_step = self.min_step_cfg
         self.steps = list(range(self.min_step, self.step_max + 1))

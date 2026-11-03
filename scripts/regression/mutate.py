@@ -318,7 +318,7 @@ MUTATIONS = [
     ("grid: trail give may exceed arm",
      "risk_variants.py", "for j in range(m, k + 1):", "for j in range(m, k + 3):"),
     ("grid: TP steps capped at 22",
-     "position_cost.py", "TP_STEP_MAX = 32", "TP_STEP_MAX = 22"),
+     "position_cost.py", "TP_STEP_DEFAULT_MAX = 32", "TP_STEP_DEFAULT_MAX = 22"),
     ("cache: signals keyed by bar index only",
      "set_engine.py", "key = hash((salt, tuple(hs[lo_w : i + 1])))", "key = hash((salt, i))"),
     ("cooldown: skipped on flat jumps",

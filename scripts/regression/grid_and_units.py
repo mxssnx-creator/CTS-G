@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from common import COST, Skip, overlay, lane_cfg, PULSE  # noqa: F401  (PULSE sets sys.path)
 from position_cost import (
-    SL_RATIOS, TP_STEP_MAX, TP_STEP_MIN, TP_UNIT_PCT, TRAIL_STEP_DEFAULT, TRAIL_STEP_MAX, TRAIL_STEP_SETTING_MAX,
+    SL_RATIOS, TP_STEP_DEFAULT_MAX, TP_STEP_MAX, TP_STEP_MIN, TP_UNIT_PCT, TRAIL_STEP_DEFAULT, TRAIL_STEP_MAX, TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN, cost_as_frac, net_pnl_pct, snap_sl_ratio, trail_floor_steps,
 )
 from risk_variants import trail_grid
@@ -17,9 +17,9 @@ def _book(**extra):
 
 
 def tp_steps():
-    steps = list(range(TP_STEP_MIN, TP_STEP_MAX + 1))
+    steps = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1))
     tp = [round(k * TP_UNIT_PCT, 6) for k in steps]
-    ok = steps[0] == 2 and steps[-1] == 32 and len(steps) == 31 and tp[0] == 0.2 and tp[-1] == 3.2
+    ok = steps[0] == 2 and steps[-1] == 32 and len(steps) == 31 and tp[0] == 0.2 and tp[-1] == 3.2 and TP_STEP_MAX == 50      # shipped grid 0.2-3.2 %, ceiling 5.0 %
     ok = ok and all(abs((tp[i + 1] - tp[i]) - 0.1) < 1e-9 for i in range(len(tp) - 1))
     return ok, f"steps={steps[0]}..{steps[-1]} n={len(steps)}; TP {tp[0]}%..{tp[-1]}% in 0.1% steps (absolute, not PositionCost multiples)"
 
@@ -37,7 +37,7 @@ def default_grid_counts():
     kinds = {}
     for st in sb.by_idx:
         kinds[st.kind] = kinds.get(st.kind, 0) + 1
-    steps, ratios = list(range(TP_STEP_MIN, TP_STEP_MAX + 1)), list(SL_RATIOS)
+    steps, ratios = list(range(TP_STEP_MIN, TP_STEP_DEFAULT_MAX + 1)), list(SL_RATIOS)
     short = list(range(2, 7))
     give_floor = trail_floor_steps() * sb.cost_pct
     m = sb.trail_min_step
@@ -139,7 +139,7 @@ def setstep_clamp():
     lo = _book(setMinStep=0)
     hi = _book(setStepMax=99)
     small = _book(setMinStep=9, setStepMax=3)
-    ok = lo.steps[0] == 2 and hi.steps[-1] == TP_STEP_MAX == 32 and small.steps and small.steps[0] <= small.steps[-1]
+    ok = lo.steps[0] == 2 and hi.steps[-1] == TP_STEP_MAX == 50 and small.steps and small.steps[0] <= small.steps[-1]
     return ok, f"min0->{lo.steps[0]} max99->{hi.steps[-1]} min9max3->{small.steps}"
 
 

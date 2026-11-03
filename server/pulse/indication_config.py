@@ -26,9 +26,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 KINDS = ("base", "exit", "trail")
 TIMEFRAMES = (1, 5, 15, 30)
 COMBINED = {"c": "c", "x": "x"}          # _c<range>: vote over 1/5/15, _x<range>: over 1/5/15/30
-MAX_NAMES_PER_ENTRY = 48
-MAX_NAMES_TOTAL = 96
-MAX_ENTRIES = 24
+MAX_NAMES_PER_ENTRY = 128
+MAX_NAMES_TOTAL = 384
+MAX_ENTRIES = 64
 
 
 def _ints(raw: Any, lo: int, hi: int) -> List[int]:
