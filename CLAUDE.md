@@ -111,6 +111,21 @@ This section supersedes older operational descriptions and historical measuremen
   **No setting reaches 1 in either window; the best cell of window A (negative 1) is among the worst of window B; the stages do not lift the executed PF above Base alone (A 0.35 against 0.38-0.40, B 0.44
   against 0.37-0.43).** Nothing here supports changing a default; it is consistent with the regime-dependent persistence found in the audit above.
 
+## Auto minimum PF without the manual ratio (2026-11-03, `learn_step_floor`, `minPfStepAutoTol` 5 %)
+
+- **Objective (owner: high PF with as many valid Sets as possible, not tied to the ratio).** Per (TP step, direction), from the causal pairs (the Set's PF over its last
+  `minPfStepAutoN` closes at an order's entry, that order's net; orders closed before the evaluation window; one Set per distinct tape): of the floors 1.00 .. 2.00 with at least
+  `minPfStepAutoMin` admitted orders, the **lowest whose delivered PF is within `minPfStepAutoTol` of the best**. A step without the orders takes its direction's pooled floor;
+  only without any the manual floor. No margin over the manual value any more. One pure function `set_engine.learn_step_floor` for the engine and the simulators;
+  `stage_eval.AutoFloors` re-learns it every test hour from the orders closed before it, so `trade_sim` / `window_grid` now measure Auto (they ran the manual floors before).
+  Checks `step-pf.*` (plain reading, plateau -> lowest floor, step -> pooled -> manual, ratio does not move it, simulator = engine at the same hour).
+- **Measured** (`trade_sim.py`, per-order validation, one position per symbol, scratch off, pause auto, hold Auto off; development windows): 3-day data (32 h) Auto **0.879 PF /
+  165 orders / net -6.9 %**, validated 2.53 % (manual floors 0.584 / 199 / -35.6 %, 1.01 %); window A data (16 h) Auto **0.953 / 81 / -1.3 %**, validated 1.95 % (manual 0.426 / 96 /
+  -26.2 %, 0.25 %). Better PF AND more validated Sets on both windows; still just under 1. The largest gain measured after the scratch fix.
+- **Last-N grid, scratch off, manual floors** (`window_grid.py`, both 24 h windows, 54 cells each): pooled over both windows the best cells are Base 30 / short 15 / Main 25 / Real 15
+  0.767 (A 0.556 on 149 orders, B 1.026 on 125), Base 30 / 15 / Main 15 0.704, Base 50 / 15 / Main 10 0.695, Base 50 alone 0.676; Base 10 alone the worst 0.380 (a long window of 10
+  selects on noise). Main long 10 / 15 / 25 and Real 1 / 5 / 15 move the result by less than the noise of 110-180 orders per cell.
+
 ## Set lanes no longer scratch (2026-11-03, `setScratchEnabled`, default off)
 
 - **Defect found.** The scratch exit is one global rule (`scratchS` 600 s, `scratchMinPct` 0.16 %): any position whose 1m close is +0.16 % gross after 10 minutes is closed. On Set
