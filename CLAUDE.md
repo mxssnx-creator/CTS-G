@@ -35,12 +35,12 @@ This section supersedes older operational descriptions and historical measuremen
   TP step, in every window of every stage (Base long / short / minimal, Main, Real, Negative). The drawdown time, the minimum order count and the consistency floor are Base-stage rules only (Main / Real windows have none; see "Execution reads the processed Sets"). **Manual**: floor =
   1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value), ratio 0.1 .. 1.5 in steps of 0.05 (back to 1.5, owner 2026-11-03), default 0.2 (`minPfStepRatio`):
   1.04 at 0.2 %, 1.06 at 0.3 %, 1.64 at 3.2 %, 1.70 at 3.5 % (`set_engine.manual_step_floor`, `config-model.manualStepPf`, one table held equal in both).
-  **Auto** (`minPfStepAuto`, default on): for each step 0.2 .. 3.5 % the engine learns the floor (1.00 .. 2.00 in 0.02) whose admitted orders -- the orders
-  whose Set had that PF over its last `minPfStepAutoN` (10) closed orders at entry -- delivered the best PF, pooled over the step's distinct Set tapes, from
-  orders that CLOSED BEFORE the evaluation window only; it needs `minPfStepAutoMin` (300) admitted orders and a 5 % lead over the manual floor's delivered PF,
-  else the manual floor stands (`SetBook._learn_step_floors`; checks `step-pf.*`: a plain-loop reading, 1,448 results after the boundary flipped without
+  **Auto** (`minPfStepAuto`, default on; ratio-free since 2026-11-03, see "Auto minimum PF without the manual ratio"): for each step 0.2 .. 3.5 % the engine
+  takes the LOWEST floor (1.00 .. 2.00 in 0.02) whose admitted orders -- the orders whose Set had that PF over its last `minPfStepAutoN` (10) closed orders at
+  entry -- delivered a PF within `minPfStepAutoTol` (5 %) of the best floor's, pooled over the step's distinct Set tapes, from orders that CLOSED BEFORE the
+  evaluation window only; it needs `minPfStepAutoMin` (300) admitted orders, else the direction's pooled floor, else the manual floor (`SetBook._learn_step_floors`; checks `step-pf.*`: a plain-loop reading, 1,448 results after the boundary flipped without
   moving the floor, a copy counted once). A step floor needs history BEFORE the window: with a 3-day lookback the live engine has it (it keeps 3 x the lookback),
-  a replay of exactly the lookback has none and runs on the manual floors. The simulators (`stage_eval`, `trade_sim`) use the manual floors; Auto is engine-only.
+  a replay of exactly the lookback has none and runs on the manual floors. The simulators learn the same Auto floors every test hour (`stage_eval.AutoFloors`).
   The global `MIN_PF_FLOOR` (1.05) still governs Exit / DCA / Block / coordinator; the per-step table may go lower (1.04 at 0.2 % by owner decision).
 - **Long and short are independent** (`directionMode` split, default; fixtures run `both`): every Set exists once per direction (`SetState.side` +1 / -1, id
   `<pack>:L:1m:...` / `<pack>:S:1m:...`), scans only its own side's entry bars (`_cand_by_side`, each bar belongs to exactly one side, so scan work is not
@@ -345,7 +345,7 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 - **Set lane.** A position opened under a Set (`pos.set_id`) is closed only by its Set's own rules, the ones the replay
   validated: stop (kept on the exchange), TP by the Set's kind (a base Set always takes its TP, an Exit Set never does, a
   trailing Set follows `setHonorTp` / `exitIgnoreTp`; `set_engine.lane_honors_tp`, replay and live alike), trailing only from an independent trailing Set (`trail_set_id`; a base Set does not trail), the time
-  exit after `hist_time_bars`, the scratch exit. Live code: `Pulse.manage_set_lane`. The Exit strategies, the
+  exit after `hist_time_bars`, the scratch exit only when `setScratchEnabled` is on (off by default since 2026-11-03). Live code: `Pulse.manage_set_lane`. The Exit strategies, the
   coordinator and the default variants never read or move these positions (`security_prices` skips the exit-lane stop
   tightening for them).
 - **Exit lane.** The Exit strategies (lock, peak, rev, time, hard) manage only positions that have no Set. They score only
@@ -383,7 +383,9 @@ Every strategy type runs its own lane; none may close, tighten or score another'
 
 ## Hold time (per step, per Set, Auto Mode)
 
-- Overlay keys: `holdEnabled` (master, default on), `holdAuto` (Auto Mode, default on), `holdAutoMax` (orders judged, at most 50, default
+- **2026-11-03: `holdAuto` is OFF by default** (overlays, presets, desk, engine): every Auto-hold variant executed worse than no hold on both windows (see "Hold Auto
+  off by default"); trailing Sets never get an Auto hold; `holdAutoMarginPct` (default 2) sets the lead a candidate needs over the global stop.
+- Overlay keys: `holdEnabled` (master, default on), `holdAuto` (Auto Mode, default off since 2026-11-03), `holdAutoMax` (orders judged, at most 50, default
   50), `holdAutoMin` (orders needed, default 10), `stepHoldOn[i]` / `stepHoldMin[i]` (manual hold of step i + 1; desk sliders 1-50 min for
   steps 1-5, 30-350 min for steps 6-12; the engine accepts 1..720). Master off = only the global time stop (`hist_time_bars`).
 - Manual: an "on" step leaves every Set of that step on its own time exit after that many minutes. Auto: every Set without a manual step
