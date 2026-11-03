@@ -1647,8 +1647,20 @@ def verdict_freshness_follows_the_replay_rotation():
     stale_1200 = _t.time() - st.evaluated_at > lim
     b.rotation_s = 10 * se.ROTATION_CAP_S
     capped = b.fresh_limit() <= 1.5 * 10 * se.ROTATION_CAP_S
-    ok = before == 240.0 and lim == 1080.0 and not stale_500 and stale_1200 and capped and se.ROTATION_CAP_S <= 1800
-    return ok, f"limit {before:.0f}s without a rotation, {lim:.0f}s at a 720 s rotation; 500 s old stale={stale_500}, 1200 s old stale={stale_1200}"
+    # the first rotation after a start (no symbol replayed twice yet, live x02 2026-11-03: a 20-minute history fetch left 746 Sets "stale" and 0 valid): the
+    # time since the oldest first replay bounds the rotation from below, capped
+    b.rotation_s = 0.0
+    now = _t.time()
+    b._hist_replay_at = {"A-USDT": now - 1200.0, "B-USDT": now - 60.0}
+    first = b.fresh_limit()
+    st.evaluated_at = now - 1150.0
+    first_stale = now - st.evaluated_at > first
+    b._hist_replay_at = {"A-USDT": now - 10 * se.ROTATION_CAP_S}
+    first_cap = b.fresh_limit()
+    ok = (before == 240.0 and lim == 1080.0 and not stale_500 and stale_1200 and capped and se.ROTATION_CAP_S <= 1800
+          and 1790.0 <= first <= 1810.0 and not first_stale and abs(first_cap - 1.5 * se.ROTATION_CAP_S) < 1.0)
+    return ok, (f"limit {before:.0f}s without a rotation, {lim:.0f}s at a 720 s rotation; 500 s old stale={stale_500}, 1200 s old stale={stale_1200}; "
+                f"first rotation 20 min in: {first:.0f}s (a verdict from the first replay stale={first_stale}), capped at {first_cap:.0f}s")
 
 
 CHECKS = [

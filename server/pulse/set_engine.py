@@ -3695,7 +3695,15 @@ class SetBook:
         """How old a Set's verdict may be: fresh_s, but never under ROTATION_FRESH_X x the measured full replay rotation. Found live on x02 (2026-11-03):
         30 symbols x 3 days x 3,176 Sets took about 12 minutes to replay once in chunks, so with 240 s every Set that passed Base went "stale" before
         its next turn and none stayed valid."""
-        return max(float(self.fresh_s), ROTATION_FRESH_X * float(getattr(self, "rotation_s", 0.0) or 0.0))
+        rot = float(getattr(self, "rotation_s", 0.0) or 0.0)
+        if rot <= 0.0:
+            # no symbol replayed twice yet (the first rotation after a start, while the history is still being fetched): the rotation is at least as long as
+            # the time since the oldest first replay. Found live on x02 (2026-11-03, 70 symbols): the fetch took over 20 minutes, the limit stayed at 240 s and
+            # every verdict went "stale" -- 0 valid Sets, no entry -- until a symbol came round again. Capped like a measured rotation.
+            seen = list((getattr(self, "_hist_replay_at", None) or {}).values())
+            if seen:
+                rot = min(ROTATION_CAP_S, max(0.0, time.time() - min(seen)))
+        return max(float(self.fresh_s), ROTATION_FRESH_X * rot)
 
     def _history_snapshot_usable(self) -> bool:
         return bool(self.hist_keep_last_complete and self._lookback_pending and self._history_snapshot_active
