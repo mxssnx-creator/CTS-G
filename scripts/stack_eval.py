@@ -71,6 +71,7 @@ def main() -> int:
     ap.add_argument("--patch", default="")
     ap.add_argument("--part", default="axis,block,dca")
     ap.add_argument("--sealed", action="store_true")
+    ap.add_argument("--axis-arms", default="", help="JSON list of Axis arms to run instead of the built-in grid")
     a = ap.parse_args()
     os.environ["STAGE_OVERLAY_PATCH"] = a.patch or "{}"
     import stage_eval as sg  # noqa: E402  (reads STAGE_OVERLAY_PATCH)
@@ -143,6 +144,9 @@ def main() -> int:
         axis_arms.append((f"pause {w}", {**off, "pause": (True, w)}, True))
     for w in (1, 2, 8):
         axis_arms.append((f"cont {w}", {**off, "cont": (True, w)}, True))
+    if a.axis_arms:
+        # explicit arms: [{"label": .., "last": [on, w], "prev": .., "cont": .., "pause": .., "linked": true}, ...]
+        axis_arms = [(x["label"], {k: tuple(x.get(k, off[k])) for k in off}, bool(x.get("linked", True))) for x in json.loads(a.axis_arms)]
     parents_by_axis: Dict[str, List[Dict[str, Any]]] = {"none": base}
     coords: Dict[str, Any] = {}
     if "axis" in a.part:
