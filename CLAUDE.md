@@ -33,7 +33,7 @@ This section supersedes older operational descriptions and historical measuremen
 
 - **Minimum PF per TP step** (`minPfByStep`, default on; replaces the window-size classes, which stay selectable with it off): a Set asks ONE floor, from its own
   TP step, in every window of every stage (Base long / short / minimal, Main, Real, Negative). The drawdown time, the minimum order count and the consistency floor are Base-stage rules only (Main / Real windows have none; see "Execution reads the processed Sets"). **Manual**: floor =
-  1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value), ratio 0.1 .. 1.1 in steps of 0.05, default 0.2 (`minPfStepRatio`):
+  1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value), ratio 0.1 .. 1.5 in steps of 0.05 (back to 1.5, owner 2026-11-03), default 0.2 (`minPfStepRatio`):
   1.04 at 0.2 %, 1.06 at 0.3 %, 1.64 at 3.2 %, 1.70 at 3.5 % (`set_engine.manual_step_floor`, `config-model.manualStepPf`, one table held equal in both).
   **Auto** (`minPfStepAuto`, default on): for each step 0.2 .. 3.5 % the engine learns the floor (1.00 .. 2.00 in 0.02) whose admitted orders -- the orders
   whose Set had that PF over its last `minPfStepAutoN` (10) closed orders at entry -- delivered the best PF, pooled over the step's distinct Set tapes, from
@@ -266,7 +266,7 @@ Set without any closed order is never judged). Only Sets that pass are tradeable
 ## Units and defaults
 
 - PositionCost is in percent, default 0.12 (`position_cost.POSITION_COST_PCT_DEFAULT`, both overlays, desk default).
-- **Ceilings raised (owner 2026-11-03)**: a TP step can be set up to 50 (5.0 %, `TP_STEP_MAX`; the shipped grid still ends at 32 = 3.2 %, `TP_STEP_DEFAULT_MAX`); the per-step floor table covers 0.2-5.0 % (manual and Auto); `indicationConfigs` 128 names per entry, 384 in all, 64 entries.
+- **Ceilings raised (owner 2026-11-03)**: a TP step can be set up to 50 (5.0 %, `TP_STEP_MAX`; the shipped grid still ends at 32 = 3.2 %, `TP_STEP_DEFAULT_MAX`); the per-step floor table stays 0.2-3.5 % (owner 2026-11-03, a TP above 3.5 % asks the 3.5 % floor); `indicationConfigs` 128 names per entry, 384 in all, 64 entries.
 - **One TP step = 0.1 % of price (owner 2026-11-02)**: TP = step x 0.1 %, steps 2..32 = 0.2 % .. 3.2 % (`position_cost.TP_UNIT_PCT`, `TP_STEP_MIN/MAX`), whatever
   PositionCost is; it was step x PositionCost. SL = SL ratio x TP with ratios 0.5..3.5 step 0.25. PositionCost still pays for every order and floors the lane's
   TP at 1 x PositionCost (`TP_MIN_COSTS`, was 2). Trailing arms and gives use the same 0.1 % unit (arms 0.3 .. 2.2 %, `trail_grid`). Default grid: 1,700 Sets

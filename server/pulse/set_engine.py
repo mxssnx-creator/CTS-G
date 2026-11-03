@@ -1278,11 +1278,11 @@ PAUSE_MODES = ("off", "auto", "fixed")
 
 # Minimum PF by TP step (owner 2026-11-02): the same floor for every window and every stage of a Set, from the Set's own TP distance.
 #   manual: 1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value); 0.2 % at ratio 0.2 = 1.04, 3.5 % = 1.70
-#   auto:   per step 0.2 .. 5.0 % the floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at entry --
+#   auto:   per step 0.2 .. 3.5 % the floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at entry --
 #           delivered the best PF, learned only from orders that closed before the evaluation window; the manual value stays unless a candidate has enough orders
 #           and beats it by STEP_PF_MARGIN
-STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.1, 0.05, 0.2
-STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 5.0             # percent: the table's range, the TP ceiling (5.0 %; was 3.5, owner 2026-11-03; the shipped grid ends at 3.2 %)
+STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.5, 0.05, 0.2
+STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 3.5             # percent: the table's range (owner 2026-11-03: back to 3.5 %; a TP above it asks the 3.5 % floor)
 STEP_PF_AUTO_N_DEFAULT = 10                           # the Set's last N closed orders at entry that the Auto Mode selects on
 STEP_PF_AUTO_MIN_DEFAULT = 300                        # admitted orders (distinct tapes pooled over a step's Sets) a candidate needs
 STEP_PF_MARGIN = 1.05                                 # a candidate must beat the manual floor's delivered PF by 5 %
@@ -1290,7 +1290,7 @@ STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1
 
 
 def step_pf_ratio(raw: Any) -> float:
-    """The configured ratio snapped to its 0.05 grid and bounded to 0.1 .. 1.1; a broken value is the default."""
+    """The configured ratio snapped to its 0.05 grid and bounded to 0.1 .. 1.5; a broken value is the default."""
     try:
         v = float(raw)
     except (TypeError, ValueError):

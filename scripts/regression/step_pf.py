@@ -17,15 +17,15 @@ def _book(**extra):
 
 
 def manual_floor_is_one_plus_step_times_ratio():
-    table = [(0.2, 0.2, 1.04), (0.25, 0.2, 1.04), (0.29, 0.2, 1.04), (0.3, 0.2, 1.06), (3.2, 0.2, 1.64), (3.5, 0.2, 1.70), (9.0, 0.2, 2.0), (5.0, 0.2, 2.0), (4.2, 0.2, 1.84),
+    table = [(0.2, 0.2, 1.04), (0.25, 0.2, 1.04), (0.29, 0.2, 1.04), (0.3, 0.2, 1.06), (3.2, 0.2, 1.64), (3.5, 0.2, 1.70), (9.0, 0.2, 1.70), (5.0, 0.2, 1.70), (4.2, 0.2, 1.70), (1.5, 1.5, 3.25),
              (0.1, 0.2, 1.04), (0.2, 1.1, 1.22), (3.5, 1.1, 4.85), (1.0, 0.1, 1.10), (0.5, 0.2, 1.10)]
     got = [round(se.manual_step_floor(tp, ratio), 6) for tp, ratio, _ in table]
     want = [w for _, _, w in table]
-    ratios = {raw: se.step_pf_ratio(raw) for raw in (0.05, 0.1, 0.2, 0.33, 1.1, 1.5, "x", None)}
+    ratios = {raw: se.step_pf_ratio(raw) for raw in (0.05, 0.1, 0.2, 0.33, 1.1, 1.5, 1.8, "x", None)}
     nan_ok = se.step_pf_ratio(float("nan")) == 0.2 and se.step_pf_ratio(float("inf")) == 0.2
-    grid_ok = all(abs(se.step_pf_ratio(0.1 + 0.05 * i) - round(0.1 + 0.05 * i, 2)) < 1e-9 for i in range(21))
-    ok = got == want and ratios == {0.05: 0.1, 0.1: 0.1, 0.2: 0.2, 0.33: 0.35, 1.1: 1.1, 1.5: 1.1, "x": 0.2, None: 0.2} and grid_ok and nan_ok
-    return ok, f"floors {got}; ratio snaps/clamps to 0.1..1.1 step 0.05: {ratios}"
+    grid_ok = all(abs(se.step_pf_ratio(0.1 + 0.05 * i) - round(0.1 + 0.05 * i, 2)) < 1e-9 for i in range(29))
+    ok = got == want and ratios == {0.05: 0.1, 0.1: 0.1, 0.2: 0.2, 0.33: 0.35, 1.1: 1.1, 1.5: 1.5, 1.8: 1.5, "x": 0.2, None: 0.2} and grid_ok and nan_ok
+    return ok, f"floors {got}; ratio snaps/clamps to 0.1..1.5 step 0.05: {ratios}"
 
 
 def one_floor_for_every_window_and_stage():

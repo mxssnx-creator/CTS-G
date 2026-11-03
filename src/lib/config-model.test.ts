@@ -172,11 +172,11 @@ test("the desk pause defaults equal the engine's", () => {
 test("the manual floor per TP step is 1 + TP% x ratio on the 0.1% grid rounded down, with the engine's numbers", () => {
   // the same table as scripts/regression/step_pf.py
   const table: Array<[number, number, number]> = [
-    [0.2, 0.2, 1.04], [0.25, 0.2, 1.04], [0.29, 0.2, 1.04], [0.3, 0.2, 1.06], [3.2, 0.2, 1.64], [3.5, 0.2, 1.7], [9.0, 0.2, 2.0], [5.0, 0.2, 2.0], [4.2, 0.2, 1.84],
+    [0.2, 0.2, 1.04], [0.25, 0.2, 1.04], [0.29, 0.2, 1.04], [0.3, 0.2, 1.06], [3.2, 0.2, 1.64], [3.5, 0.2, 1.7], [9.0, 0.2, 1.7], [5.0, 0.2, 1.7], [4.2, 0.2, 1.7], [1.5, 1.5, 3.25],
     [0.1, 0.2, 1.04], [0.2, 1.1, 1.22], [3.5, 1.1, 4.85], [1.0, 0.1, 1.1], [0.5, 0.2, 1.1],
   ];
   for (const [tp, ratio, want] of table) assert.equal(manualStepPf(tp, ratio), want, `${tp}% at ratio ${ratio}`);
-  const snaps: Array<[unknown, number]> = [[0.05, 0.1], [0.1, 0.1], [0.2, 0.2], [0.33, 0.35], [1.1, 1.1], [1.5, 1.1], ["x", 0.2], [null, 0.2], [Number.NaN, 0.2], [Infinity, 0.2]];
+  const snaps: Array<[unknown, number]> = [[0.05, 0.1], [0.1, 0.1], [0.2, 0.2], [0.33, 0.35], [1.1, 1.1], [1.5, 1.5], [1.8, 1.5], ["x", 0.2], [null, 0.2], [Number.NaN, 0.2], [Infinity, 0.2]];
   for (const [raw, want] of snaps) assert.equal(stepPfRatio(raw), want, `ratio ${String(raw)}`);
 });
 
@@ -189,6 +189,6 @@ test("the TP-step floor settings are on by default, bounded, and survive a setti
   assert.equal(overlayFromCts(cts({ rankByLane: false })).rankByLane, false);
   const bad = overlayFromCts(cts({ minPfStepRatio: "x", minPfStepAutoN: 999, minPfStepAutoMin: 1 }));
   assert.deepEqual([bad.minPfStepRatio, bad.minPfStepAutoN, bad.minPfStepAutoMin], [0.2, 50, 30]);
-  assert.equal(overlayFromCts(cts({ minPfStepRatio: 1.5 })).minPfStepRatio, 1.1, "the ratio ends at 1.1");
+  assert.equal(overlayFromCts(cts({ minPfStepRatio: 1.8 })).minPfStepRatio, 1.5, "the ratio ends at 1.5");
   assert.equal(overlayFromCts(cts({ minPfStepRatio: 0.01 })).minPfStepRatio, 0.1, "and starts at 0.1");
 });

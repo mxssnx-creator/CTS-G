@@ -123,13 +123,13 @@ export const TP_STEP_MAX = 50;
 export const TP_STEP_DEFAULT_MAX = 32;
 export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
 /** Minimum PF per TP step (owner 2026-11-02), mirrors set_engine.py: 1 + TP% x ratio on the 0.1 % grid rounded DOWN, 0.2 % at ratio 0.2 = 1.04.
- * The ratio runs 0.1 .. 1.1 in steps of 0.05 (default 0.2). Auto learns the floor per step from earlier orders and falls back to this value. */
+ * The ratio runs 0.1 .. 1.5 in steps of 0.05 (default 0.2). Auto learns the floor per step from earlier orders and falls back to this value. */
 export const STEP_PF_RATIO_MIN = 0.1;
-export const STEP_PF_RATIO_MAX = 1.1;
+export const STEP_PF_RATIO_MAX = 1.5;
 export const STEP_PF_RATIO_STEP = 0.05;
 export const STEP_PF_RATIO_DEFAULT = 0.2;
 export const STEP_PF_TP_MIN = 0.2;
-export const STEP_PF_TP_MAX = 5.0;
+export const STEP_PF_TP_MAX = 3.5;
 export const stepPfRatio = (raw: unknown): number => {
   const v = Number(raw);
   if (raw === null || raw === undefined || raw === "" || !Number.isFinite(v)) return STEP_PF_RATIO_DEFAULT;

@@ -1894,7 +1894,7 @@ function StepPfTable({ overlay, stats }: { overlay: PulseOverlay; stats: LiveSta
   return (
     <details className="col-span-full rounded-lg border border-border bg-bg2 px-3 py-2" data-testid="step-pf-table">
       <summary className="cursor-pointer font-mono text-xs text-muted">
-        Floor per TP step ({rows.length} steps, 0.2-5.0%) · manual with the ratio above{live?.auto ? " and what Auto learned" : ""}
+        Floor per TP step ({rows.length} steps, 0.2-3.5%) · manual with the ratio above{live?.auto ? " and what Auto learned" : ""}
       </summary>
       <div className="mt-2 overflow-x-auto">
         <table className="w-full text-left font-mono text-xs">
@@ -1966,7 +1966,7 @@ function PfWindowControls({
         onChange={(v) => patch("setScratchEnabled", v)}
       />
       <Toggle
-        label="Auto: learn the best floor for every step 0.2-5.0%"
+        label="Auto: learn the best floor for every step 0.2-3.5%"
         on={byStep && overlay.minPfStepAuto !== false}
         onChange={(v) => patch("minPfStepAuto", v)}
       />
