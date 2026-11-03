@@ -534,6 +534,33 @@ def set_volume_multiples_size_by_pack_type_and_range():
     return ok, f"entry notional (USDT) by setting: {out}"
 
 
+def start_records_whether_the_previous_run_crashed():
+    """The desk shows how the previous run ended: a start that finds the run-state file still "running" reports no clean stop (crash, kill or
+    machine stop; found after the 2026-11-03 container pause, which left 9 positions unmanaged), a clean stop marks "stopped". system_info carries
+    it with CPU, memory, request rates, the restore events and the recent errors."""
+    import signal as _signal
+    saved = (pt.DIR, pt.STATS_PATH, _signal.getsignal(_signal.SIGTERM))
+    out = []
+    with tempfile.TemporaryDirectory() as td:
+        pt.DIR, pt.STATS_PATH = td, os.path.join(td, "stats.json")
+        try:
+            for _ in range(3):
+                p = _bare_pulse()
+                p.started, p.errors, p.last_error, p.open = pt.time.time(), 0, "", {}
+                p.api = type("A", (), {"snapshot": lambda self: {"rest": 5, "ws": 9}})()
+                p.mark_run_start()
+                out.append(dict(p.last_run))
+                if len(out) == 2:
+                    p._write_run_state({"state": "stopped", "startedAt": p.started, "stoppedAt": pt.time.time(), "reason": "SIGTERM"})
+            info = p.system_info()
+        finally:
+            pt.DIR, pt.STATS_PATH = saved[0], saved[1]
+            _signal.signal(_signal.SIGTERM, saved[2])
+    ok = (out[0]["reason"] == "first start" and out[1]["clean"] is False and "crash" in out[1]["reason"] and out[2]["clean"] is True
+          and info["restTotal"] == 5 and info["wsTotal"] == 9 and info["machineMb"] and "recentErrors" in info and "lastRun" in info)
+    return ok, f"starts: {[(o['clean'], o['reason']) for o in out]}; system keys {sorted(info)[:8]}"
+
+
 class _PartialCloseVenue(_StubExchange):
     """Entry fills fully; the first close order fills 40% of its quantity, the next close is accepted in full unless
     fail_rest is set, in which case it is refused."""
@@ -2530,6 +2557,7 @@ CHECKS = [
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
+    ("trader.start-records-whether-the-previous-run-crashed", start_records_whether_the_previous_run_crashed),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
     ("trader.lost-entry-answer-remembered", lost_entry_answer_is_remembered_for_adoption),

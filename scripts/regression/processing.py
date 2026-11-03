@@ -1629,7 +1629,30 @@ def effective_pf_per_entry_counts_each_entry_once():
     return ok, f"pooled {snap['base']}; shared entries {shared}; separate entries {apart}"
 
 
+def verdict_freshness_follows_the_replay_rotation():
+    """A live Set's verdict expires after fresh_s, but never sooner than 1.5 x the measured full replay rotation (found live on x02 2026-11-03: a
+    12-minute rotation against 240 s left every Base-passing Set "stale"); the rotation is capped so a stuck symbol cannot keep old verdicts forever."""
+    import time as _t
+    import set_engine as se
+    b = se.SetBook()
+    b.load(overlay(**SMALL))
+    st = b.by_idx[0]
+    b.fresh_s = 240.0
+    st.evaluated_at = _t.time() - 500.0
+    before = b.fresh_limit()
+    b.rotation_s = 720.0
+    lim = b.fresh_limit()
+    stale_500 = b.fresh_s > 0 and _t.time() - st.evaluated_at > lim
+    st.evaluated_at = _t.time() - 1200.0
+    stale_1200 = _t.time() - st.evaluated_at > lim
+    b.rotation_s = 10 * se.ROTATION_CAP_S
+    capped = b.fresh_limit() <= 1.5 * 10 * se.ROTATION_CAP_S
+    ok = before == 240.0 and lim == 1080.0 and not stale_500 and stale_1200 and capped and se.ROTATION_CAP_S <= 1800
+    return ok, f"limit {before:.0f}s without a rotation, {lim:.0f}s at a 720 s rotation; 500 s old stale={stale_500}, 1200 s old stale={stale_1200}"
+
+
 CHECKS = [
+    ("processing.verdict-freshness-follows-the-replay-rotation", verdict_freshness_follows_the_replay_rotation),
     ("processing.untimed-live-closes-are-skipped", untimed_live_closes_are_skipped),
     ("processing.small-results-keep-pf-precision", small_results_keep_pf_precision),
     ("processing.executed-window-bounded-cost-correct", main_short_retains_live_votes_beyond_the_lane_cap),

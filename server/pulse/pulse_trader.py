@@ -3084,6 +3084,12 @@ class Pulse:
             except Exception:
                 r = {"code": -1, "error": True, "msg": "close response unavailable"}
             self.did_io = True
+            if r.get("cooled"):
+                # refused locally (a cooling order path): nothing reached the venue, so there is no pending close to wait for; the next pass retries
+                pos.close_pending = {}
+                self.save_open_book()
+                self.last_error = f"close {pos.symbol} held: order path cooling"
+                return False, self.px.get(pos.symbol) or pos.entry
             if r.get("error") or r.get("code") == -1:
                 pos.close_pending = {"client_id": extra["clientOrderID"]}
                 self.save_open_book()
@@ -3814,6 +3820,7 @@ class Pulse:
             if (pos.symbol, pos.side) in confirmed:
                 continue
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
+            self.note_restore("dropped", pos.symbol, pos.side, "the venue no longer holds it (two reads)")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(pos.symbol, side=pos.side)
             self.open.pop(pos.symbol, None)
@@ -3827,6 +3834,8 @@ class Pulse:
         if not hit:
             return False
         log(f"VENUE {hit[0]} {pos.symbol} {pos.side} @{hit[1]} ({why})")
+        if why == "restart":
+            self.note_restore("closed-by-venue", pos.symbol, pos.side, f"{hit[0]} @{hit[1]} while the engine was down")
         self.cancel_controls(pos.symbol, side=pos.side)   # an exchange-side SL/TP does not cancel its sibling
         self.close_pos(pos, hit[1], hit[0], exchange=False)
         return True
@@ -6237,6 +6246,7 @@ class Pulse:
             "symbolMax": MAX_SYMBOLS,
             "scanMs": round(self.last_scan_ms, 1),
             "rssMb": round(rss_mb(), 1),
+            "system": self.system_info(),
             "klinesReady": sum(1 for s in SYMBOLS if s in self.klines),
             "klinesTf": {tf: sum(1 for s in SYMBOLS if s in self.klines_tf.get(tf, {})) for tf in TIMEFRAMES},
             "prices": {s: self.px.get(s) for s in (SYMBOLS if (not hasattr(self, "load") or self.load.last_budget.stats_full or len(SYMBOLS) <= 64) else [p.symbol for p in self.open.values()][:64])},
@@ -6377,6 +6387,126 @@ class Pulse:
                 "indications": len(getattr(self.indications, "last", {}) or {}),
                 "missingInd": [s for s in SYMBOLS if s not in (getattr(self.indications, "last", {}) or {})][:12],
             },
+        }
+
+    def note_restore(self, what: str, symbol: str, side: str, detail: str) -> None:
+        """One event of the start-up reconciliation (a restored position dropped, closed by the venue while down), shown in the desk's restore dialog."""
+        ev = self.__dict__.setdefault("restore_events", [])
+        ev.append({"t": time.time(), "what": what, "symbol": symbol, "side": side, "detail": str(detail)[:200]})
+        del ev[:-50]
+
+    def mark_run_start(self) -> None:
+        """Record this start and how the previous run ended: a run-state file says running until a clean stop marks it stopped, so a start that finds
+        "running" knows the previous process died (crash, kill, container stop) and when it was last seen (its stats file's time)."""
+        path = os.path.join(DIR, f"run-state-{CONN_SHORT}.json")
+        prev: Dict[str, Any] = {}
+        try:
+            with open(path) as f:
+                prev = json.load(f)
+        except Exception:
+            prev = {}
+        last_seen = 0.0
+        try:
+            last_seen = os.path.getmtime(STATS_PATH)
+        except Exception:
+            pass
+        self.last_run = {
+            "previousStartedAt": prev.get("startedAt"),
+            "previousEnd": prev.get("stoppedAt") or (last_seen or None),
+            "clean": bool(prev.get("state") == "stopped"),
+            "reason": prev.get("reason") or ("" if prev.get("state") == "stopped" else ("no clean stop recorded (crash, kill or machine stop)" if prev else "first start")),
+            "openAtStart": len(self.open),
+        }
+        self.run_state_path = path
+        self._write_run_state({"state": "running", "startedAt": self.started, "pid": os.getpid()})
+        try:
+            import atexit
+            import signal as _signal
+            atexit.register(lambda: self._write_run_state({"state": "stopped", "startedAt": self.started, "stoppedAt": time.time(), "reason": "exit"}))
+            prev_term = _signal.getsignal(_signal.SIGTERM)
+
+            def _term(signum, frame):
+                self._write_run_state({"state": "stopped", "startedAt": self.started, "stoppedAt": time.time(), "reason": "SIGTERM"})
+                if callable(prev_term):
+                    prev_term(signum, frame)
+                else:
+                    raise SystemExit(0)
+            _signal.signal(_signal.SIGTERM, _term)
+        except Exception:
+            pass
+
+    def _write_run_state(self, row: Dict[str, Any]) -> None:
+        path = getattr(self, "run_state_path", "")
+        if not path:
+            return
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(row, f)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
+    def system_info(self) -> Dict[str, Any]:
+        """Session and machine figures for the desk footer: CPU of this process (since the last call), memory (RSS, the machine, available), REST and
+        WebSocket rates, the session, the last start (crash or clean), the restore events and the recent errors."""
+        now = time.time()
+        prev = self.__dict__.get("_sys_prev")
+        try:
+            t = os.times()
+            cpu_s = t.user + t.system
+        except Exception:
+            cpu_s = 0.0
+        api = getattr(self, "api", None)
+        rest = int(getattr(api, "rest_n", 0) or (getattr(api, "stats", {}) or {}).get("rest", 0) or 0) if api is not None else 0
+        ws = int(getattr(api, "ws_n", 0) or 0) if api is not None else 0
+        try:
+            a = api.snapshot() if hasattr(api, "snapshot") else {}
+            rest = int(a.get("rest", rest) or rest)
+            ws = int(a.get("ws", ws) or ws)
+        except Exception:
+            pass
+        cpu_pct = rest_s = ws_s = None
+        if prev and now - prev[0] > 0.5:
+            dt = now - prev[0]
+            cpu_pct = round(100.0 * max(0.0, cpu_s - prev[1]) / dt, 1)
+            rest_s = round(max(0, rest - prev[2]) / dt, 2)
+            ws_s = round(max(0, ws - prev[3]) / dt, 2)
+        if not prev or now - prev[0] >= 5.0:
+            self._sys_prev = (now, cpu_s, rest, ws)
+            self._sys_last = (cpu_pct, rest_s, ws_s)
+        else:
+            cpu_pct, rest_s, ws_s = self.__dict__.get("_sys_last", (None, None, None))
+        avail_mb = None
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        avail_mb = round(int(line.split()[1]) / 1024.0, 0)
+                        break
+        except Exception:
+            pass
+        try:
+            from load_engine import machine_mb
+            mach = round(machine_mb(), 0)
+        except Exception:
+            mach = None
+        try:
+            ncpu = os.cpu_count()
+        except Exception:
+            ncpu = None
+        errs: List[Dict[str, Any]] = []
+        try:
+            errs = list((api.err.recent(40) if hasattr(api, "err") and hasattr(api.err, "recent") else []) or [])
+        except Exception:
+            errs = []
+        return {
+            "pid": os.getpid(), "conn": CONN_SHORT, "base": BASE, "startedAt": self.started, "uptimeS": round(now - self.started, 1),
+            "cpuPct": cpu_pct, "cpuCount": ncpu, "rssMb": round(rss_mb(), 1), "machineMb": mach, "availMb": avail_mb,
+            "restPerS": rest_s, "wsPerS": ws_s, "restTotal": rest, "wsTotal": ws, "db": "none (state files)",
+            "lastRun": self.__dict__.get("last_run") or {}, "restore": list(self.__dict__.get("restore_events", []))[-50:],
+            "errors": int(self.errors or 0), "lastError": str(self.last_error or "")[:300], "recentErrors": errs[-40:],
+            "pin": RESTORE_PIN if "RESTORE_PIN" in globals() else "",
         }
 
     def write_stats(self, force: bool = False) -> None:
@@ -6970,6 +7100,7 @@ class Pulse:
 
     def run(self) -> None:
         log(f"pulse start {CONN_SHORT} {BASE}")
+        self.mark_run_start()
         sd_notify("READY=1\nWATCHDOG=1")
         if hasattr(self.api, "start_ws"):
             self.api.on_event = self.bump

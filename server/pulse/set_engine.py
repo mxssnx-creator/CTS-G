@@ -130,6 +130,8 @@ STEP_MIN = TP_STEP_MIN
 STEP_MAX = TP_STEP_MAX                       # the ceiling
 STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
 HIST_CAP = 80
+ROTATION_FRESH_X = 1.5
+ROTATION_CAP_S = 1800.0         # a symbol that stopped replaying cannot stretch the freshness limit beyond 1.5 x this
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
 # A trailing Set is only built when its arm, give and initial price stop all
@@ -1790,6 +1792,7 @@ class SetBook:
         self.max_dd_s = 420.0
         self.use_historic_gate = True
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
+        self.rotation_s = 0.0           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
@@ -2857,6 +2860,12 @@ class SetBook:
                     self._hist_inputs[symbol] = inputs
                     self._hist_replay_key[symbol] = (lookback0, gen0)
                     self._hist_replay_at[symbol] = time.time()
+                    stamps = [v for k, v in self._hist_replay_at.items() if k in self.bars]
+                    if len(stamps) >= 2:
+                        # the span over which every symbol was last replayed: one full rotation of the chunked passes (only grows to the real figure)
+                        span = max(stamps) - min(stamps)
+                        span = min(span, ROTATION_CAP_S)
+                        self.rotation_s = span if span > self.rotation_s else 0.9 * self.rotation_s + 0.1 * span
                     self._hist_replay_bar_at[symbol] = replay_bar_at
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
@@ -3601,7 +3610,13 @@ class SetBook:
         st.deact_reason = self.gate_reason(st)
 
     def _snapshot_max_age(self) -> float:
-        return self.fresh_s if self.fresh_s > 0 else 2.0 * self.refresh_s
+        return self.fresh_limit() if self.fresh_s > 0 else 2.0 * self.refresh_s
+
+    def fresh_limit(self) -> float:
+        """How old a Set's verdict may be: fresh_s, but never under ROTATION_FRESH_X x the measured full replay rotation. Found live on x02 (2026-11-03):
+        30 symbols x 3 days x 3,176 Sets took about 12 minutes to replay once in chunks, so with 240 s every Set that passed Base went "stale" before
+        its next turn and none stayed valid."""
+        return max(float(self.fresh_s), ROTATION_FRESH_X * float(getattr(self, "rotation_s", 0.0) or 0.0))
 
     def _history_snapshot_usable(self) -> bool:
         return bool(self.hist_keep_last_complete and self._lookback_pending and self._history_snapshot_active
@@ -3639,7 +3654,7 @@ class SetBook:
             return "ddt"
         if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(self.base_short, st.pack, st)):
             return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
-        if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
+        if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_limit():
             return "stale"
         return ""
 
@@ -4443,7 +4458,8 @@ class SetBook:
             "stopCapInvalid": self.stop_cap_invalid,
             "maxDdS": self.max_dd_s,
             "useHistoricGate": self.use_historic_gate,
-            "freshS": self.fresh_s,
+            "freshS": self.fresh_limit() if self.fresh_s > 0 else self.fresh_s,
+            "rotationS": round(float(getattr(self, "rotation_s", 0.0) or 0.0), 1),
             "costPct": self.cost_pct,
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if self.is_eligible(s)),

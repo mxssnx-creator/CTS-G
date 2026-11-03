@@ -206,6 +206,30 @@ export type Execution = {
   closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number };
 };
 
+/** Session and machine figures for the desk footer (server: Pulse.system_info). */
+export type SystemInfo = {
+  pid?: number;
+  conn?: string;
+  base?: string;
+  startedAt?: number;
+  uptimeS?: number;
+  cpuPct?: number | null;
+  cpuCount?: number | null;
+  rssMb?: number;
+  machineMb?: number | null;
+  availMb?: number | null;
+  restPerS?: number | null;
+  wsPerS?: number | null;
+  restTotal?: number;
+  wsTotal?: number;
+  db?: string;
+  lastRun?: { previousStartedAt?: number | null; previousEnd?: number | null; clean?: boolean; reason?: string; openAtStart?: number };
+  restore?: Array<{ t: number; what: string; symbol: string; side: string; detail: string }>;
+  errors?: number;
+  lastError?: string;
+  recentErrors?: Array<{ t?: number; kind?: string; path?: string; code?: number | string; msg?: string; method?: string; wait?: number }>;
+};
+
 export type LiveStats = {
   /** Compact Overall fallback: only explicitly attributed connection fields are available. */
   compactFallback?: boolean;
@@ -238,6 +262,7 @@ export type LiveStats = {
   symbolMax?: number;
   scanMs?: number;
   rssMb?: number;
+  system?: SystemInfo;
   klinesReady?: number;
   regime?: string;
   coord?: {
@@ -565,6 +590,8 @@ export type LiveStats = {
     wsAgeMs?: number;
     rest?: number;
     ws?: number;
+    rateTrips?: number;
+    httpErr?: number;
   };
   pfCost?: PfEvidence & {
     n?: number;

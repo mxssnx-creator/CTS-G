@@ -23,6 +23,8 @@ import {
   WinRing,
 } from "@/components/visual-stats";
 import { CoverageBar } from "@/components/coverage-overview";
+import { OverviewSections } from "@/components/overview-sections";
+import { SystemFooter } from "@/components/system-footer";
 import type { ConnType } from "@/lib/connections";
 import { createPoller } from "@/lib/poll";
 import { DEFAULT_OVERLAY } from "@/lib/config-model";
@@ -152,6 +154,8 @@ function DeskPage() {
       </section>
 
       <StatsOverview data={overview} compact live={stats} />
+
+      <OverviewSections stats={stats} />
 
       <section className="grid gap-3 lg:grid-cols-2">
         <Panel title="Realized equity path" icon={<Activity className="size-4" />}>
@@ -290,6 +294,8 @@ function DeskPage() {
           })()}
         </div>
       </section>
+
+      <SystemFooter stats={stats} />
     </DeskShell>
   );
 }
