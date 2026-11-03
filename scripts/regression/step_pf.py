@@ -65,7 +65,7 @@ def _rows(seed, n, signal=True):
     return rows
 
 
-def _oracle(rows_by_set, cutoff, ratio, bucket, n_win, n_min, cf=0.0012):
+def _oracle(rows_by_set, cutoff, ratio, bucket, n_win, n_min, cf=0.0012, tol=0.05):
     """Plain reading: loops only. Returns (floor, admitted, pf_all) for one step bucket."""
     pairs = []
     seen = set()
@@ -90,14 +90,17 @@ def _oracle(rows_by_set, cutoff, ratio, bucket, n_win, n_min, cf=0.0012):
         sel = [v for p, v in pairs if p >= f - 1e-12]
         gp, gl = sum(v for v in sel if v > 0), -sum(v for v in sel if v < 0)
         return (gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)), len(sel)
-    manual = se.manual_step_floor(bucket * 0.1, ratio)
-    ref_pf, ref_n = delivered(manual)
-    best = (manual, ref_pf, ref_n)
+    # the objective without the manual ratio: of the candidates with n_min admitted orders, the lowest floor within the tolerance of the best PF
+    rows = []
     for f in se.STEP_PF_CANDIDATES:
         pf, n = delivered(f)
-        if n >= n_min and pf > best[1] + 1e-12 and pf >= ref_pf * se.STEP_PF_MARGIN and (ref_n >= n_min or best[0] == manual):
-            best = (f, pf, n)
-    return best[0], best[2], len(pairs)
+        if n >= n_min:
+            rows.append((f, pf, n))
+    if not rows:
+        return se.manual_step_floor(bucket * 0.1, ratio), 0, len(pairs)
+    best_pf = max(r[1] for r in rows)
+    pick = [r for r in rows if r[1] + 1e-12 >= best_pf * (1.0 - tol)][0]          # candidates ascend: the first is the lowest
+    return pick[0], pick[2], len(pairs)
 
 
 BOUNDARY = T0 - 3_300_000.0       # inside the synthetic tapes (they run from T0 - 4.0 M s to about T0 - 2.65 M s): rows exist on both sides
@@ -123,9 +126,14 @@ def auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation():
     got = b.step_floor_auto.get((3, 0))
     row = next(r for r in b.step_floor_report if r["step"] == 3)
     manual = se.manual_step_floor(0.3, 0.2)
-    ok = ((got if got is not None else manual) == want_f and want_f > manual and row["admitted"] == want_n and row["orders"] == want_pairs
-          and b.step_floor(bucket_sets[0]) == want_f and b.floor_for(50, bucket_sets[0].pack, bucket_sets[0]) == want_f)
-    return ok, f"learned {got} (plain reading {want_f}, manual {manual}); admitted {row['admitted']}/{row['orders']} orders, delivered PF {row['pfAdmitted']} vs all {row['pfAll']}"
+    # the manual ratio never moves an Auto choice that has data
+    b2 = _book(minPfStepAutoMin=100, minPfStepRatio=1.0)
+    sets2 = [s for s in b2.by_idx if s.kind == "base" and s.step == 3][:3]
+    _learn(b2, {s2.id: tapes[s1.id] for s1, s2 in zip(bucket_sets, sets2)}, boundary)
+    ok = ((got if got is not None else manual) == want_f and row["source"] == "step" and row["admitted"] == want_n and row["orders"] == want_pairs
+          and b.step_floor(bucket_sets[0]) == want_f and b.floor_for(50, bucket_sets[0].pack, bucket_sets[0]) == want_f
+          and b2.step_floor_auto.get((3, 0)) == got)
+    return ok, f"learned {got} (plain reading {want_f}, manual {manual}; with ratio 1.0 still {b2.step_floor_auto.get((3, 0))}); admitted {row['admitted']}/{row['orders']} orders, delivered PF {row['pfAdmitted']} vs all {row['pfAll']}"
 
 
 def auto_floor_never_reads_the_window_it_judges():
@@ -198,8 +206,92 @@ def a_half_percent_step_at_ratio_point_two_asks_exactly_1_1():
     return ok, f"step 5 = {st.tp_pct * 100:.1f} % TP: floors by step {floors}; gate PF 1.0999 / 1.10 / 1.1001 -> {verdicts}"
 
 
+
+def auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual():
+    """learn_step_floor on pairs whose delivered PF rises to a plateau: the lowest floor within the tolerance of the best is chosen (more Sets and
+    orders at nearly the best PF), not the single best; a step without enough admitted orders takes the floor its direction's pooled pairs give; a
+    direction without any takes the manual floor."""
+    import random
+    r = random.Random(7)
+    pairs = []
+    for _ in range(4000):
+        pf_at_entry = r.uniform(0.5, 3.0)
+        edge = 0.0006 if pf_at_entry >= 1.3 else -0.0006              # orders of Sets above 1.3 at entry win on average, the others lose
+        pairs.append((pf_at_entry, edge + r.gauss(0, 0.002)))
+    got = se.learn_step_floor(pairs, 300, 0.05)
+    rows = []
+    for f in se.STEP_PF_CANDIDATES:
+        sel = [v for p, v in pairs if p >= f - 1e-12]
+        if len(sel) >= 300:
+            g, l_ = sum(v for v in sel if v > 0), -sum(v for v in sel if v < 0)
+            rows.append((f, g / l_))
+    best = max(p for _, p in rows)
+    want = min(f for f, p in rows if p >= best * 0.95 - 1e-12)
+    single_best = max(rows, key=lambda x: x[1])[0]
+    none = se.learn_step_floor(pairs[:100], 300, 0.05)
+    b = _book(minPfStepAutoMin=100)
+    sets3 = [s for s in b.by_idx if s.kind == "base" and s.step == 3][:3]
+    _learn(b, {s.id: _rows(100 + i, 1500) for i, s in enumerate(sets3)}, BOUNDARY)
+    src = {r_["step"]: r_["source"] for r_ in b.step_floor_report}
+    pooled_ok = src.get(3) == "step" and all(v == "pooled" for k, v in src.items() if k != 3) and all(b.step_floor_auto.get((k, 0)) is not None for k in src)
+    c = _book(minPfStepAutoMin=100)
+    _learn(c, {}, BOUNDARY)
+    manual_ok = all(r_["source"] == "manual" for r_ in c.step_floor_report) and not c.step_floor_auto
+    ok = got is not None and got["floor"] == want and want <= single_best and none is None and pooled_ok and manual_ok
+    return ok, (f"chosen {got and got['floor']} (lowest within 5 % of the best PF {best:.3f}; the single best floor {single_best}); 100 pairs -> {none}; "
+                f"sources with step 3 only: step 3 {src.get(3)}, others pooled={pooled_ok}; no data -> manual={manual_ok}")
+
+
+def the_simulator_learns_the_engines_floors():
+    """stage_eval.AutoFloors (the walk-forward simulators) and SetBook._learn_step_floors (the engine) learn the same floor for every (step, direction)
+    from the same orders closed before the same hour: the simulators no longer run on the manual floors while the engine runs Auto."""
+    import json as _json
+    import os as _os
+    import stage_eval as sg
+    from common import SMALL, T0, synth_bars
+    names = ["S0-USDT", "S1-USDT"]
+    bars = {s_: synth_bars(41 + i, 1500, drift=0.0005 if i % 2 == 0 else -0.0005, vol=0.003) for i, s_ in enumerate(names)}
+    times = {s_: [int(T0) + 60 * k for k in range(len(bars[s_]))] for s_ in names}
+    patch = {**SMALL, "holdEnabled": False, "histLookbackBars": 600, "histLookbackAuto": False, "stratGeneral": True, "stratIndications": True,
+             "minPfByStep": True, "minPfStepAuto": True, "minPfStepAutoMin": 30, "minPfStepAutoN": 5, "directionMode": "split", "pauseMode": "off",
+             "setScratchEnabled": True}
+    saved = _os.environ.get("STAGE_OVERLAY_PATCH")
+    try:
+        _os.environ["STAGE_OVERLAY_PATCH"] = _json.dumps(patch)
+        shadow = {}
+        for s_ in names:
+            _, warm, dirs, confs, out = sg._symbol_job((s_, bars[s_], times[s_][0]))
+            shadow[s_] = (warm, dirs, confs, out)
+        book = sg.make_book()
+        tapes = sg.Tapes(book, names, times, shadow)
+        hour = float(int((times[names[0]][0] + 1100 * 60) // 3600) * 3600)
+        auto = sg.AutoFloors(book, tapes)
+        auto.apply(book, hour)
+        sim = dict(book.step_floor_auto)
+        # the engine on the same tapes: the simulator's orders handed to the learning pass as the replay's rows
+        rows = {}
+        for st in book.by_idx:
+            tx, te, pp = tapes.by_set[st.idx]
+            rows[st.id] = [(float(a), "S", "LONG", 0.0, float(x), float(a - b), "x", st.id) for a, b, x in zip(tx, te, pp)]
+        real = book._tape_rows
+        book._tape_rows = lambda key, order, cutoff, until=None: [r for r in rows.get(key, ()) if cutoff <= r[0] <= (float("inf") if until is None else until)]
+        try:
+            book._learn_step_floors(["S"], hour)
+        finally:
+            book._tape_rows = real
+        eng = dict(book.step_floor_auto)
+    finally:
+        if saved is None:
+            _os.environ.pop("STAGE_OVERLAY_PATCH", None)
+        else:
+            _os.environ["STAGE_OVERLAY_PATCH"] = saved
+    ok = bool(sim) and sim == eng and len(set(sim.values())) >= 1
+    diff = {k: (sim.get(k), eng.get(k)) for k in set(sim) | set(eng) if sim.get(k) != eng.get(k)}
+    return ok, f"{len(sim)} (step, direction) floors learned by the simulator, {len(eng)} by the engine at the same hour; differences {diff or 'none'}; values {sorted(set(sim.values()))}"
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
     manual_floor_is_one_plus_step_times_ratio, one_floor_for_every_window_and_stage,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
-    a_half_percent_step_at_ratio_point_two_asks_exactly_1_1)]
+    a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,
+    auto_floor_takes_the_lowest_floor_near_the_best_and_falls_back_step_pooled_manual, the_simulator_learns_the_engines_floors)]

@@ -1994,8 +1994,17 @@ function PfWindowControls({
         min={30}
         max={5000}
         step={10}
-        hint="admitted orders (one per distinct Set tape) before a floor can replace the manual value; it must also beat it by 5%"
+        hint="admitted orders (one per distinct Set tape) a floor needs before Auto can choose it; with too few on a step Auto uses its direction's pooled floor, and only without any the manual value"
         onChange={(v) => patch("minPfStepAutoMin", v)}
+      />
+      <Slider
+        label="Auto: tolerance to the best PF (%)"
+        value={overlay.minPfStepAutoTol}
+        min={1}
+        max={20}
+        step={1}
+        hint="Auto takes the LOWEST floor whose delivered PF is within this much of the best one: the most valid Sets and orders at nearly the best PF. It does not use the manual ratio."
+        onChange={(v) => patch("minPfStepAutoTol", v)}
       />
       <StepPfTable overlay={overlay} stats={stats ?? null} />
       <div className="col-span-full mt-2 font-mono text-[11px] text-muted">

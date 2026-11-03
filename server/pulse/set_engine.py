@@ -1278,15 +1278,39 @@ PAUSE_MODES = ("off", "auto", "fixed")
 
 # Minimum PF by TP step (owner 2026-11-02): the same floor for every window and every stage of a Set, from the Set's own TP distance.
 #   manual: 1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value); 0.2 % at ratio 0.2 = 1.04, 3.5 % = 1.70
-#   auto:   per step 0.2 .. 3.5 % the floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at entry --
-#           delivered the best PF, learned only from orders that closed before the evaluation window; the manual value stays unless a candidate has enough orders
-#           and beats it by STEP_PF_MARGIN
+#   auto:   per step 0.2 .. 3.5 % the LOWEST floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at
+#           entry -- delivered a PF within minPfStepAutoTol (5 %) of the best floor's, learned only from orders closed before the evaluation window; independent of
+#           the manual ratio (owner 2026-11-03); a step without enough admitted orders takes its direction's pooled floor, only without any the manual value
 STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.5, 0.05, 0.2
 STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 3.5             # percent: the table's range (owner 2026-11-03: back to 3.5 %; a TP above it asks the 3.5 % floor)
 STEP_PF_AUTO_N_DEFAULT = 10                           # the Set's last N closed orders at entry that the Auto Mode selects on
 STEP_PF_AUTO_MIN_DEFAULT = 300                        # admitted orders (distinct tapes pooled over a step's Sets) a candidate needs
-STEP_PF_MARGIN = 1.05                                 # a candidate must beat the manual floor's delivered PF by 5 %
+STEP_PF_MARGIN = 1.05                                 # (earlier objective, kept for reference) a candidate had to beat the manual floor's delivered PF by 5 %
 STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1.00 .. 2.00
+STEP_PF_AUTO_TOL_DEFAULT = 0.05                       # minPfStepAutoTol: the lowest floor whose delivered PF is within 5 % of the best one
+
+
+def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, tol: float,
+                     candidates: Sequence[float] = STEP_PF_CANDIDATES) -> Optional[Dict[str, Any]]:
+    """The Auto floor of one TP step from its causal pairs (the Set's PF over its last N closes at an order's entry, that order's net), independent of
+    the manual ratio (owner 2026-11-03): every candidate floor F admits the pairs with PF >= F; among the candidates with at least `min_admitted`
+    admitted orders, the best delivered PF is found, and the LOWEST floor whose delivered PF is within `tol` of that best is chosen -- the most valid
+    Sets and orders at (nearly) the best PF. None when no candidate has the orders. Pure: the engine and the simulator both call it."""
+    prs = sorted(pairs, key=lambda x: -x[0])
+    if not prs:
+        return None
+    negs = [-x[0] for x in prs]
+    g_, l_ = prefix_sums([x[1] for x in prs])
+    rows = []
+    for f in candidates:
+        i = bisect.bisect_right(negs, -f + 1e-12)
+        if i >= min_admitted:
+            rows.append((f, pf_of(g_[i], l_[i]), i))
+    if not rows:
+        return None
+    best = max(r[1] for r in rows)
+    pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])
+    return {"floor": pick[0], "pf": pick[1], "admitted": pick[2], "bestPf": best, "orders": len(prs), "pfAll": pf_of(g_[-1], l_[-1])}
 
 
 def step_pf_ratio(raw: Any) -> float:
@@ -1762,6 +1786,7 @@ class SetBook:
         self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
         self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
         self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
+        self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
         self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
         self.step_floor_report: List[Dict[str, Any]] = []
         self._manual_floor_cache: Dict[Tuple[int, float], float] = {}
@@ -1833,7 +1858,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
-                              self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min,
+                              self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -2105,6 +2130,7 @@ class SetBook:
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
         self.pf_step_auto_min = int(max(30, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))
+        self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         mode = str(ov.get("pauseMode") or "auto").lower()
         self.pause_mode = mode if mode in PAUSE_MODES else "auto"
         self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
@@ -3062,8 +3088,9 @@ class SetBook:
         """The Auto Mode of the minimum PF per TP step (minPfByStep + minPfStepAuto), learned from orders that CLOSED BEFORE `learn_before` (the start of the
         evaluation window): the floor of a step is never fitted on the orders it will judge. For each step bucket, pooled over the distinct tapes of its Sets,
         every order is a pair (the Set's PF over its last minPfStepAutoN closed orders at that order's entry, the order's net result). A candidate floor F
-        admits the pairs with PF >= F; the floor with the best delivered PF wins if it admits at least minPfStepAutoMin orders and beats the manual floor's
-        delivered PF by STEP_PF_MARGIN, else the manual floor (1 + TP% x ratio) stands. Writes step_floor_auto and step_floor_report."""
+        admits the pairs with PF >= F; learn_step_floor takes the LOWEST floor with at least minPfStepAutoMin admitted orders whose delivered PF is within
+        minPfStepAutoTol of the best one (independent of the manual ratio); a step without enough orders takes its direction's pooled floor, only a
+        direction without any the manual floor (1 + TP% x ratio). Writes step_floor_auto and step_floor_report (with the source of each floor)."""
         if not (self.pf_by_step and self.pf_step_auto):
             self.step_floor_auto, self.step_floor_report = {}, []
             return
@@ -3096,30 +3123,21 @@ class SetBook:
         learned: Dict[Tuple[int, int], float] = {}
         report: List[Dict[str, Any]] = []
         for side in ((1, -1) if self.direction_split else (0,)):
+            pooled = learn_step_floor([x for (bk, sd), v in pairs.items() if sd == side for x in v], self.pf_step_auto_min, self.pf_step_auto_tol)
             for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
                 tp = round(bucket * TP_UNIT_PCT, 3)
                 manual = manual_step_floor(tp, self.pf_step_ratio)
-                prs = sorted(pairs.get((bucket, side), ()), key=lambda x: -x[0])
-                row: Dict[str, Any] = {"step": bucket, "side": side, "tpPct": tp, "manual": manual, "auto": None, "used": manual, "orders": len(prs),
-                                       "admitted": 0, "pfAll": 0.0, "pfAdmitted": 0.0}
-                if prs:
-                    negs = [-x[0] for x in prs]
-                    g_, l_ = prefix_sums([x[1] for x in prs])
-                    row["pfAll"] = round(pf_of(g_[-1], l_[-1]), 4)
-
-                    def at(f: float, negs=negs, g_=g_, l_=l_) -> Tuple[float, int]:
-                        i = bisect.bisect_right(negs, -f + 1e-12)
-                        return pf_of(g_[i], l_[i]), i
-                    ref_pf, ref_n = at(manual)
-                    best_f, best_pf, best_n = manual, ref_pf, ref_n
-                    for f in STEP_PF_CANDIDATES:
-                        pf_f, n_f = at(f)
-                        if n_f >= self.pf_step_auto_min and pf_f > best_pf + 1e-12 and pf_f >= ref_pf * STEP_PF_MARGIN and (ref_n >= self.pf_step_auto_min or best_f == manual):
-                            best_f, best_pf, best_n = f, pf_f, n_f
-                    row["admitted"], row["pfAdmitted"] = best_n, round(best_pf, 4)
-                    if best_f != manual:
-                        row["auto"] = row["used"] = best_f
-                        learned[(bucket, side)] = best_f
+                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol)
+                source = "step" if got else ("pooled" if pooled else "manual")
+                use = got or pooled
+                floor = use["floor"] if use else manual
+                prs = pairs.get((bucket, side), ())
+                row: Dict[str, Any] = {"step": bucket, "side": side, "tpPct": tp, "manual": manual, "auto": floor if use else None, "used": floor,
+                                       "source": source, "orders": len(prs), "admitted": use["admitted"] if use else 0,
+                                       "pfAll": round(use["pfAll"], 4) if got else 0.0, "pfAdmitted": round(use["pf"], 4) if use else 0.0,
+                                       "pfBest": round(use["bestPf"], 4) if use else 0.0}
+                if use:
+                    learned[(bucket, side)] = floor
                 report.append(row)
         self.step_floor_auto, self.step_floor_report = learned, report
 

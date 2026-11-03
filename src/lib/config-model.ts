@@ -399,6 +399,7 @@ export type PulseOverlay = {
   minPfStepRatio: number;
   minPfStepAutoN: number;
   minPfStepAutoMin: number;
+  minPfStepAutoTol: number;
   pauseMode: PauseMode;
   pauseFixedMin: number;
   pauseCandidates: number[];
@@ -638,6 +639,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfStepRatio: STEP_PF_RATIO_DEFAULT,
   minPfStepAutoN: 10,
   minPfStepAutoMin: 300,
+  minPfStepAutoTol: 5,
   pauseMode: "auto",
   pauseFixedMin: 10,
   pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
@@ -860,6 +862,7 @@ export type CtsSettings = {
   minPfStepRatio?: number;
   minPfStepAutoN?: number;
   minPfStepAutoMin?: number;
+  minPfStepAutoTol?: number;
   pauseMode?: string;
   pauseFixedMin?: number;
   pauseCandidates?: number[];
@@ -1179,6 +1182,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
     minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),
     minPfStepAutoMin: Math.max(30, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 300)))),
+    minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
     pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
     pauseCandidates: pauseList(cts.pauseCandidates),

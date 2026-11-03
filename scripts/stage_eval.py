@@ -445,6 +445,64 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
     return len(picks), bad
 
 
+class AutoFloors:
+    """The engine's Auto minimum PF per TP step (minPfByStep + minPfStepAuto) in the simulator: the same pairs (a Set's PF over its last minPfStepAutoN
+    closes at an order's entry, that order's net; one Set per distinct tape) and the same pure rule (set_engine.learn_step_floor: the lowest floor within
+    minPfStepAutoTol of the best delivered PF; step -> pooled direction -> manual), re-learned at every test hour from the orders CLOSED BEFORE that hour,
+    so no hour is judged with a floor that read it. Copies are recognised on the whole tape (the engine compares the rows before its boundary)."""
+
+    def __init__(self, book, tapes: "Tapes"):
+        self.on = bool(getattr(book, "pf_by_step", False) and getattr(book, "pf_step_auto", False))
+        self.by_key: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = {}
+        self.last = None
+        if not self.on:
+            return
+        n_win, cf, seen = int(book.pf_step_auto_n), tapes.cf, set()
+        for st in book.by_idx:
+            tx, te, pp = tapes.by_set[st.idx]
+            if len(tx) <= n_win:
+                continue
+            sig = hash((tuple(round(x, 3) for x in tx), tuple(round(x, 10) for x in pp)))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            nets = [x - cf for x in pp]
+            g, l_ = se.prefix_sums(nets)
+            out = self.by_key.setdefault((book.step_bucket(st), st.side), [])
+            for k in range(len(tx)):
+                e = bisect.bisect_left(tx, te[k])
+                if e < n_win:
+                    continue
+                gp, gl = g[e] - g[e - n_win], l_[e] - l_[e - n_win]
+                if gl > 0:
+                    out.append((tx[k], gp / gl, nets[k]))
+                elif gp > 0:
+                    out.append((tx[k], 99.0, nets[k]))
+        for v in self.by_key.values():
+            v.sort()
+
+    def apply(self, book, now: float) -> bool:
+        """Learn the floors from the orders closed before the hour of `now` and hand them to the book; True when they were (re)learned."""
+        if not self.on:
+            return False
+        hour = int(now // 3600) * 3600.0
+        if hour == self.last:
+            return False
+        self.last = hour
+        learned: Dict[Tuple[int, int], float] = {}
+        sides = (1, -1) if getattr(book, "direction_split", False) else (0,)
+        for side in sides:
+            before = {k: [(p, n) for (t, p, n) in v[:bisect.bisect_left(v, (hour, -1.0, -1.0))]] for k, v in self.by_key.items() if k[1] == side}
+            pooled = se.learn_step_floor([x for v in before.values() for x in v], book.pf_step_auto_min, book.pf_step_auto_tol)
+            lo, hi = int(round(se.STEP_PF_TP_MIN / se.TP_UNIT_PCT)), int(round(se.STEP_PF_TP_MAX / se.TP_UNIT_PCT))
+            for bucket in range(lo, hi + 1):
+                got = se.learn_step_floor(before.get((bucket, side), ()), book.pf_step_auto_min, book.pf_step_auto_tol) or pooled
+                if got:
+                    learned[(bucket, side)] = got["floor"]
+        book.step_floor_auto = learned
+        return True
+
+
 # ---- phase 3: execution --------------------------------------------------------------------------------------------------
 
 def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=None, block=None, axis_evidence=None, only_steps=None, pick=None, control=None,
@@ -463,6 +521,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     lb = book.lookback * 60.0
     every = max(1, int(refresh_s) // 60) if refresh_s else 1
     cache: Dict[int, Tuple[float, bool, Any]] = {}       # refresh_s 0: per order, each Set re-read only when its verdict can change
+    auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
 
     def verdict(st, now: float):
         if not refresh_s:
@@ -491,6 +550,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         return ranked_, valid_
 
     for h in hours:
+        if auto.apply(book, float(h)):
+            cache.clear()                                # a verdict cached under the previous hour's floors is not this hour's
         ranked, valid_n = rank_at(float(h) + 60.0)
         executed.append({"hour": h, "valid": valid_n, "total": len(book.by_idx)})
         ranked_t = float(h) + 60.0

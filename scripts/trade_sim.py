@@ -135,7 +135,9 @@ def main() -> int:
     nxt_ns = (MIN_VALIDATION_N, book.gate_window) + tuple(m for m in extra_n if m not in (MIN_VALIDATION_N, book.gate_window))
     slots = [h + k * args_refresh for h in run_hours for k in range(max(1, 3600 // args_refresh))]
     evals = []
+    auto = sg.AutoFloors(book, tapes)            # Auto floors per TP step, re-learned every hour from the orders closed before it (as the engine)
     for now in slots:
+        auto.apply(book, now)
         hv = collections.defaultdict(float)
         for st in book.by_idx:
             ok, key, n, gpf = sg.gate_metrics(book, tapes, st, now)

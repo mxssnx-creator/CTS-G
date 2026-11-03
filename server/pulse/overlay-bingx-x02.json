@@ -184,6 +184,7 @@
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 300,
+  "minPfStepAutoTol": 5,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
   "pauseCandidates": [2, 3, 5, 8, 12, 20, 30, 45, 60],
