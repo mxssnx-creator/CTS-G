@@ -202,7 +202,7 @@
   "histLookbackTargetN": 12,
   "setUseHistoricGate": true,
   "holdEnabled": true,
-  "holdAuto": true,
+  "holdAuto": false,
   "holdAutoMax": 50,
   "holdAutoMin": 10,
   "directionMode": "split",

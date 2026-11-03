@@ -600,7 +600,7 @@ function SettingsPage() {
             >
               <Grid>
                 <Toggle label="Hold time" on={overlay.holdEnabled !== false} onChange={(v) => patch("holdEnabled", v)} />
-                <Toggle label="Auto Mode (best hold per Set)" on={overlay.holdEnabled !== false && overlay.holdAuto !== false} onChange={(v) => patch("holdAuto", v)} />
+                <Toggle label="Auto Mode (best hold per Set, never on trailing Sets; off by default: measured worse than no hold)" on={overlay.holdEnabled !== false && overlay.holdAuto !== false} onChange={(v) => patch("holdAuto", v)} />
                 <Slider
                   label="Auto: orders judged (max)"
                   value={overlay.holdAutoMax ?? 50}

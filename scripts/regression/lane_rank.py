@@ -308,7 +308,29 @@ def set_lanes_do_not_scratch_unless_asked():
     return ok, f"scratch exits / orders / scratch bars: off {out[False]}, on {out[True]}"
 
 
+def hold_auto_is_off_by_default_and_never_on_trailing_sets():
+    """Hold Auto (a time exit chosen per Set from its last orders) executed far worse than no hold on both 3-day windows (0.412 against 0.879 and 0.323
+    against 0.953, trade_sim with the engine's own lanes): the shipped overlays, both secure presets and the engine's default switch it off. Switched on,
+    trailing Sets still never get a hold candidate."""
+    import glob
+    import json as _j
+    files = sorted(glob.glob(_os.path.join(_os.path.dirname(se.__file__), "overlay-*.json")))
+    root = _os.path.abspath(_os.path.join(_os.path.dirname(se.__file__), "..", ".."))
+    files += [_os.path.join(root, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
+    shipped = {_os.path.basename(f): _j.load(open(f)).get("holdAuto") for f in files}
+    bare = se.SetBook()
+    bare.load({"stratGeneral": True, "stratIndications": False, "setStepMax": 6})
+    on = se.SetBook()
+    on.load({"stratGeneral": True, "stratIndications": False, "setStepMax": 20, "holdAuto": True})
+    trail_on = [st for st in on.by_idx if st.kind == "trail"]
+    base_on = [st for st in on.by_idx if st.kind == "base"]
+    ok = (len(shipped) == 6 and all(v is False for v in shipped.values()) and not bare.hold_auto and on.hold_auto and trail_on and base_on
+          and all(on.auto_holds(st) == () for st in trail_on) and all(on.auto_holds(st) for st in base_on))
+    return ok, f"shipped holdAuto {shipped}; engine default {bare.hold_auto}; switched on: trailing candidates {set(on.auto_holds(st) for st in trail_on)}, base Sets have candidates {all(on.auto_holds(st) for st in base_on)}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
+    hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,
     the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor,

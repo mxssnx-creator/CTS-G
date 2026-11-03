@@ -49,18 +49,19 @@ def caches_refuse_mismatched_inputs_or_missing_metadata():
         return ok, f"exact={exact}; settings/data/code/simulator/bytes/legacy refused={settings_refused}/{data_refused}/{code_refused}/{sim_refused}/{bytes_refused}/{legacy_refused}"
 
 
-def simulator_refuses_unmodeled_automatic_holds():
+def simulator_models_automatic_holds():
     with tempfile.TemporaryDirectory() as d:
         preset = json.load(open(os.path.join(ROOT, "presets", "secure-minimal.json"), encoding="utf-8"))
         def run(patch):
             return subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "trade_sim.py"), "--data", d,
                                    "--cache", os.path.join(d, "cache.pkl"), "--patch", json.dumps(patch)],
                                   capture_output=True, text=True, timeout=30)
-        auto = run(preset)
+        auto = run({**preset, "holdEnabled": True, "holdAuto": True})
         fixed = run({**preset, "holdAuto": False})
-        ok = (auto.returncode == 2 and "Automatic hold selection is not modeled" in auto.stdout
+        # automatic holds are modelled now (stage_eval.build_hold_auto: the engine's own lane per Set): both settings reach the data check
+        ok = ("Automatic hold selection is not modeled" not in auto.stdout and auto.returncode == 2 and "No market data found" in auto.stdout
               and fixed.returncode == 2 and "No market data found" in fixed.stdout)
-        return ok, f"automatic holds refused={auto.returncode == 2}; explicit fixed hold reaches data check={'No market data found' in fixed.stdout}"
+        return ok, f"automatic holds reach the data check={'No market data found' in auto.stdout}; fixed hold reaches data check={'No market data found' in fixed.stdout}"
 
 
 def simulator_builds_and_reuses_only_matching_cache():
@@ -84,5 +85,5 @@ def simulator_builds_and_reuses_only_matching_cache():
 
 
 CHECKS = [("replay-provenance." + fn.__name__.replace("_", "-"), fn) for fn in (
-    caches_refuse_mismatched_inputs_or_missing_metadata, simulator_refuses_unmodeled_automatic_holds,
+    caches_refuse_mismatched_inputs_or_missing_metadata, simulator_models_automatic_holds,
     simulator_builds_and_reuses_only_matching_cache)]

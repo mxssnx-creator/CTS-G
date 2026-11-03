@@ -1854,7 +1854,7 @@ class SetBook:
             self._load(ov, cts)
             signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
-                              self.sl_min_steps, self.trail_min_steps, self.hold_auto, self.lookback, self.hist_keep_last_complete,
+                              self.sl_min_steps, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
@@ -2033,7 +2033,8 @@ class SetBook:
         # holdEnabled is the master switch (off: no per-step and no auto hold, only the global time stop); holdAuto lets every Set
         # without a manual step hold choose its own hold from its last holdAutoMax orders (at most 50, at least holdAutoMin)
         self.hold_on = bool(ov.get("holdEnabled", True))
-        self.hold_auto = self.hold_on and bool(ov.get("holdAuto", True))
+        self.hold_auto = self.hold_on and bool(ov.get("holdAuto", False))
+        self.hold_auto_margin = max(1.0, min(2.0, 1.0 + float(num(ov, "holdAutoMarginPct", (HOLD_AUTO_MARGIN - 1.0) * 100)) / 100.0))     # a candidate must beat the global stop by this     # off by default (2026-11-03): measured worse than no hold on both windows
         self.hold_auto_max = int(max(HOLD_AUTO_MIN_ORDERS, min(HOLD_AUTO_MAX_ORDERS, num(ov, "holdAutoMax", HOLD_AUTO_MAX_ORDERS))))
         self.hold_auto_min = int(max(MIN_VALIDATION_N, min(self.hold_auto_max, num(ov, "holdAutoMin", HOLD_AUTO_MIN_ORDERS))))
         self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin")) if self.hold_on else {}
@@ -3168,7 +3169,7 @@ class SetBook:
             cands.append((h, rows_all))
             rows = [r for r in rows_all if r[0] >= cutoff]
             pf, n = judge(rows)
-            if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * HOLD_AUTO_MARGIN:
+            if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN):
                 best = (pf, h, rows, n)
         # the choice now (on every order closed so far) is what a new position opens with
         st.hold_bars, st.hold_auto = best[1], True
@@ -3186,7 +3187,7 @@ class SetBook:
             def choose(i: int) -> int:
                 idx = hold_choice_at(cands, prefixes, base_ts + i * BAR_S,
                                      self.hold_auto_max, self.hold_auto_min,
-                                     HOLD_AUTO_MARGIN, self.lookback * BAR_S)
+                                     getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback * BAR_S)
                 return cands[idx][0]
             lane = SetLane(st, symbol)
             sel_pause = self._lane_pause(lane, st.pack, data.get("pause") or {}, st.side)
@@ -4402,7 +4403,7 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 # The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
 # direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
-_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True}
+_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:

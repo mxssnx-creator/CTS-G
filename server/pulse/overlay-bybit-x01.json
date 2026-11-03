@@ -173,7 +173,7 @@
   "trailMinSteps": 2,
   "shortRangeMinPf": 1.1,
   "holdEnabled": true,
-  "holdAuto": true,
+  "holdAuto": false,
   "holdAutoMax": 50,
   "holdAutoMin": 10,
   "directionMode": "split",

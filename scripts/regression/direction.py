@@ -123,7 +123,9 @@ def learned_floors_are_per_direction():
     _learn(b, flipped, BOUNDARY)
     long_same = b.step_floor_auto.get((3, 1)) == fl
     rows = [r for r in b.step_floor_report if r["step"] == 3]
-    ok = fl is not None and fl > se.manual_step_floor(0.3, 0.2) and fs is None and long_same and {r["side"] for r in rows} == {1, -1}
+    # the Auto floor no longer needs to beat the manual value: each direction learns its own floor from its own Sets' orders (the short Sets' noise gives
+    # their own floor); what matters is that inverting every short result never moves the long floor
+    ok = fl is not None and fs is not None and long_same and {r["side"] for r in rows} == {1, -1} and all(r["source"] == "step" for r in rows if r["step"] == 3)
     return ok, f"long floor {fl}, short floor {fs} (manual {se.manual_step_floor(0.3, 0.2)}); inverting every short result leaves the long floor at {b.step_floor_auto.get((3, 1))}; report has both sides"
 
 
