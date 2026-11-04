@@ -508,7 +508,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   leverageStopCap: false,
   // measured 2026-11-04 (stack_eval block2, 4,400 + 12,960 settings per window, sealed third read once): per-symbol evidence, steps of 3 PositionCosts, the first count only
   // collects evidence, counts 2 and 3 add 0.5 x the original volume, no minimum observations, no carry. Not proven: the sealed read was mixed (see CLAUDE.md).
-  blockCounts: [{ step: 3, ratio: 0.5, on: true }, { step: 3, ratio: 0.5, on: true }, { step: 3, ratio: 0.5, on: true }],
+  blockCounts: [{ step: 3, ratio: 1, on: true }, { step: 3, ratio: 1, on: true }, { step: 3, ratio: 1, on: true }],
   blockStackType: "additive",
   blockSharedTotal: 1,
   blockMinObservations: 1,

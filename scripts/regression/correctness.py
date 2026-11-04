@@ -277,13 +277,13 @@ def block_carry_sizes_the_next_parent_of_the_relation():
 
 def block_shipped_defaults_are_the_measured_ones():
     """Block v2 defaults (measured 2026-11-04, stack_eval block2 on windows C and B, 4,400 ratio combinations and 12,960 settings each; the sealed third read once for
-    four finalists): per-symbol evidence, three counts 3 PositionCosts apart, the first count only collects evidence (skip 1), counts 2 and 3 add 0.5 x the original
-    volume (Additive), no minimum observations, no carry, no window. Every shipped overlay carries them and the engine's own defaults equal them."""
+    four finalists): per-symbol evidence, three counts 3 PositionCosts apart, the first count only collects evidence (skip 1), counts 2 and 3 add 1.0 x the original
+    volume (Additive; doubled from 0.5 by the owner 2026-11-04, measured better on C and B), no minimum observations, no carry, no window. Every shipped overlay carries them and the engine's own defaults equal them."""
     import json as _j
     import block_rules as br
     from common import PULSE
     d = br.BlockCfg()
-    want_engine = (d.levels() == [3.0, 6.0, 9.0] and [d.target_ratio(n) for n in (1, 2, 3)] == [0.5, 0.5, 0.5] and d.relations == ("symbol",) and d.skip_first == 1
+    want_engine = (d.levels() == [3.0, 6.0, 9.0] and [d.target_ratio(n) for n in (1, 2, 3)] == [1.0, 1.0, 1.0] and d.relations == ("symbol",) and d.skip_first == 1
                    and d.min_obs == 1 and d.carry is False and d.stack_type == "additive")
     seen = {}
     for v in ("bingx", "bybit"):
@@ -291,7 +291,7 @@ def block_shipped_defaults_are_the_measured_ones():
             ov = _j.load(open(os.path.join(PULSE, f"overlay-{v}-{c}.json")))
             cfg = br.clean_cfg(ov)
             seen[f"{v}-{c}"] = (cfg.levels(), [cfg.target_ratio(n) for n in (1, 2, 3)], cfg.relations, cfg.skip_first, cfg.min_obs, cfg.carry, cfg.stack_type, "blockEvidenceScope" in ov)
-    ok = want_engine and all(x == ([3.0, 6.0, 9.0], [0.5, 0.5, 0.5], ("symbol",), 1, 1, False, "additive", False) for x in seen.values())
+    ok = want_engine and all(x == ([3.0, 6.0, 9.0], [1.0, 1.0, 1.0], ("symbol",), 1, 1, False, "additive", False) for x in seen.values())
     return ok, f"engine defaults equal the measured ones: {want_engine}; shipped overlays {sorted(set(map(str, seen.values())))}"
 
 

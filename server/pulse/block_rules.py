@@ -34,7 +34,7 @@ PF_RATIO_MIN, PF_RATIO_MAX = 0.2, 5.0
 
 @dataclass
 class BlockCfg:
-    counts: List[Dict[str, Any]] = field(default_factory=lambda: [{"step": 3.0, "ratio": 0.5, "on": True} for _ in range(3)])
+    counts: List[Dict[str, Any]] = field(default_factory=lambda: [{"step": 3.0, "ratio": 1.0, "on": True} for _ in range(3)])
     stack_type: str = "additive"
     shared_total: float = 1.0           # R of the shared type: the whole add budget in V0
     min_obs: int = 1                    # observations a count's record needs before it can add (a count, never a window; owner 2026-11-04: no minimum-orders gate)

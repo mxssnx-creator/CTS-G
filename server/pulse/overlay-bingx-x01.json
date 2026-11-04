@@ -198,7 +198,7 @@
     "indications": false
   },
   "minPfStepAuto": false,
-  "minPfStepRatio": 0.2,
+  "minPfStepRatio": 0.1,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
   "minPfStepAutoTol": 5,
@@ -280,17 +280,17 @@
   "blockCounts": [
     {
       "step": 3,
-      "ratio": 0.5,
+      "ratio": 1.0,
       "on": true
     },
     {
       "step": 3,
-      "ratio": 0.5,
+      "ratio": 1.0,
       "on": true
     },
     {
       "step": 3,
-      "ratio": 0.5,
+      "ratio": 1.0,
       "on": true
     }
   ],
@@ -306,5 +306,5 @@
   "stratTrend": true,
   "stratBreakout": true,
   "manualCloseRestMin": 240,
-  "minPfStepAutoHigh": 1.27
+  "minPfStepAutoHigh": 1.15
 }

@@ -12,6 +12,14 @@
   the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
   change `EQ_MIN` or reset the start equity without an explicit instruction.
 
+- **2026-11-04, owner (latest): Auto PF off on x01 (manual floors), lower min PF, 200 symbols, x02 off, Block ratios doubled, manual closes rest only that symbol and direction.**
+  x01: `minPfStepAuto` false, manual floor 1 + TP % x `minPfStepRatio` 0.1 capped by `minPfStepAutoHigh` 1.15 (new setting; 2.0 = no cap, caps the manual and the learned floor in every stage; x01 ran 1.27 for a few
+  minutes before), `symbolCap` 200; x02 is stopped (its process, not its positions - their venue-side stops stay). Block counts: ratio 1.0 each (was 0.5; Block v2 maximum), measured on executed parents of
+  C / B (symbol relation, 3 counts 3 PositionCosts apart, skip first): ratio 0.5 C PF 1.788 net 47.11 dd 25.4, B 0.811 / -11.69; **ratio 1.0 C 1.938 / 57.21 / 26.6, B 0.818 / -11.29** (no Block: 1.631 / 37.01 / 24.2 and 0.805 / -12.08); skip-first 0
+  with ratio 1.0 is worse on B (0.742 / -18.46). Auto against manual was measured worse earlier (manual 0.2: C 0.584 against 0.879 on the 3-day data; ratio 0.5 C 1.092 against Auto 1.631): the owner chose manual anyway.
+  "Axis volume ratios": the Axis has no volume setting (windows are already at their maxima 12 / 4 / 8 / 8; `posCountsVolumeRatio` is read but `size_mult` is unused), so the doubling was applied to the Block ratios.
+  `manualCloseRestMin` (240): a position the venue no longer holds with no stop / target fill of ours (a manual close, `drop_ghost`, a restored position gone) rests that SYMBOL AND DIRECTION for that long
+  (`manual-rest-<conn>.json`); every other symbol and the other direction keep opening (check `trader.a-manual-close-rests-only-that-symbol-and-direction`).
 - **2026-11-04, owner (later): Block adds are "after their ratio, without limit, based on the position's original base volume"; same for the other add types; revert indications trailing x 3; Normal range off on x01.**
   `blockRiskPctOfBalance` 0 (no risk-budget cap, engine default and desk default too): each Block count adds exactly its ratio x the parent's ORIGINAL base volume V0 (`pos.base_qty`, never a share of
   the grown position; `pulse_trader.block_risk_qty` is infinite at 0). What still bounds an add is the table itself (shipped: counts 2 and 3 at 0.5 V0 each, so a parent grows to at most 2 x V0) and the
