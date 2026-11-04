@@ -454,6 +454,8 @@ export type PulseOverlay = {
   minPfStepAutoTol: number;
   /** The lowest floor Auto may choose (1.00 .. 2.00). */
   minPfStepAutoLow: number;
+  /** Highest floor a TP step may ask (server: set_engine.STEP_PF_AUTO_HIGH_DEFAULT); 2 = no cap. */
+  minPfStepAutoHigh: number;
   pauseMode: PauseMode;
   pauseFixedMin: number;
   pauseCandidates: number[];
@@ -719,6 +721,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minPfStepAutoMin: 1,
   minPfStepAutoTol: 5,
   minPfStepAutoLow: 1,
+  minPfStepAutoHigh: 2,
   pauseMode: "auto",
   pauseFixedMin: 10,
   pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
@@ -964,6 +967,7 @@ export type CtsSettings = {
   minPfStepAutoMin?: number;
   minPfStepAutoTol?: number;
   minPfStepAutoLow?: number;
+  minPfStepAutoHigh?: number;
   pauseMode?: string;
   pauseFixedMin?: number;
   pauseCandidates?: number[];
@@ -1408,6 +1412,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfStepAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 1)))),
     minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
     minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1) * 100) / 100)),
+    minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),
     pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
     pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
     pauseCandidates: pauseList(cts.pauseCandidates),

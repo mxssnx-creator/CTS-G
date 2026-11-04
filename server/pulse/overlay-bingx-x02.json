@@ -303,5 +303,6 @@
   "blockSkipFirst": 1,
   "stratTrend": true,
   "stratBreakout": true,
-  "blockRiskPctOfBalance": 0
+  "blockRiskPctOfBalance": 0,
+  "minPfStepAutoHigh": 1.27
 }

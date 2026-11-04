@@ -134,6 +134,7 @@ STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
 HIST_CAP = 80
 ROTATION_FRESH_X = 1.5
 STEP_PF_AUTO_LOW_DEFAULT = 1.0
+STEP_PF_AUTO_HIGH_DEFAULT = 2.0      # the highest floor a TP step may ask (minPfStepAutoHigh, owner 2026-11-04 "min PF from 1.4 to 1.27"): 2.0 = no cap
 LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("neg",), "pos": ("pos",)}
 # How a lane's trailing Sets compete with its fixed-exit (base and Exit) Sets for a signal (overlay trailPick, owner 2026-11-03: "make trailing fully work"):
 # after = the trailing Sets only when no fixed-exit Set of the pack is valid on that lane (the earlier rule: a valid trailing Set almost never executed),
@@ -1873,6 +1874,7 @@ class SetBook:
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
         self.rotation_s = 0.0
         self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
+        self.pf_step_auto_high = STEP_PF_AUTO_HIGH_DEFAULT
         self.pf_range_floor: Dict[str, float] = {}      # minPfByRange: a flat minimum PF for every Set of a TP range (absent: the per-step floor)
         self.lane_order: Tuple[str, ...] = ("pos", "neg")
         self.trail_pick: str = KIND_ORDER_DEFAULT
@@ -2293,6 +2295,7 @@ class SetBook:
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
+        self.pf_step_auto_high = max(self.pf_step_auto_low, min(2.0, float(num(ov, "minPfStepAutoHigh", STEP_PF_AUTO_HIGH_DEFAULT))))
         self.pf_range_floor = pf_range_floors_of(ov.get("minPfByRange"))
         self._manual_floor_cache = {}
         mode = str(ov.get("pauseMode") or "auto").lower()
@@ -2361,7 +2364,8 @@ class SetBook:
     def step_auto_candidates(self) -> List[float]:
         """The floors Auto may choose: STEP_PF_CANDIDATES from minPfStepAutoLow up."""
         low = float(getattr(self, "pf_step_auto_low", STEP_PF_AUTO_LOW_DEFAULT))
-        return [c for c in STEP_PF_CANDIDATES if c + 1e-9 >= low] or [STEP_PF_CANDIDATES[-1]]
+        high = float(getattr(self, "pf_step_auto_high", STEP_PF_AUTO_HIGH_DEFAULT))
+        return [c for c in STEP_PF_CANDIDATES if low <= c + 1e-9 and c <= high + 1e-9] or [min(max(low, STEP_PF_CANDIDATES[0]), high)]
 
     def _step_span(self) -> Tuple[int, int]:
         """(first, last) TP step the general packs' grid spans before the range switches: setMinStep (or the step-adapt minimum) .. setStepMax, and
@@ -3457,15 +3461,16 @@ class SetBook:
             ranged = self.pf_range_floor.get(tp_range_of(bucket))
             if ranged is not None:
                 return ranged
+        high = self.pf_step_auto_high
         if self.pf_step_auto:
             learned = self.step_floor_auto.get((bucket, st.side))
             if learned is not None:
-                return float(learned)
+                return min(float(learned), high)
         key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot
         got = self._manual_floor_cache.get(key)
         if got is None:
             got = self._manual_floor_cache[key] = manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
-        return got
+        return min(got, high)
 
     def floor_for(self, n: int, pack: str, st: Optional["SetState"] = None) -> float:
         """The minimum PF a window of n orders of this pack asks. With minPfByStep (default) a Set asks one floor from its TP step in every window and stage;

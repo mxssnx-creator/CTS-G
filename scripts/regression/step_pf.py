@@ -328,8 +328,32 @@ def min_pf_by_range_replaces_the_step_floor_for_its_range_only():
     return ok, f"{len(sets)} Sets over ranges {sorted(seen)}; range floors applied and others untouched{(' bad ' + str(bad[:3])) if bad else ''}; bounds {clamp}"
 
 
+def min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates():
+    """Owner 2026-11-04 ("min PF from 1.4 to 1.27"): minPfStepAutoHigh caps the floor a TP step may ask - the manual 1 + TP% x ratio (1.64 at 3.2 % uncapped), the
+    learned Auto floor (never chosen above it, no learned value above it is returned) - in every window and stage; 2.0 (default) = unchanged; a value under the
+    Auto lower bound is raised to it; a range floor (minPfByRange) is an explicit choice and is not capped."""
+    capped = _book(setStepMax=32, minPfStepAuto=False, minPfStepAutoHigh=1.27)
+    plain = _book(setStepMax=32, minPfStepAuto=False)
+    sets = [x for x in capped.by_idx if x.kind == "base" and x.sl_ratio == 1.0]
+    bad = []
+    for x in sets:
+        c, p = capped.floor_for(50, x.pack, x), plain.floor_for(50, x.pack, x)
+        if abs(c - min(p, 1.27)) > 1e-9 or len({capped.floor_for(n, x.pack, x) for n in (1, 5, 25, 50)}) != 1:
+            bad.append((x.id, c, p))
+    auto = _book(setStepMax=32, minPfStepAutoHigh=1.27)
+    auto.step_floor_auto = {(x.step, x.side): 1.9 for x in sets}
+    learned = {auto.floor_for(50, x.pack, x) for x in sets}
+    cands = auto.step_auto_candidates()
+    low_first = _book(minPfStepAutoLow=1.5, minPfStepAutoHigh=1.2)
+    ranged = _book(setStepMax=32, minPfStepAutoHigh=1.27, minPfByRange={"short": 1.5})
+    r_floor = {ranged.floor_for(50, x.pack, x) for x in ranged.by_idx if x.kind == "base" and x.step in (8, 9)}
+    ok = (not bad and learned == {1.27} and max(cands) <= 1.27 + 1e-9 and min(cands) == 1.0 and low_first.pf_step_auto_high >= low_first.pf_step_auto_low
+          and r_floor == {1.5} and plain.pf_step_auto_high == 2.0)
+    return ok, f"{len(sets)} Sets: manual floors capped at 1.27 (bad {bad[:2]}), learned 1.9 -> {sorted(learned)}, candidates {min(cands)}..{max(cands)}, range floor {sorted(r_floor)}, default cap {plain.pf_step_auto_high}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
-    manual_floor_is_one_plus_step_times_ratio, min_pf_by_range_replaces_the_step_floor_for_its_range_only, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
+    manual_floor_is_one_plus_step_times_ratio, min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates, min_pf_by_range_replaces_the_step_floor_for_its_range_only, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,

@@ -2227,6 +2227,15 @@ function PfWindowControls({
         hint="Auto never chooses a floor under this. At 1.00 it can admit break-even Sets after costs (x02 showed 1.00 for most steps above 1.6 %)."
         onChange={(v) => patch("minPfStepAutoLow", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
       />
+      <Slider
+        label="Highest floor a TP step may ask"
+        value={overlay.minPfStepAutoHigh ?? 2}
+        min={1}
+        max={2}
+        step={0.01}
+        hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). 2.00 = no cap."
+        onChange={(v) => patch("minPfStepAutoHigh", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
+      />
       <StepPfTable overlay={overlay} stats={stats ?? null} />
       <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
         Minimum PF by last-N window size · used when the TP-step floor is off
