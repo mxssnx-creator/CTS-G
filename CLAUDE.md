@@ -12,6 +12,9 @@
   the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
   change `EQ_MIN` or reset the start equity without an explicit instruction.
 
+- **Axis Sets study (2026-11-04, `stack_eval.py --part axissets`, window C only, executed parents, baseline no Axis Sets PF 1.631 / 188 orders / net 37.01 / drawdown 24.2):** choosing the Axis setting per Set
+  from the 14 candidates gave PF 1.589 / net 34.51 / drawdown 24.2 (flat volume; "the Axis Set must reach its floor" identical); volume scaled by the Axis Set's PF gave PF 1.593 / net 68.40 / drawdown 48.49 - net and drawdown
+  both doubled with no PF gain (it is a volume multiplier, not an edge). Window B was not run (the run was stopped to free the CPU for the engine). Nothing built in the engine.
 - **2026-11-04, owner: "Make stages and last N work for each config possibility / lane independent."** `lastNByRange` (overlay, desk Settings table "Last N per TP range"): each TP range (micro, minimal,
   short, normal, long, wide) may carry its own Base long / short (`baseLong` 10-200, `baseShort` 0-200), Main long / short candidates (`mainLong`, `mainShort`), Negative windows (`negWindows`), Real
   window (`realN`) and Real Negative window (`realNegN`, new: the two lanes no longer have to share one N); a missing range or key uses the global window (`setGateWindow` ... `realGateN`), a short
