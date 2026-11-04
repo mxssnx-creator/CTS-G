@@ -1,5 +1,17 @@
 # CTS-G: standards for every session
 
+## Standing owner rules (newest first)
+
+- **2026-11-04, owner: "Do not use a minimum-orders gate. Just ensure that many validations happen and many orders open. It is meant this way."** No setting may
+  require N orders (or observations) before a Set, a block count, a pause choice, a hold choice or a PF floor may act: a Set / count is judged on the orders it has
+  (a Set without any closed order is never judged). Report **how many Sets validate and how many orders open** next to every PF. Order-count gates to keep at their
+  smallest value: `setGateMinTrades` 0, `minPfStepAutoMin`, `pauseAutoMin`, `mainShortMin`, `exitMinSamples`, `prevPosMinCount`, `blockMinSamples`, Block v2
+  `blockMinObservations` (all 1). `MIN_VALIDATION_N` only bounds the LENGTH of a last-N window and stays. A default above 1 is allowed only when a measurement on three
+  windows shows it keeps the validations and orders high AND the PF better.
+- **2026-11-03, owner:** x01 (real money) runs 120 symbols at volume factor 0.4 with no cap on open positions; always the exchange maximum leverage (`leverageStopCap` off,
+  the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
+  change `EQ_MIN` or reset the start equity without an explicit instruction.
+
 ## Current execution contract (2026-10-30)
 
 This section supersedes older operational descriptions and historical measurements below. See
