@@ -3448,7 +3448,7 @@ class Pulse:
             return
         if self.ignore_syms.get(sym, 0) > time.time():
             return
-        if manual_rest_active(self.manual_rest, sym, "LONG" if direction > 0 else "SHORT", time.time()):
+        if manual_rest_active(getattr(self, "manual_rest", {}), sym, "LONG" if direction > 0 else "SHORT", time.time()):
             return              # closed by hand a moment ago: not the exact same position again (every other symbol and direction trades on)
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
@@ -3986,19 +3986,21 @@ class Pulse:
         """A position left the venue with no stop or target fill of ours: it was closed by hand (or by something outside the engine). Trading goes on for every other
         symbol and for the other direction; this symbol and direction rests `manualCloseRestMin` minutes (owner 2026-11-04: a manual close must not be reopened as
         the exact same position)."""
-        if self.manual_rest_s <= 0:
+        rest_s = float(getattr(self, "manual_rest_s", MANUAL_REST_MIN_DEFAULT * 60.0))
+        if rest_s <= 0:
             return
         now = time.time()
-        self.manual_rest[manual_rest_key(pos.symbol, pos.side)] = now + self.manual_rest_s
-        manual_rest_prune(self.manual_rest, now)
+        book = self.__dict__.setdefault("manual_rest", {})
+        book[manual_rest_key(pos.symbol, pos.side)] = now + rest_s
+        manual_rest_prune(book, now)
         try:
             tmp = MANUAL_REST_PATH + ".tmp"
             with open(tmp, "w") as f:
-                json.dump(self.manual_rest, f)
+                json.dump(book, f)
             os.replace(tmp, MANUAL_REST_PATH)
         except Exception:
             pass
-        log(f"MANUAL CLOSE {pos.symbol} {pos.side} ({why}): no new {pos.side} on it for {self.manual_rest_s / 60:.0f} min, everything else keeps trading")
+        log(f"MANUAL CLOSE {pos.symbol} {pos.side} ({why}): no new {pos.side} on it for {rest_s / 60:.0f} min, everything else keeps trading")
 
     def drop_ghost(self, pos: Position, why: str) -> None:
         if self.open.get(pos.symbol) is None:
