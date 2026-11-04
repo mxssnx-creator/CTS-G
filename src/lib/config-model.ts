@@ -502,14 +502,16 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   leverage: 150,
   useMaxLeverage: true,
   leverageStopCap: false,
-  blockCounts: [{ step: 2, ratio: 0.5, on: true }, { step: 2, ratio: 0.5, on: true }, { step: 2, ratio: 0.5, on: true }],
+  // measured 2026-11-04 (stack_eval block2, 4,400 + 12,960 settings per window, sealed third read once): per-symbol evidence, steps of 3 PositionCosts, the first count only
+  // collects evidence, counts 2 and 3 add 0.5 x the original volume, no minimum observations, no carry. Not proven: the sealed read was mixed (see CLAUDE.md).
+  blockCounts: [{ step: 3, ratio: 0.5, on: true }, { step: 3, ratio: 0.5, on: true }, { step: 3, ratio: 0.5, on: true }],
   blockStackType: "additive",
   blockSharedTotal: 1,
-  blockMinObservations: 3,
-  blockRelations: ["set"],
+  blockMinObservations: 1,
+  blockRelations: ["symbol"],
   blockCarry: false,
   blockPauseSteps: 1,
-  blockSkipFirst: 0,
+  blockSkipFirst: 1,
   maxOpen: 0,
   maxPerGroup: 0,
   symbolsAll: false,
@@ -1166,7 +1168,7 @@ export function blockCountsOf(raw: unknown): BlockCount[] {
 export function blockRelationsOf(raw: unknown): BlockRelation[] {
   const names = (Array.isArray(raw) ? raw : []).map((x) => String(x).toLowerCase());
   const out = BLOCK_RELATIONS.filter((r) => names.includes(r));
-  return out.length ? [...out] : ["set"];
+  return out.length ? [...out] : ["symbol"];
 }
 
 /** The range switches from an overlay value: unknown names ignored, missing names at their default (server: position_cost.tp_ranges_on). */
@@ -1226,11 +1228,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockCounts: blockCountsOf(cts.blockCounts),
     blockStackType: cts.blockStackType === "shared" ? "shared" : "additive",
     blockSharedTotal: Math.max(0.1, Math.min(3, num(cts.blockSharedTotal, 1))),
-    blockMinObservations: Math.max(1, Math.min(200, Math.round(num(cts.blockMinObservations, 3)))),
+    blockMinObservations: Math.max(1, Math.min(200, Math.round(num(cts.blockMinObservations, 1)))),
     blockRelations: blockRelationsOf(cts.blockRelations),
     blockCarry: bool(cts.blockCarry, false),
     blockPauseSteps: Math.max(0, Math.min(20, Math.round(num(cts.blockPauseSteps, 1)))),
-    blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 0)))),
+    blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 1)))),
     blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
     mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 20))),
     realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 15))),

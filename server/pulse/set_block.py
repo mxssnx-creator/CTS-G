@@ -80,6 +80,7 @@ class SetBlockBook:
         if self.cfg is not None:
             return self.cfg
         cfg = br.clean_cfg({}, max_stack=int(getattr(block, "max_stack", 0) or 3), volume_ratio=float(getattr(block, "volume_ratio", 0.5) or 0.5))
+        cfg.relations, cfg.skip_first = ("set",), 0            # the book without an overlay keeps the earlier reading (the Set's own record, every count)
         cfg.min_obs = max(1, int(getattr(block, "min_samples", 3) or 3))
         cfg.pf_ratio = float(getattr(block, "pf_ratio", 0.8) or 0.8)
         return cfg

@@ -195,7 +195,7 @@ def block_engine_matches_a_plain_reading_of_the_rules():
     ratios = [0.3, 0.6, 0.9]
     with tempfile.TemporaryDirectory() as d:
         book = SetBlockBook(os.path.join(d, "b.json"))
-        book.cfg = br.clean_cfg({"blockCounts": [{"step": 1, "ratio": r} for r in ratios], "blockMinObservations": 2, "blockProfitFactorRatio": 0.8})
+        book.cfg = br.clean_cfg({"blockCounts": [{"step": 1, "ratio": r} for r in ratios], "blockMinObservations": 2, "blockProfitFactorRatio": 0.8, "blockRelations": ["set"], "blockSkipFirst": 0})
         blk = _block_cfg()
         got, qtys = [], []
         for i, ex in enumerate(exits):
@@ -253,7 +253,7 @@ def block_carry_sizes_the_next_parent_of_the_relation():
     for carry in (True, False):
         with tempfile.TemporaryDirectory() as d:
             book = SetBlockBook(os.path.join(d, "b.json"))
-            book.cfg = br.clean_cfg({"blockCarry": carry, "blockPauseSteps": 1, "blockMinObservations": 1,
+            book.cfg = br.clean_cfg({"blockCarry": carry, "blockPauseSteps": 1, "blockMinObservations": 1, "blockRelations": ["set"], "blockSkipFirst": 0,
                                      "blockCounts": [{"step": 1, "ratio": 0.3}, {"step": 1, "ratio": 0.4}, {"step": 1, "ratio": 0.5}]})
             blk = _block_cfg()
             pos = _parent(0)
@@ -273,6 +273,26 @@ def block_carry_sizes_the_next_parent_of_the_relation():
             out[carry] = (lost, back, paused)
     ok = out[True] == ((1.7, 1.0), 1.0, 1) and out[False] == ((1.0, 1.0), 1.0, 0)
     return ok, f"carry on: (scale after a loss, other Set), back at zero, paused {out[True]}; carry off {out[False]}"
+
+
+def block_shipped_defaults_are_the_measured_ones():
+    """Block v2 defaults (measured 2026-11-04, stack_eval block2 on windows C and B, 4,400 ratio combinations and 12,960 settings each; the sealed third read once for
+    four finalists): per-symbol evidence, three counts 3 PositionCosts apart, the first count only collects evidence (skip 1), counts 2 and 3 add 0.5 x the original
+    volume (Additive), no minimum observations, no carry, no window. Every shipped overlay carries them and the engine's own defaults equal them."""
+    import json as _j
+    import block_rules as br
+    from common import PULSE
+    d = br.BlockCfg()
+    want_engine = (d.levels() == [3.0, 6.0, 9.0] and [d.target_ratio(n) for n in (1, 2, 3)] == [0.5, 0.5, 0.5] and d.relations == ("symbol",) and d.skip_first == 1
+                   and d.min_obs == 1 and d.carry is False and d.stack_type == "additive")
+    seen = {}
+    for v in ("bingx", "bybit"):
+        for c in ("x01", "x02"):
+            ov = _j.load(open(os.path.join(PULSE, f"overlay-{v}-{c}.json")))
+            cfg = br.clean_cfg(ov)
+            seen[f"{v}-{c}"] = (cfg.levels(), [cfg.target_ratio(n) for n in (1, 2, 3)], cfg.relations, cfg.skip_first, cfg.min_obs, cfg.carry, cfg.stack_type, "blockEvidenceScope" in ov)
+    ok = want_engine and all(x == ([3.0, 6.0, 9.0], [0.5, 0.5, 0.5], ("symbol",), 1, 1, False, "additive", False) for x in seen.values())
+    return ok, f"engine defaults equal the measured ones: {want_engine}; shipped overlays {sorted(set(map(str, seen.values())))}"
 
 
 def block_stack_types_and_per_count_ratios():
@@ -298,7 +318,7 @@ def block_relations_are_independent_and_all_must_agree():
     with tempfile.TemporaryDirectory() as d:
         book = SetBlockBook(os.path.join(d, "b.json"))
         cfg = _block_cfg()
-        book.cfg = br.clean_cfg({"blockRelations": ["set", "step"], "blockMinObservations": 3, "blockCounts": [{"step": 1, "ratio": 0.5}] * 2})
+        book.cfg = br.clean_cfg({"blockRelations": ["set", "step"], "blockMinObservations": 3, "blockSkipFirst": 0, "blockCounts": [{"step": 1, "ratio": 0.5}] * 2})
         pos = _parent(1)
         keys = book.rel_keys(book.cfg, pos)
         for k in keys:
@@ -351,6 +371,8 @@ def block_parent_unchanged_end_to_end():
         p.block.min_samples = 3
         p.block.pause_ratio = 0
         p.block.volume_ratio = 1
+        import block_rules as _br
+        p.set_block.cfg = p.block_cfg = _br.clean_cfg({"blockCounts": [{"step": 1, "ratio": 1.0}] * 3, "blockRelations": ["set"], "blockSkipFirst": 0, "blockMinObservations": 3})
         before = (pos.base_entry, pos.base_qty, pos.sl, pos.tp, pos.set_hold_bars, pos.opened_at)
         now = time.time()
         for i in range(3):
@@ -463,7 +485,7 @@ def frozen_hold_and_block_intent_failure():
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
     paper_actual_isolation, config_change_invalidates_old_evidence, executed_restart_and_base_attribution,
     axis_continuation_and_set_isolation, block_independent_evidence_and_restart, block_actual_and_paper_costs,
-    block_has_no_window_and_counts_do_not_borrow, block_engine_matches_a_plain_reading_of_the_rules, block_carry_sizes_the_next_parent_of_the_relation, block_stack_types_and_per_count_ratios, block_relations_are_independent_and_all_must_agree,
+    block_has_no_window_and_counts_do_not_borrow, block_engine_matches_a_plain_reading_of_the_rules, block_carry_sizes_the_next_parent_of_the_relation, block_shipped_defaults_are_the_measured_ones, block_stack_types_and_per_count_ratios, block_relations_are_independent_and_all_must_agree,
     block_lifecycle_carries_until_net_is_positive_then_pauses,
     block_parent_unchanged_end_to_end, drawdown_plain_oracle, flat_rsi_and_relation_names,
     fifty_symbol_processing, balance_sizing_and_block_budget, frozen_hold_and_block_intent_failure)]

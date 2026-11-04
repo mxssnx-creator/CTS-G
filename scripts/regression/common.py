@@ -67,6 +67,10 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     ov["slMaxByRange"] = {}       # fixtures keep every SL ratio in every TP range (pinned counts, golden); the shipped overlays cap Long / Wide at 1.0
     ov["volumeByPackKind"] = {}   # fixtures size every Set at the volume factor (the shipped overlays: indications trailing x 3)
     ov["setStepAdapt"] = True     # fixtures keep the step-adapt behaviour their checks pin; the shipped default is off
+    # fixtures keep the Block reading their pinned counts were written for (the Set's own record, every count at its own PositionCost step, 3 observations); the
+    # shipped overlays run Block v2's measured defaults (per-symbol evidence, steps of 3, the first count only observes)
+    ov["blockCounts"] = [{"step": 1, "ratio": 1.0, "on": True} for _ in range(3)]
+    ov["blockRelations"], ov["blockSkipFirst"], ov["blockMinObservations"] = ["set"], 0, 3
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov

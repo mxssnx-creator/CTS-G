@@ -34,15 +34,15 @@ PF_RATIO_MIN, PF_RATIO_MAX = 0.2, 5.0
 
 @dataclass
 class BlockCfg:
-    counts: List[Dict[str, Any]] = field(default_factory=lambda: [{"step": 2.0, "ratio": 0.5, "on": True} for _ in range(3)])
+    counts: List[Dict[str, Any]] = field(default_factory=lambda: [{"step": 3.0, "ratio": 0.5, "on": True} for _ in range(3)])
     stack_type: str = "additive"
     shared_total: float = 1.0           # R of the shared type: the whole add budget in V0
-    min_obs: int = 3                    # observations a count's record needs before it can add (a count, never a window)
+    min_obs: int = 1                    # observations a count's record needs before it can add (a count, never a window; owner 2026-11-04: no minimum-orders gate)
     pf_ratio: float = 0.8
-    relations: Tuple[str, ...] = ("set",)
+    relations: Tuple[str, ...] = ("symbol",)
     carry: bool = False
     pause_steps: int = 1
-    skip_first: int = 0
+    skip_first: int = 1
 
     def levels(self) -> List[float]:
         """The cumulative trigger of every count in PositionCosts (the sum of the steps up to it)."""
@@ -88,7 +88,7 @@ def clean_cfg(raw: Any = None, **legacy: Any) -> BlockCfg:
         n = int(legacy.get("max_stack") or 3)
         r = float(legacy.get("volume_ratio") or 0.5)
         counts = [{"step": 1.0, "ratio": round(max(RATIO_MIN, min(RATIO_MAX, r)), 4), "on": True} for _ in range(max(1, min(COUNTS_MAX, n)))]
-    rel = tuple(x for x in dict.fromkeys(str(r).lower() for r in (ov.get("blockRelations") or ("set",))) if x in RELATIONS) or ("set",)
+    rel = tuple(x for x in dict.fromkeys(str(r).lower() for r in (ov.get("blockRelations") or ("symbol",))) if x in RELATIONS) or ("symbol",)
     st = str(ov.get("blockStackType") or "additive").lower()
 
     def num(key: str, default: float, lo: float, hi: float) -> float:
@@ -98,9 +98,9 @@ def clean_cfg(raw: Any = None, **legacy: Any) -> BlockCfg:
             v = default
         return max(lo, min(hi, v)) if math.isfinite(v) else default
     return BlockCfg(counts=counts, stack_type=st if st in STACK_TYPES else "additive", shared_total=round(num("blockSharedTotal", 1.0, 0.1, 3.0), 4),
-                    min_obs=int(num("blockMinObservations", 3, 1, 200)), pf_ratio=num("blockProfitFactorRatio", 0.8, PF_RATIO_MIN, PF_RATIO_MAX),
+                    min_obs=int(num("blockMinObservations", 1, 1, 200)), pf_ratio=num("blockProfitFactorRatio", 0.8, PF_RATIO_MIN, PF_RATIO_MAX),
                     relations=rel, carry=bool(ov.get("blockCarry", False)), pause_steps=int(num("blockPauseSteps", 1, 0, 20)),
-                    skip_first=int(num("blockSkipFirst", 0, 0, COUNTS_MAX)))
+                    skip_first=int(num("blockSkipFirst", 1, 0, COUNTS_MAX)))
 
 
 # ---- evidence ---------------------------------------------------------------------------------------------------------------------------------------

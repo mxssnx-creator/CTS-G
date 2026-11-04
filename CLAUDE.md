@@ -41,6 +41,21 @@ This section supersedes older operational descriptions and historical measuremen
 - Never clamp Main PF to Base PF, copy selected PF into execution PF, or remove a verified loss to make
   PF higher. Same data and rules must agree; different populations can have different PF.
 
+## Block v2 (2026-11-04): per-count steps and ratios, no windows, measured
+
+- **Rules** (`server/pulse/block_rules.py`, shared by `set_block.SetBlockBook` and `scripts/stack_eval.py --part block2`): each count has its own step (PositionCosts after the
+  count before), ratio (0.1 .. 1.0 x the parent's original volume) and switch; evidence is the cumulative {observations, gains, losses} of ALL observations (no window, no
+  lookback cut); Additive (own ratio) or Shared (one budget split over the counts that are on); relations symbol / indication / set / step, all selected must agree; opt-in
+  carry (a losing parent's level is kept until the relation's net is back positive, then a pause). Desk: Settings "Block v2". State file version 2 (version 1 migrates).
+- **Measured** (3 days each, executed parents of windows C and B, `stack_eval.py`): 12,960 settings per window; minimum observations >= 5 never beat no Block in either window
+  (0 of 4,860), observations 1 is the only value that did (owner rule 2026-11-04: no minimum-orders gate); carry lifts window C through bigger parents (adds' PF 0.3-0.6,
+  drawdown +10 %) and stays off. Best development setting: per-symbol evidence, steps of 3, the first count skipped, counts 2 / 3 at ratio 1.0 (+20 net points on C at add PF 9.5
+  on 32 adds, 3 adds on B). **Sealed third read once for four finalists: C 16 h lost (adds PF 0.09 on 9 adds, net -4.4 .. -7.7 against -1.1 without Block), B won (3 adds all
+  winners, +5.0 .. +6.6 against +3.3).** Across both sealed windows no setting beats no Block (ratio 0.5 / 0.5: +0.56 against +2.24). The development gain was partly selection.
+- **Shipped default** (least harmful measured, not proven): symbol relation, three counts 3 PositionCosts apart, count 1 only observes, counts 2 / 3 add 0.5 x V0, Additive,
+  minimum observations 1, no carry. The risk budget (`blockRiskPctOfBalance` 0.25 % of equity) still caps every add; on a ~25 USDT account it refuses most of them.
+- A defect found by the plain-reading check: the pause engaged with carry off (now only with carry).
+
 ## Live fixes, lane order, Axis / Block / DCA and grid options measured (2026-11-03)
 
 - **Live defects found on local x02 and fixed (each with a check):** the load governor's fixed 156 MB hard limit was under the Set book's footprint and

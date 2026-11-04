@@ -275,5 +275,30 @@
   },
   "leverageStopCap": false,
   "stratBlock": true,
-  "blockEvidenceScope": "set"
+  "blockCounts": [
+    {
+      "step": 3,
+      "ratio": 0.5,
+      "on": true
+    },
+    {
+      "step": 3,
+      "ratio": 0.5,
+      "on": true
+    },
+    {
+      "step": 3,
+      "ratio": 0.5,
+      "on": true
+    }
+  ],
+  "blockStackType": "additive",
+  "blockSharedTotal": 1.0,
+  "blockMinObservations": 1,
+  "blockRelations": [
+    "symbol"
+  ],
+  "blockCarry": false,
+  "blockPauseSteps": 1,
+  "blockSkipFirst": 1
 }

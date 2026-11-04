@@ -269,6 +269,8 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
             st.stage = {"pos": True, "negl": False}
             p.ensure_controls = lambda pos_: None
             p.block.min_samples, p.block.pause_ratio, p.block.volume_ratio = 3, 0, 1
+            import block_rules as _br
+            p.set_block.cfg = p.block_cfg = _br.clean_cfg({"blockCounts": [{"step": 1, "ratio": 1.0}] * 3, "blockRelations": ["set"], "blockSkipFirst": 0, "blockMinObservations": 3})
             co = Coordinator()
             co.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": True,
                          "setMinPf": 1.25, "minPf": 1.25})

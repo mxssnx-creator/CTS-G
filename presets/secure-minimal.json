@@ -11,6 +11,32 @@
   "leverage": 1,
   "useMaxLeverage": false,
   "leverageStopCap": false,
+  "blockCounts": [
+    {
+      "step": 3,
+      "ratio": 0.5,
+      "on": true
+    },
+    {
+      "step": 3,
+      "ratio": 0.5,
+      "on": true
+    },
+    {
+      "step": 3,
+      "ratio": 0.5,
+      "on": true
+    }
+  ],
+  "blockStackType": "additive",
+  "blockSharedTotal": 1,
+  "blockMinObservations": 1,
+  "blockRelations": [
+    "symbol"
+  ],
+  "blockCarry": false,
+  "blockPauseSteps": 1,
+  "blockSkipFirst": 1,
   "maxOpen": 2,
   "maxPerGroup": 1,
   "symbolsAll": true,
