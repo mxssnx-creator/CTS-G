@@ -302,5 +302,7 @@
   ],
   "blockCarry": false,
   "blockPauseSteps": 1,
-  "blockSkipFirst": 1
+  "blockSkipFirst": 1,
+  "stratTrend": true,
+  "stratBreakout": true
 }
