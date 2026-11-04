@@ -74,6 +74,7 @@ def main() -> int:
     ap.add_argument("--axis-arms", default="", help="JSON list of Axis arms to run instead of the built-in grid")
     ap.add_argument("--block-candidates", default="", help="part block2: JSON file, a list of {label, cfg} (cfg = Block v2 overlay keys, block_rules.clean_cfg)")
     a = ap.parse_args()
+    parts = {x.strip() for x in a.part.split(",") if x.strip()}      # exact part names ("block" must not match "block2")
     os.environ["STAGE_OVERLAY_PATCH"] = a.patch or "{}"
     import stage_eval as sg  # noqa: E402  (reads STAGE_OVERLAY_PATCH)
     import replay_cache  # noqa: E402
@@ -150,7 +151,7 @@ def main() -> int:
         axis_arms = [(x["label"], {k: tuple(x.get(k, off[k])) for k in off}, bool(x.get("linked", True))) for x in json.loads(a.axis_arms)]
     parents_by_axis: Dict[str, List[Dict[str, Any]]] = {"none": base}
     coords: Dict[str, Any] = {}
-    if "axis" in a.part:
+    if "axis" in parts:
         for label, axes, linked in axis_arms:
             t1 = time.time()
             c = coord_for(axes, linked)
@@ -218,7 +219,7 @@ def main() -> int:
             return a_, v_
         return pick
 
-    if "axissets" in a.part:
+    if "axissets" in parts:
         arms_as = [("choose per Set (14 settings), flat volume", {"n": 25, "min_n": 8, "margin": 1.05}),
                    ("choose per Set, the Axis Set must reach its floor", {"n": 25, "min_n": 8, "margin": 1.05, "strict": True}),
                    ("choose per Set, volume by Axis-Set PF", {"n": 25, "min_n": 8, "margin": 1.05, "vol": "pf"}),
@@ -357,7 +358,7 @@ def main() -> int:
             paper.setdefault(key, []).extend(obs_here)
         return events, adds, add_nets
 
-    if "block" in a.part:
+    if "block" in parts:
         base_cfg = {"max_stack": 6, "vol": 1.0, "pf_ratio": 0.8, "min_n": 8, "window": 25, "pause": 1, "scope": "engine"}
         arms = [("engine default (6 groups, ratio 1, 8 samples, pause 1)", {})]
         for scope in ("set", "tape-sym", "tape"):
@@ -460,7 +461,7 @@ def main() -> int:
                 b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
         return events, adds, add_nets
 
-    if "block2" in a.part:
+    if "block2" in parts:
         import block_rules as br
         cands = json.load(open(a.block_candidates)) if a.block_candidates else [{"label": "default", "cfg": {}}]
         out["block2"] = {"baseline": summarize(parent_events(base), len(base), 0, run_hours), "results": {}}
@@ -515,7 +516,7 @@ def main() -> int:
             adds += 1
         return events, adds, add_nets
 
-    if "dca" in a.part:
+    if "dca" in parts:
         base_dca = {"frac": 0.4, "mult": 0.5, "max_expo": 2.0, "gate": "sets", "deact": True}
         arms = [("auto plan (0.4 x stop, 0.5 x, on Sets, self-off)", {})]
         for fr in (0.25, 0.6, 0.8):
