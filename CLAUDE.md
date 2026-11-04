@@ -12,6 +12,14 @@
   the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
   change `EQ_MIN` or reset the start equity without an explicit instruction.
 
+- **2026-11-04, owner: "Make stages and last N work for each config possibility / lane independent."** `lastNByRange` (overlay, desk Settings table "Last N per TP range"): each TP range (micro, minimal,
+  short, normal, long, wide) may carry its own Base long / short (`baseLong` 10-200, `baseShort` 0-200), Main long / short candidates (`mainLong`, `mainShort`), Negative windows (`negWindows`), Real
+  window (`realN`) and Real Negative window (`realNegN`, new: the two lanes no longer have to share one N); a missing range or key uses the global window (`setGateWindow` ... `realGateN`), a short
+  window is capped at its long window x the ratio, so an unset overlay is byte-identical (golden unchanged). One accessor, `SetBook.win(st)` (`set_engine.LastN`), feeds `stage_params`, `_score_one`,
+  `gate_reason`, `rank_key`, the executed-lane window and the lane rank; the simulator reads the same accessor (`stage_eval`: Base eval, window figures, Axis/Block floors, processed tail, gate_until). The
+  statistics rows (`pfBase.windows`, `stages`) still print the global windows; the older audit scripts (`main_stage_audit`, `independent_progress_audit`, `window_grid` ...) assume the global ones and
+  must be run with `lastNByRange` empty. Checks `stages.last-n-windows-are-independent-per-tp-range`, `processing.sim-gate-equals-the-engine-for-every-window-configuration` (now with two per-range
+  configurations: engine and simulator agree on 936 sampled pairs). Not enabled anywhere: no per-range value was measured better yet.
 - **2026-11-04, owner (newest): "Refresh drawdown halt. And on each session money got transferred."** The drawdown halt was refreshed explicitly (x01, 11:35 UTC, the engine's own `reset-eq-bingx-x01` marker, the same
   path the desk Start uses): start equity 27.6997 -> 28.2555, session start equity 128.3826 -> 28.2555 (the 100 USDT that left the account had read as 78.5 % drawdown against the 80 % halt); ddHaltPct 80 and EQ_MIN unchanged.
   From now on a deposit or withdrawal moves the basis instead of reading as a gain or loss: `Pulse.check_transfer` (every balance read) takes the wallet-balance change, subtracts the venue income feed
@@ -819,6 +827,12 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). The Base gate
   (`setUseHistoricGate` true) is the default on every connection: entries open only under a Base-validated Set. (x02 ran
   with it off from 01e842b, 2026-10-21, until 2026-10-28; switched back on by the owner.) Credentials are never printed or stored in the repo; rotate any that appeared in a session.
+- **Positions survive an outage (2026-11-04, owner: "All positions got closed ... keep pos running and continue on crash, reloads").** After the 8 h outage the engine's 6 h time exit (hold from `opened_at`) closed 27 open positions
+  the moment it was back, because their hold had "run out" while nothing watched them (20 more left on their venue-side target, 20 on their stop). Now a restart credits the downtime to every open position
+  (`Position.hold_credit_s`, from the previous run's last sign of life, at most 24 h per restart and 72 h in all; `credit_restart_downtime` runs before the restored book is reconciled), the time and scratch exits
+  read `position_age`, and positions keep their venue-side stop and target throughout. The overlay hot reload and a Set rebuild never close anything (a Set that stops passing keeps its open positions on its own
+  lane); `flatten_untracked` and `flatten_all` have no caller. Check `trader.restart-credits-the-downtime-so-positions-keep-running`. A position that is simply held longer than its replay's hold keeps the venue stop,
+  so the risk is the stop's, not a larger one; the replay-vs-live gap of a late exit is not modelled.
 - **Engine restart after a container restart (2026-11-04).** The container restarted five times in one day and the x01 engine stayed dead for 25 minutes to 4 hours each time (its positions kept their venue-side
   stop / target orders, but nothing managed trailing, time exits, Block adds or new entries). `scripts/ensure_x01.sh` (idempotent, x01 only, never touches the halt / start equity / EQ_MIN / STOP / PAUSE / reset files)
   is run by the committed SessionStart hook in `.claude/settings.json`, so every session that starts in the container brings the engine back at once. It is not a supervisor: with no session and no

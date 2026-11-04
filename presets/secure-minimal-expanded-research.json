@@ -349,5 +349,6 @@
   "blockSkipFirst": 1,
   "minPfStepAutoHigh": 2,
   "manualCloseRestMin": 240,
-  "transferAdjust": true
+  "transferAdjust": true,
+  "lastNByRange": {}
 }

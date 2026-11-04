@@ -225,7 +225,7 @@ def main() -> int:
             key = (st.idx, lane, now)
             if key not in ax_cache:
                 auto.apply(book, float(int(now // 3600) * 3600))
-                floor = float(book.floor_for(book.realst_n, st.pack, st))
+                floor = float(book.floor_for(book.win(st).real_n, st.pack, st))
                 rows = sg.lane_stream_entries(book, tapes, st, now, lane)
                 exits = [r[0] for r in rows]
                 nets = [r[2] for r in rows]
@@ -369,7 +369,7 @@ def main() -> int:
                 vals = [g - cf for _t, _n, g in src]
                 if floor is None:
                     auto.apply(book, float(int(now // 3600) * 3600))
-                    floor = float(book.floor_for(book.realst_n, st.pack, st))
+                    floor = float(book.floor_for(book.win(st).real_n, st.pack, st))
                 thr = max(floor, calculate_block_minimum_profit_factor(floor, max(BLOCK_PF_RATIO_MIN, min(BLOCK_PF_RATIO_MAX, pf_ratio)), (filled + 1) * vol))
                 if len(vals) < min_n or (pf(vals) or 0.0) + 1e-9 < thr:
                     continue
@@ -469,7 +469,7 @@ def main() -> int:
                 fk = (m["st"].idx, hr)
                 if fk not in floor_memo:           # the Auto floor of a Set at an hour never changes between candidates: learn it once
                     auto.apply(book, hr)
-                    floor_memo[fk] = float(book.floor_for(book.realst_n, m["st"].pack, m["st"]))
+                    floor_memo[fk] = float(book.floor_for(book.win(m["st"]).real_n, m["st"].pack, m["st"]))
                 floor = floor_memo[fk]
                 fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
                 if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):

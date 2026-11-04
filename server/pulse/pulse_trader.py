@@ -405,6 +405,28 @@ def transfer_residual(delta_wallet: float, income_sum: float, balance: float) ->
     return resid if abs(resid) >= transfer_tolerance(balance) else 0.0
 
 
+DOWNTIME_CREDIT_MAX_S = 24 * 3600.0       # most one restart credits to a position's hold clock
+DOWNTIME_CREDIT_TOTAL_S = 72 * 3600.0     # most a position's hold clock can carry over all restarts
+
+
+def position_age(pos: Any, now: float) -> float:
+    """Seconds a position has been managed: since it opened, minus the time the engine was down while it was open (hold_credit_s). The time exit and the scratch exit read this,
+    so a crash, a container restart or a reload never closes a position early because its hold ran out while nothing was watching it."""
+    return max(0.0, float(now) - float(getattr(pos, "opened_at", 0.0) or 0.0) - float(getattr(pos, "hold_credit_s", 0.0) or 0.0))
+
+
+def downtime_credit(prev_end: Any, now: float, already: float = 0.0) -> float:
+    """The seconds to credit a position that was open across a restart: the gap between the previous run's last sign of life and now, at most a day, and never
+    beyond the 72 h total; 0 for an unknown previous end."""
+    try:
+        end = float(prev_end or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if end <= 0 or end > now:
+        return 0.0
+    return max(0.0, min(DOWNTIME_CREDIT_MAX_S, now - end, DOWNTIME_CREDIT_TOTAL_S - float(already or 0.0)))
+
+
 def manual_rest_key(symbol: str, side: str) -> str:
     return f"{symbol}:{str(side).upper()}"
 
@@ -834,6 +856,7 @@ class Position:
     base_entry: float = 0.0                    # immutable Set entry, apart from the exchange's averaged position entry
     base_qty: float = 0.0
     set_hold_bars: int = 0                    # hold selected at entry; later replay choices cannot change it
+    hold_credit_s: float = 0.0                # seconds the engine was not running while this position was open: they do not count against its hold (owner 2026-11-04)
     block_fills: list = field(default_factory=list)
     block_pending: dict = field(default_factory=dict)
     entry_fee_usdt: Optional[float] = None
@@ -3991,6 +4014,23 @@ class Pulse:
         self.save_open_book()
         return pos.qty <= tolerance
 
+    def credit_restart_downtime(self) -> float:
+        """Positions that survived a restart (crash, kill, container stop, deploy) keep their hold clock where it stood: the time the engine was down is credited to each
+        (`hold_credit_s`), so the 6 h time exit does not close the whole book the moment the engine is back. The venue-side stop and target kept protecting them meanwhile."""
+        now = time.time()
+        prev_end = (getattr(self, "last_run", None) or {}).get("previousEnd")
+        n, total = 0, 0.0
+        for pos in self.open.values():
+            c = downtime_credit(prev_end, now, getattr(pos, "hold_credit_s", 0.0))
+            if c > 0:
+                pos.hold_credit_s = float(getattr(pos, "hold_credit_s", 0.0) or 0.0) + c
+                n += 1
+                total += c
+        if n:
+            self.save_open_book()
+            log(f"RESTART credit: {n} open positions keep their hold clock, {total / n / 60:.0f} min of downtime credited on average")
+        return total
+
     def reconcile_restored_book(self) -> None:
         """Positions in the saved book that the venue no longer holds were closed there (by their own stop or TP) while the
         engine was down. Settle them from one positions read before the first cycle, sending no order: a close or a stop for
@@ -4366,7 +4406,7 @@ class Pulse:
             key = f"{pos.symbol}:{pos.client_id}"
             if seen.get(key) != minute:
                 seen[key] = minute
-                held = (minute + 1) * 60.0 - float(pos.opened_at)
+                held = (minute + 1) * 60.0 - float(pos.opened_at) - float(getattr(pos, "hold_credit_s", 0.0) or 0.0)
                 if held >= float(self.sets.scratch_bars) * 60.0 and (close - e) / e * side >= float(self.sets.scratch_min):
                     self.close_pos(pos, px, "scratch+")
 
@@ -4383,7 +4423,7 @@ class Pulse:
                 continue
             if px <= 0:
                 continue
-            age = now - pos.opened_at
+            age = position_age(pos, now)
             if age >= MAX_HOLD_S and not pos.set_id:
                 # a Set position leaves on its own time exit (hist_time_bars), the one the replay validated
                 self.close_pos(pos, px, "max-hold-6h")
@@ -4467,7 +4507,7 @@ class Pulse:
                         if not self.replace_sl(pos, trail):
                             pos.trail = prev
             if not self.exits.enabled:
-                age = now - pos.opened_at
+                age = position_age(pos, now)
                 if age >= TIME_STOP_S and (pnl_pct >= 0.0012 or pnl_pct <= -0.0025):
                     self.close_pos(pos, px, "time")
                     continue
@@ -7386,6 +7426,10 @@ class Pulse:
         except Exception:
             pass
         sd_notify("WATCHDOG=1")
+        try:
+            self.credit_restart_downtime()
+        except Exception:
+            log("credit_restart_downtime failed: " + traceback.format_exc()[-160:])
         try:
             self.reconcile_restored_book()
         except Exception:

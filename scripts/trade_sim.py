@@ -157,7 +157,7 @@ def main() -> int:
                 groups[k]["set_evals"] += 1
             if not ok:
                 continue
-            tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.gate_window)
+            tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.win(st).base_long)
             gp = sum(x - cf for x in pp if x - cf > 0)
             gl = -sum(x - cf for x in pp if x - cf < 0)
             txa, _tea, ppa = tapes.by_set[st.idx]

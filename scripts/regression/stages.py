@@ -732,7 +732,48 @@ def independent_all_range_stage_oracle():
     return result.returncode == 0, (result.stdout.strip() or result.stderr.strip())[-450:]
 
 
+def last_n_windows_are_independent_per_tp_range():
+    """Owner 2026-11-04 ("stages and last N work for each config possibility / lane independent"): lastNByRange gives every TP range its own Base long / short, Main long /
+    short candidates, Negative, Real and Real Negative windows. A Set of an overridden range is scored on ITS windows (the engine's _score_one numbers equal a plain
+    reading of its last N results), a Set of any other range and the global values are untouched, a short window never exceeds its long window's ratio, the lanes
+    (Real and Real Negative) take their own N, bad entries are dropped, and with no override the windows are the global ones."""
+    import time as _t
+    ov_range = {"minimal": {"baseLong": 12, "baseShort": 99, "mainLong": 10, "mainShort": [3, 5, 40], "negWindows": "1,2", "realN": 2, "realNegN": 3},
+                "bogus": {"baseLong": 5}, "micro": {"baseLong": "x", "realN": 400}}
+    parsed = se.last_n_by_range_of(ov_range)
+    plain = SetBook()
+    plain.load(overlay(**{**SMALL, "setStepMax": 6}, stratShortRange=False, stratGeneral=False, minPfByStep=False, setMinPf=0.5, setGateMinTrades=0, setMaxDdtHours=36))
+    book = SetBook()
+    book.load(overlay(**{**SMALL, "setStepMax": 6}, stratShortRange=False, stratGeneral=False, minPfByStep=False, setMinPf=0.5, setGateMinTrades=0, setMaxDdtHours=36, lastNByRange=ov_range))
+    mins = [x for x in book.by_idx if x.kind == "base" and se.tp_range_of(book.step_bucket(x)) == "minimal"]
+    micro = [x for x in book.by_idx if x.kind == "base" and se.tp_range_of(book.step_bucket(x)) == "micro"]
+    wm, wmicro, wg = book.win(mins[0]), book.win(micro[0]), plain.win(plain.by_idx[0])
+    cf = book.cost_pct / 100.0
+    rows = []
+    t0 = _t.time() - 5000
+    for i in range(40):
+        rows.append({"t": t0 + i * 60, "pnl": 0.0, "pnl_pct": (0.004 if i % 3 else -0.006) + cf, "hold_s": 30.0, "reason": "x"})
+    scored = {}
+    for tag, bk in (("override", book), ("plain", plain)):
+        st = [x for x in bk.by_idx if x.kind == "base" and se.tp_range_of(bk.step_bucket(x)) == "minimal"][0]
+        st.hist, st.live = [dict(r) for r in rows], []
+        bk._score_one(st, now=t0 + 41 * 60)
+        scored[tag] = (st.gate_n, st.base_short_n, round(st.gate_gp, 9), round(st.gate_gl, 9), st.stage_params if False else bk.stage_params(st.pack, st))
+    nets = [r["pnl_pct"] - cf for r in rows][-12:]
+    gp, gl = round(sum(x for x in nets if x > 0), 9), round(-sum(x for x in nets if x < 0), 9)
+    P = scored["override"][4]
+    ok = (set(parsed) == {"minimal", "micro"} and parsed["minimal"]["baseLong"] == 12 and parsed["minimal"]["mainShort"] == (3, 5, 40) and parsed["micro"] == {"realN": 200}
+          and (wm.base_long, wm.main_n, wm.real_n, wm.real_neg_n, wm.neg_windows) == (12, 10, 2, 3, (1, 2))
+          and wm.base_short == min(6, 99) and wm.short_windows == (3, 5)                      # long 12 x 0.5 = 6; long 10 x 0.5 = 5: 40 is over the cap
+          and wmicro.base_long == wg.base_long and wmicro.real_n == 200 and wmicro.real_neg_n == 200 and wmicro.main_n == wg.main_n
+          and scored["override"][:4] == (12, 6, gp, gl) and scored["plain"][0] == 40 and scored["plain"][1] == wg.base_short and scored["plain"][0] != scored["override"][0]
+          and (P.base_long, P.base_short, P.main_n, P.real_n, P.real_neg_n) == (12, 6, 10, 2, 3)
+          and book.gate_window_max == max(book.gate_window, 12) and plain.last_n_by_range == {} and plain.win(plain.by_idx[0]) == plain.win(None))
+    return ok, f"override Set scored on {scored['override'][:2]} (plain reading gains {gp} losses {gl}), plain book {scored['plain'][:2]}; minimal windows {wm}; micro {wmicro}; parsed {parsed}"
+
+
 CHECKS = [
+    ("stages.last-n-windows-are-independent-per-tp-range", last_n_windows_are_independent_per_tp_range),
     ("stages.independent-all-range-oracle", independent_all_range_stage_oracle),
     ("stages.independent-strategy-switches", independent_strategy_switches),
     ("stages.paper-scope-clock-isolation-and-bounded-work", paper_scope_cutoffs_isolation_and_bounded_work),

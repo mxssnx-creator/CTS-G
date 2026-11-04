@@ -53,6 +53,8 @@ import {
   manualStepPf,
   stepPfRatio,
   TP_RANGES,
+  LAST_N_FIELDS,
+  lastNByRangeOf,
   TP_STEP_MAX,
   TP_STEP_DEFAULT_MAX,
   TP_STEP_MIN,
@@ -783,6 +785,49 @@ function SettingsPage() {
                     }}
                   />
                 ))}
+                <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
+                  Last N per TP range · each range its own Base / Main / Negative / Real windows (blank = the global window); the Real and Real Neg lanes take their own N
+                </div>
+                <div className="col-span-full overflow-x-auto">
+                  <table className="w-full font-mono text-[11px]">
+                    <thead>
+                      <tr>
+                        <th className="text-left">Range</th>
+                        {LAST_N_FIELDS.map((f) => (
+                          <th key={f.key} className="text-left">{f.label}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {TP_RANGES.map((r) => (
+                        <tr key={`lastn-${r.id}`}>
+                          <td>{r.label}</td>
+                          {LAST_N_FIELDS.map((f) => {
+                            const cur = (overlay.lastNByRange ?? {})[r.id]?.[f.key];
+                            return (
+                              <td key={f.key}>
+                                <input
+                                  className="w-20 rounded border border-line bg-transparent px-1"
+                                  defaultValue={Array.isArray(cur) ? cur.join(",") : cur ?? ""}
+                                  placeholder="global"
+                                  onBlur={(e) => {
+                                    const next = { ...(overlay.lastNByRange ?? {}) } as Record<string, Record<string, unknown>>;
+                                    const row = { ...(next[r.id] ?? {}) };
+                                    if (e.target.value.trim() === "") delete row[f.key];
+                                    else row[f.key] = e.target.value;
+                                    if (Object.keys(row).length) next[r.id] = row;
+                                    else delete next[r.id];
+                                    patch("lastNByRange", lastNByRangeOf(next));
+                                  }}
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
                 <Toggle
                   label="Tight stops: SL ratios 0.2 / 0.3 / 0.4 × TP (only where the floored stop differs from every other ratio's)"
                   on={overlay.setSlLow === true}

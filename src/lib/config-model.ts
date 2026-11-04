@@ -444,6 +444,8 @@ export type PulseOverlay = {
   volumeByPackKind: Record<string, number>;
   /** Largest SL ratio per TP range (server: set_engine.SL_MAX_BY_RANGE_DEFAULT: Long and Wide 1.0). */
   slMaxByRange: Record<string, number>;
+  /** Last-N windows per TP range (server: set_engine.last_n_by_range_of): a range that is absent, or a key that is absent, uses the global window. */
+  lastNByRange: Record<string, LastNOverride>;
   /** Exit Sets (no-TP Sets) per indication pack: missing = on. */
   exitSetsByPack: Record<string, boolean>;
   /** Named trailing ranges by the arm's step (Micro .. Wide): missing = on. */
@@ -717,6 +719,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeByRange: {},
   volumeByPackKind: {},
   slMaxByRange: { long: 1, wide: 1 },
+  lastNByRange: {},
   exitSetsByPack: { indications: false }, // shipped: the indications pack's Exit Sets off (measured 2026-11-03)
   trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
   trailPick: "after",
@@ -963,6 +966,7 @@ export type CtsSettings = {
   volumeByRange?: Record<string, number>;
   volumeByPackKind?: Record<string, number>;
   slMaxByRange?: Record<string, number>;
+  lastNByRange?: Record<string, LastNOverride>;
   exitSetsByPack?: Record<string, boolean>;
   trailRanges?: Partial<Record<string, boolean>>;
   trailPick?: string;
@@ -1148,6 +1152,40 @@ function slMaxByRangeOf(raw: unknown): Record<string, number> {
       .filter(([k, v]) => ids.includes(k) && Number.isFinite(Number(v)) && Number(v) > 0)
       .map(([k, v]) => [k, Math.max(0.2, Math.min(3.5, Number(v)))]),
   );
+}
+
+export type LastNOverride = { baseLong?: number; baseShort?: number; mainLong?: number; mainShort?: number[]; negWindows?: number[]; realN?: number; realNegN?: number };
+export const LAST_N_FIELDS: { key: keyof LastNOverride; label: string; lo: number; hi: number; list?: boolean }[] = [
+  { key: "baseLong", label: "Base long", lo: 10, hi: 200 },
+  { key: "baseShort", label: "Base short", lo: 0, hi: 200 },
+  { key: "mainLong", label: "Main long", lo: 10, hi: 200 },
+  { key: "mainShort", label: "Main short", lo: 1, hi: 200, list: true },
+  { key: "negWindows", label: "Negative", lo: 1, hi: 200, list: true },
+  { key: "realN", label: "Real", lo: 1, hi: 200 },
+  { key: "realNegN", label: "Real Neg", lo: 1, hi: 200 },
+];
+
+/** lastNByRange from a settings file: only known ranges and keys, each bounded (server: set_engine.last_n_by_range_of). */
+export function lastNByRangeOf(raw: unknown): Record<string, LastNOverride> {
+  if (!raw || typeof raw !== "object") return {};
+  const ids = TP_RANGES.map((r) => r.id) as string[];
+  const out: Record<string, LastNOverride> = {};
+  for (const [rng, o] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ids.includes(rng) || !o || typeof o !== "object") continue;
+    const got: Record<string, number | number[]> = {};
+    for (const f of LAST_N_FIELDS) {
+      const v = (o as Record<string, unknown>)[f.key];
+      if (v === undefined || v === null || v === "") continue;
+      if (f.list) {
+        const arr = (Array.isArray(v) ? v : String(v).split(/[,;]/)).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= 1 && x <= 200);
+        if (arr.length) got[f.key] = Array.from(new Set(arr)).sort((a, b) => a - b);
+      } else if (Number.isFinite(Number(v))) {
+        got[f.key] = Math.max(f.lo, Math.min(f.hi, Math.round(Number(v))));
+      }
+    }
+    if (Object.keys(got).length) out[rng] = got as LastNOverride;
+  }
+  return out;
 }
 
 /** How a lane's trailing Sets compete with its base and Exit Sets (server: set_engine.KIND_ORDERS). */
@@ -1404,6 +1442,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     volumeByRange: volumeMultsOf(cts.volumeByRange),
     volumeByPackKind: cts.volumeByPackKind && typeof cts.volumeByPackKind === "object" ? volumeMultsOf(cts.volumeByPackKind) : {},
     slMaxByRange: slMaxByRangeOf(cts.slMaxByRange),
+    lastNByRange: lastNByRangeOf(cts.lastNByRange),
     exitSetsByPack: Object.fromEntries(
       Object.entries(cts.exitSetsByPack && typeof cts.exitSetsByPack === "object" ? cts.exitSetsByPack : {}).filter(([, v]) => typeof v === "boolean"),
     ) as Record<string, boolean>,

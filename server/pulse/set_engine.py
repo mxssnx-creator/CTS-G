@@ -382,6 +382,50 @@ def lane_rank_of(stats: Sequence[float], floor: float, max_dd_s: float) -> Tuple
     return (halves + 1e-9 >= floor, round(shrunk, 4), int(n), r25, -max_dd_s)
 
 
+LAST_N_KEYS = ("baseLong", "baseShort", "mainLong", "mainShort", "negWindows", "realN", "realNegN")
+
+
+@dataclass(frozen=True)
+class LastN:
+    """The last-N windows of one Set (owner 2026-11-04: stages and last N independent per config): the Base long / short, the Main long and its short candidates,
+    the Negative windows, the Real window and the Real Negative window. SetBook.win(st) gives a Set its TP range's values (lastNByRange), else the global ones."""
+    base_long: int
+    base_short: int
+    main_n: int
+    short_windows: Tuple[int, ...]
+    neg_windows: Tuple[int, ...]
+    real_n: int
+    real_neg_n: int
+
+
+def last_n_by_range_of(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """lastNByRange {range: {baseLong, baseShort, mainLong, mainShort [..], negWindows [..], realN, realNegN}}: only known ranges and keys, every value bounded
+    (long windows 10..200, a short window 0..200 and capped by its long window at use, Real windows 1..200); an unreadable value is dropped, never read as zero."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    known = {n for n, _lo, _hi in TP_RANGES}
+    for rng, o in raw.items():
+        if str(rng).lower() not in known or not isinstance(o, dict):
+            continue
+        got: Dict[str, Any] = {}
+        for key, lo, hi in (("baseLong", 10, 200), ("baseShort", 0, 200), ("mainLong", 10, 200), ("realN", 1, 200), ("realNegN", 1, 200)):
+            if key in o:
+                try:
+                    v = int(round(float(o[key])))
+                except (TypeError, ValueError):
+                    continue
+                got[key] = max(lo, min(hi, v))
+        for key in ("mainShort", "negWindows"):
+            if key in o:
+                w = parse_windows(o[key], ())
+                if w:
+                    got[key] = tuple(w)
+        if got:
+            out[str(rng).lower()] = got
+    return out
+
+
 @dataclass
 class StageParams:
     """Every rule of the Base -> Main -> Real chain for one pack (SetBook.stage_params)."""
@@ -413,6 +457,7 @@ class StageParams:
     main_min_avg: bool = False      # mainMinMode avg*
     size_floors: Tuple[Tuple[int, float], ...] = ()   # minimum PF by window size: ((up to N orders, PF), ...) ascending; empty = floor for every window
     long_floor: float = 0.0         # the minimum PF of a window longer than the last bound
+    real_neg_n: int = 0             # Real Negative lane: its own last N (lastNByRange realNegN); 0 = the Real window real_n
 
     def floor_for(self, n: int) -> float:
         """The minimum PF a window of n orders asks (minPfBySize: Micro / Minimal / Short / Medium / Long), or the one floor."""
@@ -741,7 +786,7 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
         k_ok, k_n = True, 0
     neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)
     r_ok, r_pf, r_n = last_ok(real, P.real_n)
-    q_ok, q_pf, q_n = last_ok(realneg, P.real_n)
+    q_ok, q_pf, q_n = last_ok(realneg, P.real_neg_n or P.real_n)
     main_pass = (m_ok and s_ok and k_ok) if P.main_on else True
     return {"main": m_ok, "main_pf": m_pf, "main_n": m_n, "short": s_ok, "short_pf": s_pf, "short_n": s_n, "short_win": short_n,
             "minimal": k_ok, "minimal_n": k_n, "neg": neg,
@@ -1846,6 +1891,8 @@ class SetBook:
         self.neg_windows: Tuple[int, ...] = MAIN_NEG_WINDOWS
         self.realst_on = True
         self.realst_n = REAL_GATE_N_DEFAULT
+        self.last_n_by_range: Dict[str, Dict[str, Any]] = {}   # lastNByRange: per TP range last-N windows (absent: the global ones)
+        self.gate_window_max = GATE_WINDOW_DEFAULT
         self.stage_full = False
         self.stages_on = True
         self.min_bars = 120
@@ -2088,6 +2135,8 @@ class SetBook:
         self.neg_windows = parse_windows(ov.get("mainNegWindows"), MAIN_NEG_WINDOWS)
         self.realst_on = self.stages_on and bool(ov.get("realGateEnabled", True))
         self.realst_n = max(1, min(200, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))     # 1..200: the ongoing window may be a single result
+        self.last_n_by_range = last_n_by_range_of(ov.get("lastNByRange"))
+        self.gate_window_max = max([self.gate_window] + [int(o["baseLong"]) for o in self.last_n_by_range.values() if "baseLong" in o])
         self.stage_full = bool(ov.get("stageFullWindow", False))      # False (default): every stage window judges the orders it has, at least one
         self.min_pf = base_min_pf(ov)          # at least MIN_PF_FLOOR (1.1)
         # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
@@ -3071,7 +3120,7 @@ class SetBook:
                             full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
                             self.set_processed(st, full, now=now)
                             visible = [r for r in full if r[0] >= cutoff]
-                            st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window):]]
+                            st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window_max):]]
                             st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                             self._score_one(st, now=max(now, st.score_at) if st.live else now)
                             st.n = len(visible)           # paper count in the evaluation window
@@ -3320,7 +3369,7 @@ class SetBook:
         scored = [st for st in self.by_idx if not st.locked and not st.last_error]
         if len(scored) < 20 or not self._hist_rows:
             return
-        target = min(self.gate_window, max(self.gate_min, self.lookback_sample_target))
+        target = min(self.gate_window_max, max(self.gate_min, self.lookback_sample_target))
         short = sum(1 for st in scored if st.gate_n < target)
         if short / len(scored) >= LOOKBACK_SHORT_SHARE:
             self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)
@@ -3486,18 +3535,39 @@ class SetBook:
             return self.size_long_pf
         return self.pack_min_pf.get(pack, self.min_pf)
 
+    def win(self, st: Optional["SetState"]) -> LastN:
+        """The last-N windows of one Set: its TP range's lastNByRange values (owner 2026-11-04: stages and last N independent per config), the global ones for what is
+        not set. A short window stays under shortMaxRatio of its long window; the Real Negative window follows the Real one unless set."""
+        g = LastN(self.gate_window, self.base_short, self.main_n, tuple(self.short_windows), tuple(self.neg_windows), self.realst_n, self.realst_n)
+        if st is None or not self.last_n_by_range:
+            return g
+        o = self.last_n_by_range.get(tp_range_of(self.step_bucket(st)))
+        if not o:
+            return g
+        bl = int(o.get("baseLong", g.base_long))
+        bs = 0
+        if self.stages_on:
+            bs = min(max(1, int(bl * self.short_max_ratio + 1e-9)), int(o["baseShort"])) if "baseShort" in o else min(g.base_short, max(1, int(bl * self.short_max_ratio + 1e-9)))
+        ml = int(o.get("mainLong", g.main_n))
+        scap = max(1, int(ml * self.short_ratio + 1e-9))
+        sw = tuple(w for w in o.get("mainShort", g.short_windows) if w <= scap)
+        rn = int(o.get("realN", g.real_n))
+        rnn = int(o["realNegN"]) if "realNegN" in o else (rn if "realN" in o else g.real_neg_n)
+        return LastN(bl, bs, ml, sw, tuple(o.get("negWindows", g.neg_windows)), rn, rnn)
+
     def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
         """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
         by_step = self.pf_by_step and st is not None and not is_signal_pack(pack)
         step_floor = self.step_floor(st) if by_step else 0.0
-        return StageParams(base_long=self.gate_window, base_short=self.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
-                           gate_min=self.gate_min,
+        w = self.win(st)
+        return StageParams(base_long=w.base_long, base_short=w.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
+                           gate_min=min(self.gate_min, w.base_long),
                            floor=step_floor if by_step else (self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf)),
                            max_dd_s=self.max_dd_s, lookback_s=self._evidence_lookback() * BAR_S,
                            size_floors=self.size_floors if self.pf_by_size and not by_step and not is_signal_pack(pack) else (), long_floor=self.size_long_pf,
-                           consistency=self.consistency_pf, main_on=self.main_on, main_n=self.main_n, short_on=self.short_on,
-                           short_windows=tuple(self.short_windows), short_min=self.short_min, short_margin=self.short_margin,
-                           neg_on=self.neg_on, neg_windows=tuple(self.neg_windows), real_on=self.realst_on, real_n=self.realst_n,
+                           consistency=self.consistency_pf, main_on=self.main_on, main_n=w.main_n, short_on=self.short_on,
+                           short_windows=w.short_windows, short_min=self.short_min, short_margin=self.short_margin,
+                           neg_on=self.neg_on, neg_windows=w.neg_windows, real_on=self.realst_on, real_n=w.real_n, real_neg_n=w.real_neg_n,
                            full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
                            base_min_both=self.base_min_both, main_min_both=self.main_min_both,
                            base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
@@ -3550,7 +3620,7 @@ class SetBook:
         if before and anchor > 0:
             upper = math.nextafter(upper, float("-inf"))
         if getattr(st, "proc_replayed", False):
-            m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.main_n)
+            m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.win(st).main_n)
             evidence = st.main_evidence
         else:
             held = sorted((tuple(r_.get(k) for k in _ROW_KEYS) for r_ in st.hist
@@ -3564,7 +3634,7 @@ class SetBook:
         if self.main_on and self.short_on:
             if evidence is None and st.proc_replayed and st.proc_total:
                 # Without the entry-time evidence the old candidate cannot be recomputed safely.
-                short_n = self.main_n
+                short_n = self.win(st).main_n
             elif evidence is not None:
                 # Preserve older entry-time evidence when evaluating each candidate;
                 # only the final vote is limited to the current window.
@@ -3595,19 +3665,21 @@ class SetBook:
         upper = anchor if anchor > 0 else float("inf")
         effective_lookback = self._evidence_lookback()
         cutoff = upper - effective_lookback * BAR_S if anchor > 0 else float("-inf")
+        w_ = self.win(st)
+        real_n = w_.real_neg_n if lane == "neg" else w_.real_n
         rows = sorted((r for r in st.live if str(r.get("lane") or "pos") == lane
-                       and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-self.realst_n:]
+                       and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-real_n:]
         nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
         gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
-        floor = self.floor_for(self.realst_n, st.pack, st)
-        enough = len(nets) >= self.realst_n
+        floor = self.floor_for(real_n, st.pack, st)
+        enough = len(nets) >= real_n
         pf = pf_of(gp, gl)
         sources: Dict[str, int] = {}
         for row in rows:
             source = str(row.get("fee_source") or "unknown")
             sources[source] = sources.get(source, 0) + 1
         pf_status = "empty" if not nets else "finite" if gl > 0 else "no-loss" if gp > 0 else "flat"
-        return {"source": "executed", "lane": lane, "n": len(nets), "lastN": self.realst_n,
+        return {"source": "executed", "lane": lane, "n": len(nets), "lastN": real_n,
                 "pf": round(pf, 4), "gp": gp, "gl": gl, "minPf": floor,
                 "returnPf": round(gp / gl, 4) if gl > 0 else None, "pfStatus": pf_status,
                 "feeSources": sources, "feeVerified": bool(rows) and sources.get("reported-fee", 0) == len(rows),
@@ -3676,10 +3748,11 @@ class SetBook:
         st.last15_pf = float(last15["pf"])
         st.last15_n = int(last15["count"])
         st.last15_r = float(last15["avgR"])
-        gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct, scan_all=False)
+        w = self.win(st)
+        gate = last_n_cost_pf(tape, w.base_long, self.cost_pct, scan_all=False)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
-        win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-self.gate_window:]
+        win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-w.base_long:]
         half = len(win) // 2
         if half >= 1:
             def _pf(v: List[float]) -> float:
@@ -3690,7 +3763,7 @@ class SetBook:
             st.gate_pf_old = st.gate_pf_new = 0.0
         st.gate_gp = sum(x for x in win if x > 0)
         st.gate_gl = -sum(x for x in win if x < 0)
-        sw = win[-self.base_short:] if self.base_short else []
+        sw = win[-w.base_short:] if w.base_short else []
         st.base_short_n = len(sw)
         st.base_short_gp, st.base_short_gl = sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)
         st.base_short_pf = round(pf_of(st.base_short_gp, st.base_short_gl), 4)
@@ -3703,7 +3776,7 @@ class SetBook:
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack, st))
         st.stage = v
         st.main_short_win = short_n
-        rw = m_[-self.main_n:]
+        rw = m_[-w.main_n:]
         st.main_n = len(rw)
         st.main_gp = sum(x for x in rw if x > 0)
         st.main_gl = -sum(x for x in rw if x < 0)
@@ -3715,16 +3788,16 @@ class SetBook:
         kw = m_[-self.main_min_n:] if self.main_min_n else []          # the Main minimal window's own results
         st.main_min_have = len(kw)
         st.main_min_gp, st.main_min_gl = sum(x for x in kw if x > 0), -sum(x for x in kw if x < 0)
-        nw = next((w for w in sorted(self.neg_windows) if self.neg_on and len(m_) >= w and sum(m_[-w:]) < -NEG_EPS), 0)    # the smallest Negative window that fires
+        nw = next((nwin for nwin in sorted(w.neg_windows) if self.neg_on and len(m_) >= nwin and sum(m_[-nwin:]) < -NEG_EPS), 0)    # the smallest Negative window that fires
         nv = m_[-nw:] if nw else []
         st.neg_win = nw
         st.neg_win_gp, st.neg_win_gl = sum(x for x in nv if x > 0), -sum(x for x in nv if x < 0)
-        ew = r_[-self.realst_n:]
+        ew = r_[-w.real_n:]
         st.exe_n, st.exe_pf = len(ew), round(pf_of(sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)), 4)
         st.exe_gp, st.exe_gl = sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)
         cf_rank = cost_as_frac(self.cost_pct)
         st.rank_pos, st.rank_neg = lane_rank_stats(r_, cf_rank), lane_rank_stats(q_, cf_rank)
-        qw = q_[-self.realst_n:]
+        qw = q_[-w.real_neg_n:]
         st.neg_n, st.neg_pf = len(qw), round(pf_of(sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)), 4)
         st.neg_gp, st.neg_gl = sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)
         last25 = tape[-self.deact_n :]
@@ -3736,16 +3809,16 @@ class SetBook:
         else:
             st.last25_avg_r = 0.0
             st.last25_avg_pnl = 0.0
-        dd = drawdown_time(tape[-self.gate_window:], now=anchor or None)   # the last N positions, not the whole tape
+        dd = drawdown_time(tape[-w.base_long:], now=anchor or None)   # the last N positions, not the whole tape
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
         # each Base window on its own (the stage verdict is their conjunction; the per-window figures count each separately)
-        floor_ = self.floor_for(self.gate_window, st.pack, st)                   # every window asks the minimum PF of its own size
-        st.base_long_ok = (not self.stop_cap_exceeded(st) and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
+        floor_ = self.floor_for(w.base_long, st.pack, st)                   # every window asks the minimum PF of its own size
+        st.base_long_ok = (not self.stop_cap_exceeded(st) and st.gate_n >= min(self.gate_min, w.base_long) and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
                            and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
-        st.base_short_ok = (bool(self.base_short) and st.base_short_n >= (self.base_short if self.stage_full else 1)
-                            and st.base_short_pf + 1e-9 >= self.floor_for(self.base_short, st.pack, st))
+        st.base_short_ok = (bool(w.base_short) and st.base_short_n >= (w.base_short if self.stage_full else 1)
+                            and st.base_short_pf + 1e-9 >= self.floor_for(w.base_short, st.pack, st))
         st.source_n = len(tape)
         # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
         st.active = not st.locked
@@ -3795,15 +3868,16 @@ class SetBook:
             oldest = min(st.evaluated_at, self._history_snapshot_oldest_at)
             if oldest <= 0 or time.time() - oldest > self._snapshot_max_age():
                 return "stale"
-        if st.gate_n < self.gate_min:
+        w = self.win(st)
+        if st.gate_n < min(self.gate_min, w.base_long):
             return "n<min"
-        if st.gate_pf + 1e-9 < self.floor_for(self.gate_window, st.pack, st):
+        if st.gate_pf + 1e-9 < self.floor_for(w.base_long, st.pack, st):
             return "pf<min"
         if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:
             return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
-        if self.base_short and (st.base_short_n < (self.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(self.base_short, st.pack, st)):
+        if w.base_short and (st.base_short_n < (w.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(w.base_short, st.pack, st)):
             return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
         if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_limit():
             return "stale"
@@ -3950,7 +4024,7 @@ class SetBook:
         return self.gate_reason(st) == ""
 
     def gate_keep(self) -> int:
-        return max(40, self.gate_window)
+        return max(40, self.gate_window_max)
 
     def pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
         with self._lock:
@@ -3969,7 +4043,7 @@ class SetBook:
            than the same PF on 350;
         3. more orders;
         4. the better recent R, then the shorter drawdown time."""
-        floor = self.floor_for(self.gate_window, st.pack, st)
+        floor = self.floor_for(self.win(st).base_long, st.pack, st)
         halves = min(st.gate_pf_old, st.gate_pf_new) if (st.gate_pf_old or st.gate_pf_new) else st.gate_pf
         n = max(0, int(st.n))
         shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
@@ -3982,7 +4056,8 @@ class SetBook:
         the Base tape's rank_key."""
         if not (self.rank_by_lane and (self.main_on or self.neg_on or self.realst_on)):
             return self.rank_key(st)
-        return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(self.realst_n, st.pack, st), st.max_dd_s)
+        w_ = self.win(st)
+        return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(w_.real_neg_n if lane == "neg" else w_.real_n, st.pack, st), st.max_dd_s)
 
     def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side)) and self.is_eligible(s)]
@@ -4309,7 +4384,7 @@ class SetBook:
             n_rows = 0
             for x in sts:
                 rk = self.rank_key(x)
-                for r in self._tape_at(x, x.score_at, before=getattr(x, "score_before", False))[-self.gate_window:]:
+                for r in self._tape_at(x, x.score_at, before=getattr(x, "score_before", False))[-self.win(x).base_long:]:
                     n_rows += 1
                     k = (r.get("symbol"), int(round(finite(r.get("t")) - finite(r.get("hold_s")))), x.pack, r.get("side"))
                     cur = best.get(k)
@@ -4506,7 +4581,7 @@ class SetBook:
                     "realNegN": int(st.neg_total),
                     "realNegPf": round(st.neg_pf, 4),
                     "shortPf": round(st.base_short_pf, 4),
-                    "mainShortN": int(st.main_short_win or self.main_n),
+                    "mainShortN": int(st.main_short_win or self.win(st).main_n),
                     "lane": self.lane_of(st),
                     "ratio": round(st.last15_ratio, 4),
                     "last15N": st.last15_n,
@@ -4597,7 +4672,7 @@ class SetBook:
                 "realNegWindowN": int(st.neg_n),
                 "realNegPf": round(st.neg_pf, 4),
                 "shortPf": round(st.base_short_pf, 4),
-                "mainShortN": int(st.main_short_win or self.main_n),
+                "mainShortN": int(st.main_short_win or self.win(st).main_n),
                 "lane": self.lane_of(st),
                 "why": self.gate_reason(st),
             }

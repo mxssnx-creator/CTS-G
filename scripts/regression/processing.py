@@ -898,6 +898,10 @@ def sim_gate_equals_the_engine_for_every_window_configuration():
             "minimal 3 beside short 2": {"setGateShortN": 2, "setGateMinN": 3, "setGateMinMode": "negative"},
             "legacy mainAuto keys": {"mainAutoWindows": [4, 6], "mainAutoMin": 4, "mainAutoMargin": 1.0},
             "stages off": {"stagesEnabled": False},
+            # owner 2026-11-04: stages and last N independent per config (TP range): the minimal range its own windows, the micro range its own Real windows per lane
+            "last N per range: minimal": {"lastNByRange": {"minimal": {"baseLong": 12, "baseShort": 5, "mainLong": 10, "mainShort": [3, 5], "negWindows": "1,2", "realN": 2, "realNegN": 3}}},
+            "last N per range: micro + minimal": {"lastNByRange": {"micro": {"baseLong": 30, "baseShort": 12, "realN": 6}, "minimal": {"baseLong": 14, "mainLong": 12, "realNegN": 1}},
+                                                  "setGateMinN": 1, "mainMinN": 1},
         }
         res = {}
         for label, extra in configs.items():

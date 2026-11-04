@@ -257,6 +257,7 @@
     "long": 1,
     "wide": 1
   },
+  "lastNByRange": {},
   "exitSetsByPack": {
     "indications": false
   },

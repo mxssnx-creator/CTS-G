@@ -2783,7 +2783,32 @@ def transfers_move_the_drawdown_basis_not_the_drawdown():
     return ok, f"deposit {dep}; withdrawal {wd}; PnL-explained {pnl}; lagging feed {lag}; unknown / off {unk}; drawdown in money before {dd_before:.2f} after {dd_after:.2f}; wired into refresh_balance {wired}"
 
 
+def restart_credits_the_downtime_so_positions_keep_running():
+    """Owner 2026-11-04 ("All positions got closed ... keep pos running and continue on crash, reloads"): after an 8 hour outage the engine came back and its 6 hour time exit closed
+    27 positions at once although it had not been watching them. The hold clock now excludes the time the engine was down: a restart credits the gap since the previous run's
+    last sign of life to every open position (`hold_credit_s`, at most a day per restart and 72 h in all), the time exit and the scratch exit read `position_age`, and the
+    credit is made before the restored book is reconciled."""
+    import types, time as _t
+    now = _t.time()
+    pos = types.SimpleNamespace(opened_at=now - 8 * 3600.0, hold_credit_s=0.0)
+    before = pt.position_age(pos, now)
+    fake = types.SimpleNamespace(open={"A-USDT": pos, "B-USDT": types.SimpleNamespace(opened_at=now - 1 * 3600.0, hold_credit_s=0.0)},
+                                 last_run={"previousEnd": now - 8 * 3600.0}, saved=[])
+    fake.save_open_book = lambda: fake.saved.append(1) or True
+    total = pt.Pulse.credit_restart_downtime(fake)
+    after = pt.position_age(pos, now)
+    hold_s = 6 * 3600.0
+    caps = (pt.downtime_credit(now - 40 * 3600.0, now), pt.downtime_credit(now - 8 * 3600.0, now, already=70 * 3600.0), pt.downtime_credit(None, now), pt.downtime_credit(now + 5, now))
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = ("age = position_age(pos, now)\n            if age >= MAX_HOLD_S" in src and "self.credit_restart_downtime()" in src
+             and src.index("self.credit_restart_downtime()") < src.index("self.reconcile_restored_book()", src.index("self.credit_restart_downtime()") - 400))
+    ok = (before >= hold_s and after < 60.0 and abs(pos.hold_credit_s - 8 * 3600.0) < 5.0 and fake.open["B-USDT"].hold_credit_s > 7 * 3600.0 and fake.saved
+          and caps[0] == pt.DOWNTIME_CREDIT_MAX_S and abs(caps[1] - 2 * 3600.0) < 1.0 and caps[2] == 0.0 and caps[3] == 0.0 and wired and total > 0)
+    return ok, f"age after an 8 h outage: {before / 3600:.2f} h before the credit, {after:.0f} s after (time exit at {hold_s / 3600:.0f} h no longer fires); credit caps {tuple(round(c / 3600, 2) for c in caps)} h; wired into manage and the restart path {wired}"
+
+
 CHECKS = [
+    ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),

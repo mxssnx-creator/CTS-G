@@ -188,7 +188,8 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
         valid, lane_stats = stage_lane_stats(book, tapes, st, now)          # "pos" / "neg": the lane the Set passes Real on; "" when none
         if valid and getattr(book, "rank_by_lane", False):
             # the choice among the Sets valid on a lane reads the lane's own Set (SetBook.lane_rank_key), not the raw Base tape
-            rank = se.lane_rank_of(lane_stats, book.floor_for(book.realst_n, st.pack, st), -rank[4])
+            wn = book.win(st)
+            rank = se.lane_rank_of(lane_stats, book.floor_for(wn.real_neg_n if valid == "neg" else wn.real_n, st.pack, st), -rank[4])
     return valid, rank, n, pf
 
 
@@ -196,12 +197,13 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     """The Base long window's numbers for (Set, now), as SetBook._score_one reads them: the newest gate_window orders closed in the lookback (gross values
     pp, net values w), their count and PF (rounded as last_n_cost_pf does), the drawdown time over them, both halves, and the rank inputs."""
     lb = book.lookback * 60.0
-    tx, te, pp = tapes.window(st.idx, now, lb, max(book.gate_window, book.deact_n))
+    wn = book.win(st)
+    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, book.deact_n))
     txa = tape_source(tapes, st.idx, now, lb).by_set[st.idx][0]
     n_all = bisect.bisect_left(txa, now) - bisect.bisect_left(txa, now - lb)     # SetState.n: every order in the lookback
     cf = tapes.cf
-    w = pp[-book.gate_window:]
-    wt = tx[-book.gate_window:]
+    w = pp[-wn.base_long:]
+    wt = tx[-wn.base_long:]
     gp = sum(x - cf for x in w if x - cf > 0)
     gl = -sum(x - cf for x in w if x - cf < 0)
     n = len(w)
@@ -234,20 +236,22 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
     return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
             "risk_ok": not book.stop_cap_exceeded(st),
-            "floor": book.floor_for(book.gate_window, st.pack, st), "floor_short": book.floor_for(book.base_short, st.pack, st), "cf": cf}
+            "floor": book.floor_for(wn.base_long, st.pack, st), "floor_short": book.floor_for(wn.base_short, st.pack, st), "cf": cf,
+            "base_long": wn.base_long, "base_short": wn.base_short}
 
 
 def _long_ok(book, e: Dict[str, Any]) -> bool:
     """The Base long window on its own: orders, PF, drawdown time and (when asked) the consistency of both halves."""
-    ok = e["risk_ok"] and e["n"] >= book.gate_min and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
+    ok = e["risk_ok"] and e["n"] >= min(book.gate_min, e.get("base_long", book.gate_window)) and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
     if ok and book.consistency_pf > 0 and e["n"] >= 2:
         ok = min(e["old"], e["new"]) + 1e-9 >= book.consistency_pf
     return ok
 
 
 def _short_ok(book, e: Dict[str, Any]) -> bool:
-    sw = [x - e["cf"] for x in e["w"][-book.base_short:]]
-    return len(sw) >= (book.base_short if getattr(book, "stage_full", False) else 1) and round(se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)), 4) + 1e-9 >= e["floor_short"]
+    bs = e.get("base_short", book.base_short)
+    sw = [x - e["cf"] for x in e["w"][-bs:]]
+    return len(sw) >= (bs if getattr(book, "stage_full", False) else 1) and round(se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)), 4) + 1e-9 >= e["floor_short"]
 
 
 def _min_ok(book, e: Dict[str, Any]) -> bool:
@@ -259,7 +263,7 @@ def gate_base(book, tapes: Tapes, st, now: float, coordinate: bool = True):
     """The Base part of gate_metrics: the long, short and minimal windows, the drawdown time and the rank (no stage after Base)."""
     e = base_eval(book, tapes, st, now)
     valid = _long_ok(book, e)
-    if valid and getattr(book, "base_short", 0):       # Base: the short window too (both must pass)
+    if valid and e.get("base_short", book.base_short):       # Base: the short window too (both must pass)
         valid = _short_ok(book, e)
     if valid and coordinate and getattr(book, "base_min_n", 0):
         valid = _min_ok(book, e)
@@ -297,8 +301,8 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
     out: Dict[str, Optional[Tuple[bool, float, float, int]]] = {k: None for k in ("baseLong", "baseShort", "baseMinimal", "mainLong", "mainShort", "mainMinimal", "negative", "real", "realNeg")}
     nets_w = [x - cf for x in e["w"]]
     out["baseLong"] = (_long_ok(book, e),) + sums(nets_w) + (len(nets_w),)
-    if getattr(book, "base_short", 0):
-        sw = nets_w[-book.base_short:]
+    if e.get("base_short", book.base_short):
+        sw = nets_w[-e.get("base_short", book.base_short):]
         out["baseShort"] = (_short_ok(book, e),) + sums(sw) + (len(sw),)
     if getattr(book, "base_min_n", 0):
         mw = nets_w[-book.base_min_n:]
@@ -311,7 +315,8 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
     mn, rn, qn = [nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]]
     v = se.stage_verdicts(mn, rn, qn, ch["short_n"], P)
     if book.main_on:
-        w_ = mn[-book.main_n:]
+        wn = book.win(st)
+        w_ = mn[-wn.main_n:]
         out["mainLong"] = (bool(v["main"]),) + sums(w_) + (len(w_),)
         if book.short_on:
             w_ = mn[-ch["short_n"]:]
@@ -320,14 +325,14 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
             w_ = mn[-book.main_min_n:]
             out["mainMinimal"] = (bool(v["minimal"]),) + sums(w_) + (len(w_),)
     if book.neg_on:
-        nw = next((w for w in sorted(book.neg_windows) if len(mn) >= w and sum(mn[-w:]) < -se.NEG_EPS), 0)
+        nw = next((x for x in sorted(book.win(st).neg_windows) if len(mn) >= x and sum(mn[-x:]) < -se.NEG_EPS), 0)
         out["negative"] = (bool(v["neg"]),) + (sums(mn[-nw:]) if nw else (0.0, 0.0)) + (nw,)
     main_pass = (not book.main_on) or bool(v["main"] and (v["short"] or not book.short_on))
     if book.realst_on and main_pass:
-        w_ = rn[-book.realst_n:]
+        w_ = rn[-book.win(st).real_n:]
         out["real"] = (bool(v["real"]),) + sums(w_) + (len(w_),)
     if book.realst_on and book.neg_on and v["neg"]:
-        w_ = qn[-book.realst_n:]
+        w_ = qn[-book.win(st).real_neg_n:]
         out["realNeg"] = (bool(v["realneg"]),) + sums(w_) + (len(w_),)
     return out
 
@@ -395,7 +400,7 @@ def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Opti
         if c is not None and c[0] <= now < c[1]:
             return c[2]
     rows = [{"t": t, "pnl_pct": v + tapes.cf} for t, v in lane_stream(book, tapes, st, now, lane)]
-    floor = float(book.floor_for(book.realst_n, st.pack, st)) if getattr(coord, "min_pf_linked", True) else None
+    floor = float(book.floor_for(book.win(st).real_n, st.pack, st)) if getattr(coord, "min_pf_linked", True) else None
     r = coord.judge(rows, coord.net_streak(rows), min_pf=floor)
     out = (bool(r["allow"]), float(r["metrics"]["last15Pf"]), floor)
     if cache is not None:
@@ -417,10 +422,11 @@ def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
     nets, gpre, lpre = source.prefix(st.idx)
     e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - lb)
-    floor = book.floor_for(book.gate_window, st.pack, st)
+    wn = book.win(st)
+    floor = book.floor_for(wn.base_long, st.pack, st)
     out: List[float] = []
     for k in range(e - 1, lo - 1, -1):
-        if se.processed_flag(tx, nets, gpre, lpre, te[k], book.gate_window, book.gate_min, floor, book.max_dd_s, lb, lo,
+        if se.processed_flag(tx, nets, gpre, lpre, te[k], wn.base_long, min(book.gate_min, wn.base_long), floor, book.max_dd_s, lb, lo,
                              book.consistency_pf):
             out.append(nets[k])
             if len(out) >= n:
@@ -449,8 +455,9 @@ def gate_until(book, tapes: Tapes, st, now: float) -> float:
     context_lo = bisect.bisect_left(tx, now - context_s)
     if context_lo < end:
         until = min(until, float(tx[context_lo]) + context_s)
-    _, _, pp = tapes.window(st.idx, now, lb, book.gate_window)
-    wt = tx[max(lo, end - book.gate_window):end]
+    bl = book.win(st).base_long
+    _, _, pp = tapes.window(st.idx, now, lb, bl)
+    wt = tx[max(lo, end - bl):end]
     eq = peak = 0.0
     peak_t = wt[0] if len(wt) else now
     in_dd = False
@@ -497,7 +504,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
         st, now = rnd.choice(book.by_idx), rnd.choice(hours)
         want_base = len(picks) % 2 == 0
         if want_base and tries < samples * 300:
-            tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.gate_window)
+            tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.win(st).base_long)
             g_ = sum(x - tapes.cf for x in pp if x - tapes.cf > 0)
             l_ = -sum(x - tapes.cf for x in pp if x - tapes.cf < 0)
             if len(pp) < book.gate_min or (g_ / l_ if l_ > 0 else 99.0) < book.min_pf:
