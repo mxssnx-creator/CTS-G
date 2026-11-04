@@ -436,7 +436,7 @@ export type PulseOverlay = {
   volumeByPack: Record<string, number>;
   volumeByKind: Record<string, number>;
   volumeByRange: Record<string, number>;
-  /** Volume multiple per pack and type, "<pack>:<type>" (server: pulse_trader.VOLUME_BY_PACK_KIND_DEFAULT, indications trailing x 3). */
+  /** Volume multiple per pack and type, "<pack>:<type>" (server: pulse_trader.VOLUME_BY_PACK_KIND_DEFAULT, empty since 2026-11-04). */
   volumeByPackKind: Record<string, number>;
   /** Largest SL ratio per TP range (server: set_engine.SL_MAX_BY_RANGE_DEFAULT: Long and Wide 1.0). */
   slMaxByRange: Record<string, number>;
@@ -539,7 +539,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   prevPosWindow: 25,
   exitMinSamples: 8,
   blockVolumeRatio: 1,
-  blockRiskPctOfBalance: 0.25,
+  blockRiskPctOfBalance: 0,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
@@ -555,7 +555,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaAuto: true,
   dcaOnSets: false,
   dcaOnAxis: false,
-  dcaMaxExposureX: 2,
+  dcaMaxExposureX: 0,
   dcaMinPf: 1.25,
   dcaPfWindow: 15,
   dcaDeactN: 25,
@@ -707,7 +707,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeByPack: {},
   volumeByKind: {},
   volumeByRange: {},
-  volumeByPackKind: { "indications:trail": 3 },
+  volumeByPackKind: {},
   slMaxByRange: { long: 1, wide: 1 },
   exitSetsByPack: { indications: false }, // shipped: the indications pack's Exit Sets off (measured 2026-11-03)
   trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
@@ -1240,7 +1240,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
     exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
-    blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0.25),
+    blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
@@ -1256,7 +1256,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaAuto: bool(cts.dcaAuto, true),
     dcaOnSets: bool(cts.dcaOnSets, false),
     dcaOnAxis: bool(cts.dcaOnAxis, false),
-    dcaMaxExposureX: num(cts.dcaMaxExposureX, 2),
+    dcaMaxExposureX: num(cts.dcaMaxExposureX, 0),
     dcaMinPf: pfFloor(num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT)),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
@@ -1390,7 +1390,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     volumeByPack: volumeMultsOf(cts.volumeByPack),
     volumeByKind: volumeMultsOf(cts.volumeByKind),
     volumeByRange: volumeMultsOf(cts.volumeByRange),
-    volumeByPackKind: cts.volumeByPackKind && typeof cts.volumeByPackKind === "object" ? volumeMultsOf(cts.volumeByPackKind) : { "indications:trail": 3 },
+    volumeByPackKind: cts.volumeByPackKind && typeof cts.volumeByPackKind === "object" ? volumeMultsOf(cts.volumeByPackKind) : {},
     slMaxByRange: slMaxByRangeOf(cts.slMaxByRange),
     exitSetsByPack: Object.fromEntries(
       Object.entries(cts.exitSetsByPack && typeof cts.exitSetsByPack === "object" ? cts.exitSetsByPack : {}).filter(([, v]) => typeof v === "boolean"),

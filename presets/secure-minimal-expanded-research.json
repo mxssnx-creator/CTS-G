@@ -37,7 +37,7 @@
   "prevPosWindow": 25,
   "exitMinSamples": 8,
   "blockVolumeRatio": 1,
-  "blockRiskPctOfBalance": 0.25,
+  "blockRiskPctOfBalance": 0,
   "blockProfitFactorRatio": 0.8,
   "blockPauseCountRatio": 1,
   "blockActiveLive": true,
@@ -63,7 +63,7 @@
   "dcaAuto": true,
   "dcaOnSets": false,
   "dcaOnAxis": false,
-  "dcaMaxExposureX": 2,
+  "dcaMaxExposureX": 0,
   "dcaMinPf": 1.25,
   "dcaPfWindow": 15,
   "dcaDeactN": 25,
@@ -315,9 +315,7 @@
     "risk.slTpRatios": true,
     "exec.controls": true
   },
-  "volumeByPackKind": {
-    "indications:trail": 3
-  },
+  "volumeByPackKind": {},
   "slMaxByRange": {
     "long": 1.0,
     "wide": 1.0

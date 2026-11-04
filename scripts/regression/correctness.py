@@ -545,7 +545,38 @@ def dca_ladder_equals_a_plain_reading_and_a_worked_example():
     return ok, f"400 random paths equal the plain reading ({filled} rungs filled){(' bad ' + str(bad[:2])) if bad else ''}; worked example {[(j, k, m, round(n, 6)) for j, k, m, n in ex]}"
 
 
+def block_adds_are_ratio_times_original_base_volume_without_a_risk_cap():
+    """Owner 2026-11-04 ("Block can use after their ratio without limit, based on the pos original base vol"): a count adds exactly its ratio x the parent's
+    ORIGINAL base volume V0, also after earlier adds grew the position (never a share of the grown volume); with blockRiskPctOfBalance 0 nothing else caps it
+    (block_risk_qty is infinite), while a positive budget still refuses an add on a parent whose stop loss already uses it; the shipped overlays and the desk
+    carry 0; a DCA add with dcaMaxExposureX 0 is its multiple x the original base (dca_engine self-test)."""
+    import json as _j
+    import block_rules as br
+    from common import PULSE
+    with tempfile.TemporaryDirectory() as d:
+        book = SetBlockBook(os.path.join(d, "b.json"))
+        cfg = _block_cfg()
+        book.cfg = br.clean_cfg({"blockRelations": ["set"], "blockMinObservations": 1, "blockSkipFirst": 0, "blockCounts": [{"step": 1, "ratio": 0.5}] * 2})
+        pos = _parent(1)
+        for k in book.rel_keys(book.cfg, pos):
+            book.ledger(k, create=True)
+            for _ in range(4):
+                br.add_obs(book.ledgers[k]["paper"].setdefault("1", br.new_record()), 0.01)
+        fresh = book.candidate(replace(pos, client_id="a"), 100.15, T0 + 700, cfg, .12, 86400)
+        grown = book.candidate(replace(pos, client_id="b", qty=pos.base_qty * 3.0), 100.15, T0 + 701, cfg, .12, 86400)
+    cf = 0.0012
+    free = pt.block_risk_qty(0.0, 128.0, "LONG", 100.15, 95.0, 100.0, 1.0, cf)
+    capped = pt.block_risk_qty(0.25, 128.0, "LONG", 100.15, 95.0, 100.0, 1.0, cf)         # the parent alone risks ~5 against a 0.32 budget
+    roomy = pt.block_risk_qty(5.0, 128.0, "LONG", 100.15, 99.0, 100.0, 0.5, cf)
+    files = [os.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")]
+    shipped = {os.path.basename(f): (_j.load(open(f)).get("blockRiskPctOfBalance"), _j.load(open(f)).get("dcaMaxExposureX")) for f in files}
+    ok = (fresh is not None and grown is not None and abs(fresh["qty"] - 0.5 * pos.base_qty) < 1e-9 and abs(grown["qty"] - 0.5 * pos.base_qty) < 1e-9
+          and free == float("inf") and capped == 0.0 and 0.0 < roomy < float("inf") and all(v == (0, 0) for v in shipped.values()))
+    return ok, f"add {fresh and fresh['qty']} then, on a position grown to 3 x V0, {grown and grown['qty']} (= 0.5 x V0 = {0.5 * pos.base_qty}); risk cap off {free}, 0.25 % on a wide stop {capped}, 5 % {round(roomy, 4)}; shipped (budget, DCA ceiling) {set(shipped.values())}"
+
+
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
+    block_adds_are_ratio_times_original_base_volume_without_a_risk_cap,
     dca_ladder_equals_a_plain_reading_and_a_worked_example,
     paper_actual_isolation, config_change_invalidates_old_evidence, executed_restart_and_base_attribution,
     axis_continuation_and_set_isolation, block_independent_evidence_and_restart, block_actual_and_paper_costs,

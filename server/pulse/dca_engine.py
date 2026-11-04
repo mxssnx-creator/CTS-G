@@ -128,7 +128,9 @@ class DcaBook:
         self.on_sets = bool(ov.get("dcaOnSets", False))
         self.on_axis = bool(ov.get("dcaOnAxis", False))
         try:
-            self.max_expo = max(1.0, min(8.0, float(ov.get("dcaMaxExposureX") or AUTO_MAX_EXPOSURE_X)))
+            raw_expo = ov.get("dcaMaxExposureX")
+            # 0 = no exposure ceiling (owner 2026-11-04: an add is its multiple x the position's ORIGINAL base volume, nothing else limits it); absent = the default
+            self.max_expo = AUTO_MAX_EXPOSURE_X if raw_expo is None else (0.0 if float(raw_expo) <= 0 else max(1.0, min(8.0, float(raw_expo))))
         except Exception:
             self.max_expo = AUTO_MAX_EXPOSURE_X
         try:
@@ -270,7 +272,7 @@ class DcaBook:
             return None
         add_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
         added = sum(x.qty for x in lane.steps if x.filled)
-        if self.auto:      # the calculated plan keeps the whole position under max_expo x the base size
+        if self.auto and self.max_expo > 0:      # the calculated plan keeps the whole position under max_expo x the base size (0 = no ceiling)
             add_qty = min(add_qty, max(0.0, (lane.parent_qty or qty) * (self.max_expo - 1.0) - added))
         if add_qty <= 0:
             return None
@@ -460,6 +462,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     e.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaMaxExposureX": 1.2})
     capped_add = e.due("EEE-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)
     out.append(("dca-auto-exposure-ceiling", bool(capped_add) and abs(capped_add["qty"] - 0.2) < 1e-9, f"qty under a 1.2x ceiling={capped_add and capped_add['qty']} (partial 0.5)"))
+    z = DcaBook()
+    z.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaMaxExposureX": 0})
+    free_add = z.due("ZZZ-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)
+    absent = DcaBook()
+    absent.load({"dcaEnabled": True})
+    out.append(("dca-exposure-ceiling-zero-means-none-and-sizes-from-the-original-base",
+                bool(free_add) and abs(free_add["qty"] - AUTO_RUNG_MULT * 1.0) < 1e-9 and z.max_expo == 0.0 and absent.max_expo == AUTO_MAX_EXPOSURE_X,
+                f"qty with no ceiling={free_add and free_add['qty']} (= {AUTO_RUNG_MULT} x the original base 1.0; under a 1.2x ceiling it was 0.2); ceiling 0 -> {z.max_expo}, absent -> {absent.max_expo}"))
     # the lane is scored on its own add-on results and switches off when they lose
     c = DcaBook()
     c.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaPfWindow": 8, "dcaMinPf": 1.2, "minPfLinked": False})

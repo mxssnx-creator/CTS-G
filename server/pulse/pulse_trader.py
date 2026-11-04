@@ -252,7 +252,7 @@ def volume_mults_of(raw: Any) -> Dict[str, float]:
 
 
 # The shipped pack x type multiple (owner 2026-11-03: "increase the indications trailing volume ratio by 3 times"): overlay volumeByPackKind {"<pack>:<type>": x}
-VOLUME_BY_PACK_KIND_DEFAULT = {"indications:trail": 3.0}
+VOLUME_BY_PACK_KIND_DEFAULT: Dict[str, float] = {}      # owner 2026-11-04: the indications trailing x 3 of 2026-11-03 is reverted (live PF 0.24 - 0.74); the key stays a setting
 
 
 def set_volume_mult(st: Any, by_pack: Dict[str, float], by_kind: Dict[str, float], by_range: Dict[str, float],
@@ -356,6 +356,18 @@ def short_api_msg(msg: str) -> str:
     if "cooling" in low:
         return "cooling"
     return m.strip(" ,.")[:120]
+
+
+def block_risk_qty(risk_pct: float, equity: float, side: str, px: float, sl: float, entry: float, qty: float, cf: float) -> float:
+    """The most a Block add may be under the risk budget `risk_pct` (percent of equity): the parent's loss at its existing stop (fees included) plus the add's
+    own, together under the budget. 0 or less = no budget (infinite): the add is exactly its count's ratio x the parent's original base volume."""
+    if not risk_pct or risk_pct <= 0:
+        return float("inf")
+    sign = 1 if side == "LONG" else -1
+    loss_each = max(0.0, (px - sl) * sign) + px * cf
+    existing_loss = max(0.0, (entry - sl) * sign) * qty + entry * qty * cf
+    risk_room = max(0.0, equity * risk_pct / 100 - existing_loss)
+    return risk_room / loss_each if loss_each > 0 else 0.0
 
 
 def entry_fail_cooldown_s(low: str) -> float:
@@ -4642,7 +4654,7 @@ class Pulse:
         self.slippage_allowance_pct = max(0.0, float(ov.get("slippageAllowancePct", .02)))
         self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
                                                               self.active_fee_contracts(), time.time())
-        self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", .25)))
+        self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", 0.0)))
         ov["configuredPositionCostPct"] = configured_cost
         ov["positionCostPct"] = self.position_cost_pct
         self._fee_config_dirty = False
@@ -5255,15 +5267,9 @@ class Pulse:
             if row is None:
                 continue
             room = max(0.0, min(self.max_book_notional() - pos.qty * px, self.avail_notional(c)))
-            risk_qty = float("inf")
-            if self.block_risk_pct > 0:
-                # Total parent loss at its existing stop, fees included. Adds never
-                # move that stop, and a minimum lot cannot override this budget.
-                sign = 1 if pos.side == "LONG" else -1
-                loss_each = max(0.0, (px - pos.sl) * sign) + px * cf
-                existing_loss = max(0.0, (pos.entry - pos.sl) * sign) * pos.qty + pos.entry * pos.qty * cf
-                risk_room = max(0.0, self.equity * self.block_risk_pct / 100 - existing_loss)
-                risk_qty = risk_room / loss_each if loss_each > 0 else 0.0
+            # Total parent loss at its existing stop, fees included, when a risk budget is set; 0 (owner 2026-11-04) = no cap: the add is its count's ratio x
+            # the parent's ORIGINAL base volume. Adds never move that stop, and a minimum lot cannot override a budget.
+            risk_qty = block_risk_qty(self.block_risk_pct, self.equity, pos.side, px, pos.sl, pos.entry, pos.qty, cf)
             qty = self.round_qty(c, min(row["qty"], room / px, risk_qty))
             # No minimum-lot bump beyond the independent group's planned volume.
             if qty < self.min_order_qty(c, px) or qty <= 0:

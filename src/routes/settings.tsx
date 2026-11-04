@@ -1283,7 +1283,7 @@ function SettingsPage() {
                 />
                 <Num label="Set Block risk budget" value={overlay.blockRiskPctOfBalance}
                   min={0} max={5} step={0.05} unit="%"
-                  hint="Maximum parent loss at its current stop, including costs, as a share of equity. Adds are reduced to fit; 0 disables this cap. Gaps can exceed it."
+                  hint="0 (default, owner 2026-11-04): no cap - each Block add is its count's ratio x the parent's ORIGINAL base volume. Above 0: maximum parent loss at its current stop, including costs, as a share of equity; adds are reduced to fit. Gaps can exceed it."
                   onChange={(v) => patch("blockRiskPctOfBalance", v)} />
                 <Num
                   label="PF ratio"
@@ -1605,9 +1605,9 @@ function SettingsPage() {
               />
               <Grid>
                 <Num
-                  label="Max exposure × base size (auto)"
+                  label="Max exposure × base size (auto; 0 = no ceiling)"
                   value={overlay.dcaMaxExposureX}
-                  min={1}
+                  min={0}
                   max={8}
                   step={0.5}
                   onChange={(v) => patch("dcaMaxExposureX", v)}

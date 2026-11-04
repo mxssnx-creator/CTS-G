@@ -12,6 +12,12 @@
   the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
   change `EQ_MIN` or reset the start equity without an explicit instruction.
 
+- **2026-11-04, owner (later): Block adds are "after their ratio, without limit, based on the position's original base volume"; same for the other add types; revert indications trailing x 3; Normal range off on x01.**
+  `blockRiskPctOfBalance` 0 (no risk-budget cap, engine default and desk default too): each Block count adds exactly its ratio x the parent's ORIGINAL base volume V0 (`pos.base_qty`, never a share of
+  the grown position; `pulse_trader.block_risk_qty` is infinite at 0). What still bounds an add is the table itself (shipped: counts 2 and 3 at 0.5 V0 each, so a parent grows to at most 2 x V0) and the
+  venue / margin sanity guards (`max_book_notional`, margin at most 38 % of available, venue minimum lot). `dcaMaxExposureX` 0 = no exposure ceiling (a DCA add is its multiple x the original base);
+  DCA itself stays off. `volumeByPackKind` {} everywhere (the x 3 for indications trailing is reverted; live PF 0.24 - 0.74). x01 `tpRanges.normal` false (live PF 0.36 - 0.52 on both engines); x02 keeps Normal
+  on as the control group. Checks `correctness.block-adds-are-ratio-times-original-base-volume-without-a-risk-cap`, `dca_engine` self-test row, `trader.indications-trailing-volume-is-not-multiplied`.
 - **2026-11-04, owner: signals on x01, DCA off by default, Block for all relations.** Extra packs trend + breakout are enabled on x01 and x02 (`stratTrend`, `stratBreakout`; live entries read
   them through `SetBook.entry_signals`; measured on window C PF 1.758 / 199 orders against 1.631 / 188 without; B and A pending). `dcaEnabled` / `stratDca` are off in the overlays, the desk
   default and the check `logistics.dca-off-by-default-with-set-and-axis-options-off`.

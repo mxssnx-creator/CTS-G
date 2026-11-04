@@ -34,7 +34,7 @@
   "dcaAuto": true,
   "dcaOnSets": false,
   "dcaOnAxis": false,
-  "dcaMaxExposureX": 2,
+  "dcaMaxExposureX": 0,
   "symbols": [
     "*"
   ],
@@ -266,9 +266,7 @@
   "minPfMinimalN": 10,
   "minPfShortN": 20,
   "minPfMediumN": 35,
-  "volumeByPackKind": {
-    "indications:trail": 3
-  },
+  "volumeByPackKind": {},
   "slMaxByRange": {
     "long": 1.0,
     "wide": 1.0
@@ -300,5 +298,6 @@
   ],
   "blockCarry": false,
   "blockPauseSteps": 1,
-  "blockSkipFirst": 1
+  "blockSkipFirst": 1,
+  "blockRiskPctOfBalance": 0
 }

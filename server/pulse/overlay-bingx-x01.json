@@ -34,7 +34,7 @@
   "dcaAuto": true,
   "dcaOnSets": false,
   "dcaOnAxis": false,
-  "dcaMaxExposureX": 2,
+  "dcaMaxExposureX": 0,
   "symbols": [
     "*"
   ],
@@ -184,7 +184,7 @@
     "micro": true,
     "minimal": true,
     "short": true,
-    "normal": true,
+    "normal": false,
     "long": true,
     "wide": true
   },
@@ -269,10 +269,8 @@
   "minPfShortN": 20,
   "minPfMediumN": 35,
   "slippageAllowancePct": 0.02,
-  "blockRiskPctOfBalance": 0.25,
-  "volumeByPackKind": {
-    "indications:trail": 3
-  },
+  "blockRiskPctOfBalance": 0,
+  "volumeByPackKind": {},
   "slMaxByRange": {
     "long": 1.0,
     "wide": 1.0
