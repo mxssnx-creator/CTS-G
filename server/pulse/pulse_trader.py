@@ -374,6 +374,37 @@ MANUAL_REST_PATH = os.path.join(DIR, f"manual-rest-{CONN_SHORT}.json")
 MANUAL_REST_MIN_DEFAULT = 240.0
 
 
+TRANSFER_MIN_USDT = 0.5          # a wallet change not explained by PnL, fees and funding smaller than this is noise, not a transfer
+TRANSFER_MIN_FRAC = 0.02         # ... or smaller than this share of the balance
+TRANSFER_INCOME_TYPES = ("REALIZED_PNL", "TRADING_FEE", "FUNDING_FEE", "COMMISSION", "FUNDING")
+
+
+def transfer_tolerance(balance: float) -> float:
+    return max(TRANSFER_MIN_USDT, TRANSFER_MIN_FRAC * abs(float(balance or 0.0)))
+
+
+def income_total(rows: Any, t0_ms: float, t1_ms: float) -> float:
+    """Sum of the venue's income rows that move the wallet balance on their own (realized PnL, trading fees, funding) with t0 < time <= t1 (epoch ms). A row of any
+    other type (a transfer, if the venue ever lists one) is not counted, so it stays in the residual."""
+    total = 0.0
+    for r in rows or []:
+        try:
+            if str(r.get("incomeType") or "").upper() not in TRANSFER_INCOME_TYPES:
+                continue
+            t = float(r.get("time") or 0)
+            if t0_ms < t <= t1_ms:
+                total += float(r.get("income") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return total
+
+
+def transfer_residual(delta_wallet: float, income_sum: float, balance: float) -> float:
+    """What a wallet-balance change contains beyond the venue's own PnL / fees / funding: a deposit (+) or a withdrawal (-), 0 under the tolerance."""
+    resid = float(delta_wallet) - float(income_sum)
+    return resid if abs(resid) >= transfer_tolerance(balance) else 0.0
+
+
 def manual_rest_key(symbol: str, side: str) -> str:
     return f"{symbol}:{str(side).upper()}"
 
@@ -1677,6 +1708,10 @@ class Pulse:
             self.last_error = f"balance {r.get('msg')}"
             return
         self.equity = float(row.get("equity") or row.get("balance") or 0)
+        try:
+            self._wallet = float(row.get("balance") or 0)          # the wallet balance (no unrealized PnL): only PnL, fees, funding and transfers move it
+        except (TypeError, ValueError):
+            self._wallet = 0.0
         self.available = float(row.get("availableMargin") or row.get("available") or row.get("availableBalance") or 0)
         self.used = float(row.get("usedMargin") or row.get("used") or 0)
         self.upnl = float(row.get("unrealizedProfit") or row.get("unrealized") or 0)
@@ -1713,6 +1748,10 @@ class Pulse:
                 os.replace(tmp, START_EQ_PATH)
             except Exception:
                 pass
+        try:
+            self.check_transfer(float(getattr(self, "_wallet", 0.0) or 0.0), time.time())
+        except Exception as exc:     # a failed reconciliation is unknown, never a transfer and never a crash of the balance read
+            log(f"TRANSFER check failed: {exc}", every=300.0, key="transfer-err")
         halt_eq = float(getattr(self, "_halt_eq", 0.0) or 0.0)
         econ_halt = self.halted and (
             self.halt_reason == "drawdown halt" or str(self.halt_reason or "").startswith("equity ")
@@ -1765,6 +1804,60 @@ class Pulse:
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
+
+    def check_transfer(self, wallet: float, now: float) -> float:
+        """Money moved into or out of the account is not a trading result (owner 2026-11-04: "on each session money got transferred"). The wallet balance changes by realized
+        PnL, fees and funding (all in the venue's income feed) and by transfers (not in it); a change the income feed does not explain, seen twice in a row (the feed can lag a
+        fill), is a transfer: the drawdown basis (session and start equity) moves by it, so it is neither a gain nor a loss. An income read that fails is unknown, never a
+        transfer. Returns the transfer applied (0 when none)."""
+        if not bool(getattr(self, "transfer_adjust", True)) or wallet <= 0:
+            return 0.0
+        ref = getattr(self, "_wal_ref", None)
+        if ref is None:
+            self._wal_ref = (wallet, now)
+            return 0.0
+        ref_bal, ref_t = ref
+        tol = transfer_tolerance(max(wallet, ref_bal))
+        if abs(wallet - ref_bal) < tol:
+            self._wal_ref = (wallet, now)             # small drift is PnL: keep the reference close, so the interval stays short
+            self.__dict__["_tr_pending"] = None
+            return 0.0
+        if now - float(getattr(self, "_tr_last_query", 0.0) or 0.0) < 12.0:
+            return 0.0
+        self._tr_last_query = now
+        t0, t1 = (ref_t - 90.0) * 1000.0, (now + 5.0) * 1000.0
+        try:
+            r = self.api.get("/openApi/swap/v2/user/income", {"startTime": int(t0), "endTime": int(t1), "limit": 1000})
+        except Exception:
+            return 0.0
+        rows = r.get("data") if isinstance(r, dict) and self.ok(r) else None
+        if not isinstance(rows, list):
+            return 0.0
+        resid = transfer_residual(wallet - ref_bal, income_total(rows, ref_t * 1000.0, t1), max(wallet, ref_bal))
+        if resid == 0.0:
+            self._wal_ref = (wallet, now)
+            self.__dict__["_tr_pending"] = None
+            return 0.0
+        pending = getattr(self, "_tr_pending", None)
+        if pending is None or abs(pending - resid) >= tol:
+            self._tr_pending = resid                  # first sighting: confirm on the next read (the income feed can be a few seconds behind a fill)
+            return 0.0
+        self._tr_pending = None
+        self._wal_ref = (wallet, now)
+        self.session_eq = max(0.0, float(getattr(self, "session_eq", 0.0) or 0.0) + resid)
+        self.start_eq = max(0.0, float(getattr(self, "start_eq", 0.0) or 0.0) + resid)
+        try:
+            tmp = START_EQ_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"startEquity": self.start_eq, "t": now}, f)
+            os.replace(tmp, START_EQ_PATH)
+        except Exception:
+            pass
+        book = self.__dict__.setdefault("transfers", [])
+        book.append({"t": now, "amount": round(resid, 4), "walletBefore": round(ref_bal, 4), "walletAfter": round(wallet, 4)})
+        del book[:-20]
+        log(f"TRANSFER {resid:+.4f} (wallet {ref_bal:.4f} -> {wallet:.4f}): drawdown basis session {self.session_eq:.4f} start {self.start_eq:.4f}")
+        return resid
 
     def dd_base(self) -> float:
         """The equity the drawdown halt measures from: the active session's start (default) or the stored start equity."""
@@ -4705,6 +4798,7 @@ class Pulse:
         self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
                                                               self.active_fee_contracts(), time.time())
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", 0.0)))
+        self.transfer_adjust = bool(ov.get("transferAdjust", True))
         try:
             self.manual_rest_s = max(0.0, min(7 * 24 * 60.0, float(ov.get("manualCloseRestMin", MANUAL_REST_MIN_DEFAULT)))) * 60.0
         except (TypeError, ValueError):
@@ -6307,6 +6401,8 @@ class Pulse:
             "startEquity": round(self.start_eq, 4),
             "sessionStartEquity": round(float(getattr(self, "session_eq", 0.0) or 0.0), 4),
             "ddBasis": getattr(self, "dd_basis", "session"),
+            "transfers": list(getattr(self, "transfers", []))[-5:],
+            "transferAdjust": bool(getattr(self, "transfer_adjust", True)),
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
             "unrealized": round(self.upnl, 4),

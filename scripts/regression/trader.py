@@ -2706,7 +2706,85 @@ def a_manual_close_rests_only_that_symbol_and_direction():
     return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
 
 
+def transfers_move_the_drawdown_basis_not_the_drawdown():
+    """Owner 2026-11-04 ("on each session money got transferred"): a deposit or a withdrawal is neither a gain nor a loss. The wallet balance moves by realized PnL, fees and
+    funding (the venue's income feed) and by transfers (not in the feed): a change the feed does not explain, confirmed on a second read (the feed can lag a fill), moves the
+    session and start equity by it; PnL-explained changes, a lagging feed that catches up, a failed income read and transferAdjust off move nothing; a real trading loss
+    still reads as drawdown."""
+    import types, time as _t
+    old = pt.START_EQ_PATH
+    income = {"rows": [], "fail": False}
+
+    def get(path, extra=None):
+        if income["fail"]:
+            raise RuntimeError("income unavailable")
+        return {"code": 0, "data": list(income["rows"])}
+    out = {}
+    with tempfile.TemporaryDirectory() as d:
+        pt.START_EQ_PATH = os.path.join(d, "start-eq.json")
+        try:
+            def fresh(adjust=True):
+                return types.SimpleNamespace(api=types.SimpleNamespace(get=get), ok=lambda r: isinstance(r, dict) and r.get("code") == 0, session_eq=100.0, start_eq=100.0,
+                                             transfer_adjust=adjust)
+            t0 = _t.time()
+            f = fresh()
+            pt.Pulse.check_transfer(f, 100.0, t0)                                           # the reference
+            income["rows"] = [{"incomeType": "REALIZED_PNL", "income": "0.2", "time": str(int((t0 + 19) * 1000))}]
+            small = pt.Pulse.check_transfer(f, 100.2, t0 + 20)                               # PnL-sized drift, explained by the feed
+            income["rows"] = []
+            income["rows"] = [{"incomeType": "REALIZED_PNL", "income": "0.2", "time": str(int((t0 + 19) * 1000))}]
+            first = pt.Pulse.check_transfer(f, 200.2, t0 + 40)                               # +100 not in the feed: first sighting
+            dep = pt.Pulse.check_transfer(f, 200.2, t0 + 60)                                 # confirmed
+            out["deposit"] = (small, first, dep, round(f.session_eq, 4), round(f.start_eq, 4), len(f.transfers), json.load(open(pt.START_EQ_PATH))["startEquity"])
+            pt.Pulse.check_transfer(f, 100.2, t0 + 80)
+            wd = pt.Pulse.check_transfer(f, 100.2, t0 + 100)
+            out["withdrawal"] = (wd, round(f.session_eq, 4), round(f.start_eq, 4))
+            # PnL, fees and funding explain a fall: no transfer
+            g = fresh()
+            pt.Pulse.check_transfer(g, 100.0, t0)
+            now_ms = (t0 + 30) * 1000.0
+            income["rows"] = [{"incomeType": "REALIZED_PNL", "income": "-3.5", "time": str(int(now_ms - 5000))}, {"incomeType": "TRADING_FEE", "income": "-0.5", "time": str(int(now_ms - 4000))}]
+            a1 = pt.Pulse.check_transfer(g, 96.0, t0 + 30)
+            a2 = pt.Pulse.check_transfer(g, 96.0, t0 + 60)
+            out["pnl"] = (a1, a2, g.session_eq, getattr(g, "transfers", []))
+            # a lagging feed: the first read sees -1 of the -4, the second the whole
+            h = fresh()
+            pt.Pulse.check_transfer(h, 100.0, t0)
+            income["rows"] = [{"incomeType": "REALIZED_PNL", "income": "-1.0", "time": str(int((t0 + 29) * 1000))}]
+            l1 = pt.Pulse.check_transfer(h, 96.0, t0 + 30)
+            income["rows"] = [{"incomeType": "REALIZED_PNL", "income": "-1.0", "time": str(int((t0 + 29) * 1000))}, {"incomeType": "REALIZED_PNL", "income": "-3.0", "time": str(int((t0 + 31) * 1000))}]
+            l2 = pt.Pulse.check_transfer(h, 96.0, t0 + 60)
+            out["lag"] = (l1, l2, h.session_eq, getattr(h, "transfers", []))
+            # the income read fails / the setting is off: nothing moves
+            income["fail"] = True
+            k = fresh()
+            pt.Pulse.check_transfer(k, 100.0, t0)
+            k1 = pt.Pulse.check_transfer(k, 300.0, t0 + 30)
+            k2 = pt.Pulse.check_transfer(k, 300.0, t0 + 60)
+            income["fail"] = False
+            income["rows"] = []
+            z = fresh(adjust=False)
+            pt.Pulse.check_transfer(z, 100.0, t0)
+            z1 = pt.Pulse.check_transfer(z, 300.0, t0 + 30)
+            z2 = pt.Pulse.check_transfer(z, 300.0, t0 + 60)
+            out["unknown"] = (k1, k2, k.session_eq, z1, z2, z.session_eq)
+        finally:
+            pt.START_EQ_PATH = old
+    # the drawdown in money after a deposit is unchanged: (session + 100) - (equity + 100) = session - equity
+    dd_before = 100.0 - 80.0
+    dd_after = (100.0 + 100.0) - (80.0 + 100.0)
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = "self.check_transfer(float(getattr(self, \"_wallet\", 0.0) or 0.0), time.time())" in src
+    dep, wd, pnl, lag, unk = out["deposit"], out["withdrawal"], out["pnl"], out["lag"], out["unknown"]
+    ok = (dep[0] == 0.0 and dep[1] == 0.0 and abs(dep[2] - 100.0) < 1e-9 and abs(dep[3] - 200.0) < 1e-9 and abs(dep[4] - 200.0) < 1e-9 and dep[5] == 1 and abs(dep[6] - 200.0) < 1e-9
+          and abs(wd[0] + 100.0) < 1e-9 and abs(wd[1] - 100.0) < 1e-9 and abs(wd[2] - 100.0) < 1e-9 and pnl[0] == 0.0 and pnl[1] == 0.0 and pnl[2] == 100.0 and not pnl[3]
+          and lag[0] == 0.0 and lag[1] == 0.0 and lag[2] == 100.0 and not lag[3] and unk == (0.0, 0.0, 100.0, 0.0, 0.0, 100.0)
+          and abs(dd_before - dd_after) < 1e-12 and wired)
+    return ok, f"deposit {dep}; withdrawal {wd}; PnL-explained {pnl}; lagging feed {lag}; unknown / off {unk}; drawdown in money before {dd_before:.2f} after {dd_after:.2f}; wired into refresh_balance {wired}"
+
+
 CHECKS = [
+    ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),
     ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),

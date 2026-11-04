@@ -256,6 +256,8 @@ export type PulseOverlay = {
   blockRiskPctOfBalance: number;
   /** Minutes a symbol and direction rest after a position of it was closed outside the engine (manual close); 0 = off. */
   manualCloseRestMin: number;
+  /** A deposit or withdrawal moves the drawdown basis (session and start equity) instead of reading as a gain or loss. */
+  transferAdjust: boolean;
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
   blockActiveLive: boolean;
@@ -545,6 +547,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockVolumeRatio: 1,
   blockRiskPctOfBalance: 0,
   manualCloseRestMin: 240,
+  transferAdjust: true,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
@@ -1249,6 +1252,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0),
     manualCloseRestMin: Math.max(0, Math.min(10080, Math.round(num(cts.manualCloseRestMin, 240)))),
+    transferAdjust: bool(cts.transferAdjust, true),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),

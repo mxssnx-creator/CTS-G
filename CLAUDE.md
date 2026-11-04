@@ -12,6 +12,12 @@
   the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
   change `EQ_MIN` or reset the start equity without an explicit instruction.
 
+- **2026-11-04, owner (newest): "Refresh drawdown halt. And on each session money got transferred."** The drawdown halt was refreshed explicitly (x01, 11:35 UTC, the engine's own `reset-eq-bingx-x01` marker, the same
+  path the desk Start uses): start equity 27.6997 -> 28.2555, session start equity 128.3826 -> 28.2555 (the 100 USDT that left the account had read as 78.5 % drawdown against the 80 % halt); ddHaltPct 80 and EQ_MIN unchanged.
+  From now on a deposit or withdrawal moves the basis instead of reading as a gain or loss: `Pulse.check_transfer` (every balance read) takes the wallet-balance change, subtracts the venue income feed
+  (`/openApi/swap/v2/user/income`: REALIZED_PNL, TRADING_FEE, FUNDING_FEE; it lists NO transfers - checked over 72 h), and a residual of at least max(0.5 USDT, 2 % of the balance) seen on two consecutive reads
+  (the feed can lag a fill) is a transfer: session and start equity move by it (stats `transfers`, log `TRANSFER`, overlay `transferAdjust` default on). A failed income read is unknown, never a transfer; a real
+  trading loss stays a drawdown. Check `trader.transfers-move-the-drawdown-basis-not-the-drawdown` (fails with the function disabled). Takes effect at the next engine restart.
 - **2026-11-04, owner (latest): Auto PF off on x01 (manual floors), lower min PF, 200 symbols, x02 off, Block ratios doubled, manual closes rest only that symbol and direction.**
   x01: `minPfStepAuto` false, manual floor 1 + TP % x `minPfStepRatio` 0.1 capped by `minPfStepAutoHigh` 1.15 (new setting; 2.0 = no cap, caps the manual and the learned floor in every stage; x01 ran 1.27 for a few
   minutes before), `symbolCap` 200; x02 is stopped (its process, not its positions - their venue-side stops stay). Block counts: ratio 1.0 each (was 0.5; Block v2 maximum), measured on executed parents of

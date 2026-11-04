@@ -1281,6 +1281,8 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("blockVolumeRatio", v)}
                 />
+                <Toggle label="Deposits / withdrawals move the drawdown basis (not a gain or loss)" on={overlay.transferAdjust !== false}
+                  onChange={(v) => patch("transferAdjust", v)} />
                 <Num label="Rest after a manual close" value={overlay.manualCloseRestMin} min={0} max={10080} step={30} unit="min"
                   hint="A position closed by hand on the venue is not opened again in the same direction for this long; every other symbol and the other direction keep trading. 0 = off."
                   onChange={(v) => patch("manualCloseRestMin", v)} />

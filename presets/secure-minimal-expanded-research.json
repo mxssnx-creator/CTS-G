@@ -348,5 +348,6 @@
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
   "minPfStepAutoHigh": 2,
-  "manualCloseRestMin": 240
+  "manualCloseRestMin": 240,
+  "transferAdjust": true
 }
