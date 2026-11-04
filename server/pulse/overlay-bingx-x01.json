@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 120,
+  "symbolCap": 200,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
@@ -197,7 +197,7 @@
   "exitSetsByPack": {
     "indications": false
   },
-  "minPfStepAuto": true,
+  "minPfStepAuto": false,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
   "minPfStepAutoMin": 1,
@@ -304,5 +304,7 @@
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
   "stratTrend": true,
-  "stratBreakout": true
+  "stratBreakout": true,
+  "manualCloseRestMin": 240,
+  "minPfStepAutoHigh": 1.27
 }

@@ -370,6 +370,26 @@ def block_risk_qty(risk_pct: float, equity: float, side: str, px: float, sl: flo
     return risk_room / loss_each if loss_each > 0 else 0.0
 
 
+MANUAL_REST_PATH = os.path.join(DIR, f"manual-rest-{CONN_SHORT}.json")
+MANUAL_REST_MIN_DEFAULT = 240.0
+
+
+def manual_rest_key(symbol: str, side: str) -> str:
+    return f"{symbol}:{str(side).upper()}"
+
+
+def manual_rest_active(rest: Dict[str, float], symbol: str, side: str, now: float) -> bool:
+    """True while (symbol, side) rests after a position of it was closed outside the engine (manual close on the venue)."""
+    return float(rest.get(manual_rest_key(symbol, side), 0.0) or 0.0) > now
+
+
+def manual_rest_prune(rest: Dict[str, float], now: float) -> int:
+    dead = [k for k, until in rest.items() if float(until or 0.0) <= now]
+    for k in dead:
+        rest.pop(k, None)
+    return len(dead)
+
+
 def entry_fail_cooldown_s(low: str) -> float:
     """Seconds a symbol rests after a refused entry. The venue's own "API orders are temporarily disabled ... large market fluctuations" restriction on one
     symbol lasts for a long time (x01 retried MAGMA 41 times over hours at 12 s); it rests 30 minutes. A cooling venue rests 45 s, any other refusal 12 s."""
@@ -933,6 +953,12 @@ class Pulse:
         self.load = LoadGovernor()
         self._scan_keep: List[str] = []
         self.ignore_syms: Dict[str, float] = {}
+        self.manual_rest: Dict[str, float] = {}          # "SYMBOL:SIDE" -> until: a position closed outside the engine is not opened again in the same direction for a while
+        self.manual_rest_s = MANUAL_REST_MIN_DEFAULT * 60.0
+        try:
+            self.manual_rest = {str(k): float(v) for k, v in (json.load(open(MANUAL_REST_PATH)) or {}).items()}
+        except Exception:
+            self.manual_rest = {}
         self.last_px: Dict[str, float] = {}
         self.recon_ok = True
         self.recon_detail = "pending"
@@ -3422,6 +3448,8 @@ class Pulse:
             return
         if self.ignore_syms.get(sym, 0) > time.time():
             return
+        if manual_rest_active(self.manual_rest, sym, "LONG" if direction > 0 else "SHORT", time.time()):
+            return              # closed by hand a moment ago: not the exact same position again (every other symbol and direction trades on)
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
         pack = pack_of_reason(reason)
@@ -3935,6 +3963,7 @@ class Pulse:
             log(f"DROP restored {pos.symbol} {pos.side}: the venue no longer holds it (two reads)")
             self.note_restore("dropped", pos.symbol, pos.side, "the venue no longer holds it (two reads)")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
+            self.note_manual_close(pos, "restored position gone from the venue")
             self.cancel_controls(pos.symbol, side=pos.side)
             self.open.pop(pos.symbol, None)
             self.cooldown[pos.symbol] = time.time() + 90.0
@@ -3953,6 +3982,24 @@ class Pulse:
         self.close_pos(pos, hit[1], hit[0], exchange=False)
         return True
 
+    def note_manual_close(self, pos: Position, why: str) -> None:
+        """A position left the venue with no stop or target fill of ours: it was closed by hand (or by something outside the engine). Trading goes on for every other
+        symbol and for the other direction; this symbol and direction rests `manualCloseRestMin` minutes (owner 2026-11-04: a manual close must not be reopened as
+        the exact same position)."""
+        if self.manual_rest_s <= 0:
+            return
+        now = time.time()
+        self.manual_rest[manual_rest_key(pos.symbol, pos.side)] = now + self.manual_rest_s
+        manual_rest_prune(self.manual_rest, now)
+        try:
+            tmp = MANUAL_REST_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.manual_rest, f)
+            os.replace(tmp, MANUAL_REST_PATH)
+        except Exception:
+            pass
+        log(f"MANUAL CLOSE {pos.symbol} {pos.side} ({why}): no new {pos.side} on it for {self.manual_rest_s / 60:.0f} min, everything else keeps trading")
+
     def drop_ghost(self, pos: Position, why: str) -> None:
         if self.open.get(pos.symbol) is None:
             return
@@ -3964,6 +4011,7 @@ class Pulse:
             return
         if self.close_from_venue(pos, why):
             return
+        self.note_manual_close(pos, why)
         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
         self.cancel_controls(pos.symbol, side=pos.side)   # an exchange-side SL/TP does not cancel its sibling
         pos.exit_price_estimated = True
@@ -4655,6 +4703,10 @@ class Pulse:
         self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
                                                               self.active_fee_contracts(), time.time())
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", 0.0)))
+        try:
+            self.manual_rest_s = max(0.0, min(7 * 24 * 60.0, float(ov.get("manualCloseRestMin", MANUAL_REST_MIN_DEFAULT)))) * 60.0
+        except (TypeError, ValueError):
+            self.manual_rest_s = MANUAL_REST_MIN_DEFAULT * 60.0
         ov["configuredPositionCostPct"] = configured_cost
         ov["positionCostPct"] = self.position_cost_pct
         self._fee_config_dirty = False

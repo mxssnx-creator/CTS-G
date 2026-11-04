@@ -2677,7 +2677,37 @@ def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():
     return got == [1800.0, 45.0, 12.0, 12.0] and wired, f"cooldowns {got}; entry path uses it: {wired}"
 
 
+def a_manual_close_rests_only_that_symbol_and_direction():
+    """Owner 2026-11-04: closing a position by hand must not make the engine reopen the exact same position, and must not stop trading. A position the venue no
+    longer holds and that left no stop / target fill of ours (drop_ghost, a restored position gone) puts (symbol, side) to rest for manualCloseRestMin; the other
+    direction of that symbol and every other symbol are untouched; the rest persists in a file, expires, and 0 switches it off; place() honours it."""
+    import types, time as _t
+    old = pt.MANUAL_REST_PATH
+    with tempfile.TemporaryDirectory() as d:
+        pt.MANUAL_REST_PATH = os.path.join(d, "manual-rest.json")
+        try:
+            fake = types.SimpleNamespace(manual_rest={}, manual_rest_s=240 * 60.0)
+            pt.Pulse.note_manual_close(fake, types.SimpleNamespace(symbol="AAA-USDT", side="LONG"), "ctrl-no-position")
+            now = _t.time()
+            saved = json.load(open(pt.MANUAL_REST_PATH))
+            active = [pt.manual_rest_active(fake.manual_rest, s, sd, now) for s, sd in (("AAA-USDT", "LONG"), ("AAA-USDT", "SHORT"), ("BBB-USDT", "LONG"))]
+            later = pt.manual_rest_active(fake.manual_rest, "AAA-USDT", "LONG", now + 241 * 60)
+            fake.manual_rest_s = 0.0
+            pt.Pulse.note_manual_close(fake, types.SimpleNamespace(symbol="CCC-USDT", side="SHORT"), "ctrl-no-position")
+            off = "CCC-USDT:SHORT" not in fake.manual_rest
+            expired = {"X:LONG": now - 1, "Y:LONG": now + 60}
+            pruned = pt.manual_rest_prune(expired, now)
+        finally:
+            pt.MANUAL_REST_PATH = old
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = ("manual_rest_active(self.manual_rest, sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
+             and src.count("self.note_manual_close(pos,") >= 2)
+    ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired
+    return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
+
+
 CHECKS = [
+    ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),
     ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),

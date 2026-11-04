@@ -254,6 +254,8 @@ export type PulseOverlay = {
   exitMinSamples: number;
   blockVolumeRatio: number;
   blockRiskPctOfBalance: number;
+  /** Minutes a symbol and direction rest after a position of it was closed outside the engine (manual close); 0 = off. */
+  manualCloseRestMin: number;
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
   blockActiveLive: boolean;
@@ -542,6 +544,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinSamples: 8,
   blockVolumeRatio: 1,
   blockRiskPctOfBalance: 0,
+  manualCloseRestMin: 240,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
@@ -1245,6 +1248,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0),
+    manualCloseRestMin: Math.max(0, Math.min(10080, Math.round(num(cts.manualCloseRestMin, 240)))),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),

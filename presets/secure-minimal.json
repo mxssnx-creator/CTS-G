@@ -65,6 +65,7 @@
   "exitMinSamples": 8,
   "blockVolumeRatio": 1,
   "blockRiskPctOfBalance": 0,
+  "manualCloseRestMin": 240,
   "blockProfitFactorRatio": 0.8,
   "blockPauseCountRatio": 1,
   "blockActiveLive": true,
@@ -274,6 +275,7 @@
   "minPfStepAutoMin": 1,
   "minPfStepAutoTol": 5,
   "minPfStepAutoLow": 1,
+  "minPfStepAutoHigh": 2,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
   "pauseCandidates": [

@@ -299,5 +299,6 @@
   "blockCarry": false,
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
-  "blockRiskPctOfBalance": 0
+  "blockRiskPctOfBalance": 0,
+  "manualCloseRestMin": 240
 }

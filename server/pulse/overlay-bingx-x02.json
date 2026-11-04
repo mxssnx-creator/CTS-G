@@ -304,5 +304,6 @@
   "stratTrend": true,
   "stratBreakout": true,
   "blockRiskPctOfBalance": 0,
-  "minPfStepAutoHigh": 1.27
+  "minPfStepAutoHigh": 1.27,
+  "manualCloseRestMin": 240
 }
