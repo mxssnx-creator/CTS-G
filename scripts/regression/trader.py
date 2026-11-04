@@ -574,6 +574,35 @@ def an_unsupported_cancel_replace_is_asked_once():
     return ok, f"posts sent {len(posts)} for two calls; second answered locally {second.get('unsupported')}; an unrelated refusal keeps it on {other.cancel_replace_ok}; guarded call sites {guards}"
 
 
+def leverage_maximum_follows_the_venue_dynamically():
+    """The contract list is read again every LEV_MAX_REFRESH_S and a symbol whose maximum leverage changed gets the new one (owner 2026-11-03: always the maximum,
+    dynamically): a raised maximum (50 -> 100) is adopted and the applied leverage dropped so the next entry sets it, a lowered one (150 -> 75) too, an unchanged
+    symbol and a symbol never seen keep their state, an unreadable contract list changes nothing; the call is made from the REST tick when the interval is up."""
+    p = _bare_pulse()
+    p.contracts = {s_: pt.Contract(s_, 0.001, 0.001, 3, 4, 2.0, mx) for s_, mx in (("A-USDT", 50), ("B-USDT", 150), ("C-USDT", 20))}
+    p.lev_max = {"A-USDT": 50, "B-USDT": 150, "C-USDT": 20}
+    p.lev_map = {"A-USDT": 50, "B-USDT": 150, "C-USDT": 20}
+    p._persist_lev = lambda: None
+    fresh = {"A-USDT": pt.Contract("A-USDT", 0.001, 0.001, 3, 4, 2.0, 100), "B-USDT": pt.Contract("B-USDT", 0.001, 0.001, 3, 4, 2.0, 75),
+             "C-USDT": pt.Contract("C-USDT", 0.001, 0.001, 3, 4, 2.0, 20), "NEW-USDT": pt.Contract("NEW-USDT", 0.001, 0.001, 3, 4, 2.0, 50)}
+    changed = p.refresh_leverage_limits(fresh)
+    state = ({k: p.lev_max[k] for k in ("A-USDT", "B-USDT", "C-USDT")}, {k: p.lev_map[k] for k in ("A-USDT", "B-USDT", "C-USDT")}, "NEW-USDT" in p.lev_max,
+             p.contracts["A-USDT"].max_lev, p.target_leverage(p.lev_max["A-USDT"], "A-USDT"), p.target_leverage(p.lev_max["B-USDT"], "B-USDT"))
+    pt_load = pt.load_contracts
+    try:
+        def boom(*a, **k):
+            raise OSError("down")
+        pt.load_contracts = boom
+        keep = p.refresh_leverage_limits()
+    finally:
+        pt.load_contracts = pt_load
+    src = open(os.path.join(PULSE, "pulse_trader.py")).read()
+    wired = "self.refresh_leverage_limits()" in src and pt.LEV_MAX_REFRESH_S <= 3600
+    ok = (sorted(changed) == ["A-USDT", "B-USDT"] and state == ({"A-USDT": 100, "B-USDT": 75, "C-USDT": 20}, {"A-USDT": 0, "B-USDT": 0, "C-USDT": 20}, False, 100, 100, 75)
+          and keep == [] and wired)
+    return ok, f"changed {sorted(changed)}; maxima / applied / unseen symbol added / A contract max / targets {state}; a failed list read changes {keep}; wired into the REST tick {wired}"
+
+
 def unanswered_close_that_never_existed_is_sent_again():
     """A close whose POST got no answer stays pending while the venue might still fill it, but a close the venue keeps reporting as "order not exist"
     was never accepted: found live on x02 (2026-11-03), polled for minutes while the position went unmanaged. After CLOSE_MISS_N such reads over
@@ -2694,6 +2723,7 @@ CHECKS = [
     ("trader.leverage-is-always-the-exchange-maximum-by-default", leverage_is_always_the_exchange_maximum_by_default),
     ("trader.a-moved-stop-never-storms-the-order-path", a_moved_stop_never_storms_the_order_path),
     ("trader.an-unsupported-cancel-replace-is-asked-once", an_unsupported_cancel_replace_is_asked_once),
+    ("trader.leverage-maximum-follows-the-venue-dynamically", leverage_maximum_follows_the_venue_dynamically),
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.indications-trailing-volume-is-three-times", indications_trailing_volume_is_three_times),

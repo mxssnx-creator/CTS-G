@@ -381,6 +381,8 @@ def main() -> int:
             json.dump(out, open(a.out, "w"), indent=1)
 
     # ---- Block v2 (block_rules): per-count steps and ratios, cumulative evidence, relations, Additive / Shared, lifecycle ------------------------------
+    floor_memo: Dict[Tuple[int, float], float] = {}
+
     def block_sim2(parents, cfg):
         """The engine's rules (block_rules, the same module SetBlockBook runs) over the executed parents, in time order: a parent's close (its observations
         enter the ledgers, its lifecycle updates) comes before an open at the same moment, an open before a decision. Returns (events, adds, add nets)."""
@@ -432,8 +434,12 @@ def main() -> int:
                     continue
                 if not parent_ok(r, t, no_axis_coord):
                     continue
-                auto.apply(book, float(int(t // 3600) * 3600))
-                floor = float(book.floor_for(book.realst_n, m["st"].pack, m["st"]))
+                hr = float(int(t // 3600) * 3600)
+                fk = (m["st"].idx, hr)
+                if fk not in floor_memo:           # the Auto floor of a Set at an hour never changes between candidates: learn it once
+                    auto.apply(book, hr)
+                    floor_memo[fk] = float(book.floor_for(book.realst_n, m["st"].pack, m["st"]))
+                floor = floor_memo[fk]
                 fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
                 if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):
                     continue

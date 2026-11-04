@@ -280,6 +280,7 @@ def stop_leverage_cap(sl_frac: float) -> int:
     return max(1, int(1.0 / (LIQ_SAFETY * sl + LIQ_MAINT)))
 
 
+LEV_MAX_REFRESH_S = 1800.0      # the venue's leverage maximum per symbol is read again this often (one contract-list request)
 THIN_BOOK_REST_S = 300.0
 CTRL_EXISTS_BACKOFF_S = 300.0
 # BingX bans the order path for ~7 minutes after 20 "already exists" refusals (110406) within 480 s, closes included. Found live on x02 (2026-11-03): the
@@ -1115,6 +1116,33 @@ class Pulse:
                 self.lev_map[str(k)] = n
                 self.lev_max.setdefault(str(k), n)
 
+    def refresh_leverage_limits(self, rows: Optional[Dict[str, "Contract"]] = None) -> List[str]:
+        """Follow the venue's leverage maximum dynamically (owner 2026-11-03: always the maximum): the contract list is read again every LEV_MAX_REFRESH_S
+        (one request) and a symbol whose maximum changed gets the new one; its applied leverage is dropped so the next entry sets it again (a raised maximum is
+        used, a lowered one never leaves a position above it). Returns the symbols that changed."""
+        self.lev_refresh_at = time.time()
+        try:
+            fresh = rows if rows is not None else load_contracts(None)
+        except Exception:
+            return []
+        changed: List[str] = []
+        for sym, c in fresh.items():
+            mx = int(getattr(c, "max_lev", 0) or 0)
+            if mx <= 0:
+                continue
+            old = int(self.lev_max.get(sym) or 0)
+            if old and mx != old:
+                self.lev_max[sym] = mx
+                have = self.contracts.get(sym)
+                if have is not None:
+                    have.max_lev = mx
+                self.lev_map[sym] = 0                       # not applied any more: the next entry sets the new maximum
+                changed.append(sym)
+        if changed:
+            log(f"LEV max changed on {len(changed)} symbols: {', '.join(changed[:6])}", every=60.0, key="levmax")
+            self._persist_lev()
+        return changed
+
     def ensure_max_leverage(self, symbol: str, force: bool = False) -> int:
         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
         c = self.contracts.get(symbol)
@@ -1797,6 +1825,9 @@ class Pulse:
                 pass
             self.apply_dynamic_symbols()
         self.last_rest_tick = time.time()
+        if time.time() - float(self.__dict__.get("lev_refresh_at", 0.0)) >= LEV_MAX_REFRESH_S and self.__dict__.get("lev_refresh_at") is not None:
+            self.refresh_leverage_limits()
+        self.__dict__.setdefault("lev_refresh_at", time.time())
 
     def _vol1h_from_bars(self, symbol: str) -> float:
         bars = (self.klines_tf.get("1m", {}) or {}).get(symbol) or self.klines.get(symbol) or []
