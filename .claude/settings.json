@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/ensure_x01.sh\" >> /tmp/ensure_x01.log 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -819,6 +819,10 @@ Every strategy type runs its own lane; none may close, tighten or score another'
   x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). The Base gate
   (`setUseHistoricGate` true) is the default on every connection: entries open only under a Base-validated Set. (x02 ran
   with it off from 01e842b, 2026-10-21, until 2026-10-28; switched back on by the owner.) Credentials are never printed or stored in the repo; rotate any that appeared in a session.
+- **Engine restart after a container restart (2026-11-04).** The container restarted five times in one day and the x01 engine stayed dead for 25 minutes to 4 hours each time (its positions kept their venue-side
+  stop / target orders, but nothing managed trailing, time exits, Block adds or new entries). `scripts/ensure_x01.sh` (idempotent, x01 only, never touches the halt / start equity / EQ_MIN / STOP / PAUSE / reset files)
+  is run by the committed SessionStart hook in `.claude/settings.json`, so every session that starts in the container brings the engine back at once. It is not a supervisor: with no session and no
+  process manager a dead container stays dead. After any restart the 200-symbol rebuild takes 15-25 minutes before entries resume. Check `logistics.ensure-x01-script-is-idempotent-and-starts-only-x01`.
 - State files of the live engine live in the pulse directory; tests must use private temp paths.
 
 ## Memory and speed (2026-10-29)

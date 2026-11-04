@@ -504,7 +504,45 @@ if [[ "$2" == disable ]]; then enable_stack 0 && start_stack 1 0; else start_sta
     return all(results), f"disable/stop failures abort before live or target: {results}"
 
 
+def ensure_x01_script_is_idempotent_and_starts_only_x01():
+    """The container restarted five times on 2026-11-04 and the engine stayed dead for 25 minutes to 4 hours each time. scripts/ensure_x01.sh (run by the SessionStart hook in
+    .claude/settings.json) starts the x01 engine when, and only when, none runs: with a x01 process present it reports and starts nothing, with none it reports missing
+    (dry run here: nothing is launched by the test); a process of another connection does not count; the script names no other connection, never touches the halt,
+    start equity, EQ_MIN or the STOP / PAUSE / reset files, and the hook is committed."""
+    import shutil
+    import time as _t
+    script = os.path.join(ROOT, "scripts", "ensure_x01.sh")
+    text = open(script, encoding="utf-8").read()
+    code = re.sub(r"(?m)^\s*#.*$", "", text)
+    hook = json.load(open(os.path.join(ROOT, ".claude", "settings.json"), encoding="utf-8"))
+    cmds = [h["command"] for g in hook["hooks"]["SessionStart"] for h in g["hooks"]]
+    with tempfile.TemporaryDirectory() as d:
+        stub = os.path.join(d, "bin")
+        os.makedirs(stub)
+        mine = subprocess.Popen(["sleep", "30"], env={**os.environ, "PULSE_CONN": "bingx-x01"})
+        other = subprocess.Popen(["sleep", "30"], env={**os.environ, "PULSE_CONN": "bingx-other"})
+        try:
+            def run(pids):
+                with open(os.path.join(stub, "pgrep"), "w") as f:
+                    f.write("#!/bin/sh\n" + "".join(f"echo {p}\n" for p in pids))
+                os.chmod(os.path.join(stub, "pgrep"), 0o755)
+                out = subprocess.run(["bash", script], env={**os.environ, "PATH": stub + os.pathsep + os.environ["PATH"], "ENSURE_X01_DRY": "1"},
+                                     capture_output=True, text=True, timeout=30)
+                return out.stdout.strip()
+            _t.sleep(0.2)
+            present, absent, foreign = run([mine.pid]), run([]), run([other.pid])
+        finally:
+            for pr in (mine, other):
+                pr.kill()
+                pr.wait()
+    forbidden = ("x02", "reset-eq", "STOP", "PAUSE", "ddHalt", "EQ_MIN", "start-eq", "monitor_engines")
+    ok = (present.startswith("x01 engine running") and "missing" in absent and "missing" in foreign and not any(w in code for w in forbidden)
+          and cmds and all("ensure_x01.sh" in c for c in cmds) and os.access(script, os.X_OK))
+    return ok, f"running -> {present!r}; none -> {absent!r}; another connection -> {foreign!r}; forbidden words in the code: {[w for w in forbidden if w in code]}; hook {cmds}"
+
+
 CHECKS = [
+    ("logistics.ensure-x01-script-is-idempotent-and-starts-only-x01", ensure_x01_script_is_idempotent_and_starts_only_x01),
     ("logistics.startup-controls-fail-closed", startup_controls_fail_closed_and_respect_disabled_lanes),
     ("logistics.remote-installer-preserves-local-work", remote_installer_preserves_local_work_and_forwards_flags),
     ("logistics.live-only-fails-closed-on-x02-control-error", live_only_does_not_continue_after_x02_control_failure),
