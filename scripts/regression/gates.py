@@ -456,6 +456,32 @@ def signal_floor_is_separate_from_window_classes():
     return ok, f"signals={values}, stage={stage}, ordinary={ordinary}, changed={changed}"
 
 
+def no_minimum_orders_gate_can_be_forced_to_one():
+    """Owner 2026-11-04: no minimum-orders gate. Every order-count minimum accepts 1: the Auto per-step floor (minPfStepAutoMin, was clamped to 30), the Auto pause
+    (pauseAutoMin, was clamped to 8), the Main short window's candidate minimum (mainShortMin, was 3), the Exit strategies' samples (exitMinSamples, was 5) and
+    Block v2's observations (blockMinObservations); the Base gate's own minimum (setGateMinTrades) is 0 in every shipped overlay (a Set is judged on the orders it
+    has); MIN_VALIDATION_N only bounds a window's length."""
+    import json as _j
+    import os as _o
+    import set_engine as se
+    import block_rules as br
+    from common import PULSE, ROOT
+    b = se.SetBook()
+    b.load(overlay(minPfStepAutoMin=1, pauseAutoMin=1, mainShortMin=1, setGateMinTrades=0))
+    from exit_engine import ExitBook
+    ex = ExitBook.__new__(ExitBook)
+    try:
+        ex.load({"exitMinSamples": 1}, {})
+        exit_min = ex.min_samples
+    except Exception as exc:  # noqa: BLE001
+        exit_min = f"load failed: {exc}"
+    blk = br.clean_cfg({"blockMinObservations": 1}).min_obs
+    files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")]
+    gate_off = all(int(_j.load(open(f)).get("setGateMinTrades", 0) or 0) == 0 for f in files)
+    ok = b.pf_step_auto_min == 1 and b.pause_auto_min == 1 and b.short_min == 1 and b.gate_min <= 1 and exit_min == 1 and blk == 1 and gate_off
+    return ok, f"floors accepted at 1: step floor {b.pf_step_auto_min}, pause {b.pause_auto_min}, Main short {b.short_min}, Exit {exit_min}, Block v2 {blk}; Base minimum {b.gate_min}; shipped overlays off {gate_off}"
+
+
 def pf_defaults_match_every_shipped_overlay():
     """The desk, each venue overlay and the engine agree on the six requested defaults."""
     import json
@@ -563,6 +589,7 @@ CHECKS = [
     ("gates.base-long-ten-is-judged-on-its-own-windows", base_long_ten_is_judged_on_its_own_windows),
     ("gates.modeled-stop-cap", modeled_stop_cap_rejects_unsafe_sets),
     ("gates.pf-defaults-match-shipped-overlays", pf_defaults_match_every_shipped_overlay),
+    ("gates.no-minimum-orders-gate-can-be-forced-to-one", no_minimum_orders_gate_can_be_forced_to_one),
     ("gates.signal-floor-independent-of-window-class", signal_floor_is_separate_from_window_classes),
     ("gates.minimal-coordination-is-not-pf-validation", minimal_coordination_is_not_pf_validation),
     ("gates.every-window-asks-the-minimum-pf-of-its-size", every_window_asks_the_minimum_pf_of_its_size),

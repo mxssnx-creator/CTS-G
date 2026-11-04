@@ -2056,7 +2056,7 @@ class SetBook:
         # configured windows. If none survive, _main_short_choice retains the
         # long-window reference, as it already does when no candidate wins.
         self.short_windows = tuple(w for w in parse_windows(sov["Windows"], MAIN_SHORT_WINDOWS) if w <= short_cap)
-        self.short_min = max(3, min(200, int(MAIN_SHORT_MIN_DEFAULT if sov["Min"] is None else sov["Min"])))
+        self.short_min = max(1, min(200, int(MAIN_SHORT_MIN_DEFAULT if sov["Min"] is None else sov["Min"])))     # no minimum-orders gate: down to 1
         self.short_margin = max(1.0, min(2.0, float(MAIN_SHORT_MARGIN if sov["Margin"] is None else sov["Margin"])))
         # the Main minimal window, a third last-N next to the long and the short one: the newest 1-3 results of the Main Set all positive (or all negative)
         mmode = str(ov.get("mainMinMode") or "positive").strip().lower()
@@ -2272,7 +2272,7 @@ class SetBook:
         self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
         self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
         self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
-        self.pf_step_auto_min = int(max(30, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))
+        self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
@@ -2285,7 +2285,7 @@ class SetBook:
         cands = sorted({m for m in (self._pause_minutes(x) for x in (raw_c or PAUSE_CANDIDATES_DEFAULT)) if m > 0})
         self.pause_candidates = tuple(cands) or PAUSE_CANDIDATES_DEFAULT
         self.pause_auto_max = int(max(10, min(500, num(ov, "pauseAutoMax", PAUSE_AUTO_MAX_DEFAULT))))
-        self.pause_auto_min = int(max(MIN_VALIDATION_N, min(self.pause_auto_max, num(ov, "pauseAutoMin", PAUSE_AUTO_MIN_DEFAULT))))
+        self.pause_auto_min = int(max(1, min(self.pause_auto_max, num(ov, "pauseAutoMin", PAUSE_AUTO_MIN_DEFAULT))))      # no minimum-orders gate: down to 1
         pp = ov.get("pausePack") if isinstance(ov.get("pausePack"), dict) else {}
         self.pause_pack = {str(k): m for k, m in ((k, self._pause_minutes(v)) for k, v in pp.items()) if m > 0}
         # an indicationConfigs entry may fix its indications' pause (minutes) or switch it off (0) whatever the book's mode; pausePack wins over it

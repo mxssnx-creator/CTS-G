@@ -142,7 +142,7 @@ class ExitBook:
         self.pf_n = max(MIN_VALIDATION_N, window_n(ov, "exitPfWindow", "setPfWindow", fallback=15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = gate_min_pf(ov, "exitMinPf")
-        self.min_samples = max(5, int(ov.get("exitMinSamples") or 8))
+        self.min_samples = max(1, int(ov.get("exitMinSamples") or 8))       # no minimum-orders gate (owner 2026-11-04): down to 1
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 
