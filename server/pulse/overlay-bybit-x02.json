@@ -200,7 +200,7 @@
   "minPfStepAuto": true,
   "minPfStepRatio": 0.2,
   "minPfStepAutoN": 10,
-  "minPfStepAutoMin": 300,
+  "minPfStepAutoMin": 1,
   "minPfStepAutoTol": 5,
   "pauseMode": "auto",
   "pauseFixedMin": 10,
@@ -243,7 +243,7 @@
     10,
     15
   ],
-  "mainShortMin": 8,
+  "mainShortMin": 1,
   "mainShortMargin": 1.02,
   "mainMinN": 0,
   "mainMinMode": "positive",

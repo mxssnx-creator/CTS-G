@@ -912,7 +912,7 @@ function SettingsPage() {
                 <Slider
                   label="Main · short window min orders"
                   value={overlay.mainShortMin}
-                  min={3}
+                  min={1}
                   max={50}
                   step={1}
                   hint="a candidate needs this many validated Main orders"
@@ -2203,7 +2203,7 @@ function PfWindowControls({
       <Slider
         label="Auto: orders a floor needs"
         value={overlay.minPfStepAutoMin}
-        min={30}
+        min={1}
         max={5000}
         step={10}
         hint="admitted orders (one per distinct Set tape) a floor needs before Auto can choose it; with too few on a step Auto uses its direction's pooled floor, and only without any the manual value"

@@ -1368,7 +1368,7 @@ PAUSE_MODES = ("off", "auto", "fixed")
 STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.5, 0.05, 0.2
 STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 3.5             # percent: the table's range (owner 2026-11-03: back to 3.5 %; a TP above it asks the 3.5 % floor)
 STEP_PF_AUTO_N_DEFAULT = 10                           # the Set's last N closed orders at entry that the Auto Mode selects on
-STEP_PF_AUTO_MIN_DEFAULT = 300                        # admitted orders (distinct tapes pooled over a step's Sets) a candidate needs
+STEP_PF_AUTO_MIN_DEFAULT = 1                          # admitted orders a floor candidate needs: none (owner 2026-11-04, no minimum-orders gate; measured identical to 10 / 300 on windows C and B)
 STEP_PF_MARGIN = 1.05                                 # (earlier objective, kept for reference) a candidate had to beat the manual floor's delivered PF by 5 %
 STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1.00 .. 2.00
 STEP_PF_AUTO_TOL_DEFAULT = 0.05                       # minPfStepAutoTol: the lowest floor whose delivered PF is within 5 % of the best one
@@ -1746,7 +1746,7 @@ MAIN_MIN_N_MAX = 3               # the Main minimal window: the newest 1-3 resul
 BASE_MIN_N_MAX = 3               # the Base minimal window: the newest 1-3 results (setGateMinN, 0 = off), all positive or all negative (setGateMinMode)
 BASE_SHORT_MAX_RATIO = 0.5       # the short window is at most this share of the long window (owner 2026-10-29: long 40 -> short at most 20; setGateShortMaxRatio)
 MAIN_SHORT_WINDOWS = (5, 10, 15)  # owner, 2026-10-29: the Main short window, the candidates of each Set's own window (5-15 step 5; was "Auto")
-MAIN_SHORT_MIN_DEFAULT = 8       # orders a candidate needs on the Main Set
+MAIN_SHORT_MIN_DEFAULT = 1       # orders a candidate needs on the Main Set: none (owner 2026-11-04; measured identical to 8 on window C)
 MAIN_SHORT_MARGIN = 1.02         # a candidate must beat the long window's PF by 2 %
 MAIN_NEG_WINDOWS = (5, 10)       # Main Negative lane: the average of the last N Main orders is negative, for some N
 REAL_GATE_N_DEFAULT = 15         # Real: the last N of the lane's Real Set

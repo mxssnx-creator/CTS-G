@@ -85,7 +85,7 @@ test("the Main short window and the Main minimal window default to the owner's s
   assert.equal(o.mainShortEnabled, true);
   assert.deepEqual(o.mainShortWindows, [5, 10, 15]);
   assert.equal(o.mainShortMaxRatio, 0.5);
-  assert.equal(o.mainShortMin, 8);
+  assert.equal(o.mainShortMin, 1, "no minimum-orders gate (owner 2026-11-04)");
   assert.equal(o.mainShortMargin, 1.02);
   assert.equal(o.mainMinN, 0, "the Main minimal window is off by default");
   assert.equal(o.mainMinMode, "positive");
@@ -182,13 +182,13 @@ test("the manual floor per TP step is 1 + TP% x ratio on the 0.1% grid rounded d
 
 test("the TP-step floor settings are on by default, bounded, and survive a settings load", () => {
   const d = overlayFromCts(cts());
-  assert.deepEqual([d.minPfByStep, d.minPfStepAuto, d.minPfStepRatio, d.minPfStepAutoN, d.minPfStepAutoMin], [true, true, 0.2, 10, 300]);
+  assert.deepEqual([d.minPfByStep, d.minPfStepAuto, d.minPfStepRatio, d.minPfStepAutoN, d.minPfStepAutoMin], [true, true, 0.2, 10, 1]);
   const o = overlayFromCts(cts({ minPfByStep: false, minPfStepAuto: false, minPfStepRatio: 0.45, minPfStepAutoN: 12, minPfStepAutoMin: 500 }));
   assert.deepEqual([o.minPfByStep, o.minPfStepAuto, o.minPfStepRatio, o.minPfStepAutoN, o.minPfStepAutoMin], [false, false, 0.45, 12, 500]);
   assert.equal(d.rankByLane, true);
   assert.equal(overlayFromCts(cts({ rankByLane: false })).rankByLane, false);
   const bad = overlayFromCts(cts({ minPfStepRatio: "x", minPfStepAutoN: 999, minPfStepAutoMin: 1 }));
-  assert.deepEqual([bad.minPfStepRatio, bad.minPfStepAutoN, bad.minPfStepAutoMin], [0.2, 50, 30]);
+  assert.deepEqual([bad.minPfStepRatio, bad.minPfStepAutoN, bad.minPfStepAutoMin], [0.2, 50, 1]);
   assert.equal(overlayFromCts(cts({ minPfStepRatio: 1.8 })).minPfStepRatio, 1.5, "the ratio ends at 1.5");
   assert.equal(overlayFromCts(cts({ minPfStepRatio: 0.01 })).minPfStepRatio, 0.1, "and starts at 0.1");
 });
