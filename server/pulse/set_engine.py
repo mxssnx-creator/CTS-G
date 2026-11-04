@@ -1415,6 +1415,22 @@ def step_grid_pct(tp_pct: float) -> float:
     return round(max(STEP_PF_TP_MIN, min(STEP_PF_TP_MAX, g)), 1)
 
 
+def pf_range_floors_of(raw: Any) -> Dict[str, float]:
+    """minPfByRange {range name: floor}: a flat minimum PF for the Sets of that TP range (owner 2026-11-04: lower optimal floors for Micro / Minimal / Short).
+    Unknown names, unreadable and non-finite values are dropped; a floor is bounded to 1.0 .. 2.0."""
+    out: Dict[str, float] = {}
+    if isinstance(raw, dict):
+        known = {n for n, _lo, _hi in TP_RANGES}
+        for k, v in raw.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if str(k).lower() in known and math.isfinite(f) and f > 0:
+                out[str(k).lower()] = round(max(1.0, min(2.0, f)), 4)
+    return out
+
+
 def manual_step_floor(tp_pct: float, ratio: float) -> float:
     """Neutral 1 + (TP step % x ratio): 1.04 at 0.2 % with the default ratio 0.2."""
     return round(1.0 + step_grid_pct(tp_pct) * float(ratio), 6)
@@ -1857,6 +1873,7 @@ class SetBook:
         self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
         self.rotation_s = 0.0
         self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
+        self.pf_range_floor: Dict[str, float] = {}      # minPfByRange: a flat minimum PF for every Set of a TP range (absent: the per-step floor)
         self.lane_order: Tuple[str, ...] = ("pos", "neg")
         self.trail_pick: str = KIND_ORDER_DEFAULT
         self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]
@@ -2276,6 +2293,8 @@ class SetBook:
         self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
         # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
         self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
+        self.pf_range_floor = pf_range_floors_of(ov.get("minPfByRange"))
+        self._manual_floor_cache = {}
         mode = str(ov.get("pauseMode") or "auto").lower()
         self.pause_mode = mode if mode in PAUSE_MODES else "auto"
         self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
@@ -3434,6 +3453,10 @@ class SetBook:
     def step_floor(self, st: "SetState") -> float:
         """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
         bucket = self.step_bucket(st)
+        if self.pf_range_floor:
+            ranged = self.pf_range_floor.get(tp_range_of(bucket))
+            if ranged is not None:
+                return ranged
         if self.pf_step_auto:
             learned = self.step_floor_auto.get((bucket, st.side))
             if learned is not None:

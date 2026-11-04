@@ -2666,7 +2666,18 @@ def volume_factor_is_bounded_and_defaults_to_the_minimum():
     ok = got == want and sizes == {"None": 0.5, "0": 0.5, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05
     return ok, f"factors {got}; notional at 1 % of 1,000 USDT: {sizes}"
 
+def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():
+    """x01 2026-11-04: "Reminder: Due to the large market fluctuations, in order to reduce the risk of liquidation, API orders are temporarily disabled" on MAGMA /
+    POWER / NES was retried every 2 - 3 minutes for hours. A symbol the venue restricts rests 30 minutes; cooling 45 s; any other refusal 12 s."""
+    msg = "Reminder: Due to the large market fluctuations, in order to reduce the risk of liquidation, API orders are temporarily disabled for this symbol"
+    got = [pt.entry_fail_cooldown_s(msg), pt.entry_fail_cooldown_s("venue is cooling"), pt.entry_fail_cooldown_s("The minimum order amount is 15"), pt.entry_fail_cooldown_s("")]
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = "self.cooldown[sym] = time.time() + entry_fail_cooldown_s(low)" in src
+    return got == [1800.0, 45.0, 12.0, 12.0] and wired, f"cooldowns {got}; entry path uses it: {wired}"
+
+
 CHECKS = [
+    ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),
     ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
     ("trader.thirty-ready-symbols-compete-in-one-bounded-batch", thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch),

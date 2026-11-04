@@ -183,7 +183,7 @@ def settings_reach_the_engine_and_the_replay_key():
     off = _book(minPfByStep=False, minPfStepAuto=False)
     ok = (d.pf_by_step and d.pf_step_auto and d.pf_step_ratio == 0.2 and d.pf_step_auto_n == 10
           and (on.pf_step_ratio, on.pf_step_auto_n, on.pf_step_auto_min) == (0.45, 12, 500)
-          and (bad.pf_step_ratio, bad.pf_step_auto_n, bad.pf_step_auto_min) == (0.2, 50, 30)
+          and (bad.pf_step_ratio, bad.pf_step_auto_n, bad.pf_step_auto_min) == (0.2, 50, 1)
           and not off.pf_by_step and not off.pf_step_auto
           and on._evaluation_config != _book()._evaluation_config)
     return ok, f"defaults on/auto/ratio {d.pf_by_step}/{d.pf_step_auto}/{d.pf_step_ratio}/N {d.pf_step_auto_n}; bad values -> {bad.pf_step_ratio}/{bad.pf_step_auto_n}/{bad.pf_step_auto_min}; replay key moves with the settings"
@@ -304,8 +304,32 @@ def auto_floor_never_under_its_lower_bound():
     return ok, f"Auto floor by lower bound: {got}"
 
 
+def min_pf_by_range_replaces_the_step_floor_for_its_range_only():
+    """Owner 2026-11-04 ("lower optimal min PF for micro, minimal, short"): minPfByRange {range: floor} is the one floor of every Set of that TP range in every
+    window and stage; the other ranges keep their per-step floor (manual here); a bad value is dropped; bounded to 1.0 .. 2.0; absent = unchanged."""
+    from position_cost import tp_range_of
+    plain = _book(setStepMax=32, minPfStepAuto=False)
+    ranged = _book(setStepMax=32, minPfStepAuto=False, minPfByRange={"micro": 1.02, "minimal": 1.03, "short": 1.04, "bogus": 1.5, "normal": "x", "long": 0})
+    sets = [x for x in ranged.by_idx if x.kind == "base" and x.sl_ratio == 1.0]
+    bad, seen = [], set()
+    for x in sets:
+        rng = tp_range_of(x.step)
+        seen.add(rng)
+        want = {"micro": 1.02, "minimal": 1.03, "short": 1.04}.get(rng)
+        got = ranged.floor_for(50, x.pack, x)
+        plain_floor = plain.floor_for(50, x.pack, x)
+        windows = {ranged.floor_for(n, x.pack, x) for n in (1, 5, 25, 50)} | {ranged.stage_params(x.pack, x).floor_for(n) for n in (1, 5, 25, 50)}
+        if want is not None and (got != want or len(windows) != 1):
+            bad.append((x.id, rng, got, want))
+        if want is None and (got != plain_floor or got != se.manual_step_floor(x.step * 0.1, 0.2)):
+            bad.append((x.id, rng, got, plain_floor))
+    clamp = se.pf_range_floors_of({"micro": 0.5, "short": 7, "wide": float("nan"), "normal": None, "Long": "1.3", "x": 1.2})
+    ok = not bad and {"micro", "minimal", "short", "normal", "long"} <= seen and clamp == {"micro": 1.0, "short": 2.0, "long": 1.3}
+    return ok, f"{len(sets)} Sets over ranges {sorted(seen)}; range floors applied and others untouched{(' bad ' + str(bad[:3])) if bad else ''}; bounds {clamp}"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
-    manual_floor_is_one_plus_step_times_ratio, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
+    manual_floor_is_one_plus_step_times_ratio, min_pf_by_range_replaces_the_step_floor_for_its_range_only, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,
     a_half_percent_step_at_ratio_point_two_asks_exactly_1_1,

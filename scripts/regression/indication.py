@@ -188,7 +188,7 @@ def active_and_common_reach_replay_and_live_signal():
                 prices = [100.0] * 140 + [100.0 + direction * i * .3 for i in range(1, size + 1)]
                 bars = [[p, p * 1.001, p * .999, p, 1000.0] for p in prices]
                 key = "indTypeActive" if typ == "active" else "indTypeCommon"
-                ov = overlay(**{**SMALL, **off, key: True, "activeOutbreakRanges": [size], "stratGeneral": False})
+                ov = overlay(**{**SMALL, **off, key: True, "activeOutbreakRanges": [size], "stratGeneral": False, "stratTrend": False, "stratBreakout": False})
                 b = SetBook(); b.load(ov)
                 ref = IndicationBook(); ref.load(ov)
                 evaluated = [r for r in ref.process("X", bars[-60:]) if r.kind == typ]
@@ -596,6 +596,51 @@ def market_relations_judge_by_their_rules():
     return ok, f"{len(want) - len(bad)}/{len(want)} relation cases as written{(' bad ' + str(bad)) if bad else ''}; unknown tokens accepted {unknown}; composite window {win}; families long/short {both}"
 
 
+def micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone():
+    """Owner 2026-11-04 (micro tactics): each new family fires on the pattern it is named for, in the direction written, ignores rows after the signal bar, and the
+    voted groups (g_trend_*, g_break_*, g_revert_*, g_volume_*, g_all_*) keep exactly the members they had."""
+    import random
+    import indication_lib as L
+    flat = [[100.0, 100.05, 99.95, 100.0, 1000.0] for _ in range(60)]
+    down = [[100 - i * 0.1, 100 - i * 0.1 + 0.02, 100 - i * 0.1 - 0.12, 100 - i * 0.1 - 0.1, 1000.0] for i in range(40)]
+    last = down[-1][3]
+    drift = [[100 - i * 0.02, 100 - i * 0.02 + 0.01, 100 - i * 0.02 - 0.03, 100 - i * 0.02 - 0.02, 1000.0] for i in range(60)]
+    random.seed(3)
+    noisy, p = [], 100.0
+    for _ in range(80):
+        o = p
+        p *= 1 + random.gauss(0, 0.0006)
+        noisy.append([o, max(o, p) * 1.0003, min(o, p) * 0.9997, p, 1000.0])
+    o = noisy[-1][3]
+    cases = [
+        ("sweep_n8_t1", flat + [[100.0, 100.05, 99.0, 100.1, 1500.0]], 1),
+        ("sweep_n8_t1", flat + [[100.0, 101.0, 99.95, 99.9, 1500.0]], -1),
+        ("wickrev_n8_t1", flat + [[100.0, 100.1, 98.8, 100.05, 1500.0]], 1),
+        ("volclimax_n8_t1", drift + [[98.8, 99.2, 98.6, 99.1, 5000.0]], 1),
+        ("burstgo_n8_t1", noisy + [[o, o * 1.012, o, o * 1.011, 3000.0]], 1),
+        ("burstfade_n8_t1", noisy + [[o, o, o * 0.985 * 0.999, o * 0.985, 900.0]], 1),
+        ("exhaust_n8_t1", down + [[last, last + 0.2, last - 0.01, last + 0.15, 1000.0]], 1),
+    ]
+    bad = []
+    for name, rows, want in cases:
+        got = L.LIB[name](rows)
+        if not got or got[0] != want or not 0.0 < got[1] <= 0.95:
+            bad.append((name, want, got))
+        later = rows + [[rows[-1][3], rows[-1][3] * 1.5, rows[-1][3] * 0.5, rows[-1][3], 9e9]]
+        if L.LIB[name](rows) != got or L.LIB[name](rows[:]) != got or got != L.LIB[name](list(later[:-1])):
+            bad.append((name, "not causal", got))
+    # every micro name exists at every range and timeframe, and the voted groups hold none of them
+    micro = [f for f, (g, _) in L.FAMILIES.items() if g.startswith("micro")]
+    missing = [f"{f}_{suf}" for f in micro for suf in ("n5_t1", "n8_t5", "n14_t15", "n21_t30", "c8", "x14") if f"{f}_{suf}" not in L.LIB]
+    members = {g: sorted(f for f, (gg, _) in L.FAMILIES.items() if gg == g) for g in ("trend", "break", "revert", "volume")}
+    leaked = [f for f in micro if any(f in m for m in members.values())]
+    # the all-family vote is built without the micro families: its member count equals the voted groups' families
+    voted = sum(len(m) for m in members.values()) + sum(1 for f, (g, _) in L.FAMILIES.items() if g in ("price",))
+    allfam = sum(1 for f, (g, _) in L.FAMILIES.items() if not g.startswith("micro"))
+    ok = not bad and not missing and not leaked and len(micro) == 9 and voted == allfam
+    return ok, f"{len(cases)} patterns fire as written{(' bad ' + str(bad)) if bad else ''}; {len(micro)} micro families at every range/timeframe (missing {missing[:3]}); voted groups unchanged (leaked {leaked}); all-vote families {allfam}"
+
+
 CHECKS = [
     ("indication.active-and-common-reach-replay-and-live-signal", active_and_common_reach_replay_and_live_signal),
     ("indication.ranges-forwarded-to-set-signal", indication_ranges_are_forwarded_to_the_set_signal),
@@ -611,6 +656,7 @@ CHECKS = [
     ("indication.thirty-minute-names-fire", thirty_minute_names_fire_and_read_their_history),
     ("indication.new-common-families-fire-at-every-range-and-invert", new_common_families_fire_at_every_range_and_invert),
     ("indication.market-relations-judge-by-their-rules", market_relations_judge_by_their_rules),
+    ("indication.micro-tactics-fire-on-their-pattern-and-leave-group-votes-alone", micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),

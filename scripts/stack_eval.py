@@ -61,6 +61,37 @@ def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int,
             "net_per_dd": round(net / mdd, 3) if mdd > 0 else None, "hours_positive": f"{sum(1 for v in by_h.values() if v > 0)}/{len(hours)}"}
 
 
+def dca_rungs(side: int, entry: float, exit_px: float, sl_f: float, e_i: int, i_end: int, cfg: Dict[str, Any], cf: float, hit, ind_ok=None, allow=None
+              ) -> List[Tuple[int, int, float, float]]:
+    """The rungs one parent's DCA ladder fills: [(bar j, rung k, volume m in V0, net of the add)], pure (no state of the lane).
+    Rung k sits at d_k = clamp((f0 + k x fs) x sl_f, cf, 0.9 x sl_f) against the position; it adds m_k = m0 x g^k V0, cut so the whole add volume stays under
+    max_expo - 1 (a remainder under 0.05 V0 ends the ladder). `hit(i0, i1, level, direction)` is the first bar j in [i0, i1) whose high (direction > 0) / low
+    (direction < 0) reaches the level, else -1; a gated rung (`ind_ok(j)` False) waits for the next bar that reaches its level; `allow(j)` False (the lane's
+    own off switch at that bar) ends the ladder. Every add exits at the parent's exit price and pays one PositionCost."""
+    out: List[Tuple[int, int, float, float]] = []
+    used, pos_j = 0.0, e_i + 1
+    cap = float(cfg["max_expo"]) - 1.0
+    for k in range(int(cfg["n"])):
+        d = min(max((float(cfg["f0"]) + k * float(cfg["fs"])) * sl_f, cf), 0.9 * sl_f)
+        m = float(cfg["m0"]) * (float(cfg["g"]) ** k)
+        if used + m > cap + 1e-12:
+            m = cap - used
+            if m < 0.05:
+                break
+        lvl = entry * (1 - side * d)
+        j = hit(pos_j, i_end, lvl, -side)
+        while j >= 0 and ind_ok is not None and not ind_ok(j):
+            j = hit(j + 1, i_end, lvl, -side) if j + 1 < i_end else -1
+        if j < 0:
+            break
+        if allow is not None and not allow(j):
+            break
+        out.append((j, k, m, (exit_px - lvl) / lvl * side - cf))
+        used += m
+        pos_j = j
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -538,6 +569,90 @@ def main() -> int:
             ev, n_add, nets = dca_sim(base, cfg, allow_coord)
             out["dca"][label] = {**summarize(ev, len(base), n_add, run_hours), "adds_pf": pf(nets), "cfg": cfg}
             print(f"{'DCA ' + label:44s} {json.dumps({k: v for k, v in out['dca'][label].items() if k != 'cfg'})}  [{time.time() - t1:.0f}s]", flush=True)
+            json.dump(out, open(a.out, "w"), indent=1)
+    # ---- DCA 12: up to twelve rungs of its own, per rung distance and volume, optionally gated by its own reversal indications ------------------------
+    # Owner 2026-11-04 ("12 step DCA ... own indication type ... lower and higher distances, ratios ... moderate drawdowns"). A rung k sits at a fraction
+    # d_k of the parent's own stop distance below (above) the entry, adds m_k x V0, and fills at the first bar that reaches it (strictly before the parent's
+    # exit bar on a winner, on the exit bar too on a loser: the pessimistic order). The parent keeps its stop, target and hold at the original entry, so every
+    # rung exits at the parent's exit price and pays one PositionCost. The whole add volume stays under max_expo - 1. A rung with an indication gate fills
+    # only at a bar where one of its reversal indications (library names on the 1m series) points the position's way; a rung that cannot fill there stays
+    # open for the next qualifying bar of the parent's life. The lane switches itself off when its own last 15 adds read under the minimum PF (as dca_sim).
+    if "dca12" in parts:
+        if os.environ.get("IND_LIB_PATH"):          # a newer library than the one the replay cache was built with (the gate reads only its own names)
+            import importlib.util as _iu
+            _sp = _iu.spec_from_file_location("indication_lib_gate", os.environ["IND_LIB_PATH"])
+            IL = _iu.module_from_spec(_sp)
+            _sp.loader.exec_module(IL)
+        else:
+            import indication_lib as IL
+        ind_cache: Dict[Tuple[str, int, str], int] = {}
+
+        def ind_dir(s: str, j: int, names_: Sequence[str]) -> int:
+            """Net direction of the named indications on the completed bar j of symbol s: +1 / -1 when any fires and none disagrees, else 0."""
+            up = dn = 0
+            for nm in names_:
+                k = (s, j, nm)
+                if k not in ind_cache:
+                    rows = bars[s][max(0, j - 380): j + 1]
+                    sig = IL.LIB[nm]([[float(x) for x in b[:5]] for b in rows])
+                    ind_cache[k] = int(sig[0]) if sig else 0
+                v = ind_cache[k]
+                up += v > 0
+                dn += v < 0
+            return 1 if up and not dn else (-1 if dn and not up else 0)
+
+        def dca12_sim(parents, cfg):
+            gate = cfg.get("ind") or []
+            events = parent_events(parents)
+            closes: List[Tuple[float, float]] = []
+            add_nets: List[float] = []
+            per_rung = [0] * cfg["n"]
+            adds = 0
+            for r in sorted(parents, key=lambda x: x["t_in"]):
+                tr = r["tr"]
+                s, side = r["symbol"], int(tr["dir"])
+                e_i, x_i = int(tr["entry_i"]), int(tr["exit_i"])
+                i_end = x_i + 1 if r["net"] < 0 else x_i
+
+                def allow(j, s=s):
+                    last15 = [v for t, v in closes if t <= float(times[s][j])][-15:]
+                    return not (len(last15) >= 8 and (pf(last15) or 0.0) + 1e-9 < dca_min_pf)
+                fills = dca_rungs(side, float(tr["entry_px"]), float(tr["exit_px"]), float(r["fracs"][0]), e_i, i_end, cfg, cf,
+                                  lambda i0, i1, lvl, d, s=s: first_hit(s, i0, i1, lvl, d),
+                                  (lambda j, s=s, side=side: ind_dir(s, j, gate) == side) if gate else None, allow)
+                for _j, k, m, net in fills:
+                    events.append((float(r["t"]), net, m))
+                    add_nets.append(net)
+                    closes.append((float(r["t"]), net))
+                    per_rung[k] += 1
+                    adds += 1
+            return events, adds, add_nets, per_rung
+
+        IND_REV = ["sweep_n8_t1", "wickrev_n8_t1", "exhaust_n8_t1", "volclimax_n8_t1"]
+        IND_RSI = ["rsirev_n8_t1", "stochrsi_n8_t1"]
+        IND_ALL = IND_REV + IND_RSI + ["zrev_n21_t1", "ibs_n8_t1"]
+        base12 = {"n": 12, "f0": 0.1, "fs": 0.07, "m0": 0.2, "g": 1.0, "max_expo": 3.0, "ind": []}
+        arms12: List[Tuple[str, Dict[str, Any]]] = []
+        for n_r in (1, 3, 6, 12):
+            for (f0, fs) in ((0.1, 0.05), (0.2, 0.1), (0.05, 0.075), (0.3, 0.05)):
+                for m0 in (0.1, 0.25, 0.5):
+                    if n_r == 1 and fs != 0.05:
+                        continue
+                    arms12.append((f"n{n_r} f{f0}+{fs} m{m0}", {"n": n_r, "f0": f0, "fs": fs, "m0": m0}))
+        for g in (1.15, 1.3):
+            arms12.append((f"n12 f0.05+0.075 m0.15 g{g}", {"n": 12, "f0": 0.05, "fs": 0.075, "m0": 0.15, "g": g, "max_expo": 4.0}))
+        for nm, lst in (("rev", IND_REV), ("rsi", IND_RSI), ("all", IND_ALL)):
+            for n_r in (3, 6, 12):
+                for (f0, fs) in ((0.1, 0.05), (0.05, 0.075), (0.2, 0.1)):
+                    for m0 in (0.25, 0.5):
+                        arms12.append((f"IND-{nm} n{n_r} f{f0}+{fs} m{m0}", {"n": n_r, "f0": f0, "fs": fs, "m0": m0, "ind": lst}))
+        out["dca12"] = {}
+        for label, ch in arms12:
+            t1 = time.time()
+            cfg = {**base12, **ch}
+            ev, n_add, nets, per_rung = dca12_sim(base, cfg)
+            out["dca12"][label] = {**summarize(ev, len(base), n_add, run_hours), "adds_pf": pf(nets), "per_rung": per_rung, "cfg": cfg}
+            print(f"{'DCA12 ' + label:48s} {json.dumps({k: v for k, v in out['dca12'][label].items() if k != 'cfg'})}  [{time.time() - t1:.0f}s]", flush=True)
             json.dump(out, open(a.out, "w"), indent=1)
     json.dump(out, open(a.out, "w"), indent=1)
     print(f"done [{time.time() - t0:.0f}s]")

@@ -482,7 +482,71 @@ def frozen_hold_and_block_intent_failure():
         return not early and calls == ["time"] and len(env.venue.posts) == before, f"entry hold kept={not early and calls == ['time']}; no order without persisted intent={len(env.venue.posts)==before}"
 
 
+def dca_ladder_equals_a_plain_reading_and_a_worked_example():
+    """The 12-step DCA simulator (stack_eval.dca_rungs) against a plain bar-by-bar reading on 400 random paths (rung level, first touching bar, cap on the whole
+    add volume, indication gate, off switch) and against one worked example: a long at 100, stop distance 2 %, target 4 %: rungs at 0.1 / 0.2 x the stop
+    (0.2 % and 0.4 %) of 0.25 and 0.5 V0 fill at 99.8 and 99.6 and exit at 104 together with the parent; each pays one PositionCost."""
+    import stack_eval as sv
+    rnd = random.Random(7)
+    cf = 0.0012
+    bad, filled = [], 0
+    for trial in range(400):
+        n = rnd.randint(40, 90)
+        px, hi, lo = 100.0, [], []
+        for _ in range(n):
+            o = px
+            px *= 1 + rnd.gauss(0, 0.002)
+            hi.append(max(o, px) * (1 + abs(rnd.gauss(0, 0.0007))))
+            lo.append(min(o, px) * (1 - abs(rnd.gauss(0, 0.0007))))
+        side = rnd.choice((1, -1))
+        e_i, i_end = rnd.randint(1, 10), rnd.randint(20, n - 1)
+        entry, exit_px, sl_f = 100.0, 100.0 * (1 + side * rnd.uniform(-0.03, 0.05)), rnd.choice((0.01, 0.02, 0.035))
+        cfg = {"n": rnd.choice((1, 3, 6, 12)), "f0": rnd.choice((0.05, 0.1, 0.3)), "fs": rnd.choice((0.05, 0.075, 0.1)), "m0": rnd.choice((0.1, 0.25, 0.5)),
+               "g": rnd.choice((1.0, 1.3)), "max_expo": rnd.choice((2.0, 3.0, 4.0))}
+        gated = set(rnd.sample(range(n), n // 3))
+        stop_at = rnd.randint(0, n) if rnd.random() < 0.3 else n + 1
+
+        def hit_np(i0, i1, lvl, d):
+            for j in range(i0, i1):
+                if (hi[j] >= lvl) if d > 0 else (lo[j] <= lvl):
+                    return j
+            return -1
+        got = sv.dca_rungs(side, entry, exit_px, sl_f, e_i, i_end, cfg, cf, hit_np, (lambda j: j in gated) if trial % 2 else None, lambda j: j < stop_at)
+        # the plain reading: bar by bar, no helper shared with the function under test
+        want, used, start = [], 0.0, e_i + 1
+        for k in range(cfg["n"]):
+            dist = min(max((cfg["f0"] + k * cfg["fs"]) * sl_f, cf), 0.9 * sl_f)
+            vol = cfg["m0"] * cfg["g"] ** k
+            if used + vol > cfg["max_expo"] - 1.0 + 1e-12:
+                vol = cfg["max_expo"] - 1.0 - used
+                if vol < 0.05:
+                    break
+            lvl = entry * (1 - side * dist)
+            j = start
+            found = -1
+            while j < i_end:
+                touched = (lo[j] <= lvl) if side > 0 else (hi[j] >= lvl)
+                if touched and (trial % 2 == 0 or j in gated):
+                    found = j
+                    break
+                j += 1
+            if found < 0 or found >= stop_at:
+                break
+            want.append((found, k, vol, (exit_px - lvl) / lvl * side - cf))
+            used += vol
+            start = found
+        filled += len(want)
+        if got != want:
+            bad.append((trial, got[:2], want[:2]))
+    ex = sv.dca_rungs(1, 100.0, 104.0, 0.02, 0, 10, {"n": 2, "f0": 0.1, "fs": 0.1, "m0": 0.25, "g": 2.0, "max_expo": 3.0}, cf,
+                      lambda i0, i1, lvl, d: next((j for j in range(i0, i1) if [100.0, 100.0, 99.7, 99.5, 99.9, 100, 100, 100, 100, 100][j] <= lvl), -1))
+    want_ex = [(2, 0, 0.25, (104.0 - 99.8) / 99.8 - cf), (3, 1, 0.5, (104.0 - 99.6) / 99.6 - cf)]
+    ok = not bad and filled > 500 and all(abs(a[3] - b[3]) < 1e-12 and a[:3] == b[:3] for a, b in zip(ex, want_ex)) and len(ex) == 2
+    return ok, f"400 random paths equal the plain reading ({filled} rungs filled){(' bad ' + str(bad[:2])) if bad else ''}; worked example {[(j, k, m, round(n, 6)) for j, k, m, n in ex]}"
+
+
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
+    dca_ladder_equals_a_plain_reading_and_a_worked_example,
     paper_actual_isolation, config_change_invalidates_old_evidence, executed_restart_and_base_attribution,
     axis_continuation_and_set_isolation, block_independent_evidence_and_restart, block_actual_and_paper_costs,
     block_has_no_window_and_counts_do_not_borrow, block_engine_matches_a_plain_reading_of_the_rules, block_carry_sizes_the_next_parent_of_the_relation, block_shipped_defaults_are_the_measured_ones, block_stack_types_and_per_count_ratios, block_relations_are_independent_and_all_must_agree,

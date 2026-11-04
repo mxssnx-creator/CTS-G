@@ -358,6 +358,15 @@ def short_api_msg(msg: str) -> str:
     return m.strip(" ,.")[:120]
 
 
+def entry_fail_cooldown_s(low: str) -> float:
+    """Seconds a symbol rests after a refused entry. The venue's own "API orders are temporarily disabled ... large market fluctuations" restriction on one
+    symbol lasts for a long time (x01 retried MAGMA 41 times over hours at 12 s); it rests 30 minutes. A cooling venue rests 45 s, any other refusal 12 s."""
+    low = str(low or "").lower()
+    if "api orders are temporarily" in low or "large market fluctuations" in low:
+        return 1800.0
+    return 45.0 if "cooling" in low else 12.0
+
+
 def is_transient_api(msg: str) -> bool:
     low = str(msg or "").lower()
     return any(k in low for k in _TRANSIENT_API)
@@ -3605,7 +3614,7 @@ class Pulse:
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
                 low = str(msg or "").lower()
-                self.cooldown[sym] = time.time() + (45.0 if "cooling" in low else 12.0)
+                self.cooldown[sym] = time.time() + entry_fail_cooldown_s(low)
                 if "insufficient" in low and "margin" in low:
                     self.cooldown["__book__"] = time.time() + 20.0
                     log(f"ENTRY wait available={self.available:.4f} after {sym}", every=15.0, key="avail-wait")

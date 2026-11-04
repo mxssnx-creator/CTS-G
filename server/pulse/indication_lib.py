@@ -1095,6 +1095,196 @@ def f_ibs(b, n):
     return None
 
 
+# ---- micro tactics (2026-11-04): short-horizon price-action and flow patterns -----------------------------------------
+# Sources: liquidity-sweep / stop-run reversals and wick rejection (price-action scalping), volume-climax exhaustion (Wyckoff), volatility-burst
+# fade and continuation (large-move z-scores), momentum change / acceleration (arXiv 2308.14235 finds a "momentum change" measure more robust than
+# order-flow imbalance on 1 s crypto data), rolling-VWAP crosses with volume, micro-trend pullbacks. All causal: the newest row is a completed bar.
+
+def _sd(vals: Sequence[float]) -> float:
+    m = sum(vals) / len(vals)
+    return math.sqrt(sum((v - m) ** 2 for v in vals) / len(vals))
+
+
+def f_sweep(b, n):
+    """Liquidity sweep: the newest bar pierces the prior n-bar extreme and closes back inside it (a stop run that failed) -> trade the reversal."""
+    if len(b) < n + 2:
+        return None
+    prev = b[-n - 1 : -1]
+    lo_p = min(float(r[2]) for r in prev)
+    hi_p = max(float(r[1]) for r in prev)
+    o, h, l, c = (float(x) for x in b[-1][:4])
+    atr = _atr(b, n)
+    if atr <= 0:
+        return None
+    if l < lo_p and c > lo_p and c > o:
+        return 1, _conf(0.6, min(0.25, (lo_p - l) / atr * 0.25))
+    if h > hi_p and c < hi_p and c < o:
+        return -1, _conf(0.6, min(0.25, (h - hi_p) / atr * 0.25))
+    return None
+
+
+def f_wickrev(b, n):
+    """Wick rejection: a bar at least as wide as the average true range whose lower (upper) wick is 60 % or more of its range and that closes in the
+    upper (lower) 40 % -> long (short)."""
+    if len(b) < n + 2:
+        return None
+    o, h, l, c = (float(x) for x in b[-1][:4])
+    rng = h - l
+    atr = _atr(b[:-1], n)
+    if rng <= 0 or atr <= 0 or rng < atr:
+        return None
+    low_w = (min(o, c) - l) / rng
+    up_w = (h - max(o, c)) / rng
+    loc = (c - l) / rng
+    if low_w >= 0.6 and loc >= 0.6:
+        return 1, _conf(0.6, min(0.2, (low_w - 0.6) * 0.5))
+    if up_w >= 0.6 and loc <= 0.4:
+        return -1, _conf(0.6, min(0.2, (up_w - 0.6) * 0.5))
+    return None
+
+
+def _burst(b, n):
+    """(z, volume ratio) of the newest bar's close-to-close return against the prior n returns; None without enough rows."""
+    if len(b) < n + 3:
+        return None
+    c = _cl(b)
+    rets = [c[i] / c[i - 1] - 1.0 for i in range(len(c) - n - 1, len(c) - 1) if c[i - 1] > 0]
+    if len(rets) < n:
+        return None
+    sd = _sd(rets)
+    if sd <= 0 or c[-2] <= 0:
+        return None
+    z = (c[-1] / c[-2] - 1.0) / sd
+    vols = [float(r[4]) for r in b[-n - 1 : -1]]
+    mv = sum(vols) / len(vols)
+    return z, (float(b[-1][4]) / mv if mv > 0 else 0.0)
+
+
+def f_burstfade(b, n):
+    """A burst of 3 sd or more on a quiet volume (under 1.5 x the average) is a liquidity gap, not information: fade it."""
+    r = _burst(b, n)
+    if r is None:
+        return None
+    z, vr = r
+    if z <= -3.0 and vr < 1.5:
+        return 1, _conf(0.58, min(0.2, (-z - 3.0) * 0.06))
+    if z >= 3.0 and vr < 1.5:
+        return -1, _conf(0.58, min(0.2, (z - 3.0) * 0.06))
+    return None
+
+
+def f_burstgo(b, n):
+    """A burst of 2.5 sd or more on 1.5 x the average volume or more is information: go with it."""
+    r = _burst(b, n)
+    if r is None:
+        return None
+    z, vr = r
+    if abs(z) >= 2.5 and vr >= 1.5:
+        return (1 if z > 0 else -1), _conf(0.58, min(0.2, (abs(z) - 2.5) * 0.05 + min(0.1, (vr - 1.5) * 0.03)))
+    return None
+
+
+def f_exhaust(b, n):
+    """Exhaustion: k = n // 2 (at least 3) consecutive closes one way that moved 1.5 ATR or more, then the first close back -> reversal."""
+    k = max(3, n // 2)
+    if len(b) < k + n + 2:
+        return None
+    c = _cl(b)
+    atr = _atr(b[:-1], n)
+    if atr <= 0:
+        return None
+    run = c[-k - 2 : -1]                         # k + 1 closes before the newest
+    down = all(run[i + 1] < run[i] for i in range(k))
+    up = all(run[i + 1] > run[i] for i in range(k))
+    move = abs(run[-1] - run[0])
+    if down and c[-1] > c[-2] and move >= 1.5 * atr:
+        return 1, _conf(0.6, min(0.2, (move / atr - 1.5) * 0.05))
+    if up and c[-1] < c[-2] and move >= 1.5 * atr:
+        return -1, _conf(0.6, min(0.2, (move / atr - 1.5) * 0.05))
+    return None
+
+
+def f_momchg(b, n):
+    """Momentum change: with k = max(2, n // 2) the move of the last k bars against the move of the k bars before it; the signal is the direction
+    of the latest move when it is accelerating (the change is as large as half an ATR) and the two moves share a sign."""
+    k = max(2, n // 2)
+    if len(b) < 2 * k + n + 2:
+        return None
+    c = _cl(b)
+    m1 = c[-1] - c[-1 - k]
+    m0 = c[-1 - k] - c[-1 - 2 * k]
+    atr = _atr(b[:-1], n)
+    if atr <= 0:
+        return None
+    acc = m1 - m0
+    if m1 > 0 and m0 > 0 and acc >= 0.5 * atr:
+        return 1, _conf(0.58, min(0.2, acc / atr * 0.08))
+    if m1 < 0 and m0 < 0 and -acc >= 0.5 * atr:
+        return -1, _conf(0.58, min(0.2, -acc / atr * 0.08))
+    return None
+
+
+def f_volclimax(b, n):
+    """Volume climax: 3 x the average volume or more on a bar that closes against its extreme after an n-bar move one way -> reversal."""
+    if len(b) < n + 2:
+        return None
+    o, h, l, c = (float(x) for x in b[-1][:4])
+    rng = h - l
+    vols = [float(r[4]) for r in b[-n - 1 : -1]]
+    mv = sum(vols) / len(vols)
+    if rng <= 0 or mv <= 0 or float(b[-1][4]) < 3.0 * mv:
+        return None
+    cl = _cl(b)
+    drift = cl[-2] - cl[-n - 1]
+    loc = (c - l) / rng
+    if drift < 0 and loc >= 0.6:
+        return 1, _conf(0.6, min(0.2, (float(b[-1][4]) / mv - 3.0) * 0.03))
+    if drift > 0 and loc <= 0.4:
+        return -1, _conf(0.6, min(0.2, (float(b[-1][4]) / mv - 3.0) * 0.03))
+    return None
+
+
+def f_vwapx(b, n):
+    """Rolling-VWAP cross: the close crosses the n-bar volume-weighted average from the other side on at least the average volume."""
+    if len(b) < n + 3:
+        return None
+    rows = b[-n - 1 :]
+    vw = [0.0, 0.0]
+    for r in rows[:-1]:
+        tp = (float(r[1]) + float(r[2]) + float(r[3])) / 3.0
+        vw[0] += tp * float(r[4])
+        vw[1] += float(r[4])
+    if vw[1] <= 0:
+        return None
+    v = vw[0] / vw[1]
+    c1, c0 = float(rows[-1][3]), float(rows[-2][3])
+    mv = vw[1] / n
+    if float(rows[-1][4]) < mv:
+        return None
+    atr = _atr(b, n)
+    if atr <= 0:
+        return None
+    if c0 <= v < c1:
+        return 1, _conf(0.58, min(0.2, (c1 - v) / atr * 0.2))
+    if c0 >= v > c1:
+        return -1, _conf(0.58, min(0.2, (v - c1) / atr * 0.2))
+    return None
+
+
+def f_mpull(b, n):
+    """Micro-trend pullback: EMA(n) above EMA(3n) (an up-trend), one or two lower closes, then a close above the bar before -> long (mirror short)."""
+    if len(b) < 3 * n + 3:
+        return None
+    c = _cl(b)
+    fast = _ema(c, n)
+    slow = _ema(c, 3 * n)
+    if fast[-1] > slow[-1] and c[-2] < c[-3] and c[-1] > c[-2] and c[-1] > fast[-1] * 0.998:
+        return 1, _conf(0.58, min(0.2, (fast[-1] / slow[-1] - 1.0) * 20.0))
+    if fast[-1] < slow[-1] and c[-2] > c[-3] and c[-1] < c[-2] and c[-1] < fast[-1] * 1.002:
+        return -1, _conf(0.58, min(0.2, (slow[-1] / fast[-1] - 1.0) * 20.0))
+    return None
+
+
 FAMILIES: Dict[str, Tuple[str, Callable]] = {
     # name: (group, function)
     "ker": ("trend", f_ker), "chop": ("trend", f_chop), "aroon": ("trend", f_aroon), "vortex": ("trend", f_vortex),
@@ -1112,6 +1302,10 @@ FAMILIES: Dict[str, Tuple[str, Callable]] = {
     "supertrend": ("trend", f_supertrend), "trix": ("trend", f_trix), "tsi": ("trend", f_tsi), "elder": ("trend", f_elder), "emax": ("trend", f_emax),
     "squeeze": ("break", f_squeeze), "willr": ("revert", f_willr), "stochrsi": ("revert", f_stochrsi),
     "rsidiv": ("revert", f_rsidiv), "rsishort": ("revert", f_rsi2), "rsireg": ("trend", f_rsireg), "ibs": ("revert", f_ibs),
+    # micro tactics: their own groups, so no existing group vote (g_trend_*, g_break_* ...) changes
+    "sweep": ("microrev", f_sweep), "wickrev": ("microrev", f_wickrev), "burstfade": ("microrev", f_burstfade), "exhaust": ("microrev", f_exhaust),
+    "volclimax": ("microrev", f_volclimax), "burstgo": ("microgo", f_burstgo), "momchg": ("microgo", f_momchg), "vwapx": ("microgo", f_vwapx),
+    "mpull": ("microgo", f_mpull),
 }
 
 
@@ -1150,7 +1344,7 @@ def _multi(fam: str, n: int, tfs: Sequence[int] = TFS) -> Callable[[Sequence[Row
 
 def _group(group: Optional[str], rng: str, need: int = 3) -> Callable[[Sequence[Row]], Signal]:
     """Votes of every family of the group (all when None), at the range's two sizes on the three timeframes."""
-    parts = [_single(fam, n, tf) for fam, (g, _) in FAMILIES.items() if group is None or g == group
+    parts = [_single(fam, n, tf) for fam, (g, _) in FAMILIES.items() if (g == group if group is not None else not g.startswith("micro"))     # the all-family vote keeps its earlier members
              for n in RANGES[rng] for tf in TFS]
 
     def run(rows: Sequence[Row]) -> Signal:

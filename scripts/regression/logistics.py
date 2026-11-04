@@ -14,7 +14,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "38382d3ae7d2b3b977784a7cc78a7db28b1e8061"
+PIN_WANT = "b1f3dc9a56a0f81bf46c69e4a7d3850d06aeb1f1"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -102,6 +102,9 @@ DESK_DEFAULT_EXCEPTIONS = {
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
+    "volumeFactor": "owner 2026-11-03: x01 runs the volume factor 0.4 (8 x the minimum); the desk default stays the minimum 0.05",
+    "stratTrend": "owner 2026-11-04: signals on at x01 and x02 (trend + breakout packs); the shared desk default keeps the extra packs off",
+    "stratBreakout": "owner 2026-11-04: signals on at x01 and x02 (trend + breakout packs); the shared desk default keeps the extra packs off",
     "ddHaltPct": "owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (x01 and x02); the Bybit overlays keep 18",
 }
 
@@ -210,14 +213,14 @@ def engine_absent_defaults_agree():
     return not problems, f"problems={problems}" if problems else "absent defaults agree: scratchMin 0.16%, minStep 6"
 
 
-def dca_is_on_with_set_and_axis_options_off_everywhere():
+def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
     dca_src = open(os.path.join(PULSE, "dca_engine.py"), encoding="utf-8").read()
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
     hard = re.search(r"DCA_HARD_OFF\s*=\s*False", dca_src) is not None   # the kill switch exists and is not thrown
     ok_all, detail = hard, [f"kill_switch_not_thrown={hard}"]
     for path in (X01, X02):
         ov = json.load(open(path))
-        good = (ov.get("dcaEnabled") is True and ov.get("stratDca") is True and ov.get("dcaAuto") is True
+        good = (ov.get("dcaEnabled") is False and ov.get("stratDca") is False and ov.get("dcaAuto") is True
                 and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         ok_all = ok_all and good
         detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
@@ -519,7 +522,7 @@ CHECKS = [
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),
-    ("logistics.dca-on-with-set-and-axis-options-off", dca_is_on_with_set_and_axis_options_off_everywhere),
+    ("logistics.dca-off-by-default-with-set-and-axis-options-off", dca_is_off_by_default_with_set_and_axis_options_off_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),
     ("logistics.no-leftover-zest-names", no_leftover_zest_names),

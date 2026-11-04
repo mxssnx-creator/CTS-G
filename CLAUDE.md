@@ -12,6 +12,32 @@
   the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
   change `EQ_MIN` or reset the start equity without an explicit instruction.
 
+- **2026-11-04, owner: signals on x01, DCA off by default, Block for all relations.** Extra packs trend + breakout are enabled on x01 and x02 (`stratTrend`, `stratBreakout`; live entries read
+  them through `SetBook.entry_signals`; measured on window C PF 1.758 / 199 orders against 1.631 / 188 without; B and A pending). `dcaEnabled` / `stratDca` are off in the overlays, the desk
+  default and the check `logistics.dca-off-by-default-with-set-and-axis-options-off`.
+
+## Live-close audit, Block relations, 12-step DCA, micro tactics (2026-11-04)
+
+- **Live closes (x01 197, x02 120 rows).** `pnl` equals gross minus the recorded fees on every row (max difference 0.00000), `net_pnl_pct` equals gross minus fee / notional on every row
+  (0 mismatches): the cost is deducted once. Stop fills sit at 1.09 x the planned stop (median) and 1.28 x (mean) on base Sets, 1.44 x on trailing Sets (p90 2.2 x; thin small caps gap
+  through the level, e.g. 4.9 x), target fills at 1.01 x; the replay assumes exactly 1.00 x on stops, so replay PF overstates what stops deliver live. Not modelled yet (an option
+  would be a stop-fill factor in the replay; it would lower every displayed PF and change which Sets validate).
+- **Block relations** (`stack_eval.py --part block2`, executed parents of C / B, shipped counts 3 x 3 PositionCosts apart, skip first, ratio 0.5, minimum observations 1). Baseline C PF 1.631 net
+  37.01 dd 24.2, B 0.805 net -12.08 dd 30.9. symbol: C 1.788 / 47.11 / 25.4 (32 adds, add PF 9.5), B 0.811 / -11.69 (3 adds); step (Overall): C 1.599 / 37.65 / 28.3, B 0.813 / -11.55;
+  set: C 1.587 / 36.88, B 0.811 / -11.69; indication: C 1.544 / 34.20, B 0.813 / -11.55; symbol + step: C 1.638 / 38.16 / 25.4 (16 adds), B 0.809 / -11.82; all four agreeing: C 1.620 / 37.05
+  (5 adds). Skipping no count (`skip_first` 0) is worse on B in every relation (net -12.4 .. -15.3). Shared stacking is within 3 net points of Additive. Every relation is at or above no
+  Block on net in both windows; none is a large gain; symbol stays the shipped default.
+- **12-step DCA** (`stack_eval.py --part dca12`, 98 arms on executed parents of C / B; rung k at (f0 + k x fs) x the parent's stop distance, volume m0 x g^k V0, total add volume under
+  `max_expo` - 1, parent keeps its stop and target, optional gate by reversal indications). Best by net with drawdown at most 1.15 x no DCA on both windows: 3 rungs f 0.1 + 0.05, m 0.1:
+  C +0.56 net points, B +0.21 (inside the noise). Larger volumes lift net (n6 f 0.05 + 0.075, m 0.5: C +3.9, B +6.2) at 1.5 - 1.9 x the drawdown (47 against 24 on C). Rungs 7-12 never fill
+  at stop distances up to 0.9 x the stop (n6 = n12). The reversal-indication gate (`IND-*` arms) cut the drawdown a little and the net more. DCA stays off; the engine still has the 1-rung auto plan
+  and static lists; a 12-rung engine mode was not built because the measured gain does not justify it.
+- **Min PF** (C, today's code): Auto tolerance 2 % 1.751 / 194 against 1.631 / 188 (5 %) and 1.554 (0 %); manual step ratio 0.5 gives 1.092 / 276 and 0.8 1.025 / 275 (worse than Auto); a global
+  `setMinPf` 1.4 is identical to 1.25 (the per-step floors govern). Raising the floor does not raise the executed PF.
+- **Micro tactics** (`indication_lib` groups `microrev` / `microgo`, outside the voted groups so no existing vote changes): sweep (liquidity sweep), wickrev, burstfade, burstgo, exhaust, volclimax,
+  momchg, vwapx, mpull; sources in the module comment (arXiv 2308.14235 momentum change, arXiv 2607.09426 / 2602.00776 find 1 - 5 minute order imbalance weak). Check
+  `indication.micro-tactics-fire-on-their-pattern-and-leave-group-votes-alone`. Post-Base measurement queued (`q32`).
+
 ## Current execution contract (2026-10-30)
 
 This section supersedes older operational descriptions and historical measurements below. See

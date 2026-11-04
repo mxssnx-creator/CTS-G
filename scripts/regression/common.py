@@ -71,6 +71,7 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     # shipped overlays run Block v2's measured defaults (per-symbol evidence, steps of 3, the first count only observes)
     ov["blockCounts"] = [{"step": 1, "ratio": 1.0, "on": True} for _ in range(3)]
     ov["blockRelations"], ov["blockSkipFirst"], ov["blockMinObservations"] = ["set"], 0, 3
+    ov["stratTrend"], ov["stratBreakout"] = False, False   # fixtures keep the packs their pinned counts were written for (general, indications, Short Range); the shipped x01 / x02 run trend + breakout (owner 2026-11-04)
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov
