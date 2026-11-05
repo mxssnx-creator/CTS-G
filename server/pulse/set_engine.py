@@ -1969,6 +1969,7 @@ class SetBook:
         self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
+        self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
         self.hist_honor_tp = True
         self.normal_entries = True
         self.exit_sets = True
@@ -2311,6 +2312,17 @@ class SetBook:
         # on or off on its own; a range off builds none of its trailing Sets, the other ranges' Sets are unchanged (their ids carry arm and give only)
         self.trail_ranges = tp_ranges_on(ov.get("trailRanges")) if ov.get("trailRanges") is not None else {k: True for k in TP_RANGES_DEFAULT}
         self.trails = [t for t in self.trails if self.trail_ranges.get(tp_range_of(int(round(t[1] / TP_UNIT_PCT))), True)]
+        # trailMinLockPct (owner 2026-11-05, "disable non performing by adjusting minimal steps"): a pair whose arm minus give is under it builds no Set. The stop of such a pair
+        # sits at the entry (or a hair above) the moment it arms, so an exit through it pays the PositionCost: live x01 closed 53 trailing positions with a lock of 0.1 % or
+        # less, 4 won (PF 0.14, -2.35 USDT), against locks of 0.2 % (33 closes, PF 2.09) and 0.3 %+ (45 closes, PF 1.15). 0 (default) keeps every pair, byte-identical to the earlier grid.
+        try:
+            self.trail_min_lock = max(0.0, min(TRAIL_DISTANCE_LIMIT_PCT, float(ov.get("trailMinLockPct") or 0.0)))
+        except (TypeError, ValueError):
+            self.trail_min_lock = 0.0
+        if not math.isfinite(self.trail_min_lock):
+            self.trail_min_lock = 0.0
+        if self.trail_min_lock > 0:
+            self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
         if not trailing_enabled(ov):
             self.trails = []
         try:
@@ -4009,6 +4021,7 @@ class SetBook:
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
+            "trailMinLockPct": self.trail_min_lock,
             "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
             "indexed": True,

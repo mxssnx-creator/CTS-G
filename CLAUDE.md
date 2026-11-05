@@ -2,6 +2,15 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-05, owner: "Enable block and also subtype Overall" / "Increase also overall vol factor by 5 times" / "Check, disable non performing by adjusting minimal steps and ratios" / "Increase vol ratios for performing coordinations".**
+  (1) Block runs with the relations **symbol + step (Overall)** on every shipped overlay, the desk default and the presets (`blockRelations` ["symbol", "step"]; the engine's absent-key default stays "symbol").
+  Block v2 needs every selected relation to agree, so an add now needs both the per-symbol proof and the per-TP-step proof: measured (executed parents, ratio 1.0, skip first) symbol alone C PF 1.938 / net 57.21 / 32 adds,
+  B 0.818 / -11.29; symbol + step C 1.645 / 39.3 / 16 adds, B 0.813 / -11.55 (half the adds; an "any relation agrees" mode would need a new `blockRelationMode`, not built). Check
+  `logistics.block-is-on-with-the-symbol-and-overall-relations`. (2) x01 `volumeFactor` 1.0 -> **5.0** (hot reload 01:20 UTC): one position is balance x 5 % x 5 = 8.15 USDT notional at 32.6 USDT equity
+  (was 1.63); a Block parent grows to 3 x that. Live stops cost 0.068 USDT on average at the old size (220 stops = -14.9 USDT of the -5.18 net over 407 closes), so one stop now costs about 0.34 USDT (1 % of equity);
+  the 80 % drawdown halt (session start equity) and `EQ_MIN` are untouched and are the only backstop besides the stops. Revert = `volumeFactor` 1.0 in the x01 overlay (hot reload). (3) New opt-in setting
+  `trailMinLockPct` (default 0 = every pair, golden unchanged; desk Settings next to the trailing minimum): trailing pairs with arm - give under it build no Set; live x01 closed 53 positions with a lock of 0.1 % or less, 4 won (PF 0.14, -2.35 USDT), against locks of 0.2 % (33 closes, PF 2.09) and 0.3 %+ (45 closes, PF 1.15). Check `grid.trail-min-lock-removes-only-pairs-that-lock-nothing`. Any change of the Set grid (ranges, SL ceilings, trailing pairs, Exit Sets) makes the engine re-evaluate before it validates
+  again (the evaluation signature holds the Set list), so grid changes are batched into one reload.
 - **2026-11-04, owner: "Do not use a minimum-orders gate. Just ensure that many validations happen and many orders open. It is meant this way."** No setting may
   require N orders (or observations) before a Set, a block count, a pause choice, a hold choice or a PF floor may act: a Set / count is judged on the orders it has
   (a Set without any closed order is never judged). Report **how many Sets validate and how many orders open** next to every PF. Order-count gates to keep at their

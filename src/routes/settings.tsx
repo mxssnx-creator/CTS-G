@@ -1088,6 +1088,15 @@ function SettingsPage() {
                   hint={`Minimum trailing distance = PositionCost + n steps = ${(((overlay.trailMinSteps ?? 2) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 2).`}
                   onChange={(v) => patch("trailMinSteps", Math.max(1, Math.min(7, Math.round(v))))}
                 />
+                <Slider
+                  label="Min trailing lock · arm − give (%)"
+                  value={overlay.trailMinLockPct}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  hint="A trailing pair whose arm minus give is under this builds no Set (0 = every pair). The stop of such a pair sits at the entry when it arms, so an exit through it pays the PositionCost: live x01 closed 53 pairs with a lock of 0.1 % or less, 4 won (PF 0.14)."
+                  onChange={(v) => patch("trailMinLockPct", Math.max(0, Math.min(3, Math.round(v * 100) / 100)))}
+                />
               </Grid>
               <SetsLiveTable stats={stats} overlay={overlay} />
               <p className="text-sm text-muted">

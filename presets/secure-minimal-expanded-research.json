@@ -121,6 +121,7 @@
   "shortRangeMinPf": 1.1,
   "slMinSteps": 1,
   "trailMinSteps": 2,
+  "trailMinLockPct": 0,
   "stratDca": false,
   "indTypeState": true,
   "indTypeDirection": true,
@@ -342,7 +343,8 @@
   "blockSharedTotal": 1,
   "blockMinObservations": 1,
   "blockRelations": [
-    "symbol"
+    "symbol",
+    "step"
   ],
   "blockCarry": false,
   "blockPauseSteps": 1,

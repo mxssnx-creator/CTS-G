@@ -334,6 +334,8 @@ export type PulseOverlay = {
   slMinSteps: number;
   /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
   trailMinSteps: number;
+  /** Smallest arm - give (percent) a trailing pair may have; pairs under it build no Set. 0 = every pair. */
+  trailMinLockPct: number;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -516,7 +518,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockStackType: "additive",
   blockSharedTotal: 1,
   blockMinObservations: 1,
-  blockRelations: ["symbol"],
+  blockRelations: ["symbol", "step"],
   blockCarry: false,
   blockPauseSteps: 1,
   blockSkipFirst: 1,
@@ -635,6 +637,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   shortRangeMinPf: 1.1,
   slMinSteps: 1,
   trailMinSteps: 2,
+  trailMinLockPct: 0,
   stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
@@ -884,6 +887,7 @@ export type CtsSettings = {
   shortRangeMinPf?: number;
   slMinSteps?: number;
   trailMinSteps?: number;
+  trailMinLockPct?: number;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -1363,6 +1367,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.1)),
     slMinSteps: num(cts.slMinSteps, 1),
     trailMinSteps: num(cts.trailMinSteps, 2),
+    trailMinLockPct: Math.max(0, Math.min(3, num(cts.trailMinLockPct, 0))),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),

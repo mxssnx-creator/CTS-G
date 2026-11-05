@@ -296,7 +296,8 @@
   "blockSharedTotal": 1.0,
   "blockMinObservations": 1,
   "blockRelations": [
-    "symbol"
+    "symbol",
+    "step"
   ],
   "blockCarry": false,
   "blockPauseSteps": 1,

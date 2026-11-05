@@ -102,7 +102,7 @@ DESK_DEFAULT_EXCEPTIONS = {
     # balance-based size and the 18 % halt for every other connection
     "targetNotional": "x01 runs the minimum order size (0.2, raised to the venue minimum); desk default 2.15",
     "sizePctOfBalance": "x01 runs the minimum order size (0 = fixed notional); desk default 1 % of the balance",
-    "volumeFactor": "owner 2026-11-03: x01 runs the volume factor 0.4 (8 x the minimum); the desk default stays the minimum 0.05",
+    "volumeFactor": "owner 2026-11-05: x01 runs the volume factor 5.0 (earlier 0.4, then 1.0); the desk default stays the minimum 0.05",
     "minPfStepRatio": "owner 2026-11-04: x01 asks 1 + TP % x 0.1 (lower floors, more positions open); the shared desk default is 0.2",
     "minPfStepAutoHigh": "owner 2026-11-04: x01 caps every TP step's floor at 1.15; the shared desk default is uncapped (2.0)",
     "minPfStepAuto": "owner 2026-11-04: x01 runs the manual per-step floors (1 + TP % x ratio), Auto PF off; the shared desk default keeps Auto on",
@@ -227,6 +227,23 @@ def dca_is_off_by_default_with_set_and_axis_options_off_everywhere():
                 and ov.get("dcaOnSets") is False and ov.get("dcaOnAxis") is False)
         ok_all = ok_all and good
         detail.append(f"{os.path.basename(path)}: enabled={ov.get('dcaEnabled')} auto={ov.get('dcaAuto')} onSets={ov.get('dcaOnSets')} onAxis={ov.get('dcaOnAxis')}")
+    return ok_all, " ".join(detail)
+
+
+def block_is_on_with_the_symbol_and_overall_relations_everywhere():
+    """Owner 2026-11-05 ("enable block and also subtype Overall"): every shipped overlay and the desk default run Block with the symbol relation and the Overall (step) relation."""
+    ok_all, detail = True, []
+    for path in (X01, X02):
+        ov = json.load(open(path))
+        good = (ov.get("blockEnabled") is True and ov.get("stratBlock") is True
+                and list(ov.get("blockRelations") or []) == ["symbol", "step"])
+        ok_all = ok_all and good
+        detail.append(f"{os.path.basename(path)}: enabled={ov.get('blockEnabled')} relations={ov.get('blockRelations')}")
+    cm = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    desk = re.search(r'^\s*blockRelations:\s*\[([^\]]*)\],', cm, re.M)
+    got = [x.strip().strip('"') for x in desk.group(1).split(",")] if desk else None
+    ok_all = ok_all and got == ["symbol", "step"]
+    detail.append(f"desk default={got}")
     return ok_all, " ".join(detail)
 
 
@@ -564,6 +581,7 @@ CHECKS = [
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),
     ("logistics.dca-off-by-default-with-set-and-axis-options-off", dca_is_off_by_default_with_set_and_axis_options_off_everywhere),
+    ("logistics.block-is-on-with-the-symbol-and-overall-relations", block_is_on_with_the_symbol_and_overall_relations_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),
     ("logistics.no-leftover-zest-names", no_leftover_zest_names),

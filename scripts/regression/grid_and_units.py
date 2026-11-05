@@ -342,6 +342,26 @@ def exit_sets_switch_per_pack():
     return ok, f"indications Exit off removes {len(gone)} Sets (all its Exit Sets), the other {len(o_sig)} unchanged; exitIgnoreTp off leaves no Exit Set"
 
 
+def trail_min_lock_removes_only_pairs_that_lock_nothing():
+    """trailMinLockPct (owner 2026-11-05): a trailing pair whose arm minus give is under it builds no Set; every other Set keeps its id and tape key, and 0 (the default) is the earlier grid."""
+    base = _book()
+    off = _book(trailMinLockPct=0)
+    lock = _book(trailMinLockPct=0.3)
+    huge = _book(trailMinLockPct=99)                      # bounded at the 3 % distance limit: it cannot invent a pair
+    def trails(b):
+        return {st.id: (st.trail_arm, st.trail_give) for st in b.by_idx if st.kind == "trail"}
+    tb, tl = trails(base), trails(lock)
+    gone = {i for i in tb if i not in tl}
+    ok = (trails(off) == tb and len(off.by_idx) == len(base.by_idx)              # 0 = unchanged
+          and bool(gone) and all(tb[i][0] - tb[i][1] < 0.3 - 1e-9 for i in gone)    # only pairs under the lock leave
+          and all(tl[i][0] - tl[i][1] >= 0.3 - 1e-9 for i in tl)                   # every kept pair locks at least 0.3 %
+          and set(tl) <= set(tb) and all(tl[i] == tb[i] for i in tl)
+          and len(lock.by_idx) == len(base.by_idx) - len(gone)                      # base / Exit Sets untouched
+          and not any(st.kind == "trail" for st in huge.by_idx)                     # a lock beyond every pair leaves no trailing Set, nothing is invented
+          and lock.trail_min_lock == 0.3 and off.trail_min_lock == 0.0)
+    return ok, f"pairs {len(tb)} -> {len(tl)} at lock 0.3 % ({len(gone)} removed, all with arm - give < 0.3); 0 keeps {len(trails(off))}; 99 keeps {len(trails(huge))}"
+
+
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.5-3.5", sl_ratios),
@@ -350,6 +370,7 @@ CHECKS = [
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),
     ("grid.trail-grid-pure", trail_grid_pure),
+    ("grid.trail-min-lock-removes-only-pairs-that-lock-nothing", trail_min_lock_removes_only_pairs_that_lock_nothing),
     ("grid.trail-distance-limit", trail_distance_limit),
     ("grid.trail-limit-no-unsafe-fallback", trail_limit_has_no_unsafe_fallback),
     ("grid.trail-limit-replay-levels", trail_limit_matches_replay_levels),

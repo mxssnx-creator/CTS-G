@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 1.0,
+  "volumeFactor": 5.0,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -298,7 +298,8 @@
   "blockSharedTotal": 1.0,
   "blockMinObservations": 1,
   "blockRelations": [
-    "symbol"
+    "symbol",
+    "step"
   ],
   "blockCarry": false,
   "blockPauseSteps": 1,

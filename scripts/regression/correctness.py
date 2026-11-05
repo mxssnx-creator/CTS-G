@@ -291,7 +291,9 @@ def block_shipped_defaults_are_the_measured_ones():
             ov = _j.load(open(os.path.join(PULSE, f"overlay-{v}-{c}.json")))
             cfg = br.clean_cfg(ov)
             seen[f"{v}-{c}"] = (cfg.levels(), [cfg.target_ratio(n) for n in (1, 2, 3)], cfg.relations, cfg.skip_first, cfg.min_obs, cfg.carry, cfg.stack_type, "blockEvidenceScope" in ov)
-    ok = want_engine and all(x == ([3.0, 6.0, 9.0], [1.0, 1.0, 1.0], ("symbol",), 1, 1, False, "additive", False) for x in seen.values())
+    # owner 2026-11-05 ("enable block and also subtype Overall"): the shipped overlays add the Overall relation (step) to the measured symbol relation; the engine's own
+    # absent-key default stays the measured symbol relation (symbol + Overall requires both proofs to agree, about half the adds on window C: block2 note in CLAUDE.md)
+    ok = want_engine and all(x == ([3.0, 6.0, 9.0], [1.0, 1.0, 1.0], ("symbol", "step"), 1, 1, False, "additive", False) for x in seen.values())
     return ok, f"engine defaults equal the measured ones: {want_engine}; shipped overlays {sorted(set(map(str, seen.values())))}"
 
 
