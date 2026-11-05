@@ -362,6 +362,29 @@ def trail_min_lock_removes_only_pairs_that_lock_nothing():
     return ok, f"pairs {len(tb)} -> {len(tl)} at lock 0.3 % ({len(gone)} removed, all with arm - give < 0.3); 0 keeps {len(trails(off))}; 99 keeps {len(trails(huge))}"
 
 
+def x01_builds_none_of_the_switched_off_non_performers():
+    """Owner 2026-11-05 ("disable non performing by adjusting minimal steps and ratios"): the grid the shipped x01 overlay builds has no Micro-range Set, no trend or Short Range pack, none of the SL
+    ratios 0.75 / 1.5 / 1.75 / 2.75 / 3.5 and no trailing pair that locks (arm - give) under 0.2 %; x02 (the control, Short Range was never on there) still builds trend, Micro, all ratios and every trailing pair. Each switch-off cites its live and replay numbers in CLAUDE.md."""
+    import json as _j, os as _o
+    from common import PULSE
+    def grid(name):
+        b = SetBook()
+        b.load(_j.load(open(_o.path.join(PULSE, name))))
+        return b
+    x1, x2 = grid("overlay-bingx-x01.json"), grid("overlay-bingx-x02.json")
+    bad_ratio = {0.75, 1.5, 1.75, 2.75, 3.5}
+    def kinds(b):
+        base = [st for st in b.by_idx if st.kind in ("base", "exit")]
+        return {"packs": {st.pack for st in b.by_idx},
+                "micro": any(st.kind != "trail" and st.step <= 3 for st in b.by_idx),
+                "ratios": {round(float(st.sl_ratio), 2) for st in base},
+                "min_lock": min((st.trail_arm - st.trail_give for st in b.by_idx if st.kind == "trail"), default=9.0)}
+    k1, k2 = kinds(x1), kinds(x2)
+    ok = (not ({"trend", "shortrange"} & k1["packs"]) and not k1["micro"] and not (bad_ratio & k1["ratios"]) and k1["min_lock"] >= 0.2 - 1e-9
+          and "trend" in k2["packs"] and k2["micro"] and bad_ratio <= k2["ratios"] and k2["min_lock"] < 0.2 - 1e-9)
+    return ok, f"x01 {len(x1.by_idx)} Sets packs={sorted(k1['packs'])} micro={k1['micro']} ratios={sorted(k1['ratios'])} min lock={k1['min_lock']:.2f}; x02 {len(x2.by_idx)} Sets packs={sorted(k2['packs'])} micro={k2['micro']}"
+
+
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
     ("grid.sl-ratios-0.5-3.5", sl_ratios),
@@ -370,6 +393,7 @@ CHECKS = [
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),
     ("grid.trail-grid-pure", trail_grid_pure),
+    ("grid.x01-builds-none-of-the-switched-off-non-performers", x01_builds_none_of_the_switched_off_non_performers),
     ("grid.trail-min-lock-removes-only-pairs-that-lock-nothing", trail_min_lock_removes_only_pairs_that_lock_nothing),
     ("grid.trail-distance-limit", trail_distance_limit),
     ("grid.trail-limit-no-unsafe-fallback", trail_limit_has_no_unsafe_fallback),

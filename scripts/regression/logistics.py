@@ -108,6 +108,8 @@ DESK_DEFAULT_EXCEPTIONS = {
     "minPfStepAuto": "owner 2026-11-04: x01 runs the manual per-step floors (1 + TP % x ratio), Auto PF off; the shared desk default keeps Auto on",
     "stratTrend": "owner 2026-11-04: signals on at x01 and x02 (trend + breakout packs); the shared desk default keeps the extra packs off",
     "stratBreakout": "owner 2026-11-04: signals on at x01 and x02 (trend + breakout packs); the shared desk default keeps the extra packs off",
+    "stratShortRange": "owner 2026-11-05: x01 switches Short Range off (live 0.26 on 5, replay 0.76 on 39 orders over C / B / A); the shared desk default keeps it on",
+    "trailMinLockPct": "owner 2026-11-05: x01 builds no trailing pair that locks under 0.2 % (live 0.14 PF on 53 closes); the shared desk default is 0 (every pair)",
     "ddHaltPct": "owner 2026-10-28: the drawdown halt is 80 % of the active session's start equity (x01 and x02); the Bybit overlays keep 18",
 }
 

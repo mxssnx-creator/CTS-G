@@ -74,6 +74,9 @@ def overlay(name: str = "overlay-bingx-x01.json", **extra: Any) -> Dict[str, Any
     # x01 (owner 2026-11-04) runs the manual floors 1 + TP % x 0.1 capped at 1.15 (Auto off); fixtures keep the floor rules their checks were written for (Auto on, ratio 0.2, no cap)
     ov["minPfStepAuto"], ov["minPfStepRatio"], ov["minPfStepAutoHigh"], ov["minPfByRange"] = True, 0.2, 2.0, {}
     ov["stratTrend"], ov["stratBreakout"] = False, False   # fixtures keep the packs their pinned counts were written for (general, indications, Short Range); the shipped x01 / x02 run trend + breakout (owner 2026-11-04)
+    # x01 (owner 2026-11-05, disable the non-performers): Micro range, trend pack and Short Range off, five SL ratios dropped, trailing pairs that lock under 0.2 % dropped; fixtures keep the full grid
+    ov["trailMinLockPct"], ov["stratShortRange"] = 0.0, True
+    ov.pop("setSlRatios", None)
     ov["pauseMode"] = "off"       # fixtures replay without the pause (pinned counts, golden); the pause checks and the auto golden ask for it
     ov.update(extra)
     return ov

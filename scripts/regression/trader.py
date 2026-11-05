@@ -638,7 +638,7 @@ def unanswered_close_that_never_existed_is_sent_again():
 
 def indications_trailing_volume_is_not_multiplied():
     """volumeByPackKind: the x 3 of 2026-11-03 for indications trailing Sets is reverted (owner 2026-11-04, live PF 0.24 - 0.74): the engine default is empty,
-    every shipped overlay and preset carries {}, an overlay without the key gets no multiple; the setting still works when asked for (3 x on top of the pack /
+    no shipped file multiplies indications trailing (the presets carry {}; x01 sizes general Exit Sets 1.5 x, owner 2026-11-05), an overlay without the key gets no multiple; the setting still works when asked for (3 x on top of the pack /
     type / range multiples, a value over the bound is capped at 5)."""
     import types, json as _j
     from common import ROOT
@@ -654,7 +654,8 @@ def indications_trailing_volume_is_not_multiplied():
             [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     shipped = {os.path.basename(f): _j.load(open(f)).get("volumeByPackKind") for f in files}
     ok = (got == {"ind trail": 1.0, "ind base": 1.0, "gen trail": 1.0} and abs(stacked - 4.5) < 1e-12 and capped == pt.VOLUME_MULT_MAX
-          and all(v == {} for v in shipped.values()) and pt.VOLUME_BY_PACK_KIND_DEFAULT == {})
+          and all(v == {} or (isinstance(v, dict) and "indications:trail" not in v) for v in shipped.values()) and pt.VOLUME_BY_PACK_KIND_DEFAULT == {}
+          and all(v == {} for k, v in shipped.items() if k.endswith(".json") and not k.startswith("overlay-")))     # owner 2026-11-05: x01 sizes general Exit Sets 1.5 x; no shipped file multiplies indications trailing
     return ok, f"default multiples {got}, asked for 3 with pack 1.5 {stacked}, 9 capped to {capped}; shipped {set(map(str, shipped.values()))}"
 
 
