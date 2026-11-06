@@ -362,27 +362,22 @@ def trail_min_lock_removes_only_pairs_that_lock_nothing():
     return ok, f"pairs {len(tb)} -> {len(tl)} at lock 0.3 % ({len(gone)} removed, all with arm - give < 0.3); 0 keeps {len(trails(off))}; 99 keeps {len(trails(huge))}"
 
 
-def x01_builds_none_of_the_switched_off_non_performers():
-    """Owner 2026-11-05 ("disable non performing by adjusting minimal steps and ratios"): the grid the shipped x01 overlay builds has no Micro-range Set, no trend or Short Range pack, none of the SL
-    ratios 0.75 / 1.5 / 1.75 / 2.75 / 3.5 and no trailing pair that locks (arm - give) under 0.2 %; x02 (the control, Short Range was never on there) still builds trend, Micro, all ratios and every trailing pair. Each switch-off cites its live and replay numbers in CLAUDE.md."""
+def x01_runs_the_full_grid_the_replay_measured_best():
+    """Owner 2026-11-05 asked to switch off the groups that read badly in isolation (Micro range, Short Range, five SL ratios, trailing pairs that lock under 0.2 %). The counterfactual
+    replay of 2026-11-06 (C / B / A, executed positions, `trade_sim.py`) showed removing them LOWERS the result - pooled PF 0.701 on 464 orders (net -61.7 %) with them switched off
+    against 0.895 on 538 orders (net -20.1 %) with all four back, and every window worse (PF C 1.07 / B 0.54 / A 0.38 against 1.14 / 0.77 / 0.59): a group that loses in isolation
+    also takes signals that would otherwise go to worse Sets. The shipped x01 grid therefore keeps all of them: Micro range, Short Range, all 13 SL ratios and every trailing pair (only the Normal range stays off, owner 2026-11-04). The trend signal
+    pack is OFF: the same counterfactual with trend on reads pooled PF 0.895 on 538 orders (net -20.1) against 1.032 on 516 (net +5.6) with it off, worse on B and A (0.77 / 0.59 against 0.97 / 0.98)."""
     import json as _j, os as _o
     from common import PULSE
-    def grid(name):
-        b = SetBook()
-        b.load(_j.load(open(_o.path.join(PULSE, name))))
-        return b
-    x1, x2 = grid("overlay-bingx-x01.json"), grid("overlay-bingx-x02.json")
-    bad_ratio = {0.75, 1.5, 1.75, 2.75, 3.5}
-    def kinds(b):
-        base = [st for st in b.by_idx if st.kind in ("base", "exit")]
-        return {"packs": {st.pack for st in b.by_idx},
-                "micro": any(st.kind != "trail" and st.step <= 3 for st in b.by_idx),
-                "ratios": {round(float(st.sl_ratio), 2) for st in base},
-                "min_lock": min((st.trail_arm - st.trail_give for st in b.by_idx if st.kind == "trail"), default=9.0)}
-    k1, k2 = kinds(x1), kinds(x2)
-    ok = (not ({"trend", "shortrange"} & k1["packs"]) and not k1["micro"] and not (bad_ratio & k1["ratios"]) and k1["min_lock"] >= 0.2 - 1e-9
-          and "trend" in k2["packs"] and k2["micro"] and bad_ratio <= k2["ratios"] and k2["min_lock"] < 0.2 - 1e-9)
-    return ok, f"x01 {len(x1.by_idx)} Sets packs={sorted(k1['packs'])} micro={k1['micro']} ratios={sorted(k1['ratios'])} min lock={k1['min_lock']:.2f}; x02 {len(x2.by_idx)} Sets packs={sorted(k2['packs'])} micro={k2['micro']}"
+    b = SetBook()
+    b.load(_j.load(open(_o.path.join(PULSE, "overlay-bingx-x01.json"))))
+    base = [st for st in b.by_idx if st.kind in ("base", "exit")]
+    ratios = {round(float(st.sl_ratio), 2) for st in base}
+    locks = [st.trail_arm - st.trail_give for st in b.by_idx if st.kind == "trail"]
+    ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and {"shortrange", "general", "indications"} <= {st.pack for st in b.by_idx} and "trend" not in {st.pack for st in b.by_idx}
+          and len(ratios) == 13 and locks and min(locks) < 0.1 and not any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
+    return ok, f"x01 {len(b.by_idx)} Sets, packs {sorted({st.pack for st in b.by_idx})}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 
 CHECKS = [
@@ -393,7 +388,7 @@ CHECKS = [
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),
     ("grid.trail-min-step-clamp", trail_min_step_clamp),
     ("grid.trail-grid-pure", trail_grid_pure),
-    ("grid.x01-builds-none-of-the-switched-off-non-performers", x01_builds_none_of_the_switched_off_non_performers),
+    ("grid.x01-runs-the-full-grid-the-replay-measured-best", x01_runs_the_full_grid_the_replay_measured_best),
     ("grid.trail-min-lock-removes-only-pairs-that-lock-nothing", trail_min_lock_removes_only_pairs_that_lock_nothing),
     ("grid.trail-distance-limit", trail_distance_limit),
     ("grid.trail-limit-no-unsafe-fallback", trail_limit_has_no_unsafe_fallback),

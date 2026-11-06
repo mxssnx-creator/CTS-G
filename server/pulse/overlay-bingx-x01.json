@@ -166,7 +166,7 @@
   "setMaxDdtHours": 24,
   "loadPartial": true,
   "exitMinPf": 1.25,
-  "stratShortRange": false,
+  "stratShortRange": true,
   "shortRangeStepMin": 2,
   "shortRangeStepMax": 6,
   "shortRangeMinPf": 1.1,
@@ -181,7 +181,7 @@
   "rankByLane": true,
   "setScratchEnabled": false,
   "tpRanges": {
-    "micro": false,
+    "micro": true,
     "minimal": true,
     "short": true,
     "normal": false,
@@ -310,15 +310,5 @@
   "stratBreakout": true,
   "manualCloseRestMin": 240,
   "minPfStepAutoHigh": 1.15,
-  "trailMinLockPct": 0.2,
-  "setSlRatios": [
-    0.5,
-    1.0,
-    1.25,
-    2.0,
-    2.25,
-    2.5,
-    3.0,
-    3.25
-  ]
+  "trailMinLockPct": 0
 }

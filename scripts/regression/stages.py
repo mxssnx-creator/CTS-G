@@ -337,7 +337,7 @@ def a_set_verdict_ignores_every_other_set():
 def every_tp_range_builds_replays_and_exits_at_its_own_target():
     """Owner 2026-11-03: every TP step range works. With Micro .. Wide on (Long / Wide at SL ratio 1.0 at most, as shipped), both packs build base Sets in every
     range; the replay gives every range orders, the base Sets of every range leave by their own target, and every target exit sits exactly at +TP =
-    step x 0.1 % (every stop at -SL), Wide included (3.3 .. 5.0 %); the shipped overlays switch every range on (x01 without Normal, owner 2026-11-04, and without Micro, owner 2026-11-05)."""
+    step x 0.1 % (every stop at -SL), Wide included (3.3 .. 5.0 %); the shipped overlays switch every range on (x01 without Normal, owner 2026-11-04; the Micro range was switched off on 2026-11-05 and is back on since the 2026-11-06 replay)."""
     import json as _j, os as _o
     from position_cost import cost_as_frac, tp_range_of
     from common import PULSE
@@ -371,7 +371,7 @@ def every_tp_range_builds_replays_and_exits_at_its_own_target():
     every_tp = all(tps.get(r, 0) > 0 for r in ranges)
     files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")]
     # every range is on in the shipped overlays; owner 2026-11-04: the Normal range is off on x01 only (live PF 0.36 - 0.52 on both engines, x02 keeps it as the control)
-    shipped = all(all((_j.load(open(f)).get("tpRanges") or {}).get(r, True) or (r in ("normal", "micro") and f.endswith("overlay-bingx-x01.json")) for r in ranges) for f in files)
+    shipped = all(all((_j.load(open(f)).get("tpRanges") or {}).get(r, True) or (r == "normal" and f.endswith("overlay-bingx-x01.json")) for r in ranges) for f in files)
     ok = every_built and every_order and every_tp and worst_tp < 1e-9 and worst_sl < 1e-9 and shipped
     return ok, (f"base Sets per (pack, range) {dict(sorted(built.items()))}; orders {orders}; target exits {tps}; target at +TP (max deviation {worst_tp:.1e}), "
                 f"stop at -SL ({worst_sl:.1e}); shipped overlays switch every range on: {shipped}")
