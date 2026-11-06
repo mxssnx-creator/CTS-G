@@ -626,6 +626,15 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it
     axis_cache: Dict[Tuple[int, str], Any] = {}
     opened: List[Tuple[float, str, str]] = []           # (exit t, Set id, lane) of executed positions: the Axis continuation cap counts the open ones
+    # the profit group gate (SetBook.group_gate, owner 2026-11-06): a group (pack x kind x TP range x lane) opens only while the newest groupGateN net results it executed inside
+    # the last groupGateHours hours have a PF at or above groupGatePf; the same set_group / group_verdict as the live engine, on the positions executed so far
+    gg = (int(book.group_gate_n), float(book.group_gate_pf), float(book.group_gate_hours), int(book.group_gate_min)) if getattr(book, "group_gate", False) else None
+    ghist: Dict[str, List[Tuple[float, float]]] = {}
+
+    def group_ok(st_, lane_: str, now_: float) -> bool:
+        if gg is None:
+            return True
+        return se.group_verdict(ghist.get(se.set_group(st_.id, lane_), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
 
     def verdict(st, now: float):
         if not refresh_s:
@@ -691,6 +700,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
                         cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                         for _key, st_c in cands:
+                            if not group_ok(st_c, lane_, entry_t):
+                                continue
                             ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
                             if ok_a:
                                 chosen, vol_pick = st_c, vol_a
@@ -705,6 +716,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
                         cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
                         for _key, st_c in cands:
+                            if not group_ok(st_c, lane_, entry_t):
+                                continue
                             ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
                             cap = axis_coord.slot_cap(0, pf_a, min_pf=floor_a)
                             n_open = sum(1 for x_t, sid_, ln_ in opened if x_t > entry_t and sid_ == st_c.id and ln_ == lane_)
@@ -719,6 +732,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                     # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
                     pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
                                                    key=lambda r: r[0], reverse=True)]
+                    if gg is not None:
+                        pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
                     if pool:
                         lane_pick = lane_
                         break
@@ -774,6 +789,8 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))
+                if gg is not None:
+                    ghist.setdefault(se.set_group(st.id, lane_pick), []).append((rec["t"], rec["net"]))
     return executed
 
 

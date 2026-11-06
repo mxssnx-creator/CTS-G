@@ -200,6 +200,50 @@ TRAIL_SL_RATIO = 0.6
 # fit inside this price-distance limit. It is not a guarantee of fill price.
 TRAIL_DISTANCE_LIMIT_PCT = 3.0
 EXIT_TAG = "xt"                 # id suffix of an Exit Set (no TP: stop, time and scratch exits only)
+
+# ---- the profit group gate (owner 2026-11-06: "make only profitable ones run, but also Signals") --------------------------------------------------------------------------
+# A GROUP is pack x kind (base / exit / trail) x TP range (micro .. wide; a trailing Set by its arm) x lane. A group opens new positions only while the newest `groupGateN` net
+# results it EXECUTED inside the last `groupGateHours` hours have a PF at or above `groupGatePf` (gains over losses of the net position returns, judged on the results it has: no
+# minimum count; a group without a result in the window runs). Open positions are never touched; the evidence ages out, so a blocked group re-tests itself.
+_GROUP_ST = re.compile(r":st(\d+)")
+_GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::ts[0-9.]+)?$")
+
+
+def set_group(set_id: str, lane: str = "pos") -> str:
+    """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group)."""
+    sid = str(set_id or "")
+    pack = sid.split(":", 1)[0] or "-"
+    tr = _GROUP_TR.search(sid)
+    if sid.endswith(":" + EXIT_TAG):
+        kind = "exit"
+    elif tr:
+        kind = "trail"
+    else:
+        kind = "base"
+    rng = "?"
+    if kind == "trail" and tr:
+        rng = tp_range_of(int(round(float(tr.group(1)) / TP_UNIT_PCT)))
+    else:
+        m = _GROUP_ST.search(sid)
+        if m:
+            rng = tp_range_of(int(m.group(1)))
+    return f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+
+
+def group_verdict(rows, now: float, n: int = 10, floor: float = 1.0, hours: float = 12.0, min_n: int = 1) -> Tuple[bool, Optional[float], int]:
+    """(allow, pf, k) for one group from its executed results [(close time, net position return)] in any order: the newest `n` that closed inside (now - hours, now]. No result,
+    fewer than `min_n` results (default 1: judged on the orders it has, owner rule 2026-11-04) or no loss among them allows; otherwise the PF must reach `floor` (a hair of
+    tolerance for float noise)."""
+    lo = float(now) - float(hours) * 3600.0
+    window = sorted(((float(t), float(x)) for t, x in rows if lo < float(t) <= float(now) and math.isfinite(float(x))))[-max(1, int(n)):]
+    if not window or len(window) < max(1, int(min_n)):
+        return True, None, len(window)
+    gain = sum(x for _t, x in window if x > 0)
+    loss = -sum(x for _t, x in window if x < 0)
+    if loss <= 0:
+        return True, None, len(window)
+    pf = gain / loss
+    return pf + 1e-12 >= float(floor), pf, len(window)
 SET_KINDS = ("base", "exit", "trail")
 RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
 RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
@@ -1969,6 +2013,8 @@ class SetBook:
         self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
+        self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
+        self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
         self.hist_honor_tp = True
         self.normal_entries = True
@@ -2323,6 +2369,18 @@ class SetBook:
             self.trail_min_lock = 0.0
         if self.trail_min_lock > 0:
             self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
+        # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
+        self.group_gate = bool(ov.get("groupGate", False))
+        def _num(key, default, lo, hi):
+            try:
+                x = float(ov.get(key) if ov.get(key) is not None else default)
+            except (TypeError, ValueError):
+                return default
+            return max(lo, min(hi, x)) if math.isfinite(x) else default
+        self.group_gate_n = int(_num("groupGateN", 10, 1, 200))
+        self.group_gate_pf = _num("groupGatePf", 1.0, 0.5, 3.0)
+        self.group_gate_hours = _num("groupGateHours", 12.0, 1.0, 72.0)
+        self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
         if not trailing_enabled(ov):
             self.trails = []
         try:
@@ -4022,6 +4080,7 @@ class SetBook:
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
             "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
             "trailMinLockPct": self.trail_min_lock,
+            "groupGate": {"on": self.group_gate, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
             "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
             "indexed": True,

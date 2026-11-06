@@ -33,7 +33,7 @@ from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, lane_honors_tp, self_test as sets_self_test
+from set_engine import EXIT_TAG, STAGE_REASONS, SetBook, group_verdict, lane_honors_tp, set_group, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -3532,6 +3532,15 @@ class Pulse:
         if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
             blocked = []
             def allows(st, lane):
+                if self.sets.group_gate:
+                    gkey = set_group(st.id, lane)
+                    g_ok, g_pf, g_k = group_verdict(self.__dict__.get("group_exec", {}).get(gkey, ()), time.time(), self.sets.group_gate_n,
+                                                    self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)
+                    self.coord.scopes[gkey] = {"allow": g_ok, "orders": g_k, "pf": g_pf, "source": "executed", "minPf": self.sets.group_gate_pf,
+                                               "reasons": [] if g_ok else [f"group newest {g_k} PF {g_pf:.2f}<{self.sets.group_gate_pf:g}"]}
+                    if not g_ok:
+                        blocked.append(gkey)
+                        return False
                 source = st.neg if lane == "neg" else st.exe
                 now = st.score_at
                 cutoff = now - self.sets.lookback * 60
@@ -3555,13 +3564,23 @@ class Pulse:
                 if chosen is not None:
                     return chosen, lane, ""
             return None, "", blocked[0] if blocked else ""
+        group_blocked = ""
         try:
             chosen = self.sets.pick_any(pack, side=side)
+            if chosen is not None and getattr(self.sets, "group_gate", False):
+                # the profit group gate: skip the Sets whose group is losing, the next-ranked Set of another group runs instead
+                now_g = time.time()
+                def group_open(st_):
+                    return group_verdict(self.__dict__.get("group_exec", {}).get(set_group(st_.id, self.sets.lane_of(st_) or "pos"), ()), now_g,
+                                         self.sets.group_gate_n, self.sets.group_gate_pf, self.sets.group_gate_hours, self.sets.group_gate_min)[0]
+                if not group_open(chosen):
+                    group_blocked = set_group(chosen.id, self.sets.lane_of(chosen) or "pos")
+                    chosen = self.sets.pick_any(pack, side=side, predicate=group_open)
         except Exception:
             return None, "", ""
         coord = getattr(self, "coord", None)
         if chosen is None or coord is None:
-            return chosen, (self.sets.lane_of(chosen) or "pos") if chosen is not None else "", ""
+            return chosen, (self.sets.lane_of(chosen) or "pos") if chosen is not None else "", group_blocked if chosen is None else ""
         try:
             lane = self.sets.lane_of(chosen) or "pos"
         except Exception:
@@ -4595,6 +4614,7 @@ class Pulse:
         self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
         self.exec_sets: Dict[str, int] = {}
         self.exec_scope: Dict[str, Dict[str, Any]] = {}
+        self.group_exec: Dict[str, Deque[Tuple[float, float]]] = {}
         if not os.path.exists(TRADES_PATH):
             return
         down_iv = downtime_intervals()
@@ -4678,6 +4698,13 @@ class Pulse:
                     fee_source = fee_source if fee_source in ("reported-fee", "exchange-rate-estimate", "configured-estimate") else "unknown"
                     sources = row["fee_sources"]
                     sources[fee_source] = sources.get(fee_source, 0) + 1
+                if net_return is not None:
+                    # the profit group gate reads each group's own executed results (set_group: pack x kind x TP range x lane), newest last
+                    gx = self.__dict__.setdefault("group_exec", {})
+                    gq = gx.get(set_group(rec.set_id, lane))
+                    if gq is None:
+                        gq = gx[set_group(rec.set_id, lane)] = collections.deque(maxlen=200)
+                    gq.append((float(rec.t), float(net_return)))
 
     def execution_snapshot(self) -> Dict[str, Any]:
         """Sets and orders after every validation gate, as executed: how many Sets pass all gates now, which positions are open under which
@@ -4724,7 +4751,18 @@ class Pulse:
                 "feeSources": dict(e["fee_sources"]),
             }}
         stage_counts = self.sets.stage_counts() if hasattr(self.sets, "stage_counts") else {}
+        gate_on = bool(getattr(self.sets, "group_gate", False))
+        group_rows: Dict[str, Any] = {}
+        now_g = time.time()
+        for gkey, gq in sorted((self.__dict__.get("group_exec") or {}).items()):
+            g_ok, g_pf, g_k = group_verdict(gq, now_g, getattr(self.sets, "group_gate_n", 10), getattr(self.sets, "group_gate_pf", 1.0), getattr(self.sets, "group_gate_hours", 12.0),
+                                              getattr(self.sets, "group_gate_min", 1))
+            if g_k:
+                group_rows[gkey] = {"orders": g_k, "pf": round(g_pf, 3) if g_pf is not None else None, "allow": bool(g_ok)}
         return {
+            "groups": {"enabled": gate_on, "n": getattr(self.sets, "group_gate_n", 10), "pf": getattr(self.sets, "group_gate_pf", 1.0),
+                       "hours": getattr(self.sets, "group_gate_hours", 12.0), "min": getattr(self.sets, "group_gate_min", 1),
+                       "scopes": dict(list(group_rows.items())[:150])},
             "overall": {"scopes": scopes, "blocked": int(n.get("scopeBlocked", 0))},
             "sets": {"configured": counts.get("configured", 0), "valid": counts.get("valid", 0),
                      "baseValid": stage_counts.get("base", counts.get("valid", 0) + sum(int(reasons.get(k, 0)) for k in STAGE_REASONS)),

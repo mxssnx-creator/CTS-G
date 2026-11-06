@@ -336,6 +336,12 @@ export type PulseOverlay = {
   trailMinSteps: number;
   /** Smallest arm - give (percent) a trailing pair may have; pairs under it build no Set. 0 = every pair. */
   trailMinLockPct: number;
+  /** Profit group gate: a group (pack x type x TP range x lane) opens positions only while its newest `groupGateN` executed results of the last `groupGateHours` hours have PF >= `groupGatePf`; judged on the results it has (`groupGateMin` 1). */
+  groupGate: boolean;
+  groupGateN: number;
+  groupGatePf: number;
+  groupGateHours: number;
+  groupGateMin: number;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -638,6 +644,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   slMinSteps: 1,
   trailMinSteps: 2,
   trailMinLockPct: 0,
+  groupGate: false,
+  groupGateN: 10,
+  groupGatePf: 1,
+  groupGateHours: 12,
+  groupGateMin: 1,
   stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
@@ -888,6 +899,11 @@ export type CtsSettings = {
   slMinSteps?: number;
   trailMinSteps?: number;
   trailMinLockPct?: number;
+  groupGate?: boolean;
+  groupGateN?: number;
+  groupGatePf?: number;
+  groupGateHours?: number;
+  groupGateMin?: number;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -1368,6 +1384,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     slMinSteps: num(cts.slMinSteps, 1),
     trailMinSteps: num(cts.trailMinSteps, 2),
     trailMinLockPct: Math.max(0, Math.min(3, num(cts.trailMinLockPct, 0))),
+    groupGate: bool(cts.groupGate, false),
+    groupGateN: Math.max(1, Math.min(200, Math.round(num(cts.groupGateN, 10)))),
+    groupGatePf: Math.max(0.5, Math.min(3, num(cts.groupGatePf, 1))),
+    groupGateHours: Math.max(1, Math.min(72, num(cts.groupGateHours, 12))),
+    groupGateMin: Math.max(1, Math.min(50, Math.round(num(cts.groupGateMin, 1)))),
     stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),

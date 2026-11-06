@@ -2925,10 +2925,76 @@ def live_executed_pf_equals_the_plain_reading_of_the_trades_file():
                 f"engine {executed.get('lane:neg', {}).get('pf')} / {executed.get('lane:neg', {}).get('cashPf')}")
 
 
+def the_group_gate_blocks_a_losing_group_and_only_that_group():
+    """Owner 2026-11-06 ("make only profitable ones run, but also Signals"): with groupGate on, a group (pack x kind x TP range x lane, `set_group`) whose newest `groupGateN`
+    executed results inside the last `groupGateHours` hours have a PF under `groupGatePf` opens no position; the other groups of the same pack keep opening, a never-traded
+    group runs, the evidence ages out (the group re-tests itself), the gate is off by default, and the block is reported (`scopeBlocked`, stats `groups`). Checked through
+    the real selection (`_scope_choice`) with the Axis on and with it off."""
+    from coord_engine import Coordinator
+    from set_engine import SetBook, group_verdict, set_group
+    from position_cost import tp_range_of
+    import time as _t
+    sid_group = lambda st, lane="pos": set_group(st.id, lane)
+    def build(gate, axes):
+        book = SetBook()
+        book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0, "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off",
+                   "setMinPf": 1.1, "setMinStep": 2, "setStepMax": 5, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"], "stratGeneral": True, "stratIndications": False,
+                   "groupGate": gate, "groupGateN": 5, "groupGatePf": 1.0, "groupGateHours": 12})
+        rows = [st for st in book.by_idx if st.pack == "general" and st.kind == "base"]
+        micro = next(st for st in rows if tp_range_of(st.step) == "micro")
+        minimal = next(st for st in rows if tp_range_of(st.step) == "minimal")
+        book.by_idx = [micro, minimal]
+        book.sets = {st.id: st for st in book.by_idx}
+        now = _t.time()
+        for st, score in ((micro, 2.0), (minimal, 1.5)):             # the micro group is the better-ranked Set
+            st.active, st.locked, st.last_error = True, False, ""
+            st.gate_n, st.gate_pf, st.n = 20, score, 20
+            st.max_dd_s, st.score_at = 0, now
+            st.exe = [(now - 60 * i, 0.004) for i in range(4, 0, -1)]   # the paper evidence is fine for both: only the executed group results differ
+        coord = Coordinator()
+        coord.load({}, {"axisLastEnabled": axes, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": False, "minPf": 1.1})
+        p = _bare_pulse()
+        p.sets, p.coord, p.open, p.position_cost_pct = book, coord, {}, 0.12
+        return p, micro, minimal, now
+    def close(p, st, net, t_):
+        p._exec_note(pt.Closed(t_, "A-USDT", "LONG", 1.0, 1.0, 1.0, net, 0.0, "sl" if net < 0 else "tp", 60.0, set_id=st.id, pack="general", lane="pos", net_pnl_pct=net))
+    out = {}
+    for axes in (True, False):
+        p, micro, minimal, now = build(True, axes)
+        first = p._scope_choice("general")[0]                           # no executed result yet: the best-ranked Set (micro group) runs
+        for i in range(3):
+            close(p, micro, -0.02, now - 600 + i)                       # the micro group loses three times in a row
+        after_loss = p._scope_choice("general")
+        for i in range(3):
+            close(p, minimal, -0.02, now - 500 + i)                     # now the minimal group loses too
+        both_lost = p._scope_choice("general")
+        close(p, micro, 0.09, now - 100)                                 # one big win lifts the micro group: gains 0.09 against losses 0.06
+        recovered = p._scope_choice("general")
+        out[axes] = (getattr(first, "id", None) == micro.id, getattr(after_loss[0], "id", None) == minimal.id, both_lost[0] is None and both_lost[2].startswith("group:"),
+                     getattr(recovered[0], "id", None) == micro.id)
+    p, micro, minimal, now = build(True, True)
+    for i in range(3):
+        close(p, micro, -0.02, now - 20 * 3600 + i)                      # losses older than groupGateHours
+    aged = p._scope_choice("general")[0]
+    off, o_micro, _m, o_now = build(False, True)
+    for i in range(3):
+        close(off, o_micro, -0.02, o_now - 600 + i)
+    gate_off = off._scope_choice("general")[0]
+    snap_groups = p.execution_snapshot() if hasattr(p, "execution_snapshot") else {}
+    pure = (group_verdict([], 100.0)[0] and group_verdict([(99.0, 0.05)], 100.0)[0] and not group_verdict([(99.0, -0.01), (98.0, 0.005)], 100.0, 10, 1.0, 12)[0]
+            and group_verdict([(99.0, -0.01), (98.0, 0.011)], 100.0)[0] and group_verdict([(1.0, -0.5)], 100000.0)[0])
+    ids = (set_group("indications:L:1m:sl0.50:st21", "pos"), set_group("trend:S:1m:sl1.00:st5:xt", "neg"), set_group("general:S:1m:tr0.70:0.60", "pos"))
+    ok = (all(out[a] == (True, True, True, True) for a in (True, False)) and getattr(aged, "id", None) == micro.id and getattr(gate_off, "id", None) == o_micro.id and pure
+          and ids == ("group:indications:base:long:pos", "group:trend:exit:minimal:neg", "group:general:trail:short:pos") and SetBook().group_gate is False)
+    return ok, (f"axis on {out[True]}, axis off {out[False]} (first runs, loser blocked -> the other group, both blocked -> none by group key, one win -> back); aged evidence reopens="
+                f"{getattr(aged, 'id', None) == micro.id}; gate off ignores losses={getattr(gate_off, 'id', None) == o_micro.id}; keys {ids}")
+
+
 CHECKS = [
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
     ("trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored", closes_made_while_the_engine_was_down_are_recorded_but_not_scored),
     ("trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file", live_executed_pf_equals_the_plain_reading_of_the_trades_file),
+    ("trader.group-gate-blocks-a-losing-group-and-only-that-group", the_group_gate_blocks_a_losing_group_and_only_that_group),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),

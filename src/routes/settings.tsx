@@ -2232,6 +2232,27 @@ function PfWindowControls({
         onChange={(v) => patch("rankByLane", v)}
       />
       <Toggle
+        label="Profit group gate: a group (indication × type × TP range × lane) opens positions only while its own newest executed results are profitable (PF ≥ the floor below, judged on the results it has)"
+        on={overlay.groupGate === true}
+        onChange={(v) => patch("groupGate", v)}
+      />
+      {overlay.groupGate === true ? (
+        <Grid>
+          <Slider label="Group gate · newest executed results" value={overlay.groupGateN} min={1} max={50} step={1}
+            hint="At most this many of the group's newest executed results are judged (fewer if it has fewer)."
+            onChange={(v) => patch("groupGateN", Math.max(1, Math.min(200, Math.round(v))))} />
+          <Slider label="Group gate · minimum PF" value={overlay.groupGatePf} min={0.5} max={2} step={0.05}
+            hint="1.00 = break-even after costs. A group below it opens nothing new; its open positions run on."
+            onChange={(v) => patch("groupGatePf", Math.max(0.5, Math.min(3, Math.round(v * 100) / 100)))} />
+          <Slider label="Group gate · window (hours)" value={overlay.groupGateHours} min={1} max={72} step={1}
+            hint="Results older than this are forgotten, so a blocked group re-tests itself."
+            onChange={(v) => patch("groupGateHours", Math.max(1, Math.min(72, Math.round(v))))} />
+          <Slider label="Group gate · results needed to judge" value={overlay.groupGateMin} min={1} max={10} step={1}
+            hint="1 = judged on the results it has (owner rule: no minimum-orders gate); more lets a group lose that many times before it is blocked."
+            onChange={(v) => patch("groupGateMin", Math.max(1, Math.min(50, Math.round(v))))} />
+        </Grid>
+      ) : null}
+      <Toggle
         label="Scratch exit on Set lanes (off: a Set leaves only by its own stop, target and time; the global +0.16 % scratch cut every range's winners)"
         on={overlay.setScratchEnabled === true}
         onChange={(v) => patch("setScratchEnabled", v)}

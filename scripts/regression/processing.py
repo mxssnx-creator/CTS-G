@@ -1667,6 +1667,46 @@ def verdict_freshness_follows_the_replay_rotation():
                 f"first rotation 20 min in: {first:.0f}s (a verdict from the first replay stale={first_stale}), capped at {first_cap:.0f}s")
 
 
+def simulator_applies_the_group_gate_as_the_engine_does():
+    """The simulator (stage_eval.execute) reads the same set_group / group_verdict as the live engine: with groupGate on, a group whose newest `groupGateN` executed results lose
+    opens nothing more and the next-ranked Set of another group takes the signal; with it off (the default) every signal goes to the best-ranked Set."""
+    import os, sys, types
+    from common import ROOT
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import stage_eval as sg
+    import set_engine as se
+    from position_cost import tp_range_of
+
+    def run(gate, win=False):
+        b = _book(n_syms=1, bars=300, stagesEnabled=False, mainGateEnabled=False, **{**SMALL, "setStepMax": 5, "setSlRatios": [0.5], "groupGate": gate, "groupGateN": 2,
+                                                                                       "groupGatePf": 1.0, "groupGateHours": 12})
+        rows_ = [x for x in b.by_idx if x.kind == "base"]
+        micro = next(x for x in rows_ if tp_range_of(x.step) == "micro")
+        minimal = next(x for x in rows_ if tp_range_of(x.step) == "minimal" and x.pack == micro.pack)
+        b.by_idx, b.packs = [micro, minimal], [micro.pack]
+        for i_, x in enumerate(b.by_idx):
+            x.idx = i_
+        hour = float((int(T0) // 3600) * 3600)
+        bars = [[100.0, 101.0, 99.0, 100.0, 1.0] for _ in range(60)]
+        times = [int(hour) + i * 60 for i in range(60)]
+        dirs = [1 if i in (0, 4, 8, 12, 16, 20) else 0 for i in range(60)]
+        shadow = {"S": (0, {micro.pack: dirs}, {micro.pack: [0.9] * 60}, {})}
+        gm, gu, scan = sg.gate_metrics, sg.gate_until, se.SetLane.scan
+        try:
+            sg.gate_metrics = lambda _b, _t, st_, t_: (True, (True, 2.0 if st_ is micro else 1.0, 1, 0, 0), 1, 2.0)    # both valid, the micro group ranked first
+            sg.gate_until = lambda *_a: hour + 3600.0
+            se.SetLane.scan = lambda _self, i, *_a, **_k: [{"entry_i": i, "exit_i": i + 1, "entry_px": 100.0, "exit_px": 101.0 if win else 99.0, "dir": 1,
+                                                            "pnl_pct": 0.02 if win else -0.02, "reason": "tp" if win else "sl"}]
+            rows = sg.execute(b, ["S"], {"S": bars}, {"S": times}, shadow, types.SimpleNamespace(cf=COST / 100), [hour], refresh_s=0)
+        finally:
+            sg.gate_metrics, sg.gate_until, se.SetLane.scan = gm, gu, scan
+        return [("micro" if r["set"] == micro.id else "minimal") for r in rows if "set" in r]
+    off, on, on_win = run(False), run(True), run(True, win=True)
+    # judged on the orders it has: one losing result is a PF of 0, so the group rests until its evidence is older than groupGateHours; a winning group is never blocked
+    ok = off == ["micro"] * 6 and on == ["micro", "minimal"] and on_win == ["micro"] * 6
+    return ok, f"gate off: {off}; gate on, every exit a loss: {on}; gate on, every exit a win: {on_win}"
+
+
 CHECKS = [
     ("processing.verdict-freshness-follows-the-replay-rotation", verdict_freshness_follows_the_replay_rotation),
     ("processing.untimed-live-closes-are-skipped", untimed_live_closes_are_skipped),
@@ -1679,6 +1719,7 @@ CHECKS = [
     ("processing.live-scoring-obeys-lookback-and-event-clock", live_scoring_obeys_lookback_and_event_clock),
     ("processing.replay-uses-each-symbols-last-completed-bar", replay_uses_each_symbols_last_completed_bar),
     ("processing.simulator-validates-at-entry-and-refreshes-at-boundary", simulator_validates_at_entry_and_refreshes_at_the_boundary),
+    ("processing.simulator-applies-the-group-gate-as-the-engine-does", simulator_applies_the_group_gate_as_the_engine_does),
     ("processing.simulator-preserves-open-at-window-end", simulator_preserves_open_positions_at_window_end),
     ("processing.hold-adapter-uses-selected-sets-tape", hold_adapter_uses_the_selected_sets_tape),
     ("processing.live-windows-preserve-owner-and-lane-history", live_windows_preserve_owner_and_lane_history),
