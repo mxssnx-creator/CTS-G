@@ -560,8 +560,50 @@ def ensure_x01_script_is_idempotent_and_starts_only_x01():
     return ok, f"running -> {present!r}; none -> {absent!r}; another connection -> {foreign!r}; forbidden words in the code: {[w for w in forbidden if w in code]}; hook {cmds}"
 
 
+def x01_watchdog_keeps_the_engine_running_once_and_backs_off():
+    """Owner 2026-11-06 ("Always keep engine continuously running"): scripts/x01_watchdog.sh loops over scripts/ensure_x01.sh (which starts the x01 engine only when none runs),
+    runs as ONE instance (pidfile), logs each start and backs off after three starts inside ten minutes (a crash loop); ensure_x01.sh starts the watchdog (not in a dry run, not
+    from the loop itself); neither script names x02 or touches the halt, start equity, EQ_MIN or the control files. Run here against a stub ensure script in a temp directory."""
+    import shutil
+    import time as _t
+    wd = os.path.join(ROOT, "scripts", "x01_watchdog.sh")
+    ens = os.path.join(ROOT, "scripts", "ensure_x01.sh")
+    wtext, etext = open(wd, encoding="utf-8").read(), open(ens, encoding="utf-8").read()
+    strip = lambda s: re.sub(r"(?m)^\s*#.*$", "", s)
+    forbidden = ("x02", "reset-eq", "STOP", "PAUSE", "ddHalt", "EQ_MIN", "start-eq", "monitor_engines")
+    bad = [w for w in forbidden if w in strip(wtext) or w in strip(etext)]
+    with tempfile.TemporaryDirectory() as d:
+        repo, run = os.path.join(d, "repo", "scripts"), os.path.join(d, "dir")
+        os.makedirs(repo)
+        os.makedirs(run)
+        shutil.copy(wd, os.path.join(repo, "x01_watchdog.sh"))
+        with open(os.path.join(repo, "ensure_x01.sh"), "w") as f:
+            f.write("#!/usr/bin/env bash\necho \"x01 engine started (pid 1)\"\n")
+        env = {**os.environ, "REPO": os.path.join(d, "repo"), "PULSE_DIR": run, "WATCHDOG_EVERY": "1"}
+        log = os.path.join(d, "out.log")
+        with open(log, "w") as lf:
+            proc = subprocess.Popen(["bash", os.path.join(repo, "x01_watchdog.sh")], env=env, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            deadline = _t.time() + 15
+            while _t.time() < deadline and "backing off" not in open(log).read():
+                _t.sleep(0.3)
+            second = subprocess.run(["bash", os.path.join(repo, "x01_watchdog.sh")], env=env, capture_output=True, text=True, timeout=20).stdout.strip()
+            out = open(log).read()
+        finally:
+            try:
+                os.killpg(proc.pid, 9)
+            except OSError:
+                pass
+            proc.wait()
+    starts = out.count("watchdog: x01 engine started")
+    ok = (starts >= 3 and "backing off" in out and second.startswith("watchdog already running") and not bad and os.access(wd, os.X_OK)
+          and "x01_watchdog.sh" in etext and "ENSURE_X01_NO_WATCHDOG" in etext and "ENSURE_X01_DRY" in etext and "ENSURE_X01_NO_WATCHDOG=1" in wtext)
+    return ok, f"starts logged {starts}, backoff {'backing off' in out}, second instance {second!r}, forbidden words {bad}"
+
+
 CHECKS = [
     ("logistics.ensure-x01-script-is-idempotent-and-starts-only-x01", ensure_x01_script_is_idempotent_and_starts_only_x01),
+    ("logistics.x01-watchdog-keeps-the-engine-running-once-and-backs-off", x01_watchdog_keeps_the_engine_running_once_and_backs_off),
     ("logistics.startup-controls-fail-closed", startup_controls_fail_closed_and_respect_disabled_lanes),
     ("logistics.remote-installer-preserves-local-work", remote_installer_preserves_local_work_and_forwards_flags),
     ("logistics.live-only-fails-closed-on-x02-control-error", live_only_does_not_continue_after_x02_control_failure),

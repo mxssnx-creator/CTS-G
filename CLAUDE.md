@@ -2,6 +2,13 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-06, owner: "Always keep engine continuously running."** Three layers (x01 only, none touches a setting, the halt, start equity, EQ_MIN or the STOP / PAUSE / reset files): (1) `scripts/x01_watchdog.sh`, one instance (pidfile
+  `x01-watchdog.pid`), runs `scripts/ensure_x01.sh` every 20 s and starts the engine when its process is missing (three starts inside ten minutes = a crash loop: it backs off 600 s); started by `ensure_x01.sh` itself; (2) the
+  SessionStart hook runs `ensure_x01.sh` (also starts the watchdog) whenever a session starts; (3) a scheduled wake-up of the session (`trig_014XqU7tj9psfDCRbbMjZ1Ut`, hourly at :17, the platform's minimum interval) runs the same
+  script, so a container restart with no open session is repaired within the hour. The watchdog dies with the container; layers 2 and 3 revive it. Check `logistics.x01-watchdog-keeps-the-engine-running-once-and-backs-off`.
+  **Outage found 2026-11-06 (x01 dead 11-05 07:40 -> 11-06 10:14, 26 h, nothing running between sessions):** its 62 open positions stayed on their venue-side stop / target (55 targets and 5 stops filled meanwhile, +13.07 USDT in the trades file,
+  income feed +13.29 USDT), and the wallet fell from 29.34 to 17.36 USDT: about 25 USDT left the account as a transfer, not a trading loss (the transfer detector `check_transfer` only runs while the engine runs, so a transfer during downtime is
+  not adjusted; the session basis re-baselines at the restart, `startEquity` 28.2555 was left alone by rule).
 - **2026-11-05, owner: "Enable block and also subtype Overall" / "Increase also overall vol factor by 5 times" / "Check, disable non performing by adjusting minimal steps and ratios" / "Increase vol ratios for performing coordinations".**
   (1) Block runs with the relations **symbol + step (Overall)** on every shipped overlay, the desk default and the presets (`blockRelations` ["symbol", "step"]; the engine's absent-key default stays "symbol").
   Block v2 needs every selected relation to agree, so an add now needs both the per-symbol proof and the per-TP-step proof: measured (executed parents, ratio 1.0, skip first) symbol alone C PF 1.938 / net 57.21 / 32 adds,
