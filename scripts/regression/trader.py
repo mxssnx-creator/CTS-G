@@ -2796,7 +2796,13 @@ def restart_credits_the_downtime_so_positions_keep_running():
     fake = types.SimpleNamespace(open={"A-USDT": pos, "B-USDT": types.SimpleNamespace(opened_at=now - 1 * 3600.0, hold_credit_s=0.0)},
                                  last_run={"previousEnd": now - 8 * 3600.0}, saved=[])
     fake.save_open_book = lambda: fake.saved.append(1) or True
-    total = pt.Pulse.credit_restart_downtime(fake)
+    saved_dt = pt.DOWNTIME_PATH
+    with tempfile.TemporaryDirectory() as td:          # the restart also records the outage interval: never in the live state directory
+        pt.DOWNTIME_PATH = os.path.join(td, "downtime.json")
+        try:
+            total = pt.Pulse.credit_restart_downtime(fake)
+        finally:
+            pt.DOWNTIME_PATH = saved_dt
     after = pt.position_age(pos, now)
     hold_s = 6 * 3600.0
     caps = (pt.downtime_credit(now - 40 * 3600.0, now), pt.downtime_credit(now - 8 * 3600.0, now, already=70 * 3600.0), pt.downtime_credit(None, now), pt.downtime_credit(now + 5, now))
@@ -2808,8 +2814,121 @@ def restart_credits_the_downtime_so_positions_keep_running():
     return ok, f"age after an 8 h outage: {before / 3600:.2f} h before the credit, {after:.0f} s after (time exit at {hold_s / 3600:.0f} h no longer fires); credit caps {tuple(round(c / 3600, 2) for c in caps)} h; wired into manage and the restart path {wired}"
 
 
+def closes_made_while_the_engine_was_down_are_recorded_but_not_scored():
+    """Owner 2026-11-06 ("ensure correctness and correct PF eval"): a position the venue closed on its own target / stop while the engine was down never ran under its Set's rules (the
+    Set's stop, trailing and time exit did not run), so its result is real cash but not a Set-lane result. The close found at restart is written to the trades file with the reason
+    suffix "-downtime", counted apart (`downtimeCloses`), scored in no Set / lane / pack PF and does not ban the symbol; the readers of the trades file (`_exec_boot`,
+    `seed_set_executions`, `strategy_closes`) skip such rows and every row whose close time lies inside a recorded outage (state file `downtime-<conn>.json`, written by the restart's
+    `credit_restart_downtime`, only for gaps of two minutes or more); a close of a running engine counts as before."""
+    import types, time as _t
+    sid = "general:L:1m:sl1.00:st4"
+
+    def one(downtime):
+        def run():
+            p, sym = _enter(_RefusingCloseVenue(executed="1", requested="1"))
+            pos = p.open[sym]
+            pos.set_id, pos.pack, pos.lane = sid, "general", "pos"
+            pos.downtime_close = downtime
+            p.close_pos(pos, 101.0, "tp", exchange=False)
+            rows = [json.loads(x) for x in open(pt.TRADES_PATH)] if os.path.exists(pt.TRADES_PATH) else []
+            return (dict(p.exec_scope), dict(p.exec_n), [r["reason"] for r in rows], sym in p.ignore_syms, sym in p.open)
+        return _isolated(run)
+    live, down = one(False), one(True)
+    with tempfile.TemporaryDirectory() as td:
+        saved = (pt.TRADES_PATH, pt.DOWNTIME_PATH)
+        pt.TRADES_PATH, pt.DOWNTIME_PATH = os.path.join(td, "trades.jsonl"), os.path.join(td, "downtime.json")
+        try:
+            now = _t.time()
+            short_ok = not pt.record_downtime(now - 60.0, now)            # a one-minute gap is a restart, not an outage
+            kept = pt.record_downtime(now - 3 * 3600.0, now + 60.0)
+            fake = types.SimpleNamespace(open={}, last_run={"previousEnd": now - 8 * 3600.0}, save_open_book=lambda: True)
+            pt.Pulse.credit_restart_downtime(fake)
+            iv = pt.downtime_intervals()
+            rows = [
+                {"t": now - 10 * 3600.0, "symbol": "A", "side": "LONG", "pnl": 0.1, "net_pnl_pct": 0.01, "reason": "tp", "set_id": sid, "pack": "general", "lane": "pos", "conn": pt.CONN_SHORT},
+                {"t": now - 5 * 3600.0, "symbol": "B", "side": "LONG", "pnl": 0.1, "net_pnl_pct": 0.01, "reason": "tp", "set_id": sid, "pack": "general", "lane": "pos", "conn": pt.CONN_SHORT},      # inside the 3 h outage
+                {"t": now - 1000.0, "symbol": "C", "side": "LONG", "pnl": 0.1, "net_pnl_pct": 0.01, "reason": "tp-downtime", "set_id": sid, "pack": "general", "lane": "pos", "conn": pt.CONN_SHORT},
+                {"t": now - 900.0, "symbol": "D", "side": "LONG", "pnl": 0.1, "net_pnl_pct": 0.01, "reason": "tp-unverified-exit", "set_id": sid, "pack": "general", "lane": "pos", "conn": pt.CONN_SHORT},
+                {"t": now + 200.0, "symbol": "E", "side": "LONG", "pnl": -0.1, "net_pnl_pct": -0.01, "reason": "sl", "set_id": sid, "pack": "general", "lane": "pos", "conn": pt.CONN_SHORT},
+            ]
+            with open(pt.TRADES_PATH, "w") as f:
+                f.write("".join(json.dumps(r) + "\n" for r in rows))
+            boot = pt.Pulse.__new__(pt.Pulse)
+            boot._exec_boot()
+            scope = boot.exec_scope.get("overall", {})
+            tagged = [pt.not_scored_close(r, iv) for r in rows]
+        finally:
+            pt.TRADES_PATH, pt.DOWNTIME_PATH = saved
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    wired = src.index("pos.downtime_close = True") < src.index('self.close_from_venue(pos, "restart")', src.index("pos.downtime_close = True")) and "record_downtime(prev_end, now + 60.0)" in src
+    ok = (live[0].get("overall", {}).get("orders") == 1 and live[2] == ["tp"] and not live[4]
+          and not down[0] and down[1].get("downtime") == 1 and down[1].get("skipped") == 1 and down[2] == ["tp-downtime"] and not down[3] and not down[4]
+          and short_ok and kept and len(iv) == 2 and tagged == [False, True, True, True, False]
+          and scope.get("orders") == 2 and boot.exec_n.get("skipped") == 3 and boot.exec_n.get("downtime") == 2 and wired)
+    return ok, (f"running close scored {live[0].get('overall', {}).get('orders')}x as {live[2]}; downtime close scored {len(down[0])} scopes, recorded as {down[2]}, symbol banned={down[3]}, "
+                f"counted downtime={down[1].get('downtime')}; short gap recorded={not short_ok}, intervals {len(iv)}; boot reader scored {scope.get('orders')} of 5 rows, skipped {boot.exec_n.get('skipped')} "
+                f"(downtime {boot.exec_n.get('downtime')}); wired {wired}")
+
+
+def live_executed_pf_equals_the_plain_reading_of_the_trades_file():
+    """Owner 2026-11-06 ("ensure correctness and correct PF eval"): the executed PF the engine publishes per scope (overall, lane, pack, Set:lane; `pf` on the net position return,
+    `cashPf` in USDT) equals scripts/live_pf_audit.py's plain-loop recomputation from the trades file, on rows of every kind: a Set stop and target on both lanes, a Block-add close
+    (cash covers the grown position, the return the base notional), a no-ctrl close (scored), an unverified exit, a downtime close, a row of another connection and one that is not ours
+    (all skipped), and a row whose return is unknown (its scope reports pf None, never a partial sample)."""
+    import importlib.util, time as _t
+    from common import ROOT
+    spec = importlib.util.spec_from_file_location("live_pf_audit", os.path.join(ROOT, "scripts", "live_pf_audit.py"))
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    now = _t.time()
+    base = {"symbol": "A-USDT", "side": "LONG", "qty": 10.0, "entry": 1.0, "conn": pt.CONN_SHORT, "ours": True}
+    def row(i, **kw):
+        r = {**base, "t": now - 5000.0 + i, "client_id": "", "lane": "pos", "pack": "general", "set_id": "general:L:1m:sl1.00:st4", "reason": "tp", "pnl": 0.2, "net_pnl_pct": 0.02, "fee_source": "reported-fee"}
+        r.update(kw)
+        return r
+    rows = [
+        row(1, reason="sl", pnl=-0.35, net_pnl_pct=-0.035),
+        row(2),
+        row(3, lane="neg", pack="indications", set_id="indications:S:1m:sl1.00:st6", pnl=0.5, net_pnl_pct=0.05),
+        row(4, lane="neg", pack="indications", set_id="indications:S:1m:sl1.00:st6", reason="sl", pnl=-0.4, net_pnl_pct=-0.04),
+        row(5, qty=30.0, base_qty=10.0, pnl=0.9, net_pnl_pct=0.03, block_fills=[[1.01, 10.0], [1.02, 10.0]]),          # Block adds: cash on 30 units, the return on the base notional
+        row(6, reason="no-ctrl", pnl=-0.01, net_pnl_pct=-0.001),
+        row(7, reason="tp-unverified-exit", pnl=0.3, net_pnl_pct=0.03),
+        row(8, reason="tp-downtime", pnl=0.4, net_pnl_pct=0.04),
+        row(9, conn="bingx-other", pnl=0.7, net_pnl_pct=0.07),
+        row(10, ours=False, pnl=0.8, net_pnl_pct=0.08),
+        row(11, pack="trend", set_id="trend:L:1m:sl1.00:st5", pnl=0.1, net_pnl_pct=None),                                # unknown return: pf None for this Set's scopes
+        row(12, set_id="", pack="", pnl=0.6, net_pnl_pct=0.06),                                                          # no Set: not a Set-lane close
+    ]
+    def run():
+        p, _sym = _enter(_RefusingCloseVenue(executed="1", requested="1"))
+        with open(pt.TRADES_PATH, "w") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in rows))
+        p._exec_boot()
+        scopes = p.execution_snapshot()["overall"]["scopes"]
+        return {k: v.get("executed", {}) for k, v in scopes.items()}
+    saved = pt.DOWNTIME_PATH
+    with tempfile.TemporaryDirectory() as td:
+        pt.DOWNTIME_PATH = os.path.join(td, "downtime.json")
+        try:
+            executed = _isolated(run)
+        finally:
+            pt.DOWNTIME_PATH = saved
+    plain = audit.recompute(rows, pt.CONN_SHORT, None, [])
+    bad = audit.diff(plain, {k: {"executed": v} for k, v in executed.items()})
+    ov, neg, pos, trend = audit.figures(plain["overall"]), audit.figures(plain["lane:neg"]), audit.figures(plain["lane:pos"]), audit.figures(plain["pack:trend"])
+    # by hand: scored rows 1-6 and 11 (7 closes on the Set lane); gains 0.02 + 0.05 + 0.03, losses 0.035 + 0.04 + 0.001 on returns
+    want_pf = round((0.02 + 0.05 + 0.03) / (0.035 + 0.04 + 0.001), 3)
+    ok = (not bad and ov["orders"] == 7 and ov["pf"] is None and trend["pf"] is None and plain["lane:neg"]["orders"] == 2 and neg["pf"] == round(0.05 / 0.04, 3)
+          and pos["orders"] == 5 and executed["overall"]["orders"] == 7 and executed["pack:trend"]["pf"] is None and want_pf > 0)
+    return ok, (f"{len(rows)} rows, scored {ov['orders']} Set-lane closes, differences {bad[:3]}; overall pf {ov['pf']} (unknown return in one row -> None), neg lane pf {neg['pf']} / cash {neg['cashPf']}, "
+                f"engine {executed.get('lane:neg', {}).get('pf')} / {executed.get('lane:neg', {}).get('cashPf')}")
+
+
 CHECKS = [
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
+    ("trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored", closes_made_while_the_engine_was_down_are_recorded_but_not_scored),
+    ("trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file", live_executed_pf_equals_the_plain_reading_of_the_trades_file),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),

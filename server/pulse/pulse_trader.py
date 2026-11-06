@@ -427,6 +427,67 @@ def downtime_credit(prev_end: Any, now: float, already: float = 0.0) -> float:
     return max(0.0, min(DOWNTIME_CREDIT_MAX_S, now - end, DOWNTIME_CREDIT_TOTAL_S - float(already or 0.0)))
 
 
+# Closes made while the engine was NOT running (owner 2026-11-06, "ensure correctness and correct PF eval"): a position the venue closed on its own stop / target during an outage
+# was never managed by its Set (the Set's own stop, trailing and time exit did not run; only the far venue-side stop and the target did), so its result is not a result of
+# the Set's rules. It stays in the trades file (real cash) but is not scored in any Set / lane / pack PF. Live x01 2026-11-06: 49 such closes (43 targets) made the
+# negative lane read PF 1.53 where its engine-managed closes read 1.22 and the positive lane 0.65 against 0.54.
+DOWNTIME_PATH = os.path.join(DIR, f"downtime-{CONN_SHORT}.json")
+DOWNTIME_MIN_S = 120.0          # a gap shorter than this between two runs is a restart, not an outage worth an interval
+DOWNTIME_KEEP = 200
+
+
+def downtime_intervals(path: Optional[str] = None) -> List[Tuple[float, float]]:
+    """[(start, end)] epoch seconds the engine was down, from the state file; unreadable or missing = none."""
+    try:
+        raw = json.load(open(path or DOWNTIME_PATH))
+    except Exception:
+        return []
+    out: List[Tuple[float, float]] = []
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            a, b = float(item[0]), float(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if math.isfinite(a) and math.isfinite(b) and b > a:
+            out.append((a, b))
+    return out
+
+
+def record_downtime(start: Any, end: float, path: Optional[str] = None) -> bool:
+    """Append one outage interval (the previous run's last sign of life .. now + a minute for the restart's own reconcile closes); False when it is too short or unknown."""
+    try:
+        a = float(start or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if a <= 0 or end - a < DOWNTIME_MIN_S:
+        return False
+    target = path or DOWNTIME_PATH
+    items = [list(x) for x in downtime_intervals(target)]
+    items.append([a, end])
+    items = items[-DOWNTIME_KEEP:]
+    try:
+        tmp = target + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(items, f)
+        os.replace(tmp, target)
+    except Exception:
+        return False
+    return True
+
+
+def not_scored_close(rec: Dict[str, Any], intervals: Any = ()) -> bool:
+    """True for a trades-file row that no Set / lane / pack PF may score: an exit whose price could not be verified, a close the venue made while the engine was down (reason
+    suffix "-downtime", or a close time inside a recorded outage)."""
+    reason = str(rec.get("reason") or "").lower()
+    if "unverified-exit" in reason or "-downtime" in reason:
+        return True
+    try:
+        t = float(rec.get("t") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return any(a < t <= b for a, b in intervals)
+
+
 def manual_rest_key(symbol: str, side: str) -> str:
     return f"{symbol}:{str(side).upper()}"
 
@@ -856,6 +917,7 @@ class Position:
     base_entry: float = 0.0                    # immutable Set entry, apart from the exchange's averaged position entry
     base_qty: float = 0.0
     set_hold_bars: int = 0                    # hold selected at entry; later replay choices cannot change it
+    downtime_close: bool = False              # set while a close found at restart is recorded: the venue closed it while the engine was down (not scored, see not_scored_close)
     hold_credit_s: float = 0.0                # seconds the engine was not running while this position was open: they do not count against its hold (owner 2026-11-04)
     block_fills: list = field(default_factory=list)
     block_pending: dict = field(default_factory=dict)
@@ -4020,6 +4082,7 @@ class Pulse:
         now = time.time()
         prev_end = (getattr(self, "last_run", None) or {}).get("previousEnd")
         n, total = 0, 0.0
+        record_downtime(prev_end, now + 60.0)       # closes the venue made meanwhile are not Set-lane results (not_scored_close)
         for pos in self.open.values():
             c = downtime_credit(prev_end, now, getattr(pos, "hold_credit_s", 0.0))
             if c > 0:
@@ -4075,9 +4138,11 @@ class Pulse:
                 continue
             if (pos.symbol, pos.side) in held:
                 continue
+            pos.downtime_close = True                       # the venue closed it while the engine was down: recorded, never scored
             if self.close_from_venue(pos, "restart"):
                 self.cooldown[pos.symbol] = time.time() + 90.0
                 continue
+            pos.downtime_close = False
             # an empty list is a real answer too (the account is flat): the second read below decides it, so a lagging empty
             # read cannot drop a live position, and a flat account no longer keeps its ghosts (x02 kept 15 after its venue went flat)
             if confirmed is None:
@@ -4188,6 +4253,10 @@ class Pulse:
         if pos.exit_price_estimated:
             skip_eval = True
             reason = str(reason) + "-unverified-exit"
+        downtime = bool(getattr(pos, "downtime_close", False)) and not pos.exit_price_estimated
+        if downtime:
+            skip_eval = True                   # recorded for the cash audit, scored nowhere (the Set's own rules did not run)
+            reason = str(reason) + "-downtime"
         if pos.side == "LONG":
             pnl_pct = (exit_px - pos.entry) / pos.entry
         else:
@@ -4241,6 +4310,8 @@ class Pulse:
             self.seen_fill_cids.add(pos.client_id)
         if skip_eval:
             self._exec_inc("skipped")       # closed, not scored: counted apart so no order goes missing
+            if downtime:
+                self._exec_inc("downtime")
             # Keep the unverified outcome in the durable audit. Readers exclude
             # its estimated return from PF; restart must retain the missing-fill
             # count instead of silently forgetting the position.
@@ -4250,7 +4321,8 @@ class Pulse:
             except Exception:
                 self.last_error = f"unverified exit audit persistence failed: {pos.symbol}"
             self.open.pop(pos.symbol, None)
-            self.ban_sym(pos.symbol)
+            if not downtime:
+                self.ban_sym(pos.symbol)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
             self.save_open_book()
             self._stats_force = True
@@ -4525,6 +4597,7 @@ class Pulse:
         self.exec_scope: Dict[str, Dict[str, Any]] = {}
         if not os.path.exists(TRADES_PATH):
             return
+        down_iv = downtime_intervals()
         try:
             with open(TRADES_PATH) as f:
                 for line in f:
@@ -4541,8 +4614,10 @@ class Pulse:
                             continue
                         if (cid and not self.cid_ours(cid)) or (conn and conn != CONN_SHORT):
                             continue
-                        if "unverified-exit" in str(rec.get("reason") or "").lower():
+                        if not_scored_close(rec, down_iv):
                             self._exec_inc("skipped")
+                            if "unverified-exit" not in str(rec.get("reason") or "").lower():
+                                self._exec_inc("downtime")
                             continue
                         self._exec_note(Closed(t, str(rec.get("symbol") or ""), str(rec.get("side") or ""),
                             0, 0, 0, pnl if pnl is not None else float("nan"), 0, str(rec.get("reason") or ""), 0,
@@ -4663,7 +4738,7 @@ class Pulse:
                      "underInvalidSet": under_invalid, "setRetired": retired, "byPack": by_pack},
             "closed": {"orders": int(n.get("set", 0) + n.get("exit", 0)), "setLane": int(n.get("set", 0)), "exitLane": int(n.get("exit", 0)),
                        "blockAddFills": int(n.get("blockAddFills", 0)),
-                       "wins": int(n.get("wins", 0)), "losses": int(n.get("losses", 0)), "skippedNotScored": int(n.get("skipped", 0)), "droppedNoRecord": int(n.get("dropped", 0)),
+                       "wins": int(n.get("wins", 0)), "losses": int(n.get("losses", 0)), "skippedNotScored": int(n.get("skipped", 0)), "downtimeCloses": int(n.get("downtime", 0)), "droppedNoRecord": int(n.get("dropped", 0)),
                        "setsThatTraded": len(self.__dict__.get("exec_sets", {}))},
             # entries never sent: the venue's book was too far from the decision price or too thin (book_allows), or a Real scope blocked
             "entriesSkipped": {"thinBook": int(n.get("skippedThinBook", 0)), "scopeBlocked": int(n.get("scopeBlocked", 0))},
@@ -4735,6 +4810,7 @@ class Pulse:
         now = time.time()
         cutoff = now - self.sets.lookback * 60
         pending = {}
+        down_iv = downtime_intervals()
         with open(TRADES_PATH) as stream:
             for line in stream:
                 try:
@@ -4749,7 +4825,7 @@ class Pulse:
                     sid = str(row.get("set_id") or "")
                     if sid not in self.sets.sets and sid not in self.sets.retired:
                         continue
-                    if "unverified-exit" in str(row.get("reason") or "").lower():
+                    if not_scored_close(row, down_iv):
                         continue
                     key = (sid, str(row.get("lane") or "pos"))
                     buf = pending.setdefault(key, {})
@@ -5776,6 +5852,7 @@ class Pulse:
         Execution errors and large historical positions remain real outcomes.
         """
         out: List[Closed] = []
+        down_iv = downtime_intervals()
         for c in self.closed:
             if getattr(c, "ours", True) is False:
                 continue
@@ -5785,7 +5862,7 @@ class Pulse:
             conn = getattr(c, "conn", "") or ""
             if conn and conn != CONN_SHORT:
                 continue
-            if "unverified-exit" in str(c.reason or "").lower():
+            if not_scored_close({"reason": c.reason, "t": c.t}, down_iv):
                 continue
             if not all(math.isfinite(float(v)) for v in (c.qty, c.entry, c.exit, c.pnl, c.pnl_pct)) or c.qty <= 0 or c.entry <= 0 or c.exit <= 0:
                 continue
