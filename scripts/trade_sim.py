@@ -50,6 +50,18 @@ def acc_pf(vals):
     return pf(sum(v for v in vals if v > 0), -sum(v for v in vals if v < 0))
 
 
+def future_entries(txa, tea, ppa, now, count, cost):
+    """Only positions entered after this validation, never inherited open positions."""
+    start = bisect.bisect_left(txa, now)
+    out = []
+    for i in range(start, len(ppa)):
+        if tea[i] >= now:
+            out.append(ppa[i] - cost)
+            if len(out) >= count:
+                break
+    return out
+
+
 def range_of(st):
     if st.kind == "trail":
         return f"trail {st.trail_key}" + (f" ts{st.trail_sl:.2f}" if getattr(st, "trail_sl", 0) else "")
@@ -77,6 +89,8 @@ def main() -> int:
     ap.add_argument("--eval-every", type=int, default=600, help="seconds between the listing's validation samples")
     ap.add_argument("--last-hours", type=int, default=0, help="simulate only the last N hours of the data (a report window)")
     ap.add_argument("--trades", action="store_true", help="print every executed position")
+    ap.add_argument("--stage-details", action="store_true", help="export each hourly last-N stage by type and TP range")
+    ap.add_argument("--axis-current", action="store_true", help="apply the overlay's Axis rules to every entry, as live")
     ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
     args_refresh = max(60, min(3600, int(a.eval_every)))
@@ -116,8 +130,12 @@ def main() -> int:
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
     hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
+    if not hours:
+        raise ValueError("No complete report hour remains after prehistory")
     split = hours[len(hours) * 2 // 3]
     lo, hi = (split, hours[-1] + 3600) if a.sealed else (hours[0], split)
+    if a.last_hours and not 0 < a.last_hours <= len(hours):
+        raise ValueError(f"requested {a.last_hours} hours but only {len(hours)} complete report hours are available")
     if a.last_hours:
         lo, hi = hours[-a.last_hours], hours[-1] + 3600
     run_hours = [h for h in hours if lo <= h < hi]
@@ -146,26 +164,51 @@ def main() -> int:
     nxt_ns = (MIN_VALIDATION_N, book.gate_window) + tuple(m for m in extra_n if m not in (MIN_VALIDATION_N, book.gate_window))
     slots = [h + k * args_refresh for h in run_hours for k in range(max(1, 3600 // args_refresh))]
     evals = []
+    stage_evals = []
     auto = sg.AutoFloors(book, tapes)            # Auto floors per TP step, re-learned every hour from the orders closed before it (as the engine)
     for now in slots:
         auto.apply(book, now)
         hv = collections.defaultdict(float)
+        stage_rows = collections.defaultdict(lambda: collections.defaultdict(float))
         for st in book.by_idx:
-            ok, key, n, gpf = sg.gate_metrics(book, tapes, st, now)
+            # Effective Base PF must describe Base-passing Sets, independently
+            # of whether their later Main/Real windows already pass.
+            ok, key, n, gpf = sg.gate_base(book, tapes, st, now)
             keys = by_set_group[st.idx]
             for k in keys:
                 groups[k]["set_evals"] += 1
+            if a.stage_details:
+                figures = sg.window_figures(book, tapes, st, now)
+                for stage, value in figures.items():
+                    if value is None:
+                        continue
+                    passed, gain, loss, count = value
+                    for dimension, group in keys:
+                        if dimension not in ("all", "type", "tprange", "side"):
+                            continue
+                        sr = stage_rows[(dimension, group, stage)]
+                        sr["evaluated"] += 1
+                        sr["passed"] += bool(passed)
+                        if passed:
+                            sr["gp"] += gain
+                            sr["gl"] += loss
+                            sr["orders"] += count
             if not ok:
                 continue
+            executable = bool(sg.gate_metrics(book, tapes, st, now)[0])
+            hv["executable"] += executable
             tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.win(st).base_long)
             gp = sum(x - cf for x in pp if x - cf > 0)
             gl = -sum(x - cf for x in pp if x - cf < 0)
-            txa, _tea, ppa = tapes.by_set[st.idx]
-            i0 = bisect.bisect_left(txa, now)
-            nxt = {m: [x - cf for x in ppa[i0:i0 + m]] for m in nxt_ns}
+            txa, tea, ppa = tapes.by_set[st.idx]
+            # A trade already open at validation was not admitted by that
+            # decision. Only later entries belong to its next-N evidence.
+            future = future_entries(txa, tea, ppa, now, max(nxt_ns), cf)
+            nxt = {m: future[:m] for m in nxt_ns}
             for k in keys:
                 g = groups[k]
                 g["valid_evals"] += 1
+                g["executable_evals"] += executable
                 g["in_gp"] += gp
                 g["in_gl"] += gl
                 g["in_n"] += len(pp)
@@ -182,11 +225,23 @@ def main() -> int:
             hv["in_gl"] += gl
             hv["min_n"] = n if not hv.get("min_n") else min(hv["min_n"], n)
         evals.append({"t": now, "valid": int(hv["valid"]), "valid_pct": round(100.0 * hv["valid"] / len(book.by_idx), 2),
+                      "executable": int(hv["executable"]), "executable_pct": round(100.0 * hv["executable"] / len(book.by_idx), 2),
                       "eff_pf": pf(hv["in_gp"], hv["in_gl"]), "min_n": int(hv.get("min_n") or 0),
                       "next": {str(m): pf(hv[f"n{m}_gp"], hv[f"n{m}_gl"]) for m in nxt_ns}})
+        for (dimension, group, stage), sr in sorted(stage_rows.items()):
+            stage_evals.append({"t": now, "dimension": dimension, "group": group, "stage": stage,
+                                "evaluated": int(sr["evaluated"]), "passed": int(sr["passed"]),
+                                "passed_pct": round(100 * sr["passed"] / sr["evaluated"], 3),
+                                "selection_pf": pf(sr["gp"], sr["gl"]), "orders": int(sr["orders"]),
+                                "gain": sr["gp"], "loss": sr["gl"]})
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
 
-    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)), include_open=True)
+    coordinator = None
+    if a.axis_current:
+        from coord_engine import Coordinator
+        coordinator = Coordinator()
+        coordinator.load({}, overlay)
+    rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=max(0, int(a.refresh)), include_open=True, axis_coord=coordinator)
     trades = [r for r in rows if "net" in r and lo <= r["t_in"] < hi]
     open_at_end = [r for r in rows if r.get("open_at_end") and lo <= r["t_in"] < hi]
     by_id = {st.id: st for st in book.by_idx}
@@ -210,6 +265,7 @@ def main() -> int:
         bl = blocks(g.get("ex_list") or [])
         return {"group": k[1], "sets": int(g["sets"]),
                 "valid_pct": round(100.0 * g["valid_evals"] / g["set_evals"], 2) if g["set_evals"] else 0.0,
+                "executable_pct": round(100.0 * g["executable_evals"] / g["set_evals"], 2) if g["set_evals"] else 0.0,
                 "eff_pf": pf(g["in_gp"], g["in_gl"]), "eff_orders": int(g["in_n"]),
                 "next8_pf": pf(g[f"n{nxt_ns[0]}_gp"], g[f"n{nxt_ns[0]}_gl"]), "next8_orders": int(g[f"n{nxt_ns[0]}_n"]),
                 "next50_pf": pf(g[f"n{nxt_ns[1]}_gp"], g[f"n{nxt_ns[1]}_gl"]), "next50_orders": int(g[f"n{nxt_ns[1]}_n"]),
@@ -228,12 +284,16 @@ def main() -> int:
             ev = [e for e in evals if h <= e["t"] < h + 3600]
             tr = [r["net"] for r in trades if h <= r["t_in"] < h + 3600]
             out_h.append({"t": h, "valid_pct": round(sum(e["valid_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
+                          "executable_pct": round(sum(e["executable_pct"] for e in ev) / len(ev), 2) if ev else 0.0,
                           "eff_pf": ev[0]["eff_pf"] if ev else None, "next": ev[0]["next"] if ev else {},
                           "orders": len(tr), "net_pct": round(100 * sum(tr), 3), "exec_pf": acc_pf(tr),
                           "wins": sum(1 for x in tr if x > 0)})
         return out_h
 
     out = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
+           "validation_scope": "Base only; executable_pct is the separate full Base/Main/Real gate",
+           "execution_axis": "overlay settings" if a.axis_current else "off (parent control)",
+           "start_utc": lo, "end_utc": hi, "replay_fingerprint": manifest,
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
@@ -247,6 +307,7 @@ def main() -> int:
            "tpranges_all": [summary(k) for k in sorted(groups) if k[0] == "tprange_all"],
            "sides": [summary(k) for k in sorted(groups) if k[0] == "side"],
            "evaluations": evals,
+           "stage_evaluations": stage_evals,
            "hourly": hourly(),
            "open_at_end": [{**{k: r[k] for k in ("t_in", "t_mark", "symbol", "set", "pack", "kind", "lane", "side", "entry", "mark")},
                             "mark_net_pct": round(100 * r["mark_net"], 4)} for r in open_at_end],

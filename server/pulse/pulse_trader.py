@@ -5921,7 +5921,15 @@ class Pulse:
             memo = self._entry_sig = {}
         out: Dict[str, Tuple[float, str, int, str]] = {}
         budget = ENTRY_SIG_BUDGET
-        eligible = {pack for pack in self.sets.packs if self._scope_pick(pack)[0] is not None}
+        # A pack may qualify only on the opposite side of this signal. Cache
+        # eligibility by pack AND direction for this cycle, never across cycles:
+        # stage/Axis verdicts may change while the completed-bar signal is cached.
+        eligible: Dict[Tuple[str, int], bool] = {}
+        def can_enter(candidate):
+            key = (candidate[0], int(candidate[1]))
+            if key not in eligible:
+                eligible[key] = self._scope_choice(key[0], side=key[1])[0] is not None
+            return eligible[key]
         for s in SYMBOLS:
             if s in self.open:
                 continue
@@ -5939,7 +5947,7 @@ class Pulse:
                     sig = []
                 hit = memo[s] = (bar_t, sig)
             hits = hit[1]
-            sig = next((candidate for candidate in hits if candidate[0] in eligible), hits[0] if hits else None)
+            sig = next((candidate for candidate in hits if can_enter(candidate)), hits[0] if hits else None)
             if sig:
                 pack, d, conf, why = sig
                 out[s] = (float(conf), s, int(d), f"set:{pack}:{why}")

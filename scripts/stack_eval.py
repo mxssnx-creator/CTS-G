@@ -52,12 +52,20 @@ def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int,
         eq += n * w
         peak = max(peak, eq)
         mdd = max(mdd, peak - eq)
+    def bucket(t):
+        # The final candle closes exactly at the report end. Keep that settled
+        # fill in the last hour so hourly totals reconcile to the portfolio.
+        return float(hours[-1]) if hours and t == hours[-1] + 3600 else float(int(t // 3600) * 3600)
     by_h: Dict[float, float] = {}
     for t, n, w in events:
-        h = float(int(t // 3600) * 3600)
+        h = bucket(t)
         by_h[h] = by_h.get(h, 0.0) + n * w
     net = sum(vals)
+    hourly = [{"t": h, "net_pct": round(100 * by_h.get(h, 0), 6),
+               "fills": sum(1 for t, _, _ in events if bucket(t) == h),
+               "pf": pf([n * w for t, n, w in events if bucket(t) == h])} for h in hours]
     return {"pf": pf(vals), "parents": parents, "adds": adds, "net_pct": round(100 * net, 2), "max_dd_pct": round(100 * mdd, 2),
+            "hourly": hourly,
             "net_per_dd": round(net / mdd, 3) if mdd > 0 else None, "hours_positive": f"{sum(1 for v in by_h.values() if v > 0)}/{len(hours)}"}
 
 
@@ -70,7 +78,7 @@ def dca_rungs(side: int, entry: float, exit_px: float, sl_f: float, e_i: int, i_
     own off switch at that bar) ends the ladder. Every add exits at the parent's exit price and pays one PositionCost."""
     out: List[Tuple[int, int, float, float]] = []
     used, pos_j = 0.0, e_i + 1
-    cap = float(cfg["max_expo"]) - 1.0
+    cap = float(cfg["max_expo"]) - 1.0 if float(cfg["max_expo"]) > 0 else float("inf")
     for k in range(int(cfg["n"])):
         d = min(max((float(cfg["f0"]) + k * float(cfg["fs"])) * sl_f, cf), 0.9 * sl_f)
         m = float(cfg["m0"]) * (float(cfg["g"]) ** k)
@@ -102,8 +110,10 @@ def main() -> int:
     ap.add_argument("--patch", default="")
     ap.add_argument("--part", default="axis,block,dca")
     ap.add_argument("--sealed", action="store_true")
+    ap.add_argument("--last-hours", type=int, default=0, help="compare on the same final N full hours as trade_sim")
     ap.add_argument("--axis-arms", default="", help="JSON list of Axis arms to run instead of the built-in grid")
     ap.add_argument("--block-candidates", default="", help="part block2: JSON file, a list of {label, cfg} (cfg = Block v2 overlay keys, block_rules.clean_cfg)")
+    ap.add_argument("--block-axis-current", action="store_true", help="compare Block v2 on parents admitted by the overlay's Axis rules")
     a = ap.parse_args()
     parts = {x.strip() for x in a.part.split(",") if x.strip()}      # exact part names ("block" must not match "block2")
     os.environ["STAGE_OVERLAY_PATCH"] = a.patch or "{}"
@@ -134,12 +144,18 @@ def main() -> int:
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
     hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
+    if not hours:
+        raise ValueError("No complete report hour remains after prehistory")
     split = hours[len(hours) * 2 // 3]
     lo, hi = (split, hours[-1] + 3600) if a.sealed else (hours[0], split)
+    if a.last_hours:
+        if not 0 < a.last_hours <= len(hours):
+            raise ValueError(f"requested {a.last_hours} hours, available {len(hours)}")
+        lo, hi = hours[-a.last_hours], hours[-1] + 3600
     run_hours = [h for h in hours if lo <= h < hi]
     by_id = {st.id: st for st in book.by_idx}
     auto = sg.AutoFloors(book, tapes)
-    out: Dict[str, Any] = {"window": "sealed" if a.sealed else "development", "data": a.data, "hours": len(run_hours), "patch": json.loads(a.patch or "{}"),
+    out: Dict[str, Any] = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "data": a.data, "hours": len(run_hours), "patch": json.loads(a.patch or "{}"),
                            "axis": {}, "block": {}, "block2": {}, "dca": {}, "combined": {}}
     print(f"symbols={len(names)} Sets={len(book.by_idx)} hours={len(run_hours)} [{time.time() - t0:.0f}s]", flush=True)
 
@@ -414,7 +430,7 @@ def main() -> int:
     # ---- Block v2 (block_rules): per-count steps and ratios, cumulative evidence, relations, Additive / Shared, lifecycle ------------------------------
     floor_memo: Dict[Tuple[int, float], float] = {}
 
-    def block_sim2(parents, cfg):
+    def block_sim2(parents, cfg, coordinator):
         """The engine's rules (block_rules, the same module SetBlockBook runs) over the executed parents, in time order: a parent's close (its observations
         enter the ledgers, its lifecycle updates) comes before an open at the same moment, an open before a decision. Returns (events, adds, add nets)."""
         import heapq
@@ -463,7 +479,7 @@ def main() -> int:
                 books = [led(k) for k in m["rk"]]
                 if any(int(b["life"].get("pause", 0)) > 0 for b in books):
                     continue
-                if not parent_ok(r, t, no_axis_coord):
+                if not parent_ok(r, t, coordinator):
                     continue
                 hr = float(int(t // 3600) * 3600)
                 fk = (m["st"].idx, hr)
@@ -483,7 +499,7 @@ def main() -> int:
             for n, net in m["fired"].items():
                 ratio = cfg.target_ratio(n)
                 events.append((float(r["t"]), net, ratio * m["scale"]))
-                add_nets.append(net)
+                add_nets.append(net * ratio * m["scale"])
                 adds += 1
                 add_part += ratio * net
             events.append((float(r["t"]), float(r["net"]), m["scale"]))
@@ -501,14 +517,21 @@ def main() -> int:
     if "block2" in parts:
         import block_rules as br
         cands = json.load(open(a.block_candidates)) if a.block_candidates else [{"label": "default", "cfg": {}}]
-        out["block2"] = {"baseline": summarize(parent_events(base), len(base), 0, run_hours), "results": {}}
+        block_coord, block_parents = no_axis_coord, base
+        if a.block_axis_current:
+            block_coord = Coordinator()
+            block_coord.load({}, overlay)
+            block_parents = run(block_coord)
+        out["block2"] = {"axis": "overlay" if a.block_axis_current else "off",
+                         "baseline": summarize(parent_events(block_parents), len(block_parents), 0, run_hours), "results": {}}
         t1 = time.time()
         for k, c in enumerate(cands):
             cfg = br.clean_cfg(c.get("cfg") or {})
-            ev, n_add, nets = block_sim2(base, cfg)
-            res = summarize(ev, len(base), n_add, run_hours)
+            ev, n_add, nets = block_sim2(block_parents, cfg, block_coord)
+            res = summarize(ev, len(block_parents), n_add, run_hours)
             res["adds_pf"] = pf(nets)
-            res["adds_net_pct"] = round(100 * sum(n_ * cfg.target_ratio(1) for n_ in nets), 2) if nets else 0.0
+            res["adds_net_pct"] = round(100 * sum(nets), 2)
+            res["cfg"] = c.get("cfg") or {}
             out["block2"]["results"][c["label"]] = res
             if k % 500 == 499:
                 print(f"block2 {k + 1}/{len(cands)} [{time.time() - t1:.0f}s]", flush=True)

@@ -169,7 +169,7 @@ def main(argv=None):
     if args.update_golden:
         os.environ["CTSG_UPDATE_GOLDEN"] = "1"
     checks = []
-    for name in SUITES:
+    for name in SUITES + ["lowrange_integration"]:
         mod = importlib.import_module(name)
         for cname, fn in mod.CHECKS:
             checks.append((cname, fn))
