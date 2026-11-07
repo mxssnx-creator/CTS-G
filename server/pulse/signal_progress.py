@@ -287,13 +287,25 @@ class SignalProgress:
             node=book.node();h=node.history
             if len(raw["times"])!=len(raw["values"]) or len(raw["times"])>h.capacity:raise ValueError("invalid Signal history tail")
             for t,v in zip(raw["times"],raw["values"]):h.record(t,v)
-            if raw["count"]<len(h.times) or any(not math.isfinite(raw[k]) or raw[k]<0 for k in ("gain","loss")):
+            if (type(raw["count"]) is not int or raw["count"]<len(h.times) or
+                    type(raw["opened"]) is not int or raw["opened"] < raw["count"] + bool(raw["position"]) or
+                    any(type(raw[k]) not in (int,float) or not math.isfinite(raw[k]) or raw[k]<0 for k in ("gain","loss"))):
                 raise ValueError("invalid Signal history totals")
+            # Retained losses cannot disappear on restart. If the whole tape is
+            # retained, totals must reconcile exactly apart from relative float
+            # summation error; no absolute epsilon may erase tiny losses.
+            for name, tail in (("gain",h.gain),("loss",h.loss)):
+                total=raw[name]
+                same=math.isclose(total,tail,rel_tol=1e-12,abs_tol=0)
+                if (total < tail and not same) or (raw["count"]==len(h.times) and not same):
+                    raise ValueError("Signal checkpoint totals disagree with retained closes")
             h.count,h.gain,h.loss=raw["count"],raw["gain"],raw["loss"]
             node.opened=raw["opened"]
             if raw["position"]:
                 node.position=Position(**raw["position"])
-                if node.position.side!=root.identity["side"] or any(not math.isfinite(v) for v in raw["position"].values()):
+                if (node.position.side!=root.identity["side"] or
+                        any(not math.isfinite(v) for v in raw["position"].values()) or
+                        node.position.entry <= 0 or node.position.qty <= 0):
                     raise ValueError("invalid Signals checkpoint position")
                 book.active.setdefault(root.identity["symbol"],{})[key]=(root,node)
             return node

@@ -9,7 +9,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'server/pulse'))
-from signal_windows import History,DEFAULT_WINDOWS,rules,policy_listing
+from signal_windows import History,Rule,DEFAULT_WINDOWS,rules,policy_listing
 from signal_progress import SignalProgress,distance_checks
 from signal_replay import open_position,close_result
 
@@ -67,6 +67,16 @@ def scalar_path(bars,events,br,mr,side,p=P):
 
 
 class Windows(unittest.TestCase):
+    def test_policy_cache_uses_rule_values_not_object_identity(self):
+        h=History(30)
+        for i in range(24):h.record(i,.01)
+        policy=[Rule(10,4,1,'positive')]
+        self.assertEqual(set(h.evaluate(30,100,policy)),{'l10-s4-m1-positive'})
+        policy[:]=[Rule(20,10,1,'negative')]
+        self.assertEqual(h.evaluate(30,100,policy),{})
+        policy[:]=[Rule(20,10,1,'positive')]
+        self.assertEqual(set(h.evaluate(30,100,policy)),{'l20-s10-m1-positive'})
+
     def test_exact_cartesian_pairs_and_excluded_long5(self):
         policy=rules();self.assertEqual(len(policy),42)
         self.assertEqual({r.long for r in policy},{10,15,20})
@@ -275,6 +285,17 @@ class Progress(unittest.TestCase):
         b.step('A',bars[0],{})
         with self.assertRaises(ValueError):b.step('A',bars[2],{})
         with self.assertRaises(ValueError):b.step('A',bars[1],{('A','other','short',1,'source'):1})
+
+    def test_restart_reconciles_retained_losses_and_count_evidence(self):
+        book,_=self.book();bars=self.bars(15);events={r[0]:1 for r in bars}
+        bars[5][2:5]=[100.1,99,99.4]
+        self.run_book(book,bars,events)
+        original=book.checkpoint()
+        self.assertGreater(original['roots'][0]['base']['loss'],0)
+        self.assertEqual(SignalProgress.restore(original).checkpoint(),original)
+        for key,value in [('loss',0),('gain',99),('count',1.5),('opened',0)]:
+            bad=copy.deepcopy(original);bad['roots'][0]['base'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):SignalProgress.restore(bad)
 
     def test_common_floor_and_no_ordinary_strategy_ranges(self):
         raw=cfg();raw['minPf']=2.19

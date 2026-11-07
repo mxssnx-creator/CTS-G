@@ -3,12 +3,14 @@ import { gunzipSync,gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { sourceEvents } from '../server/signals/source-events.mjs';
 
-const [feedPath,outPath,startText,endText]=process.argv.slice(2);
+const [feedPath,outPath,startText,endText,symbolCountText='8']=process.argv.slice(2);
 const start=Number(startText),end=Number(endText);
+const symbolCount=Number(symbolCountText);
+if (!Number.isInteger(symbolCount) || symbolCount<1 || symbolCount>200) throw new Error('symbol count must be 1–200');
 if (!feedPath || !outPath || !(end>start) || start%3600000 || end%3600000 || existsSync(outPath)) throw new Error('feed out start_ms end_ms required; preserve prior output');
 const bytes=readFileSync(feedPath),feed=JSON.parse(feedPath.endsWith('.gz')?gunzipSync(bytes):bytes);
-const symbols=Object.keys(feed.candles).filter(k=>k.endsWith('|1')).map(k=>k.slice(0,-2)).sort().slice(0,8);
-if (symbols.length!==8) throw new Error('Exactly eight symbols required');
+const symbols=Object.keys(feed.candles).filter(k=>k.endsWith('|1')).map(k=>k.slice(0,-2)).sort().slice(0,symbolCount);
+if (symbols.length!==symbolCount) throw new Error('Requested symbol count unavailable');
 const data=Object.fromEntries(symbols.map(s=>[s,feed.candles[s+'|1'].filter(r=>r.t>=start&&r.t<end).map(r=>[r.t,r.o,r.h,r.l,r.c,r.v])]));
 if (Object.values(data).some(rows=>rows.length!==(end-start)/60000 || rows[0][0]!==start || rows.at(-1)[0]+60000!==end)) throw new Error('Incomplete requested feed');
 const began=performance.now(),result=sourceEvents(data);
