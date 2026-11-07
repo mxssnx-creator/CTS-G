@@ -1008,6 +1008,9 @@ from indication_lib import rows_for as _rows_for  # noqa: E402
 from indication_ao import AO as _AO  # noqa: E402  (ported from CTS-A-O; imports indication_lib only)
 INDICATORS.update(_AO)
 WINDOWS.update({name: _LIB_WINDOW for name in _AO})
+from indication_ao_lowrange import LOW_RANGE as _AO_LOW_RANGE  # noqa: E402
+INDICATORS.update(_AO_LOW_RANGE)
+WINDOWS.update({name: _LIB_WINDOW for name in _AO_LOW_RANGE})
 
 
 def _highest_tf(name: str) -> int:

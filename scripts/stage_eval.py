@@ -681,77 +681,79 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 w, dirs, confs, _ = shadow[s]
                 if i < w:
                     continue
-                best = None
-                for p in book.packs:
-                    d, c = dirs[p][i], confs[p][i]
-                    if d != 0 and c >= cfg["entry_conf"] and (best is None or c > best[1]):
-                        best = (p, c, d)
-                if best is None:
+                signals = sorted(((p, confs[p][i], dirs[p][i]) for p in book.packs
+                                  if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
+                if not signals:
                     continue
-                pack, conf, d = best
                 if not refresh_s and ranked_t != entry_t:
-                    ranked, ranked_t = rank_at(entry_t)[0], entry_t      # completed signal candle's close is the entry time
-                # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
-                pool, lane_pick = [], ""
-                vol_pick = 1.0
-                if axis_pick is not None:
-                    # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
-                    chosen = None
-                    for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
-                        cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
-                        for _key, st_c in cands:
-                            if not group_ok(st_c, lane_, entry_t):
-                                continue
-                            ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
-                            if ok_a:
-                                chosen, vol_pick = st_c, vol_a
+                    ranked, ranked_t = rank_at(entry_t)[0], entry_t
+                # As live, try the next signal if the stronger pack has no
+                # executable Set for THIS direction / lane / Axis / group.
+                for pack, conf, d in signals:
+                    # SetBook.pick_any: the positive lane first, then Real Negative; per lane base and Exit Sets together, else trailing
+                    pool, lane_pick = [], ""
+                    vol_pick = 1.0
+                    if axis_pick is not None:
+                        # a per-candidate rule (Axis Sets): the engine's lane and kind order, the first Set the rule allows, with the volume it gives
+                        chosen = None
+                        for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
+                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                            for _key, st_c in cands:
+                                if not group_ok(st_c, lane_, entry_t):
+                                    continue
+                                ok_a, vol_a = axis_pick(st_c, lane_, entry_t)
+                                if ok_a:
+                                    chosen, vol_pick = st_c, vol_a
+                                    break
+                            if chosen is not None:
+                                pool, lane_pick = [chosen], lane_
                                 break
-                        if chosen is not None:
-                            pool, lane_pick = [chosen], lane_
-                            break
-                if axis_coord is not None:
-                    # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
-                    # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
-                    chosen = None
-                    for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
-                        cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
-                        for _key, st_c in cands:
-                            if not group_ok(st_c, lane_, entry_t):
-                                continue
-                            ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
-                            cap = axis_coord.slot_cap(0, pf_a, min_pf=floor_a)
-                            n_open = sum(1 for x_t, sid_, ln_ in opened if x_t > entry_t and sid_ == st_c.id and ln_ == lane_)
-                            if ok_a and n_open < cap:
-                                chosen = st_c
+                    if axis_coord is not None:
+                        # the engine's Axis per Set (Pulse._scope_choice with an Axis enabled): the positive lane first, then Real Negative; per lane base and Exit
+                        # Sets by rank, then trailing; the first Set whose own lane stream the Axis allows and whose open positions are under its continuation cap
+                        chosen = None
+                        for lane_, kinds in (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))]):
+                            cands = sorted([r for k_ in kinds for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)], key=lambda r: r[0], reverse=True)
+                            for _key, st_c in cands:
+                                if not group_ok(st_c, lane_, entry_t):
+                                    continue
+                                ok_a, pf_a, floor_a = axis_judge(book, tapes, axis_coord, st_c, entry_t, lane_, axis_cache)
+                                cap = axis_coord.slot_cap(0, pf_a, min_pf=floor_a)
+                                n_open = sum(1 for x_t, sid_, ln_ in opened if x_t > entry_t and sid_ == st_c.id and ln_ == lane_)
+                                if ok_a and n_open < cap:
+                                    chosen = st_c
+                                    break
+                            if chosen is not None:
+                                pool, lane_pick = [chosen], lane_
                                 break
-                        if chosen is not None:
-                            pool, lane_pick = [chosen], lane_
+                    for lane_, kinds_ in (() if (axis_coord is not None or axis_pick is not None) else (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))])):
+                        # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...)); the (lane, kinds) walk is the engine's
+                        # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
+                        pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
+                                                       key=lambda r: r[0], reverse=True)]
+                        if gg is not None:
+                            pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
+                        if pool:
+                            lane_pick = lane_
                             break
-                for lane_, kinds_ in (() if (axis_coord is not None or axis_pick is not None) else (book.pick_sequence_for(pack) if hasattr(book, "pick_sequence_for") else [(l_, k_) for l_ in getattr(book, "lane_order", ("pos", "neg")) for k_ in (("base", "exit"), ("trail",))])):
-                    # a signal is only ever judged by a Set that may trade its direction (SetBook.pick_any(side=...)); the (lane, kinds) walk is the engine's
-                    # SetBook.pick_sequence_for (trailPick / trailPickByPack: lanes outside, or kinds outside for first-any)
-                    pool = [st for _, st in sorted([r for k_ in kinds_ for r in ranked.get((pack, k_, lane_), []) if r[1].side in (0, d)],
-                                                   key=lambda r: r[0], reverse=True)]
-                    if gg is not None:
-                        pool = [st_ for st_ in pool if group_ok(st_, lane_, entry_t)]
-                    if pool:
-                        lane_pick = lane_
-                        break
-                if set_axis:
-                    n_, min_pf = set_axis
-                    keep = []
-                    for st in pool:
-                        tx, te, pp = tapes.window(st.idx, entry_t, lb, n_)
-                        g = sum(x - cf for x in pp if x - cf > 0)
-                        l_ = -sum(x - cf for x in pp if x - cf < 0)
-                        if len(pp) >= n_ and (g / l_ if l_ > 0 else 99.0) >= min_pf:
-                            keep.append(st)
-                    pool = keep
-                if not pool:
+                    if set_axis:
+                        n_, min_pf = set_axis
+                        keep = []
+                        for st in pool:
+                            tx, te, pp = tapes.window(st.idx, entry_t, lb, n_)
+                            g = sum(x - cf for x in pp if x - cf > 0)
+                            l_ = -sum(x - cf for x in pp if x - cf < 0)
+                            if len(pp) >= n_ and (g / l_ if l_ > 0 else 99.0) >= min_pf:
+                                keep.append(st)
+                        pool = keep
+                    if not pool:
+                        continue
+                    if axis and not axis_allows(closes if axis_evidence is None else axis_evidence, entry_t, axis, cf):
+                        continue
+                    st = pick(pool, (s, t)) if pick else pool[0]
+                    break
+                else:
                     continue
-                if axis and not axis_allows(closes if axis_evidence is None else axis_evidence, entry_t, axis, cf):
-                    continue
-                st = pick(pool, (s, t)) if pick else pool[0]
                 lane = se.SetLane(st, s)
                 dd = [0] * len(bars[s])
                 cc = [0.0] * len(bars[s])
