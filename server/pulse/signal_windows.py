@@ -121,7 +121,9 @@ class History:
         lo, hi = bisect_left(self.times, now-history_ms), bisect_left(self.times, now)
         if not policy or hi-lo < min(r.long+r.minimal for r in policy):
             return {}
-        memo = ("rules", id(policy), lo, hi, floor, max_dd)
+        # A mutable policy or recycled object id must never reuse another
+        # configuration's qualification. Frozen Rule values define identity.
+        memo = ("rules", tuple(policy), lo, hi, floor, max_dd)
         if memo in self.cache:
             return self.cache[memo]
         passed = {}

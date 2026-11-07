@@ -120,6 +120,7 @@ def main():
     ap.add_argument('--config',type=Path,required=True);ap.add_argument('--out',type=Path,required=True)
     ap.add_argument('--sources',default='all');ap.add_argument('--jobs',type=int,default=2)
     ap.add_argument('--prehistory-hours',type=int,default=100)
+    ap.add_argument('--trading-hours',type=int,default=12)
     args=ap.parse_args()
     if args.out.exists():ap.error('preserve earlier study outputs')
     cfg=json.loads(args.config.read_text())
@@ -131,9 +132,10 @@ def main():
     eventbytes=args.events.read_bytes();event=json.loads(gzip.decompress(eventbytes) if args.events.suffix=='.gz' else eventbytes)
     if event['provenance']['feedSha256']!=hashlib.sha256(feedbytes).hexdigest():ap.error('source events and candles differ')
     start,end=event['provenance']['start'],event['provenance']['end']
-    if (not 12<=args.prehistory_hours<=720 or end-start!=(args.prehistory_hours+12)*3600000 or
+    if (not 12<=args.prehistory_hours<=720 or not 1<=args.trading_hours<=72 or
+            end-start!=(args.prehistory_hours+args.trading_hours)*3600000 or
             cfg['progress']['historyMinutes']>args.prehistory_hours*60):
-        ap.error('complete configured prehistory plus 12h trading required')
+        ap.error('complete configured prehistory plus requested trading hours required')
     trade_start=start+args.prehistory_hours*3600000
     data={s:[[r['t'],r['o'],r['h'],r['l'],r['c'],r['v']] for r in raw['candles'][s+'|1'] if start<=r['t']<end] for s in event['provenance']['symbols']}
     groups=defaultdict(list)
