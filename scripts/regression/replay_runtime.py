@@ -8,6 +8,18 @@ from common import ROOT, T0, SMALL, overlay
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import stage_eval as sg
 import set_engine as se
+from trade_sim import settlement_hours
+
+
+def realized_hours_do_not_borrow_future_closes():
+    rows = [{"t_in": 60, "t": 7200, "net": .03},
+            {"t_in": 120, "t": 3600, "net": -.01},
+            {"t_in": 3660, "t": 7260, "net": .02}]
+    held = [{"t_in": 180, "mark_net": -.5}]
+    got = settlement_hours(rows, held, [0, 3600, 7200])
+    actual = [(r["orders"], r["opened"], r["net_pct"], r["exec_pf"]) for r in got]
+    expected = [(1, 3, -1., 0.), (1, 1, 3., 99.), (1, 0, 2., 99.)]
+    return actual == expected, f"exit-hour close/open/net/PF={actual}"
 
 
 def axis_windows_follow_settlement_order():
@@ -60,4 +72,5 @@ def held_positions_consume_axis_slots_until_the_end():
 
 
 CHECKS = [("replay-runtime." + fn.__name__.replace("_", "-"), fn) for fn in (
-    axis_windows_follow_settlement_order, held_positions_consume_axis_slots_until_the_end)]
+    axis_windows_follow_settlement_order, held_positions_consume_axis_slots_until_the_end,
+    realized_hours_do_not_borrow_future_closes)]
