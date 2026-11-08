@@ -803,8 +803,8 @@ def symbol_cap_applies_under_a_wildcard():
     p.symbols_dynamic = True
     p.overlay_wild = True
     p.open = {}
-    x01_cap = int(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"])      # x01's own cap (120 since 2026-11-03)
-    n_names = x01_cap + 40
+    x01_cap = int(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"])
+    n_names = max(x01_cap, 120) + 40
     p.universe = [{"symbol": f"S{i:03d}-USDT", "vol1h": float(1000 - i), "maxLeverage": 50, "quoteVolume": 1.0,
                    "vol24h": 0.0, "changePct": 0.0} for i in range(n_names)]
     p.last_dyn_sel = 0.0
@@ -823,6 +823,9 @@ def symbol_cap_applies_under_a_wildcard():
         p.open = {last: types.SimpleNamespace(symbol=last)}
         p.apply_dynamic_symbols(force=True)
         out["with_open"] = (len(pt.SYMBOLS), last in pt.SYMBOLS)
+        p.symbol_cap = 120
+        p.apply_dynamic_symbols(force=True)
+        out["requested_120"] = (len(pt.SYMBOLS), last in pt.SYMBOLS)
         p.symbol_cap = x01_cap
         p.apply_dynamic_symbols(force=True)
         out["x01"] = (len(pt.SYMBOLS), last in pt.SYMBOLS)
@@ -834,17 +837,18 @@ def symbol_cap_applies_under_a_wildcard():
     finally:
         pt.SYMBOLS[:] = saved_syms
     ok = (out.get("capped") == 50 and out.get("uncapped") == n_names and out.get("with_open") == (50, True)
+          and out.get("requested_120") == (120, True)
           and out.get("x01") == (x01_cap, True) and out.get("protect_more_than_cap") == (x01_cap + 1, True))
     return ok, (f"wildcard cap 50 -> {out.get('capped')}; cap 0 -> {out.get('uncapped')}; "
-                f"cap 50 + one open -> {out.get('with_open')}; x01 -> {out.get('x01')}; "
-                f"31 open positions -> {out.get('protect_more_than_cap')}")
+                f"cap 50 + one open -> {out.get('with_open')}; requested cap 120 -> {out.get('requested_120')}; "
+                f"x01 -> {out.get('x01')}; {x01_cap + 1} open positions -> {out.get('protect_more_than_cap')}")
 
 
 def x01_bootstrap_honors_cap_before_ranked_tickers():
     """A real Pulse initialization with an offline fake cannot begin with an unbounded wildcard."""
     saved_syms, saved_loader, saved_overlay = list(pt.SYMBOLS), pt.load_contracts, pt.OVERLAY_PATH
     saved_open_loader = pt.Pulse._load_open_book
-    cap = int(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"])      # x01's own cap (120 since 2026-11-03)
+    cap = int(json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))["symbolCap"])
     names = [f"S{i:03d}-USDT" for i in range(cap + 30)]
     contracts = {s: pt.Contract(symbol=s, min_qty=0.001, step=0.001, qprec=3, pprec=6,
                                 min_usdt=5.0, max_lev=50) for s in names}
@@ -1995,6 +1999,137 @@ def a_venue_ban_pauses_the_flatten_and_a_refused_close_is_logged():
     return ok, f"close calls during the ban={banned} after={free} refusal logged={logged} position kept={kept}"
 
 
+class _EntryBudgetVenue(_BookVenue):
+    """In-memory venue for entry budgets and retry IDs; no network or real orders."""
+
+    def __init__(self, required_qty=None, reconcile_by_cid=False, first_error=None, top_qty=100, fail_leverage=False):
+        super().__init__({"askPrice": 100.0, "askQty": top_qty, "bidPrice": 99.99, "bidQty": top_qty})
+        self.required_qty = required_qty
+        self.reconcile_by_cid = reconcile_by_cid
+        self.first_error = first_error
+        self.fail_leverage = fail_leverage
+        self.entry_posts = []
+        self.order_reads = []
+        self.leverage_posts = []
+
+    def post(self, path, body):
+        if path.endswith("/trade/leverage"):
+            self.leverage_posts.append(dict(body))
+            if self.fail_leverage:
+                return {"code": 100400, "msg": "leverage update refused"}
+        if path.endswith("/trade/order") and body.get("type") == "MARKET":
+            row = dict(body)
+            self.posts.append((path, row))
+            self.entry_posts.append(row)
+            if len(self.entry_posts) == 1 and self.first_error is not None:
+                return {"code": 109400, "msg": self.first_error}
+            if len(self.entry_posts) == 1 and self.required_qty is not None:
+                return {"code": 109400, "msg": f"minimum order amount is {self.required_qty}"}
+            if self.reconcile_by_cid:
+                return {"code": 0, "data": {"order": {"status": "NEW"}}}
+            return {"code": 0, "data": {"order": {"orderId": "991", "status": "FILLED", "avgPrice": "100",
+                                                     "executedQty": str(row["quantity"])}}}
+        return super().post(path, body)
+
+    def get(self, path, extra=None):
+        if path.endswith("/trade/order") and self.reconcile_by_cid:
+            params = dict(extra or {})
+            self.order_reads.append(params)
+            last = self.entry_posts[-1]
+            if params.get("clientOrderId") == last["clientOrderID"]:
+                return {"code": 0, "data": {"order": {"symbol": "BTC-USDT", "status": "FILLED",
+                                                          "avgPrice": "100", "executedQty": str(last["quantity"])}}}
+            return {"code": 109421, "msg": "order not exist"}
+        return super().get(path, extra)
+
+
+def _entry_budget_case(*, strict, multiple=1.0, carry=False, required_qty=None, reconcile=False,
+                       available=100.0, first_error=None, top_qty=100, has_set=True, fail_leverage=False):
+    def run():
+        sym = "BTC-USDT"
+        venue = _EntryBudgetVenue(required_qty, reconcile, first_error, top_qty, fail_leverage)
+        contract = pt.Contract(sym, 0.001, 0.001, 3, 2, 0.1, 150)
+        p = pt.Pulse(venue, {sym: contract})
+        p.boot_ts, p.halted, p.available, p.equity = 0.0, False, available, 100.0
+        p.size_pct, p.volume_factor, p.size_max, p.strict_size_cap = 1.0, 1.0, 25.0, strict
+        p.px[sym] = 100.0
+        p.entry_sense = lambda *a, **k: None
+        p.ensure_max_leverage = lambda *a, **k: 150
+        p.lev_max[sym] = p.lev_map[sym] = 150
+        p.control_orders = False
+        p.sets.use_historic_gate = False
+        next_cid = iter(range(1, 20))
+        p.cid = lambda *args, **kwargs: f"{pt.TAG}otest{next(next_cid)}"
+        st = types.SimpleNamespace(id="indications:L:1m:sl1.00:st5", pack="indications", kind="base", step=5, idx=0,
+                                   sl_ratio=1.0, trail_key="", trail_arm=0.0, trail_give=0.0, hold_bars=0)
+        p._scope_choice = lambda pack, side=0: (st, "pos", "") if has_set else (None, "", "")
+        p.sets.lane_fracs = lambda _st: (0.01, 0.015)
+        p.volume_by_pack, p.volume_by_kind, p.volume_by_range = {}, {}, {}
+        p.volume_by_pack_kind = {"indications:base": multiple}
+        if carry:
+            p.block.enabled = p.strat_block = True
+            if has_set:
+                p.block_cfg.carry = True
+                p.set_block = types.SimpleNamespace(entry_scale=lambda *args: 2.0)
+            else:
+                p.block.parent_scale = lambda *args: 2.0
+        try:
+            p.place(sym, 1, "set:indications:x", 0.9)
+            pos = p.open.get(sym)
+            return {"notionals": [round(float(row["quantity"]) * 100.0, 5) for row in venue.entry_posts],
+                    "ids": [row["clientOrderID"] for row in venue.entry_posts],
+                    "read_ids": [row.get("clientOrderId") for row in venue.order_reads],
+                    "position_qty": None if pos is None else pos.qty,
+                    "position_cid": None if pos is None else pos.client_id, "available_after": p.available,
+                    "leverage_posts": len(venue.leverage_posts), "leverage_recorded": p.lev_map.get(sym)}
+        finally:
+            p.pool.shutdown(wait=True)
+    return _isolated(run)
+
+
+def strict_entry_budget_survives_set_multipliers_and_block_carry():
+    fixed = _entry_budget_case(strict=True, multiple=1.5)
+    carried = _entry_budget_case(strict=True, carry=True)
+    carried_plain = _entry_budget_case(strict=True, carry=True, has_set=False)
+    legacy = _entry_budget_case(strict=False, multiple=1.5)
+    ok = (fixed["notionals"] == [1.0] and carried["notionals"] == [1.0]
+          and carried_plain["notionals"] == [1.0] and legacy["notionals"] == [1.5])
+    return ok, f"strict multiplier={fixed['notionals']} Set/plain carries={carried['notionals']}/{carried_plain['notionals']} legacy={legacy['notionals']}"
+
+
+def minimum_order_retry_respects_budget_and_reconciles_its_own_id():
+    strict = _entry_budget_case(strict=True, required_qty=0.02)
+    margin = _entry_budget_case(strict=False, required_qty=0.1, available=0.02)
+    allowed = _entry_budget_case(strict=True, multiple=0.5, required_qty=0.008, reconcile=True)
+    thin = _entry_budget_case(strict=True, multiple=0.5, required_qty=0.008, top_qty=0.006)
+    malformed = _entry_budget_case(strict=True, required_qty="1..2")
+    ok = (strict["notionals"] == [1.0] and strict["position_qty"] is None
+          and margin["notionals"] == [1.0] and margin["position_qty"] is None
+          and allowed["notionals"] == [0.5, 0.8] and allowed["position_qty"] == 0.008
+          and allowed["ids"][0] != allowed["ids"][1] and allowed["read_ids"] == [allowed["ids"][1]]
+          and allowed["position_cid"] == allowed["ids"][1]
+          and thin["notionals"] == [0.5] and thin["position_qty"] is None
+          and malformed["notionals"] == [1.0] and malformed["position_qty"] is None)
+    return ok, f"strict={strict}, low margin={margin}, allowed={allowed}, thin={thin['notionals']}, malformed={malformed['notionals']}"
+
+
+def leverage_retry_checks_margin_and_reconciles_its_own_id():
+    error = "maximum leverage is 30"
+    low = _entry_budget_case(strict=True, first_error=error, available=0.02)
+    allowed = _entry_budget_case(strict=True, first_error=error, available=0.1, reconcile=True)
+    rejected = _entry_budget_case(strict=True, first_error=error, available=0.1, fail_leverage=True)
+    ok = (low["notionals"] == [1.0] and low["position_qty"] is None
+          and low["leverage_posts"] == 0
+          and allowed["notionals"] == [1.0, 1.0] and allowed["position_qty"] == 0.01
+          and allowed["ids"][0] != allowed["ids"][1] and allowed["read_ids"] == [allowed["ids"][1]]
+          and allowed["position_cid"] == allowed["ids"][1]
+          and abs(allowed["available_after"] - (0.1 - 1.0 / 30.0)) < 1e-9
+          and allowed["leverage_posts"] == 2 and allowed["leverage_recorded"] == 30
+          and rejected["notionals"] == [1.0] and rejected["position_qty"] is None
+          and rejected["leverage_posts"] > 0 and rejected["leverage_recorded"] != 30)
+    return ok, f"low margin={low}, allowed retry={allowed}, leverage refused={rejected}"
+
+
 def strict_size_budget_skips_oversized_venue_minimum():
     """The opt-in small-balance budget skips an oversized minimum; legacy sizing remains unchanged."""
     p = _bare_pulse()
@@ -2007,10 +2142,12 @@ def strict_size_budget_skips_oversized_venue_minimum():
     capped = p.size_qty(c, 100.0)              # budget is capped at 5 USDT
     p.equity = 0.0
     unknown = p.size_qty(c, 100.0)             # no fixed-notional fallback
+    p.equity = float("inf")
+    nonfinite = p.size_qty(c, 100.0)           # a corrupt balance cannot pass by hitting the size ceiling
     p.equity, p.strict_size_cap = 100.0, False
     legacy = p.size_qty(c, 100.0)              # older overlays keep their existing behavior
-    ok = small == 0 and abs(capped * 100.0 - 5.0) < 1e-9 and unknown == 0 and legacy * 100.0 >= 5.0
-    return ok, f"small={small} capped_notional={capped * 100.0} unknown={unknown} legacy_notional={legacy * 100.0}"
+    ok = small == 0 and abs(capped * 100.0 - 5.0) < 1e-9 and unknown == 0 and nonfinite == 0 and legacy * 100.0 >= 5.0
+    return ok, f"small={small} capped_notional={capped * 100.0} unknown={unknown} nonfinite={nonfinite} legacy_notional={legacy * 100.0}"
 
 
 def position_size_follows_the_balance_and_the_volume_factor():
@@ -2657,15 +2794,15 @@ def real_stage_overall_strategies_judge_every_scope_on_its_own_stream():
 def volume_factor_is_bounded_and_defaults_to_the_minimum():
     """volumeFactor (owner: default and minimum 0.05): an overlay without it, with 0, a negative or an unreadable value sizes at 0.05, never at 1.0 (the
     earlier fallback, 20 x the default); a valid value is kept inside 0.05 .. 10; the sized notional follows it."""
-    got = {repr(raw): pt.volume_factor_of(raw) for raw in (None, 0, -1, "x", float("nan"), 0.05, 0.3, 3, 99)}
-    want = {"None": 0.05, "0": 0.05, "-1": 0.05, "'x'": 0.05, "nan": 0.05, "0.05": 0.05, "0.3": 0.3, "3": 3.0, "99": 10.0}
+    got = {repr(raw): pt.volume_factor_of(raw) for raw in (None, 0, -1, "x", float("nan"), 0.05, 0.3, 1, 3, 99)}
+    want = {"None": 0.05, "0": 0.05, "-1": 0.05, "'x'": 0.05, "nan": 0.05, "0.05": 0.05, "0.3": 0.3, "1": 1.0, "3": 3.0, "99": 10.0}
     p = _bare_pulse()
     p.equity, p.size_pct, p.size_max = 1000.0, 1.0, 1e9
     sizes = {}
-    for raw in (None, 0, 2):
+    for raw in (None, 0, 1, 2):
         p.volume_factor = pt.volume_factor_of(raw)
         sizes[repr(raw)] = round(p.sized_notional(), 6)
-    ok = got == want and sizes == {"None": 0.5, "0": 0.5, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05
+    ok = got == want and sizes == {"None": 0.5, "0": 0.5, "1": 10.0, "2": 20.0} and pt.VOLUME_FACTOR_MIN == 0.05
     return ok, f"factors {got}; notional at 1 % of 1,000 USDT: {sizes}"
 
 def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():
@@ -3002,6 +3139,9 @@ CHECKS = [
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
     ("trader.thirty-ready-symbols-compete-in-one-bounded-batch", thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch),
     ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),
+    ("trader.strict-entry-budget-survives-multipliers-and-carry", strict_entry_budget_survives_set_multipliers_and_block_carry),
+    ("trader.minimum-retry-respects-budget-and-client-id", minimum_order_retry_respects_budget_and_reconciles_its_own_id),
+    ("trader.leverage-retry-respects-margin-and-client-id", leverage_retry_checks_margin_and_reconciles_its_own_id),
     ("trader.no-untagged-order-when-set-disappears", entry_does_not_open_when_the_set_disappears_after_sense),
     ("trader.entry-selection-keeps-packs-and-axis-lanes-independent", entry_selection_keeps_packs_and_axis_lanes_independent),
     ("trader.one-dynamic-set-axis-does-not-block-other-sets", one_dynamic_set_axis_does_not_block_other_sets),

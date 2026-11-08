@@ -1444,6 +1444,22 @@ class Pulse:
         lev = max(1, self.leverage_for(c) if c is not None else int(LEVERAGE or 1))
         return max(0.0, float(self.available or 0)) * lev * 0.90
 
+    def strict_entry_budget(self) -> Optional[float]:
+        """The optional balance-relative parent-entry ceiling, or None when it is disabled."""
+        if not bool(getattr(self, "strict_size_cap", False)):
+            return None
+        try:
+            equity = float(getattr(self, "equity", 0.0) or 0.0)
+            pct = float(getattr(self, "size_pct", 0.0) or 0.0)
+            maximum = float(getattr(self, "size_max", 0.0) or 0.0)
+            factor = volume_factor_of(getattr(self, "volume_factor", VOLUME_FACTOR_MIN))
+            if not all(math.isfinite(v) and v > 0 for v in (equity, pct, maximum, factor)):
+                return 0.0
+            budget = min(equity * pct / 100.0 * factor, maximum)
+            return budget if math.isfinite(budget) and budget > 0 else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
     def max_book_notional(self) -> float:
         """Per-position book room. Limited books cap at base × configured rungs.
         Unlimited Block/DCA books (0 rungs = unlimited count) still get a hard
@@ -1511,16 +1527,12 @@ class Pulse:
         room = self.avail_notional(c)
         if room <= 0 or floor_n > room * 1.02:
             return 0.0
-        strict = bool(getattr(self, "strict_size_cap", False))
-        if strict:
+        limit = self.strict_entry_budget()
+        if limit is not None:
             # A small wallet must not be rounded up to the venue minimum or
             # fall back to a fixed order when equity is unknown. This is an
             # entry-notional cap, not a guarantee of execution price or loss.
-            equity = float(getattr(self, "equity", 0.0) or 0.0)
-            pct = float(getattr(self, "size_pct", 0.0) or 0.0)
-            factor = volume_factor_of(getattr(self, "volume_factor", VOLUME_FACTOR_MIN))
-            limit = min(equity * pct / 100.0 * factor, float(getattr(self, "size_max", 0.0) or 0.0))
-            if not math.isfinite(limit) or equity <= 0 or pct <= 0 or factor <= 0 or limit <= 0 or floor_n > limit + 1e-9:
+            if limit <= 0 or floor_n > limit + 1e-9:
                 return 0.0
             want_n = min(limit, room)
         else:
@@ -1532,7 +1544,7 @@ class Pulse:
             return 0.0
         if q * px > room * 1.02:
             return 0.0
-        if strict and q * px > limit + 1e-9:
+        if limit is not None and q * px > limit + 1e-9:
             return 0.0
         # Final sanity: an entry may never exceed 2× the configured target
         # (exchange min-lot floor excepted) — catches corrupt sizing upstream.
@@ -3663,6 +3675,7 @@ class Pulse:
         qty = self.size_qty(c, px)
         if qty <= 0:
             return
+        strict_budget = self.strict_entry_budget()
         notional = qty * px
         if notional > self.max_book_notional() * 1.02:
             return
@@ -3721,7 +3734,10 @@ class Pulse:
             # group's net is back to equal, within the book and what the balance can carry
             scale = self.block.parent_scale(sym, side)
             if scale > 1.0:
-                scaled = self.cap_order_qty(c, px, qty * scale, min(self.max_book_notional(), self.avail_notional(c)))
+                cap_b = min(self.max_book_notional(), self.avail_notional(c))
+                if strict_budget is not None:
+                    cap_b = min(cap_b, strict_budget)
+                scaled = self.cap_order_qty(c, px, qty * scale, cap_b)
                 if scaled > qty:
                     log(f"BLOCK carry {sym} {side} x{scale:.2f} qty {qty} -> {scaled}", every=30.0, key=f"bcarry:{sym}")
                     qty = scaled
@@ -3739,6 +3755,8 @@ class Pulse:
                 bscale = sb_.entry_scale(chosen.id, lane, "LONG" if direction > 0 else "SHORT", sym, self.block)
                 if bscale > 1.0 + 1e-9:
                     cap_b = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+                    if strict_budget is not None:
+                        cap_b = min(cap_b, strict_budget)
                     q3 = self.cap_order_qty(c, px, qty * bscale, cap_b)
                     if q3 > qty:
                         log(f"BLOCK carry {sym} {chosen.id} x{bscale:.2f} qty {qty} -> {q3}", every=30.0, key=f"bcarry2:{sym}")
@@ -3747,6 +3765,8 @@ class Pulse:
                         margin = notional / max(1, lev)
             if abs(vm - 1.0) > 1e-9:
                 cap_n = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+                if strict_budget is not None:
+                    cap_n = min(cap_n, strict_budget)
                 q2 = self.cap_order_qty(c, px, qty * vm, cap_n)
                 if q2 <= 0:
                     return
@@ -3755,6 +3775,10 @@ class Pulse:
                 margin = notional / max(1, lev)
                 if margin > float(self.available or 0) * 0.95:
                     return
+        # cap_order_qty permits a venue-minimum tolerance for legacy overlays;
+        # a strict parent budget must also hold after every scaling path.
+        if strict_budget is not None and (strict_budget <= 0 or qty * px > strict_budget + 1e-9):
+            return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -3815,7 +3839,8 @@ class Pulse:
             msg0 = str(r.get("msg") or "").lower()
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
-                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)))
+                cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
+                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                 self.did_io = True
         if not self.ok(r):
             msg = str(r.get("msg") or "")
@@ -3825,28 +3850,45 @@ class Pulse:
                 self.lev_max[sym] = cap
                 if c is not None:
                     c.max_lev = cap
-                for lev_side in ("LONG", "SHORT"):
-                    self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": sym, "side": lev_side, "leverage": cap})
-                self.lev_map[sym] = cap
-                self._persist_lev()
-                r = self.api.post(
-                    "/openApi/swap/v2/trade/order",
-                    _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
-                )
-                self.did_io = True
-                msg = str(r.get("msg") or "")
+                lev = self.leverage_for(c)
+                margin = notional / max(1, lev)
+                # The corrected venue leverage can need substantially more
+                # margin; never retry with the earlier leverage's budget.
+                if margin <= float(self.available or 0) * 0.95 and self.book_allows(sym, direction, qty, px, sl_check)[0]:
+                    applied = True
+                    for lev_side in ("LONG", "SHORT"):
+                        reply = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": sym, "side": lev_side, "leverage": cap})
+                        if not self.ok(reply):
+                            applied = False
+                    if applied:
+                        self.lev_map[sym] = cap
+                        self._persist_lev()
+                        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
+                        r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
+                        self.did_io = True
+                        msg = str(r.get("msg") or "")
             m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
             if m2 and not self.ok(r):
-                need = float(m2.group(1))
-                c.min_qty = max(float(c.min_qty or 0), need)
-                qty = self.round_qty_up(c, need)
-                if qty > 0:
-                    r = self.api.post(
-                        "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)),
-                    )
-                    self.did_io = True
-                    msg = str(r.get("msg") or "")
+                try:
+                    need = float(m2.group(1))
+                except (TypeError, ValueError, OverflowError):
+                    need = 0.0
+                if math.isfinite(need) and need > 0:
+                    c.min_qty = max(float(c.min_qty or 0), need)
+                    retry_qty = self.min_order_qty(c, px)
+                    retry_notional = retry_qty * px
+                    retry_margin = retry_notional / max(1, lev)
+                    viable = (retry_qty > 0 and math.isfinite(retry_notional)
+                              and retry_notional <= self.max_book_notional() * 1.02
+                              and retry_notional <= self.avail_notional(c) * 1.02
+                              and retry_margin <= float(self.available or 0) * 0.95
+                              and (strict_budget is None or retry_notional <= strict_budget + 1e-9))
+                    if viable and self.book_allows(sym, direction, retry_qty, px, sl_check)[0]:
+                        qty, notional, margin = retry_qty, retry_notional, retry_margin
+                        cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
+                        r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
+                        self.did_io = True
+                        msg = str(r.get("msg") or "")
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
