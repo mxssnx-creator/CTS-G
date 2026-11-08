@@ -179,11 +179,11 @@ def the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor():
 
     def make(linked):
         book = se.SetBook()
-        book.load({"stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0, "minPfBySize": False, "minPfByStep": True, "minPfStepAuto": False,
+        book.load({"positionCostPct": .12, "stagesEnabled": False, "histLookbackAuto": False, "setGateMinTrades": 0, "minPfBySize": False, "minPfByStep": True, "minPfStepAuto": False,
                    "minPfStepRatio": 0.2, "directionMode": "both", "pauseMode": "off", "setMinPf": 1.25, "setMinStep": 2, "setStepMax": 12,
                    "setSlRatios": [1.0], "trailVariants": [], "stratGeneral": True, "stratIndications": False})
         co = Coordinator()
-        co.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": linked,
+        co.load({}, {"positionCostPct": .12, "axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": linked,
                      "setMinPf": 1.25, "minPf": 1.25})
         p = _bare_pulse()
         p.sets, p.coord, p.open, p.position_cost_pct = book, co, {}, 0.12
@@ -272,7 +272,7 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
             import block_rules as _br
             p.set_block.cfg = p.block_cfg = _br.clean_cfg({"blockCounts": [{"step": 1, "ratio": 1.0}] * 3, "blockRelations": ["set"], "blockSkipFirst": 0, "blockMinObservations": 3})
             co = Coordinator()
-            co.load({}, {"axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": True,
+            co.load({}, {"positionCostPct": .12, "axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": True,
                          "setMinPf": 1.25, "minPf": 1.25})
             p.coord = co
             p.set_axis_floor = lambda st_: floor

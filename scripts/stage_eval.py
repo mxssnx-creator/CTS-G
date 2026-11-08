@@ -56,13 +56,33 @@ def load_bars(data_dir: str, n_symbols: int) -> Tuple[List[str], Dict[str, List[
     return names, bars, times
 
 
+def replay_overlay():
+    """Resolve immutable replay fee evidence through Pulse's own fee model."""
+    from fee_policy import cost_policy
+    from execution_cost import FeeSchedule, fee_rate
+    ov = json.load(open(OVERLAY))
+    patch = json.loads(os.environ.get("STAGE_OVERLAY_PATCH") or "{}")
+    ov.update(patch)
+    schedule = FeeSchedule()
+    contracts, now = {}, 0
+    snapshot_path = os.environ.get("STAGE_FEE_SNAPSHOT")
+    if snapshot_path:
+        snapshot = json.load(open(snapshot_path))
+        now = float(snapshot["asOf"])
+        contracts = {s: None for s in snapshot["selectedSymbols"]}
+        for symbol, row in snapshot.get("symbols", {}).items():
+            maker, taker = fee_rate(row.get("makerRate")), fee_rate(row.get("takerRate"))
+            if maker is not None and taker is not None:
+                schedule.account[symbol] = {"maker": maker, "taker": taker, "t": float(row["at"])}
+        ov["replayFeeSnapshot"] = snapshot  # included in cache provenance
+    if "positionCostPct" not in patch:
+        ov["positionCostPct"] = schedule.paper_budget(cost_policy(ov), contracts, now)
+    return ov
+
+
 def make_book() -> se.SetBook:
     b = se.SetBook()
-    ov = json.load(open(OVERLAY))
-    patch = os.environ.get("STAGE_OVERLAY_PATCH")      # e.g. {"extraIndicators": ["trend_c10"]}: a variant under test
-    if patch:
-        ov.update(json.loads(patch))
-    b.load(ov)
+    b.load(replay_overlay())
     return b
 
 
@@ -765,6 +785,10 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         # An unfinished position still occupies its symbol.  Do not
                         # retrospectively try later signals as though it were flat.
                         busy[s] = end - 1
+                        # The position also occupies its Axis continuation slot.
+                        # Its exit is unknown beyond this replay window; omitting
+                        # it here lets other symbols exceed the live per-Set cap.
+                        opened.append((float("inf"), st.id, lane_pick))
                         if include_open:
                             pos = lane.open
                             mark = float(bars[s][end - 1][3])
@@ -798,7 +822,9 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
 
 def axis_allows(closes, now, axis, cf) -> bool:
     last_n, min_pf, pause_k = axis
-    done = [x for t, x in closes if t <= now]
+    # Candidate paths are simulated in entry order. A later entry can close
+    # first, so last-N and the loss streak must follow settlement time.
+    done = [x for t, x in sorted(closes, key=lambda row: row[0]) if t <= now]
     if pause_k:
         k = 0
         for x in reversed(done):

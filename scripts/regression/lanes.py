@@ -131,6 +131,7 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
             venue.price = lambda: p.px.get(SYM) or 100.0      # market orders fill at the tick
             live.pulse = p
             p.sets = b
+            p.position_cost_pct = b.cost_pct  # same explicit fixture cost on both consumers
             b.pick_any = lambda pack, _st=st, **kw: _st
             b.pick_trail = lambda pack: None
             p.boot_ts = 0.0
@@ -162,7 +163,7 @@ def live(b, st, bars, i, d, others=False, on_cycle=None, dca=None, after_open=No
                 p.coord.rearrange = True
                 p.score = lambda s_: (side, "x", 0.99)
             if dca is not None:                    # the DCA lane on, with these overlay keys (cooldown 0)
-                p.dca.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, **dca})
+                p.dca.load({"positionCostPct": b.cost_pct, "dcaEnabled": True, "dcaCooldownSeconds": 0, **dca})
                 p.dca.enabled = True
             trace = []
             for bi in range(i + 1, len(bars)):
@@ -387,7 +388,7 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
     scored = bool(p2.dca.closes) and expect is not None and abs(p2.dca.closes[-1]["pnl_pct"] - expect) < 1e-9 and abs(expect - c.pnl_pct) > 1e-5
     # the Set is scored on its own lane: exit against the entry it opened at, the base size, and the USDT result of that size
     sr = seen[-1] if seen else None
-    fee_rate = max(0.0, p2.overlay["configuredPositionCostPct"] - p2.slippage_allowance_pct) / 200
+    fee_rate = .0008  # actual-fill fallback; never derived by subtracting paper slippage
     base_cash = q0 * (c.exit - 100.0) - q0 * (100.0 + c.exit) * fee_rate
     base_ok = sr is not None and abs(sr.entry - 100.0) < 1e-9 and abs(sr.qty - q0) < 1e-9 and abs(sr.pnl_pct - (c.exit - 100.0) / 100.0) < 1e-9 \
         and abs(sr.pnl - base_cash) < 1e-12
@@ -395,7 +396,7 @@ def dca_is_an_optin_lane_that_leaves_the_set_lane_alone():
     same_exit = levels_fixed and scored and all(v["exit"] == (rep["reason"], rep["exit_i"]) for v in out.values())
     untouched = len(out["off"]["qty"]) == 1 and len(out["on, Sets not allowed"]["qty"]) == 1 and out["on, Sets not allowed"]["dca closes"] == 0
     added = len(out["on, onSets"]["qty"]) == 2 and out["on, onSets"]["dca closes"] == 1 and out["on, onSets"]["dca pnl"][0] < 0
-    return same_exit and untouched and added, f"replay exit={rep and (rep['reason'], rep['exit_i'])}; {out}"
+    return same_exit and untouched and added, f"replay exit={rep and (rep['reason'], rep['exit_i'])}; {out}; levels={levels_fixed} scored={scored} base={base_ok} cash={sr.pnl if sr else None}/{base_cash}"
 
 
 def dca_switch_reaches_the_module_flag():
@@ -643,6 +644,7 @@ def exit_lane_closes_never_reach_a_set_and_a_set_close_reaches_only_its_own():
             contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
             p = pt.Pulse(_Venue(), contracts)
             p.sets = b
+            p.position_cost_pct = b.cost_pct  # same explicit fixture cost on both consumers
             p.px[SYM] = 100.0
             exit_n0 = sum(v.n for v in p.exits.lanes.values())
             before = snap()
@@ -741,6 +743,7 @@ def a_recovered_set_position_keeps_its_own_lane():
                 contracts = {SYM: pt.Contract(symbol=SYM, min_qty=0.001, step=0.001, qprec=3, pprec=8, min_usdt=5.0, max_lev=50)}
                 p = pt.Pulse(venue, contracts)
                 p.sets = b
+                p.position_cost_pct = b.cost_pct  # same explicit fixture cost on both consumers
                 p.px[SYM] = 100.0
                 p.control_orders = False
                 p.open = {}
@@ -800,6 +803,7 @@ class _Env:
         p = pt.Pulse(self.venue, contracts)
         self.venue.price = lambda: (p.px.get(SYM) or 100.0) * (1.0 + self.slip)
         p.sets = _book()
+        p.position_cost_pct = p.sets.cost_pct
         p.sets.pick_any = lambda pack, **kw: None            # no Set: the position belongs to the Exit lane
         p.sets.pick_trail = lambda pack: None
         p.boot_ts = 0.0

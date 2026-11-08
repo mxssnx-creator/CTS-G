@@ -55,6 +55,22 @@ def acc_pf(vals):
     return pf(sum(v for v in vals if v > 0), -sum(v for v in vals if v < 0))
 
 
+def settlement_hours(trades, open_at_end, hours):
+    """Realized hourly returns use exit bar END times; held marks never become closes.
+
+    Keep the historical entry-cohort report separate: a later win cannot be
+    displayed as realized cash in its earlier admission hour.
+    """
+    out = []
+    for h in hours:
+        closed = [r["net"] for r in trades if h < r["t"] <= h + 3600]
+        opened = sum(h <= r["t_in"] < h + 3600 for r in [*trades, *open_at_end])
+        out.append({"t": h, "orders": len(closed), "opened": opened,
+                    "net_pct": round(100 * sum(closed), 3), "exec_pf": acc_pf(closed),
+                    "wins": sum(x > 0 for x in closed)})
+    return out
+
+
 def future_entries(txa, tea, ppa, now, count, cost, symbols=None):
     """Reference next-entry cohort from an exit-ordered tape.
 
@@ -137,9 +153,7 @@ def main() -> int:
     if not names:
         print("No market data found")
         return 2
-    overlay = json.load(open(sg.OVERLAY, encoding="utf-8"))
-    if a.patch:
-        overlay.update(json.loads(a.patch))
+    overlay = sg.replay_overlay()
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
     if loaded_names != names or replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
@@ -161,7 +175,7 @@ def main() -> int:
     future_tapes = FutureEntryTapes(names, times, shadow, cf)
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
-    hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
+    hours = [float(h) for h in range(((int(start) + 3599) // 3600) * 3600, int(end), 3600)]
     if not hours:
         raise ValueError("No complete report hour remains after prehistory")
     split = hours[len(hours) * 2 // 3]
@@ -341,7 +355,10 @@ def main() -> int:
            "sides": [summary(k) for k in sorted(groups) if k[0] == "side"],
            "evaluations": evals,
            "stage_evaluations": stage_evals,
+           "hourly_scope": "entry cohorts: eventual returns grouped by entry hour; not realized hourly results",
            "hourly": hourly(),
+           "settled_hourly_scope": "exit bar end: h < exit <= h+1h; held marks excluded; opened includes held entries",
+           "settled_hourly": settlement_hours(trades, open_at_end, run_hours),
            "open_at_end": [{**{k: r[k] for k in ("t_in", "t_mark", "symbol", "set", "pack", "kind", "lane", "side", "entry", "mark")},
                             "mark_net_pct": round(100 * r["mark_net"], 4)} for r in open_at_end],
            "closed_and_marked_pf": acc_pf([r["net"] for r in trades] + [r["mark_net"] for r in open_at_end]),

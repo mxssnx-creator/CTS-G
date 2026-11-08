@@ -10,7 +10,7 @@ from set_engine import BarIndex, SetBook, SetLane, hit_exit
 
 def _book_one(**extra):
     b = SetBook()
-    b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
+    b.load({"positionCostPct": COST, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
             "setStepMax": 5, "setSlRatios": [1.0], "trailVariants": ["0.3:0.1"], "mainGateEnabled": False, "stagesEnabled": False,
             "minPfBySize": False, "minPfByStep": False, "directionMode": "both", "pauseMode": "off", **extra})       # the one-floor rule (the size classes and the step floors have their own checks)
     return b
@@ -79,7 +79,7 @@ def stop_gap_prices_all_lane_paths():
 
 def trailing_stop_gap_and_intrabar_arm():
     b = SetBook()
-    b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
+    b.load({"positionCostPct": COST, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
             "setStepMax": 5, "setSlRatios": [3.5], "exitIgnoreTp": True, "trailVariants": ["0.6:0.36"]})
     st = _set(b, "trail")
     cfg = lane_cfg(time_bars=99, scratch_bars=99, honor_tp=False)
@@ -203,7 +203,7 @@ def entry_long_levels_sit_around_close():
 
 def trail_arms_then_gives_back():
     b = SetBook()
-    b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
+    b.load({"positionCostPct": COST, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
             "setSlRatios": [3.5], "exitIgnoreTp": True, "trailVariants": ["0.6:0.36"]})
     st = next(s for s in b.by_idx if s.kind == "trail")
     lane = SetLane(st, "X")
@@ -216,7 +216,7 @@ def trail_arms_then_gives_back():
 
 def explicit_trail_list_obeys_the_minimum_distance():
     b = SetBook()
-    b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
+    b.load({"positionCostPct": COST, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5, "setStepMax": 5,
             "setSlRatios": [3.5], "trailVariants": ["0.3:0.1", "0.2:0.1", "0.9:0.5"], "directionMode": "both"})
     trails = sorted((s.trail_arm, s.trail_give) for s in b.by_idx if s.kind == "trail")
     floor = 3 * COST          # PositionCost + 2 steps

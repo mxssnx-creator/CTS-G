@@ -121,7 +121,7 @@ def selected_fees_exclude_inactive_symbols():
     try:
         pt.SYMBOLS = ["ACTIVE"]
         p.refresh_fees()
-        paper = p.fee_schedule.paper_budget(.12, .02, p.active_fee_contracts(), 0)
+        paper = p.fee_schedule.paper_budget(__import__("fee_policy").cost_policy(), p.active_fee_contracts(), 0)
         fee, source = p.fill_cost({}, 2, 100, "UNKNOWN")
         pos = types.SimpleNamespace(fee_source="reported-fee")
         p.note_fee_source(pos, "taker-rate")
@@ -130,7 +130,7 @@ def selected_fees_exclude_inactive_symbols():
         p.note_fee_source(pos, "reported-fee")
         ok = (abs(paper - .22) < 1e-12 and p._fee_config_dirty
               and p.fee_schedule.rates("ACTIVE")[2] == "account-rate"
-              and abs(fee - .1) < 1e-12 and source == "configured-estimate"
+              and abs(fee - .16) < 1e-12 and source == "configured-estimate"
               and rate_source == "exchange-rate-estimate" and pos.fee_source == "configured-estimate")
     finally:
         pt.SYMBOLS = original
@@ -152,7 +152,7 @@ def fallback_fees_do_not_charge_slippage_twice():
             env.venue.price = lambda: 100.98 if direction > 0 else 99.02
             p.close_pos(pos, p.px[SYM], "time")
             rec = p.closed[-1]
-            fee_rate = max(0, p.overlay["configuredPositionCostPct"] - p.slippage_allowance_pct) / 200
+            fee_rate = .0008  # configured fallback taker rate; no paper slippage
             expected = rec.qty * (rec.exit - rec.entry) * direction - rec.qty * (rec.entry + rec.exit) * fee_rate
             outcomes.append(abs(rec.pnl - expected) < 1e-10 and rec.fee_source == "configured-estimate"
                             and rec.net_pnl_pct is not None and rec.fees_usdt is not None)
@@ -480,7 +480,21 @@ def zero_allowance_preserves_measured_net_percentage():
     return got["netPct"] == .01 and got["netSumPct"] == .02 and got["pf"] == 2, f"mean={got['netPct']} sum={got['netSumPct']} PF={got['pf']}"
 
 
+def dynamic_fee_policy_defaults_and_staleness():
+    from fee_policy import cost_policy, paper_cost_pct
+    policy = cost_policy()
+    schedule = FeeSchedule()
+    schedule.account["A"] = {"maker": 0, "taker": .0002, "t": 10000}
+    values = (schedule.paper_budget(policy, {"A": None, "B": None}, 10000),
+              schedule.paper_budget(policy, {"A": None}, 10000),
+              schedule.paper_budget(policy, {"A": None}, 18000),
+              schedule.paper_budget(policy, {"A": None}, 9000),
+              paper_cost_pct(cost_policy({"takerFeeRate": 0, "slippageFeeRatio": 0})))
+    return all(abs(a-b) < 1e-12 for a,b in zip(values,(.176,.044,.176,.176,0))), str(values)
+
+
 CHECKS = [("cost-accounting." + fn.__name__.replace("_", "-"), fn) for fn in (
+    dynamic_fee_policy_defaults_and_staleness,
     zero_allowance_preserves_measured_net_percentage,
     pf_evidence_distinguishes_high_finite_and_no_loss,
     fee_and_slippage_oracle, mixed_liquidity_and_slippage_on_each_leg, net_result_survives_consumers_and_cost_changes,

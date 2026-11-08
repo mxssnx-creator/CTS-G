@@ -2226,7 +2226,7 @@ class SetBook:
         self.max_ddt_h = hrs
         self.max_dd_s = hrs * 3600.0
         self.use_historic_gate = True      # the Base gate is always on: entries open only under a Base-validated Set (the overlay key is ignored)
-        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct", ov.get("setCostPct")))
         self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))
         if ov.get("timeStopS") is not None:
             # the live time stop, in bars: replay and simulator hold for the same time (6 h = 360 bars)
@@ -4494,6 +4494,10 @@ class SetBook:
         base_only = [x for x in allsets if not self.base_validation_reason(x)]
         eligible = [x for x in allsets if not self.gate_reason(x)]
         total = len(allsets)
+        def configured_ns(sts: List[SetState], field: str, fallback: Any) -> Any:
+            vals = sorted({v for st in sts for v in (getattr(self.win(st), field) if isinstance(getattr(self.win(st), field), tuple) else (getattr(self.win(st), field),))})
+            return (vals[0] if len(vals) == 1 else vals) if vals else fallback
+
         by_pack: Dict[str, Any] = {}
         for pack in self.packs:
             ps = [x for x in allsets if x.pack == pack]
@@ -4508,18 +4512,18 @@ class SetBook:
         main_pass = [x for x in base_only if self._main_pf_pass(x)]
         rgp, rgl = sum(x.main_gp for x in main_pass), sum(x.main_gl for x in main_pass)
         main = {"pf": round(pf_of(rgp, rgl, sum(x.main_n for x in main_pass)), 4), "n": sum(x.main_n for x in main_pass), "sets": len(main_pass),
-                "on": self.main_on, "lastN": self.main_n}
+                "on": self.main_on, "lastN": configured_ns(main_pass, "main_n", self.main_n)}
         agp, agl = sum(x.main_gp for x in valid), sum(x.main_gl for x in valid)
-        main_all_lanes = {"pf": round(pf_of(agp, agl, sum(x.main_n for x in valid)), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": self.main_n}
+        main_all_lanes = {"pf": round(pf_of(agp, agl, sum(x.main_n for x in valid)), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": configured_ns(valid, "main_n", self.main_n)}
         pgp, pgl = sum(x.main_gp for x in base_only), sum(x.main_gl for x in base_only)
         processed = {"pf": round(pf_of(pgp, pgl, sum(x.main_n for x in base_only)), 4), "n": sum(x.main_n for x in base_only),
-                     "sets": len(base_only), "orders": sum(int(x.proc_total) for x in base_only), "lastN": self.main_n, "source": "paper"}
+                     "sets": len(base_only), "orders": sum(int(x.proc_total) for x in base_only), "lastN": configured_ns(base_only, "main_n", self.main_n), "source": "paper"}
         pos = [x for x in valid if self.validation_lane(x) == "pos"]
         neg = [x for x in valid if self.validation_lane(x) == "neg"]
         executable = {"pf": round(pf_of(sum(x.exe_gp for x in pos), sum(x.exe_gl for x in pos)), 4), "sets": len(pos), "n": sum(x.exe_n for x in pos),
-                      "orders": sum(int(x.exe_total) for x in pos), "lastN": self.realst_n, "on": self.realst_on, "source": "paper"}
+                      "orders": sum(int(x.exe_total) for x in pos), "lastN": configured_ns(pos, "real_n", self.realst_n), "on": self.realst_on, "source": "paper"}
         realneg = {"pf": round(pf_of(sum(x.neg_gp for x in neg), sum(x.neg_gl for x in neg)), 4), "sets": len(neg), "n": sum(x.neg_n for x in neg),
-                   "orders": sum(int(x.neg_total) for x in neg), "lastN": self.realst_n, "on": self.neg_on, "source": "paper"}
+                   "orders": sum(int(x.neg_total) for x in neg), "lastN": configured_ns(neg, "real_neg_n", self.realst_n), "on": self.neg_on, "source": "paper"}
         stage_sets = {"base": len(base_only), "main": len(main_pass),
                       "negative": sum(1 for x in base_only if (x.stage or {}).get("neg")), "real": len(pos), "realNeg": len(neg)}
 
@@ -4571,6 +4575,16 @@ class SetBook:
             "real": window_row(self.realst_on, self.realst_n, mp, [x for x in mp if sv(x).get("real")], "exe_gp", "exe_gl", "exe_n"),
             "realNeg": window_row(self.realst_on and self.neg_on, self.realst_n, neg_in, [x for x in neg_in if sv(x).get("realneg")], "neg_gp", "neg_gl", "neg_n"),
         }
+        for key, field in (("baseLong", "base_long"), ("baseShort", "base_short"), ("mainLong", "main_n"),
+                           ("mainShort", "short_windows"), ("negative", "neg_windows"), ("real", "real_n"), ("realNeg", "real_neg_n")):
+            windows[key]["n"] = configured_ns(allsets, field, windows[key]["n"])
+            dist: Dict[str, int] = {}
+            for st in allsets:
+                val = getattr(self.win(st), field)
+                label = ",".join(map(str, val)) if isinstance(val, tuple) else str(val)
+                dist[label] = dist.get(label, 0) + 1
+            windows[key]["configuredSets"] = dist
+        windows["baseShort"]["on"] = any(self.win(st).base_short > 0 for st in allsets)
         chosen: Dict[str, int] = {}
         for x in base_only:
             if self.main_on and self.short_on:
@@ -4640,6 +4654,8 @@ class SetBook:
                     "trailGive": st.trail_give,
                     "trI": st.tr_i,
                     "step": st.step,
+                    "stagePolicy": {"minPf": self.floor_for(self.win(st).base_long, st.pack, st),
+                                    "windows": self.win(st).__dict__, "scope": "set", "source": "paper"},
                     "side": st.side,
                     "stepI": st.step_i,
                     "tpPct": round(st.tp_pct * 100, 4),
@@ -4847,7 +4863,7 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 # The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
 # direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
-_SELFTEST_PIN = {"directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True, "exitSetsByPack": {}, "slMaxByRange": {}, "setStepAdapt": True}
+_SELFTEST_PIN = {"positionCostPct": .12, "directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True, "exitSetsByPack": {}, "slMaxByRange": {}, "setStepAdapt": True}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
@@ -5258,7 +5274,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # R6: one cost default, shared by indication settings and position cost
     from indication_engine import DEFAULT_SETTINGS as IND_DEFAULTS
     from position_cost import POSITION_COST_PCT_DEFAULT as PCD
-    out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD == 0.12, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
+    out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD and abs(PCD - .176) < 1e-12, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
     # perf: scan() is the lane loop used by the replay and the simulator; step() is its reference.
     import random as _random
     _rnd = _random.Random(11)

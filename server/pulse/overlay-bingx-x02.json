@@ -55,7 +55,7 @@
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
   "rearrangeGap": 0.22,
-  "positionCostPct": 0.12,
+  "positionCostPct": 0.176,
   "pfWindow": 8,
   "setPfWindow": 8,
   "exitPfWindow": 8,
@@ -306,5 +306,9 @@
   "stratBreakout": true,
   "blockRiskPctOfBalance": 0,
   "minPfStepAutoHigh": 1.27,
-  "manualCloseRestMin": 240
+  "manualCloseRestMin": 240,
+  "slippageAllowancePct": 0.016,
+  "makerFeeRate": 0.0005,
+  "takerFeeRate": 0.0008,
+  "slippageFeeRatio": 0.1
 }

@@ -25,6 +25,7 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
 from set_block import SetBlockBook
 from block_rules import clean_cfg as clean_block_cfg
+from fee_policy import cost_policy
 from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
@@ -1137,8 +1138,7 @@ class Pulse:
     def refresh_fees(self) -> None:
         now = time.time()
         self.fee_schedule.refresh(self.api, list(SYMBOLS), now)
-        budget = self.fee_schedule.paper_budget(float(self.overlay.get("configuredPositionCostPct") or .12),
-                                               self.slippage_allowance_pct, self.active_fee_contracts(), now)
+        budget = self.fee_schedule.paper_budget(cost_policy(self.overlay), self.active_fee_contracts(), now)
         if abs(budget - self.position_cost_pct) > 1e-10:
             self._fee_config_dirty = True
 
@@ -1146,9 +1146,12 @@ class Pulse:
         maker, taker, _ = self.fee_schedule.rates(symbol, self.contracts.get(symbol), time.time())
         if pos is not None and taker is None:
             maker, taker = pos.fee_maker, pos.fee_taker
-        configured = float(self.overlay.get("configuredPositionCostPct") or self.position_cost_pct)
-        fee_only_pct = max(0.0, configured - self.slippage_allowance_pct)
-        return fill_fee(data, qty, price, maker, taker, fee_only_pct)
+        policy = cost_policy(self.overlay)
+        # Unknown schedules remain estimates; use the appropriate maker/taker
+        # fallback without subtracting paper slippage from the fee.
+        is_maker = data.get("isMaker") in (True, "true", "TRUE")
+        fallback = policy["makerFeeRate"] if is_maker else policy["takerFeeRate"]
+        return fill_fee(data, qty, price, maker, taker, 200 * fallback)
 
     @staticmethod
     def note_fee_source(pos, source: str) -> None:
@@ -4990,9 +4993,9 @@ class Pulse:
         if ov.get("staggerS"):
             STAGGER_S = float(ov["staggerS"])
         configured_cost = float(ov.get("positionCostPct") or .12)
-        self.slippage_allowance_pct = max(0.0, float(ov.get("slippageAllowancePct", .02)))
-        self.position_cost_pct = self.fee_schedule.paper_budget(configured_cost, self.slippage_allowance_pct,
-                                                              self.active_fee_contracts(), time.time())
+        policy = cost_policy(ov)
+        self.position_cost_pct = self.fee_schedule.paper_budget(policy, self.active_fee_contracts(), time.time())
+        self.slippage_allowance_pct = self.position_cost_pct * policy["slippageFeeRatio"] / (1 + policy["slippageFeeRatio"])
         self.block_risk_pct = max(0.0, float(ov.get("blockRiskPctOfBalance", 0.0)))
         self.transfer_adjust = bool(ov.get("transferAdjust", True))
         try:

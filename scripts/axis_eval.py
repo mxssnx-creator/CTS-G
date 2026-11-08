@@ -10,7 +10,6 @@ import argparse
 import itertools
 import json
 import os
-import pickle
 import sys
 import time
 
@@ -31,12 +30,14 @@ def main():
     ap.add_argument("--grid", default="small")
     a = ap.parse_args()
     names, bars, times = sg.load_bars(a.data, a.symbols)
+    import replay_cache
+    manifest = replay_cache.fingerprint(a.data, names, sg.replay_overlay(), sg.PULSE, sg.__file__)
     if a.cache and os.path.exists(a.cache):
-        shadow = pickle.load(open(a.cache, "rb"))
+        shadow = replay_cache.load(a.cache, manifest)
     else:
         shadow = sg.build(names, bars, times, a.jobs)
         if a.cache:
-            pickle.dump(shadow, open(a.cache, "wb"))
+            replay_cache.save(a.cache, shadow, manifest)
     book = sg.make_book()
     tapes = sg.Tapes(book, names, times, shadow)
     start = max(times[s][0] for s in names) + book.lookback * 60
