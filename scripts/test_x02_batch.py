@@ -1,10 +1,32 @@
 """Offline transport regression: no exchange calls or credentials."""
 import json
 import unittest
-from x02_low_steps_session import Session, batch_payload, crossed_protection_error
+from unittest.mock import patch
+from x02_low_steps_session import ObservationDeadline, Session, batch_payload, crossed_protection_error
 
 
 class BatchEncoding(unittest.TestCase):
+    def test_slow_monitor_io_leaves_compute_time_and_honors_deadline(self):
+        clock=[0.0];calls=[]
+        class API:
+            def call(self,*args,**kwargs):
+                calls.append(args[1]);clock[0]+=7;return {'data':[]}
+            def rows(self,*args,**kwargs):
+                calls.append(args[0]);clock[0]+=7;return []
+        s=Session.__new__(Session);s.api=API();s.save=lambda:None;s._last_sample=0
+        s.report={'cases':[],'plan':[],'snapshots':[]}
+        with patch('x02_low_steps_session.time.monotonic',side_effect=lambda:clock[0]),patch('builtins.print'):
+            s.sample()  # Three slow reads take 21 seconds.
+            clock[0]=25;s.monitor_replay(100)
+            self.assertEqual(len(calls),3,'A slow sample must not starve subsequent replay callbacks')
+            clock[0]=32;s.monitor_replay(100)
+            self.assertEqual(len(calls),6)
+            with self.assertRaises(ObservationDeadline):s.monitor_replay(53)
+            self.assertEqual(len(calls),6,'Deadline must not start more exchange reads')
+            clock[0]=64
+            with self.assertRaises(ObservationDeadline):s.monitor_replay(70)
+            self.assertEqual(len(calls),9,'An in-flight sample may finish, then the replay must stop')
+
     def test_both_trigger_directions_use_scoped_recovery(self):
         self.assertTrue(crossed_protection_error('VST API 110413: Take Profit price should be greater than the current price'))
         self.assertTrue(crossed_protection_error('VST API 110414: Take Profit price should be lower than the current price'))

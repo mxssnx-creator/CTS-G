@@ -18,6 +18,8 @@ The new 12-symbol/24-hour CTS-G replay produced 58 closes, settled PF 1.206 and 
 
 The x02 harness only supports VST. Geometry probes are deliberate admissions; native qualified signal decisions run in shadow. Probe PF is not strategy PF. Sampled REST marks cannot establish exact tick-level parity. Aborted sessions remain incomplete even after cleanup. Acceptance requires 50 accepted symbols, ten active minutes after admission, resolved order identities, flat owned exposure and no orphaned test controls.
 
+During the 50-symbol observation, REST sampling took longer than its ten-second interval. Timestamping the start of a sample made every subsequent replay callback sample again, starving shadow computation. The harness now measures the quiet interval after completed IO and checks its observation deadline during history refresh and replay. An interrupted replay is explicitly marked and never reported as a completed native decision sample. A regression simulates three seven-second reads and proves both compute time and deadline behavior. The original live observation and explicit cleanup recovery remain separate evidence; this correction does not turn that run into native sim/live parity.
+
 CTS-A native complete-grid generation now emits all 20 Micro cells and 90 Minimal cells, including Trend/Break indication lanes. Partial fills match their original order before matching new configuration identities; queue rebalancing runs only when capacity is exhausted.
 
 CTS-A-O processing and all 128 toggle combinations passed with two compute workers in 249 seconds. One-worker runs exceeded the fixture’s former 400-second wait; this is cold compute latency, not measured active-order latency.

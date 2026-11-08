@@ -25,6 +25,10 @@ from pulse_trader import ctrl_payload
 from set_engine import SetBook, bar_signal
 
 
+class ObservationDeadline(Exception):
+    """The bounded demo observation ended; finish owned cleanup, not another replay."""
+
+
 def batch_payload(bodies):
     """The batch JSON schema uses numbers; the single-order query uses text."""
     if not 1 <= len(bodies) <= 5:
@@ -287,7 +291,6 @@ class Session(Acceptance):
             self.save();self.cleanup(c)
 
     def sample(self):
-        self._last_sample=time.monotonic()
         prices=self.api.call('GET','/openApi/swap/v2/quote/premiumIndex',{'timestamp':int(time.time()*1000)},signed=False)['data']
         if not isinstance(prices,list):raise RuntimeError('Mark-price bulk response unknown')
         marks={p['symbol']:float(p['markPrice']) for p in prices}
@@ -322,6 +325,14 @@ class Session(Acceptance):
         print(json.dumps({'elapsedSeconds':round((snap['at']-self.report.get('activeStartedAt',snap['at']))/1000),
                           'symbols':len(self.report['plan']),'cases':len(self.report['cases']),
                           'openPositions':len(bypos),'ownControls':snap['pendingControls']}),flush=True)
+        # Measure the quiet interval after IO completes. Slow REST requests
+        # otherwise make every replay callback immediately sample again.
+        self._last_sample=time.monotonic()
+
+    def monitor_replay(self,deadline):
+        if time.monotonic()>=deadline:raise ObservationDeadline()
+        if time.monotonic()-self._last_sample>=10:self.sample()
+        if time.monotonic()>=deadline:raise ObservationDeadline()
 
     def partial_probes(self):
         # One additional lot and one partial close on a few still-open lanes; overall controls retain ownership.
@@ -454,11 +465,19 @@ class Session(Acceptance):
                 m=int((self.report['snapshots'][-1]['at']-self.report['allSymbolsOpenedAt'])/60000)
                 if m!=minute:
                     minute=m
-                    with ThreadPoolExecutor(max_workers=3) as pool:
-                        for sym,rows in pool.map(self.candles,self.report['plan']):
-                            self.book.bars[sym]=[[float(r[k]) for k in ('open','high','low','close','volume')] for r in rows]
-                            self.book.bar_t[sym]=int(rows[-1]['time'])/1000
-                    self.book.replay_all(now=max(self.book.bar_t.values())+60,on_step=lambda: self.sample() if time.monotonic()-self._last_sample>10 else None);self.shadow()
+                    try:
+                        with ThreadPoolExecutor(max_workers=3) as pool:
+                            for sym,rows in pool.map(self.candles,self.report['plan']):
+                                self.monitor_replay(deadline)
+                                self.book.bars[sym]=[[float(r[k]) for k in ('open','high','low','close','volume')] for r in rows]
+                                self.book.bar_t[sym]=int(rows[-1]['time'])/1000
+                        self.book.replay_all(now=max(self.book.bar_t.values())+60,on_step=lambda: self.monitor_replay(deadline))
+                    except ObservationDeadline:
+                        # A partially refreshed book is not a completed native
+                        # decision sample. Continue directly to owned cleanup.
+                        self.report['shadowDeadlineReached']=True
+                        break
+                    self.shadow()
                 time.sleep(max(0,min(10-(time.monotonic()-tick),deadline-time.monotonic())))
             self.report['activeEndedAt']=int(time.time()*1000)
         except Exception as exc:
