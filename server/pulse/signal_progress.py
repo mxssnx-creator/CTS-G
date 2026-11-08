@@ -15,6 +15,7 @@ import json
 import math
 
 from signal_replay import Position, open_position, advance_position, close_result, canonical
+from signal_sources import validate_bars
 from signal_windows import History, rules, positive, STRATEGY_RANGES, SIGNAL_MIN_PF, policy_listing
 
 
@@ -98,6 +99,7 @@ class SignalProgress:
         self.capacity = max(real_n if type(real_n) is int else 0,
                             *(r.long+r.minimal for r in (*self.base_rules,*self.main_rules)))
         self.roots, self.events, self.active, self.last_bars = {}, {}, {}, {}
+        self.registered_symbols = set()
         self.history_ms = config["historyMinutes"]*60000
         self.floor, self.max_dd, self.fees = config["minPf"], config["maxContextDrawdown"], f
         self.version = hashlib.sha256(canonical(config).encode()).hexdigest()
@@ -109,6 +111,11 @@ class SignalProgress:
     def register(self, identity, protection):
         if self.steps:
             raise ValueError("register the complete source/profile universe before progression starts")
+        root = self._prepare_root(identity, protection)
+        self._install_root(root)
+        return root.id
+
+    def _prepare_root(self, identity, protection):
         if set(identity) != {"symbol", "source", "sourceRange", "tf", "side", "coordination"}:
             raise ValueError("incomplete Signals source identity")
         if (identity["side"] not in (-1,1) or identity["tf"] not in (1,5,15,30) or
@@ -122,11 +129,71 @@ class SignalProgress:
         rid = hashlib.sha256(canonical({"source":ident,"protection":p}).encode()).hexdigest()[:24]
         if rid in self.roots:
             raise ValueError("duplicate Signals profile")
-        root = Root(rid, ident, p, self.node())
-        self.roots[rid] = root
-        key = self.event_key(ident)
-        self.events.setdefault(key, {}).setdefault(ident["side"], []).append(root)
-        return rid
+        return Root(rid, ident, p, self.node())
+
+    def _install_root(self, root):
+        self.roots[root.id] = root
+        key = self.event_key(root.identity)
+        self.events.setdefault(key, {}).setdefault(root.identity["side"], []).append(root)
+        self.registered_symbols.add(root.identity["symbol"])
+
+    def register_new_symbol(self, symbol, profiles):
+        """Add all profiles for a never-observed symbol as empty, independent lanes.
+
+        The caller may then replay its contiguous prehistory before the current
+        minute. Existing or already-observed symbols cannot acquire new lanes:
+        that would silently omit earlier events. Validate the whole batch before
+        changing the book; this API never opens an account or sends orders.
+        """
+        if not isinstance(symbol, str) or not symbol or symbol in self.registered_symbols or symbol in self.last_bars:
+            raise ValueError("Signals symbol is invalid or already observed")
+        if not isinstance(profiles, (list, tuple)) or not profiles:
+            raise ValueError("new Signals symbol requires a complete profile batch")
+        prepared, seen = [], set()
+        for pair in profiles:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise ValueError("invalid Signals profile batch")
+            root = self._prepare_root(*pair)
+            if root.identity["symbol"] != symbol or root.id in seen:
+                raise ValueError("mismatched symbol or duplicate Signals profile")
+            seen.add(root.id)
+            prepared.append(root)
+        for root in prepared:
+            self._install_root(root)
+        return [root.id for root in prepared]
+
+    def prefill_new_symbol(self, symbol, rows, next_time):
+        """Warm a new symbol from contiguous completed minutes without emitting candidates.
+
+        Each row is (bar, events), with the same event-key contract as step().
+        The final bar must end exactly at the caller's next decision minute.
+        Invalid input is rejected before any lane or clock changes. A caller
+        still supplies causal source events and remains responsible for memory
+        limits and for any later execution integration.
+        """
+        if symbol not in self.registered_symbols or symbol in self.last_bars:
+            raise ValueError("Signals prefill requires a registered, unobserved symbol")
+        if (type(next_time) is not int or next_time < 0 or next_time % 60000 or
+                not isinstance(rows, (list, tuple)) or not 1 <= len(rows) <= 4320):
+            raise ValueError("invalid Signals prefill range")
+        if any(not isinstance(row, (list, tuple)) or len(row) != 2 for row in rows):
+            raise ValueError("invalid Signals prefill row")
+        bars = [row[0] for row in rows]
+        try:
+            validate_bars(bars)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid Signals prefill bars") from exc
+        if bars[-1][0] + 60000 != next_time:
+            raise ValueError("Signals prefill must end at the next decision minute")
+        for _, events in rows:
+            if not isinstance(events, dict) or any(
+                    not isinstance(key, tuple) or key not in self.events or key[0] != symbol
+                    or type(side) is not int or side not in (-1, 1) for key, side in events.items()):
+                raise ValueError("event outside registered Signals symbol")
+        discarded = 0
+        for bar, events in rows:
+            discarded += len(self.step(symbol, bar, events))
+        return {"bars": len(rows), "discardedCandidates": discarded, "nextTime": next_time}
 
     @staticmethod
     def event_key(identity):
