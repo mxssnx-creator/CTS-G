@@ -13,6 +13,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import json
 import hashlib
 import math
+import re
 from pathlib import Path
 import sys
 import time
@@ -53,8 +54,9 @@ def stop_prices(entry, side, step, ratio, cost_pct, net_pct, precision):
 
 
 def crossed_protection_error(error):
-    # The venue uses different codes for a trigger on either side of the market.
-    return any('VST API '+str(code)+':' in str(error) for code in (110413,110414))
+    # TP and SL each have a separate code for either side of the current mark.
+    # Match the documented rejection itself; unrelated/unknown failures still abort.
+    return bool(re.search(r'VST API 11041[1-4]: (?:Stop Loss|Take Profit) price should be (?:greater|lower|less|higher) than the current price', str(error)))
 
 
 def plan_for(contracts,tickers,count=50):
@@ -181,7 +183,11 @@ class Session(Acceptance):
             if qty<=1e-12:break
             cid=self.cid();body=ctrl_payload(case['symbol'],case['side'],kind,px,str(qty),cid,close_pos=True)
             case['controls'].append(dict(cid=cid,kind=kind,orderId='',requested=body));self.save()
-            response=self.write('POST',ORDER,body);r=response['data'];r=r.get('order',r)
+            try:response=self.write('POST',ORDER,body)
+            except RuntimeError as exc:
+                if not crossed_protection_error(exc):raise
+                self.recover_crossed_protection([case],str(exc));return
+            r=response['data'];r=r.get('order',r)
             case['controls'][-1]['orderId']=str(r.get('orderId') or '')
             self.save()
         self.check('stop-floor-and-target',abs(case['sl']-case['entry'])/case['entry']+1e-12>=sl_floor_frac(self.cost,min_distance_pct=self.net)

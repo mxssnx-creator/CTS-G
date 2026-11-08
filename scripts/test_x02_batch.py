@@ -8,6 +8,8 @@ class BatchEncoding(unittest.TestCase):
     def test_both_trigger_directions_use_scoped_recovery(self):
         self.assertTrue(crossed_protection_error('VST API 110413: Take Profit price should be greater than the current price'))
         self.assertTrue(crossed_protection_error('VST API 110414: Take Profit price should be lower than the current price'))
+        self.assertTrue(crossed_protection_error('VST API 110411: Stop Loss price should be lower than the current price'))
+        self.assertTrue(crossed_protection_error('VST API 110412: Stop Loss price should be greater than the current price'))
         self.assertFalse(crossed_protection_error('VST API 109500: unknown status'))
         self.assertFalse(crossed_protection_error('transport timeout'))
 

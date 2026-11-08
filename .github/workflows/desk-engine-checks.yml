@@ -29,3 +29,5 @@ jobs:
         run: node scripts/run-ts-tests.mjs
       - name: Run offline engine tests
         run: python3 scripts/regression/run.py --jobs 4
+      - name: Check VST transport and accounting offline
+        run: PYTHONPATH=server/pulse:scripts python3 -m unittest scripts/test_x02_batch.py
