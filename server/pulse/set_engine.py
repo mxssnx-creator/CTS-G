@@ -1097,6 +1097,15 @@ def pack_signals(
         cache.update(used)
     return signals
 
+def stop_gap_price(side: int, stop: float, open_price: float) -> float:
+    """Use the adverse bar open when an already-active stop is gapped over.
+
+    This is an OHLC approximation, not a guarantee of market liquidity or an
+    exchange fill. A stop created later within the bar is handled separately.
+    """
+    return min(stop, open_price) if side > 0 else max(stop, open_price)
+
+
 def hit_exit(
     side: int,
     entry: float,
@@ -1106,7 +1115,8 @@ def hit_exit(
     bar: Sequence[float],
     ignore_tp: bool = False,
 ) -> Tuple[Optional[str], float]:
-    """Pessimistic same-bar: SL (or trail) wins if both fire."""
+    """Pessimistic same-bar: SL (or trail) wins if both fire; adverse open gaps use the bar open."""
+    opening = float(bar[0])
     high = float(bar[1])
     low = float(bar[2])
     close = float(bar[3])
@@ -1115,7 +1125,7 @@ def hit_exit(
         sl_hit = low <= stop
         tp_hit = high >= tp
         if sl_hit:
-            return "sl", stop
+            return "sl", stop_gap_price(side, stop, opening)
         if (not ignore_tp) and tp_hit:
             return "tp", tp
         return None, close
@@ -1123,7 +1133,7 @@ def hit_exit(
     sl_hit = high >= stop
     tp_hit = low <= tp
     if sl_hit:
-        return "sl", stop
+        return "sl", stop_gap_price(side, stop, opening)
     if (not ignore_tp) and tp_hit:
         return "tp", tp
     return None, close
@@ -1729,7 +1739,7 @@ class SetLane:
                 else:
                     close = acc.close[j]
                     if j == j_sl:
-                        why, px = "sl", sl
+                        why, px = "sl", stop_gap_price(side, sl, float(bars[j][0]))
                     elif j == j_tp:
                         why, px = "tp", tp
                     elif j == j_time:
@@ -1768,13 +1778,13 @@ class SetLane:
                     if side > 0:
                         stop = max(sl, trail) if trail is not None else sl
                         if low <= stop:
-                            why, px = "sl", stop
+                            why, px = "sl", stop_gap_price(side, stop, float(bars[i][0]))
                         elif honor_tp and high >= tp:
                             why, px = "tp", tp
                     else:
                         stop = min(sl, trail) if trail is not None else sl
                         if high >= stop:
-                            why, px = "sl", stop
+                            why, px = "sl", stop_gap_price(side, stop, float(bars[i][0]))
                         elif honor_tp and low <= tp:
                             why, px = "tp", tp
                     if why is None:

@@ -50,16 +50,16 @@ def expected_exit(bars: Sequence[Sequence[float]], ei: int, side: int, honor_tp:
     sl = entry * (1 - side * sl_frac)
     tp = entry * (1 + side * tp_frac)
     for j in range(ei + 1, len(bars)):
-        hi, lo, cl = float(bars[j][1]), float(bars[j][2]), float(bars[j][3])
+        op, hi, lo, cl = (float(bars[j][k]) for k in range(4))
         held = j - ei
         if side > 0:
             if lo <= sl:
-                return j, "sl", sl
+                return j, "sl", min(op, sl)
             if honor_tp and hi >= tp:
                 return j, "tp", tp
         else:
             if hi >= sl:
-                return j, "sl", sl
+                return j, "sl", max(op, sl)
             if honor_tp and lo <= tp:
                 return j, "tp", tp
         if held >= cfg["time_bars"]:
