@@ -270,6 +270,96 @@ class Progress(unittest.TestCase):
         self.assertEqual(a.checkpoint()['roots'][0],b.checkpoint()['roots'][0])
         self.assertTrue(all(r.base.history.count==0 for k,r in b.roots.items() if k!=rb))
 
+    def test_new_symbol_starts_its_own_history_and_survives_restart(self):
+        raw=cfg()
+        one={"long":[2],"short":[1],"minimal":[1],"polarity":["positive"],"shortRatio":.5}
+        raw['base']=copy.deepcopy(one);raw['main']=copy.deepcopy(one);raw['realLastN']='coordinated'
+        live=SignalProgress(raw);a=live.register(identity('A'),P)
+        ref_a=SignalProgress(raw);ref_a.register(identity('A'),P)
+        bars=self.bars(100);key_a=live.event_key(identity('A'))
+        for bar in bars[:40]:
+            ev={key_a:1};live.step('A',bar,ev);ref_a.step('A',bar,ev)
+        original=copy.deepcopy(live.checkpoint()['roots'][0])
+        ids=live.register_new_symbol('B',[(identity('B'),P),(identity('B',-1),P)])
+        self.assertEqual(len(ids),2)
+        self.assertEqual(live.checkpoint()['roots'][0],original)
+        self.assertEqual(live.roots[ids[0]].base.history.count,0)
+        ref_b=SignalProgress(raw)
+        self.assertEqual(ref_b.register(identity('B'),P),ids[0])
+        self.assertEqual(ref_b.register(identity('B',-1),P),ids[1])
+        key_b=live.event_key(identity('B'));out=[];expected=[]
+        for i,bar in enumerate(bars[40:]):
+            ev_a={key_a:1};ev_b={key_b:1}
+            live.step('A',bar,ev_a);ref_a.step('A',bar,ev_a)
+            out.extend(live.step('B',bar,ev_b));expected.extend(ref_b.step('B',bar,ev_b))
+            if i==25:live=SignalProgress.restore(live.checkpoint())
+        self.assertEqual(out,expected)
+        self.assertGreater(len(out),0)
+        self.assertEqual(live.checkpoint()['roots'][0],ref_a.checkpoint()['roots'][0])
+        self.assertEqual(live.checkpoint()['roots'][1:],ref_b.checkpoint()['roots'])
+        with self.assertRaises(ValueError):live.register_new_symbol('B',[(identity('B'),P)])
+
+    def test_new_symbol_batch_is_atomic_and_cannot_rewrite_history(self):
+        book,_=self.book();bar=self.bars(1)[0];book.step('A',bar,{})
+        before=book.checkpoint()
+        for profiles in ([],[(identity('B'),P),(identity('B'),P)],
+                         [(identity('B'),P),(identity('B'),{**P,'strategyRange':'micro'})],
+                         [(identity('B'),P),(identity('C'),P)]):
+            with self.subTest(profiles=profiles),self.assertRaises(ValueError):book.register_new_symbol('B',profiles)
+            self.assertEqual(book.checkpoint(),before)
+        with self.assertRaises(ValueError):book.register(identity('B'),P)
+        book.step('C',bar,{})
+        before=book.checkpoint()
+        with self.assertRaises(ValueError):book.register_new_symbol('C',[(identity('C'),P)])
+        self.assertEqual(book.checkpoint(),before)
+
+    def test_new_symbol_prefill_discards_historical_candidates(self):
+        raw=cfg()
+        one={"long":[2],"short":[1],"minimal":[1],"polarity":["positive"],"shortRatio":.5}
+        raw['base']=copy.deepcopy(one);raw['main']=copy.deepcopy(one);raw['realLastN']='coordinated'
+        book=SignalProgress(raw);book.register(identity('A'),P)
+        bars=self.bars(65);a_key=book.event_key(identity('A'))
+        for bar in bars[:40]:book.step('A',bar,{a_key:1})
+        old_a=copy.deepcopy(book.checkpoint()['roots'][0])
+        rid=book.register_new_symbol('B',[(identity('B'),P)])[0];b_key=book.event_key(identity('B'))
+        reference=SignalProgress(raw);reference.register(identity('B'),P)
+        expected=[]
+        for bar in bars[:40]:expected.extend(reference.step('B',bar,{b_key:1}))
+        self.assertGreater(len(expected),0)
+        result=book.prefill_new_symbol('B',[(bar,{b_key:1}) for bar in bars[:40]],bars[40][0])
+        self.assertEqual(result,{'bars':40,'discardedCandidates':len(expected),'nextTime':bars[40][0]})
+        self.assertEqual(book.checkpoint()['roots'][0],old_a)
+        self.assertEqual(book.checkpoint()['roots'][1],reference.checkpoint()['roots'][0])
+        book=SignalProgress.restore(book.checkpoint())
+        self.assertEqual(book.step('B',bars[40],{b_key:1}),reference.step('B',bars[40],{b_key:1}))
+        self.assertEqual(book.roots[rid].base.history.count,reference.roots[rid].base.history.count)
+        with self.assertRaises(ValueError):book.prefill_new_symbol('B',[(bars[0],{})],bars[1][0])
+
+    def test_prefill_rejects_gaps_unknown_events_and_wrong_cutoff_atomically(self):
+        book,_=self.book();book.step('A',self.bars(1)[0],{})
+        book.register_new_symbol('B',[(identity('B'),P)])
+        bars=self.bars(3);key=book.event_key(identity('B'));bad=('B','other','short',1,'source')
+        samples=[([(bars[0],{}),(bars[2],{})],bars[2][0]+60000),
+                 ([(bars[0],{}),(bars[1],{bad:1})],bars[2][0]),
+                 ([(bars[0],{key:1}),(bars[1],{})],bars[1][0]),
+                 ([(bars[0],{})],bars[2][0]),([],bars[0][0])]
+        for rows,next_time in samples:
+            before=book.checkpoint()
+            with self.subTest(rows=rows,next_time=next_time),self.assertRaises(ValueError):
+                book.prefill_new_symbol('B',rows,next_time)
+            self.assertEqual(book.checkpoint(),before)
+
+    def test_prefill_rejects_oversized_and_late_invalid_bars_atomically(self):
+        book,_=self.book();book.register_new_symbol('B',[(identity('B'),P)])
+        bars=self.bars(4);invalid=bars[-1].copy();invalid[2]=invalid[3]-1
+        for rows,next_time in (
+                ([(bars[0],{})]*4321,60000),
+                ([(bar,{}) for bar in bars[:-1]]+[(invalid,{})],bars[-1][0]+60000)):
+            before=book.checkpoint()
+            with self.subTest(length=len(rows)),self.assertRaises(ValueError):
+                book.prefill_new_symbol('B',rows,next_time)
+            self.assertEqual(book.checkpoint(),before)
+
     def test_incremental_restart_and_duplicate_delivery(self):
         a,_=self.book();b,_=self.book();bars=self.bars(100);events={r[0]:1 for r in bars}
         expected=self.run_book(a,bars,events)
