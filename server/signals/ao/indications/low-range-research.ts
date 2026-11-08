@@ -1,3 +1,4 @@
+import { SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, minimumStopFraction } from "../protection-policy.ts";
 /** Low-Range candidates, each separately Base-qualified in the opt-in Short grid.
  * All signals use completed bars only; registration does not establish profitability. */
 import type { Bars, Protect, RangeTag } from "../domain/types.ts";
@@ -146,7 +147,7 @@ export function lowRangeState(k: SeriesCache, window: LowRangeWindow, method: Lo
 }
 
 export const LOW_RANGE_STEPS = [2, 3, 4, 5, 6] as const;
-export const LOW_RANGE_SL_RATIOS = Array.from({ length: 13 }, (_, i) => (i + 2) / 4);
+export const LOW_RANGE_SL_RATIOS = SL_TP_RATIOS;
 export const LOW_RANGE_TRAIL_RATIOS = [0, 0.25, 0.5, 0.75] as const;
 export const LOW_RANGE_TAGS = ["mc", "mn", "sh"] as const;
 
@@ -154,6 +155,7 @@ export interface LowRangeProtectionPolicy {
   /** Fraction of price; 0.002 is the existing fixed 0.2% range basis, not the modeled fee. */
   step: number;
   cost: number;
+  minSlDistancePct?: number;
   steps: readonly number[];
   slRatios: readonly number[];
   trailRatios: readonly number[];
@@ -165,7 +167,7 @@ export const DEFAULT_LOW_RANGE_POLICY: LowRangeProtectionPolicy = {
 };
 
 /**
- * Gross price distances: TP=cost+range, SL=cost+max(step, range*ratio),
+ * Gross price distances: TP=cost+range, SL=max(TP*ratio, cost+global net distance),
  * trailing gap=max(cost+2*step, cost+range*trailRatio). Net returns still
  * deduct cost exactly once at settlement. A floor can merge requested cells.
  */
@@ -174,7 +176,7 @@ export function lowRangeProtects(policy: LowRangeProtectionPolicy = DEFAULT_LOW_
   if (!(Number.isFinite(step) && step > 0 && Number.isFinite(cost) && cost >= 0) ||
       !steps.length || !slRatios.length || !trailRatios.length || !tags.length ||
       steps.some((v) => !Number.isFinite(v) || v < 2 || v > 6) ||
-      slRatios.some((v) => !Number.isFinite(v) || v < 0.5 || v > 3.5) ||
+      slRatios.some((v) => !Number.isFinite(v) || v < SL_TP_MIN || v > SL_TP_MAX) ||
       trailRatios.some((v) => !Number.isFinite(v) || v < 0 || v > 1) ||
       tags.some((v) => !(LOW_RANGE_TAGS as readonly string[]).includes(v)))
     throw new RangeError("invalid Low-Range research protection policy");
@@ -184,7 +186,7 @@ export function lowRangeProtects(policy: LowRangeProtectionPolicy = DEFAULT_LOW_
   const result: Protect[] = [], seen = new Set<string>();
   for (const tag of tags) for (const n of steps) for (const ratio of slRatios) for (const tr of trailRatios) {
     const distance = n * step;
-    const p: Protect = { tp: round(cost + distance), sl: round(cost + Math.max(step, distance * ratio)),
+    const p: Protect = { tp: round(cost + distance), sl: round(Math.max((cost + distance) * ratio, minimumStopFraction(cost, policy.minSlDistancePct))),
       trail: tr ? round(cost + Math.max(2 * step, distance * tr)) : 0,
       hold: Math.max(1, Math.ceil(holds[tag] / 15)), tag: tag as RangeTag, maxHoldMin: holds[tag],
       ...(tr ? { trailStep: 1, trailFree: false } : {}) };

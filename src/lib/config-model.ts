@@ -1,3 +1,4 @@
+import protectionPolicy from "../../server/pulse/protection-policy.json" with { type: "json" };
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
   "XRP-USDT",
@@ -101,14 +102,18 @@ export const PF_TYPE_DEFAULTS = {
   minPfLong: 1.5,
   minPfSignals: 2.2,
 } as const;
-export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
-/** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
-export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
+export const SL_TP_RATIOS: readonly number[] = protectionPolicy.slTpRatios;
+/** Set grid: SL = TP x ratio, 0.25..2.5 step 0.25 (10 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
+export const SL_SET_RATIOS = SL_TP_RATIOS;
+export function setSlRatiosOf(value: unknown): number[] {
+  const rows = Array.isArray(value) ? value.filter((r): r is number => typeof r === "number" && Number.isFinite(r)).map(r => snapSlToTp(r)) : [];
+  return rows.length ? [...new Set(rows)].sort((a, b) => a - b) : [...SL_SET_RATIOS];
+}
 export const TRAIL_VARIANTS = ["0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5"] as const;
 
-export function snapSlToTp(v: number, lo = 0.3, hi = 1.5, step = 0.3): number {
-  const x = Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : 0.6));
-  return Math.round((lo + Math.round((x - lo) / step) * step) * 10) / 10;
+export function snapSlToTp(v: number, lo = SL_TP_RATIOS[0], hi = SL_TP_RATIOS.at(-1)!, step = 0.25): number {
+  const x = Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : 0.5));
+  return Math.round((lo + Math.round((x - lo) / step) * step) * 100) / 100;
 }
 
 export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax = 0.5): number {
@@ -333,8 +338,8 @@ export type PulseOverlay = {
   shortRangeStepMax: number;
   /** Short Range has its own Base PF floor, whatever the global setMinPf is (default 1.1). */
   shortRangeMinPf: number;
-  /** Overall minimum stop = PositionCost + slMinSteps steps (one step = one PositionCost). */
-  slMinSteps: number;
+  /** Minimum initial SL = modeled round-trip cost + this net price percent. */
+  minSlDistancePct: number;
   /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
   trailMinSteps: number;
   /** Smallest arm - give (percent) a trailing pair may have; pairs under it build no Set. 0 = every pair. */
@@ -444,7 +449,7 @@ export type PulseOverlay = {
   setScratchEnabled: boolean;
   // Set grid extensions (2026-11-03): named TP ranges on / off, SL ratios 0.2 / 0.3 / 0.4 x TP, trailing arms up to 3.0 %, trailing stop families.
   tpRanges: Record<TpRangeId, boolean>;
-  setSlLow: boolean;
+  setSlRatios: number[];
   trailStepMax: number;
   trailSlRatios: number[];
   // own volume multiples (0.1 .. 5, missing = 1) per indication pack, Set type (base / exit / trail) and TP range (micro .. wide, trail)
@@ -615,7 +620,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   tpMinPct: 0.35,
   tpMaxPct: 4.5,
   tpCostRatio: 5,
-  slToTpRatio: 0.6,
+  slToTpRatio: 0.5,
   slToTpAuto: true,
   slToTpRecalcN: 8,
   slToTpRecalcEvery: 8,
@@ -647,7 +652,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   shortRangeStepMin: 2,
   shortRangeStepMax: 6,
   shortRangeMinPf: 1.1,
-  slMinSteps: 1,
+  minSlDistancePct: protectionPolicy.minSlDistancePct.default,
   trailMinSteps: 2,
   trailMinLockPct: 0,
   groupGate: false,
@@ -731,7 +736,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   rankByLane: true,
   setScratchEnabled: false,
   tpRanges: { ...TP_RANGES_DEFAULT, wide: true }, // shipped overlays: every range on, Wide included (owner 2026-11-03)
-  setSlLow: false,
+  setSlRatios: [...SL_SET_RATIOS],
   trailStepMax: TRAIL_STEP_MAX_DEFAULT,
   trailSlRatios: [],
   volumeByPack: {},
@@ -902,7 +907,7 @@ export type CtsSettings = {
   shortRangeStepMin?: number;
   shortRangeStepMax?: number;
   shortRangeMinPf?: number;
-  slMinSteps?: number;
+  minSlDistancePct?: number;
   trailMinSteps?: number;
   trailMinLockPct?: number;
   groupGate?: boolean;
@@ -984,7 +989,7 @@ export type CtsSettings = {
   rankByLane?: boolean;
   setScratchEnabled?: boolean;
   tpRanges?: Partial<Record<string, boolean>>;
-  setSlLow?: boolean;
+  setSlRatios?: number[];
   trailStepMax?: number;
   trailSlRatios?: number[];
   volumeByPack?: Record<string, number>;
@@ -1358,7 +1363,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     tpMinPct: num(cts.tpMinPct, 0.35),
     tpMaxPct: num(cts.tpMaxPct, 4.5),
     tpCostRatio: num(cts.tpCostRatio, 5),
-    slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
+    slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.5)),
     slToTpAuto: bool(cts.slToTpAuto, true),
     slToTpRecalcN: Math.max(8, num(cts.slToTpRecalcN, 8)),
     slToTpRecalcEvery: num(cts.slToTpRecalcEvery, 8),
@@ -1390,7 +1395,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     shortRangeStepMin: num(cts.shortRangeStepMin, 2),
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
     shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.1)),
-    slMinSteps: num(cts.slMinSteps, 1),
+    minSlDistancePct: Math.max(protectionPolicy.minSlDistancePct.min, Math.min(protectionPolicy.minSlDistancePct.max, num(cts.minSlDistancePct, protectionPolicy.minSlDistancePct.default))),
     trailMinSteps: num(cts.trailMinSteps, 2),
     trailMinLockPct: Math.max(0, Math.min(3, num(cts.trailMinLockPct, 0))),
     groupGate: bool(cts.groupGate, false),
@@ -1469,7 +1474,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rankByLane: bool(cts.rankByLane, true),
     setScratchEnabled: bool(cts.setScratchEnabled, false),
     tpRanges: tpRangesOf(cts.tpRanges),
-    setSlLow: bool(cts.setSlLow, false),
+    setSlRatios: setSlRatiosOf(cts.setSlRatios),
     trailStepMax: Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(num(cts.trailStepMax, TRAIL_STEP_MAX_DEFAULT)))),
     trailSlRatios: trailSlRatiosOf(cts.trailSlRatios),
     volumeByPack: volumeMultsOf(cts.volumeByPack),
@@ -1539,7 +1544,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.minPfMediumN = Math.max(out.minPfShortN, Math.round(num(out.minPfMediumN, 35)));
   out.histLookbackMax = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackMax, 4320))));
   out.histLookbackTargetN = Math.max(1, Math.min(200, Math.round(num(out.histLookbackTargetN, 12))));
-  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6));
+  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.5));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),

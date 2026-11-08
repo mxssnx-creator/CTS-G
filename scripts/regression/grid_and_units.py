@@ -25,8 +25,8 @@ def tp_steps():
 
 
 def sl_ratios():
-    ok = len(SL_RATIOS) == 13 and SL_RATIOS[0] == 0.5 and SL_RATIOS[-1] == 3.5
-    ok = ok and all(abs((SL_RATIOS[i + 1] - SL_RATIOS[i]) - 0.25) < 1e-9 for i in range(12))
+    ok = len(SL_RATIOS) == 10 and SL_RATIOS[0] == 0.25 and SL_RATIOS[-1] == 2.5
+    ok = ok and all(abs((SL_RATIOS[i + 1] - SL_RATIOS[i]) - 0.25) < 1e-9 for i in range(len(SL_RATIOS) - 1))
     return ok, f"n={len(SL_RATIOS)} {SL_RATIOS[0]}..{SL_RATIOS[-1]}"
 
 
@@ -47,7 +47,7 @@ def default_grid_counts():
     short_base, short_exit = len(ratios) * len(short), len({round(r * k, 6) for r in ratios for k in short})
     want = {"base": 2 * full_base + short_base, "exit": 2 * full_exit + short_exit, "trail": 2 * len(pairs) + len(short_pairs)}
     ok = (len(sb.packs) == 3 and all(kinds.get(k) == v for k, v in want.items()) and len(sb.by_idx) == sum(want.values())
-          and sb.steps == steps and len(sb.sl_ratios) == 13)
+          and sb.steps == steps and len(sb.sl_ratios) == 10)
     return ok, f"sets={len(sb.by_idx)} base={kinds.get('base')} exit={kinds.get('exit')} trail={kinds.get('trail')} packs={len(sb.packs)}; rules want {want}"
 
 
@@ -105,11 +105,11 @@ def trail_distance_limit():
 def trail_limit_has_no_unsafe_fallback():
     """An impossible cost floor or initial stop removes trailing Sets instead of inventing a fallback."""
     floor = _book(positionCostPct=1.1, trailMinSteps=2)      # minimum trailing distance 3.3 % > the 3 % limit: nothing can trail
-    stop = _book(positionCostPct=0.8, slMinSteps=3, trailMinSteps=1, stratShortRange=False,
+    stop = _book(positionCostPct=2.1, minSlDistancePct=1, trailMinSteps=1, stratShortRange=False,
                  trailVariants=["2.0:1.9"])                   # give floor 1.6 % is met, but the minimum stop (1 + 3) x 0.8 = 3.2 % is over the limit
-    edge = _book(positionCostPct=1.0, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
+    edge = _book(positionCostPct=1.5, minSlDistancePct=1, trailMinSteps=1, trailMinStep=2, trailStepMax=30,
                  setMinStep=2, setStepMax=2, stratShortRange=False)
-    above = _book(positionCostPct=1.00001, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
+    above = _book(positionCostPct=1.50001, minSlDistancePct=1, trailMinSteps=1, trailMinStep=2, trailStepMax=30,
                   setMinStep=2, setStepMax=2, stratShortRange=False)
     count = lambda b: sum(st.kind == "trail" for st in b.by_idx)
     ok = count(floor) == 0 and count(stop) == 0 and count(edge) > 0 and count(above) == 0
@@ -119,10 +119,10 @@ def trail_limit_has_no_unsafe_fallback():
 
 def trail_limit_matches_replay_levels():
     """A limit-bound trailing Set opens at the same 3% stop in the two replay paths, for both sides."""
-    b = _book(positionCostPct=1.0, slMinSteps=2, trailMinSteps=1, trailMinStep=2,
-              setMinStep=2, setStepMax=2, stratShortRange=False)
-    st = next(s for s in b.by_idx if s.kind == "trail")
-    cfg = lane_cfg(cost_pct=1.0, sl_floor_steps=2)
+    b = _book(positionCostPct=0.15, minSlDistancePct=0.1, trailMinSteps=1,
+              setMinStep=12, setStepMax=12, stratShortRange=False, trailSlRatios=[2.5])
+    st = next(s for s in b.by_idx if s.kind == "trail" and abs(b.lane_fracs(s)[0] - .03) < 1e-12)
+    cfg = lane_cfg(cost_pct=b.cost_pct, min_sl_distance_pct=b.min_sl_distance_pct)
     bar = [100.0, 100.0, 100.0, 100.0, 1.0]
     levels = []
     for direction in (1, -1):
@@ -166,7 +166,7 @@ def cost_units():
 
 
 def sl_snap():
-    cases = [(0.6, 0.5), (0.8, 0.75), (9.0, 3.5), (-1.0, 0.5), (1.0, 1.0)]
+    cases = [(0.6, 0.5), (0.8, 0.75), (9.0, 2.5), (-1.0, 0.5), (1.0, 1.0)]
     bad = [(x, snap_sl_ratio(x), want) for x, want in cases if abs(snap_sl_ratio(x) - want) > 1e-9]
     return not bad, f"bad={bad}" if bad else f"{len(cases)} cases"
 
@@ -191,7 +191,7 @@ def tp_ranges_switch_only_their_own_steps():
     kw = dict(setStepMax=32, stratShortRange=True)
     ref = _book(**kw)
     off = _book(tpRanges={"short": False}, **kw)
-    wide = _book(tpRanges={"wide": True}, **kw)
+    wide = _book(tpRanges={"wide": True}, **{**kw, "setStepMax": 50})
     general = lambda st: st.pack != "shortrange" and st.kind in ("base", "exit")
     r_sig, o_sig, w_sig = _sig(ref), _sig(off), _sig(wide)
     gone = set(r_sig) - set(o_sig)
@@ -209,32 +209,15 @@ def tp_ranges_switch_only_their_own_steps():
 
 
 def low_sl_ratios_build_only_distinct_stops():
-    """setSlLow adds SL ratios 0.2 / 0.3 / 0.4 x TP. Every low-ratio Set's stop is max(minimum stop, r x TP) and differs from the stop of every other Set
-    at its pack, direction and step (a floored copy is never built); every Set of the shipped grid is unchanged; each low ratio builds Sets; ratios snap
-    0.2 / 0.3 / 0.4 below 0.45."""
-    kw = dict(setStepMax=32, stratShortRange=True)
-    ref = _book(**kw)
-    low = _book(setSlLow=True, **kw)
-    r_sig, l_sig = _sig(ref), _sig(low)
-    same = not (set(r_sig) - set(l_sig)) and all(l_sig[i] == r_sig[i] for i in r_sig)
-    floor = sl_floor_frac(low.cost_pct, low.sl_min_steps)
-    lows = [st for st in low.by_idx if st.kind == "base" and st.sl_ratio < 0.5]
-    stop_ok = all(abs(lane_fracs(st, low.cost_pct)[0] - max(floor, step_tp_pct(st.step, low.cost_pct) * st.sl_ratio)) < 1e-12 for st in lows)
-    by_cell = {}
+    """One quarter-step grid replaces the overlapping legacy low-ratio toggle."""
+    ref, low = _book(), _book(setSlLow=True)
+    ids = [st.id for st in low.by_idx]
+    ok = _sig(ref) == _sig(low) and len(ids) == len(set(ids))
+    ok = ok and low.sl_ratios == [i / 4 for i in range(1, 11)]
     for st in low.by_idx:
-        if st.kind == "base":
-            by_cell.setdefault((st.pack, st.side, st.step), []).append((round(lane_fracs(st, low.cost_pct)[0], 12), st.sl_ratio))
-    copies = [(k, v) for k, v in by_cell.items() for stop, r in v if r < 0.5 and sum(1 for s2, _ in v if s2 == stop) > 1]
-    lows_x = [st for st in low.by_idx if st.kind == "exit" and st.sl_ratio < 0.5]
-    exit_stops = [round(lane_fracs(st, low.cost_pct)[0], 12) for st in low.by_idx if st.kind == "exit" and st.pack == "general" and st.side == 0]
-    exit_dup = len(exit_stops) - len(set(exit_stops))
-    ref_exit = [round(lane_fracs(st, ref.cost_pct)[0], 12) for st in ref.by_idx if st.kind == "exit" and st.pack == "general" and st.side == 0]
-    exit_ok = exit_dup == len(ref_exit) - len(set(ref_exit))     # low ratios add no Exit Set whose stop another Exit Set already has
-    each = {r: sum(1 for st in lows if abs(st.sl_ratio - r) < 1e-9) for r in (0.2, 0.3, 0.4)}
-    snap_ok = [snap_sl_ratio(x) for x in (0.2, 0.33, 0.36, 0.44, 0.45, 0.1)] == [0.2, 0.3, 0.4, 0.4, 0.5, 0.2]
-    ok = same and stop_ok and not copies and all(each.values()) and exit_ok and bool(lows_x) and snap_ok
-    return ok, (f"shipped Sets unchanged={same}; {len(lows)} low-ratio base Sets {each}, stops = max(floor, r x TP): {stop_ok}; floored copies {len(copies)}; "
-                f"{len(lows_x)} low-ratio Exit Sets, no repeated stop added: {exit_ok}; snap {snap_ok}")
+        sl, tp = low.lane_fracs(st)
+        ok = ok and sl + 1e-12 >= (low.cost_pct + low.min_sl_distance_pct) / 100
+    return ok, f"legacy toggle leaves {len(ids)} unique set identities; canonical ratios={low.sl_ratios}"
 
 
 def trailing_families_are_their_own_sets():
@@ -275,10 +258,10 @@ def trailing_ranges_and_an_entrys_thin_trailing_range():
     left = {tp_range_of(round(st.trail_arm / TP_UNIT_PCT)) for st in cut.by_idx if st.kind == "trail"}
     ent = _book(indicationConfigs=[{"families": ["donch"], "ranges": [8], "timeframes": [1], "stepMin": 3, "stepMax": 10, "trailStepMin": 4, "trailStepMax": 6}], **kw)
     xp = [p for p in ent.packs if p.startswith("extra.")]
-    x_arms = sorted({st.trail_arm for st in ent.by_idx if st.kind == "trail" and st.pack in xp})
+    x_arms = sorted({st.trail_arm for st in ent.by_idx if st.kind == "trail" and st.pack.startswith("extra.")})
     g_arms = sorted({st.trail_arm for st in ent.by_idx if st.kind == "trail" and st.pack == "general"})
     plain = _book(indicationConfigs=[{"families": ["donch"], "ranges": [8], "timeframes": [1], "stepMin": 3, "stepMax": 10}], **kw)
-    p_arms = sorted({st.trail_arm for st in plain.by_idx if st.kind == "trail" and st.pack in xp})
+    p_arms = sorted({st.trail_arm for st in plain.by_idx if st.kind == "trail" and st.pack.startswith("extra.")})
     cats = {}
     for st in ent.by_idx:
         if st.kind == "trail":
@@ -376,13 +359,13 @@ def x01_runs_the_full_grid_the_replay_measured_best():
     ratios = {round(float(st.sl_ratio), 2) for st in base}
     locks = [st.trail_arm - st.trail_give for st in b.by_idx if st.kind == "trail"]
     ok = (any(st.kind != "trail" and st.step <= 3 for st in b.by_idx) and {"shortrange", "general", "indications"} <= {st.pack for st in b.by_idx} and "trend" not in {st.pack for st in b.by_idx}
-          and len(ratios) == 13 and locks and min(locks) < 0.1 and not any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
+          and len(ratios) == 10 and locks and min(locks) < 0.1 and not any(13 <= st.step <= 20 for st in base if st.kind != "trail") and b.trail_min_lock == 0.0)
     return ok, f"x01 {len(b.by_idx)} Sets, packs {sorted({st.pack for st in b.by_idx})}, micro Sets {any(st.kind != 'trail' and st.step <= 3 for st in b.by_idx)}, SL ratios {len(ratios)}, smallest trailing lock {min(locks):.2f}, Normal-range Sets {sum(1 for st in base if 13 <= st.step <= 20)}"
 
 
 CHECKS = [
     ("grid.tp-steps-2-32", tp_steps),
-    ("grid.sl-ratios-0.5-3.5", sl_ratios),
+    ("grid.sl-ratios-0.25-2.5", sl_ratios),
     ("grid.default-grid-follows-its-rules", default_grid_counts),
     ("grid.ids-unique-contiguous", ids_unique),
     ("grid.trail-give-le-arm-and-floor", trail_rules_default),

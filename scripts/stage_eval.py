@@ -89,7 +89,7 @@ def make_book() -> se.SetBook:
 def lane_cfg(b: se.SetBook) -> Dict[str, Any]:
     return {"entry_conf": b.entry_conf, "time_bars": b.hist_time_bars, "scratch_bars": b.scratch_bars,
             "scratch_min": b.scratch_min, "cooldown": b.cooldown_bars, "cost_pct": b.cost_pct,
-            "honor_tp": bool(getattr(b, "hist_honor_tp", True)), "sl_floor_steps": b.sl_min_steps}
+            "honor_tp": bool(getattr(b, "hist_honor_tp", True)), "min_sl_distance_pct": b.min_sl_distance_pct}
 
 
 # ---- phase 1: shadow tapes and signals, one worker per symbol ---------------------------------------------------------
@@ -811,7 +811,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
                        "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
-                       "tr": tr, "fracs": se.lane_fracs(st, book.cost_pct, book.sl_min_steps), "vol": vol_pick}
+                       "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))

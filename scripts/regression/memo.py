@@ -36,7 +36,7 @@ def _key(b: SetBook, symbol: str, now: float):
     sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, st.tp_pct, st.sl_ratio,
                   st.hold_bars, b.auto_holds(st)) for st in b.by_idx)
     return (symbol, digest, float(now), b.bar_t.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
-            b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, b.sl_min_steps,
+            b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, b.min_sl_distance_pct,
             bool(getattr(b, "hist_honor_tp", True)), sets)
 
 

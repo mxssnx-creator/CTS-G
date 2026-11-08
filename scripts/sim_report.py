@@ -2,7 +2,7 @@
 """24-hour trade simulation on stored 1m history with the engine's own Set machinery, and a detailed HTML report.
 
 What runs: the shipped x01 overlay with the Short Range pack (Low-Range signals) next to the Indications and General
-packs, all limited to TP steps 2-6 (one step = one PositionCost), SL ratios 0.5..3.5 step 0.25, trailing Sets from the
+packs, all limited to TP steps 2-6 (one step = 0.1% of price), SL ratios 0.25..2.5 step 0.25, trailing Sets from the
 engine's grid. The Base validation is the engine's own (`SetBook._score_one` / `gate_reason`): every Set keeps a shadow
 lane that is always on and forms its validation tape, and an executed lane opens positions only in the hours in which
 its Set is validated, scored from trades that closed BEFORE the hour (no look-ahead). Open positions run to their own
@@ -10,7 +10,7 @@ exit; positions still open at the window end are marked to the last close and li
 
 The headline numbers are post-Base: the PF of the executed orders (which only validated Sets can open), the share of
 Sets validated, and the order count behind them. Unfiltered PF (the shadow tapes of every Set) is shown for
-reference only: it is under 1 by design.
+reference only; it is a different cohort and may be above or below 1.
 
 usage: sim_report.py --data DIR --out report.html [--json trades.json] [--hours 24] [--symbols 20]
   DIR holds <SYMBOL>.json files of rows [t_ms, o, h, l, c, v].
@@ -29,6 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "server", "pulse"))
 import set_engine as se  # noqa: E402
 from set_engine import BAR_S, SetBook, SetLane  # noqa: E402
+from fee_policy import DEFAULT_COST_PCT
 
 PULSE = os.path.join(HERE, "..", "server", "pulse")
 BURN = 1920          # bars of shadow history before the window (the engine's default lookback)
@@ -51,11 +52,11 @@ def load_bars(data_dir: str, n_symbols: int) -> Tuple[List[str], Dict[str, List[
     return syms, bars, times
 
 
-def build_book(cost: float, sl_min_steps: int = 1, trail_min_steps: int = 2, extra: Dict[str, Any] = None) -> SetBook:
+def build_book(cost: float, min_sl_distance_pct: float = 0.1, trail_min_steps: int = 2, extra: Dict[str, Any] = None) -> SetBook:
     ov = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json")))
     ov.update({"stratShortRange": True, "stratIndications": True, "stratGeneral": True,
                "setMinStep": 2, "setStepMax": 6, "shortRangeStepMin": 2, "shortRangeStepMax": 6,
-               "setStepAdapt": False, "positionCostPct": cost, "slMinSteps": sl_min_steps,
+               "setStepAdapt": False, "positionCostPct": cost, "minSlDistancePct": min_sl_distance_pct,
                "trailMinSteps": trail_min_steps, **(extra or {})})
     b = SetBook()
     b.load(ov)
@@ -86,7 +87,7 @@ def run(a: argparse.Namespace) -> Dict[str, Any]:
         extra["setMaxDdtHours"] = a.ddt_h
     if a.consistency:
         extra["setGateConsistencyPf"] = a.consistency
-    sb = build_book(a.cost, a.sl_min_steps, a.trail_min_steps, extra)
+    sb = build_book(a.cost, a.min_sl_distance_pct, a.trail_min_steps, extra)
     sets = [st for st in sb.by_idx]
     off = int(a.offset_h * 60)       # the window ends `offset_h` hours before the end of the data
     bars = {s: bars_all[s][len(bars_all[s]) - off - L : len(bars_all[s]) - off] for s in syms}
@@ -95,7 +96,7 @@ def run(a: argparse.Namespace) -> Dict[str, Any]:
     cfg = {"entry_conf": sb.entry_conf, "time_bars": max(8, min(sb.hist_time_bars, 360)),
            "scratch_bars": max(8, int(sb.scratch_s / BAR_S)), "scratch_min": sb.scratch_min,
            "cooldown": sb.cooldown_bars, "cost_pct": sb.cost_pct, "honor_tp": bool(sb.hist_honor_tp),
-           "sl_floor_steps": sb.sl_min_steps}
+           "min_sl_distance_pct": sb.min_sl_distance_pct}
     warm = min(sb.warmup, 30)
     sig: Dict[str, Dict[str, Tuple[List[int], List[float]]]] = {}
     for s in syms:
@@ -199,7 +200,7 @@ def run(a: argparse.Namespace) -> Dict[str, Any]:
         "meta": {"symbols": syms, "hours": a.hours, "cost_pct": sb.cost_pct, "min_pf": sb.min_pf, "gate_window": sb.gate_window,
                  "gate_min": sb.gate_min, "max_ddt_h": sb.max_dd_s / 3600.0, "packs": sb.packs,
                  "window_start": tms[syms[0]][BURN], "window_end": tms[syms[0]][L - 1],
-                 "sl_floor_steps": sb.sl_min_steps, "runtime_s": round(time.time() - t_start, 1),
+                 "min_sl_distance_pct": sb.min_sl_distance_pct, "runtime_s": round(time.time() - t_start, 1),
                  "sets": len(sets)},
         "trades": trades,
         "sets": sets_info,
@@ -260,8 +261,8 @@ def main() -> int:
     ap.add_argument("--json", default="")
     ap.add_argument("--hours", type=int, default=24)
     ap.add_argument("--symbols", type=int, default=20)
-    ap.add_argument("--cost", type=float, default=0.12)
-    ap.add_argument("--sl-min-steps", type=int, default=1)
+    ap.add_argument("--cost", type=float, default=DEFAULT_COST_PCT, help="explicit modeled round-trip percent; default derives from fallback fees plus slippage")
+    ap.add_argument("--min-sl-distance-pct", type=float, default=0.1)
     ap.add_argument("--trail-min-steps", type=int, default=2)
     ap.add_argument("--offset-h", type=float, default=0.0)
     ap.add_argument("--gate-window", type=int, default=0)

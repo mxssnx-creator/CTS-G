@@ -9,6 +9,8 @@ required net % = cost% × ((ratio − 1) / 0.10)
 from __future__ import annotations
 
 import math
+import json
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from fee_policy import DEFAULT_COST_PCT
@@ -22,21 +24,23 @@ RATIO_STEP = 0.02
 LAST_N_DEFAULT = 15
 MIN_VALIDATION_N = 8         # no last-N validation reads fewer orders than this
 OVERALL_N_DEFAULT = 50       # the overall validation's last N (setGateWindow, the Base gate window)
-SL_TP_MIN = 0.3
-SL_TP_MAX = 1.5
-SL_TP_STEP = 0.3
-SL_TP_RATIOS = (0.3, 0.6, 0.9, 1.2, 1.5)
-# Set grid (base Sets): SL = TP x ratio, ratio 0.5..3.5 step 0.25 (13 values). The legacy SL_TP_* above
-# still drive the live VariantBook recalculation in risk_variants, which the pinned engine imports.
-SL_RATIO_MIN = 0.5
-SL_RATIO_MAX = 3.5
-SL_RATIO_STEP = 0.25
-SL_RATIOS = tuple(round(SL_RATIO_MIN + i * SL_RATIO_STEP, 2) for i in range(int(round((SL_RATIO_MAX - SL_RATIO_MIN) / SL_RATIO_STEP)) + 1))
-# Tight stops (owner 2026-11-03: "SL ratios from 0.2 of TP away"): 0.2 / 0.3 / 0.4 x TP, added to the grid by setSlLow. The overall minimum stop
-# (PositionCost + slMinSteps steps) still floors every stop, so a low ratio only builds a Set where its floored stop differs from every other ratio's at that step.
-SL_RATIOS_LOW = (0.2, 0.3, 0.4)
-SL_RATIO_FLOOR = SL_RATIOS_LOW[0]
-SL_RATIOS_ALL = SL_RATIOS_LOW + SL_RATIOS
+# One shipped policy is consumed by both the Python engine and settings UI.
+_PROTECTION_POLICY = json.loads(Path(__file__).with_name("protection-policy.json").read_text())
+SL_TP_RATIOS = tuple(_PROTECTION_POLICY["slTpRatios"])
+SL_TP_MIN, SL_TP_MAX = SL_TP_RATIOS[0], SL_TP_RATIOS[-1]
+SL_TP_STEP = SL_TP_RATIOS[1] - SL_TP_RATIOS[0]
+SL_RATIO_MIN, SL_RATIO_MAX, SL_RATIO_STEP = SL_TP_MIN, SL_TP_MAX, SL_TP_STEP
+SL_RATIOS = SL_TP_RATIOS
+SL_RATIOS_LOW = ()  # legacy setSlLow adds no duplicate grid
+SL_RATIO_FLOOR = SL_RATIO_MIN
+SL_RATIOS_ALL = SL_RATIOS
+MIN_SL_DISTANCE_PCT_DEFAULT = _PROTECTION_POLICY["minSlDistancePct"]["default"]
+
+
+def normalize_min_sl_distance_pct(value: Any = None) -> float:
+    bounds = _PROTECTION_POLICY["minSlDistancePct"]
+    return max(bounds["min"], min(bounds["max"], finite(value, bounds["default"])))
+
 # TP grid (base Sets), owner 2026-11-02: the step is an ABSOLUTE distance, TP = k x TP_UNIT_PCT of price with k = 2..32, i.e. 0.2 % .. 3.2 % in 0.1 %
 # steps. It was k x PositionCost (a distance that moves with the venue's fees); PositionCost still pays for every order and floors the TP (TP_MIN_COSTS).
 TP_UNIT_PCT = 0.1
@@ -79,7 +83,7 @@ TRAIL_STEP_MAX = 22
 TRAIL_STEP_CEIL = 30            # trailStepMax may raise the largest arm to 3.0 % (the trailing distance limit); more trailing arms (owner 2026-11-03)
 # Trailing stop families (owner 2026-11-03: "more Trailing additionally"): besides the shipped trailing Sets (initial stop TRAIL_SL_RATIO x the mid-step
 # TP), each ratio r in trailSlRatios builds the same arm / give pairs again with the initial stop at r x the arm, as their own Sets (id suffix ":ts<r>").
-TRAIL_SL_RATIOS = (0.5, 1.0, 1.5, 2.0, 3.0)
+TRAIL_SL_RATIOS = SL_TP_RATIOS
 # Overall minimum distances, in PositionCost units, counted as "PositionCost + n steps" (one step = one PositionCost):
 # a stop is never tighter than PositionCost + SL_MIN_STEPS steps, and a trailing stop never trails closer than
 # PositionCost + TRAIL_MIN_STEPS steps. Defaults: 1 and 2, i.e. 2 x and 3 x PositionCost.
@@ -97,10 +101,12 @@ def configure_min_steps(sl: Any = None, trail: Any = None) -> Dict[str, int]:
     return dict(_MIN_STEPS)
 
 
-def sl_floor_frac(cost_pct: float, steps: Optional[int] = None) -> float:
-    """The smallest stop distance as a fraction of price: (1 + steps) x PositionCost."""
-    n = _MIN_STEPS["sl"] if steps is None else int(steps)
-    return (1 + n) * max(0.0, float(cost_pct)) / 100.0
+def sl_floor_frac(cost_pct: float, steps: Optional[int] = None, *, min_distance_pct: Any = None) -> float:
+    """Initial SL floor: modeled cost + configured net price percent. Legacy steps are ignored.
+
+    Explicit per-book input avoids one instance's settings changing another instance's stops.
+    """
+    return (max(0.0, float(cost_pct)) + normalize_min_sl_distance_pct(min_distance_pct)) / 100.0
 
 
 def trail_floor_steps(steps: Optional[int] = None) -> int:
@@ -117,28 +123,19 @@ def finite(v: Any, fallback: float = 0.0) -> float:
 
 
 def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: float = SL_TP_STEP) -> float:
-    x = finite(value, 0.6)
+    x = finite(value, 0.5)
     if x <= 0:
-        x = 0.6
+        x = 0.5
     x = max(lo, min(hi, x))
     n = int((x - lo) / step + 0.5 + 1e-12)
     nmax = int((hi - lo) / step + 0.5)
     n = max(0, min(nmax, n))
-    return round(lo + n * step, 1)
+    return round(lo + n * step, 2)
 
 
 def snap_sl_ratio(value: Any) -> float:
-    """Snap an SL-to-TP ratio onto the Set grid: 0.2 / 0.3 / 0.4 (SL_RATIOS_LOW) below 0.45, else SL_RATIOS (0.5..3.5 step 0.25)."""
-    x = finite(value, 0.6)
-    if x <= 0:
-        x = 0.6
-    if x < 0.45:
-        return min(SL_RATIOS_LOW, key=lambda r: (abs(r - max(SL_RATIO_FLOOR, x)), r))
-    x = max(SL_RATIO_MIN, min(SL_RATIO_MAX, x))
-    n = int((x - SL_RATIO_MIN) / SL_RATIO_STEP + 0.5 + 1e-12)
-    nmax = int(round((SL_RATIO_MAX - SL_RATIO_MIN) / SL_RATIO_STEP))
-    n = max(0, min(nmax, n))
-    return round(SL_RATIO_MIN + n * SL_RATIO_STEP, 2)
+    """Snap every strategy to the same 0.25..2.5 by 0.25 grid."""
+    return snap_ratio(value)
 
 
 GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
@@ -306,9 +303,10 @@ def resolve_sl_tp(
     ind_tp: float = 0.0,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
     tp_cost_ratio: float = 5.0,
-    sl_to_tp: float = 0.6,
+    sl_to_tp: float = 0.5,
     rr: float = 1.8,
     bind_sl_to_tp: bool = True,
+    min_sl_distance_pct: float = MIN_SL_DISTANCE_PCT_DEFAULT,
 ) -> tuple[float, float, str]:
     """Return SL/TP as fractions. TP is primary; SL = TP × snapped ratio."""
     ratio = snap_ratio(sl_to_tp)
@@ -322,10 +320,10 @@ def resolve_sl_tp(
     else:
         tp = clamp_pct(cost_tp, tp_min, tp_max)
         src = "cost"
-    floor = sl_floor_frac(cost_pct)
+    floor = sl_floor_frac(cost_pct, min_distance_pct=min_sl_distance_pct)
     if bind_sl_to_tp:
         sl = max(floor, clamp_pct(tp * ratio, sl_min, sl_max))   # never under PositionCost + SL_MIN_STEPS steps
-        src = f"{src}:r{ratio:.1f}"
+        src = f"{src}:r{ratio:.2f}"
         return sl, tp, src
     cost_sl = max(sl_min, cost_tp * ratio)
     sl, chosen_tp = cost_sl, cost_tp
@@ -338,8 +336,6 @@ def resolve_sl_tp(
         chosen_tp = clamp_pct(base_tp if base_tp > 0 else cost_tp, tp_min, tp_max)
         src = "overlay"
     sl = max(floor, sl)
-    if chosen_tp < sl * 1.05:
-        chosen_tp = clamp_pct(sl * rr, tp_min, tp_max)
     return sl, chosen_tp, src
 
 
@@ -360,15 +356,15 @@ if __name__ == "__main__":
         sl_min=0.002, sl_max=0.012, tp_min=0.0035, tp_max=0.024,
         cost_pct=0.15, tp_cost_ratio=5, sl_to_tp=0.64,
     )
-    assert src.endswith("r0.6") and abs(tp - 0.0075) < 1e-9
-    assert abs(sl - 0.0075 * 0.6) < 1e-9, (sl, tp, src)
+    assert src.endswith("r0.75") and abs(tp - 0.0075) < 1e-9
+    assert abs(sl - 0.0075 * 0.75) < 1e-9, (sl, tp, src)
     sl15, tp15, src15 = resolve_sl_tp(
         base_sl=0.0048, base_tp=0.0075,
         sl_min=0.002, sl_max=0.02, tp_min=0.0035, tp_max=0.024,
         sl_to_tp=1.5,
     )
     assert abs(sl15 - 0.0075 * 1.5) < 1e-9 and sl15 > tp15
-    assert abs(snap_ratio(0.64) - 0.6) < 1e-9
+    assert abs(snap_ratio(0.64) - 0.75) < 1e-9
     print("position_cost ok", got, src, src15)
 
 

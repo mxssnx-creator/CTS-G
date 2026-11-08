@@ -9,7 +9,7 @@ import indication_config as ic
 import indication_extra as ie
 import set_engine as se
 
-SNAP = lambda x: min(3.5, max(0.5, round(x * 4) / 4))      # noqa: E731  (the 0.25 grid of SL ratios, 0.5-3.5)
+SNAP = lambda x: min(2.5, max(0.25, round(x * 4) / 4))      # noqa: E731  (the 0.25 grid of SL ratios, 0.25-2.5)
 RATIOS = [0.5, 1.0, 1.5]
 
 
@@ -27,8 +27,8 @@ def expansion_is_the_cross_product_of_known_names():
                     name = fam + suf + rel
                     if ie.known(name):
                         want.add(name)
-    got = set(out["names"])
-    rng = out["ranges"][sorted(got)[0]]
+    got = {ic.source_name(n) for n in out["names"]}
+    rng = out["ranges"][out["names"][0]]
     ok = got == want and len(got) >= 12 and rng["lo"] == 3 and rng["hi"] == 9 and not [d for d in out["dropped"] if d["reason"] == "over the bound"]
     return ok, f"{len(got)} names == plain cross product ({len(want)}); step range {rng['lo']}-{rng['hi']}; dropped={len(out['dropped'])}"
 
@@ -38,7 +38,7 @@ def unknown_and_over_bound_combinations_are_dropped_and_listed():
     reasons = {(d["name"], d["reason"]) for d in out["dropped"]}
     wide = _expand([{"families": ["donch", "kelt", "brk", "atrx", "adx", "roc"], "ranges": [5, 8, 14, 21], "timeframes": [1, 5, 15, 30], "relations": ["", "T5", "B15"]}])
     cap_ok = len(wide["names"]) <= ic.MAX_NAMES_PER_ENTRY and any(d["reason"] == "over the bound" for d in wide["dropped"])
-    ok = out["names"] == ["donch_n8_t5"] and ("nosuchfamily_n8_t5", "unknown to the library") in reasons and ("donch_n8_t5@zz9", "unknown to the library") in reasons and cap_ok
+    ok = [ic.source_name(n) for n in out["names"]] == ["donch_n8_t5"] and ("nosuchfamily_n8_t5", "unknown to the library") in reasons and ("donch_n8_t5@zz9", "unknown to the library") in reasons and cap_ok
     return ok, f"kept={out['names']} dropped={len(out['dropped'])}; wide entry capped at {len(wide['names'])} (<= {ic.MAX_NAMES_PER_ENTRY}) with {len(wide['dropped'])} dropped"
 
 
@@ -49,9 +49,12 @@ def settings_are_normalised_and_pause_semantics_hold():
         {"names": ["g_volume_min"], "pause": "auto", "enabled": True},
         {"names": ["g_all_min"], "enabled": False},
     ])
+    out["ranges"] = {ic.source_name(n): v for n, v in out["ranges"].items()}
+    out["pause"] = {ic.source_name(n): v for n, v in out["pause"].items()}
+    out["names"] = [ic.source_name(n) for n in out["names"]]
     a, b_, c = (out["ranges"][n] for n in ("g_trend_min", "g_revert_min", "g_volume_min"))
     ok = (out["names"] == ["g_revert_min", "g_trend_min", "g_volume_min"]
-          and (a["lo"], a["hi"]) == (30, 30) and a["kinds"] == ["exit"] and a["ratios"] == [0.5, 3.5]
+          and (a["lo"], a["hi"]) == (30, 30) and a["kinds"] == ["exit"] and a["ratios"] == [0.5, 2.5]
           and out["pause"] == {"g_trend_min": 0, "g_revert_min": 25} and "g_volume_min" not in out["pause"]
           and b_["kinds"] == list(ic.KINDS) and c["lo"] == 2 and c["ratios"] == RATIOS)
     return ok, f"steps clamped {a['lo']}-{a['hi']}, ratios {a['ratios']}, types {a['kinds']}, pause map {out['pause']} (auto absent, disabled entry skipped)"
@@ -62,16 +65,16 @@ def sets_follow_the_configured_ranges():
     b.load(overlay(stratIndications=False, stratGeneral=False, stratShortRange=False, indicationConfigs=[
         {"families": ["donch"], "ranges": [8], "timeframes": [5], "stepMin": 3, "stepMax": 6, "slRatios": [1.0, 2.0], "types": ["base", "exit", "trail"], "pause": 20},
         {"names": ["g_trend_min"], "stepMin": 4, "stepMax": 4, "slRatios": [1.5], "types": ["exit"], "pause": 0}]))
-    donch = [s for s in b.by_idx if s.pack == "extra.donch_n8_t5"]
-    trend = [s for s in b.by_idx if s.pack == "extra.g_trend_min"]
+    donch = [s for s in b.by_idx if ic.source_name(s.pack) == "extra.donch_n8_t5"]
+    trend = [s for s in b.by_idx if ic.source_name(s.pack) == "extra.g_trend_min"]
     base = [s for s in donch if s.kind == "base"]
     trail = [s for s in donch if s.kind == "trail"]
     arm_cap = 6 * b.cost_pct + 1e-9
-    ok = (b.packs == ["extra.donch_n8_t5", "extra.g_trend_min"]
+    ok = ([ic.source_name(p) for p in b.packs] == ["extra.donch_n8_t5", "extra.g_trend_min"]
           and len(base) == 2 * 4 and {s.step for s in base} == {3, 4, 5, 6} and {s.sl_ratio for s in base} == {1.0, 2.0}
           and trail and all(s.trail_arm <= arm_cap for s in trail)
           and len(trend) == 1 and trend[0].kind == "exit" and trend[0].step == 4
-          and b.pause_minutes("extra.donch_n8_t5", "A") == 20 and not b.pause_active("extra.g_trend_min") and b.pause_active("extra.donch_n8_t5"))
+          and b.pause_minutes(donch[0].pack, "A") == 20 and not b.pause_active(trend[0].pack) and b.pause_active(donch[0].pack))
     return ok, f"donch base={len(base)} exit={sum(1 for s in donch if s.kind == 'exit')} trail={len(trail)} (arms <= largest step); trend sets={len(trend)}; pause donch 20, trend none"
 
 

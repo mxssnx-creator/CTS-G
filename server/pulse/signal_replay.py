@@ -16,6 +16,7 @@ import json
 import math
 
 from signal_sources import SOURCES, RANGES, TIMEFRAMES, onsets, validate_bars, completed_bars, warmup_bars
+from position_cost import sl_floor_frac
 
 MINUTE = 60000
 HOUR = 3600000
@@ -44,9 +45,13 @@ def validate_config(raw):
     """Strict research schema: misspelled/unsupported controls cannot silently do nothing."""
     required = {"schema", "sources", "ranges", "timeframes", "protections", "lastNLanes", "minPf", "historyMinutes",
                 "maxContextDrawdown", "normalEnabled", "trailingEnabled", "fees", "risk", "mode"}
-    if set(raw) != required or raw["schema"] != "cts-g-signals-replay-v1" or raw["mode"] != "offline-only":
+    if set(raw) - {"minSlDistancePct"} != required or raw["schema"] != "cts-g-signals-replay-v1" or raw["mode"] != "offline-only":
         raise ValueError("unsupported Signals research schema/keys/mode")
     cfg = json.loads(canonical(raw))
+    minimum = cfg.get("minSlDistancePct", .1)
+    if type(minimum) not in (int, float) or not math.isfinite(minimum) or not .1 <= minimum <= 1:
+        raise ValueError("minSlDistancePct must be 0.1–1.0 percent of price")
+    cfg["minSlDistancePct"] = minimum
     for key, supported in (("sources", SOURCES), ("ranges", RANGES), ("timeframes", TIMEFRAMES)):
         if not cfg[key] or len(set(cfg[key])) != len(cfg[key]) or any(x not in supported for x in cfg[key]):
             raise ValueError(f"unsupported or repeated {key}")
@@ -93,8 +98,9 @@ def validate_config(raw):
         ids.add(p["id"])
         if any(type(p[k]) not in (int, float) or not math.isfinite(p[k]) or not 0 <= p[k] < 1 for k in ("tp", "sl", "trailArm", "trailGap")):
             raise ValueError("invalid protection fraction")
-        if p["sl"] <= floor or type(p["holdMinutes"]) is not int or not 1 <= p["holdMinutes"] <= 4320:
-            raise ValueError("stop must exceed modeled costs and hold must be bounded")
+        if p["sl"] <= 0 or type(p["holdMinutes"]) is not int or not 1 <= p["holdMinutes"] <= 4320:
+            raise ValueError("stop must be positive and hold must be bounded")
+        p["sl"] = max(p["sl"], sl_floor_frac(floor * 100, min_distance_pct=minimum))
         if p["kind"] == "normal" and (p["tp"] <= floor or p["trailArm"] or p["trailGap"]):
             raise ValueError("normal requires TP and no trailing")
         if p["kind"] != "normal" and not floor < p["trailGap"] <= p["trailArm"]:

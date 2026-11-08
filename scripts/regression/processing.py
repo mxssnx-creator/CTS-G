@@ -37,7 +37,7 @@ def every_set_processed_full_grid():
     b.replay_all(now=T0)
     p = b.progress
     unscored = [st.id for st in b.by_idx if st.last_error or st.gate_n < 0]
-    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1700 and not unscored and p.errors == 0
+    ok = p.phase == "ready" and p.ready and p.sets_done == len(b.by_idx) == 1406 and not unscored and p.errors == 0
     return ok, f"phase={p.phase} sets={len(b.by_idx)} sets_done={p.sets_done} unscored={len(unscored)} errors={p.errors}"
 
 
@@ -1565,7 +1565,7 @@ def sets_with_few_orders_are_judged_when_the_minimum_is_off():
     pass; the same book under a minimum of 25 holds none of them and marks the short Sets "n<min". Every Set valid under 25 stays valid
     with the minimum off, and "n<min" is left only to Sets with no closed order."""
     def run(**ov):
-        bk = _book(n_syms=2, bars=500, mainGateEnabled=False, stagesEnabled=False, setGateShortN=0, setMinPf=1.0,
+        bk = _book(n_syms=2, bars=180, mainGateEnabled=False, stagesEnabled=False, setGateShortN=0, setMinPf=1.0,
                    setMaxDdtHours=36, histLookbackAuto=False, **ov)  # isolate the admission minimum from an active history rebuild
         bk.replay_all(now=T0)
         valid = {st.id for st in bk.by_idx if not bk.gate_reason(st)}

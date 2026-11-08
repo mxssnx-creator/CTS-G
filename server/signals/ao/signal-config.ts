@@ -1,3 +1,5 @@
+import { RT_COST } from "./model-cost.ts";
+import { SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, minimumStopFraction } from "./protection-policy.ts";
 // Signals processing settings and sources (pure, no engine imports: shared by the engine, config and the UI).
 // The engine side (combos, configs, active ranking, guard) is in signals.ts.
 import { INDICATION_KINDS, type IndicationKind } from "./domain/types.ts";
@@ -730,12 +732,12 @@ export const DEFAULT_SIGNALS: SignalSettings = {
   // All four independent Expanded lanes retain minute-based pricing and causal entry/exit calculations.
   lanes: [1, 5, 15, 30],
   // 7 targets × 6 stop ratios = 42 Normal configs; include 1 % / 1.5 % targets and tighter risk ratios.
-  normal: { tp: [0.01, 0.015, 0.025, 0.03, 0.04, 0.05, 0.06], slOfTp: [0.5, 0.75, 1, 1.5, 2, 3] },
+  normal: { tp: [0.01, 0.015, 0.025, 0.03, 0.04, 0.05, 0.06], slOfTp: [...SL_TP_RATIOS] },
   // 7 targets × 5 trail widths = 35 capped Trailing configs, stops at 3 × target.
   trailing: {
     tp: [0.01, 0.015, 0.03, 0.04, 0.05, 0.06, 0.08],
     trailOfTp: [0.2, 0.3, 0.4, 0.6, 0.8],
-    slOfTp: 3,
+    slOfTp: 1,
   },
   trailingOnly: {
     enabled: true,
@@ -789,7 +791,7 @@ export const DEFAULT_SIGNALS: SignalSettings = {
   minBlockShare: 0.6,
   validate: true,
   validateH: 24,
-  minSl: 0.005,
+  minSl: minimumStopFraction(RT_COST),
   minTrail: 0.002,
   // off: pausing a source after its executed orders lost cost net at every tested setting (continuous 8 days,
   // 43 sources: no gate PF 1.53 net 3470 · best gate 2 d / 67 % PF 1.50 net 2671; docs/signals-validation.md)
@@ -958,7 +960,7 @@ export function signalSettings(s?: Partial<SignalSettings> | null): SignalSettin
   hs.enabled = hs.enabled !== false;
   hs.quantiles = nums(hs.quantiles, 0.2, 0.95, DEFAULT_SIGNALS.hist.quantiles);
   hs.trailOfTp = nums(hs.trailOfTp, 0.1, 0.95, DEFAULT_SIGNALS.hist.trailOfTp);
-  hs.slOfTp = nums(hs.slOfTp, 0.25, 5, DEFAULT_SIGNALS.hist.slOfTp);
+  hs.slOfTp = nums(hs.slOfTp, SL_TP_MIN, SL_TP_MAX, DEFAULT_SIGNALS.hist.slOfTp);
   hs.minN = Math.min(1000, Math.max(5, Math.round(Number(hs.minN) || DEFAULT_SIGNALS.hist.minN)));
   // the lookback in hours (0 = the whole history), never negative, at most 30 days
   const lb = Number(hs.lookbackH);

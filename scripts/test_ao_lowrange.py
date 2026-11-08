@@ -35,7 +35,7 @@ class AOPortTest(unittest.TestCase):
         ids = [st.id for st in b.by_idx]
         self.assertEqual(len(ids), len(set(ids)))
         for name in names:
-            states = [st for st in b.by_idx if st.pack == "extra." + name]
+            states = [st for st in b.by_idx if st.pack.split("~cfg", 1)[0] == "extra." + name]
             self.assertTrue(states)
             self.assertEqual({st.kind for st in states}, {"base", "exit", "trail"})
             self.assertEqual({st.side for st in states}, {-1, 1})

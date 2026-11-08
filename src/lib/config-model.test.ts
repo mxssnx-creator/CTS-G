@@ -6,6 +6,12 @@ import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
 
+test("SL grids normalize legacy ratios once and empty grids retain the ten defaults", () => {
+  const all = Array.from({length:10},(_,i)=>(i+1)/4);
+  for (const v of [undefined, [], [NaN, Infinity, "wrong"]]) assert.deepEqual(overlayFromCts(cts({setSlRatios:v})).setSlRatios, all);
+  assert.deepEqual(overlayFromCts(cts({setSlRatios:[.1,.3,.6,1,3,5,1]})).setSlRatios,[.25,.5,1,2.5]);
+});
+
 test("Normal admission is independent and a raw trailing module disable survives a settings save", () => {
   const loaded = overlayFromCts(cts(), { stratNormal: false, stratTrailing: true,
     modules: { "strategy.trailing": false } });

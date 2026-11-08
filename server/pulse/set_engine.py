@@ -58,6 +58,8 @@ from position_cost import (
     TRAIL_STEP_SETTING_MAX,
     TRAIL_STEP_SETTING_MIN,
     SL_MIN_STEPS_DEFAULT,
+    MIN_SL_DISTANCE_PCT_DEFAULT,
+    normalize_min_sl_distance_pct,
     TRAIL_MIN_STEPS_DEFAULT,
     configure_min_steps,
     cost_as_frac,
@@ -82,7 +84,7 @@ from indication_engine import (
 )
 from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
 from risk_variants import parse_trail, trail_grid
-from indication_config import expand as expand_indication_configs
+from indication_config import source_name, expand as expand_indication_configs
 
 PACKS = ("indications", "general")
 EXTRA_INDICATOR_PREFIX = "extra."
@@ -1015,7 +1017,7 @@ def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
         if pk in packs:
             names += list(ind_settings.get(vkey) or default)
     w = IND_WINDOW_BARS if "indications" in packs else GENERAL_WINDOW_BARS
-    return max([w, EXTRA_WINDOW if names else 0] + [window_of(str(n)) for n in names])
+    return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names])
 
 
 def bar_signal(
@@ -1044,7 +1046,7 @@ def bar_signal(
             row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
     for pk in packs:
         if pk.startswith(EXTRA_INDICATOR_PREFIX):
-            row[pk] = _variant_signal(hist, [pk[len(EXTRA_INDICATOR_PREFIX):]])
+            row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
     return row
 
 
@@ -1435,11 +1437,11 @@ def lane_honors_tp(kind: str) -> Optional[bool]:
     return None
 
 
-def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None) -> Tuple[float, float]:
+def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None, *, min_sl_distance_pct: float = MIN_SL_DISTANCE_PCT_DEFAULT) -> Tuple[float, float]:
     """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
     ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under TP_MIN_COSTS x PositionCost.
     The live trader takes a Set position's levels from here, so live and replay share one formula."""
-    return max(sl_floor_frac(cost_pct, floor_steps), set_stop_base(st)), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
+    return max(sl_floor_frac(cost_pct, min_distance_pct=min_sl_distance_pct), set_stop_base(st)), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
 
 
 def set_stop_base(st: "SetState") -> float:
@@ -1619,7 +1621,7 @@ class SetLane:
             return None
         close = float(bar[3])
         cost_frac = cost_as_frac(cfg["cost_pct"])
-        sl_frac = max(sl_floor_frac(cfg["cost_pct"], cfg.get("sl_floor_steps")), self.sl_base)   # never under PositionCost + steps
+        sl_frac = max(sl_floor_frac(cfg["cost_pct"], min_distance_pct=cfg.get("min_sl_distance_pct")), self.sl_base)   # never under PositionCost + steps
         tp_frac = max(TP_MIN_COSTS * cost_frac, self.tp_frac)       # a TP never under TP_MIN_COSTS x PositionCost
         if d > 0:
             sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
@@ -1660,7 +1662,7 @@ class SetLane:
         pause_fixed = self.pause
         cost_pct = cfg["cost_pct"]
         cost_frac = cost_as_frac(cost_pct)
-        sl_floor = sl_floor_frac(cost_pct, cfg.get("sl_floor_steps"))
+        sl_floor = sl_floor_frac(cost_pct, min_distance_pct=cfg.get("min_sl_distance_pct"))
         honor_tp = bool(cfg["honor_tp"] if self.honor is None else self.honor)
         use_trail = self.use_trail
         arm = self.arm
@@ -2021,7 +2023,8 @@ class SetBook:
         self.step_adapt = False
         self.sl_max_by_range: Dict[str, float] = dict(SL_MAX_BY_RANGE_DEFAULT)
         self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
-        self.sl_min_steps = SL_MIN_STEPS_DEFAULT
+        self.sl_min_steps = SL_MIN_STEPS_DEFAULT  # serialized legacy alias, not an active stop floor
+        self.min_sl_distance_pct = MIN_SL_DISTANCE_PCT_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
@@ -2074,7 +2077,7 @@ class SetBook:
             self._load(ov, cts)
             signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
                               self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
-                              self.sl_min_steps, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
+                              self.min_sl_distance_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
@@ -2299,13 +2302,9 @@ class SetBook:
         lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
         hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
         self.short_steps = list(range(lo, hi + 1))
-        # overall minimum stop and trailing distance, "PositionCost + n steps" (one step = one PositionCost)
-        sl_ms = ov.get("slMinSteps")
-        tr_ms = ov.get("trailMinSteps")
-        mins = configure_min_steps(SL_MIN_STEPS_DEFAULT if sl_ms is None else sl_ms,
-                                   TRAIL_MIN_STEPS_DEFAULT if tr_ms is None else tr_ms)
-        self.sl_min_steps = mins["sl"]
-        self.trail_min_steps = mins["trail"]
+        self.min_sl_distance_pct = normalize_min_sl_distance_pct(ov.get("minSlDistancePct"))
+        # Per-book trailing floor. Do not mutate process-wide defaults during configuration.
+        self.trail_min_steps = int(max(1, min(7, round(finite(ov.get("trailMinSteps"), TRAIL_MIN_STEPS_DEFAULT)))))
         # Set grid: every SL ratio in setSlRatios (default 0.5..3.5 step 0.25) x every TP step x every pack.
         raw_ratios = ov.get("setSlRatios") or list(SL_RATIOS)
         ratios: List[float] = []
@@ -2501,7 +2500,7 @@ class SetBook:
         .. TP_STEP_MAX (5.0 %) when Wide is on."""
         lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
         on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
-        top = STEP_MAX if on.get("wide") else self.step_max
+        top = min(self.step_max, STEP_MAX if on.get("wide") else TP_STEP_DEFAULT_MAX)
         return lo, clamp_step(top, lo, STEP_MAX)
 
     def _step_grid(self) -> List[int]:
@@ -2570,10 +2569,10 @@ class SetBook:
             # the shipped trailing Sets' stop: TRAIL_SL_RATIO x the mid-step TP of the pack's own grid (the general packs: of the shipped grid, so a TP range
             # switch never moves it)
             mid_step = (pack_steps[len(pack_steps) // 2] if pack_steps else 8) if (pack == SHORT_PACK or pr) else self._trail_mid_step()
-            trail_stop = max(sl_floor_frac(self.cost_pct, self.sl_min_steps),
+            trail_stop = max(sl_floor_frac(self.cost_pct, min_distance_pct=self.min_sl_distance_pct),
                              step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
             legacy_trails = pack_trails if trail_stop <= TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12 else []
-            floor_sl = sl_floor_frac(self.cost_pct, self.sl_min_steps)
+            floor_sl = sl_floor_frac(self.cost_pct, min_distance_pct=self.min_sl_distance_pct)
 
             def eff_stop(r: float, k: int) -> float:
                 return round(max(floor_sl, step_tp_pct(k, self.cost_pct) * r), 12)
@@ -3313,7 +3312,7 @@ class SetBook:
             "cooldown": self.cooldown_bars,
             "cost_pct": self.cost_pct,
             "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
-            "sl_floor_steps": self.sl_min_steps,
+            "min_sl_distance_pct": self.min_sl_distance_pct,
         }
         # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
         dirs: Dict[str, List[int]] = {}
@@ -4065,7 +4064,7 @@ class SetBook:
                 b["bestPf"] = st.gate_pf
                 b["bestIdx"] = st.idx
         for st in base_sets:
-            skey = f"{st.sl_ratio:.1f}"
+            skey = f"{st.sl_ratio:.2f}"
             s = by_sl.setdefault(skey, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
             s["n"] += 1
             s["active"] += int(st.active)
@@ -4088,7 +4087,9 @@ class SetBook:
                           "short": sum(1 for st in self.by_idx if st.side < 0), "both": sum(1 for st in self.by_idx if st.side == 0)},
             "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
                            "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
-            "minSteps": {"sl": self.sl_min_steps, "trail": self.trail_min_steps},
+            "minSlDistancePct": self.min_sl_distance_pct,
+            "effectiveMinSlPct": self.cost_pct + self.min_sl_distance_pct,
+            "minSteps": {"trail": self.trail_min_steps},
             "trailMinLockPct": self.trail_min_lock,
             "groupGate": {"on": self.group_gate, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
             "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
@@ -4242,7 +4243,7 @@ class SetBook:
 
     def lane_fracs(self, st: SetState) -> Tuple[float, float]:
         """(sl_frac, tp_frac) of a Set's lane with this book's PositionCost and minimum stop steps (the replay's cfg)."""
-        return lane_fracs(st, self.cost_pct, self.sl_min_steps)
+        return lane_fracs(st, self.cost_pct, min_sl_distance_pct=self.min_sl_distance_pct)
 
     def stop_cap_exceeded(self, st: SetState) -> bool:
         """Limit modeled initial stop distance plus cost; zero disables this entry filter."""
