@@ -2,6 +2,8 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-08, latest requested x01 values:** the owner requested `symbolCap` 120 and `volumeFactor` 1, superseding the earlier request for 100 symbols and the minimum volume factor. This records the requested preference for later sessions; it is not evidence that an active instance has those settings.
+
 - **2026-11-06, owner: "Make only profitable ones run, but also Signals" / "Ensure correctness and correct PF eval".** Measured on C / B / A (3-day windows, executed positions, `trade_sim.py`, 20 symbols; PF / orders / net %).
   (a) **PF evaluation corrected.** A close the venue made while the engine was down (its Set's own stop, trailing and time exit did not run) was scored as a Set-lane result: x01's three outages booked 49 such closes
   (43 targets), which lifted the executed PF to 0.87 per close / 1.12 in USDT and the negative lane to 1.53; engine-managed closes read **0.71 / 0.91 overall, positive lane 0.54, negative lane 1.22 (174 closes)**. Such closes are now recorded
