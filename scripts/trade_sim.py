@@ -137,9 +137,7 @@ def main() -> int:
     if not names:
         print("No market data found")
         return 2
-    overlay = json.load(open(sg.OVERLAY, encoding="utf-8"))
-    if a.patch:
-        overlay.update(json.loads(a.patch))
+    overlay = sg.replay_overlay()
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
     if loaded_names != names or replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
@@ -161,7 +159,7 @@ def main() -> int:
     future_tapes = FutureEntryTapes(names, times, shadow, cf)
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
-    hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
+    hours = [float(h) for h in range(((int(start) + 3599) // 3600) * 3600, int(end), 3600)]
     if not hours:
         raise ValueError("No complete report hour remains after prehistory")
     split = hours[len(hours) * 2 // 3]

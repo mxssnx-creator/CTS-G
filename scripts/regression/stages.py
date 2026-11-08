@@ -772,7 +772,26 @@ def last_n_windows_are_independent_per_tp_range():
     return ok, f"override Set scored on {scored['override'][:2]} (plain reading gains {gp} losses {gl}), plain book {scored['plain'][:2]}; minimal windows {wm}; micro {wmicro}; parsed {parsed}"
 
 
+def effective_window_statistics_follow_range_settings():
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "setStepMax": 6}, lastNByRange={"minimal": {"baseLong": 12, "baseShort": 3,
+        "mainLong": 10, "mainShort": [2, 3], "realN": 2, "realNegN": 3}}))
+    got = b._pf_split()["windows"]
+    expected = {}
+    for key, field in (("baseLong", "base_long"), ("baseShort", "base_short"), ("mainLong", "main_n"),
+                       ("real", "real_n"), ("realNeg", "real_neg_n")):
+        counts = {}
+        for st in b.by_idx:
+            val = str(getattr(b.win(st), field))
+            counts[val] = counts.get(val, 0) + 1
+        expected[key] = counts
+    ok = all(got[key]["configuredSets"] == counts for key, counts in expected.items())
+    ok = ok and got["real"]["configuredSets"] != got["realNeg"]["configuredSets"]
+    return ok, str(expected)
+
+
 CHECKS = [
+    ("stages.effective-window-statistics-follow-range-settings", effective_window_statistics_follow_range_settings),
     ("stages.last-n-windows-are-independent-per-tp-range", last_n_windows_are_independent_per_tp_range),
     ("stages.independent-all-range-oracle", independent_all_range_stage_oracle),
     ("stages.independent-strategy-switches", independent_strategy_switches),

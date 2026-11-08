@@ -55,7 +55,7 @@
   "posCountsVolumeRatio": 0.05,
   "rearrange": true,
   "rearrangeGap": 0.22,
-  "positionCostPct": 0.12,
+  "positionCostPct": 0.176,
   "pfWindow": 8,
   "setPfWindow": 8,
   "exitPfWindow": 8,
@@ -268,7 +268,7 @@
   "minPfMinimalN": 10,
   "minPfShortN": 20,
   "minPfMediumN": 35,
-  "slippageAllowancePct": 0.02,
+  "slippageAllowancePct": 0.016,
   "blockRiskPctOfBalance": 0,
   "volumeByPackKind": {
     "general:exit": 1.5
@@ -310,5 +310,8 @@
   "stratBreakout": true,
   "manualCloseRestMin": 240,
   "minPfStepAutoHigh": 1.15,
-  "trailMinLockPct": 0
+  "trailMinLockPct": 0,
+  "makerFeeRate": 0.0005,
+  "takerFeeRate": 0.0008,
+  "slippageFeeRatio": 0.1
 }

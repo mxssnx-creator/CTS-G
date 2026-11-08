@@ -5,6 +5,7 @@ Paper uses a round-trip allowance. Actual fill prices already contain slippage:
 only fees are deducted from their price return, never the allowance again.
 """
 import math
+from fee_policy import cost_policy, paper_cost_pct
 
 
 def number(value):
@@ -57,18 +58,19 @@ class FeeSchedule:
 
     def rates(self, symbol, contract=None, now=None):
         row = self.account.get(symbol)
-        if row and (now is None or now - row["t"] <= 7200):
+        if row and (now is None or 0 <= now - row["t"] <= 7200):
             return row["maker"], row["taker"], "account-rate"
         maker = fee_rate(getattr(contract, "maker_fee", None))
         taker = fee_rate(getattr(contract, "taker_fee", None))
         return maker, taker, "contract-rate" if taker is not None else "configured-estimate"
 
-    def paper_budget(self, fallback_pct, slippage_pct, contracts, now):
-        # One shared cost for the Set grid: conservative for every active symbol.
-        # The configured cost remains the floor, never an additional deduction.
+    def paper_budget(self, policy, contracts, now):
+        # One shared Set grid: include unknown selected symbols at the fallback
+        # rate. A known cheap symbol must not mask an unmeasured expensive one.
         rates = [self.rates(s, c, now)[1] for s, c in contracts.items()]
-        known = [r for r in rates if r is not None]
-        return max(fallback_pct, 200 * max(known) + slippage_pct) if known else fallback_pct
+        effective = [policy["takerFeeRate"] if r is None else r for r in rates]
+        rate = max(effective) if effective else policy["takerFeeRate"]
+        return paper_cost_pct(policy, rate, rate)
 
     def snapshot(self, now, contracts, budget_pct, slippage_pct):
         return {"paperCostPct": budget_pct, "slippageAllowancePct": slippage_pct,

@@ -11,7 +11,9 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-POSITION_COST_PCT_DEFAULT = 0.12
+from fee_policy import DEFAULT_COST_PCT
+
+POSITION_COST_PCT_DEFAULT = DEFAULT_COST_PCT
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
 RATIO_MIN = 1.02
@@ -150,10 +152,10 @@ PF_SIZE_BOUNDS_DEFAULT = {"minPfMicroN": 5, "minPfMinimalN": 10, "minPfShortN": 
 
 
 def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """PositionCost in PERCENT (0.15 = 0.15%). A non-positive or non-finite value falls back to the default.
+    """PositionCost in PERCENT (0.15 = 0.15%). A negative or non-finite value falls back to the default.
     There is no magnitude guessing: 3 means 3%, never 0.03%."""
     x = finite(value, default)
-    return x if x > 0 else default
+    return x if x >= 0 else default
 
 
 def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:

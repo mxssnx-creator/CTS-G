@@ -110,6 +110,7 @@ export type WindowFigure = PfEvidence & {
   meanPf: number | null;
   orders: number;
   chosen?: Record<string, number>;
+  configuredSets?: Record<string, number>;
   mode?: "positive" | "negative" | "both" | "avgpositive" | "avgnegative" | "avgboth";
   role?: "coordination";
 };
@@ -128,15 +129,15 @@ export type PfBase = {
   baseEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
   baseOnlyEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
   /** Main PF-passing Sets over their Main long windows. */
-  main?: PfPool & { on: boolean; lastN: number };
+  main?: PfPool & { on: boolean; lastN: number | number[] };
   /** Main windows of all final PF-validated Sets, including the separate Negative lane. */
-  mainAllLanes?: PfPool & { lastN: number };
+  mainAllLanes?: PfPool & { lastN: number | number[] };
   /** The Main Sets of every Base-passing Set. */
-  processed?: PfPool & { orders: number; lastN: number };
+  processed?: PfPool & { orders: number; lastN: number | number[] };
   /** Real stage: the Real Sets (orders opened while Base and Main passed) of the Sets valid on the positive lane, over the Real last N. */
-  real?: { pf: number; sets: number; n?: number; orders: number; lastN: number; on: boolean };
+  real?: { pf: number; sets: number; n?: number; orders: number; lastN: number | number[]; on: boolean };
   /** Real stage, Negative lane: the Real Negative Sets of the Sets valid on it. */
-  realneg?: { pf: number; sets: number; n?: number; orders: number; lastN: number; on: boolean };
+  realneg?: { pf: number; sets: number; n?: number; orders: number; lastN: number | number[]; on: boolean };
   stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
   /** Per stage, over the Sets that pass it (never over all Sets): how many, their share of every configured Set, the pooled PF and the mean of their own PFs. */
   stages?: Record<"base" | "main" | "real" | "realNeg" | "valid", StageFigure> & { allSets: number };

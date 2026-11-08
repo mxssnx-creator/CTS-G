@@ -289,6 +289,9 @@ export type PulseOverlay = {
   minPf: number;
   positionCostPct: number;
   slippageAllowancePct: number;
+  makerFeeRate: number;
+  takerFeeRate: number;
+  slippageFeeRatio: number;
   windowsLinked: boolean;
   pfWindow: number;
   slMinPct: number;
@@ -600,8 +603,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseEnabled: true,
   axisPauseMaxWindow: 8,
   minPf: GATE_MIN_PF_DEFAULT,
-  positionCostPct: 0.12,
-  slippageAllowancePct: 0.02,
+  positionCostPct: 0.176,
+  slippageAllowancePct: 0.016,
+  makerFeeRate: 0.0005,
+  takerFeeRate: 0.0008,
+  slippageFeeRatio: 0.1,
   windowsLinked: true,
   pfWindow: 8,
   slMinPct: 0.2,
@@ -1340,8 +1346,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: pfFloor(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
-    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.12),
-    slippageAllowancePct: num(cts.slippageAllowancePct, 0.02),
+    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.176),
+    slippageAllowancePct: num(cts.slippageAllowancePct, 0.016),
+    makerFeeRate: num(cts.makerFeeRate, 0.0005),
+    takerFeeRate: num(cts.takerFeeRate, 0.0008),
+    slippageFeeRatio: num(cts.slippageFeeRatio, 0.1),
     windowsLinked: bool(cts.windowsLinked, true),
     pfWindow: Math.max(8, num(cts.pfWindow, 15)),
     slMinPct: num(cts.slMinPct, 0.2),

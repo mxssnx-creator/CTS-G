@@ -324,20 +324,18 @@ function SettingsPage() {
             >
               <CostEvidencePanel stats={stats} />
               <Grid>
-                <Slider
-                  label="Paper cost allowance"
-                  value={overlay.positionCostPct}
-                  min={0.02}
-                  max={1}
-                  step={0.01}
-                  unit="%"
-                  hint="Default 0.12% round trip. Exchange fees plus the slippage allowance can raise this floor. Actual fills use their recorded fees."
-                  onChange={(v) => patch("positionCostPct", v)}
-                />
-                <Num label="Slippage allowance" value={overlay.slippageAllowancePct}
-                  min={0} max={1} step={0.01} unit="%"
-                  hint="Round-trip paper allowance. Actual fill prices already include slippage."
-                  onChange={(v) => patch("slippageAllowancePct", v)} />
+                <Num label="Fallback taker fee" value={overlay.takerFeeRate * 100}
+                  min={0} max={5} step={0.001} unit="%"
+                  hint="Used when the exchange has not supplied a current fee rate."
+                  onChange={(v) => patch("takerFeeRate", v / 100)} />
+                <Num label="Fallback maker fee" value={overlay.makerFeeRate * 100}
+                  min={0} max={5} step={0.001} unit="%"
+                  hint="Maker requires confirmed maker liquidity; LIMIT alone is not evidence."
+                  onChange={(v) => patch("makerFeeRate", v / 100)} />
+                <Num label="Slippage / fee ratio" value={overlay.slippageFeeRatio}
+                  min={0} max={10} step={0.05} unit="× fee"
+                  hint="0.1 = 10% of fees. Paper estimates only; actual fill prices already contain slippage."
+                  onChange={(v) => patch("slippageFeeRatio", v)} />
                 <Slider
                   label="Min PF"
                   value={overlay.minPf}
