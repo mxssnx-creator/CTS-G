@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import heapq
 import json
 import os
 import sys
@@ -98,6 +99,39 @@ def dca_rungs(side: int, entry: float, exit_px: float, sl_f: float, e_i: int, i_
         used += m
         pos_j = j
     return out
+
+
+def admit_dca_candidates(candidates, min_pf, *, deact=True, check_average=True, allow=None, stop_parent=False):
+    """Admit simulated adds using only earlier, chronologically closed adds.
+
+    Candidate fields: now, close, net, parent_key, symbol, rung and parent.
+    The parent key and symbol provide deterministic ties without future prices.
+    An add closing at the candidate's exact clock is not evidence for it.
+    """
+    ordered = sorted(candidates, key=lambda c: (c['now'], c['symbol'], c['parent_key'], c['rung']))
+    pending, closes, admitted, blocked = [], [], [], set()
+    for c in ordered:
+        now = c['now']
+        while pending and pending[0][0] < now:
+            closes.append(heapq.heappop(pending)[-1])
+        key = c['parent_key']
+        if key in blocked:
+            continue
+        last15, last25 = closes[-15:], closes[-25:]
+        is_off = deact and ((len(last15) >= 8 and (pf(last15) or 0.0) + 1e-9 < min_pf) or
+                            (check_average and len(last25) >= 25 and sum(last25) < 0))
+        if is_off or (allow is not None and not allow(c)):
+            if stop_parent:
+                blocked.add(key)
+            continue
+        admitted.append(c)
+        heapq.heappush(pending, (c['close'], c['symbol'], key, c['rung'], c['net']))
+    return admitted
+
+
+def dca_prior_bar_indication(ind_dir, symbol, hit_index, side, names):
+    """Use the last completed bar before a simulated intrabar price hit."""
+    return hit_index > 0 and ind_dir(symbol, hit_index - 1, names) == side
 
 
 def main() -> int:
@@ -544,10 +578,9 @@ def main() -> int:
     def dca_sim(parents, cfg, coord) -> Tuple[List[Tuple[float, float, float]], int, List[float]]:
         frac, mult, gate, deact = cfg["frac"], min(cfg["mult"], cfg["max_expo"] - 1.0), cfg["gate"], cfg["deact"]
         events = parent_events(parents)
-        closes: List[Tuple[float, float]] = []         # (t, net) of the DCA lane's own adds
-        add_nets: List[float] = []
-        adds = 0
-        for r in sorted(parents, key=lambda x: x["t_in"]):
+        candidates = []
+        ordered_parents = sorted(parents, key=lambda x: (x['t_in'], x['symbol'], x['set']))
+        for parent_no, r in enumerate(ordered_parents):
             tr = r["tr"]
             s, side = r["symbol"], int(tr["dir"])
             entry, exit_px = float(tr["entry_px"]), float(tr["exit_px"])
@@ -559,22 +592,13 @@ def main() -> int:
             if j < 0:
                 continue
             now = float(times[s][j])
-            if deact:
-                past = [v for t, v in closes if t <= now]
-                last15 = past[-15:]
-                if len(last15) >= 8 and (pf(last15) or 0.0) + 1e-9 < dca_min_pf:
-                    continue
-                last25 = past[-25:]
-                if len(last25) >= 25 and sum(v / cf for v in last25) / len(last25) < 0:
-                    continue
-            if gate == "axis" and not parent_ok(r, now, coord):
-                continue
             net = (exit_px - lvl) / lvl * side - cf
-            events.append((float(r["t"]), net, mult))
-            add_nets.append(net)
-            closes.append((float(r["t"]), net))
-            adds += 1
-        return events, adds, add_nets
+            candidates.append({'now': now, 'close': float(r['t']), 'net': net, 'rung': 0,
+                               'symbol': s, 'parent_key': parent_no, 'parent': r})
+        admitted = admit_dca_candidates(candidates, dca_min_pf, deact=deact,
+                   allow=(lambda c: parent_ok(c['parent'], c['now'], coord)) if gate == 'axis' else None)
+        events.extend((c['close'], c['net'], mult) for c in admitted)
+        return events, len(admitted), [c['net'] for c in admitted]
 
     if "dca" in parts:
         base_dca = {"frac": 0.4, "mult": 0.5, "max_expo": 2.0, "gate": "sets", "deact": True}
@@ -627,29 +651,26 @@ def main() -> int:
         def dca12_sim(parents, cfg):
             gate = cfg.get("ind") or []
             events = parent_events(parents)
-            closes: List[Tuple[float, float]] = []
-            add_nets: List[float] = []
-            per_rung = [0] * cfg["n"]
-            adds = 0
-            for r in sorted(parents, key=lambda x: x["t_in"]):
+            candidates = []
+            ordered_parents = sorted(parents, key=lambda x: (x['t_in'], x['symbol'], x['set']))
+            for parent_no, r in enumerate(ordered_parents):
                 tr = r["tr"]
                 s, side = r["symbol"], int(tr["dir"])
                 e_i, x_i = int(tr["entry_i"]), int(tr["exit_i"])
                 i_end = x_i + 1 if r["net"] < 0 else x_i
 
-                def allow(j, s=s):
-                    last15 = [v for t, v in closes if t <= float(times[s][j])][-15:]
-                    return not (len(last15) >= 8 and (pf(last15) or 0.0) + 1e-9 < dca_min_pf)
                 fills = dca_rungs(side, float(tr["entry_px"]), float(tr["exit_px"]), float(r["fracs"][0]), e_i, i_end, cfg, cf,
                                   lambda i0, i1, lvl, d, s=s: first_hit(s, i0, i1, lvl, d),
-                                  (lambda j, s=s, side=side: ind_dir(s, j, gate) == side) if gate else None, allow)
-                for _j, k, m, net in fills:
-                    events.append((float(r["t"]), net, m))
-                    add_nets.append(net)
-                    closes.append((float(r["t"]), net))
-                    per_rung[k] += 1
-                    adds += 1
-            return events, adds, add_nets, per_rung
+                                  (lambda j, s=s, side=side: dca_prior_bar_indication(ind_dir, s, j, side, gate)) if gate else None)
+                for j, k, m, net in fills:
+                    candidates.append({'now': float(times[s][j]), 'close': float(r['t']), 'net': net,
+                                       'rung': k, 'weight': m, 'symbol': s, 'parent_key': parent_no, 'parent': r})
+            admitted = admit_dca_candidates(candidates, dca_min_pf, check_average=False, stop_parent=True)
+            per_rung = [0] * cfg['n']
+            for c in admitted:
+                events.append((c['close'], c['net'], c['weight']))
+                per_rung[c['rung']] += 1
+            return events, len(admitted), [c['net'] for c in admitted], per_rung
 
         IND_REV = ["sweep_n8_t1", "wickrev_n8_t1", "exhaust_n8_t1", "volclimax_n8_t1"]
         IND_RSI = ["rsirev_n8_t1", "stochrsi_n8_t1"]
