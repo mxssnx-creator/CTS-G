@@ -5,7 +5,7 @@ Lanes are driven with hand-built bars so every expected price and reason is know
 from __future__ import annotations
 
 from common import COST, PULSE, lane_cfg  # noqa: F401
-from set_engine import SetBook, SetLane
+from set_engine import BarIndex, SetBook, SetLane, hit_exit
 
 
 def _book_one(**extra):
@@ -44,6 +44,74 @@ def sl_wins_same_bar_long():
     recs = _run(SetLane(st, "X"), bars, [1, 0], [0.9, 0.0], lane_cfg())
     ok = len(recs) == 1 and recs[0]["reason"] == "sl" and abs(recs[0]["exit_px"] - sl) < 1e-9
     return ok, f"reason={recs[0]['reason'] if recs else None} px={recs[0]['exit_px'] if recs else None:.4f} sl={sl:.4f}" if recs else "no exit"
+
+
+def _lane_paths(st, bars, direction, cfg):
+    """Exercise the scalar, walked and indexed implementations on identical bars."""
+    dirs = [direction] + [0] * (len(bars) - 1)
+    confs = [0.9] + [0.0] * (len(bars) - 1)
+    lane = SetLane(st, "X")
+    stepped = []
+    for i, bar in enumerate(bars):
+        row = lane.step(i, bar, dirs[i], confs[i], True, cfg)
+        if row is not None:
+            stepped.append(row)
+    walked = SetLane(st, "X").scan(0, len(bars), bars, dirs, confs, True, cfg)
+    indexed = SetLane(st, "X").scan(0, len(bars), bars, dirs, confs, True, cfg, acc=BarIndex(bars))
+    return stepped, walked, indexed
+
+
+def stop_gap_prices_all_lane_paths():
+    st, _, sl, tp = _long_entry_levels()
+    cfg = lane_cfg(time_bars=99, scratch_bars=99)
+    cases = [
+        (1, [_bar(100, 100, 100, 100), _bar(97, 98, 96, 97)], 97.0),
+        (-1, [_bar(100, 100, 100, 100), _bar(103, 104, 102, 103)], 103.0),
+        # Both levels are hit after a normal open: the stop still wins.
+        (1, [_bar(100, 100, 100, 100), _bar(100, tp + 1, sl - 1, 100)], sl),
+    ]
+    for direction, bars, expected in cases:
+        for path, rows in zip(("step", "walk", "index"), _lane_paths(st, bars, direction, cfg)):
+            if len(rows) != 1 or rows[0]["reason"] != "sl" or abs(rows[0]["exit_px"] - expected) > 1e-9:
+                return False, f"{direction=} {path=} {expected=} rows={rows}"
+    return True, "long and short gaps use adverse opens; non-gap tie uses stop on all paths"
+
+
+def trailing_stop_gap_and_intrabar_arm():
+    b = SetBook()
+    b.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 5,
+            "setStepMax": 5, "setSlRatios": [3.5], "exitIgnoreTp": True, "trailVariants": ["0.6:0.36"]})
+    st = _set(b, "trail")
+    cfg = lane_cfg(time_bars=99, scratch_bars=99, honor_tp=False)
+    cases = [
+        # A trail armed in an earlier candle is already active at the next open.
+        (1, [_bar(100, 100, 100, 100), _bar(100, 100.8, 100, 100.75),
+             _bar(100.2, 100.3, 100.0, 100.1)], 100.2),
+        (-1, [_bar(100, 100, 100, 100), _bar(100, 100, 99.2, 99.25),
+              _bar(99.8, 100, 99.7, 99.9)], 99.8),
+        # The trail arms during this candle: its earlier open cannot fill it.
+        (1, [_bar(100, 100, 100, 100), _bar(100, 100.8, 100, 100.4)],
+         100.8 * (1 - 0.0036)),
+    ]
+    for direction, bars, expected in cases:
+        for path, rows in zip(("step", "walk", "index"), _lane_paths(st, bars, direction, cfg)):
+            if len(rows) != 1 or rows[0]["reason"] != "sl" or abs(rows[0]["exit_px"] - expected) > 1e-9:
+                return False, f"{direction=} {path=} {expected=} rows={rows}"
+    return True, "existing trails use gap opens; a newly armed trail does not use an earlier open"
+
+
+def direct_stop_gap_prices():
+    cases = [
+        (1, 99.0, 102.0, None, _bar(97, 98, 96, 97), 97.0),
+        (-1, 101.0, 98.0, None, _bar(103, 104, 102, 103), 103.0),
+        (1, 99.0, 102.0, 100.5, _bar(100, 100.4, 99.9, 100.2), 100.0),
+        (1, 99.0, 102.0, None, _bar(100, 103, 98, 100), 99.0),
+    ]
+    for side, sl, tp, trail, bar, expected in cases:
+        got = hit_exit(side, 100.0, sl, tp, trail, bar)
+        if got != ("sl", expected):
+            return False, f"{side=} {bar=} {got=} {expected=}"
+    return True, "direct stop and existing-trail gap prices match the adverse opening price"
 
 
 def tp_when_only_tp_hit_long():
@@ -186,6 +254,9 @@ def gate_window_caps_sample():
 
 
 CHECKS = [
+    ("lane.stop-gap-direct", direct_stop_gap_prices),
+    ("lane.stop-gap-all-paths", stop_gap_prices_all_lane_paths),
+    ("lane.trailing-stop-gap-and-intrabar-arm", trailing_stop_gap_and_intrabar_arm),
     ("lane.sl-wins-same-bar-long", sl_wins_same_bar_long),
     ("lane.tp-only-hit-long", tp_when_only_tp_hit_long),
     ("lane.sl-wins-same-bar-short", sl_wins_same_bar_short),
