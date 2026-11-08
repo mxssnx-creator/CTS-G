@@ -8,6 +8,30 @@ import tempfile
 from common import ROOT, T0, synth_bars
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import replay_cache
+from fetch_audit_market import select_universe
+
+
+def market_audit_selects_200_eligible_distinct_symbols():
+    tickers = [{"symbol": f"COIN{i:03d}-USDT", "quoteVolume": str(i)} for i in range(300)]
+    contracts = {r["symbol"]: {"apiStateOpen": True if i % 2 else "TRUE"}
+                 for i, r in enumerate(tickers)}
+    # These higher-volume records must not consume the first 200 places.
+    excluded = [f"NCSK{i}-USDT" for i in range(90)] + ["NCCOXAU-USDT", "NCFXEUR-USDT", "ETH-USDC", "SOL-USDC"]
+    for symbol in excluded:
+        tickers.append({"symbol": symbol, "quoteVolume": "1000000"})
+        contracts[symbol] = {"apiStateOpen": "true"}
+    tickers.extend([dict(tickers[-1]), dict(tickers[299]),
+                    {"symbol": "CLOSED-USDT", "quoteVolume": "9999999"},
+                    {"symbol": "MISSING-USDT", "quoteVolume": "9999999"}])
+    contracts["CLOSED-USDT"] = {"apiStateOpen": False}
+    for i, value in enumerate(("NaN", "Infinity", "invalid", "-1")):
+        symbol = f"BAD{i}-USDT"
+        tickers.append({"symbol": symbol, "quoteVolume": value})
+        contracts[symbol] = {"apiStateOpen": True}
+    actual = [r["symbol"] for r in select_universe(tickers, contracts)]
+    expected = [f"COIN{i:03d}-USDT" for i in range(299, 99, -1)]
+    ok = actual == expected and len(set(actual)) == 200
+    return ok, f"eligible unique symbols={len(set(actual))}; high-volume exclusions cannot crowd out the crypto universe"
 
 
 def caches_refuse_mismatched_inputs_or_missing_metadata():
@@ -85,5 +109,6 @@ def simulator_builds_and_reuses_only_matching_cache():
 
 
 CHECKS = [("replay-provenance." + fn.__name__.replace("_", "-"), fn) for fn in (
+    market_audit_selects_200_eligible_distinct_symbols,
     caches_refuse_mismatched_inputs_or_missing_metadata, simulator_models_automatic_holds,
     simulator_builds_and_reuses_only_matching_cache)]
