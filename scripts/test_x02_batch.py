@@ -1,10 +1,85 @@
 """Offline transport regression: no exchange calls or credentials."""
 import json
 import unittest
-from x02_low_steps_session import Session, batch_payload, crossed_protection_error
+from unittest.mock import patch
+from x02_low_steps_session import ObservationDeadline, Session, batch_payload, crossed_protection_error
+from set_engine import SetBook
 
 
 class BatchEncoding(unittest.TestCase):
+    def test_complete_history_resolves_controls_and_explicit_rejections_without_lookup_storm(self):
+        def row(oid,cid,side,qty,price,status):return dict(orderId=oid,clientOrderId=cid,symbol='X-USDT',positionSide='LONG',side=side,executedQty=str(qty),avgPrice=str(price),status=status)
+        history=[row('1','entry','BUY',2,100,'FILLED'),dict(row('20','close','SELL',2,101,'FILLED'),triggerOrderId='2'),row('3','control','SELL',0,0,'CANCELLED')]
+        class API:
+            def order(self,*args):raise AssertionError('Complete history should avoid individual lookups')
+            def rows(self,*args):return []
+            def call(self,*args):return {'data':{'orders':history}}
+        s=Session.__new__(Session);s.api=API();s.save=lambda:None;s.log=[]
+        for h in history:
+            s.log.append(dict(method='POST',body=dict(symbol=h['symbol'],positionSide=h['positionSide'],side=h['side'],clientOrderID=h['clientOrderId']),
+                              response={'data':{'order':dict(orderId=h.get('triggerOrderId') or h['orderId'],status='NEW')}}))
+        s.log.append(dict(method='POST',body=dict(symbol='X-USDT',positionSide='LONG',side='SELL',clientOrderID='rejected'),
+                          error='VST API 101205: No position to close'))
+        s.report={'startedUtcMs':1,'feePolicy':{'takerFeeRate':.0005},'cases':[
+            {'symbol':'X-USDT','side':'LONG','step':2,'ratio':.25,'cleaned':True,'simExit':None}]}
+        s.finish_stats()
+        self.assertTrue(s.report['executionProbeStats']['accountingComplete'])
+        self.assertEqual(s.report['executionProbeStats']['filledOrders'],2)
+        self.assertEqual(len(s.report['confirmedRejectedIntents']),1)
+        self.assertEqual({o['orderId'] for o in s.report['settlements'][0]['orders']},{'1','20'})
+
+    def test_terminal_protection_uses_accepted_venue_identity(self):
+        calls=[]
+        class API:
+            def order(self,symbol,cid,oid=None):
+                calls.append(oid)
+                if oid!='17':raise RuntimeError('Conditional client ID is not queryable')
+                return dict(orderId='17',status='CANCELED',executedQty='0',avgPrice='0')
+            def rows(self,*args):return []
+            def call(self,*args):return {'data':[]}
+        s=Session.__new__(Session);s.api=API();s.save=lambda:None
+        def intent(cid,side,ack):return dict(method='POST',body=dict(symbol='X-USDT',positionSide='LONG',side=side,clientOrderID=cid),response={'data':{'order':ack}})
+        s.log=[intent('entry','BUY',dict(status='FILLED',side='BUY',executedQty='2',avgPrice='100')),
+               intent('close','SELL',dict(status='FILLED',side='SELL',executedQty='2',avgPrice='101')),
+               intent('control','SELL',dict(status='NEW',orderId=17))]
+        s.report={'startedUtcMs':1,'feePolicy':{'takerFeeRate':.0005},'cases':[
+            {'symbol':'X-USDT','side':'LONG','step':2,'ratio':.25,'cleaned':True,'simExit':None}]}
+        s.finish_stats()
+        self.assertEqual(calls,['17'])
+        self.assertTrue(s.report['executionProbeStats']['accountingComplete'])
+        self.assertEqual(s.report['executionProbeStats']['filledOrders'],2)
+
+    def test_deadline_escapes_native_symbol_failure_isolation(self):
+        book=SetBook();book.enabled=True
+        book.bars={'X-USDT':[[100,101,99,100,1]]*120}
+        book.usable=lambda symbol:True
+        def replay_symbol(*args,**kwargs):kwargs['on_step']()
+        book._replay_symbol=replay_symbol
+        def expired():raise ObservationDeadline()
+        with self.assertRaises(ObservationDeadline):book.replay_all(now=7200,on_step=expired)
+        self.assertFalse(book._running,'Deadline cancellation must release the native replay state')
+
+    def test_slow_monitor_io_leaves_compute_time_and_honors_deadline(self):
+        clock=[0.0];calls=[]
+        class API:
+            def call(self,*args,**kwargs):
+                calls.append(args[1]);clock[0]+=7;return {'data':[]}
+            def rows(self,*args,**kwargs):
+                calls.append(args[0]);clock[0]+=7;return []
+        s=Session.__new__(Session);s.api=API();s.save=lambda:None;s._last_sample=0
+        s.report={'cases':[],'plan':[],'snapshots':[]}
+        with patch('x02_low_steps_session.time.monotonic',side_effect=lambda:clock[0]),patch('builtins.print'):
+            s.sample()  # Three slow reads take 21 seconds.
+            clock[0]=25;s.monitor_replay(100)
+            self.assertEqual(len(calls),3,'A slow sample must not starve subsequent replay callbacks')
+            clock[0]=32;s.monitor_replay(100)
+            self.assertEqual(len(calls),6)
+            with self.assertRaises(ObservationDeadline):s.monitor_replay(53)
+            self.assertEqual(len(calls),6,'Deadline must not start more exchange reads')
+            clock[0]=64
+            with self.assertRaises(ObservationDeadline):s.monitor_replay(70)
+            self.assertEqual(len(calls),9,'An in-flight sample may finish, then the replay must stop')
+
     def test_both_trigger_directions_use_scoped_recovery(self):
         self.assertTrue(crossed_protection_error('VST API 110413: Take Profit price should be greater than the current price'))
         self.assertTrue(crossed_protection_error('VST API 110414: Take Profit price should be lower than the current price'))

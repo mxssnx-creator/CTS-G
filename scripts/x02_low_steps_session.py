@@ -25,6 +25,12 @@ from pulse_trader import ctrl_payload
 from set_engine import SetBook, bar_signal
 
 
+class ObservationDeadline(BaseException):
+    """The bounded demo observation ended; finish owned cleanup, not another replay."""
+    # This control-flow cancellation must escape replay_all's per-symbol
+    # Exception isolation, just as an operator interrupt does.
+
+
 def batch_payload(bodies):
     """The batch JSON schema uses numbers; the single-order query uses text."""
     if not 1 <= len(bodies) <= 5:
@@ -287,7 +293,6 @@ class Session(Acceptance):
             self.save();self.cleanup(c)
 
     def sample(self):
-        self._last_sample=time.monotonic()
         prices=self.api.call('GET','/openApi/swap/v2/quote/premiumIndex',{'timestamp':int(time.time()*1000)},signed=False)['data']
         if not isinstance(prices,list):raise RuntimeError('Mark-price bulk response unknown')
         marks={p['symbol']:float(p['markPrice']) for p in prices}
@@ -322,6 +327,14 @@ class Session(Acceptance):
         print(json.dumps({'elapsedSeconds':round((snap['at']-self.report.get('activeStartedAt',snap['at']))/1000),
                           'symbols':len(self.report['plan']),'cases':len(self.report['cases']),
                           'openPositions':len(bypos),'ownControls':snap['pendingControls']}),flush=True)
+        # Measure the quiet interval after IO completes. Slow REST requests
+        # otherwise make every replay callback immediately sample again.
+        self._last_sample=time.monotonic()
+
+    def monitor_replay(self,deadline):
+        if time.monotonic()>=deadline:raise ObservationDeadline()
+        if time.monotonic()-self._last_sample>=10:self.sample()
+        if time.monotonic()>=deadline:raise ObservationDeadline()
 
     def partial_probes(self):
         # One additional lot and one partial close on a few still-open lanes; overall controls retain ownership.
@@ -386,10 +399,54 @@ class Session(Acceptance):
         for r in self.log:
             b=r['body'];cid=b.get('clientOrderID')
             if r['method']=='POST' and cid:intents[(b['symbol'],cid.lower())]=r
+        # A complete bounded history resolves terminal controls in one request,
+        # including their venue IDs when a client-ID lookup is unsupported.
+        history_by_id={};history_by_cid={};history_by_trigger={};history_complete=False
+        try:
+            params=dict(startTime=self.report['startedUtcMs']-1000,
+                        endTime=int(time.time()*1000)+getattr(self.api,'offset',0),limit=1000)
+            data=self.api.call('GET','/openApi/swap/v2/trade/allOrders',params)['data']
+            history=data.get('orders',[]) if isinstance(data,dict) else data
+            if not isinstance(history,list):raise RuntimeError('Unknown order-history response')
+            history_by_id={str(o['orderId']):o for o in history if o.get('orderId')}
+            trigger_rows={}
+            for o in history:
+                trigger=str(o.get('triggerOrderId') or '')
+                if trigger and trigger!='0':trigger_rows.setdefault(trigger,[]).append(o)
+            # A triggered protection may become a new child execution order.
+            # Never choose an arbitrary child if the venue returns several.
+            history_by_trigger={k:v[0] for k,v in trigger_rows.items() if len(v)==1}
+            history_by_cid={(o['symbol'],str(o.get('clientOrderID') or o.get('clientOrderId')).lower()):o
+                            for o in history if o.get('clientOrderID') or o.get('clientOrderId')}
+            accepted_ids=set()
+            for r in intents.values():
+                a=r.get('response',{}).get('data',{});a=a.get('order',a)
+                if a.get('orderId'):accepted_ids.add(str(a['orderId']))
+            history_complete=(len(history)<params['limit'] and len(history_by_id)==len(history)
+                              and bool(accepted_ids) and accepted_ids.issubset(set(history_by_id)|set(history_by_trigger))
+                              and not any(len(v)>1 and k in accepted_ids for k,v in trigger_rows.items()))
+            self.report['terminalHistoryAudit']=dict(request=params,orders=len(history),complete=history_complete)
+        except (RuntimeError,KeyError,TypeError,ValueError) as exc:
+            self.report['terminalHistoryError']=str(exc)
+        confirmed_rejections=[]
         def resolve(item):
             key,r=item;ack=r.get('response',{}).get('data',{});ack=ack.get('order',ack)
+            # Conditional orders are not reliably queryable by client ID once
+            # terminal. Their accepted venue ID is the authoritative identity.
+            oid=str(ack.get('orderId') or '') or None
+            historical=(history_by_trigger.get(oid) or history_by_id.get(oid)) if oid else history_by_cid.get(key)
+            if historical:
+                if any(historical.get(k)!=r['body'].get(k) for k in ('symbol','side','positionSide')):
+                    return key,None,'Historical order ownership mismatch'
+                return key,historical,None
             if ack.get('status')=='FILLED':return key,ack,None
-            try:return key,self.api.order(key[0],key[1]),None
+            b=r['body'];closing=(b.get('positionSide'),b.get('side')) in (('LONG','SELL'),('SHORT','BUY'))
+            explicit_reject=crossed_protection_error(r.get('error','')) or str(r.get('error','')).startswith('VST API 101205: No position to close')
+            if history_complete and not oid and closing and explicit_reject:
+                confirmed_rejections.append(dict(symbol=key[0],clientOrderID=key[1],error=r['error'],
+                    evidence='explicit venue rejection and absence from complete bounded history'))
+                return key,dict(executedQty='0',status='RECONCILED_REJECTION'),None
+            try:return key,self.api.order(key[0],key[1],oid),None
             except RuntimeError as exc:return key,None,str(exc)
         with ThreadPoolExecutor(max_workers=3) as pool:
             resolved=list(pool.map(resolve,intents.items()))
@@ -421,6 +478,7 @@ class Session(Acceptance):
                              feeSource='account-rate estimate',accountingComplete=complete,unmatchedQuantity=qty_delta,
                              simExit=c['simExit'],cleaned=c['cleaned'],orders=orders))
         self.report['settlements']=rows
+        self.report['confirmedRejectedIntents']=confirmed_rejections
         self.report['unresolvedAccountingOrders']=unresolved
         complete=all(x['accountingComplete'] for x in rows)
         gp=sum(max(0,x['netEstimate'] or 0) for x in rows);gl=-sum(min(0,x['netEstimate'] or 0) for x in rows)
@@ -454,11 +512,19 @@ class Session(Acceptance):
                 m=int((self.report['snapshots'][-1]['at']-self.report['allSymbolsOpenedAt'])/60000)
                 if m!=minute:
                     minute=m
-                    with ThreadPoolExecutor(max_workers=3) as pool:
-                        for sym,rows in pool.map(self.candles,self.report['plan']):
-                            self.book.bars[sym]=[[float(r[k]) for k in ('open','high','low','close','volume')] for r in rows]
-                            self.book.bar_t[sym]=int(rows[-1]['time'])/1000
-                    self.book.replay_all(now=max(self.book.bar_t.values())+60,on_step=lambda: self.sample() if time.monotonic()-self._last_sample>10 else None);self.shadow()
+                    try:
+                        with ThreadPoolExecutor(max_workers=3) as pool:
+                            for sym,rows in pool.map(self.candles,self.report['plan']):
+                                self.monitor_replay(deadline)
+                                self.book.bars[sym]=[[float(r[k]) for k in ('open','high','low','close','volume')] for r in rows]
+                                self.book.bar_t[sym]=int(rows[-1]['time'])/1000
+                        self.book.replay_all(now=max(self.book.bar_t.values())+60,on_step=lambda: self.monitor_replay(deadline))
+                    except ObservationDeadline:
+                        # A partially refreshed book is not a completed native
+                        # decision sample. Continue directly to owned cleanup.
+                        self.report['shadowDeadlineReached']=True
+                        break
+                    self.shadow()
                 time.sleep(max(0,min(10-(time.monotonic()-tick),deadline-time.monotonic())))
             self.report['activeEndedAt']=int(time.time()*1000)
         except Exception as exc:
