@@ -13,12 +13,16 @@ ratio, trailing pair) it reports, on the development window (the first two third
   sets          Sets of that group
   valid %       mean share of its Sets that pass Base at each evaluation
   eff PF        PF after Base: the last-N gate windows of the validated Sets, pooled (in-sample: what they were chosen on)
-  next8 PF      the PF of each validated Set's next 8 orders after the validation (MIN_VALIDATION_N), pooled
-  next50 PF     the same over its next 50 orders (the gate window): does a passed last-N carry into the next N?
+  next8 PF      the PF of each validated Set's next 8 entries after validation (MIN_VALIDATION_N), pooled
+  next50 PF     the same over its next 50 entries (the gate window): does a passed last-N carry into the next N?
   exec PF       the positions the walk-forward opened under that group's Sets (one per symbol, best valid Set)
   orders, net   executed orders and their net (percent of one position's notional, after PositionCost)
   blk50 >= 1    consecutive blocks of 50 executed orders whose PF is at least 1 (stability, in orders)
   min n         the fewest gate-window orders behind any validation of the group (the last-N count; must be >= 8)
+
+Next-entry observations can overlap between validation samples, and cohorts
+near the end may contain fewer than N completed trades. They are shadow-tape
+statistics, not the PF of executed portfolio positions.
 
 usage: trade_sim.py --data DIR --cache shadow.pkl [--symbols 20] [--out FILE] [--sealed | --last-hours 12] [--patch JSON]
                     [--refresh 0] [--eval-every 600] [--trades]
@@ -28,6 +32,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import collections
+from array import array
 import json
 import os
 import sys
@@ -50,16 +55,42 @@ def acc_pf(vals):
     return pf(sum(v for v in vals if v > 0), -sum(v for v in vals if v < 0))
 
 
-def future_entries(txa, tea, ppa, now, count, cost):
-    """Only positions entered after this validation, never inherited open positions."""
+def future_entries(txa, tea, ppa, now, count, cost, symbols=None):
+    """Reference next-entry cohort from an exit-ordered tape.
+
+    Inherited positions are excluded. When supplied, stable symbol IDs break
+    ties at the same entry time, without using a future close or its result.
+    The production walk uses FutureEntryTapes for repeated queries.
+    """
+    if count <= 0:
+        return []
     start = bisect.bisect_left(txa, now)
-    out = []
-    for i in range(start, len(ppa)):
-        if tea[i] >= now:
-            out.append(ppa[i] - cost)
-            if len(out) >= count:
-                break
-    return out
+    indices = (i for i in range(start, len(ppa)) if tea[i] >= now)
+    selected = sorted(indices, key=lambda i: (tea[i], symbols[i] if symbols is not None else i))[:count]
+    return [ppa[i] - cost for i in selected]
+
+
+class FutureEntryTapes:
+    """Lazily index each Set by entry time and stable symbol, not exit time."""
+
+    def __init__(self, names, times, shadow, cost):
+        self.names, self.times, self.shadow, self.cost = sorted(names), times, shadow, cost
+        self.cache = {}
+
+    def window(self, idx, now, count):
+        if count <= 0:
+            return []
+        if idx not in self.cache:
+            rows = []
+            for symbol_order, name in enumerate(self.names):
+                ent, ex, pp = self.shadow[name][3][idx]
+                ts = self.times[name]
+                rows.extend((ts[ent[i]] + 60, symbol_order, i, pp[i]) for i in range(len(ent)))
+            rows.sort(key=lambda row: (row[0], row[1], row[2]))
+            self.cache[idx] = (array("d", (row[0] for row in rows)), array("d", (row[3] for row in rows)))
+        starts, returns = self.cache[idx]
+        start = bisect.bisect_left(starts, now)
+        return [value - self.cost for value in returns[start:start + count]]
 
 
 def range_of(st):
@@ -127,6 +158,7 @@ def main() -> int:
         return 2
     tapes = sg.Tapes(book, names, times, shadow)
     cf = cost_as_frac(book.cost_pct)
+    future_tapes = FutureEntryTapes(names, times, shadow, cf)
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
     hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
@@ -200,10 +232,10 @@ def main() -> int:
             tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.win(st).base_long)
             gp = sum(x - cf for x in pp if x - cf > 0)
             gl = -sum(x - cf for x in pp if x - cf < 0)
-            txa, tea, ppa = tapes.by_set[st.idx]
             # A trade already open at validation was not admitted by that
-            # decision. Only later entries belong to its next-N evidence.
-            future = future_entries(txa, tea, ppa, now, max(nxt_ns), cf)
+            # decision. Select the earliest later entries rather than the
+            # first closes, with stable symbol order when entries share a minute.
+            future = future_tapes.window(st.idx, now, max(nxt_ns))
             nxt = {m: future[:m] for m in nxt_ns}
             for k in keys:
                 g = groups[k]
@@ -292,6 +324,7 @@ def main() -> int:
 
     out = {"window": f"last {a.last_hours} h" if a.last_hours else "sealed" if a.sealed else "development", "symbols": names, "sets": len(book.by_idx),
            "validation_scope": "Base only; executable_pct is the separate full Base/Main/Real gate",
+           "forward_cohort_scope": "earliest entries at or after each validation, ties by symbol; completed shadow trades only; overlapping and potentially incomplete cohorts",
            "execution_axis": "overlay settings" if a.axis_current else "off (parent control)",
            "start_utc": lo, "end_utc": hi, "replay_fingerprint": manifest,
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
