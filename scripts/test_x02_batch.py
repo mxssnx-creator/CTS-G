@@ -7,6 +7,48 @@ from set_engine import SetBook
 
 
 class BatchEncoding(unittest.TestCase):
+    def test_complete_history_resolves_controls_and_explicit_rejections_without_lookup_storm(self):
+        def row(oid,cid,side,qty,price,status):return dict(orderId=oid,clientOrderId=cid,symbol='X-USDT',positionSide='LONG',side=side,executedQty=str(qty),avgPrice=str(price),status=status)
+        history=[row('1','entry','BUY',2,100,'FILLED'),dict(row('20','close','SELL',2,101,'FILLED'),triggerOrderId='2'),row('3','control','SELL',0,0,'CANCELLED')]
+        class API:
+            def order(self,*args):raise AssertionError('Complete history should avoid individual lookups')
+            def rows(self,*args):return []
+            def call(self,*args):return {'data':{'orders':history}}
+        s=Session.__new__(Session);s.api=API();s.save=lambda:None;s.log=[]
+        for h in history:
+            s.log.append(dict(method='POST',body=dict(symbol=h['symbol'],positionSide=h['positionSide'],side=h['side'],clientOrderID=h['clientOrderId']),
+                              response={'data':{'order':dict(orderId=h.get('triggerOrderId') or h['orderId'],status='NEW')}}))
+        s.log.append(dict(method='POST',body=dict(symbol='X-USDT',positionSide='LONG',side='SELL',clientOrderID='rejected'),
+                          error='VST API 101205: No position to close'))
+        s.report={'startedUtcMs':1,'feePolicy':{'takerFeeRate':.0005},'cases':[
+            {'symbol':'X-USDT','side':'LONG','step':2,'ratio':.25,'cleaned':True,'simExit':None}]}
+        s.finish_stats()
+        self.assertTrue(s.report['executionProbeStats']['accountingComplete'])
+        self.assertEqual(s.report['executionProbeStats']['filledOrders'],2)
+        self.assertEqual(len(s.report['confirmedRejectedIntents']),1)
+        self.assertEqual({o['orderId'] for o in s.report['settlements'][0]['orders']},{'1','20'})
+
+    def test_terminal_protection_uses_accepted_venue_identity(self):
+        calls=[]
+        class API:
+            def order(self,symbol,cid,oid=None):
+                calls.append(oid)
+                if oid!='17':raise RuntimeError('Conditional client ID is not queryable')
+                return dict(orderId='17',status='CANCELED',executedQty='0',avgPrice='0')
+            def rows(self,*args):return []
+            def call(self,*args):return {'data':[]}
+        s=Session.__new__(Session);s.api=API();s.save=lambda:None
+        def intent(cid,side,ack):return dict(method='POST',body=dict(symbol='X-USDT',positionSide='LONG',side=side,clientOrderID=cid),response={'data':{'order':ack}})
+        s.log=[intent('entry','BUY',dict(status='FILLED',side='BUY',executedQty='2',avgPrice='100')),
+               intent('close','SELL',dict(status='FILLED',side='SELL',executedQty='2',avgPrice='101')),
+               intent('control','SELL',dict(status='NEW',orderId=17))]
+        s.report={'startedUtcMs':1,'feePolicy':{'takerFeeRate':.0005},'cases':[
+            {'symbol':'X-USDT','side':'LONG','step':2,'ratio':.25,'cleaned':True,'simExit':None}]}
+        s.finish_stats()
+        self.assertEqual(calls,['17'])
+        self.assertTrue(s.report['executionProbeStats']['accountingComplete'])
+        self.assertEqual(s.report['executionProbeStats']['filledOrders'],2)
+
     def test_deadline_escapes_native_symbol_failure_isolation(self):
         book=SetBook();book.enabled=True
         book.bars={'X-USDT':[[100,101,99,100,1]]*120}

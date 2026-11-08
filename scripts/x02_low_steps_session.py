@@ -399,10 +399,54 @@ class Session(Acceptance):
         for r in self.log:
             b=r['body'];cid=b.get('clientOrderID')
             if r['method']=='POST' and cid:intents[(b['symbol'],cid.lower())]=r
+        # A complete bounded history resolves terminal controls in one request,
+        # including their venue IDs when a client-ID lookup is unsupported.
+        history_by_id={};history_by_cid={};history_by_trigger={};history_complete=False
+        try:
+            params=dict(startTime=self.report['startedUtcMs']-1000,
+                        endTime=int(time.time()*1000)+getattr(self.api,'offset',0),limit=1000)
+            data=self.api.call('GET','/openApi/swap/v2/trade/allOrders',params)['data']
+            history=data.get('orders',[]) if isinstance(data,dict) else data
+            if not isinstance(history,list):raise RuntimeError('Unknown order-history response')
+            history_by_id={str(o['orderId']):o for o in history if o.get('orderId')}
+            trigger_rows={}
+            for o in history:
+                trigger=str(o.get('triggerOrderId') or '')
+                if trigger and trigger!='0':trigger_rows.setdefault(trigger,[]).append(o)
+            # A triggered protection may become a new child execution order.
+            # Never choose an arbitrary child if the venue returns several.
+            history_by_trigger={k:v[0] for k,v in trigger_rows.items() if len(v)==1}
+            history_by_cid={(o['symbol'],str(o.get('clientOrderID') or o.get('clientOrderId')).lower()):o
+                            for o in history if o.get('clientOrderID') or o.get('clientOrderId')}
+            accepted_ids=set()
+            for r in intents.values():
+                a=r.get('response',{}).get('data',{});a=a.get('order',a)
+                if a.get('orderId'):accepted_ids.add(str(a['orderId']))
+            history_complete=(len(history)<params['limit'] and len(history_by_id)==len(history)
+                              and bool(accepted_ids) and accepted_ids.issubset(set(history_by_id)|set(history_by_trigger))
+                              and not any(len(v)>1 and k in accepted_ids for k,v in trigger_rows.items()))
+            self.report['terminalHistoryAudit']=dict(request=params,orders=len(history),complete=history_complete)
+        except (RuntimeError,KeyError,TypeError,ValueError) as exc:
+            self.report['terminalHistoryError']=str(exc)
+        confirmed_rejections=[]
         def resolve(item):
             key,r=item;ack=r.get('response',{}).get('data',{});ack=ack.get('order',ack)
+            # Conditional orders are not reliably queryable by client ID once
+            # terminal. Their accepted venue ID is the authoritative identity.
+            oid=str(ack.get('orderId') or '') or None
+            historical=(history_by_trigger.get(oid) or history_by_id.get(oid)) if oid else history_by_cid.get(key)
+            if historical:
+                if any(historical.get(k)!=r['body'].get(k) for k in ('symbol','side','positionSide')):
+                    return key,None,'Historical order ownership mismatch'
+                return key,historical,None
             if ack.get('status')=='FILLED':return key,ack,None
-            try:return key,self.api.order(key[0],key[1]),None
+            b=r['body'];closing=(b.get('positionSide'),b.get('side')) in (('LONG','SELL'),('SHORT','BUY'))
+            explicit_reject=crossed_protection_error(r.get('error','')) or str(r.get('error','')).startswith('VST API 101205: No position to close')
+            if history_complete and not oid and closing and explicit_reject:
+                confirmed_rejections.append(dict(symbol=key[0],clientOrderID=key[1],error=r['error'],
+                    evidence='explicit venue rejection and absence from complete bounded history'))
+                return key,dict(executedQty='0',status='RECONCILED_REJECTION'),None
+            try:return key,self.api.order(key[0],key[1],oid),None
             except RuntimeError as exc:return key,None,str(exc)
         with ThreadPoolExecutor(max_workers=3) as pool:
             resolved=list(pool.map(resolve,intents.items()))
@@ -434,6 +478,7 @@ class Session(Acceptance):
                              feeSource='account-rate estimate',accountingComplete=complete,unmatchedQuantity=qty_delta,
                              simExit=c['simExit'],cleaned=c['cleaned'],orders=orders))
         self.report['settlements']=rows
+        self.report['confirmedRejectedIntents']=confirmed_rejections
         self.report['unresolvedAccountingOrders']=unresolved
         complete=all(x['accountingComplete'] for x in rows)
         gp=sum(max(0,x['netEstimate'] or 0) for x in rows);gl=-sum(min(0,x['netEstimate'] or 0) for x in rows)
