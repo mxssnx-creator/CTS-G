@@ -3,9 +3,20 @@ import json
 import unittest
 from unittest.mock import patch
 from x02_low_steps_session import ObservationDeadline, Session, batch_payload, crossed_protection_error
+from set_engine import SetBook
 
 
 class BatchEncoding(unittest.TestCase):
+    def test_deadline_escapes_native_symbol_failure_isolation(self):
+        book=SetBook();book.enabled=True
+        book.bars={'X-USDT':[[100,101,99,100,1]]*120}
+        book.usable=lambda symbol:True
+        def replay_symbol(*args,**kwargs):kwargs['on_step']()
+        book._replay_symbol=replay_symbol
+        def expired():raise ObservationDeadline()
+        with self.assertRaises(ObservationDeadline):book.replay_all(now=7200,on_step=expired)
+        self.assertFalse(book._running,'Deadline cancellation must release the native replay state')
+
     def test_slow_monitor_io_leaves_compute_time_and_honors_deadline(self):
         clock=[0.0];calls=[]
         class API:

@@ -25,8 +25,10 @@ from pulse_trader import ctrl_payload
 from set_engine import SetBook, bar_signal
 
 
-class ObservationDeadline(Exception):
+class ObservationDeadline(BaseException):
     """The bounded demo observation ended; finish owned cleanup, not another replay."""
+    # This control-flow cancellation must escape replay_all's per-symbol
+    # Exception isolation, just as an operator interrupt does.
 
 
 def batch_payload(bodies):
