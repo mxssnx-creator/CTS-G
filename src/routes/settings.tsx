@@ -480,7 +480,7 @@ function SettingsPage() {
                 </table>
               </div>
               <p className="text-sm text-muted">
-                Active {overlay.slToTpRatio.toFixed(1)} · TP {(overlay.positionCostPct * overlay.tpCostRatio).toFixed(2)}% × ratio → SL{" "}
+                Active {overlay.slToTpRatio.toFixed(2)} · TP {(overlay.positionCostPct * overlay.tpCostRatio).toFixed(2)}% × ratio → SL{" "}
                 {(overlay.positionCostPct * overlay.tpCostRatio * overlay.slToTpRatio).toFixed(2)}%. Auto picks the ratio with the best last-{overlay.slToTpRecalcN} PositionCost score.
               </p>
             </Card>
@@ -826,11 +826,6 @@ function SettingsPage() {
                     </tbody>
                   </table>
                 </div>
-                <Toggle
-                  label="Tight stops: SL ratios 0.2 / 0.3 / 0.4 × TP (only where the floored stop differs from every other ratio's)"
-                  on={overlay.setSlLow === true}
-                  onChange={(v) => patch("setSlLow", v)}
-                />
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
@@ -1069,13 +1064,13 @@ function SettingsPage() {
                   onChange={(v) => patch("shortRangeMinPf", v)}
                 />
                 <Slider
-                  label="Min stop · steps over cost"
-                  value={overlay.slMinSteps}
-                  min={0}
-                  max={5}
-                  step={1}
-                  hint={`Overall minimum stop = PositionCost + n steps = ${(((overlay.slMinSteps ?? 1) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 1).`}
-                  onChange={(v) => patch("slMinSteps", Math.max(0, Math.min(5, Math.round(v))))}
+                  label="Minimum SL above costs (%)"
+                  value={overlay.minSlDistancePct}
+                  min={0.1}
+                  max={1}
+                  step={0.1}
+                  hint={`Initial SL floor = modeled costs + ${overlay.minSlDistancePct.toFixed(1)}% of entry price. Requested TP is unchanged.`}
+                  onChange={(v) => patch("minSlDistancePct", Math.max(0.1, Math.min(1, v)))}
                 />
                 <Slider
                   label="Min trailing distance · steps over cost"

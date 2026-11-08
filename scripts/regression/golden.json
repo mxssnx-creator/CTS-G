@@ -1,15 +1,15 @@
 {
- "sets": 1700,
- "trades": 173952,
- "sha256": "1b88476bbaeb50b8f764018ee7f9ec8858a95499fff95360cc204930b02bdd50",
+ "sets": 1406,
+ "trades": 169096,
+ "sha256": "9349d4270ec16f5c082595e32bb752502d156a11655621c1268a22156a9e3ff0",
  "pauseAuto": {
-  "sets": 1700,
-  "trades": 132810,
-  "sha256": "1ca815a767701cad2d0441d6726c6efe56480df4ca4e2348af134c0a89af9f63"
+  "sets": 1406,
+  "trades": 127576,
+  "sha256": "3e37588e5de940c99b4bb4878d89c6e9497702ce00fbd23a7b8306ecbb82999c"
  },
  "splitAuto": {
-  "sets": 3400,
-  "trades": 191992,
-  "sha256": "7b1dd2526ca4e401cd61547979f79425a59f05485166d90c46492b8841e4b4d1"
+  "sets": 2812,
+  "trades": 175503,
+  "sha256": "e877b07078a341baeab086360503373e08a0e660632a57ce7d4b85b40e125a99"
  }
 }

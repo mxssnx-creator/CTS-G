@@ -146,7 +146,7 @@ def short_range_grid_is_steps_2_to_6():
     off = SetBook()
     off.load(overlay(stratShortRange=False))
     wide = _short_book(shortRangeStepMin=3, shortRangeStepMax=5)
-    ok = (steps == [2, 3, 4, 5, 6] and ratios == [0.5 + 0.25 * i for i in range(13)] and len(base) == 65
+    ok = (steps == [2, 3, 4, 5, 6] and ratios == [0.25 + 0.25 * i for i in range(10)] and len(base) == 50
           and SHORT_PACK not in off.packs
           and sorted({s.step for s in wide.by_idx if s.kind == "base"}) == [3, 4, 5])
     return ok, f"steps={steps} ratios={len(ratios)} base Sets={len(base)} explicit off={SHORT_PACK not in off.packs}"
@@ -186,7 +186,7 @@ def minimum_stop_and_trail_follow_cost_plus_steps():
     finally:
         pc._MIN_STEPS.clear()
         pc._MIN_STEPS.update(saved)
-    ok = (abs(floor - 0.0024) < 1e-12 and abs(sl - 0.0024) < 1e-12 and abs(floor3 - 0.0048) < 1e-12 and trail3 == 5
+    ok = (abs(floor - 0.0022) < 1e-12 and abs(sl - 0.0022) < 1e-12 and abs(floor3 - 0.0022) < 1e-12 and trail3 == 5
           and clamped == {"sl": 5, "trail": 7})
     return ok, f"floor={floor} resolved sl={sl} (ratio 0.3 x TP 0.36% = 0.108% is under it) floor(3)={floor3} trail(4)={trail3} clamp={clamped}"
 

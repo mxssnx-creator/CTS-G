@@ -278,7 +278,7 @@ def memoized_replays_keep_inputs_and_invalidate_hold_changes():
         one, two = make(), make()
         key = memo._key(one, "A-USDT", T0)
         changed_hold = memo._key(make(holdAuto=False), "A-USDT", T0)
-        changed_stop = memo._key(make(slMinSteps=3), "A-USDT", T0)
+        changed_stop = memo._key(make(minSlDistancePct=0.3), "A-USDT", T0)
         with memo.using():
             one.replay_all(now=T0)
             two.replay_all(now=T0)

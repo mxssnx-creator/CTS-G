@@ -1,3 +1,4 @@
+import { SL_TP_RATIOS, minimumStopFraction } from "./protection-policy.ts";
 /**
  * Minimal Coord.
  * Position-cost ranges, independent of the wide protect grid. TP multiples use the named 0.2 % reference basis
@@ -141,46 +142,32 @@ export const TRAIL_CONFIGS = [0, 0.25, 0.5, 0.75] as const;
 export const costTps = (lo: number, hi: number, step: number): number[] =>
   steps(lo, hi, step).map((n) => +(RANGE_COST_BASIS * n).toFixed(4));
 
-/**
- * Minimal: 4–8× cost (0.8–1.6 %), step 0.5× (13 Oct, was 1×). Stops 1.5–3× the target, step 0.25 (MINIMAL_SL).
- * Every trailing distance; a trailing cell keeps its own stop ratio from 1× (a forced 2× stop made each loss twice
- * the trailed win: 12 h, 3 October, Trailing PF 1.04 → 1.47 and the engine 1.15 → 1.49 with 1×).
- */
-/**
- * The minimum stop of EVERY evaluated config (operator, 5 Oct): 0.5 % of price. A tighter stop sits inside the
- * spread and ordinary noise — it is taken out before the target can be reached whatever the entry's edge (the Micro
- * cells at 0.1-0.2 % stops traded at a 0 % win rate). Every grid, Base cell, DCA rung and Axis desk floor is held
- * to it, so no setting can evaluate a config below it.
- */
-export const EVAL_MIN_SL = 0.005;
+/** Default initial SL: one modeled round trip plus the global net price distance. Runtime settings
+ * resolve this for the connection's current cost; held positions retain their captured protection. */
+export const EVAL_MIN_SL = minimumStopFraction(RT_COST);
 
-/**
- * Minimal's stops widened (operator, 6 Oct: "set Minimal stop loss wider and min trailing a bit wider"): stop ratios
- * 1.5–3× the target (was 1–2×; the measured best Minimal ratio, 2.0, was the top of the old ladder), the stop floor
- * 0.6 % (was 0.5 %) and the trailing floor 0.3 % (was 0.2 %) — so a trailed Minimal position is not stopped by
- * ordinary noise before its 0.8–1.6 % target.
- */
-export const MINIMAL_SL: readonly number[] = steps(1.5, 3, 0.25);
+/** Every range uses the same ten requested SL/TP ratios. Distinct requested ratios may hit the same floor. */
+export const MINIMAL_SL: readonly number[] = SL_TP_RATIOS;
 export const MINIMAL_RANGE: CoordRange = {
   volumeFactor: 1,
   tp: costTps(4, 8, 0.5),
   slOfTp: MINIMAL_SL,
   trailOfTp: TRAIL_CONFIGS,
-  trailSlOfTp: 1,
-  minSl: +(RANGE_COST_BASIS * 3).toFixed(4),
+  trailSlOfTp: SL_TP_RATIOS[0],
+  minSl: EVAL_MIN_SL,
   minTrail: +(RANGE_COST_BASIS * 1.5).toFixed(4),
 };
 
 /** Short's stop ratios: 1–2.5× the target, step 0.25 (13 Oct, was 1 / 1.5 / 2). */
-export const SHORT_SL: readonly number[] = steps(1, 2.5, 0.25);
+export const SHORT_SL: readonly number[] = SL_TP_RATIOS;
 /** Short: 9–14× cost (1.8–2.8 %), step 1× (8× belongs to Minimal). Stops 1–2.5× the target, trailing cells too. */
 export const SHORT_RANGE: CoordRange = {
   volumeFactor: 1,
   tp: costTps(9, 14, 1),
   slOfTp: SHORT_SL,
   trailOfTp: TRAIL_CONFIGS,
-  trailSlOfTp: 1,
-  minSl: +(RANGE_COST_BASIS * 3).toFixed(4),
+  trailSlOfTp: SL_TP_RATIOS[0],
+  minSl: EVAL_MIN_SL,
   minTrail: +RANGE_COST_BASIS.toFixed(4),
 };
 
@@ -189,7 +176,7 @@ export const SHORT_RANGE: CoordRange = {
  * on the plain and the trailing cells alike (trailSlOfTp 0.25: every TP × SL × Trail is a config). The range's stop
  * floor (minSl) holds the tightest ratios at the floor.
  */
-export const WIDE_TARGET_SL: readonly number[] = steps(0.25, 1.5, 0.25);
+export const WIDE_TARGET_SL: readonly number[] = SL_TP_RATIOS;
 
 /** General: 15–22× cost (3.0–4.4 %), step 1× (13 Oct, was 16–22 step 2). Stops 0.25–1.5× the target (WIDE_TARGET_SL). */
 export const GENERAL_RANGE: CoordRange = {
@@ -198,7 +185,7 @@ export const GENERAL_RANGE: CoordRange = {
   slOfTp: WIDE_TARGET_SL,
   trailOfTp: TRAIL_CONFIGS,
   trailSlOfTp: 0.25,
-  minSl: +(RANGE_COST_BASIS * 5).toFixed(4),
+  minSl: EVAL_MIN_SL,
   minTrail: +(RANGE_COST_BASIS * 2).toFixed(4),
 };
 
@@ -209,7 +196,7 @@ export const LONG_RANGE: CoordRange = {
   slOfTp: WIDE_TARGET_SL,
   trailOfTp: TRAIL_CONFIGS,
   trailSlOfTp: 0.25,
-  minSl: +(RANGE_COST_BASIS * 8).toFixed(4),
+  minSl: EVAL_MIN_SL,
   minTrail: +(RANGE_COST_BASIS * 3).toFixed(4),
 };
 
@@ -233,20 +220,20 @@ export const FORMER_MICRO_TP: readonly number[] = [0.001, 0.0015, 0.002, 0.0025,
  * (tpNetOfCost), so ratio 1.0 means the stop is the whole net target plus the cost away, never inside it; the
  * tighter 0.5 / 0.75 ratios were stopped out by noise before the target could be reached.
  */
-export const MICRO_SL: readonly number[] = steps(1, 5, 0.25);
+export const MICRO_SL: readonly number[] = SL_TP_RATIOS;
 export const MICRO_RANGE: CoordRange = {
   volumeFactor: 1,
   tp: MICRO_TP,
   slOfTp: MICRO_SL,
   trailOfTp: TRAIL_CONFIGS,
   /** Trailing cells keep the stated stop ratio from 1×. */
-  trailSlOfTp: 1,
+  trailSlOfTp: SL_TP_RATIOS[0],
   minSl: EVAL_MIN_SL,
   // at least half the 0.2% PositionCost (13 Oct, with the ¼ trail share); every other range's trail floor is 0.2 % or more
   minTrail: +(RANGE_COST_BASIS * 0.5).toFixed(4),
   tpNetOfCost: true,
   /** the stop floor net of configured cost; at defaults 0.20 % net + 0.15 % cost = 0.35 % price distance */
-  minSlNet: 0.002,
+  minSlNet: 0.001,
 };
 
 /**
@@ -391,7 +378,7 @@ export function forEachMicro(
 
 /** 2×–5× position cost, step 0.25. Stops 0.5×–3× in steps of 0.25. Off unless a setting enables it. */
 export const MINIMAL_PLUS_TP = steps(2, 5, 0.25).map((n) => +(RANGE_COST_BASIS * n).toFixed(4));
-export const MINIMAL_PLUS_SL = steps(0.5, 3, 0.25);
+export const MINIMAL_PLUS_SL = SL_TP_RATIOS;
 export const MINIMAL_PLUS_TRAIL = TRAIL_CONFIGS;
 /** Trailing cells use a higher stop than the short range (2×): at least 2.5× the target. */
 export const MINIMAL_PLUS_TRAIL_SL = 2.5;
@@ -402,7 +389,7 @@ export const MINIMAL_PLUS_RANGE: CoordRange = {
   slOfTp: MINIMAL_PLUS_SL,
   trailOfTp: MINIMAL_PLUS_TRAIL,
   trailSlOfTp: MINIMAL_PLUS_TRAIL_SL,
-  minSl: +(RANGE_COST_BASIS * 0.5).toFixed(4),
+  minSl: EVAL_MIN_SL,
   minTrail: +(RANGE_COST_BASIS * 0.5).toFixed(4),
 };
 

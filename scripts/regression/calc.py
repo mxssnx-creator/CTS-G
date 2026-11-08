@@ -216,7 +216,7 @@ def set_floors_follow_the_configured_cost():
         o = lane.open
         c = cost / 100.0
         tp_frac = max(c, 0.002)                          # step 2 = 0.2 %; a PositionCost above that lifts the lane's TP to the cost
-        sl_frac = max(2 * c, 0.002 * 0.5)                # ratio 0.5 x TP, never under PositionCost + one step = 2 x cost
+        sl_frac = max(c + .001, 0.002 * 0.5)                # ratio 0.5 x TP, never under PositionCost + one step = 2 x cost
         ok = (o is not None and abs(o["tp"] - 100.0 * (1 + tp_frac)) < 1e-9 and abs(o["sl"] - 100.0 * (1 - sl_frac)) < 1e-9)
         ok_all = ok_all and ok
         detail.append(f"cost={cost}: sl={o['sl']:.5f} tp={o['tp']:.5f}" if o else f"cost={cost}: no entry")

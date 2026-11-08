@@ -3784,6 +3784,7 @@ class Pulse:
             return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
+            min_sl_distance_pct=getattr(self.sets, "min_sl_distance_pct", 0.1),
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
             tp_cost_ratio=self.tp_cost_ratio, sl_to_tp=sl_ratio, bind_sl_to_tp=True,
@@ -3946,6 +3947,7 @@ class Pulse:
         if not ind_kind and ind is not None:
             ind_kind = str(getattr(ind, "kind", "") or "")
         sl_pct, tp_pct, src = resolve_sl_tp(
+            min_sl_distance_pct=getattr(self.sets, "min_sl_distance_pct", 0.1),
             base_sl=SL_PCT,
             base_tp=TP_PCT,
             sl_min=self.sl_min,
@@ -6294,6 +6296,7 @@ class Pulse:
             if track.get("trail"):
                 trail_key = str(track.get("trail"))
             sl_pct, tp_pct, src = resolve_sl_tp(
+            min_sl_distance_pct=getattr(self.sets, "min_sl_distance_pct", 0.1),
                 base_sl=SL_PCT, base_tp=TP_PCT,
                 sl_min=self.sl_min, sl_max=self.sl_max,
                 tp_min=self.tp_min, tp_max=self.tp_max,
@@ -6560,6 +6563,7 @@ class Pulse:
         self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
         self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
         sl, tp, src = resolve_sl_tp(
+            min_sl_distance_pct=getattr(self.sets, "min_sl_distance_pct", 0.1),
             base_sl=0.0048, base_tp=0.0075,
             sl_min=0.002, sl_max=0.02, tp_min=0.0035, tp_max=0.024,
             sl_to_tp=1.5,

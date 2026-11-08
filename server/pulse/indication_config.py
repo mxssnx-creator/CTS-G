@@ -22,6 +22,8 @@ Nothing here relaxes a gate: the packs are judged by the same Base -> Main -> Re
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 KINDS = ("base", "exit", "trail")
@@ -70,7 +72,7 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
     """Expand `indicationConfigs` into {"names", "ranges", "pause", "dropped", "entries"}.
 
     names    the indicator names to run as packs (sorted, unique)
-    ranges   name -> {"lo", "hi", "ratios", "kinds"}: how that name's Sets are built (the last entry naming it wins)
+    ranges   config-qualified name -> geometry and source; different entries never overwrite each other
     pause    name -> minutes for entries that fix the pause (0 = none); entries on "auto" are absent (the book's mode decides)
     dropped  [{"entry", "name", "reason"}]: combinations the library does not know, or that exceed the bounds
     entries  one summary per entry: its label, how many names and Sets-grid dimensions it produced"""
@@ -130,18 +132,24 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
         made = 0
         for base in base_names:
             for rel in rels:
-                name = f"{base}@{rel}" if rel else base
-                if name in names and name in ranges and ranges[name].get("entry") == e_i:
+                source = f"{base}@{rel}" if rel else base
+                geometry = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds,
+                            "trailLo": trail_lo, "trailHi": trail_hi, "pause": pz,
+                            "coordination": raw.get("coordination"), "major": raw.get("major"), "minor": raw.get("minor"),
+                            "label": str(raw.get("label") or "")}
+                signature = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+                name = source + "~cfg" + signature
+                if name in names:
                     continue
                 if made >= MAX_NAMES_PER_ENTRY or (len(names) >= MAX_NAMES_TOTAL and name not in names):
                     dropped.append({"entry": label, "name": name, "reason": "over the bound"})
                     continue
-                if not known(name):
-                    dropped.append({"entry": label, "name": name, "reason": "unknown to the library"})
+                if not known(source):
+                    dropped.append({"entry": label, "name": source, "reason": "unknown to the library"})
                     continue
                 names[name] = None
                 ranges[name] = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds, "entry": e_i,
-                               "trailLo": trail_lo, "trailHi": trail_hi}
+                               "trailLo": trail_lo, "trailHi": trail_hi, "source": source, "configKey": signature}
                 if isinstance(pz, (int, float)) and not isinstance(pz, bool):
                     pause[name] = max(0, int(pz))
                 else:
@@ -150,3 +158,8 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
         entries.append({"label": label, "names": made, "stepMin": lo, "stepMax": hi, "ratios": len(ratios), "types": kinds,
                         "steps": hi - lo + 1, "trailStepMin": trail_lo or None, "trailStepMax": trail_hi or None})
     return {"names": sorted(names), "ranges": ranges, "pause": pause, "dropped": dropped, "entries": entries}
+
+
+def source_name(name: str) -> str:
+    """Unwrap only the config identity; relation suffixes remain part of the source signal."""
+    return str(name).split("~cfg", 1)[0]

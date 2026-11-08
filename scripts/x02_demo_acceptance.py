@@ -35,22 +35,29 @@ class Client:
         self.key=lines[lines.index('API Key')+1]
         self.secret=lines[lines.index('Secret Key')+1]
         self.offset=0
-        now=self.call('GET','/openApi/swap/v2/server/time',signed=False)['data']['serverTime']
+        now=self.call('GET','/openApi/swap/v2/server/time',{'timestamp':int(time.time()*1000)},signed=False)['data']['serverTime']
         self.offset=int(now)-int(time.time()*1000)
 
     def call(self,method,path,params=None,*,signed=True):
-        p=dict(params or {})
-        if signed:p.update(timestamp=int(time.time()*1000)+self.offset,recvWindow=10000)
-        raw='&'.join(f'{k}={p[k]}' for k in sorted(p))
-        qs=urllib.parse.urlencode(sorted(p.items()))
-        if signed:qs+='&signature='+hmac.new(self.secret.encode(),raw.encode(),hashlib.sha256).hexdigest()
-        req=urllib.request.Request(HOST+path+('?' + qs if qs else ''),method=method,
-            headers={'X-BX-APIKEY':self.key} if signed else {})
-        try:
-            with urllib.request.urlopen(req,timeout=10) as response:data=json.load(response)
-        except Exception as exc:
-            # Transport exceptions may contain a signed URL. Never serialize it.
-            raise RuntimeError('VST transport failure: '+type(exc).__name__) from None
+        for attempt in range(3 if method == 'GET' else 1):
+            p=dict(params or {})
+            if signed:p.update(timestamp=int(time.time()*1000)+self.offset,recvWindow=60000)
+            raw='&'.join(f'{k}={p[k]}' for k in sorted(p))
+            qs=urllib.parse.urlencode(sorted(p.items()))
+            if signed:qs+='&signature='+hmac.new(self.secret.encode(),raw.encode(),hashlib.sha256).hexdigest()
+            req=urllib.request.Request(HOST+path+('?' + qs if qs else ''),method=method,
+                headers={'X-BX-APIKEY':self.key} if signed else {})
+            try:
+                with urllib.request.urlopen(req,timeout=25) as response:data=json.load(response)
+                break
+            except Exception as exc:
+                # Read retries are safe. Writes remain single dispatch and must be reconciled by their identity.
+                if method == 'GET' and attempt < 2:
+                    time.sleep(.5)
+                    continue
+                # Transport exceptions may contain a signed URL. Only exception classes enter the journal.
+                reason=getattr(exc,'reason',None)
+                raise RuntimeError('VST transport failure: '+type(exc).__name__+'/'+type(reason).__name__) from None
         if not isinstance(data,dict):raise RuntimeError('VST invalid response shape')
         if data.get('code')!=0:
             msg=str(data.get('msg','')).replace(self.key,'[redacted]').replace(self.secret,'[redacted]')
@@ -113,12 +120,15 @@ class Acceptance:
 
     def market(self,symbol,position_side,side,qty):
         cid=self.cid();body=dict(symbol=symbol,positionSide=position_side,side=side,type='MARKET',quantity=str(qty),clientOrderID=cid)
-        try:self.write('POST',ORDER,body)
+        try:response=self.write('POST',ORDER,body)
         except RuntimeError:
             # Query the original identity after an uncertain response; never
             # retry a market order under a new ID while its result is unknown.
             order=self.api.order(symbol,cid)
-        else:order=self.api.order(symbol,cid)
+        else:
+            order=response.get('data',{});order=order.get('order',order)
+            if not (order.get('status')=='FILLED' and float(order.get('executedQty') or 0)>0 and float(order.get('avgPrice') or 0)>0):
+                order=self.api.order(symbol,cid)
         filled=float(order.get('executedQty') or 0);price=float(order.get('avgPrice') or 0)
         self.check('market-fill',filled>0 and price>0 and order.get('status')=='FILLED',symbol=symbol,
             positionSide=position_side,side=side,requestedQty=float(qty),filledQty=filled,price=price,orderId=str(order['orderId']))
@@ -157,7 +167,8 @@ class Acceptance:
         submitted=[r for r in self.log if r['method']=='POST' and r['body'].get('symbol')==symbol
                    and r['body'].get('positionSide')==side and r['body'].get('type')=='MARKET']
         for intent in submitted:
-            order=self.api.order(symbol,intent['body']['clientOrderID'])
+            ack=intent.get('response',{}).get('data',{});ack=ack.get('order',ack)
+            order=ack if intent['result']=='accepted' and ack.get('status')=='FILLED' else self.api.order(symbol,intent['body']['clientOrderID'])
             if order.get('status') not in ('FILLED','CANCELED','CANCELLED','EXPIRED','REJECTED'):
                 self.write('DELETE',ORDER,{'symbol':symbol,'orderId':str(order['orderId'])})
                 order=self.api.order(symbol,intent['body']['clientOrderID'])

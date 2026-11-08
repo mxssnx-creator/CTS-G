@@ -33,6 +33,19 @@ def fixture_bars(n=180):
 
 
 class SignalContracts(unittest.TestCase):
+    def test_global_initial_stop_minimum_preserves_signal_target(self):
+        raw=config(); raw['minSlDistancePct']=.4
+        raw['protections'][0]['sl']=.0001
+        out=model.validate_config(raw);fees=out['fees']
+        cost=fees[fees['entryLiquidity']]+fees[fees['exitLiquidity']]+2*fees['slippagePerLeg']
+        self.assertAlmostEqual(out['protections'][0]['sl'],cost+.004)
+        self.assertEqual(out['protections'][0]['tp'],raw['protections'][0]['tp'])
+        self.assertEqual(raw['protections'][0]['sl'],.0001)
+        self.assertEqual(model.validate_config(config())['minSlDistancePct'],.1)
+        for value in (0,1.01,True,float('nan')):
+            raw=config();raw['minSlDistancePct']=value
+            with self.assertRaises(ValueError):model.validate_config(raw)
+
     def test_strict_schema_and_effective_switches(self):
         model.validate_config(config())
         for key, value in (("sources", ["not-a-signal"]), ("timeframes", [2]), ("mode", "live"), ("minPf", 2.199), ("normalEnabled", "false")):

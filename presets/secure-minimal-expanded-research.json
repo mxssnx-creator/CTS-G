@@ -91,7 +91,7 @@
   "tpMinPct": 0.35,
   "tpMaxPct": 4.5,
   "tpCostRatio": 5,
-  "slToTpRatio": 0.6,
+  "slToTpRatio": 0.5,
   "slToTpAuto": true,
   "slToTpRecalcN": 8,
   "slToTpRecalcEvery": 8,
@@ -122,7 +122,6 @@
   "shortRangeStepMin": 2,
   "shortRangeStepMax": 6,
   "shortRangeMinPf": 1.1,
-  "slMinSteps": 1,
   "trailMinSteps": 2,
   "trailMinLockPct": 0,
   "groupGate": false,
@@ -225,7 +224,6 @@
     "long": true,
     "wide": true
   },
-  "setSlLow": false,
   "trailStepMax": 22,
   "trailSlRatios": [],
   "volumeByPack": {},
@@ -360,5 +358,18 @@
   "minPfStepAutoHigh": 2,
   "manualCloseRestMin": 240,
   "transferAdjust": true,
-  "lastNByRange": {}
+  "lastNByRange": {},
+  "minSlDistancePct": 0.1,
+  "setSlRatios": [
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+    2.25,
+    2.5
+  ]
 }

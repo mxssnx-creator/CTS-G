@@ -422,9 +422,9 @@ def modeled_stop_cap_rejects_unsafe_sets():
     import stage_eval as sg
     # a step is 0.1 % of price: step 12 x ratio 3.5 = a 4.2 % stop (+ one cost 0.15 %) is over the 3 % cap, step 2 x 0.5 (the 0.24 % minimum stop) is under
     b = SetBook(); b.load(overlay(positionCostPct=0.15, minPfBySize=False, setMinStep=2, setStepMax=12,
-                                  setSlRatios=[0.5, 3.5], maxModeledStopLossPct=3.0))
+                                  setSlRatios=[0.5, 2.5], maxModeledStopLossPct=3.0))
     low = next(st for st in b.by_idx if st.kind == "base" and st.step == 2 and st.sl_ratio == 0.5)
-    high = next(st for st in b.by_idx if st.kind == "base" and st.step == 12 and st.sl_ratio == 3.5)
+    high = next(st for st in b.by_idx if st.kind == "base" and st.step == 12 and st.sl_ratio == 2.5)
     for st in (low, high):
         st.active, st.locked, st.last_error, st.gate_n, st.gate_pf, st.max_dd_s = True, False, "", 50, 2.0, 0.0
     before = (b.stop_cap_exceeded(low), b.stop_cap_exceeded(high), b.base_validation_reason(high))

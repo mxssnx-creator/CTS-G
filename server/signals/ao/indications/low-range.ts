@@ -2,14 +2,13 @@
 import type { IndicationSpec } from "./registry.ts";
 import type { LowRangeGrid, Protect } from "../domain/types.ts";
 import { RT_COST } from "../model-cost.ts";
-import { INTRADAY_TIMEFRAMES } from "./intraday-timeframes.ts";
 import {
   DEFAULT_LOW_RANGE_POLICY, LOW_RANGE_IDS, LOW_RANGE_METHODS, LOW_RANGE_RELATIONS, LOW_RANGE_WINDOWS,
   lowRangeProtects, lowRangeState,
 } from "./low-range-research.ts";
 
 export { LOW_RANGE_IDS, LOW_RANGE_METHODS, LOW_RANGE_RELATIONS, LOW_RANGE_WINDOWS };
-export const LOW_RANGE_TIMEFRAMES = INTRADAY_TIMEFRAMES;
+export const LOW_RANGE_TIMEFRAMES = [1, 5, 15] as const;
 export const isLowRangeInd = (id: string) => id.startsWith("low-range-");
 
 /** Candidate calculation is registered; protection cells remain opt-in until forward validation supports them. */
@@ -32,11 +31,11 @@ export function lowRangeSpecs(): IndicationSpec[] {
 }
 
 /** Exact same effective cells are supplied to Base and tape construction. */
-export function lowRangeGridProtects(grid: LowRangeGrid | undefined, cost = RT_COST, tfMin = 15): Protect[] {
+export function lowRangeGridProtects(grid: LowRangeGrid | undefined, cost = RT_COST, tfMin = 15, minSlDistancePct = 0.1): Protect[] {
   if (!grid?.enabled) return [];
   if (!(Number.isFinite(grid.maxHoldMin) && grid.maxHoldMin >= 1 && Number.isFinite(tfMin) && tfMin > 0))
     throw new RangeError("invalid Low-Range hold/timeframe");
-  return lowRangeProtects({ step: grid.step, cost, steps: grid.steps, slRatios: grid.slRatios,
+  return lowRangeProtects({ step: grid.step, cost, minSlDistancePct, steps: grid.steps, slRatios: grid.slRatios,
     trailRatios: grid.trailRatios, tags: ["sh"] }).map((p) => ({
       ...p, lowRangeOnly: true, hold: Math.floor(grid.maxHoldMin / tfMin), maxHoldMin: grid.maxHoldMin,
     }));
