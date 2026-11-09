@@ -63,19 +63,21 @@ def main():
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.colors import TwoSlopeNorm
     import numpy as np
     plt.rcParams.update({'font.size':9,'axes.spines.top':False,'axes.spines.right':False})
     ranges=['micro','minimal','short'];modes=[x[0] for x in protocol['negativeCases']];triples=protocol['triples']
     figure,axes=plt.subplots(3,3,figsize=(18,14),constrained_layout=True)
     for i,name in enumerate(ranges):
-        selected=[t for t in trials if t['range']==name];data=np.full((5,10),np.nan);counts=np.zeros((5,10))
+        selected=[t for t in trials if t['range']==name];data=np.full((5,10),np.nan);counts=np.zeros((5,10));no_loss=np.zeros((5,10),dtype=bool)
         for t in selected:
             y=modes.index(t['mode']);x=triples.index([t['baseN'],t['mainN'],t['realN']]);counts[y,x]=t['closed']['n']
+            no_loss[y,x]=t['closed']['noLoss']
             if t['closed']['pf'] is not None:data[y,x]=t['closed']['pf']
-        ax=axes[i,0];im=ax.imshow(data,vmin=0,vmax=1.5,cmap='RdYlGn',aspect='auto')
-        ax.set_title(name.title()+' · settled PF (all sample sizes)');ax.set_yticks(range(5),modes);ax.set_xticks(range(10),['/'.join(map(str,x)) for x in triples],rotation=45,ha='right');ax.set_xlabel('Base / Main / Real N')
+        ax=axes[i,0];im=ax.imshow(data,norm=TwoSlopeNorm(vmin=0,vcenter=1,vmax=2.5),cmap='RdYlGn',aspect='auto')
+        ax.set_title(name.title()+' · settled PF (1 = neutral; NL = no loss)');ax.set_yticks(range(5),modes);ax.set_xticks(range(10),['/'.join(map(str,x)) for x in triples],rotation=45,ha='right');ax.set_xlabel('Base / Main / Real N')
         for y in range(5):
-            for x in range(10):ax.text(x,y,'—' if math.isnan(data[y,x]) else f'{data[y,x]:.2f}',ha='center',va='center',fontsize=8)
+            for x in range(10):ax.text(x,y,('NL' if no_loss[y,x] else '—') if math.isnan(data[y,x]) else f'{data[y,x]:.2f}',ha='center',va='center',fontsize=8)
         ax=axes[i,1];ax.imshow(counts,cmap='Blues',aspect='auto');ax.set_title(name.title()+' · settled parent counts');ax.set_yticks(range(5),modes);ax.set_xticks(range(10),['/'.join(map(str,x)) for x in triples],rotation=45,ha='right');ax.set_xlabel('Base / Main / Real N')
         for y in range(5):
             for x in range(10):ax.text(x,y,str(int(counts[y,x])),ha='center',va='center',fontsize=8)
