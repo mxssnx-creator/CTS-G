@@ -3127,7 +3127,34 @@ def the_group_gate_blocks_a_losing_group_and_only_that_group():
                 f"{getattr(aged, 'id', None) == micro.id}; gate off ignores losses={getattr(gate_off, 'id', None) == o_micro.id}; keys {ids}")
 
 
+def alternate_lane_keeps_the_executed_group_gate():
+    """Changing the approved lane cannot bypass the losing execution group's gate."""
+    from set_engine import set_group
+    now = pt.time.time()
+    rows = [types.SimpleNamespace(id="general:L:1m:sl0.50:st2", lane="pos"),
+            types.SimpleNamespace(id="general:L:1m:sl0.50:st2", lane="neg"),
+            types.SimpleNamespace(id="general:L:1m:sl0.50:st5", lane="neg")]
+    def pick(_pack, side=0, allowed_lanes=None, predicate=None):
+        return next((st for st in rows if (allowed_lanes is None or st.lane in allowed_lanes)
+                     and (predicate is None or predicate(st))), None)
+    p = _bare_pulse()
+    p.sets = types.SimpleNamespace(pick_any=pick, lane_of=lambda st: st.lane,
+                                  group_gate=True, group_gate_n=5, group_gate_pf=1.05,
+                                  group_gate_hours=12, group_gate_min=1)
+    p.coord = types.SimpleNamespace(scope_allows=lambda pack, lane: (lane == "neg", "positive-scope-blocked"))
+    p.group_exec = {set_group(rows[1].id, "neg"): [(now - 1, -0.01)]}
+    allowed = p._scope_choice("general", 1)
+    p.group_exec[set_group(rows[2].id, "neg")] = [(now - 1, -0.01)]
+    denied = p._scope_choice("general", 1)
+    p.sets.group_gate = False
+    disabled = p._scope_choice("general", 1)
+    ok = (allowed[0] is rows[2] and allowed[1] == "neg" and denied[0] is None
+          and bool(denied[2]) and disabled[0] is rows[1])
+    return ok, f"healthy alternative={allowed[0] is rows[2]}, all losing denied={denied[0] is None}, gate off={disabled[0] is rows[1]}"
+
+
 CHECKS = [
+    ("trader.alternate-lane-keeps-the-executed-group-gate", alternate_lane_keeps_the_executed_group_gate),
     ("trader.restart-credits-the-downtime-so-positions-keep-running", restart_credits_the_downtime_so_positions_keep_running),
     ("trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored", closes_made_while_the_engine_was_down_are_recorded_but_not_scored),
     ("trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file", live_executed_pf_equals_the_plain_reading_of_the_trades_file),
