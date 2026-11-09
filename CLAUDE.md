@@ -2,6 +2,8 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-09, latest request:** Micro qualification first, then 80 symbols and the lowest volume factor (0.05) for a 3 USD test account. This supersedes the 120-symbol/factor-1 preference below; it is not evidence of an account start. Preserve the distinction between strategy qualification, strict funded-size feasibility and verified venue execution. Public fee/lot quotes are not authenticated account evidence. The new Micro study is offline and never starts a connection or changes a production preset.
+
 - **2026-11-08, latest requested x01 values:** the owner requested `symbolCap` 120 and `volumeFactor` 1, superseding the earlier request for 100 symbols and the minimum volume factor. This records the requested preference for later sessions; it is not evidence that an active instance has those settings.
 
 - **2026-11-06, owner: "Make only profitable ones run, but also Signals" / "Ensure correctness and correct PF eval".** Measured on C / B / A (3-day windows, executed positions, `trade_sim.py`, 20 symbols; PF / orders / net %).

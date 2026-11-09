@@ -2130,6 +2130,32 @@ def leverage_retry_checks_margin_and_reconciles_its_own_id():
     return ok, f"low margin={low}, allowed retry={allowed}, leverage refused={rejected}"
 
 
+def size_budget_preserves_exact_venue_minimum():
+    """A min-lot notional/price round trip must not lose a quantity step."""
+    import pulse_trader as pt
+    p = pt.Pulse.__new__(pt.Pulse)
+    p.equity = p.available = 3.0
+    p.size_pct, p.volume_factor, p.size_max = 5.0, .05, 25.0
+    p.leverage_for = lambda _c: 1
+    c = pt.Contract("STRK-USDT", 53.996, .001, 3, 5, 2.0, 1)
+    px = .03735
+    minimum = p.min_order_qty(c, px)
+    p.strict_size_cap = False
+    legacy = p.size_qty(c, px)
+    p.strict_size_cap = True
+    small = p.size_qty(c, px)
+    p.size_pct, p.volume_factor, p.size_max = 100.0, 1.0, minimum * px
+    exact = p.size_qty(c, px)
+    p.size_max = (minimum - c.step) * px
+    below = p.size_qty(c, px)
+    p.strict_size_cap, p.available = False, 1.0
+    no_margin = p.size_qty(c, px)
+    return (minimum == 53.996 and legacy == minimum and small == 0
+            and exact == minimum and below == 0 and no_margin == 0), (
+        f"minimum={minimum} legacy={legacy} strictSmall={small} strictExact={exact} "
+        f"strictBelow={below} noMargin={no_margin}")
+
+
 def strict_size_budget_skips_oversized_venue_minimum():
     """The opt-in small-balance budget skips an oversized minimum; legacy sizing remains unchanged."""
     p = _bare_pulse()
@@ -3166,6 +3192,7 @@ CHECKS = [
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
     ("trader.thirty-ready-symbols-compete-in-one-bounded-batch", thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch),
     ("trader.strict-size-budget", strict_size_budget_skips_oversized_venue_minimum),
+    ("trader.minimum-lot-roundtrip", size_budget_preserves_exact_venue_minimum),
     ("trader.strict-entry-budget-survives-multipliers-and-carry", strict_entry_budget_survives_set_multipliers_and_block_carry),
     ("trader.minimum-retry-respects-budget-and-client-id", minimum_order_retry_respects_budget_and_reconciles_its_own_id),
     ("trader.leverage-retry-respects-margin-and-client-id", leverage_retry_checks_margin_and_reconciles_its_own_id),

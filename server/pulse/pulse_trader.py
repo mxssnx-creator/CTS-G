@@ -1544,7 +1544,11 @@ class Pulse:
             want_n = floor_n
         q = self.round_qty(c, want_n / px)
         if q < floor:
-            return 0.0
+            # The approved minimum's notional / price round trip can land
+            # one float ULP below its exact step (53.996 -> 53.995999999999995).
+            # Preserve that already rounded minimum; margin and the optional
+            # strict budget were checked above and are checked again below.
+            q = floor
         if q * px > room * 1.02:
             return 0.0
         if limit is not None and q * px > limit + 1e-9:
