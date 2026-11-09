@@ -1274,6 +1274,7 @@ class SetState:
     neg_win_gp: float = 0.0
     neg_win_gl: float = 0.0
     stage: Dict[str, Any] = field(default_factory=dict)             # stage_verdicts of the last evaluation
+    sample_counts: Optional[Dict[str, int]] = None  # eligible own closes at the scored clock; None means not measured
     proc_replayed: bool = False     # proc comes from a replay pass (else processed_stream derives it from the held tape)
     last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
@@ -2126,6 +2127,7 @@ class SetBook:
                     st.base_short_gp = st.base_short_gl = st.main_short_gp = st.main_short_gl = 0.0
                     st.base_min_gp = st.base_min_gl = st.main_min_gp = st.main_min_gl = 0.0
                     st.base_min_ok = st.base_long_ok = st.base_short_ok = False
+                    st.sample_counts = None
                     for key in ("gate_pf_old", "gate_pf_new", "main_short_win", "neg_win", "neg_win_gp", "neg_win_gl",
                                 "last15_pf", "last15_n", "last15_r", "last25_avg_r", "last25_n", "last25_avg_pnl",
                                 "max_dd_s", "avg_dd_s", "dd_episodes", "wins", "gp", "gl", "wr", "expectancy",
@@ -3863,7 +3865,8 @@ class SetBook:
         gate = last_n_cost_pf(tape, w.base_long, self.cost_pct, scan_all=False)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
-        win = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None][-w.base_long:]
+        base_nets = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None]
+        win = base_nets[-w.base_long:]
         half = len(win) // 2
         if half >= 1:
             def _pf(v: List[float]) -> float:
@@ -3874,16 +3877,17 @@ class SetBook:
             st.gate_pf_old = st.gate_pf_new = 0.0
         st.gate_gp = sum(x for x in win if x > 0)
         st.gate_gl = -sum(x for x in win if x < 0)
-        sw = win[-w.base_short:] if w.base_short else []
+        sw = base_nets[-w.base_short:] if w.base_short else []
         st.base_short_n = len(sw)
         st.base_short_gp, st.base_short_gl = sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)
         st.base_short_pf = round(pf_of(st.base_short_gp, st.base_short_gl), 4)
-        mw = win[-self.base_min_n:] if self.base_min_n else []
+        mw = base_nets[-self.base_min_n:] if self.base_min_n else []
         st.base_min_n = len(mw)
         st.base_min_gp, st.base_min_gl = sum(x for x in mw if x > 0), -sum(x for x in mw if x < 0)
         st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
                                                     and sign_ok(mw, self.base_min_positive, self.base_min_both, self.base_min_avg))
         m_, r_, q_, short_n = self._streams(st, now=anchor, before=before)  # paper stages use the same decision boundary
+        st.sample_counts = {"base": len(base_nets), "main": len(m_), "real": len(r_), "realNeg": len(q_)}
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack, st))
         st.stage = v
         st.main_short_win = short_n
@@ -4601,7 +4605,7 @@ class SetBook:
         neg_in = [x for x in base_only if sv(x).get("neg")]
         windows = {
             "baseLong": window_row(True, self.gate_window, allsets, [x for x in allsets if x.base_long_ok], "gate_gp", "gate_gl", "gate_n"),
-            "baseShort": window_row(bool(self.base_short), self.base_short, allsets, [x for x in allsets if x.base_short_ok], "base_short_gp", "base_short_gl", "base_short_n"),
+            "baseShort": window_row(any(self.win(x).base_short > 0 for x in allsets), self.base_short, allsets, [x for x in allsets if x.base_short_ok], "base_short_gp", "base_short_gl", "base_short_n"),
             "baseMinimal": window_row(bool(self.base_min_n), self.base_min_n, allsets, [x for x in allsets if x.base_min_ok], "base_min_gp", "base_min_gl", "base_min_n", coordination=True),
             "mainLong": window_row(self.main_on, self.main_n, base_only, [x for x in base_only if sv(x).get("main")], "main_gp", "main_gl", "main_n"),
             "mainShort": window_row(self.main_on and self.short_on, list(self.short_windows), base_only, [x for x in base_only if sv(x).get("short")],
@@ -4629,6 +4633,31 @@ class SetBook:
         windows["mainShort"]["chosen"] = chosen          # how many Base-passing Sets run each short window (the Set's own pick among the candidates)
         windows["baseMinimal"]["mode"] = ("avg" if self.base_min_avg else "") + ("both" if self.base_min_both else ("positive" if self.base_min_positive else "negative"))
         windows["mainMinimal"]["mode"] = ("avg" if self.main_min_avg else "") + ("both" if self.main_min_both else ("positive" if self.main_min_positive else "negative"))
+        # Full requested N is a count diagnostic, independent of PF, warm-up
+        # waivers and available-window admission. Include unmeasured and empty
+        # Sets in the stage population; never borrow a sibling's closes.
+        sample_specs = {
+            "baseLong": (allsets, "base", lambda st: self.win(st).base_long),
+            "baseShort": (allsets, "base", lambda st: self.win(st).base_short),
+            "baseMinimal": (allsets, "base", lambda st: self.base_min_n),
+            "mainLong": (base_only, "main", lambda st: self.win(st).main_n),
+            "mainShort": (base_only, "main", lambda st: st.main_short_win or self.win(st).main_n),
+            "mainMinimal": (base_only, "main", lambda st: self.main_min_n),
+            "negative": (base_only, "main", lambda st: max(self.win(st).neg_windows, default=0)),
+            "real": (mp, "real", lambda st: self.win(st).real_n),
+            "realNeg": (neg_in, "realNeg", lambda st: self.win(st).real_neg_n),
+        }
+        for key, (population, source, requested) in sample_specs.items():
+            enabled = [st for st in population if windows[key]["on"] and requested(st) > 0]
+            measured = [st for st in enabled if st.sample_counts is not None]
+            full = sum(st.sample_counts.get(source, 0) >= requested(st) for st in measured)
+            windows[key]["samples"] = {
+                "population": len(enabled), "full": full, "insufficient": len(measured) - full,
+                "unavailable": len(enabled) - len(measured), "disabled": len(population) - len(enabled),
+                "pct": round(100.0 * full / len(enabled), 2) if enabled and measured else None,
+                "basis": "full-requested-window", "at": max((st.score_at for st in measured), default=None),
+                "oldestAt": min((st.score_at for st in measured), default=None),
+            }
         # stages: `base` is the end figure (the Sets that pass Base and Main, pooled over their Base windows), `baseOnly` the Base gate
         # alone; `main` the Main PF-passing Sets over their Main long windows; `mainAllLanes` the final Sets including Negative-lane
         # bypasses; `processed` the Main Sets (orders opened while

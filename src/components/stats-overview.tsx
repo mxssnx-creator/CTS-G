@@ -204,18 +204,19 @@ function StagesCard({ live }: { live: LiveStats | null | undefined }) {
 }
 
 /** Every last-N window on its own: the Sets passing that window alone, and the pooled PF and order count of the orders it reads. */
-function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
+export function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
   const rows = windowFigures(live?.sets?.pfBase);
   if (!rows.length) return null;
   return (
-    <div className="mt-4">
-      <div className="mb-1 font-mono text-[11px] text-muted">Last-N windows, each judged on its own (a stage passes when all of its windows do)</div>
-      <table className="w-full text-sm" data-testid="window-figures">
+    <div className="mt-4 overflow-x-auto">
+      <div className="mb-1 font-mono text-[11px] text-muted">Last-N windows · full samples and passing PF are separate. Negative requires all configured dip windows for the sample count; Main short uses its selected N.</div>
+      <table className="w-full min-w-[40rem] text-sm" data-testid="window-figures">
         <thead className="font-mono text-[11px] text-muted">
           <tr>
             <th className="pb-2 text-left font-medium">Window</th>
             <th className="pb-2 text-right font-medium">Setting</th>
             <th className="pb-2 text-right font-medium" title="Sets judged by this window's stage">Judged</th>
+            <th className="pb-2 text-right font-medium" title="Full requested N in this Set's own tape, including losing windows. Empty and unmeasured Sets remain in the denominator.">Enough samples</th>
             <th className="pb-2 text-right font-medium">Pass</th>
             <th className="pb-2 text-right font-medium" title="Share of the Sets its stage judges">% of judged</th>
             <th className="pb-2 text-right font-medium" title="Net gains over net losses of the samples this window reads, over the Sets that pass it">PF</th>
@@ -228,6 +229,10 @@ function WindowsTable({ live }: { live: LiveStats | null | undefined }) {
               <td className="py-1.5">{r.stage} · {r.label}{r.chosen ? <span className="ml-2 text-muted">({r.chosen})</span> : null}</td>
               <td className="py-1.5 text-right">{r.setting}</td>
               <td className="py-1.5 text-right">{r.on ? r.pop : "—"}</td>
+              <td className="py-1.5 text-right">{(() => {
+                const s = live?.sets?.pfBase?.windows?.[r.key]?.samples;
+                return !r.on ? "Disabled" : !s || s.pct == null ? "Unavailable" : `${s.full}/${s.population} (${s.pct.toFixed(1)}%)`;
+              })()}</td>
               <td className="py-1.5 text-right">{r.on ? r.sets : "—"}</td>
               <td className="py-1.5 text-right">{r.on ? `${r.pct.toFixed(1)}%` : "—"}</td>
               <td className={`py-1.5 text-right ${r.pf === null ? "" : r.pf >= 1.1 ? "text-primary" : r.pf < 1 ? "text-danger" : ""}`}>{!r.on ? "Disabled" : live?.sets?.pfBase?.windows?.[r.key]?.role === "coordination" ? "Sign condition" : evidencePfText(live?.sets?.pfBase?.windows?.[r.key], r.orders)}</td>

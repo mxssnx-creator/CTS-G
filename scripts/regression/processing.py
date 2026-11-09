@@ -1365,17 +1365,17 @@ def real_gate_is_per_set_at_the_base_minimum_pf():
         return s20.gate_n, s20.main_n, b20.gate_reason(s20)
     out["20 orders, Real N 30"] = short_tape(True)                       # the strict rule: the window must hold its 30 orders
     out["20 orders, Real N 30, available"] = short_tape(False)           # the default: judged on the 20 it has
-    floor3 = _book(n_syms=1, bars=300, mainGateN=3)                        # an N under the floor is read as 10
+    floor3 = _book(n_syms=1, bars=300, mainGateN=3)                        # explicitly configured low windows are preserved
     out["Real N 3"] = floor3.main_n
     b2, st2, _ = judged(True, bad)
     pool_off = [x.id for x in judged(False, bad)[0].valid_for(st2.pack, "base")]
     pool_on = [x.id for x in b2.valid_for(st2.pack, "base")]
     snap = judged(True, good)[0].snapshot()["pfBase"]
     ok = (out["boundary 1.25"] == "" and out["just under"] == "main" and out["bad last 12"] == "main" and out["bad, Real off"] == ""
-          and out["min PF 1.5 moves Real too"] in ("pf<min", "main") and out["N=8"][0] == 10 and before == after
+          and out["min PF 1.5 moves Real too"] in ("pf<min", "main") and out["N=8"][0] == 8 and before == after
           and out["20 orders, Real N 30"][0] == 20 and out["20 orders, Real N 30"][1] < 30 and out["20 orders, Real N 30"][2] == "main"
           and out["20 orders, Real N 30, available"][2] == ""
-          and out["Real N 3"] == 10
+          and out["Real N 3"] == 3
           and st2.id in pool_off and st2.id not in pool_on and "main" in snap and "real" in snap and "baseOnly" in snap)
     return ok, f"reasons {out}; other Set left it alone={before == after}; pool off/on holds the Set={st2.id in pool_off}/{st2.id in pool_on}; pfBase keys {sorted(snap)[:6]}"
 

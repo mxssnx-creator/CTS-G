@@ -221,7 +221,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     pp, net values w), their count and PF (rounded as last_n_cost_pf does), the drawdown time over them, both halves, and the rank inputs."""
     lb = book.lookback * 60.0
     wn = book.win(st)
-    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, book.deact_n))
+    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, wn.base_short, book.base_min_n, book.deact_n))
     txa = tape_source(tapes, st.idx, now, lb).by_set[st.idx][0]
     n_all = bisect.bisect_left(txa, now) - bisect.bisect_left(txa, now - lb)     # SetState.n: every order in the lookback
     cf = tapes.cf
@@ -257,7 +257,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
         return g / l_ if l_ > 0 else (99.0 if g > 0 else (1.0 if len(v) else 0.0))
     h = n // 2
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
-    return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
+    return {"w": w, "coord": pp, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
             "risk_ok": not book.stop_cap_exceeded(st),
             "floor": book.floor_for(wn.base_long, st.pack, st), "floor_short": book.floor_for(wn.base_short, st.pack, st), "cf": cf,
             "base_long": wn.base_long, "base_short": wn.base_short}
@@ -274,12 +274,12 @@ def _long_ok(book, e: Dict[str, Any]) -> bool:
 
 def _short_ok(book, e: Dict[str, Any]) -> bool:
     bs = e.get("base_short", book.base_short)
-    sw = [x - e["cf"] for x in e["w"][-bs:]]
+    sw = [x - e["cf"] for x in e.get("coord", e["w"])[-bs:]]
     return len(sw) >= (bs if getattr(book, "stage_full", False) else 1) and round(se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)), 4) + 1e-9 >= e["floor_short"]
 
 
 def _min_ok(book, e: Dict[str, Any]) -> bool:
-    mw = [x - e["cf"] for x in e["w"][-book.base_min_n:]]
+    mw = [x - e["cf"] for x in e.get("coord", e["w"])[-book.base_min_n:]]
     return len(mw) >= (book.base_min_n if getattr(book, "stage_full", False) else 1) and se.sign_ok(mw, book.base_min_positive, getattr(book, "base_min_both", False), getattr(book, "base_min_avg", False))
 
 
@@ -324,12 +324,13 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
         return sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
     out: Dict[str, Optional[Tuple[bool, float, float, int]]] = {k: None for k in ("baseLong", "baseShort", "baseMinimal", "mainLong", "mainShort", "mainMinimal", "negative", "real", "realNeg")}
     nets_w = [x - cf for x in e["w"]]
+    nets_coord = [x - cf for x in e["coord"]]
     out["baseLong"] = (_long_ok(book, e),) + sums(nets_w) + (len(nets_w),)
     if e.get("base_short", book.base_short):
-        sw = nets_w[-e.get("base_short", book.base_short):]
+        sw = nets_coord[-e.get("base_short", book.base_short):]
         out["baseShort"] = (_short_ok(book, e),) + sums(sw) + (len(sw),)
     if getattr(book, "base_min_n", 0):
-        mw = nets_w[-book.base_min_n:]
+        mw = nets_coord[-book.base_min_n:]
         out["baseMinimal"] = (_min_ok(book, e),) + sums(mw) + (len(mw),)
     base_pass = out["baseLong"][0] and (out["baseShort"] is None or out["baseShort"][0])
     if not base_pass or not (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
