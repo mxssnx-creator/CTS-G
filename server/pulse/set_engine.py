@@ -841,9 +841,11 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     real_loss_ok = negative_filter_ok(real, P.negative_filter)
     r_ok = r_ok and real_loss_ok
     q_ok, q_pf, q_n = last_ok(realneg, P.real_neg_n or P.real_n)
+    realneg_loss_ok = negative_filter_ok(realneg, P.negative_filter)
+    q_ok = q_ok and realneg_loss_ok
     main_pass = (m_ok and s_ok and k_ok) if P.main_on else True
     return {"main": m_ok, "main_pf": m_pf, "main_n": m_n, "short": s_ok, "short_pf": s_pf, "short_n": s_n, "short_win": short_n,
-            "minimal": k_ok, "minimal_n": k_n, "neg": neg, "mainLossFilter": main_loss_ok, "realLossFilter": real_loss_ok,
+            "minimal": k_ok, "minimal_n": k_n, "neg": neg, "mainLossFilter": main_loss_ok, "realLossFilter": real_loss_ok, "realNegLossFilter": realneg_loss_ok,
             "real": r_ok, "real_pf": r_pf, "real_n": r_n, "realneg": q_ok, "realneg_pf": q_pf, "realneg_n": q_n,
             "pos": main_pass and (r_ok if P.real_on else True), "negl": neg and (q_ok if P.real_on else True)}
 

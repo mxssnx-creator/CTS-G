@@ -72,6 +72,11 @@ def full_base_and_negative_windows():
     own=[.02,.02,.02,-.001]
     v=stage_verdicts(own,own,[],3,replace(p,main_on=True,main_n=3,short_on=False,real_n=3,negative_filter=policy))
     assert v['main_pf']>1 and not v['pos'] and not v['mainLossFilter']
+    negative_p=replace(p,neg_on=True,neg_windows=(1,),real_on=True,real_n=3,negative_filter=policy)
+    recovery=stage_verdicts([-.01],[],own,3,negative_p)
+    assert recovery['neg'] and recovery['realneg_pf']>1 and not recovery['negl'] and not recovery['realNegLossFilter']
+    # The negative Main trigger is intentional. Only its own Real-negative closes can clear that branch's veto.
+    assert stage_verdicts([-.01],[],[.01,.01,.01],3,negative_p)['negl']
     assert negative_filter_ok(own,negative_filter({'windows':[1,3],'mode':'all'}))
     assert not negative_filter_ok([.02,float('nan'),.02],policy)
     assert not negative_filter_ok([.02],policy)
