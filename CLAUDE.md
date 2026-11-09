@@ -2,6 +2,14 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-09, post-Base / Block follow-up:** preserve actual later losses even
+  when qualification PF was high. Block now honors explicit range floors,
+  counts partial targets once, weights add cash by entry notional, includes
+  actual base fees when complete, and ignores unverified closes in its lifecycle.
+  Fixed-target adds require positive remaining net room. Replay preserves both
+  valid parent lanes. The 52-case offline sensitivity found no profitable preset;
+  see `docs/verification/block-postbase-20261109.md`. No connection was started.
+
 - **2026-11-09, later request:** Lower Micro qualification while remaining positive. The explicit TP-range floor is 1.01 (`minPfByRange.micro`) across its stages; the window-size `minPfMicro` control is a different policy. This requested threshold is not evidence of profitable future executions or an account start.
 
 - **2026-11-09, latest request:** Micro qualification first, then 80 symbols and the lowest volume factor (0.05) for a 3 USD test account. This supersedes the 120-symbol/factor-1 preference below; it is not evidence of an account start. Preserve the distinction between strategy qualification, strict funded-size feasibility and verified venue execution. Public fee/lot quotes are not authenticated account evidence. The new Micro study is offline and never starts a connection or changes a production preset.

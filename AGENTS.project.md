@@ -1,5 +1,11 @@
 # CTS-G project instructions
 
+The latest priority is post-Base PF through execution and correct Block behavior.
+Keep selected-window qualification separate from later settled results, including
+all losses. See `docs/verification/block-postbase-20261109.md` for the Block
+floor, partial-fill, fees, notional weighting, lane and fixed-target repairs.
+The 52-case offline sensitivity did not establish a profitable Block preset.
+
 The owner's latest requested x01 settings (2026-11-09) are **80 symbols**
 (`symbolCap: 80`), the **lowest volume factor** (currently `volumeFactor: 0.05`),
 and a **3 USD test account**, with Micro qualification required first. These

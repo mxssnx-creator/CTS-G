@@ -130,7 +130,28 @@ def record_pf(rec: Sequence[float]) -> float:
 
 def threshold(cfg: BlockCfg, floor: float, fired_ratio: float) -> float:
     """The PF the stack this count would create must clear: the parent Set's floor, raised by the volume the stack carries (block_engine's formula)."""
-    return max(float(floor), calculate_block_minimum_profit_factor(float(floor), max(PF_RATIO_MIN, min(PF_RATIO_MAX, cfg.pf_ratio)), fired_ratio))
+    # The Set's explicit range/step floor is authoritative. The legacy BlockBook
+    # still uses its global minimum; it must not silently override this link.
+    return max(float(floor), calculate_block_minimum_profit_factor(float(floor), max(PF_RATIO_MIN, min(PF_RATIO_MAX, cfg.pf_ratio)), fired_ratio, minimum_pf=1.0))
+
+
+def base_return_contribution(net_return: float, entry_price: float, quantity_ratio: float, base_entry: float) -> float:
+    """An add's cash result per unit of ORIGINAL base entry notional.
+
+    Ratios size quantities, not notionals. An add at a different entry price
+    therefore contributes net_return * qty_ratio * add_entry / base_entry.
+    """
+    return net_return * quantity_ratio * entry_price / base_entry
+
+
+def target_covers_cost(entry: float, target: float, side: int, cost_fraction: float) -> bool:
+    """A fixed-target add needs positive modeled net room even at its target.
+
+    This is a feasibility bound, not a forecast that the target will be reached.
+    Exit/trailing lanes that ignore a fixed TP must not use this bound.
+    """
+    return (all(math.isfinite(v) for v in (entry, target, cost_fraction)) and entry > 0 and target > 0
+            and (target / entry - 1) * side - cost_fraction > 1e-12)
 
 
 def count_passes(cfg: BlockCfg, n: int, records: Iterable[Optional[Sequence[float]]], executed: Iterable[Optional[Sequence[float]]], floor: float,
@@ -180,8 +201,8 @@ def carried_scale(cfg: BlockCfg, life: Dict[str, Any]) -> float:
 
 
 def life_after_close(cfg: BlockCfg, life: Dict[str, Any], parent_net: float, highest_fired: int) -> Dict[str, Any]:
-    """Update a relation's lifecycle at a parent's close. parent_net is the whole parent's net result in V0 (the base position plus its adds' ratios times their
-    nets). A net loss raises the carried level to the highest count the parent fired; the relation's net accumulates; at or above zero the level resets
+    """Update a relation's lifecycle at a parent's close. parent_net is the base plus Block cash result divided by that parent's original base entry notional.
+    This accumulates normalized returns, not wallet cash across differently sized parents. A net loss raises the carried level to the highest count the parent fired; at or above zero the level resets
     and `pause_steps` parents are paused. A paused relation counts a parent down."""
     out = dict(life)
     if not cfg.carry:

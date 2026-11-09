@@ -267,7 +267,7 @@ MUTATIONS = [
     ("min PF: the 1.05 floor is dropped",
      "position_cost.py", "    return max(MIN_PF_FLOOR, x)", "    return x"),
     ("min PF: Block falls under the floor at a small volume ratio",
-     "block_engine.py", "    return max(MIN_PF_FLOOR, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)", "    return 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment"),
+     "block_engine.py", "    return max(minimum_pf, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)", "    return 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment"),
     ("stage: the Base short window is skipped in the chain",
      "set_engine.py", "        if bs:\n            t0 = e - bs", "        if False:\n            t0 = e - bs"),
     ("stage: the Base short window does not gate",

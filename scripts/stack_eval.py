@@ -45,6 +45,24 @@ def pf(vals: Sequence[float]) -> Optional[float]:
     return round(gp / gl, 3) if gl > 0 else (99.0 if gp > 0 else None)
 
 
+def qualified_parent_lanes(book, tapes, st, now: float) -> Tuple[str, ...]:
+    """All currently qualified paper lanes of this parent, not the preferred one.
+
+    Existing parents retain their lane when both pass. Ranking a new entry must
+    not silently revoke Block/DCA eligibility for a valid Negative parent.
+    """
+    import stage_eval as sg
+    import set_engine as se
+    if not sg.gate_base(book, tapes, st, now)[0]:
+        return ()
+    if not (book.main_on or book.neg_on or book.realst_on):
+        return ("pos",)
+    ch, nets = sg.chain_at(book, tapes, st, now)
+    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]],
+                          [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
+    return tuple(lane for lane, ready in (("pos", v["pos"]), ("neg", v["negl"])) if ready)
+
+
 def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int, hours: Sequence[float]) -> Dict[str, Any]:
     """events: (exit t, net fraction, weight). PF, net and max drawdown of the weighted results; hours with a positive net."""
     vals = [n * w for _, n, w in events]
@@ -323,19 +341,18 @@ def main() -> int:
     # ---- helpers shared by Block and DCA: the parent's Set still valid on its lane, its Axis allowing, at a moment inside the parent ------------------
     allow_coord = coord_for({k: (True, v[1]) for k, v in {"last": (True, 4), "prev": (True, 12), "cont": (True, 8), "pause": (True, 8)}.items()}, True)
     no_axis_coord = coord_for(off, True)
-    valid_cache: Dict[Tuple[int, float], str] = {}
+    valid_cache: Dict[Tuple[int, float], Tuple[str, ...]] = {}
 
-    def set_lane_at(st, now: float) -> str:
+    def set_lanes_at(st, now: float) -> Tuple[str, ...]:
         k = (st.idx, now)
         if k not in valid_cache:
             auto.apply(book, float(int(now // 3600) * 3600))
-            ok, _key, _n, _pf = sg.gate_metrics(book, tapes, st, now)
-            valid_cache[k] = ok if isinstance(ok, str) else ("pos" if ok else "")
+            valid_cache[k] = qualified_parent_lanes(book, tapes, st, now)
         return valid_cache[k]
 
     def parent_ok(r, now: float, coord) -> bool:
         st = by_id[r["set"]]
-        if set_lane_at(st, now) != r["lane"]:
+        if r["lane"] not in set_lanes_at(st, now):
             return False
         if coord is None:
             return True
@@ -525,6 +542,13 @@ def main() -> int:
                 if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):
                     continue
                 lvl = m["hits"][n - 1][2]
+                from set_engine import lane_honors_tp
+                honor_tp = lane_honors_tp(m["st"].kind)
+                honor_tp = bool(getattr(book, "hist_honor_tp", True)) if honor_tp is None else honor_tp
+                if honor_tp:
+                    target = m["entry"] * (1 + m["side"] * book.lane_fracs(m["st"])[1])
+                    if not br.target_covers_cost(lvl, target, m["side"], cf):
+                        continue
                 net = (m["exit"] - lvl) / lvl * m["side"] - cf
                 m["fired"][n] = net
                 continue
@@ -532,10 +556,11 @@ def main() -> int:
             add_part = 0.0
             for n, net in m["fired"].items():
                 ratio = cfg.target_ratio(n)
-                events.append((float(r["t"]), net, ratio * m["scale"]))
-                add_nets.append(net * ratio * m["scale"])
+                weight = br.base_return_contribution(1.0, m["hits"][n - 1][2], ratio, m["entry"])
+                events.append((float(r["t"]), net, weight * m["scale"]))
+                add_nets.append(net * weight * m["scale"])
                 adds += 1
-                add_part += ratio * net
+                add_part += weight * net
             events.append((float(r["t"]), float(r["net"]), m["scale"]))
             parent_net = float(r["net"]) + add_part
             highest = max(m["fired"]) if m["fired"] else 0
