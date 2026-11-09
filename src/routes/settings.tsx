@@ -2234,7 +2234,7 @@ function PfWindowControls({
           }} />
         {overlay.minPfByRange?.micro != null ? <Slider
           label="Micro range · minimum PF"
-          value={overlay.minPfByRange.micro} min={1.001} max={2} step={0.001}
+          value={overlay.minPfByRange.micro} min={1.001} max={2} step={0.001} digits={3}
           hint="One positive PF floor for Micro TP steps 2–3 across Base, Main, Real and their strategy gates. PF 1.000 is break-even after modeled costs."
           onChange={(value) => patch("minPfByRange", { ...overlay.minPfByRange, micro: value })} /> : null}
       </> : null}
@@ -2594,6 +2594,7 @@ function Slider({
   max,
   step,
   unit = "",
+  digits = 2,
   hint,
   onChange,
 }: {
@@ -2603,6 +2604,7 @@ function Slider({
   max: number;
   step: number;
   unit?: string;
+  digits?: number;
   hint?: string;
   onChange: (n: number) => void;
 }) {
@@ -2617,7 +2619,7 @@ function Slider({
             min={min}
             max={max}
             step={step}
-            value={Number.isInteger(step) && step >= 1 ? value : Number(value.toFixed(step < 0.05 ? 2 : 2))}
+            value={Number.isInteger(step) && step >= 1 ? value : Number(value.toFixed(digits))}
             onChange={(e) => {
               const n = Number(e.target.value);
               if (!Number.isFinite(n)) return;
