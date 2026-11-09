@@ -107,7 +107,7 @@ def naive_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     for k in range(n):
         entry = ents[k]
         idx = _closed(ts, entry, P.lookback_s, P.base_long)
-        if len(idx) < P.gate_min:
+        if len(idx) < (P.base_long if full else P.gate_min):
             continue
         if round(_pf([nets[j] for j in idx]), 4) + 1e-9 < P.floor_for(P.base_long):
             continue

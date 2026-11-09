@@ -109,6 +109,9 @@ def _symbol_job(args):
     # the rest after a winning close (overlay pauseMode / pausePack): the engine's own plan, chosen only from earlier results
     plan = b._pause_plan(s, bars, float(t0), warm, len(bars), cfg, dirs, confs, cands, acc)
     for st in b.by_idx:
+        if not b.symbol_allows(st.pack, s):
+            out[st.idx] = (array("i"), array("i"), array("d"))
+            continue
         lane = se.SetLane(st, s)
         sel_pause = b._lane_pause(lane, st.pack, plan, st.side)
         trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
@@ -262,7 +265,8 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
 
 def _long_ok(book, e: Dict[str, Any]) -> bool:
     """The Base long window on its own: orders, PF, drawdown time and (when asked) the consistency of both halves."""
-    ok = e["risk_ok"] and e["n"] >= min(book.gate_min, e.get("base_long", book.gate_window)) and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
+    required = e.get("base_long", book.gate_window) if book.stage_full else min(book.gate_min, e.get("base_long", book.gate_window))
+    ok = e["risk_ok"] and e["n"] >= required and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
     if ok and book.consistency_pf > 0 and e["n"] >= 2:
         ok = min(e["old"], e["new"]) + 1e-9 >= book.consistency_pf
     return ok
@@ -446,7 +450,7 @@ def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
     floor = book.floor_for(wn.base_long, st.pack, st)
     out: List[float] = []
     for k in range(e - 1, lo - 1, -1):
-        if se.processed_flag(tx, nets, gpre, lpre, te[k], wn.base_long, min(book.gate_min, wn.base_long), floor, book.max_dd_s, lb, lo,
+        if se.processed_flag(tx, nets, gpre, lpre, te[k], wn.base_long, book.base_need(st), floor, book.max_dd_s, lb, lo,
                              book.consistency_pf):
             out.append(nets[k])
             if len(out) >= n:
@@ -702,7 +706,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if i < w:
                     continue
                 signals = sorted(((p, confs[p][i], dirs[p][i]) for p in book.packs
-                                  if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
+                                  if book.symbol_allows(p, s) and dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
                 if not signals:
                     continue
                 if not refresh_s and ranked_t != entry_t:

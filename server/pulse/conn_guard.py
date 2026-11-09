@@ -22,6 +22,10 @@ PINNED = {
 }
 TRUE_WORDS = ("1", "true", "yes")
 FALSE_WORDS = ("0", "false", "no")
+BINGX_PRICE_STREAMS = {
+    "https://open-api.bingx.com": "wss://open-api-swap.bingx.com/swap-market",
+    "https://open-api-vst.bingx.com": "wss://vst-open-api-ws.bingx.com/swap-market",
+}
 
 
 class ConnGuardError(RuntimeError):
@@ -30,6 +34,16 @@ class ConnGuardError(RuntimeError):
 
 def _norm(url: str) -> str:
     return (url or "").strip().rstrip("/").lower()
+
+
+def resolve_bingx_price_stream(base: str, requested: str | None = None) -> str:
+    """Keep market prices on the same environment as authenticated REST calls."""
+    expected = BINGX_PRICE_STREAMS.get(_norm(base))
+    if expected is None:
+        raise ConnGuardError("BingX client requires a pinned REST endpoint")
+    if requested and _norm(requested) != _norm(expected):
+        raise ConnGuardError("BingX price stream contradicts its REST environment")
+    return expected
 
 
 def mode_of(base: str) -> str:

@@ -1,3 +1,5 @@
+import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
+import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -863,7 +865,7 @@ function SettingsPage() {
                 <Slider
                   label="Base · long window (last N orders)"
                   value={overlay.setGateWindow}
-                  min={10}
+                  min={1}
                   max={200}
                   step={1}
                   hint="default 50 · each Set on its own last N orders, at the minimum PF, with the drawdown time"
@@ -871,11 +873,11 @@ function SettingsPage() {
                 />
                 <Slider
                   label="Base · short window (last N orders)"
-                  value={Math.min(overlay.setGateShortN, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
+                  value={Math.min(overlay.setGateShortN, Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)))}
                   min={0}
-                  max={Math.max(5, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
-                  step={5}
-                  hint={`the second Base window, 0 = off · at most ${Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)} with the long window ${overlay.setGateWindow} and the ratio below · default 25: best of the 24 h grid (scripts/base_window_grid.py)`}
+                  max={Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
+                  step={1}
+                  hint={`the second Base window, 0 = off · at most ${Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))} with the long window ${overlay.setGateWindow} and the ratio below · default 25: best of the 24 h grid (scripts/base_window_grid.py)`}
                   onChange={(v) => patch("setGateShortN", v)}
                 />
                 <Slider
@@ -925,7 +927,7 @@ function SettingsPage() {
                 <Slider
                   label="Main · long window (last N Main orders)"
                   value={overlay.mainGateN}
-                  min={10}
+                  min={1}
                   max={200}
                   step={1}
                   hint="default 25 · the first Main window, at the Base minimum PF"
@@ -1213,6 +1215,38 @@ function SettingsPage() {
                 <KV k="Min step" v={String(overlay.minStep)} />
                 <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>
+            </Card>
+          )}
+
+          {section === "block" && (
+            <Card title="Relate strategy" hint="Independent post-Base sizing policies. Twelve winning steps by default; a loss resets its relation. Stops must stay at or below half the TP distance after costs and minimum-distance adjustments.">
+              {overlay.relateConfigs.map((cfg, index) => {
+                const update = (change: Partial<RelateConfig>) => patch("relateConfigs", overlay.relateConfigs.map((c, i) => i === index ? { ...c, ...change } : c));
+                return <fieldset key={cfg.id} className="mb-5 rounded-xl border border-white/10 p-4">
+                  <legend className="px-2 text-sm font-medium">{cfg.id}</legend>
+                  <Grid>
+                    <Toggle label="Enable policy" on={cfg.enabled} onChange={enabled => update({ enabled })} />
+                    <Num label="Winning steps" value={cfg.steps} min={2} max={15} step={1} onChange={steps => update({ steps })} />
+                    <Num label="Increase ratio" value={cfg.ratio} min={.2} max={6} step={.2} onChange={ratio => update({ ratio })} />
+                    <Num label="Maximum SL / TP" value={cfg.maxSlRatio} min={.01} max={.5} step={.01} onChange={maxSlRatio => update({ maxSlRatio })} />
+                    <Num label="Policy stack ceiling" value={cfg.maxStack} min={1} max={8} step={.25} hint="Parallel policies share a total 8× ceiling, including Block and DCA." onChange={maxStack => update({ maxStack })} />
+                    <Num label="Minimum return PF" value={cfg.minPf} min={1.01} max={10} step={.01} onChange={minPf => update({ minPf })} />
+                    <Num label="Last-N parent closes" value={cfg.lastN} min={cfg.minTrades} max={250} step={1} onChange={lastN => update({ lastN })} />
+                    <Num label="Minimum parent closes" value={cfg.minTrades} min={60} max={cfg.lastN} step={1} onChange={minTrades => update({ minTrades })} />
+                    <label className="text-sm">Relation combination<select className="mt-1 block w-full rounded border p-2" value={cfg.mode} onChange={e => update({ mode: e.target.value === "additive" ? "additive" : "shared" })}><option value="shared">Shared average</option><option value="additive">Additive</option></select></label>
+                    {RELATE_SOURCES.map(source => <Toggle key={source} label={source} on={cfg.sources.includes(source)} onChange={on => {
+                      const sources = on ? [...cfg.sources, source] : cfg.sources.filter(s => s !== source);
+                      if (sources.length) update({ sources });
+                    }} />)}
+                  </Grid>
+                  {overlay.relateConfigs.length > 1 && <button className="mt-3 text-sm underline" onClick={() => patch("relateConfigs", overlay.relateConfigs.filter((_, i) => i !== index))}>Remove policy</button>}
+                </fieldset>;
+              })}
+              <button className="rounded border px-3 py-2 text-sm" disabled={overlay.relateConfigs.length >= 12} onClick={() => {
+                let n = 1; while (overlay.relateConfigs.some(c => c.id === `relate-${n}`)) n++;
+                patch("relateConfigs", [...overlay.relateConfigs, { ...structuredClone(DEFAULT_RELATE_CONFIG), id: `relate-${n}` }]);
+              }}>Add independent policy</button>
+              <p className="mt-3 text-xs opacity-70">Policies start disabled. Only confirmed owned parent closes build this live record; simulated or sibling wins cannot stand in for it. A passing window does not guarantee subsequent profit.</p>
             </Card>
           )}
 
@@ -2440,6 +2474,52 @@ function PauseChosen({ stats }: { stats: LiveStats | null }) {
   );
 }
 
+function LastNLaneEditor({value,onChange}:{value:LastNLane[];onChange:(value:LastNLane[])=>void}) {
+  const [error,setError]=useState("");
+  const update=(i:number,patch:Partial<LastNLane>)=>{
+    try { onChange(lastNLanes(value.map((p,k)=>k===i?{...p,...patch}:p)));setError(""); }
+    catch(e) { setError(e instanceof Error?e.message:"Invalid window settings"); }
+  };
+  const numbers=(text:string)=>text.split(/[,;\s]+/).filter(Boolean).map(Number);
+  return <details className="rounded border border-border p-3" data-testid="last-n-lane-editor">
+    <summary className="cursor-pointer text-sm">Independent Last-N profiles ({value.length || "global windows"})</summary>
+    <p className="my-2 text-xs text-muted">Each profile evaluates its own prior results. Changing a profile rebuilds its qualification history. Recent-loss filters pause new entries; held positions retain their exits.</p>
+    {value.map((p,i)=><details key={p.id} className="my-2 rounded border border-border p-2">
+      <summary className="cursor-pointer text-sm">{p.id} · {p.role}</summary>
+      <Grid>
+        <label className="text-xs">Role<select className="mt-1 block w-full rounded border border-border bg-bg p-2" value={p.role}
+          onChange={e=>update(i,{role:e.target.value as LastNLane['role']})}>
+          {['major','minor','independent','additional'].map(r=><option key={r}>{r}</option>)}
+        </select></label>
+        {([['baseLong','Base N',30],['baseShort','Base secondary N (0 = off)',15],['mainLong','Main N',20],['realN','Real N',12],['realNegN','Real negative N',12]] as const).map(([key,label,fallback])=>
+          <Slider key={key} label={label} value={p.lastN[key]??fallback} min={key==='baseShort'?0:1} max={200} step={1}
+            onChange={v=>update(i,{lastN:{...p.lastN,[key]:v}})} />)}
+        <CsvField label="Main short candidates" value={(p.lastN.mainShort??[5,10]).join(', ')} hint="1–200; limited by the configured short/long ratio"
+          onCommit={text=>update(i,{lastN:{...p.lastN,mainShort:numbers(text)}})} />
+        <CsvField label="Negative recovery windows" value={(p.lastN.negWindows??[5,10]).join(', ')} hint="1–200; the negative lane still needs its own positive Real PF"
+          onCommit={text=>update(i,{lastN:{...p.lastN,negWindows:numbers(text)}})} />
+        <Toggle label="Recent-loss filter" on={!!p.negativeFilter} onChange={on=>update(i,{negativeFilter:on?{windows:[3,5],mode:'all',maxPf:1}:null})} />
+        {p.negativeFilter && <>
+          <CsvField label="Loss windows" value={p.negativeFilter.windows.join(', ')} hint="1–200; complete own Main and Real windows required"
+            onCommit={text=>update(i,{negativeFilter:{...p.negativeFilter!,windows:numbers(text)}})} />
+          <label className="text-xs">Pause when<select className="mt-1 block w-full rounded border border-border bg-bg p-2" value={p.negativeFilter.mode}
+            onChange={e=>update(i,{negativeFilter:{...p.negativeFilter!,mode:e.target.value as 'any'|'all'}})}>
+            <option value="any">Any loss window is negative</option><option value="all">All loss windows are negative</option>
+          </select></label>
+          <Slider label="Negative PF threshold" value={p.negativeFilter.maxPf} min={0} max={1} step={.05}
+            onChange={v=>update(i,{negativeFilter:{...p.negativeFilter!,maxPf:v}})} />
+        </>}
+      </Grid>
+      <button type="button" className="mt-2 rounded border border-border px-2 py-1 text-xs" onClick={()=>onChange(value.filter((_,k)=>k!==i))}>Remove profile</button>
+    </details>)}
+    {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+    <button type="button" disabled={value.length>=8} className="mt-2 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" onClick={()=>{
+      let n=1;while(value.some(p=>p.id===`lane-${n}`))n++;
+      onChange([...value,{...structuredClone(DEFAULT_LAST_N_LANES[2]),id:`lane-${n}`}]);
+    }}>Add independent profile</button>
+  </details>;
+}
+
 function IndicationConfigEditor({
   value,
   onChange,
@@ -2473,7 +2553,7 @@ function IndicationConfigEditor({
               onCommit={(t) => set(i, { timeframes: t.split(/[,;\s]+/).filter(Boolean).map((x) => (x === "c" || x === "x" ? x : Number(x))) as IndicationConfig["timeframes"] })}
             />
             <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; trend T5 / B15 / M30; RSI regime RS5 / rs5 (dip); drawdown DR240 / dr240; recovery RC240 / rc240; VWAP VW240 / vw240; past PR480 / YD1440; average MA60 / ma60; I inverts. Upper case with the direction, lower case against it." onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
-            <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.5-3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
+            <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.25–3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
             <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
             <Slider label="TP step to" value={e.stepMax} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMax).toFixed(1)}%`} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
             <Slider label="Trailing arm from (0 = every arm)" value={e.trailStepMin ?? 0} min={0} max={TP_STEP_MAX} step={1} hint={e.trailStepMin ? `${tpPctOfStep(e.trailStepMin).toFixed(1)}%` : "every arm up to the TP step to"} onChange={(v) => set(i, { trailStepMin: v < 2 ? 0 : v, trailStepMax: v < 2 ? e.trailStepMax : Math.max(v, e.trailStepMax ?? 0) })} />
@@ -2495,6 +2575,7 @@ function IndicationConfigEditor({
               </select>
             </label>
           </Grid>
+          <LastNLaneEditor value={e.lastNLanes??[]} onChange={lastNLanes=>set(i,{lastNLanes})} />
           <div className="flex flex-wrap gap-3 font-mono text-xs">
             {SET_TYPES.map((t) => (
               <label key={t} className="flex items-center gap-1">

@@ -55,8 +55,8 @@ def trace_set(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float],
         g, l_ = gpre[e] - gpre[s0], lpre[e] - lpre[s0]
         long_pf = round(se.pf_of(g, l_), 4)
         o: Dict[str, Any] = {"k": k, "entry": entry, "exit": ts[k], "net": nets[k], "closed_before": e - s0, "base_long_pf": long_pf}
-        ok_flag = se.processed_flag(ts, nets, gpre, lpre, entry, P.base_long, P.gate_min, P.floor_for(P.base_long), P.max_dd_s, lb, 0, P.consistency)
-        if e - s0 < P.gate_min:
+        ok_flag = se.processed_flag(ts, nets, gpre, lpre, entry, P.base_long, (P.base_long if full else P.gate_min), P.floor_for(P.base_long), P.max_dd_s, lb, 0, P.consistency)
+        if e - s0 < (P.base_long if full else P.gate_min):
             o["base_stop"] = "orders"
         elif long_pf + 1e-9 < P.floor_for(P.base_long):
             o["base_stop"] = "long"

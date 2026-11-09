@@ -129,7 +129,7 @@ def minimum_order_count_off_judges_on_available_orders():
 
 def stage_short_window_judges_the_orders_it_has():
     """The Base short window (setGateShortN) is judged on the orders a Set has: a Set with 8 orders against a short window of 15 passes it at the
-    minimum PF (the long window already judges those orders), a PF under the minimum fails it, and with stageFullWindow it needs its 15 orders."""
+    minimum PF, a PF under the minimum fails it, and strict mode also needs the complete Base long window."""
     def reason(full, n, pf):
         b = SetBook()
         b.load(overlay(stagesEnabled=True, mainGateEnabled=False, realGateEnabled=False, mainNegEnabled=False, setGateShortN=15, setGateWindow=50,
@@ -139,20 +139,21 @@ def stage_short_window_judges_the_orders_it_has():
         st.base_short_n, st.base_short_pf = n, pf
         return b.gate_reason(st)
     avail, low, strict, full15 = reason(False, 8, 2.0), reason(False, 8, 1.0), reason(True, 8, 2.0), reason(True, 15, 2.0)
-    ok = avail == "" and low == "short" and strict == "short" and full15 == ""
-    return ok, f"8 orders: available={avail!r} PF 1.0={low!r}; strict 8 orders={strict!r}, strict 15 orders={full15!r}"
+    full50=reason(True,50,2.0)
+    ok = avail == "" and low == "short" and strict == "n<min" and full15 == "n<min" and full50 == ""
+    return ok, f"8 orders: available={avail!r} PF 1.0={low!r}; strict 8={strict!r}, 15={full15!r}, 50={full50!r}"
 
 
 def stage_windows_accept_one_and_two():
     """The ongoing (Real) window may be one result and the Negative windows the last one or two results (owner 2026-10-29): realGateN 1 is read as 1
-    (not raised to 3), mainNegWindows "1,2" and [2, 1] as (1, 2), a value under 1 as 1; Main long starts at 10."""
+    (not raised to 3), mainNegWindows "1,2" and [2, 1] as (1, 2), a value under 1 as 1; Main long starts at 1."""
     def load(**ov):
         b = SetBook()
         b.load(overlay(**ov))
         return b
     a, b2, c = load(realGateN=1, mainNegWindows="1,2"), load(realGateN=0, mainNegWindows=[2, 1, 2]), load(mainGateN=1)
     independent = load(setGateWindow=10, mainGateN=200)
-    ok = a.realst_n == 1 and a.neg_windows == (1, 2) and b2.realst_n == 1 and b2.neg_windows == (1, 2) and c.main_n == 10 and independent.main_n == 200
+    ok = a.realst_n == 1 and a.neg_windows == (1, 2) and b2.realst_n == 1 and b2.neg_windows == (1, 2) and c.main_n == 1 and independent.main_n == 200
     return ok, f"Real 1 -> {a.realst_n}, Negative '1,2' -> {a.neg_windows}; Real 0 -> {b2.realst_n}, [2,1,2] -> {b2.neg_windows}; Main static 1 -> {c.main_n}"
 
 
@@ -189,7 +190,7 @@ def main_short_windows_are_at_most_half_of_the_long_window():
            "no configured candidate under cap": shorts(mainGateN=20, mainShortWindows=[10, 15], mainShortMaxRatio=0.25),
            "legacy keys": shorts(mainGateN=25, mainShortWindows=None, mainShortMaxRatio=None, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
            "new key wins": shorts(mainGateN=25, mainShortWindows=[5, 10], mainAutoWindows=[5]) }
-    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (5,), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
+    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
             "no configured candidate under cap": (), "legacy keys": (5,), "new key wins": (5, 10)}
     bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
     bare.load({"mainGateN": 25, "mainShortWindows": [5, 10, 15]})
@@ -340,7 +341,8 @@ def base_minimal_window_positive_and_negative():
         "both: a win and a loss": reason(base + [W, L, W], setGateMinN=2, setGateMinMode="both"),
         "both: three, one differs": reason(base + [L, L, W], setGateMinN=3, setGateMinMode="both"),
         "two results, N 3, available": reason([W, W], setGateMinN=3, setGateMinMode="positive"),
-        "two results, N 3, full window": reason([W, W], setGateMinN=3, setGateMinMode="positive", stageFullWindow=True),
+        # Complete the primary Base window so this case isolates the secondary minimal-N rule.
+        "two results, N 3, full window": reason([W, W], setGateWindow=2, setGateMinN=3, setGateMinMode="positive", stageFullWindow=True),
         "stages off": reason(base + [L], setGateMinN=1, setGateMinMode="positive", stagesEnabled=False),
     }
     want = {"off by default": "", "+1 last win": "", "+1 last loss": "minimal", "+2 last win, loss before": "minimal", "+2 last two wins": "",
@@ -581,7 +583,7 @@ def base_long_ten_is_judged_on_its_own_windows():
     v = se.stage_verdicts([0.002, 0.002], [0.002], [], P.main_n, P)
     low = _book(setGateWindow=5)
     ok = (b.gate_window == 10 and b.base_short == 5 and b.gate_min <= 1 and not P.full_window and ch["main"][:1] == [1] and ch["real"][:1] == [2]
-          and v["pos"] and low.gate_window == 10)
+          and v["pos"] and low.gate_window == 5)
     return ok, (f"long {b.gate_window} short {b.base_short} (asked 10, capped at half) minimum orders {b.gate_min}; first Main order #{ch['main'][:1]}, first Real "
                 f"order #{ch['real'][:1]}; two closes valid on the lane={v['pos']}; long 5 asked -> {low.gate_window}")
 

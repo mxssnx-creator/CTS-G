@@ -64,6 +64,24 @@
   "prevPosMinCount": 8,
   "prevPosWindow": 25,
   "exitMinSamples": 8,
+  "relateConfigs": [
+    {
+      "id": "relate-12",
+      "enabled": false,
+      "steps": 12,
+      "ratio": 0.2,
+      "mode": "shared",
+      "sources": [
+        "config",
+        "symbol"
+      ],
+      "lastN": 250,
+      "minTrades": 60,
+      "minPf": 1.1,
+      "maxStack": 2,
+      "maxSlRatio": 0.5
+    }
+  ],
   "blockVolumeRatio": 1,
   "blockRiskPctOfBalance": 0,
   "manualCloseRestMin": 240,
@@ -153,6 +171,7 @@
   "shortRangeStepMin": 2,
   "shortRangeStepMax": 6,
   "shortRangeMinPf": 1.1,
+  "minSlDistancePct": 0.1,
   "trailMinSteps": 2,
   "trailMinLockPct": 0,
   "groupGate": false,
@@ -245,6 +264,9 @@
   "holdAutoMin": 10,
   "directionMode": "split",
   "minPfByStep": true,
+  "minPfByRange": {
+    "micro": 1.01
+  },
   "rankByLane": true,
   "setScratchEnabled": false,
   "tpRanges": {
@@ -255,6 +277,18 @@
     "long": true,
     "wide": true
   },
+  "setSlRatios": [
+    0.25,
+    0.5,
+    0.75,
+    1,
+    1.25,
+    1.5,
+    1.75,
+    2,
+    2.25,
+    2.5
+  ],
   "trailStepMax": 22,
   "trailSlRatios": [],
   "volumeByPack": {},
@@ -370,21 +404,5 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  },
-  "minSlDistancePct": 0.1,
-  "setSlRatios": [
-    0.25,
-    0.5,
-    0.75,
-    1.0,
-    1.25,
-    1.5,
-    1.75,
-    2.0,
-    2.25,
-    2.5
-  ],
-  "minPfByRange": {
-    "micro": 1.01
   }
 }
