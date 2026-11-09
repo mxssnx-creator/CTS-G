@@ -29,6 +29,7 @@ from fee_policy import cost_policy
 from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
 from position_cost import row_net_pnl_pct
 from coord_engine import Coordinator
+from relate_engine import RelateBook, MAX_STACK as RELATE_MAX_STACK
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules, trailing_enabled
 from position_cost import MIN_PF_FLOOR, MIN_VALIDATION_N, base_min_pf, window_n, last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt, sl_floor_frac
@@ -42,7 +43,7 @@ from conn_guard import ConnGuardError, mode_of, resolve_base
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
-BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
+BASE, _INITIAL_MODE = resolve_base(CONN_SHORT, env_base=os.environ.get("PULSE_BASE", ""))
 DIR = "/opt/grok-x01-pulse"
 STATS_PATH = os.path.join(DIR, f"stats-{CONN_SHORT}.json")
 TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
@@ -937,6 +938,8 @@ class Position:
     close_pending: dict = field(default_factory=dict)
     close_reason: str = ""
     control_fill_state: dict = field(default_factory=dict)  # cumulative quantities/notionals/fees by protective order ID
+    relate_receipt: dict = field(default_factory=dict)
+    relate_origin_qty: float = 0.0
 
 
 @dataclass
@@ -971,6 +974,7 @@ class Closed:
     fee_source: str = "configured-estimate"
     entry_slippage: float = 0.0
     exit_slippage: float = 0.0
+    relate_receipt: dict = field(default_factory=dict)
 
 
 class Pulse:
@@ -1095,6 +1099,7 @@ class Pulse:
             "blockWindow": 25,
         })
         self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
+        self.relate = RelateBook(path=BLOCK_PATH + ".relate.json")
         self.coord = Coordinator()
         self.indications = IndicationBook()
         self.dca = DcaBook()
@@ -2001,7 +2006,10 @@ class Pulse:
         ws_age = (time.time() - getattr(hub, "last_msg", 0)) if hub and getattr(hub, "last_msg", 0) else 99
         ws_ok = bool(getattr(hub, "ok", False) and ws_age < 4.0)
         covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0)
-        if ws_ok and covered >= max(8, len(SYMBOLS) - 2):
+        # A healthy stream only covers the current selection. It cannot discover
+        # or rank the universe, and must not freeze the alphabetical boot list.
+        universe_fresh = bool(self.universe) and time.time() - self.last_uni < UNIVERSE_EVERY
+        if ws_ok and covered >= max(8, len(SYMBOLS) - 2) and universe_fresh:
             return
         self.did_io = True
         r = self.api.public("/openApi/swap/v2/quote/ticker")
@@ -2704,6 +2712,10 @@ class Pulse:
 
     def max_range_prices(self, pos: Position) -> Tuple[float, float]:
         """Overall security SL/TP: widest of the order range and overlay max."""
+        if pos.relate_receipt and pos.relate_receipt.get("total", 0) > pos.relate_receipt.get("base", 0) + 1e-12:
+            # A Relate raise was admitted against this immutable Set stop; an outer
+            # control must not silently widen that recorded risk after sizing.
+            return self.security_prices(pos)
         sl_f, tp_f, sl_lo, sl_hi = self.opt_fracs(pos)
         sl_w = max(sl_f, sl_hi, float(self.sl_max), float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
         tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
@@ -3545,9 +3557,11 @@ class Pulse:
         except Exception:
             return None
 
-    def _scope_choice(self, pack: str, side: int = 0) -> Tuple[Any, str, str]:
+    def _scope_choice(self, pack: str, side: int = 0, symbol: str = "") -> Tuple[Any, str, str]:
         """Pick within the pack's allowed lanes (and, with a side, the signal's direction: a long signal is only ever judged by a long Set);
         another pack or a blocked positive lane cannot mask a valid alternative."""
+        if symbol and isinstance(self.sets, SetBook) and not self.sets.symbol_allows(pack, symbol):
+            return None, "", "symbol-lane"
         if isinstance(self.sets, SetBook) and getattr(self, "coord", None) is not None and any(ax.enabled for ax in self.coord.axes.values()):
             blocked = []
             def allows(st, lane):
@@ -3664,6 +3678,9 @@ class Pulse:
             return
         if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or sym in self.open:
             return
+        if any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
+               for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
+            return   # reconcile an uncertain Relate order before another admission
         if time.time() < self.cooldown.get(sym, 0):
             return
         if self.ignore_syms.get(sym, 0) > time.time():
@@ -3686,6 +3703,8 @@ class Pulse:
         qty = self.size_qty(c, px)
         if qty <= 0:
             return
+        relate_origin_qty = qty
+        relate_receipt = {}
         strict_budget = self.strict_entry_budget()
         notional = qty * px
         if notional > self.max_book_notional() * 1.02:
@@ -3697,7 +3716,7 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
-        chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction)   # keep the exact lane approved by its own Axis
+        chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction, symbol=sym)   # keep the exact lane approved by its own Axis
         if chosen is None and blocked_by:
             self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
             if time.time() - self.skip_log.get("scope", 0) > 40:
@@ -3803,6 +3822,28 @@ class Pulse:
             sl_check = float(self.sets.lane_fracs(chosen)[0]) if chosen else float(sl_pct_a)
         except Exception:
             sl_check = float(sl_pct_a)
+        relate = getattr(self, "relate", None)
+        if chosen and relate is not None and any(cfg["enabled"] for cfg in relate.configs):
+            from position_cost import tp_range_of
+            sl_r, tp_r = self.sets.lane_fracs(chosen)
+            sl_r = abs(px - self.round_px(c, px * (1 - direction * sl_r))) / px
+            tp_r = abs(px - self.round_px(c, px * (1 + direction * tp_r))) / px
+            identity = {"config": chosen.id, "symbol": sym, "side": side,
+                        "indication": str(chosen.pack) + ":" + str(chosen.tf),
+                        "strategy": str(chosen.kind), "coordination": "Main-Real",
+                        "range": tp_range_of(self.sets.step_bucket(chosen)), "lane": lane}
+            relate_receipt = relate.decide(identity, time.time(), sl_r, tp_r,
+                qualified=True, base=qty / relate_origin_qty)
+            requested = relate_origin_qty * relate_receipt["total"]
+            cap_n = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+            if strict_budget is not None:
+                cap_n = min(cap_n, strict_budget)
+            # Downward lot rounding: an exchange minimum cannot enlarge a Relate portion.
+            q = self.round_qty(c, min(requested, cap_n / px))
+            if q < self.min_order_qty(c, px) or q <= 0:
+                return
+            qty, notional = q, q * px
+            relate_receipt = relate.resized(relate_receipt, qty / relate_origin_qty)
         # leverage: always the contract's exchange maximum (owner 2026-11-03, leverageStopCap off by default). With leverageStopCap on, never so high that the
         # venue liquidates before the Set's stop (found live on x02: at 150x a short liquidated at +0.23 % with its stop at +0.45 %)
         cap = stop_leverage_cap(sl_check) if bool(getattr(self, "lev_stop_cap", False)) else 0
@@ -3834,6 +3875,10 @@ class Pulse:
         attach: Dict[str, str] = {}
 
         def _entry_body(order_qty, order_cid):
+            if relate_receipt:
+                r_sl, r_tp = self.sets.lane_fracs(chosen)
+                relate.reserve(order_cid, relate_receipt, relate_origin_qty,
+                    {"sl": r_sl, "tp": r_tp, "setId": set_id, "lane": lane})
             body = {
                 "symbol": sym,
                 "type": "MARKET",
@@ -3855,6 +3900,8 @@ class Pulse:
                 r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                 self.did_io = True
         if not self.ok(r):
+            if relate_receipt and not r.get("error") and r.get("code") != -1:
+                relate.release(cid)   # definite refusal; an unknown transport outcome stays reserved
             msg = str(r.get("msg") or "")
             m = re.search(r"maximum leverage[^\d]*(\d+)", msg, re.I)
             if m:
@@ -3902,6 +3949,8 @@ class Pulse:
                         self.did_io = True
                         msg = str(r.get("msg") or "")
             if not self.ok(r):
+                if relate_receipt and not r.get("error") and r.get("code") != -1:
+                    relate.release(cid)
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
                 low = str(msg or "").lower()
@@ -3991,7 +4040,14 @@ class Pulse:
             overall=True, close_position=True, ind_kind=ind_kind,
             base_entry=avg if chosen else 0.0, base_qty=filled if chosen else 0.0,
             set_hold_bars=(int(getattr(chosen, "hold_bars", 0) or self.sets.hist_time_bars) if chosen else 0),
+            relate_origin_qty=relate_origin_qty if relate_receipt else 0.0,
         )
+        if relate_receipt:
+            try:
+                pos.relate_receipt = relate.resized(relate_receipt, filled / relate_origin_qty)
+            except ValueError:
+                relate.error = "Relate fill exceeded captured sizing; raises disabled"
+                pos.relate_receipt = {**relate_receipt, "fillUnknown": True}
         fee, source = self.fill_cost(data, filled, avg, sym)
         pos.fee_maker, pos.fee_taker, _ = self.fee_schedule.rates(sym, c, time.time())
         pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
@@ -4005,7 +4061,8 @@ class Pulse:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
         self.open[sym] = pos
         self.owned_syms.add(sym)
-        self.save_open_book()
+        if self.save_open_book() and relate_receipt:
+            relate.release(cid)
         if cid:
             self.seen_fill_cids.add(cid)
         slip = abs(avg - px) / px if px > 0 else 0.0
@@ -4374,7 +4431,17 @@ class Pulse:
             net_pnl_pct=accounted["net_pct"] if accounted else None, base_net_pnl_pct=base_net,
             fees_usdt=accounted["fees"] if accounted else None, fee_source=pos.fee_source,
             entry_slippage=pos.entry_slippage, exit_slippage=pos.exit_slippage,
+            relate_receipt=pos.relate_receipt,
         )
+        if pos.relate_receipt and getattr(self, "relate", None) is not None:
+            try:
+                # Exactly one settled parent; partial closes and Block/DCA legs do not
+                # multiply Last-N observations. Unknown exits consume unknown evidence.
+                unit_return = base_net if base_net is not None else (accounted["net_pct"] if accounted else None)
+                self.relate.close(pos.relate_receipt, pos.client_id or pos.order_id, rec.t,
+                    None if skip_eval or pos.relate_receipt.get("fillUnknown") else unit_return, accepted=pos.ours, final=True)
+            except Exception:
+                self.relate.error = "Relate close persistence failed; raises disabled"
         if pos.set_id and getattr(self, "set_block", None) is not None:
             try:
                 self.set_block.close(pos, exit_px, rec.t, self.block, self.position_cost_pct, score=not skip_eval)
@@ -4938,6 +5005,11 @@ class Pulse:
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
         self.overlay = ov
+        if getattr(self, "relate", None) is not None:
+            try:
+                self.relate.configure(ov.get("relateConfigs"))
+            except ValueError as exc:
+                self.relate.error = str(exc)
         try:
             self.overlay_mtime = os.path.getmtime(OVERLAY_PATH)
         except Exception:
@@ -5625,6 +5697,8 @@ class Pulse:
             if row is None:
                 continue
             room = max(0.0, min(self.max_book_notional() - pos.qty * px, self.avail_notional(c)))
+            if pos.relate_receipt and pos.relate_origin_qty > 0:
+                room = min(room, max(0.0, RELATE_MAX_STACK * pos.relate_origin_qty - pos.qty) * px)
             # Total parent loss at its existing stop, fees included, when a risk budget is set; 0 (owner 2026-11-04) = no cap: the add is its count's ratio x
             # the parent's ORIGINAL base volume. Adds never move that stop, and a minimum lot cannot override a budget.
             risk_qty = block_risk_qty(self.block_risk_pct, self.equity, pos.side, px, pos.sl, pos.entry, pos.qty, cf)
@@ -5754,6 +5828,9 @@ class Pulse:
                     continue
                 qty = floor
             if qty <= 0:
+                continue
+            if pos.relate_receipt and pos.relate_origin_qty > 0 and pos.qty + qty > RELATE_MAX_STACK * pos.relate_origin_qty + 1e-12:
+                self.dca.skips += 1
                 continue
             if (pos.qty + qty) * px > self.max_book_notional() * 1.02:
                 self.dca.skips += 1
@@ -5980,11 +6057,11 @@ class Pulse:
         # A pack may qualify only on the opposite side of this signal. Cache
         # eligibility by pack AND direction for this cycle, never across cycles:
         # stage/Axis verdicts may change while the completed-bar signal is cached.
-        eligible: Dict[Tuple[str, int], bool] = {}
-        def can_enter(candidate):
-            key = (candidate[0], int(candidate[1]))
+        eligible: Dict[Tuple[str, int, str], bool] = {}
+        def can_enter(candidate, symbol):
+            key = (candidate[0], int(candidate[1]), symbol)
             if key not in eligible:
-                eligible[key] = self._scope_choice(key[0], side=key[1])[0] is not None
+                eligible[key] = self._scope_choice(key[0], side=key[1], symbol=key[2])[0] is not None
             return eligible[key]
         for s in SYMBOLS:
             if s in self.open:
@@ -6003,7 +6080,7 @@ class Pulse:
                     sig = []
                 hit = memo[s] = (bar_t, sig)
             hits = hit[1]
-            sig = next((candidate for candidate in hits if can_enter(candidate)), hits[0] if hits else None)
+            sig = next((candidate for candidate in hits if can_enter(candidate, s)), None)
             if sig:
                 pack, d, conf, why = sig
                 out[s] = (float(conf), s, int(d), f"set:{pack}:{why}")
@@ -6162,6 +6239,43 @@ class Pulse:
         for pos in list(self.open.values()):
             self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why)
 
+    def recover_relate_intent(self, pos: Position) -> bool:
+        """Recover only an exact confirmed entry identity, never a symbol-level guess."""
+        relate = getattr(self, "relate", None)
+        if relate is None:
+            return False
+        for cid, intent in list(relate.pending.items()):
+            identity = intent["receipt"]["identity"]
+            if identity["symbol"] != pos.symbol or identity["side"] != pos.side:
+                continue
+            reply = self.api.get("/openApi/swap/v2/trade/order", {"symbol": pos.symbol, "clientOrderID": cid})
+            if not self.ok(reply):
+                continue
+            row = (reply.get("data") or {}).get("order") or reply.get("data") or {}
+            if not isinstance(row, dict) or self.order_cid(row) != cid:
+                continue
+            qty = filled_qty(row, 0)
+            avg = float(row.get("avgPrice") or 0)
+            if not math.isfinite(qty) or qty <= 0 or abs(qty - pos.qty) > max(1e-12, pos.qty * 1e-9) or avg <= 0:
+                continue
+            try:
+                receipt = relate.resized(intent["receipt"], qty / intent["originQty"])
+            except ValueError:
+                relate.error = "Relate recovered volume is unverified; raises disabled"
+                continue
+            protect = intent["protection"]
+            pos.relate_receipt, pos.relate_origin_qty = receipt, intent["originQty"]
+            pos.sl_pct, pos.tp_pct = protect["sl"], protect["tp"]
+            pos.set_id, pos.lane, pos.client_id = protect["setId"], protect["lane"], cid
+            pos.base_entry, pos.base_qty = avg, qty
+            fee, source = self.fill_cost(row, qty, avg, pos.symbol)
+            pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
+            pos.fee_source = source
+            if self.open.get(pos.symbol) is pos and self.save_open_book() and str(row.get("status") or "").upper() in ("FILLED", "CANCELED", "CANCELLED", "EXPIRED"):
+                relate.release(cid)
+            return True
+        return False
+
     def adopt_exchange_positions(self) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
         self.did_io = True
@@ -6232,6 +6346,13 @@ class Pulse:
             except Exception:
                 tagged = []
             owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
+            if not owned and any(v.get("receipt", {}).get("identity", {}).get("symbol") == sym
+                                 for v in getattr(getattr(self, "relate", None), "pending", {}).values()):
+                probe = Position(sym, side, qty, px, time.time(), px, px, px)
+                if self.recover_relate_intent(probe):
+                    self.open[sym] = ours = probe
+                    self.owned_syms.add(sym)
+                    owned = True
             unknown = time.time() - float((getattr(self, "unknown_entry", {}) or {}).get(f"{sym}:{side}", 0) or 0) < 180.0
             if not tagged and not owned and not unknown:
                 foreign.add(f"{sym}:{side}")
@@ -6295,6 +6416,7 @@ class Pulse:
                             ours.pack = str(trk.get("pack") or ours.pack)
                     except Exception:
                         pass
+                self.recover_relate_intent(ours)
                 continue
             if px <= 0:
                 continue
@@ -6342,6 +6464,7 @@ class Pulse:
                 liq=liq, position_id=pid, lane=str(track.get("lane") or ("pos" if set_id else "")),
             )
             rec_pos = self.open[sym]
+            self.recover_relate_intent(rec_pos)
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
             log(f"RECOVER {sym} {side} qty={qty} cid={cid}", every=20.0, key=f"rec:{sym}")
             if getattr(self, "control_orders", True):
@@ -6668,6 +6791,7 @@ class Pulse:
                                                                                    self.sets.lookback * 60) if getattr(self, "set_block", None) else {}},
             "pulse": self.pulse_snapshot(),
             "coord": self.coord.snapshot(),
+            "relate": self.relate.snapshot() if getattr(self, "relate", None) else {},
             "pfCost": pc,
             "costModel": self.fee_schedule.snapshot(time.time(), self.active_fee_contracts(),
                                                     self.position_cost_pct, self.slippage_allowance_pct),
@@ -7674,6 +7798,7 @@ class Pulse:
 
 def make_api(conn: str, key: str, secret: str, base: str):
     """The venue client of a connection: bybit-* talks to Bybit V5 (bybit_fast), everything else to BingX."""
+    base, _mode = resolve_base(conn, env_base=base)
     if str(conn).startswith("bybit-"):
         from bybit_fast import FastBybit
         return FastBybit(key, secret, ErrorLog(ERR_PATH), base=base)

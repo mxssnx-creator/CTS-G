@@ -1,10 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { defaultOverlay, manualStepPf, overlayFromCts, pfRangeFloorsOf, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { indicationConfigList, defaultOverlay, manualStepPf, overlayFromCts, pfRangeFloorsOf, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("global and per-range Last-N retain the lowest requested windows", () => {
+  for (const n of [1,2,3,5,8,10,200]) {
+    const loaded=overlayFromCts(cts({setGateWindow:n,mainGateN:n,lastNByRange:{micro:{baseLong:n,mainLong:n}}}));
+    assert.equal(loaded.setGateWindow,n);
+    assert.equal(loaded.mainGateN,n);
+    assert.deepEqual(loaded.lastNByRange.micro,{baseLong:n,mainLong:n});
+    const saved=overlayFromCts(cts(),syncOverlayFlags(loaded));
+    assert.equal(saved.setGateWindow,n);
+    assert.equal(saved.lastNByRange.micro.baseLong,n);
+  }
+});
 
 test("Micro range PF survives loading and saving independently of window-size floors", () => {
   assert.deepEqual(defaultOverlay().minPfByRange, { micro: 1.01 });
@@ -92,9 +104,9 @@ test("pre-history settings retain three days and a separate collection target", 
   assert.equal(overlayFromCts(cts({ histLookbackMax: 6000 })).histLookbackMax, 4320);
 });
 
-test("Main long N is independently limited to 10 through 200", () => {
+test("Main long N is independently limited to 1 through 200", () => {
   assert.equal(overlayFromCts(cts({ setGateWindow: 10, mainGateN: 200 })).mainGateN, 200);
-  assert.equal(overlayFromCts(cts({ mainGateN: 3 })).mainGateN, 10);
+  assert.equal(overlayFromCts(cts({ mainGateN: 3 })).mainGateN, 3);
   assert.equal(overlayFromCts(cts({ mainGateN: 250 })).mainGateN, 200);
 });
 
@@ -209,4 +221,17 @@ test("the TP-step floor settings are on by default, bounded, and survive a setti
   assert.deepEqual([bad.minPfStepRatio, bad.minPfStepAutoN, bad.minPfStepAutoMin], [0.2, 50, 1]);
   assert.equal(overlayFromCts(cts({ minPfStepRatio: 1.8 })).minPfStepRatio, 1.5, "the ratio ends at 1.5");
   assert.equal(overlayFromCts(cts({ minPfStepRatio: 0.01 })).minPfStepRatio, 0.1, "and starts at 0.1");
+});
+
+
+test("per-config lane policy, major/minor identity and quarter SL survive settings round-trip", () => {
+  const entry = {label:"Micro", names:["momchg_n5_t1"], major:"trend", minor:"additional", coordination:"independent", symbols:["BTC-USDT"], slRatios:[.25,.5],
+    lastNLanes:[{id:"minor",role:"minor",scope:"symbol",lastN:{baseLong:20,realN:5},minPfByStep:{"2":1.01}}]};
+  const parsed = indicationConfigList([entry])[0];
+  assert.deepEqual(parsed.slRatios,[.25,.5]);
+  assert.equal(parsed.major,"trend"); assert.equal(parsed.minor,"additional");
+  assert.equal(parsed.lastNLanes![0].lastN.realN,5);
+  const ov = overlayFromCts(cts({indicationConfigs:[entry]}));
+  assert.deepEqual(overlayFromCts(cts(), syncOverlayFlags(ov)).indicationConfigs,ov.indicationConfigs);
+  assert.throws(()=>indicationConfigList([{...entry,lastNLanes:[{id:"bad",lastN:{realN:0}}]}]));
 });

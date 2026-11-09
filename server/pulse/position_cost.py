@@ -369,12 +369,12 @@ if __name__ == "__main__":
 
 
 def overall_validation_n(ov: Any) -> int:
-    """The overall validation's last N: the Base gate window every Set is judged on (setGateWindow, 10..200, default 50)."""
+    """The overall validation's last N: the Base gate window every Set is judged on (setGateWindow, 1..200, default 50)."""
     try:
         n = int((ov or {}).get("setGateWindow") or OVERALL_N_DEFAULT)
     except (TypeError, ValueError):
         n = OVERALL_N_DEFAULT
-    return max(10, min(200, n))
+    return max(1, min(200, n))
 
 
 def window_n(ov: Any, *keys: str, fallback: Optional[int] = None) -> int:

@@ -1,3 +1,5 @@
+import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "./lane-policy.ts";
+import { relateConfigs, type RelateConfig } from "./relate-config.ts";
 import protectionPolicy from "../../server/pulse/protection-policy.json" with { type: "json" };
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
@@ -181,6 +183,9 @@ export const SET_TYPES = ["base", "exit", "trail"] as const;
 export const INDICATION_TIMEFRAMES = [1, 5, 15, 30] as const;
 /** One range configuration of the additional indications; mirrors server/pulse/indication_config.py (the engine expands and validates it). */
 export type IndicationConfig = {
+  lastNLanes?: LastNLane[];
+  symbols?: string[];
+  major?: string; minor?: string; coordination?: string;
   label: string;
   enabled: boolean;
   families: string[]; // library families, e.g. "donch", "kelt"
@@ -198,6 +203,7 @@ export type IndicationConfig = {
   trailStepMax: number;
 };
 export const DEFAULT_INDICATION_CONFIG: IndicationConfig = {
+  lastNLanes: structuredClone(DEFAULT_LAST_N_LANES),
   label: "",
   enabled: true,
   families: [],
@@ -269,6 +275,7 @@ export type PulseOverlay = {
   prevPosMinCount: number;
   prevPosWindow: number;
   exitMinSamples: number;
+  relateConfigs: RelateConfig[];
   blockVolumeRatio: number;
   blockRiskPctOfBalance: number;
   /** Minutes a symbol and direction rest after a position of it was closed outside the engine (manual close); 0 = off. */
@@ -576,6 +583,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   prevPosMinCount: 8,
   prevPosWindow: 25,
   exitMinSamples: 8,
+  relateConfigs: relateConfigs(undefined),
   blockVolumeRatio: 1,
   blockRiskPctOfBalance: 0,
   manualCloseRestMin: 240,
@@ -846,6 +854,7 @@ export type CtsSettings = {
   blockSkipFirst?: number;
   blockWindow?: number;
   exitMinSamples?: number;
+  relateConfigs?: RelateConfig[];
   blockVolumeRatio?: number;
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
@@ -1154,9 +1163,14 @@ export function indicationConfigList(v: unknown): IndicationConfig[] {
     const types = strList(e.types).filter((t) => (SET_TYPES as readonly string[]).includes(t));
     const relRaw: unknown[] = Array.isArray(e.relations) ? e.relations : typeof e.relations === "string" ? e.relations.split(/[,;]/) : [""];
     const rel = relRaw.map((x) => String(x ?? "").trim());
-    const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.5 && x <= 3.5);
+    const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.25 && x <= 3.5);
     return {
       label: String(e.label ?? `entry ${i + 1}`).slice(0, 60),
+      lastNLanes: lastNLanes(e.lastNLanes),
+      symbols: strList(e.symbols),
+      major: typeof e.major === "string" ? e.major : undefined,
+      minor: typeof e.minor === "string" ? e.minor : undefined,
+      coordination: typeof e.coordination === "string" ? e.coordination : undefined,
       enabled: e.enabled !== false,
       families: strList(e.families),
       names: strList(e.names),
@@ -1203,9 +1217,9 @@ function slMaxByRangeOf(raw: unknown): Record<string, number> {
 
 export type LastNOverride = { baseLong?: number; baseShort?: number; mainLong?: number; mainShort?: number[]; negWindows?: number[]; realN?: number; realNegN?: number };
 export const LAST_N_FIELDS: { key: keyof LastNOverride; label: string; lo: number; hi: number; list?: boolean }[] = [
-  { key: "baseLong", label: "Base long", lo: 10, hi: 200 },
+  { key: "baseLong", label: "Base long", lo: 1, hi: 200 },
   { key: "baseShort", label: "Base short", lo: 0, hi: 200 },
-  { key: "mainLong", label: "Main long", lo: 10, hi: 200 },
+  { key: "mainLong", label: "Main long", lo: 1, hi: 200 },
   { key: "mainShort", label: "Main short", lo: 1, hi: 200, list: true },
   { key: "negWindows", label: "Negative", lo: 1, hi: 200, list: true },
   { key: "realN", label: "Real", lo: 1, hi: 200 },
@@ -1334,6 +1348,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     prevPosMinCount: Math.max(1, Math.round(num(cts.prevPosMinCount ?? cts.prev_pos_min_count, 8))),
     prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
     exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
+    relateConfigs: relateConfigs(live?.relateConfigs ?? cts.relateConfigs),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0),
     manualCloseRestMin: Math.max(0, Math.min(10080, Math.round(num(cts.manualCloseRestMin, 240)))),
@@ -1443,7 +1458,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setDeactN: num(cts.setDeactN, 25),
     setMinPf: pfFloor(num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
     setMaxDdtHours: num(cts.setMaxDdtHours, 24),
-    setGateWindow: Math.max(10, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
+    setGateWindow: Math.max(1, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
     setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
     stagesEnabled: bool(cts.stagesEnabled, true),
     stageFullWindow: bool(cts.stageFullWindow, false),
@@ -1463,7 +1478,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
     setGateMinMode: minMode(cts.setGateMinMode),
     mainGateEnabled: bool(cts.mainGateEnabled, true),
-    mainGateN: Math.max(10, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
+    mainGateN: Math.max(1, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
     mainShortEnabled: bool(cts.mainShortEnabled ?? cts.mainAutoEnabled, true),
     mainShortWindows: windows(cts.mainShortWindows ?? cts.mainAutoWindows, [5, 10, 15]),
     mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),
@@ -1642,6 +1657,7 @@ export async function fetchCtsSettings(conn = "overall"): Promise<CtsSettings | 
 export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
+    relateConfigs: relateConfigs(overlay.relateConfigs),
     minPfSignals: Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(overlay.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals))),
     symbols: capSymbols(overlay.symbols || []),
   };

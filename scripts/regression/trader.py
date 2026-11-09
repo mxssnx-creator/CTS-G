@@ -683,7 +683,7 @@ def set_volume_multiples_size_by_pack_type_and_range():
                 p.entry_sense = lambda *a, **k: None
                 p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
                 p.volume_by_pack, p.volume_by_kind, p.volume_by_range = (pt.volume_mults_of(m) for m in mults)
-                p._scope_choice = lambda pack, side=0: (st, "pos", "")
+                p._scope_choice = lambda pack, side=0, symbol="": (st, "pos", "")
                 p.sets.lane_fracs = lambda s_: (0.01, 0.015)
                 p.place(sym, 1, "set:indications:x", 0.9)
                 orders = [b for path, b in api.posts if path.endswith("/trade/order") and str(b.get("type")) == "MARKET"]
@@ -2062,7 +2062,7 @@ def _entry_budget_case(*, strict, multiple=1.0, carry=False, required_qty=None, 
         p.cid = lambda *args, **kwargs: f"{pt.TAG}otest{next(next_cid)}"
         st = types.SimpleNamespace(id="indications:L:1m:sl1.00:st5", pack="indications", kind="base", step=5, idx=0,
                                    sl_ratio=1.0, trail_key="", trail_arm=0.0, trail_give=0.0, hold_bars=0)
-        p._scope_choice = lambda pack, side=0: (st, "pos", "") if has_set else (None, "", "")
+        p._scope_choice = lambda pack, side=0, symbol="": (st, "pos", "") if has_set else (None, "", "")
         p.sets.lane_fracs = lambda _st: (0.01, 0.015)
         p.volume_by_pack, p.volume_by_kind, p.volume_by_range = {}, {}, {}
         p.volume_by_pack_kind = {"indications:base": multiple}
@@ -2282,6 +2282,7 @@ def live_entries_are_the_replays_signal_on_the_completed_minute():
             b.ingest_bars(sym, bars[:-1], last_t=t_open - 60.0)        # the minute has closed, the venue has not served it yet
             p = _bare_pulse()
             p.sets = b
+            p._scope_choice = lambda pack, side=0, symbol="": (object(), "pos", "")  # declared admitted stage; signal transport only
             p.open = {}
             early = p.set_entry_candidates(now=t_open + 60.0 + 2.0)
             b.ingest_bars(sym, bars, tail=True, last_t=t_open)
@@ -2343,7 +2344,7 @@ def thirty_ready_symbols_are_ranked_in_one_bounded_signal_batch():
         p = _bare_pulse()
         p.open = {}
         p.sets = Sets()
-        p._scope_pick = lambda pack: (object(), "")
+        p._scope_choice = lambda pack, side=0, symbol="": (object(), "pos", "")
         return p
 
     old_syms = pt.SYMBOLS
@@ -2382,7 +2383,7 @@ def strongest_ready_symbol_can_take_the_first_slot():
     p.strat_general = False
     p.coord = Coordinator()
     p.coord.load({}, {})
-    p._scope_pick = lambda pack: (object(), "")
+    p._scope_choice = lambda pack, side=0, symbol="": (object(), "pos", "")
     p.strategy_closes = lambda: []
     p.real_stage_paper = False
     p.entries_blocked = lambda: False
@@ -2589,6 +2590,7 @@ def the_entry_loop_places_the_set_signal_and_not_the_live_score():
         return False, "no signal bar in the fixture"
     p = _bare_pulse()
     p.sets = b
+    p._scope_choice = lambda pack, side=0, symbol="": (object(), "pos", "")  # declared admitted stage; signal transport only
     p.open = {}
     p.halted = False
     p.closed = []
@@ -2642,6 +2644,7 @@ def the_entry_loop_mirrors_the_set_signal_without_any_last_n_validation():
                         reason="sl", hold_s=60.0, set_id="s", pack="indications") for k in range(30)]
     p = _bare_pulse()
     p.sets = b
+    p._scope_choice = lambda pack, side=0, symbol="": (object(), "pos", "")  # declared admitted stage; signal transport only
     p.open = {}
     p.halted = False
     p.closed = losses

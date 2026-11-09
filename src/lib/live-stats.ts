@@ -111,6 +111,7 @@ export type WindowFigure = PfEvidence & {
   orders: number;
   chosen?: Record<string, number>;
   configuredSets?: Record<string, number>;
+  samples?: { population: number; full: number; insufficient: number; unavailable: number; disabled: number; pct: number | null; at: number | null; oldestAt: number | null; basis: string };
   mode?: "positive" | "negative" | "both" | "avgpositive" | "avgnegative" | "avgboth";
   role?: "coordination";
 };

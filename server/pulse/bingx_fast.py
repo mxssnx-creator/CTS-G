@@ -51,7 +51,10 @@ except Exception:
 
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
-RECV = 5000
+# VST account reads can take over five seconds. Keep the signed receive window
+# aligned with the bounded synchronous transport budget; never retry a write.
+HTTP_TIMEOUT_S = 10.0
+RECV = int(HTTP_TIMEOUT_S * 1000)
 UA = "grok-x01-pulse/2.0"
 
 # CTS connector numbers (UID / IP)
@@ -289,7 +292,10 @@ def _batch_numbers(order: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class FastBingX:
-    def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: str = WS_URL) -> None:
+    def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: Optional[str] = None) -> None:
+        from conn_guard import resolve_bingx_price_stream
+        # Resolve before constructing HTTP clients or starting background threads.
+        selected_ws = resolve_bingx_price_stream(base or BASE, ws_url)
         self.key = key
         self.secret = secret
         self.err = err
@@ -310,7 +316,7 @@ class FastBingX:
             )
         self.px: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
-        self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
+        self.hub = PriceHub(self._on_px, err, ws_url=selected_ws)
         self.on_event = None
         self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0}
         self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err, gate=self)
@@ -427,7 +433,7 @@ class FastBingX:
             headers={"X-BX-APIKEY": self.key, "User-Agent": UA},
         )
         try:
-            with self._opener.open(req, timeout=5) as resp:
+            with self._opener.open(req, timeout=HTTP_TIMEOUT_S) as resp:
                 return loads(resp.read())
         except urllib.error.HTTPError as e:
             try:
@@ -583,6 +589,9 @@ class AsyncBridge:
         try:
             return fut.result(timeout)
         except Exception as e:
+            # Timed-out batches used to keep running while the caller submitted
+            # replacements. Cancel both in-flight reads and queued semaphore work.
+            fut.cancel()
             self.err.write("async-gather", msg=str(e)[:200])
             return [(p, e2, {"error": True, "msg": str(e)[:180]}) for p, e2 in reqs]
 

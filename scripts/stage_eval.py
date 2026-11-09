@@ -109,6 +109,9 @@ def _symbol_job(args):
     # the rest after a winning close (overlay pauseMode / pausePack): the engine's own plan, chosen only from earlier results
     plan = b._pause_plan(s, bars, float(t0), warm, len(bars), cfg, dirs, confs, cands, acc)
     for st in b.by_idx:
+        if not b.symbol_allows(st.pack, s):
+            out[st.idx] = (array("i"), array("i"), array("d"))
+            continue
         lane = se.SetLane(st, s)
         sel_pause = b._lane_pause(lane, st.pack, plan, st.side)
         trades = lane.scan(0, len(bars), bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
@@ -218,7 +221,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     pp, net values w), their count and PF (rounded as last_n_cost_pf does), the drawdown time over them, both halves, and the rank inputs."""
     lb = book.lookback * 60.0
     wn = book.win(st)
-    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, book.deact_n))
+    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, wn.base_short, book.base_min_n, book.deact_n))
     txa = tape_source(tapes, st.idx, now, lb).by_set[st.idx][0]
     n_all = bisect.bisect_left(txa, now) - bisect.bisect_left(txa, now - lb)     # SetState.n: every order in the lookback
     cf = tapes.cf
@@ -254,7 +257,7 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
         return g / l_ if l_ > 0 else (99.0 if g > 0 else (1.0 if len(v) else 0.0))
     h = n // 2
     old, new = (round(_pf(w[:h]), 4), round(_pf(w[h:]), 4)) if h >= 1 else (0.0, 0.0)
-    return {"w": w, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
+    return {"w": w, "coord": pp, "n": n, "pf": pf, "gp": gp, "gl": gl, "max_s": max_s, "old": old, "new": new, "n_all": n_all, "r25": r25,
             "risk_ok": not book.stop_cap_exceeded(st),
             "floor": book.floor_for(wn.base_long, st.pack, st), "floor_short": book.floor_for(wn.base_short, st.pack, st), "cf": cf,
             "base_long": wn.base_long, "base_short": wn.base_short}
@@ -262,7 +265,8 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
 
 def _long_ok(book, e: Dict[str, Any]) -> bool:
     """The Base long window on its own: orders, PF, drawdown time and (when asked) the consistency of both halves."""
-    ok = e["risk_ok"] and e["n"] >= min(book.gate_min, e.get("base_long", book.gate_window)) and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
+    required = e.get("base_long", book.gate_window) if book.stage_full else min(book.gate_min, e.get("base_long", book.gate_window))
+    ok = e["risk_ok"] and e["n"] >= required and e["pf"] + 1e-9 >= e["floor"] and e["max_s"] < book.max_dd_s
     if ok and book.consistency_pf > 0 and e["n"] >= 2:
         ok = min(e["old"], e["new"]) + 1e-9 >= book.consistency_pf
     return ok
@@ -270,12 +274,12 @@ def _long_ok(book, e: Dict[str, Any]) -> bool:
 
 def _short_ok(book, e: Dict[str, Any]) -> bool:
     bs = e.get("base_short", book.base_short)
-    sw = [x - e["cf"] for x in e["w"][-bs:]]
+    sw = [x - e["cf"] for x in e.get("coord", e["w"])[-bs:]]
     return len(sw) >= (bs if getattr(book, "stage_full", False) else 1) and round(se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)), 4) + 1e-9 >= e["floor_short"]
 
 
 def _min_ok(book, e: Dict[str, Any]) -> bool:
-    mw = [x - e["cf"] for x in e["w"][-book.base_min_n:]]
+    mw = [x - e["cf"] for x in e.get("coord", e["w"])[-book.base_min_n:]]
     return len(mw) >= (book.base_min_n if getattr(book, "stage_full", False) else 1) and se.sign_ok(mw, book.base_min_positive, getattr(book, "base_min_both", False), getattr(book, "base_min_avg", False))
 
 
@@ -320,12 +324,13 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
         return sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
     out: Dict[str, Optional[Tuple[bool, float, float, int]]] = {k: None for k in ("baseLong", "baseShort", "baseMinimal", "mainLong", "mainShort", "mainMinimal", "negative", "real", "realNeg")}
     nets_w = [x - cf for x in e["w"]]
+    nets_coord = [x - cf for x in e["coord"]]
     out["baseLong"] = (_long_ok(book, e),) + sums(nets_w) + (len(nets_w),)
     if e.get("base_short", book.base_short):
-        sw = nets_w[-e.get("base_short", book.base_short):]
+        sw = nets_coord[-e.get("base_short", book.base_short):]
         out["baseShort"] = (_short_ok(book, e),) + sums(sw) + (len(sw),)
     if getattr(book, "base_min_n", 0):
-        mw = nets_w[-book.base_min_n:]
+        mw = nets_coord[-book.base_min_n:]
         out["baseMinimal"] = (_min_ok(book, e),) + sums(mw) + (len(mw),)
     base_pass = out["baseLong"][0] and (out["baseShort"] is None or out["baseShort"][0])
     if not base_pass or not (getattr(book, "main_on", False) or getattr(book, "neg_on", False) or getattr(book, "realst_on", False)):
@@ -446,7 +451,7 @@ def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
     floor = book.floor_for(wn.base_long, st.pack, st)
     out: List[float] = []
     for k in range(e - 1, lo - 1, -1):
-        if se.processed_flag(tx, nets, gpre, lpre, te[k], wn.base_long, min(book.gate_min, wn.base_long), floor, book.max_dd_s, lb, lo,
+        if se.processed_flag(tx, nets, gpre, lpre, te[k], wn.base_long, book.base_need(st), floor, book.max_dd_s, lb, lo,
                              book.consistency_pf):
             out.append(nets[k])
             if len(out) >= n:
@@ -702,7 +707,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 if i < w:
                     continue
                 signals = sorted(((p, confs[p][i], dirs[p][i]) for p in book.packs
-                                  if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
+                                  if book.symbol_allows(p, s) and dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]), key=lambda x: -x[1])
                 if not signals:
                     continue
                 if not refresh_s and ranked_t != entry_t:

@@ -21,6 +21,7 @@ Nothing here relaxes a gate: the packs are judged by the same Base -> Main -> Re
 (MAX_NAMES_PER_ENTRY, MAX_NAMES_TOTAL) so a setting cannot ask for an unbounded Set count; a combination over the bound is dropped and listed."""
 from __future__ import annotations
 
+from lane_policy import expand_entries
 import math
 import hashlib
 import json
@@ -83,7 +84,7 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
     entries: List[Dict[str, Any]] = []
     if not isinstance(configs, (list, tuple)):
         return {"names": [], "ranges": {}, "pause": {}, "dropped": [], "entries": []}
-    for e_i, raw in enumerate(list(configs)[:MAX_ENTRIES]):
+    for e_i, raw in enumerate(expand_entries(list(configs)[:MAX_ENTRIES])):
         if not isinstance(raw, dict) or raw.get("enabled", True) is False:
             continue
         label = str(raw.get("label") or f"entry {e_i + 1}")[:60]
@@ -137,6 +138,8 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
                             "trailLo": trail_lo, "trailHi": trail_hi, "pause": pz,
                             "coordination": raw.get("coordination"), "major": raw.get("major"), "minor": raw.get("minor"),
                             "label": str(raw.get("label") or "")}
+                if raw.get("lanePolicy") is not None: geometry["lanePolicy"] = raw["lanePolicy"]
+                if raw.get("symbol"): geometry["symbol"] = raw["symbol"]
                 signature = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
                 name = source + "~cfg" + signature
                 if name in names:
@@ -149,7 +152,9 @@ def expand(configs: Any, known: Callable[[str], bool], step_lo: int, step_hi: in
                     continue
                 names[name] = None
                 ranges[name] = {"lo": lo, "hi": hi, "ratios": sorted(set(ratios)) or list(default_ratios), "kinds": kinds, "entry": e_i,
-                               "trailLo": trail_lo, "trailHi": trail_hi, "source": source, "configKey": signature}
+                               "trailLo": trail_lo, "trailHi": trail_hi, "source": source, "configKey": signature,
+                               "lanePolicy": raw.get("lanePolicy"), "symbol": raw.get("symbol", ""),
+                               "coordination": raw.get("coordination"), "major": raw.get("major"), "minor": raw.get("minor")}
                 if isinstance(pz, (int, float)) and not isinstance(pz, bool):
                     pause[name] = max(0, int(pz))
                 else:
