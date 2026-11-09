@@ -5620,7 +5620,8 @@ class Pulse:
             floor = self.set_axis_floor(st)
             if not self.coord.judge(evidence, self.coord.net_streak(evidence), min_pf=floor)["allow"]:
                 continue
-            row = self.set_block.candidate(pos, px, now, self.block, self.position_cost_pct, lookback, floor=floor)
+            row = self.set_block.candidate(pos, px, now, self.block, self.position_cost_pct, lookback, floor=floor,
+                                           honor_tp=self.lane_honors_tp(pos))
             if row is None:
                 continue
             room = max(0.0, min(self.max_book_notional() - pos.qty * px, self.avail_notional(c)))

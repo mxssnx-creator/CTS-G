@@ -139,9 +139,11 @@ class SetBlockBook:
             return {"pf": 0.0, "n": 0}
         return {"pf": br.record_pf(rec), "n": int(rec[0])}
 
-    def candidate(self, pos, price: float, now: float, block, cost_pct: float, lookback_s: float, floor: Optional[float] = None) -> Optional[Dict]:
+    def candidate(self, pos, price: float, now: float, block, cost_pct: float, lookback_s: float, floor: Optional[float] = None, *, honor_tp: bool = False) -> Optional[Dict]:
         lane = self.observe(pos, price, now, block, cost_pct, lookback_s)
         if lane is None:
+            return None
+        if honor_tp and not br.target_covers_cost(price, pos.tp, 1 if pos.side == "LONG" else -1, cost_as_frac(cost_pct)):
             return None
         cfg = self.config(block)
         rkeys = self.rel_keys(cfg, pos)
@@ -167,9 +169,12 @@ class SetBlockBook:
                 continue                       # the current price must still satisfy the count's own step
             recs = [b["paper"].get(str(n)) for b in books]
             execs = [b["executed"].get(str(n)) for b in books]
-            if not br.count_passes(cfg, n, recs, execs, base_pf, fired_ratio):
+            # A partially filled count is already in fired_ratio. Its remainder
+            # completes that same target; count_passes adds the target once.
+            other_ratio = fired_ratio - (cfg.target_ratio(n) if filled.get(n, 0.0) > 0 else 0.0)
+            if not br.count_passes(cfg, n, recs, execs, base_pf, other_ratio):
                 continue
-            return {"group": n, "qty": remaining, "minPf": br.threshold(cfg, base_pf, fired_ratio + cfg.target_ratio(n)),
+            return {"group": n, "qty": remaining, "minPf": br.threshold(cfg, base_pf, other_ratio + cfg.target_ratio(n)),
                     "paper": self.stats(recs[0]), "executed": self.stats(execs[0])}
         return None
 
@@ -178,6 +183,12 @@ class SetBlockBook:
         lane = self.parents.get(self.key(pos))
         parent = self.parent_id(pos)
         if not lane or lane.get("parent") != parent or lane.get("closed") == parent:
+            return
+        if not score or not math.isfinite(price) or price <= 0:
+            # Unverified/downtime closes retire the parent but cannot recover a
+            # deficit, consume a pause or alter paper/executed qualification.
+            lane.update(parent="", closed=parent, entries={}, updated=now)
+            self.save()
             return
         cfg = self.config(block)
         side = 1 if pos.side == "LONG" else -1
@@ -197,6 +208,7 @@ class SetBlockBook:
                     br.add_obs(b["paper"].setdefault(n, br.new_record()), net)
             for n, items in groups.items():
                 notional = sum(float(x["qty"]) * float(x["price"]) for x in items)
+                quantity = sum(float(x["qty"]) for x in items)
                 gross = sum(float(x["qty"]) * (price - float(x["price"])) * side for x in items)
                 if notional > 0:
                     net_add = gross / notional - cf
@@ -206,9 +218,12 @@ class SetBlockBook:
                         net_add = (gross - entry_fee - exit_fee) / notional
                     for b in books:
                         br.add_obs(b["executed"].setdefault(n, br.new_record()), net_add)
-                    add_part += (sum(float(x["qty"]) for x in items) / pos.base_qty) * net_add
+                    add_part += br.base_return_contribution(net_add, notional / quantity, quantity / pos.base_qty, pos.base_entry)
                     highest = max(highest, int(n))
         parent_net = ((price / pos.base_entry - 1) * side - cf if pos.base_entry > 0 and math.isfinite(price) and price > 0 else 0.0) + add_part
+        if pos.base_entry_fee_usdt is not None and pos.exit_fee_qty >= pos.qty > 0 and pos.base_qty > 0 and pos.base_entry > 0:
+            base_fees = pos.base_entry_fee_usdt + pos.exit_fee_usdt * pos.base_qty / pos.qty
+            parent_net = (price / pos.base_entry - 1) * side - base_fees / (pos.base_qty * pos.base_entry) + add_part
         for b in books:
             b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
             b["updated"] = now

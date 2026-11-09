@@ -148,6 +148,151 @@ def block_independent_evidence_and_restart():
                 f"first={first and first['group']}; count 2 blocked={second is None}; other Set blocked={isolated is None}; observations per count={counts}; PF count 1 / 2 = {pf1:.2f} / {pf2:.2f}")
 
 
+def block_linked_floor_and_partial_remainder():
+    """Micro's explicit floor survives Block; a partial count is not budgeted twice."""
+    import block_rules as br
+    from block_engine import calculate_block_minimum_profit_factor
+    results = []
+    for stack_type in ("additive", "shared"):
+        with tempfile.TemporaryDirectory() as d:
+            b = SetBlockBook(os.path.join(d, "b.json"))
+            b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockMinObservations": 1,
+                                  "blockSkipFirst": 0, "blockStackType": stack_type,
+                                  "blockSharedTotal": .4, "blockProfitFactorRatio": 5,
+                                  "blockCounts": [{"step": 1, "ratio": .4}]})
+            pos, cfg = _parent(), _block_cfg()
+            led = b.ledger(b.rel_keys(b.cfg, pos)[0], create=True)
+            led["paper"]["1"] = [2, .017, .01]  # PF 1.7 clears one .4 target (1.5), not two (2.0).
+            full = b.candidate(pos, 100.2, T0 + 10, cfg, .12, 86400, floor=1.25)
+            pos.block_fills = [{"group": 1, "qty": .1, "price": 100.2}]
+            remaining = b.candidate(pos, 100.2, T0 + 11, cfg, .12, 86400, floor=1.25)
+            pos.block_fills.append({"group": 1, "qty": .3, "price": 100.2})
+            done = b.candidate(pos, 100.2, T0 + 12, cfg, .12, 86400, floor=1.25)
+            results.append(bool(full and remaining and abs(full["qty"] - .4) < 1e-12
+                                and abs(remaining["qty"] - .3) < 1e-12
+                                and abs(remaining["minPf"] - 1.5) < 1e-12 and done is None))
+    low = br.clean_cfg({"blockProfitFactorRatio": .2})
+    floors = [br.threshold(low, f, .1) for f in (1.001, 1.01, 1.25)]
+    legacy = calculate_block_minimum_profit_factor(1.01, .2, .1)
+    return all(results) and floors == [1.001, 1.01, 1.25] and legacy >= 1.02, f"partial remainder additive/shared={results}; linked floors={floors}; legacy floor={legacy}"
+
+
+def block_lifecycle_matches_cash_and_actual_fees():
+    """A price-weighted cash oracle catches a false recovery caused by qty weights."""
+    import block_rules as br
+    outcomes = []
+    for side, add_px, exit_px in (("LONG", 104., 102.1), ("SHORT", 96., 97.9)):
+        for actual in (False, True):
+            with tempfile.TemporaryDirectory() as d:
+                b = SetBlockBook(os.path.join(d, "b.json"))
+                b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockCarry": True,
+                                      "blockSkipFirst": 0, "blockCounts": [{"step": 1, "ratio": 1}]})
+                pos, cfg = _parent(side=side), _block_cfg()
+                pos.qty = 2
+                pos.block_fills = [{"group": 1, "qty": 1., "price": add_px}]
+                if actual:
+                    pos.base_entry_fee_usdt = .02
+                    pos.block_fills[0]["fee_usdt"] = .03
+                    pos.exit_fee_qty, pos.exit_fee_usdt = 2., .04
+                b.observe(pos, add_px, T0 + 10, cfg, .12, 86400)
+                # Keep the cumulative life negative to inspect the exact contribution.
+                led = b.ledger(b.rel_keys(b.cfg, pos)[0], create=True)
+                led["life"] = {"level": 1, "net": -.1, "pause": 0}
+                b.close(pos, exit_px, T0 + 60, cfg, .12)
+                sd = 1 if side == "LONG" else -1
+                gross = ((exit_px - 100) + (exit_px - add_px)) * sd
+                fees = .09 if actual else .0012 * (100 + add_px)
+                expected = -.1 + (gross - fees) / 100
+                got = led["life"]["net"]
+                snap = json.dumps(b.ledgers, sort_keys=True)
+                b.close(pos, exit_px, T0 + 61, cfg, .12)
+                outcomes.append(abs(got - expected) < 1e-12 and snap == json.dumps(b.ledgers, sort_keys=True))
+    # Without an existing deficit the LONG modeled result is still a loss, not recovery.
+    with tempfile.TemporaryDirectory() as d:
+        b = SetBlockBook(os.path.join(d, "b.json")); b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockCarry": True})
+        pos = _parent(); pos.qty = 2; pos.block_fills = [{"group": 1, "qty": 1., "price": 104.}]
+        b.observe(pos, 104, T0 + 10, _block_cfg(), .12, 86400)
+        b.close(pos, 102.1, T0 + 60, _block_cfg(), .12)
+        life = b.ledgers[b.rel_keys(b.cfg, pos)[0]]["life"]
+        outcomes.append(life["level"] == 1 and life["net"] < 0 and life["pause"] == 0)
+    return all(outcomes), f"cash/fee oracle LONG/SHORT modeled/actual and false recovery={outcomes}"
+
+
+def block_unscored_close_does_not_change_evidence_or_lifecycle():
+    import block_rules as br
+    results = []
+    for score, price in ((False, 105.), (True, float("nan"))):
+        with tempfile.TemporaryDirectory() as d:
+            b = SetBlockBook(os.path.join(d, "b.json"))
+            b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockCarry": True})
+            pos, cfg = _parent(), _block_cfg()
+            b.observe(pos, 101, T0 + 10, cfg, .12, 86400)
+            led = b.ledger(b.rel_keys(b.cfg, pos)[0], create=True)
+            led["life"] = {"level": 1, "net": -.01, "pause": 2}
+            before = json.dumps(b.ledgers, sort_keys=True)
+            b.close(pos, price, T0 + 60, cfg, .12, score=score)
+            results.append(before == json.dumps(b.ledgers, sort_keys=True) and not b.parents[b.key(pos)]["parent"])
+    return all(results), f"unscored/invalid closes retire parent without updating ledgers={results}"
+
+
+def block_replay_keeps_all_valid_parent_lanes_and_notional_weights():
+    import ast
+    from pathlib import Path
+    from unittest.mock import patch
+    import block_rules as br
+    import stack_eval as sv
+    import stage_eval as sg
+    import set_engine as se
+    b = SetBook(); b.load(overlay(**SMALL))
+    st = b.by_idx[0]
+    with patch.object(sg, "gate_base", return_value=(True, (), 1, 2.)), \
+         patch.object(sg, "chain_at", return_value=({"main": [], "real": [], "realneg": [], "short_n": 5}, [])), \
+         patch.object(se, "stage_verdicts", return_value={"pos": True, "negl": True}):
+        st.stage = {"pos": True, "negl": True}
+        lanes = sv.qualified_parent_lanes(b, None, st, T0)
+        native = tuple(b._execution_lanes(st))
+    # Execute the production replay function on a two-parent fixture. The first
+    # parent trains Block, the second fires one add; its cash result is explicit.
+    tree = ast.parse(Path(sv.__file__).read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    fn = next(n for n in main.body if isinstance(n, ast.FunctionDef) and n.name == "block_sim2")
+    cfg = br.clean_cfg({"blockRelations": ["set"], "blockSkipFirst": 0,
+                        "blockCounts": [{"step": 20, "ratio": .4}], "blockMinObservations": 1})
+    cf = .0012; add_px = 100 * (1 + 20 * cf); exit_px = 101.5
+    stub = types.SimpleNamespace(id="s", pack="p", step=2, idx=0, kind="exit")
+    ctx = {"by_id": {"s": stub}, "cf": cf, "times": {"X": [0., 60., 120., 180., 240., 300.]},
+           "first_hit": lambda s, e, x, level, sd: e if e < x else -1,
+           "parent_ok": lambda *a: True, "floor_memo": {},
+           "auto": types.SimpleNamespace(apply=lambda *a: None),
+           "book": types.SimpleNamespace(win=lambda s: types.SimpleNamespace(real_n=5), floor_for=lambda *a: 1.01)}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), sv.__file__, "exec"), ctx)
+    parents = [{"set": "s", "symbol": "X", "lane": "pos", "t_in": 0., "t": 120., "net": .05 - cf,
+                "tr": {"dir": 1, "entry_px": 100., "exit_px": 105., "entry_i": 0, "exit_i": 2}},
+               {"set": "s", "symbol": "X", "lane": "pos", "t_in": 180., "t": 300., "net": .015 - cf,
+                "tr": {"dir": 1, "entry_px": 100., "exit_px": exit_px, "entry_i": 3, "exit_i": 5}}]
+    events, adds, nets = ctx["block_sim2"](parents, cfg, None)
+    expected_add = (.4 * (exit_px - add_px) - cf * .4 * add_px) / 100
+    return lanes == native == ("pos", "neg") and adds == 1 and abs(nets[0] - expected_add) < 1e-12, f"lanes={lanes}, native={native}; adds={adds}, add cash/base={nets}, oracle={expected_add}"
+
+
+def block_fixed_target_requires_positive_room_after_costs():
+    import block_rules as br
+    results = []
+    for side, quote, target in (("LONG", 100.15, 100.2), ("SHORT", 99.85, 99.8)):
+        with tempfile.TemporaryDirectory() as d:
+            b = SetBlockBook(os.path.join(d, "b.json"))
+            b.cfg = br.clean_cfg({"blockRelations": ["set"], "blockMinObservations": 1,
+                                  "blockSkipFirst": 0, "blockCounts": [{"step": .5, "ratio": .2}]})
+            pos, cfg = _parent(side=side), _block_cfg(); pos.tp = target
+            b.ledger(b.rel_keys(b.cfg, pos)[0], create=True)["paper"]["1"] = [2, .02, .01]
+            blocked = b.candidate(pos, quote, T0 + 10, cfg, .12, 86400, floor=1.01, honor_tp=True)
+            independent_exit = b.candidate(pos, quote, T0 + 11, cfg, .12, 86400, floor=1.01, honor_tp=False)
+            pos.tp = 102 if side == "LONG" else 98
+            roomy = b.candidate(pos, quote, T0 + 12, cfg, .12, 86400, floor=1.01, honor_tp=True)
+            results.append(blocked is None and independent_exit is not None and roomy is not None)
+    return all(results), f"LONG/SHORT net-negative fixed targets blocked, independent Exit and feasible targets retained={results}"
+
+
 def block_actual_and_paper_costs():
     """An executed add's record holds its NET result (notional weighted gross move less one PositionCost), once, as one observation."""
     with tempfile.TemporaryDirectory() as d:
@@ -578,6 +723,10 @@ def block_adds_are_ratio_times_original_base_volume_without_a_risk_cap():
 
 
 CHECKS = [("correctness." + fn.__name__.replace("_", "-"), fn) for fn in (
+    block_linked_floor_and_partial_remainder, block_lifecycle_matches_cash_and_actual_fees,
+    block_unscored_close_does_not_change_evidence_or_lifecycle,
+    block_replay_keeps_all_valid_parent_lanes_and_notional_weights,
+    block_fixed_target_requires_positive_room_after_costs,
     block_adds_are_ratio_times_original_base_volume_without_a_risk_cap,
     dca_ladder_equals_a_plain_reading_and_a_worked_example,
     paper_actual_isolation, config_change_invalidates_old_evidence, executed_restart_and_base_attribution,

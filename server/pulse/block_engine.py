@@ -62,12 +62,12 @@ def calculate_block_volume_multiplier(block_count: int, volume_ratio: float) -> 
 
 
 def calculate_block_minimum_profit_factor(
-    default_min_pf: float, block_pf_ratio: float, volume_increment: float
+    default_min_pf: float, block_pf_ratio: float, volume_increment: float, *, minimum_pf: float = MIN_PF_FLOOR
 ) -> float:
     if min(default_min_pf, block_pf_ratio, volume_increment) <= 0:
         return 0.0
     bounded = clamp(block_pf_ratio, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
-    return max(MIN_PF_FLOOR, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)     # never under the floor (1.1)
+    return max(minimum_pf, 1 + max(0.0, default_min_pf - 1) * bounded * volume_increment)
 
 
 def calculate_block_effective_minimum_profit_factor(configured: float, normal: float) -> float:
