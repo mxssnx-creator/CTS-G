@@ -90,7 +90,7 @@ export function capSymbols(list: string[]): string[] {
 }
 // Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
 export const GATE_MIN_PF_DEFAULT = 1.25;
-// No validation gate asks less net PF than this. Mirrors position_cost.py MIN_PF_FLOOR (1.02, owner 2026-11-03; was 1.05).
+// Floor for the general/window-size settings; explicit per-step/range rules have their own bounds.
 export const MIN_PF_FLOOR = 1.02;
 const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
 /** Defaults for the last-N window classes and the separate Signal source. */
@@ -136,6 +136,18 @@ export const TP_RANGES = [
   { id: "wide", label: "Wide", lo: 33, hi: 50 },
 ] as const;
 export type TpRangeId = (typeof TP_RANGES)[number]["id"];
+export const MICRO_RANGE_PF_DEFAULT = 1.01;
+export function pfRangeFloorsOf(raw: unknown): Partial<Record<TpRangeId, number>> {
+  const out: Partial<Record<TpRangeId, number>> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const name = key.toLowerCase() as TpRangeId;
+    if (!TP_RANGES.some(r => r.id === name) || (typeof value !== "number" && typeof value !== "string")) continue;
+    const floor = Number(value);
+    if (Number.isFinite(floor) && floor > 0) out[name] = Math.round(Math.max(1, Math.min(2, floor)) * 10000) / 10000;
+  }
+  return out;
+}
 export const TP_RANGES_DEFAULT: Record<TpRangeId, boolean> = { micro: true, minimal: true, short: true, normal: true, long: true, wide: false };
 /** Trailing grid ceiling: arms up to trailStepMax steps (default 22 = 2.2 %, at most 30 = 3.0 %). */
 export const TRAIL_STEP_MAX_DEFAULT = 22;
@@ -445,6 +457,8 @@ export type PulseOverlay = {
   // split (default): every Set exists once per trade direction, each with its own lane, tape, windows, stages, pause and floor; both: one Set trades both.
   directionMode: DirectionMode;
   minPfByStep: boolean;
+  /** Explicit TP-range floors override manual and learned per-step floors in every stage. */
+  minPfByRange: Partial<Record<TpRangeId, number>>;
   rankByLane: boolean;
   setScratchEnabled: boolean;
   // Set grid extensions (2026-11-03): named TP ranges on / off, SL ratios 0.2 / 0.3 / 0.4 x TP, trailing arms up to 3.0 %, trailing stop families.
@@ -733,6 +747,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   holdAutoMin: 10,
   directionMode: "split",
   minPfByStep: true,
+  minPfByRange: { micro: MICRO_RANGE_PF_DEFAULT },
   rankByLane: true,
   setScratchEnabled: false,
   tpRanges: { ...TP_RANGES_DEFAULT, wide: true }, // shipped overlays: every range on, Wide included (owner 2026-11-03)
@@ -986,6 +1001,7 @@ export type CtsSettings = {
   holdAutoMin?: number;
   directionMode?: string;
   minPfByStep?: boolean;
+  minPfByRange?: Partial<Record<TpRangeId, number>>;
   rankByLane?: boolean;
   setScratchEnabled?: boolean;
   tpRanges?: Partial<Record<string, boolean>>;
@@ -1471,6 +1487,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
     directionMode: cts.directionMode === "both" ? "both" : "split",
     minPfByStep: bool(cts.minPfByStep, true),
+    minPfByRange: pfRangeFloorsOf(cts.minPfByRange ?? DEFAULT_OVERLAY.minPfByRange),
     rankByLane: bool(cts.rankByLane, true),
     setScratchEnabled: bool(cts.setScratchEnabled, false),
     tpRanges: tpRangesOf(cts.tpRanges),
@@ -1535,6 +1552,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
   };
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
+  out.minPfByRange = pfRangeFloorsOf(out.minPfByRange);
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
     out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
   }

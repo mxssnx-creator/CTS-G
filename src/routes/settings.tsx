@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MIN_PF_FLOOR,
+  MICRO_RANGE_PF_DEFAULT,
   BLOCK_COUNTS_MAX,
   BLOCK_RATIO_MAX,
   BLOCK_RATIO_MIN,
@@ -2179,12 +2180,15 @@ function StepPfTable({ overlay, stats }: { overlay: PulseOverlay; stats: LiveSta
               const tp = tpPctOfStep(k);
               const manual = manualStepPf(tp, overlay.minPfStepRatio);
               const r = learned.get(k);
+              const range = TP_RANGES.find(range => k >= range.lo && k <= range.hi);
+              const used = (range && overlay.minPfByRange?.[range.id]) ?? Math.min(overlay.minPfStepAutoHigh,
+                overlay.minPfStepAuto !== false && r?.auto != null ? r.auto : manual);
               return (
                 <tr key={k} className="border-t border-border">
                   <td className="py-0.5">{tp.toFixed(1)}%</td>
                   <td>{manual.toFixed(2)}</td>
                   <td>{r?.auto != null ? r.auto.toFixed(2) : "–"}</td>
-                  <td>{(overlay.minPfStepAuto !== false && r?.auto != null ? r.auto : manual).toFixed(2)}</td>
+                  <td>{used.toFixed(3)}</td>
                   <td>{r?.orders ?? "–"}</td>
                   <td>{r?.admitted ?? "–"}</td>
                   <td>{r && r.orders ? r.pfAdmitted.toFixed(2) : "–"}</td>
@@ -2219,6 +2223,21 @@ function PfWindowControls({
         on={byStep}
         onChange={(v) => patch("minPfByStep", v)}
       />
+      {byStep ? <>
+        <Toggle label="Use a separate Micro range PF floor"
+          on={overlay.minPfByRange?.micro != null}
+          onChange={(on) => {
+            const floors = { ...overlay.minPfByRange };
+            if (on) floors.micro = MICRO_RANGE_PF_DEFAULT;
+            else delete floors.micro;
+            patch("minPfByRange", floors);
+          }} />
+        {overlay.minPfByRange?.micro != null ? <Slider
+          label="Micro range · minimum PF"
+          value={overlay.minPfByRange.micro} min={1.001} max={2} step={0.001}
+          hint="One positive PF floor for Micro TP steps 2–3 across Base, Main, Real and their strategy gates. PF 1.000 is break-even after modeled costs."
+          onChange={(value) => patch("minPfByRange", { ...overlay.minPfByRange, micro: value })} /> : null}
+      </> : null}
       <Toggle
         label="Choose among valid Sets by the lane's own Set (Real / Real Negative orders), not the raw Base tape"
         on={overlay.rankByLane !== false}

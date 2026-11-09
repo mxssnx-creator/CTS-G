@@ -11,7 +11,7 @@ final margin, strict-budget and sanity checks still apply.
 The regression fails on the prior code and passes with the fix. It covers the
 ordinary minimum, an exactly funded strict minimum, an insufficient strict
 budget and insufficient margin. All 124 trader regressions pass offline. No
-account, leverage setting, production preset or exchange order is changed.
+account, leverage setting or exchange order is changed. The subsequent owner request lowers the shipped Micro qualification floor to 1.01; this requested setting is not a profitability certification.
 
 ## Three-dollar audit
 
@@ -88,3 +88,23 @@ Results include hourly validated/evaluated counts, window PF, executable sets,
 closed and held returns, half-window results, and individual trade prices.
 Current venue PF is unavailable unless authenticated fills are independently
 obtained and reconciled. No real-money run is asserted by this work.
+
+## Requested lower positive Micro floor
+
+The later owner request explicitly lowers Micro qualification. The active
+`minPfByStep` policy supersedes `minPfMicro`, which describes a window-size
+class rather than a TP range. The shipped BingX and Bybit overlays and desk
+default now use `minPfByRange: {micro: 1.01}`. The Settings control persists an
+explicit range floor, preserves an explicit disable, and shows the effective
+override in the per-step table. Other range and Signal floors retain their rules.
+
+A native regression checks all Micro sets from the four shipped overlays at
+window sizes 1, 5, 10, 20 and 50, including StageParams, and confirms 1.01 in
+every stage. Configuration round-trip tests distinguish this from the unchanged
+window-size class. The requested 1.01 and the diagnostic 1.001 floor are also
+compared on frozen native tapes in a separately recorded research follow-up.
+Neither is represented as proof of positive future executions.
+
+The first hosted suite found a stale deploy pin after the sizing edit
+(642 passed, one pin mismatch). The deploy checksum and restore patch were
+updated, then all 30 logistics checks passed, including both restore paths.

@@ -328,6 +328,25 @@ def min_pf_by_range_replaces_the_step_floor_for_its_range_only():
     return ok, f"{len(sets)} Sets over ranges {sorted(seen)}; range floors applied and others untouched{(' bad ' + str(bad[:3])) if bad else ''}; bounds {clamp}"
 
 
+def shipped_micro_floor_is_positive_and_shared_by_every_stage():
+    import json
+    from pathlib import Path
+    from common import PULSE
+    failures, checked = [], 0
+    for path in Path(PULSE).glob('overlay-*.json'):
+        raw = json.loads(path.read_text())
+        book = se.SetBook(); book.load(raw)
+        micro_sets = [st for st in book.by_idx if book.step_bucket(st) in (2, 3) and not se.is_signal_pack(st.pack)]
+        if raw.get('minPfByRange', {}).get('micro') != 1.01 or not micro_sets:
+            failures.append(path.name + ': missing Micro')
+        for st in micro_sets:
+            got = {book.floor_for(n, st.pack, st) for n in (1,5,10,20,50)}
+            got |= {book.stage_params(st.pack, st).floor_for(n) for n in (1,5,10,20,50)}
+            if got != {1.01}: failures.append((path.name, st.id, got))
+            checked += 1
+    return checked > 0 and not failures, f'{checked} Micro sets; all stage floors = 1.01; failures={failures[:3]}'
+
+
 def min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates():
     """Owner 2026-11-04 ("min PF from 1.4 to 1.27"): minPfStepAutoHigh caps the floor a TP step may ask - the manual 1 + TP% x ratio (1.64 at 3.2 % uncapped), the
     learned Auto floor (never chosen above it, no learned value above it is returned) - in every window and stage; 2.0 (default) = unchanged; a value under the
@@ -353,6 +372,7 @@ def min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates():
 
 
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
+    shipped_micro_floor_is_positive_and_shared_by_every_stage,
     manual_floor_is_one_plus_step_times_ratio, min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates, min_pf_by_range_replaces_the_step_floor_for_its_range_only, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,
     copies_count_once_and_thin_evidence_keeps_the_manual_floor, settings_reach_the_engine_and_the_replay_key,

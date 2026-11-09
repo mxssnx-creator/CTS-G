@@ -8,6 +8,11 @@ owner's preference, not an active account balance or a verified running instance
 Research tests must distinguish nominal sizing from exchange minimum lots;
 minimum-volume settings alone do not cap notional after venue rounding.
 
+The later request lowers Micro qualification while remaining positive: the
+explicit Micro TP-range default is `minPfByRange.micro: 1.01`. It applies across
+the stage windows when per-step qualification is enabled. This requested
+threshold does not establish profitable subsequent executions.
+
 Read `CLAUDE.md` for the project's execution, stage, accounting and history
 contracts. Distinguish simulations and paper-stage figures from confirmed
 exchange fills and actual executed profit factor.

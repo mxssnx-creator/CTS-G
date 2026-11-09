@@ -1,10 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { defaultOverlay, manualStepPf, overlayFromCts, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
+import { defaultOverlay, manualStepPf, overlayFromCts, pfRangeFloorsOf, stepPfRatio, syncOverlayFlags, PF_TYPE_DEFAULTS, type CtsSettings } from "./config-model.ts";
 import { secureMinimalPreset } from "./presets.ts";
 
 const cts = (extra: Record<string, unknown> = {}) => extra as unknown as CtsSettings;
+
+test("Micro range PF survives loading and saving independently of window-size floors", () => {
+  assert.deepEqual(defaultOverlay().minPfByRange, { micro: 1.01 });
+  const loaded = overlayFromCts(cts({ minPfByRange: { micro: 1.001, short: 1.2 } }));
+  assert.deepEqual(loaded.minPfByRange, { micro: 1.001, short: 1.2 });
+  assert.equal(loaded.minPfMicro, PF_TYPE_DEFAULTS.minPfMicro);
+  const saved = syncOverlayFlags(loaded);
+  assert.deepEqual(overlayFromCts(cts(), saved).minPfByRange, loaded.minPfByRange);
+  assert.deepEqual(overlayFromCts(cts(), { minPfByRange: {} }).minPfByRange, {}, "explicit disable survives reload");
+  assert.deepEqual(pfRangeFloorsOf({ Micro: "1.001", wide: Infinity, short: 9, normal: null, bogus: 1.3, long: "bad" }),
+    { micro: 1.001, short: 2 });
+});
 
 test("SL grids normalize legacy ratios once and empty grids retain the ten defaults", () => {
   const all = Array.from({length:10},(_,i)=>(i+1)/4);
