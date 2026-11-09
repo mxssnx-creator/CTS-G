@@ -108,7 +108,47 @@ def simulator_builds_and_reuses_only_matching_cache():
         return ok, f"build/reuse exits={first.returncode}/{second.returncode}; changed settings refused={changed.returncode != 0}"
 
 
+def micro_short_selection_preserves_losses_and_sample_requirements():
+    from micro_short_study import metric, candidate_rank
+    wins = metric([.01] * 20)
+    good = {"closed": wins, "marked": wins, "halves": [metric([.01] * 10)] * 2}
+    held_loss = {**good, "marked": metric([.01] * 20 + [-.25])}
+    thin = {**good, "halves": [metric([.01]), metric([.01] * 19)]}
+    unknown_rejected = False
+    try:
+        metric([.01, float("nan")])
+    except ValueError:
+        unknown_rejected = True
+    ok = (metric([])["pf"] is None and metric([0])["pf"] == 1
+          and candidate_rank(good)[0] and not candidate_rank(held_loss)[0]
+          and not candidate_rank(thin)[0] and unknown_rejected)
+    return ok, "no-loss is distinct from empty; held loss, thin half and unknown return cannot qualify"
+
+
+def micro_short_plans_keep_ranges_and_signal_families_independent():
+    from micro_short_study import plans
+    from set_engine import extra_known
+    base = {"lastNByRange": {"long": {"realN": 25}}, "minPfStepRatio": .1}
+    original = json.dumps(base, sort_keys=True)
+    groups = plans(base) + [g for g in plans(base, True) if g["id"].endswith("-microfamily")]
+    profiles = [p["id"] for g in groups for p in g["profiles"]]
+    unknown = []
+    for g in groups:
+        for cfg in g["overlay"]["indicationConfigs"]:
+            for name in cfg["names"]:
+                for relation in cfg["relations"]:
+                    source = name + ("@" + relation if relation else "")
+                    if not extra_known(source): unknown.append(source)
+    micro = next(g for g in groups if g["id"] == "micro-hold0-core")
+    short = next(g for g in groups if g["id"] == "short-hold0-core")
+    ok = (len(profiles) == len(set(profiles)) == 84 and not unknown
+          and micro["overlay"]["setStepMax"] == 3 and short["overlay"]["setMinStep"] == 7
+          and json.dumps(base, sort_keys=True) == original)
+    return ok, f"84 distinct profiles; unknown sources={unknown}; source settings unchanged"
+
+
 CHECKS = [("replay-provenance." + fn.__name__.replace("_", "-"), fn) for fn in (
     market_audit_selects_200_eligible_distinct_symbols,
     caches_refuse_mismatched_inputs_or_missing_metadata, simulator_models_automatic_holds,
-    simulator_builds_and_reuses_only_matching_cache)]
+    simulator_builds_and_reuses_only_matching_cache, micro_short_selection_preserves_losses_and_sample_requirements,
+    micro_short_plans_keep_ranges_and_signal_families_independent)]
