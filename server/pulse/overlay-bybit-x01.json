@@ -308,5 +308,8 @@
   "blockSkipFirst": 1,
   "blockRiskPctOfBalance": 0,
   "manualCloseRestMin": 240,
-  "minSlDistancePct": 0.1
+  "minSlDistancePct": 0.1,
+  "minPfByRange": {
+    "micro": 1.01
+  }
 }

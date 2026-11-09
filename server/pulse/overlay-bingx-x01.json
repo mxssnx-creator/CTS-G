@@ -320,5 +320,8 @@
   "makerFeeRate": 0.0005,
   "takerFeeRate": 0.0008,
   "slippageFeeRatio": 0.1,
-  "minSlDistancePct": 0.1
+  "minSlDistancePct": 0.1,
+  "minPfByRange": {
+    "micro": 1.01
+  }
 }
