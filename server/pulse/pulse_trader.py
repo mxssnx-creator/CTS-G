@@ -3606,7 +3606,11 @@ class Pulse:
         allowed = [candidate for candidate in ("pos", "neg") if coord.scope_allows(pack, candidate)[0]]
         if allowed:
             try:
-                alternative = self.sets.pick_any(pack, allowed_lanes=allowed, side=side)
+                # Changing lanes must preserve every filter used on the initial
+                # choice. Otherwise an approved alternate scope resurrects a
+                # losing executed group that the group gate already rejected.
+                filters = {"predicate": group_open} if getattr(self.sets, "group_gate", False) else {}
+                alternative = self.sets.pick_any(pack, allowed_lanes=allowed, side=side, **filters)
                 if alternative is not None and (self.sets.lane_of(alternative) or "pos") in allowed:
                     return alternative, self.sets.lane_of(alternative) or "pos", ""
             except (TypeError, AttributeError):
