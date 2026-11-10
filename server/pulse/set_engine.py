@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from config_num import num
 from lane_policy import expand_entries, negative_filter_ok
+import relation_lanes
 from modules import trailing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
@@ -2048,6 +2049,12 @@ class SetBook:
         self.sl_min_steps = SL_MIN_STEPS_DEFAULT  # serialized legacy alias, not an active stop floor
         self.min_sl_distance_pct = MIN_SL_DISTANCE_PCT_DEFAULT
         self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
+        # relationLanes: last-N lanes of the post-Base orders by relation (overall / indication / type / range / step), next to the per-configuration lanes; their
+        # verdicts raise the volume of a member Set's positive-lane entry (relation_lanes.py). Off by default: nothing is built and every multiple is 1.
+        self.relation_cfg = relation_lanes.RelationConfig()
+        self.relation_state: Dict[str, Dict[str, Any]] = {}     # lane id -> its figures at the last complete scoring pass
+        self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
+        self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
@@ -2122,6 +2129,7 @@ class SetBook:
                 self._history_snapshot_active = False
                 self.progress.ready = False
                 self.last_run = 0.0
+                self.relation_state, self.relation_at = {}, 0.0      # lanes of the previous rules raise nothing
                 for st in self.by_idx:
                     st.last_error = "configuration changed; replay required"
                     st.hist, st.proc, st.exe, st.neg = [], [], [], []
@@ -2404,6 +2412,14 @@ class SetBook:
             self.trail_min_lock = 0.0
         if self.trail_min_lock > 0:
             self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
+        # relation lanes read the chains and change no tape or Set verdict, so they are not part of the evaluation signature. A change of what the lanes ARE
+        # (relations, windows, floor) drops the held lanes until the next scoring pass rebuilds them; ratios and the ceiling apply at once.
+        rel_cfg = relation_lanes.config_of(ov.get("relationLanes"))
+        prev_rel = getattr(self, "relation_cfg", None)
+        if prev_rel is None or (rel_cfg.enabled, rel_cfg.on, rel_cfg.main_n, rel_cfg.real_n, rel_cfg.min_pf, rel_cfg.full_window) != (
+                prev_rel.enabled, prev_rel.on, prev_rel.main_n, prev_rel.real_n, prev_rel.min_pf, prev_rel.full_window):
+            self.relation_state, self.relation_at = {}, 0.0
+        self.relation_cfg = rel_cfg
         # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
         self.group_gate = bool(ov.get("groupGate", False))
         def _num(key, default, lo, hi):
@@ -2733,6 +2749,8 @@ class SetBook:
             st.active = False
             st.deact_reason = "out of grid (step-adapt)"
         self.retired = gone
+        if set(next_sets) != set(self.sets):
+            self.relation_state, self.relation_at = {}, 0.0     # the lanes' member Sets changed: the held lanes are not these Sets' lanes
         self.sets = next_sets
         self.by_idx = by_idx
         for st_ in by_idx:
@@ -3223,11 +3241,13 @@ class SetBook:
                         except Exception as exc:                              # never stops the scoring: the manual floors stand
                             self.step_floor_auto, self.step_floor_report = {}, []
                             errors.append(f"step floors: {type(exc).__name__}: {exc}"[:160])
+                    rel_acc = relation_lanes.Accumulator() if self.relation_cfg.enabled and not (stale or defer_score) else None
+                    rel_failed = False
                     for st in ([] if stale or defer_score else self.by_idx):
                         try:
                             full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
                             full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
-                            self.set_processed(st, full, now=now)
+                            self.set_processed(st, full, now=now, relations=rel_acc)
                             visible = [r for r in full if r[0] >= cutoff]
                             st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window_max):]]
                             st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
@@ -3237,6 +3257,18 @@ class SetBook:
                             st.last_error = f"{type(exc).__name__}: {exc}"[:160]
                             st.deact_reason = "error"
                             errors.append(f"set {st.id}: {st.last_error}")
+                            rel_failed = True
+                    if not (stale or defer_score):
+                        # the relation lanes of this pass, from the chains just built. A pass in which any member failed publishes no lanes
+                        # (a lane missing a member's orders is not that relation), and a failure here never stops the Set scoring above.
+                        t_rel = time.time()
+                        try:
+                            self.relation_state = rel_acc.lanes(self.relation_cfg) if rel_acc is not None and not rel_failed else {}
+                            self.relation_at = float(now) if self.relation_state else 0.0
+                        except Exception as exc:
+                            self.relation_state, self.relation_at = {}, 0.0
+                            errors.append(f"relation lanes: {type(exc).__name__}: {exc}"[:160])
+                        self.relation_ms = round(1000.0 * (time.time() - t_rel), 1)
                 finally:
                     self._history_snapshot_promoting = False
             ok_syms = len(names) - sym_failed
@@ -3306,6 +3338,8 @@ class SetBook:
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
+                + (f" · {sum(1 for v in self.relation_state.values() if v.get('ok'))}/{len(self.relation_state)} relation lanes pass"
+                   if self.relation_cfg.enabled else "")
                 + (" · rebuilding; prior scores retained" if defer_score else "")
                 + (" · evidence expired during scoring" if scoring_stale else "")
                 + (" · partial" if aborted else "")
@@ -3717,7 +3751,7 @@ class SetBook:
                            base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
 
     def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False,
-                  now: Optional[float] = None) -> Dict[str, Any]:
+                  now: Optional[float] = None, relation_rows: bool = False) -> Dict[str, Any]:
         """The Set's chain (stage_chain) over replayed rows: {"main", "real", "realneg": [(exit t, net)], "short_n"}."""
         cf = cost_as_frac(self.cost_pct)
         ts = [finite(r[0]) for r in full]
@@ -3727,6 +3761,9 @@ class SetBook:
         ch = stage_chain(ts, ents, nets, self.stage_params(st.pack, st), window_start=cutoff)
         out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
         out["short_n"] = ch["short_n"]
+        if relation_rows:
+            # the Main-Set orders with their entry and symbol: what the Set contributes to its relation lanes (relation_lanes.Accumulator)
+            out["main_rows"] = [(ts[k], ents[k], full[k][1], nets[k]) for k in ch["main"]]
         if capture_evidence:
             evidence = ch.get("main_context", ch["main"])
             out["main_evidence"] = (array("d", (ts[k] for k in evidence)), array("d", (ents[k] for k in evidence)),
@@ -3740,11 +3777,14 @@ class SetBook:
     def _processed_of(self, st: SetState, full: Sequence[tuple]) -> List[Tuple[float, float]]:
         return self._chain_of(st, full)["main"]
 
-    def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None) -> None:
+    def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None,
+                      relations: Optional["relation_lanes.Accumulator"] = None) -> None:
         """The Set's chain in every replay pass: its Main Set (orders opened while Base passed), Real Set (opened while Main passed,
         judged on the Main Set) and Real Negative Set (opened while the Main Set's recent average was negative), and its Main short window.
         Every stage after Base reads these Sets, never the raw tape."""
-        ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on, now=now)
+        ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on, now=now, relation_rows=relations is not None)
+        if relations is not None:
+            relations.add(self.relation_cell(st), ch["main_rows"])
         st.proc, st.proc_total = ch["main"][-PROC_KEEP:], len(ch["main"])
         st.exe, st.exe_total = ch["real"][-PROC_KEEP:], len(ch["real"])
         st.neg, st.neg_total = ch["realneg"][-PROC_KEEP:], len(ch["realneg"])
@@ -4438,6 +4478,32 @@ class SetBook:
         lanes = self._execution_lanes(st)
         return lanes[0] if lanes else ""
 
+    def relation_cell(self, st: SetState) -> Tuple[str, str, str, str, str]:
+        """The Set's relation cell (indication, direction, type, TP range, step): every relation lane it belongs to is a projection of it."""
+        return relation_lanes.cell_of(st.pack, st.side, st.kind, st.step, self.step_bucket(st), st.trail_arm)
+
+    def relation_mult(self, st: Optional[SetState], lane: str = "pos") -> Tuple[float, List[str]]:
+        """(volume multiple, the relations behind it) for an entry under this Set and lane: 1 + the ratios of the Set's relation lanes that pass now, at most
+        relationLanes.maxMult. 1 when the lanes are off, not built yet, or the entry is on the Real Negative lane."""
+        if st is None or not self.relation_cfg.enabled:
+            return 1.0, []
+        with self._lock:
+            return relation_lanes.multiple(self.relation_cell(st), lane, self.relation_state, self.relation_cfg)
+
+    def relation_report(self, limit: int = 400) -> Dict[str, Any]:
+        """The relation lanes for the statistics: the configuration, per relation the lanes built / passing and the pooled window PF, and the lanes themselves
+        (passing first, then by observations; at most limit rows)."""
+        with self._lock:
+            cfg, lanes = self.relation_cfg, dict(self.relation_state)
+        rows = [{"id": lane_id, "relation": v["relation"], "role": v["role"], "pack": v["pack"], "side": v["side"], "value": v["value"], "sets": v["sets"],
+                 "entries": v["entries"], "orders": v["orders"], "mainN": v["mainHave"], "mainPf": v["mainPf"], "mainOk": v["mainOk"],
+                 "realEntries": v["realEntries"], "realN": v["realHave"], "realPf": v["realPf"], "realOk": v["realOk"], "ok": v["ok"],
+                 "ratio": cfg.ratio(v["relation"]) if v["ok"] else 0.0}
+                for lane_id, v in lanes.items()]
+        rows.sort(key=lambda r: (not r["ok"], relation_lanes.RELATIONS.index(r["relation"]), -r["entries"], r["id"]))
+        return {"config": cfg.as_dict(), "at": self.relation_at, "ms": self.relation_ms, "lanes": len(rows), "passing": sum(1 for r in rows if r["ok"]),
+                "byRelation": relation_lanes.summary(lanes, cfg) if lanes else {}, "rows": rows[:max(0, int(limit))], "rowsOmitted": max(0, len(rows) - int(limit))}
+
     def kind_order_for(self, pack: str) -> Tuple[Tuple[str, ...], ...]:
         """The kind order (KIND_ORDERS) of a pack: trailPickByPack by the exact pack name, else by its library group ("group:trend"), else trailPick."""
         got = self._kind_order_memo.get(pack)
@@ -4720,9 +4786,20 @@ class SetBook:
         if self.pf_history and now - self.pf_history[-1]["t"] < 20.0:
             return
         split = self._pf_split_nohist()
-        self.pf_history.append({"t": round(now, 1), "pf": split["base"]["pf"], "n": split["base"]["n"],
-                                "valid": split["valid"], "validatedPct": split["validatedPct"],
-                                "unfiltered": split["unfiltered"]["pf"]})
+        point = {"t": round(now, 1), "pf": split["base"]["pf"], "n": split["base"]["n"],
+                 "valid": split["valid"], "validatedPct": split["validatedPct"],
+                 "unfiltered": split["unfiltered"]["pf"]}
+        # the same point per stage and lane: the Sets passing Base / Main / Real / Real Negative (count, share of all Sets, PF of their own window), and the
+        # relation lanes built and passing, so the progress of every lane is followed pass by pass, not only the end figure
+        stages = split.get("stages") or {}
+        point["stages"] = {k: {"sets": int(v.get("sets", 0)), "pct": float(v.get("pct", 0.0)), "pf": v.get("pf")}
+                           for k, v in stages.items() if isinstance(v, dict)}
+        if self.relation_cfg.enabled:
+            lanes = self.relation_state
+            point["relations"] = {"lanes": len(lanes), "passing": sum(1 for v in lanes.values() if v.get("ok")),
+                                  "by": {r: [sum(1 for v in lanes.values() if v["relation"] == r and v.get("ok")),
+                                             sum(1 for v in lanes.values() if v["relation"] == r)] for r in relation_lanes.RELATIONS}}
+        self.pf_history.append(point)
         del self.pf_history[:-720]
 
     def _pf_split_nohist(self) -> Dict[str, Any]:
@@ -4908,6 +4985,7 @@ class SetBook:
             "counts": self.counts(),
             "pfBase": self._pf_split(),
             "pause": self._pause_report(),
+            "relations": self.relation_report(),
             "stepPf": {"on": self.pf_by_step, "auto": self.pf_step_auto, "ratio": self.pf_step_ratio, "autoN": self.pf_step_auto_n,
                        "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
             "indicationConfigs": dict(self.config_report),

@@ -940,6 +940,8 @@ class Position:
     control_fill_state: dict = field(default_factory=dict)  # cumulative quantities/notionals/fees by protective order ID
     relate_receipt: dict = field(default_factory=dict)
     relate_origin_qty: float = 0.0
+    rel_mult: float = 1.0            # the volume multiple the relation lanes asked at entry (relationLanes; 1 = none) and the relations behind it
+    rel_why: str = ""
 
 
 @dataclass
@@ -975,6 +977,8 @@ class Closed:
     entry_slippage: float = 0.0
     exit_slippage: float = 0.0
     relate_receipt: dict = field(default_factory=dict)
+    rel_mult: float = 1.0
+    rel_why: str = ""
 
 
 class Pulse:
@@ -3707,6 +3711,7 @@ class Pulse:
         side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
         chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction, symbol=sym)   # keep the exact lane approved by its own Axis
+        rel_mult, rel_why = 1.0, []
         if chosen is None and blocked_by:
             self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
             if time.time() - self.skip_log.get("scope", 0) > 40:
@@ -3795,9 +3800,35 @@ class Pulse:
                 margin = notional / max(1, lev)
                 if margin > float(self.available or 0) * 0.95:
                     return
+            # relation lanes (relationLanes, off by default): the Set's overall / type / range / step lanes that pass their own last-N windows on the post-Base
+            # orders raise this entry's volume by their ratios (positive lane only). The raise is best effort on top of the size decided above: it is rounded
+            # DOWN to the lot step, stays under the hard size ceiling, the book room, the available margin and (strict cap) the budget x that same ratio, and
+            # together with the static multiples never exceeds VOLUME_MULT_MAX. When it does not fit, the entry opens at the size it had: a raise never
+            # cancels an entry.
+            try:
+                rel_ask, rel_why = self.sets.relation_mult(chosen, lane)
+            except Exception:
+                rel_ask, rel_why = 1.0, []
+            if isinstance(rel_ask, (int, float)) and not isinstance(rel_ask, bool) and math.isfinite(rel_ask) and rel_ask > 1.0 + 1e-9:
+                rel_ask = min(float(rel_ask), max(1.0, VOLUME_MULT_MAX / max(vm, 1e-9)))
+                n_ = self.__dict__.setdefault("exec_n", {})
+                n_["relationAsked"] = int(n_.get("relationAsked", 0)) + 1
+                cap_r = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+                if strict_budget is not None:
+                    cap_r = min(cap_r, strict_budget * rel_ask)
+                q4 = self.round_qty(c, min(qty * rel_ask, cap_r / px))
+                if q4 > qty * (1.0 + 1e-9) and q4 * px / max(1, lev) <= float(self.available or 0) * 0.95:
+                    rel_mult = q4 / qty                       # what the lot step and the ceilings let through
+                    log(f"RELATION {sym} {chosen.id} x{rel_ask:.2f} ({'+'.join(rel_why)}) qty {qty} -> {q4}", every=30.0, key=f"rel:{sym}", quiet=True)
+                    qty = q4
+                    notional = qty * px
+                    margin = notional / max(1, lev)
+                    n_["relationRaised"] = int(n_.get("relationRaised", 0)) + 1
+            if rel_mult <= 1.0:
+                rel_why = []
         # cap_order_qty permits a venue-minimum tolerance for legacy overlays;
         # a strict parent budget must also hold after every scaling path.
-        if strict_budget is not None and (strict_budget <= 0 or qty * px > strict_budget + 1e-9):
+        if strict_budget is not None and (strict_budget <= 0 or qty * px > strict_budget * max(1.0, rel_mult) + 1e-9):
             return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
@@ -3934,6 +3965,7 @@ class Pulse:
                               and (strict_budget is None or retry_notional <= strict_budget + 1e-9))
                     if viable and self.book_allows(sym, direction, retry_qty, px, sl_check)[0]:
                         qty, notional, margin = retry_qty, retry_notional, retry_margin
+                        rel_mult, rel_why = 1.0, []          # the venue's minimum lot sized this entry, not a relation raise
                         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
                         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                         self.did_io = True
@@ -4031,6 +4063,7 @@ class Pulse:
             base_entry=avg if chosen else 0.0, base_qty=filled if chosen else 0.0,
             set_hold_bars=(int(getattr(chosen, "hold_bars", 0) or self.sets.hist_time_bars) if chosen else 0),
             relate_origin_qty=relate_origin_qty if relate_receipt else 0.0,
+            rel_mult=float(rel_mult), rel_why="+".join(rel_why),
         )
         if relate_receipt:
             try:
@@ -4422,6 +4455,7 @@ class Pulse:
             fees_usdt=accounted["fees"] if accounted else None, fee_source=pos.fee_source,
             entry_slippage=pos.entry_slippage, exit_slippage=pos.exit_slippage,
             relate_receipt=pos.relate_receipt,
+            rel_mult=float(getattr(pos, "rel_mult", 1.0) or 1.0), rel_why=str(getattr(pos, "rel_why", "") or ""),
         )
         if pos.relate_receipt and getattr(self, "relate", None) is not None:
             try:

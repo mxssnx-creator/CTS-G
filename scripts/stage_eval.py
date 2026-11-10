@@ -437,6 +437,31 @@ def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Opti
     return out
 
 
+def relation_rows(book, tapes: Tapes, st, now: float) -> List[Tuple[float, float, str, float]]:
+    """(exit t, entry t, symbol, net) of the Set's Main-Set orders inside the lookback at now: what SetBook.set_processed hands the relation lanes
+    (set_engine._chain_of(..., relation_rows=True)), from the same chain every other stage figure here reads."""
+    lb = book.lookback * 60.0
+    src = tape_source(tapes, st.idx, now, lb)
+    tx, te, pp = src.by_set[st.idx]
+    symbols = getattr(src, "symbols_by_set", {}).get(st.idx) or tapes.symbols_by_set[st.idx]
+    e = bisect.bisect_left(tx, now)
+    lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
+    ts, ents = list(tx[lo:e]), list(te[lo:e])
+    nets = [x - tapes.cf for x in pp[lo:e]]
+    ch = se.stage_chain(ts, ents, nets, book.stage_params(st.pack, st), window_start=now - lb)
+    return [(ts[k], ents[k], symbols[lo + k], nets[k]) for k in ch["main"]]
+
+
+def relation_lanes_at(book, tapes: Tapes, now: float, cfg=None) -> Dict[str, Dict[str, Any]]:
+    """The relation lanes at now, as SetBook builds them in a scoring pass: every Set's Main-Set orders through relation_lanes.Accumulator and the
+    one lane_state the engine uses. cfg: another RelationConfig on the same orders (a study arm); default the book's."""
+    import relation_lanes as rl
+    acc = rl.Accumulator()
+    for st in book.by_idx:
+        acc.add(book.relation_cell(st), relation_rows(book, tapes, st, now))
+    return acc.lanes(cfg or book.relation_cfg)
+
+
 def stage_lane(book, tapes: Tapes, st, now: float) -> str:
     """The lane the Set passes the stages on: "pos", "neg" or ""."""
     return stage_lane_stats(book, tapes, st, now)[0]

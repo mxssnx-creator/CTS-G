@@ -715,6 +715,75 @@ def set_volume_multiples_size_by_pack_type_and_range():
     return ok, f"entry notional (USDT) by setting: {out}"
 
 
+def relation_lanes_raise_a_set_entry_and_never_cancel_it():
+    """relationLanes: the multiple SetBook.relation_mult answers for the chosen Set and lane raises that entry's quantity (rounded DOWN to the lot step), on top of
+    the size it had; the position and its close record carry what was really raised. A raise that does not fit under the hard size ceiling opens the entry at its
+    base size (it never cancels an entry); the lane handed to relation_mult is the lane the entry opens on; a failing lookup or a nonsense answer raises nothing;
+    with the strict size cap the budget scales by the same ratio and no further."""
+    import types
+    sym = "BTC-USDT"
+    st = types.SimpleNamespace(id="indications:L:1m:sl1.00:st15", pack="indications", kind="base", step=15, idx=0, sl_ratio=1.0, trail_key="",
+                               trail_arm=0.0, trail_give=0.0, hold_bars=0)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    out, lanes_seen = {}, []
+
+    def boom(_st, _lane):
+        raise RuntimeError("lanes unavailable")
+    cases = (("plain", lambda s_, l_: (1.0, []), {}), ("raised", lambda s_, l_: (1.5, ["overall", "type"]), {}),
+             ("ceiling", lambda s_, l_: (1.5, ["overall"]), {"size_max": "base"}), ("error", boom, {}), ("nonsense", lambda s_, l_: (float("nan"), ["x"]), {}),
+             ("bound", lambda s_, l_: (50.0, ["overall"]), {"size_max": 1e9}),
+             ("strict", lambda s_, l_: (1.5, ["indication"]), {"strict": True}), ("strict plain", lambda s_, l_: (1.0, []), {"strict": True}))
+    with tempfile.TemporaryDirectory() as td:
+        pt.dump_cts_settings = lambda: {}
+        try:
+            for label, fn, opt in cases:
+                for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+                    setattr(pt, name, os.path.join(td, f"{label.replace(' ', '-')}-{name.lower()}.json"))
+                api = _BookVenue({"askPrice": 100.0, "askQty": 1e6, "bidPrice": 99.99, "bidQty": 1e6})
+                contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=0.1, max_lev=150)}
+                p = pt.Pulse(api, contracts)
+                p.boot_ts, p.halted, p.available = 0.0, False, 1e6
+                p.px[sym] = 100.0
+                p.entry_sense = lambda *a, **k: None
+                p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
+                if opt.get("strict"):
+                    p.strict_size_cap, p.equity, p.size_pct, p.size_max = True, 1000.0, 1.0, 25.0
+                if "size_max" in opt:
+                    p.size_max = out["plain"]["notional"] if opt["size_max"] == "base" else opt["size_max"]
+                lane = "neg" if label == "nonsense" else "pos"
+                p._scope_choice = lambda pack, side=0, symbol="", _lane=lane: (st, _lane, "")
+                p.sets.lane_fracs = lambda s_: (0.01, 0.015)
+
+                def mult(s_, l_, _fn=fn):
+                    lanes_seen.append(l_)
+                    return _fn(s_, l_)
+                p.sets.relation_mult = mult
+                p.place(sym, 1, "set:indications:x", 0.9)
+                orders = [b for path, b in api.posts if path.endswith("/trade/order") and str(b.get("type")) == "MARKET"]
+                pos = p.open.get(sym)
+                out[label] = {"notional": round(float(orders[0]["quantity"]) * 100.0, 4) if orders else None,
+                              "mult": round(float(pos.rel_mult), 4) if pos else None, "why": pos.rel_why if pos else None,
+                              "asked": int(p.exec_n.get("relationAsked", 0)), "raised": int(p.exec_n.get("relationRaised", 0))}
+                if label == "raised" and pos is not None:
+                    p.close_pos(pos, 101.0, "test")
+                    rec = p.closed[-1] if getattr(p, "closed", None) else None
+                    out["raised"]["closed"] = (round(float(rec.rel_mult), 4), rec.rel_why) if rec is not None else None
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    base = out["plain"]["notional"]
+    sbase = out["strict plain"]["notional"]
+    ok = (base is not None and out["plain"]["mult"] == 1.0 and out["plain"]["asked"] == 0
+          and out["raised"]["notional"] is not None and abs(out["raised"]["notional"] - 1.5 * base) < 0.11 and out["raised"]["notional"] <= 1.5 * base + 1e-9
+          and abs(out["raised"]["mult"] - out["raised"]["notional"] / base) < 1e-3 and out["raised"]["why"] == "overall+type" and out["raised"]["raised"] == 1
+          and out["raised"].get("closed") == (out["raised"]["mult"], "overall+type")
+          and out["ceiling"]["notional"] == base and out["ceiling"]["mult"] == 1.0 and out["ceiling"]["why"] == "" and out["ceiling"]["asked"] == 1 and out["ceiling"]["raised"] == 0
+          and out["error"]["notional"] == base and out["error"]["mult"] == 1.0 and out["nonsense"]["notional"] == base and out["nonsense"]["mult"] == 1.0
+          and abs(out["bound"]["notional"] - pt.VOLUME_MULT_MAX * base) < 0.11
+          and sbase is not None and abs(out["strict"]["notional"] - 1.5 * sbase) < 0.11 and out["strict"]["notional"] <= 1.5 * sbase + 1e-9
+          and lanes_seen == ["pos", "pos", "pos", "pos", "neg", "pos", "pos", "pos"])
+    return ok, f"entry notional and recorded multiple by case: {out}; lanes handed over {lanes_seen}"
+
+
 def start_records_whether_the_previous_run_crashed():
     """The desk shows how the previous run ended: a start that finds the run-state file still "running" reports no clean stop (crash, kill or
     machine stop; found after the 2026-11-03 container pause, which left 9 positions unmanaged), a clean stop marks "stopped". system_info carries
@@ -3275,6 +3344,7 @@ CHECKS = [
     ("trader.unanswered-close-that-never-existed-is-sent-again", unanswered_close_that_never_existed_is_sent_again),
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.indications-trailing-volume-is-not-multiplied", indications_trailing_volume_is_not_multiplied),
+    ("trader.relation-lanes-raise-a-set-entry-and-never-cancel-it", relation_lanes_raise_a_set_entry_and_never_cancel_it),
     ("trader.start-records-whether-the-previous-run-crashed", start_records_whether_the_previous_run_crashed),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),

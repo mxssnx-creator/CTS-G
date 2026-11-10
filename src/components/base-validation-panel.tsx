@@ -16,7 +16,7 @@ import type { LiveStats } from "@/lib/live-stats";
 import { ClientChart } from "@/components/visual-stats";
 import { POSITION_COST_PCT_DEFAULT } from "@/lib/analytics";
 import { hourlyPf } from "@/lib/hourly-pf";
-import { basePackFigures, historicalPlotPf } from "@/lib/base-progress";
+import { basePackFigures, historicalPlotPf, stageProgress } from "@/lib/base-progress";
 
 const PACK_LABEL: Record<string, string> = {
   indications: "Indications",
@@ -67,6 +67,9 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
       })),
     [pb],
   );
+  const stageLines = useMemo(() => stageProgress(pb?.history), [pb]);
+  const hasStageLines = stageLines.some((p) => p.base !== null);
+  const hasRelationLine = stageLines.some((p) => p.relations !== null);
   if (!pb) return null;
   const hoursWithCash = hourly.filter((h) => !h.partial && h.netCash !== null);
   const hoursPositive = hoursWithCash.filter((h) => h.netCash !== null && h.netCash > 0).length;
@@ -151,6 +154,30 @@ export function BaseValidationPanel({ live, minPf = 1.1 }: { live: LiveStats | n
           </LineChart>
         </ClientChart>
       </Panel>
+      {hasStageLines ? (
+        <Panel
+          title="Stage and lane progress"
+          hint="Share of all Sets passing each stage (Base, Main, Real, Real Negative), one point per scoring pass, and the share of the relation lanes that pass. Every line is its own lane; none is an average of the others."
+        >
+          <ClientChart height={200}>
+            <LineChart data={stageLines} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #2a2f3a)" />
+              <XAxis dataKey="time" tick={{ fontSize: 10 }} minTickGap={24} />
+              <YAxis yAxisId="sets" tick={{ fontSize: 11 }} unit="%" domain={[0, "auto"]} />
+              {hasRelationLine ? <YAxis yAxisId="rel" orientation="right" tick={{ fontSize: 11 }} unit="%" domain={[0, 100]} /> : null}
+              <Tooltip />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Line yAxisId="sets" type="monotone" dataKey="base" name="Base %" stroke="#8a93a6" strokeWidth={1.5} dot={false} connectNulls={false} />
+              <Line yAxisId="sets" type="monotone" dataKey="main" name="Main %" stroke="#4c8dff" strokeWidth={1.5} dot={false} connectNulls={false} />
+              <Line yAxisId="sets" type="monotone" dataKey="real" name="Real %" stroke="#1f9d5c" strokeWidth={2} dot={false} connectNulls={false} />
+              <Line yAxisId="sets" type="monotone" dataKey="realNeg" name="Real Negative %" stroke="#e0a030" strokeWidth={1.5} dot={false} connectNulls={false} />
+              {hasRelationLine ? (
+                <Line yAxisId="rel" type="monotone" dataKey="relations" name="Relation lanes passing %" stroke="#b56cff" strokeWidth={1.5} strokeDasharray="4 2" dot={false} connectNulls={false} />
+              ) : null}
+            </LineChart>
+          </ClientChart>
+        </Panel>
+      ) : null}
       <Panel title="Set states" hint="Every Set is ready, waiting for minimal coordination, invalid, locked or in error.">
         <ClientChart height={200}>
           <BarChart data={states} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>

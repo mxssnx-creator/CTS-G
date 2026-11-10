@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
-import type { LiveStats } from "@/lib/live-stats";
+import { relationFigures, type LiveStats } from "@/lib/live-stats";
 import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
 import { executionScopeText, scopeStatus } from "@/lib/execution-scope";
 import { evidencePfText } from "@/lib/evidence-view";
@@ -199,7 +199,66 @@ function StagesCard({ live }: { live: LiveStats | null | undefined }) {
         Every stage PF is measured on the window the stage judged, so it is at or above the minimum PF by construction; the PF of orders opened AFTER a decision is the executed figure below.
       </p>
       <WindowsTable live={live} />
+      <RelationsTable live={live} />
     </Card>
+  );
+}
+
+const RELATION_NAME: Record<string, string> = { overall: "Overall", indication: "Indication", type: "Type", range: "TP range", step: "Step" };
+
+/** Relation lanes: per relation the lanes built and passing, and the pooled PF of every observation their windows read (one observation = one entry). */
+export function RelationsTable({ live }: { live: LiveStats | null | undefined }) {
+  const report = live?.sets?.relations;
+  const rows = relationFigures(report);
+  if (!rows.length) return null;
+  const lanes = (report?.rows ?? []).filter((r) => r.ok).slice(0, 12);
+  const cfg = report?.config;
+  return (
+    <div className="mt-4 overflow-x-auto" data-testid="relation-lanes">
+      <div className="mb-1 font-mono text-[11px] text-muted">
+        Relation lanes · post-Base orders by relation, each entry counted once · Main last {cfg?.mainN}, Real last {cfg?.realN || "off"}, minimum PF {cfg?.minPf?.toFixed(2)} ·
+        {" "}{report?.passing ?? 0} of {report?.lanes ?? 0} lanes pass · volume ×1 to ×{cfg?.maxMult?.toFixed(2)}
+      </div>
+      <table className="w-full min-w-[40rem] text-sm">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 text-left font-medium">Relation</th>
+            <th className="pb-2 text-left font-medium">Lane type</th>
+            <th className="pb-2 text-right font-medium">Lanes</th>
+            <th className="pb-2 text-right font-medium" title="Lanes whose Main window passes">Main pass</th>
+            <th className="pb-2 text-right font-medium" title="Lanes passing Main and Real: these raise the volume">Pass</th>
+            <th className="pb-2 text-right font-medium" title="Gains over losses of every observation the Main windows read, all lanes of the relation">Main PF</th>
+            <th className="pb-2 text-right font-medium" title="The same over the Real windows of the passing lanes (in-sample: the lanes were selected on it)">PF (passing)</th>
+            <th className="pb-2 text-right font-medium">Entries</th>
+            <th className="pb-2 text-right font-medium" title="Volume added to an entry while the lane passes">Ratio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} className={`border-t border-border font-mono text-xs ${r.on ? "" : "text-muted"}`}>
+              <td className="py-1.5">{RELATION_NAME[r.key] ?? r.key}</td>
+              <td className="py-1.5">{r.role}</td>
+              <td className="py-1.5 text-right">{r.lanes}</td>
+              <td className="py-1.5 text-right">{r.mainOk}</td>
+              <td className="py-1.5 text-right">{r.ok}</td>
+              <td className={`py-1.5 text-right ${r.mainObs < 1 ? "" : r.mainPf >= 1.1 ? "text-primary" : r.mainPf < 1 ? "text-danger" : ""}`}>{r.mainObs < 1 ? "—" : r.mainPf >= 99 ? "no loss" : r.mainPf.toFixed(2)}</td>
+              <td className="py-1.5 text-right">{r.passObs < 1 ? "—" : r.passPf >= 99 ? "no loss" : r.passPf.toFixed(2)}</td>
+              <td className="py-1.5 text-right">{r.entries}</td>
+              <td className="py-1.5 text-right">{r.ratio > 0 ? `+${r.ratio.toFixed(2)}` : "observe"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {lanes.length ? (
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          Passing now: {lanes.map((l) => `${l.pack} ${l.side} ${l.relation}${l.value ? ` ${l.value}` : ""} (${l.entries} entries, Main ${l.mainPf >= 99 ? "no loss" : l.mainPf.toFixed(2)})`).join(" · ")}
+          {(report?.passing ?? 0) > lanes.length ? ` · +${(report?.passing ?? 0) - lanes.length} more` : ""}
+        </p>
+      ) : null}
+      <p className="mt-2 text-xs text-muted">
+        A relation lane is judged on the orders its Sets opened after Base, never on the raw tapes. Its windows are in-sample for the lanes that pass; what a raise is worth is the executed figure, stated per order and in USDT separately.
+      </p>
+    </div>
   );
 }
 

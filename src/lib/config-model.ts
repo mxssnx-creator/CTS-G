@@ -1,5 +1,6 @@
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "./lane-policy.ts";
 import { relateConfigs, type RelateConfig } from "./relate-config.ts";
+import { relationLanesOf, type RelationLanesConfig } from "./relation-lanes.ts";
 import protectionPolicy from "../../server/pulse/protection-policy.json" with { type: "json" };
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
@@ -277,6 +278,8 @@ export type PulseOverlay = {
   prevPosWindow: number;
   exitMinSamples: number;
   relateConfigs: RelateConfig[];
+  /** Relation lanes: last-N lanes of the post-Base orders by relation (overall / type / range / step); passing lanes raise an entry's volume by their ratio. */
+  relationLanes: RelationLanesConfig;
   blockVolumeRatio: number;
   blockRiskPctOfBalance: number;
   /** Minutes a symbol and direction rest after a position of it was closed outside the engine (manual close); 0 = off. */
@@ -585,6 +588,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   prevPosWindow: 25,
   exitMinSamples: 8,
   relateConfigs: relateConfigs(undefined),
+  relationLanes: relationLanesOf(undefined),
   blockVolumeRatio: 1,
   blockRiskPctOfBalance: 0,
   manualCloseRestMin: 240,
@@ -856,6 +860,7 @@ export type CtsSettings = {
   blockWindow?: number;
   exitMinSamples?: number;
   relateConfigs?: RelateConfig[];
+  relationLanes?: RelationLanesConfig;
   blockVolumeRatio?: number;
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
@@ -1350,6 +1355,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
     exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
     relateConfigs: relateConfigs(live?.relateConfigs ?? cts.relateConfigs),
+    relationLanes: relationLanesOf(live?.relationLanes ?? cts.relationLanes),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0),
     manualCloseRestMin: Math.max(0, Math.min(10080, Math.round(num(cts.manualCloseRestMin, 240)))),
@@ -1659,6 +1665,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
     relateConfigs: relateConfigs(overlay.relateConfigs),
+    relationLanes: relationLanesOf(overlay.relationLanes),
     minPfSignals: Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(overlay.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals))),
     symbols: capSymbols(overlay.symbols || []),
   };

@@ -1,5 +1,6 @@
 import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
+import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
 import { createFileRoute } from "@tanstack/react-router";
@@ -1214,6 +1215,63 @@ function SettingsPage() {
                 <KV k="Min step" v={String(overlay.minStep)} />
                 <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>
+            </Card>
+          )}
+
+          {section === "block" && (
+            <Card
+              title="Relation lanes"
+              hint="Last-N lanes of the post-Base orders by relation, next to every configuration's own lane. A passing lane raises the volume of its Sets' positive-lane entries; it never opens, blocks or closes a position."
+            >
+              {(() => {
+                const cfg = relationLanesOf(overlay.relationLanes);
+                const update = (change: Partial<typeof cfg>) => patch("relationLanes", relationLanesOf({ ...cfg, ...change }));
+                const all = RELATIONS.filter((r) => cfg.relations[r].on);
+                return (
+                  <div data-testid="relation-lanes-settings">
+                    <Grid>
+                      <Toggle label="Relation lanes" on={cfg.enabled} onChange={(enabled) => update({ enabled })} />
+                      <Num label="Main window (entries)" value={cfg.mainN} min={1} max={200} step={1} hint="last N post-Base entries of the relation, each entry once" onChange={(mainN) => update({ mainN })} />
+                      <Num label="Real window (entries)" value={cfg.realN} min={0} max={200} step={1} hint="entries opened while the Main window passed; 0 = no Real stage" onChange={(realN) => update({ realN })} />
+                      <Num label="Minimum PF" value={cfg.minPf} min={RELATION_PF_FLOOR} max={10} step={0.01} onChange={(minPf) => update({ minPf })} />
+                      <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={RELATION_MULT_MAX} step={0.25} hint="1 + the passing relations' ratios, never above this" onChange={(maxMult) => update({ maxMult })} />
+                      <Toggle label="Windows need their full N" on={cfg.fullWindow} onChange={(fullWindow) => update({ fullWindow })} />
+                    </Grid>
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="w-full min-w-[520px] text-left text-sm">
+                        <thead className="font-mono text-[11px] text-muted">
+                          <tr>
+                            <th className="pb-2 font-medium">Relation</th>
+                            <th className="pb-2 font-medium">Lane type</th>
+                            <th className="pb-2 font-medium">Built</th>
+                            <th className="pb-2 font-medium">Volume ratio when passing</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {RELATIONS.map((name) => (
+                            <tr key={name} className="border-t border-border">
+                              <td className="py-1.5">{RELATION_LABEL[name]}</td>
+                              <td className="py-1.5 font-mono text-xs text-muted">{RELATION_ROLE[name]}</td>
+                              <td className="py-1.5">
+                                <Toggle label={`Build ${name}`} on={cfg.relations[name].on} onChange={(on) => update({ relations: { ...cfg.relations, [name]: { ...cfg.relations[name], on } } })} />
+                              </td>
+                              <td className="py-1.5">
+                                <Num label={`${name} ratio`} value={cfg.relations[name].ratio} min={0} max={RELATION_RATIO_MAX} step={0.05}
+                                  onChange={(ratio) => update({ relations: { ...cfg.relations, [name]: { ...cfg.relations[name], ratio } } })} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-3 text-xs opacity-70">
+                      With every built relation passing an entry opens at ×{relationMultiple({ ...cfg, enabled: true }, all).toFixed(2)} the volume factor's size; with none at ×1.00.
+                      Ratio 0 = the lane is built and shown, and raises nothing. The Real Negative lane is never raised. The raise is rounded down to the lot step and stays under the size ceiling,
+                      the book room and the available margin; when it does not fit, the entry opens at its base size. A larger volume weights results, it does not change a per-order PF.
+                    </p>
+                  </div>
+                );
+              })()}
             </Card>
           )}
 

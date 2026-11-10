@@ -157,8 +157,36 @@ export type PfBase = {
   /** "gate-window": pooled over each Set's last setGateWindow orders, never the whole tape. */
   basis?: string;
   /** Continuous progress of the effective PF and the validated share, one point per scoring pass (oldest first). */
-  history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number }>;
+  history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number;
+    /** Per stage at that pass: the Sets passing it, their share of all Sets and the PF of their own window. */
+    stages?: Record<string, { sets: number; pct: number; pf: number | null }>;
+    /** Relation lanes built and passing at that pass; `by` = [passing, built] per relation. */
+    relations?: { lanes: number; passing: number; by?: Record<string, [number, number]> } }>;
 };
+
+export type RelationLaneRow = {
+  id: string; relation: string; role: string; pack: string; side: string; value: string; sets: number;
+  entries: number; orders: number; mainN: number; mainPf: number; mainOk: boolean;
+  realEntries: number; realN: number; realPf: number; realOk: boolean; ok: boolean; ratio: number;
+};
+export type RelationSummary = {
+  role: string; on: boolean; ratio: number; lanes: number; mainOk: number; ok: number; entries: number; orders: number;
+  mainPf: number; mainObs: number; passPf: number; passObs: number;
+};
+export type RelationReport = {
+  config?: { enabled?: boolean; mainN?: number; realN?: number; minPf?: number; maxMult?: number; fullWindow?: boolean;
+    relations?: Record<string, { on?: boolean; ratio?: number; role?: string }> };
+  at?: number; ms?: number; lanes?: number; passing?: number;
+  byRelation?: Record<string, RelationSummary>;
+  rows?: RelationLaneRow[]; rowsOmitted?: number;
+};
+
+/** Per relation, in the fixed order, the figures of the relation lanes for the desk; empty when the lanes are off or not built yet. */
+export function relationFigures(report: RelationReport | undefined | null): Array<RelationSummary & { key: string }> {
+  const by = report?.byRelation;
+  if (!report?.config?.enabled || !by) return [];
+  return ["overall", "indication", "type", "range", "step"].filter((k) => by[k]).map((k) => ({ key: k, ...by[k] }));
+}
 
 /** Sets and orders as executed, after every validation gate (Pulse.execution_snapshot). */
 export type OverallScope = {
@@ -657,6 +685,9 @@ export type LiveStats = {
       autoMin?: number;
       steps?: Array<{ step: number; side?: number; source?: string; tpPct: number; manual: number; auto: number | null; used: number; orders: number; admitted: number; pfAll: number; pfAdmitted: number }>;
     };
+    /** Relation lanes (SetBook.relation_report): the configuration, per relation the lanes built / passing with the pooled PF of ALL the observations their
+     * windows read, and the lanes themselves (passing first). One observation = one entry, the mean net of its member Sets' closed post-Base orders. */
+    relations?: RelationReport;
     /** Pause after success: the mode and settings, and per indication (pack) the minutes the Auto Mode chose across symbols. */
     pause?: {
       mode?: string;
