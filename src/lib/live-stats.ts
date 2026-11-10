@@ -655,7 +655,7 @@ export type LiveStats = {
       ratio?: number;
       autoN?: number;
       autoMin?: number;
-      steps?: Array<{ step: number; tpPct: number; manual: number; auto: number | null; used: number; orders: number; admitted: number; pfAll: number; pfAdmitted: number }>;
+      steps?: Array<{ step: number; side?: number; source?: string; tpPct: number; manual: number; auto: number | null; used: number; orders: number; admitted: number; pfAll: number; pfAdmitted: number }>;
     };
     /** Pause after success: the mode and settings, and per indication (pack) the minutes the Auto Mode chose across symbols. */
     pause?: {

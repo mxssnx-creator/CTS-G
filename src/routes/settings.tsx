@@ -1,3 +1,4 @@
+import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
@@ -51,8 +52,6 @@ import {
   STEP_PF_RATIO_MAX,
   STEP_PF_RATIO_MIN,
   STEP_PF_RATIO_STEP,
-  STEP_PF_TP_MAX,
-  STEP_PF_TP_MIN,
   manualStepPf,
   stepPfRatio,
   TP_RANGES,
@@ -2187,22 +2186,23 @@ function SettingsPage() {
 
 function StepPfTable({ overlay, stats }: { overlay: PulseOverlay; stats: LiveStats | null }) {
   const live = stats?.sets?.stepPf;
-  const learned = new Map((live?.steps ?? []).map((r) => [r.step, r]));
-  const rows: number[] = [];
-  for (let k = Math.round(STEP_PF_TP_MIN / TP_UNIT_PCT); k <= Math.round(STEP_PF_TP_MAX / TP_UNIT_PCT); k++) rows.push(k);
+  const rows = stepPfRows(overlay, live?.steps);
   return (
     <details className="col-span-full rounded-lg border border-border bg-bg2 px-3 py-2" data-testid="step-pf-table">
       <summary className="cursor-pointer font-mono text-xs text-muted">
-        Floor per TP step ({rows.length} steps, 0.2-3.5%) · manual with the ratio above{live?.auto ? " and what Auto learned" : ""}
+        Shared PF by TP step and direction (0.2–5.0%) · targets above 3.5% use the final Auto bucket
       </summary>
+      <p className="mt-2 text-xs text-muted">Each direction keeps its own learned evidence. A range override replaces Auto; config-specific step and SL-ratio overrides take precedence within their own lanes.</p>
       <div className="mt-2 overflow-x-auto">
         <table className="w-full text-left font-mono text-xs">
           <thead className="text-muted">
             <tr>
               <th className="py-1">TP</th>
+              <th>Direction</th>
               <th>Manual</th>
               <th>Auto</th>
               <th>Used</th>
+              <th>Source</th>
               <th>Orders read</th>
               <th>Admitted</th>
               <th>PF admitted</th>
@@ -2210,19 +2210,15 @@ function StepPfTable({ overlay, stats }: { overlay: PulseOverlay; stats: LiveSta
             </tr>
           </thead>
           <tbody>
-            {rows.map((k) => {
-              const tp = tpPctOfStep(k);
-              const manual = manualStepPf(tp, overlay.minPfStepRatio);
-              const r = learned.get(k);
-              const range = TP_RANGES.find(range => k >= range.lo && k <= range.hi);
-              const used = (range && overlay.minPfByRange?.[range.id]) ?? Math.min(overlay.minPfStepAutoHigh,
-                overlay.minPfStepAuto !== false && r?.auto != null ? r.auto : manual);
+            {rows.map(({ step, tp, side, manual, used, source, evidence: r }) => {
               return (
-                <tr key={k} className="border-t border-border">
+                <tr key={`${step}:${side}`} className="border-t border-border">
                   <td className="py-0.5">{tp.toFixed(1)}%</td>
+                  <td>{side > 0 ? "Long" : side < 0 ? "Short" : "Both"}</td>
                   <td>{manual.toFixed(2)}</td>
                   <td>{r?.auto != null ? r.auto.toFixed(2) : "–"}</td>
                   <td>{used.toFixed(3)}</td>
+                  <td>{source}</td>
                   <td>{r?.orders ?? "–"}</td>
                   <td>{r?.admitted ?? "–"}</td>
                   <td>{r && r.orders ? r.pfAdmitted.toFixed(2) : "–"}</td>

@@ -3545,7 +3545,7 @@ class Pulse:
         chosen, _lane, blocked = self._scope_choice(pack)
         return chosen, blocked
 
-    def set_axis_floor(self, st: Any) -> Optional[float]:
+    def set_axis_floor(self, st: Any, lane: str = "pos") -> Optional[float]:
         """The minimum PF the Axis, Block and DCA-on-Axis gates ask of ONE Set's own stream: that Set's floor, the one its Base, Main and Real windows ask
         (minPfByStep: its TP step), so a stage after Real does not re-judge the Set at a pooled floor. None (the coordinator's own floor) when the gates are
         unlinked (minPfLinked off), for a position without a Set, or when the book cannot say."""
@@ -3553,7 +3553,9 @@ class Pulse:
         if st is None or coord is None or not getattr(coord, "min_pf_linked", True) or not isinstance(self.sets, SetBook):
             return None
         try:
-            return float(self.sets.floor_for(self.sets.realst_n, st.pack, st))
+            windows = self.sets.win(st)
+            n = windows.real_neg_n if lane == "neg" else windows.real_n
+            return float(self.sets.floor_for(n, st.pack, st))
         except Exception:
             return None
 
@@ -3580,7 +3582,7 @@ class Pulse:
                 cf = cost_as_frac(self.position_cost_pct)
                 rows = [{"t": t, "pnl_pct": value + cf} for t, value in source
                         if cutoff <= t <= now]
-                floor = self.set_axis_floor(st)
+                floor = self.set_axis_floor(st, lane)
                 result = self.coord.judge(rows, self.coord.net_streak(rows), min_pf=floor)
                 key = f"set:{st.id}:{lane}"
                 scope = {"allow": result["allow"], "reasons": result["reasons"], "orders": len(rows),
@@ -5689,7 +5691,7 @@ class Pulse:
             src = st.neg if lane == "neg" else st.exe
             cf = cost_as_frac(self.position_cost_pct)
             evidence = [{"pnl_pct": net + cf} for t, net in src if now - lookback <= t <= now]
-            floor = self.set_axis_floor(st)
+            floor = self.set_axis_floor(st, lane)
             if not self.coord.judge(evidence, self.coord.net_streak(evidence), min_pf=floor)["allow"]:
                 continue
             row = self.set_block.candidate(pos, px, now, self.block, self.position_cost_pct, lookback, floor=floor,
@@ -5771,7 +5773,7 @@ class Pulse:
             source = st.neg if lane == "neg" else st.exe
             rows = [{"pnl_pct": value + cf} for t, value in source
                     if now - self.sets.lookback * 60 <= t <= now]
-            return bool(self.coord.judge(rows, self.coord.net_streak(rows), min_pf=self.set_axis_floor(st))["allow"])
+            return bool(self.coord.judge(rows, self.coord.net_streak(rows), min_pf=self.set_axis_floor(st, lane))["allow"])
         return False
 
     def maybe_dca_adds(self) -> None:

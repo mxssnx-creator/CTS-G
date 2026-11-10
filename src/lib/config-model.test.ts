@@ -235,3 +235,10 @@ test("per-config lane policy, major/minor identity and quarter SL survive settin
   assert.deepEqual(overlayFromCts(cts(), syncOverlayFlags(ov)).indicationConfigs,ov.indicationConfigs);
   assert.throws(()=>indicationConfigList([{...entry,lastNLanes:[{id:"bad",lastN:{realN:0}}]}]));
 });
+
+
+test("TP-step PF ratio decimal midpoints match native half-up normalization", () => {
+  for(let k=0;k<28;k++) assert.equal(stepPfRatio(.125+.05*k), Math.round((.15+.05*k)*100)/100);
+  assert.equal(stepPfRatio(1e300),1.5);
+  assert.equal(stepPfRatio(-1e300),.1);
+});
