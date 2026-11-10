@@ -272,11 +272,12 @@ def the_simulator_learns_the_engines_floors():
         rows = {}
         for st in book.by_idx:
             tx, te, pp = tapes.by_set[st.idx]
-            rows[st.id] = [(float(a), "S", "LONG", 0.0, float(x), float(a - b), "x", st.id) for a, b, x in zip(tx, te, pp)]
+            rows[st.id] = [(float(a), symbol, "LONG", 0.0, float(x), float(a - b), "x", st.id)
+                           for a, b, x, symbol in zip(tx, te, pp, tapes.symbols_by_set[st.idx])]
         real = book._tape_rows
         book._tape_rows = lambda key, order, cutoff, until=None: [r for r in rows.get(key, ()) if cutoff <= r[0] <= (float("inf") if until is None else until)]
         try:
-            book._learn_step_floors(["S"], hour)
+            book._learn_step_floors(names, hour - book.lookback * se.BAR_S)
         finally:
             book._tape_rows = real
         eng = dict(book.step_floor_auto)
@@ -371,7 +372,72 @@ def min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates():
     return ok, f"{len(sets)} Sets: manual floors capped at 1.27 (bad {bad[:2]}), learned 1.9 -> {sorted(learned)}, candidates {min(cands)}..{max(cands)}, range floor {sorted(r_floor)}, default cap {plain.pf_step_auto_high}"
 
 
+
+def auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity():
+    from dataclasses import replace
+    b = _book(minPfStepAuto=True)
+    base = next(st for st in b.by_idx if st.kind == "base")
+    b.step_floor_auto = {(35, base.side): 1.18}
+    for step in (35, 36, 42, 50):
+        st = replace(base, step=step, tp_pct=step * .001)
+        assert b.step_bucket(st) == step and b.auto_step_bucket(st) == 35
+        assert {b.floor_for(n, st.pack, st) for n in (1, 5, 50, 200)} == {1.18}
+        assert b.stage_params(st.pack, st).floor == 1.18
+    b.pf_range_floor = {"wide": 1.31}
+    st = replace(base, step=50, tp_pct=.05)
+    assert b.step_floor(st) == 1.31
+    b.pack_ranges[st.pack] = {"lanePolicy": {"minPfByStep": {"50": 1.44}}}
+    assert b.floor_for(5, st.pack, st) == 1.44
+    return True, "steps 35..50 share Auto's final bucket; actual step/range/policy identity is preserved"
+
+
+def auto_replay_matches_native_boundary_and_complete_tape_identity():
+    from types import SimpleNamespace
+    import stage_eval as sg
+    b = _book(minPfStepAutoMin=200, histLookbackBars=600)
+    b.by_idx = [st for st in b.by_idx if st.kind == "base" and st.step == 3][:2]
+    assert len(b.by_idx) == 2
+    a, c = b.by_idx
+    ts = [T0 + k * 300 for k in range(130)]
+    gross = [.0052] * len(ts)
+    now = ((ts[-1] + b.lookback * 60) // 3600 + 1) * 3600
+    boundary = now - b.lookback * 60
+    for same_symbol, same_entry in ((False, True), (True, False), (True, True)):
+        symbols = ["A", "A" if same_symbol else "B"]
+        entries = [[t - (60 if i == 0 or same_entry else 120) for t in ts] for i in range(2)]
+        tapes = SimpleNamespace(cf=.0012,
+            by_set={st.idx:(ts, entries[i], gross) for i, st in enumerate(b.by_idx)},
+            symbols_by_set={st.idx:[symbols[i]]*len(ts) for i, st in enumerate(b.by_idx)})
+        rows = {st.id:[(t,symbols[i],"LONG",.004,g,t-e,"tp",st.id) for t,e,g in zip(ts,entries[i],gross)]
+                for i, st in enumerate(b.by_idx)}
+        _learn(b, rows, boundary); expected = dict(b.step_floor_auto)
+        assert bool(expected) == (not same_symbol or not same_entry), "only actual copied events deduplicate"
+        auto = sg.AutoFloors(b,tapes); auto.apply(b,now)
+        assert b.step_floor_auto == expected
+    # Trades inside the evaluated lookback cannot teach the floor being used to judge them.
+    b.pf_step_auto_min = 1
+    in_window = [boundary + k * 60 for k in range(50)]
+    tapes = SimpleNamespace(cf=.0012,
+        by_set={st.idx:(in_window,[t-30 for t in in_window],[.0052]*len(in_window)) for st in b.by_idx},
+        symbols_by_set={st.idx:["A"]*len(in_window) for st in b.by_idx})
+    auto = sg.AutoFloors(b,tapes); auto.apply(b,now)
+    assert not b.step_floor_auto, "simulation must not learn from the judged window"
+    return True, "native/replay match with distinct symbols, distinct entries, exact copies and lookback embargo"
+
+
+
+def ratio_midpoints_match_desk_half_up_normalization():
+    for k in range(28):
+        value=.125+.05*k; expected=round(.15+.05*k,2)
+        assert se.step_pf_ratio(value) == expected, (value,se.step_pf_ratio(value),expected)
+    assert se.step_pf_ratio(1e300)==1.5 and se.step_pf_ratio(-1e300)==.1
+    return True,"28 midpoint ratios snap half-up identically to desk; extreme finite inputs remain bounded"
+
+
 CHECKS = [("step-pf." + fn.__name__.replace("_", "-"), fn) for fn in (
+    ratio_midpoints_match_desk_half_up_normalization,
+    auto_wide_steps_use_the_last_table_bucket_but_keep_policy_identity,
+    auto_replay_matches_native_boundary_and_complete_tape_identity,
     shipped_micro_floor_is_positive_and_shared_by_every_stage,
     manual_floor_is_one_plus_step_times_ratio, min_pf_step_cap_bounds_every_step_floor_and_the_auto_candidates, min_pf_by_range_replaces_the_step_floor_for_its_range_only, one_floor_for_every_window_and_stage, auto_floor_never_under_its_lower_bound,
     auto_floor_matches_a_plain_reading_and_learns_from_a_real_relation, auto_floor_never_reads_the_window_it_judges,

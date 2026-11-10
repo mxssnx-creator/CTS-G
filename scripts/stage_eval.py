@@ -171,13 +171,15 @@ class Tapes:
     def __init__(self, book, names, times, shadow):
         self.cf = cost_as_frac(book.cost_pct)
         self.by_set: Dict[int, Tuple[array, array, array]] = {}
+        self.symbols_by_set: Dict[int, Tuple[str, ...]] = {}
         for st in book.by_idx:
             rows = []
             for s in names:
                 ent, ex, pp = shadow[s][3][st.idx]
                 ts = times[s]
-                rows.extend((ts[ex[k]] + 60, ts[ent[k]] + 60, pp[k]) for k in range(len(ex)))
-            rows.sort()
+                rows.extend((ts[ex[k]] + 60, ts[ent[k]] + 60, pp[k], s) for k in range(len(ex)))
+            rows.sort(key=lambda r: (r[0], r[3]))
+            self.symbols_by_set[st.idx] = tuple(r[3] for r in rows)
             self.by_set[st.idx] = (array("d", (r[0] for r in rows)), array("d", (r[1] for r in rows)),
                                    array("d", (r[2] for r in rows)))
 
@@ -425,7 +427,9 @@ def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Opti
         if c is not None and c[0] <= now < c[1]:
             return c[2]
     rows = [{"t": t, "pnl_pct": v + tapes.cf} for t, v in lane_stream(book, tapes, st, now, lane)]
-    floor = float(book.floor_for(book.win(st).real_n, st.pack, st)) if getattr(coord, "min_pf_linked", True) else None
+    windows = book.win(st)
+    n = windows.real_neg_n if lane == "neg" else windows.real_n
+    floor = float(book.floor_for(n, st.pack, st)) if getattr(coord, "min_pf_linked", True) else None
     r = coord.judge(rows, coord.net_streak(rows), min_pf=floor)
     out = (bool(r["allow"]), float(r["metrics"]["last15Pf"]), floor)
     if cache is not None:
@@ -562,7 +566,7 @@ class AutoFloors:
     """The engine's Auto minimum PF per TP step (minPfByStep + minPfStepAuto) in the simulator: the same pairs (a Set's PF over its last minPfStepAutoN
     closes at an order's entry, that order's net; one Set per distinct tape) and the same pure rule (set_engine.learn_step_floor: the lowest floor within
     minPfStepAutoTol of the best delivered PF; step -> pooled direction -> manual), re-learned at every test hour from the orders CLOSED BEFORE that hour,
-    so no hour is judged with a floor that read it. Copies are recognised on the orders closed before the hour, as the engine compares its rows."""
+    so the evaluation window is never judged with a floor fitted on it. Copies retain symbol, direction and entry provenance, as in the engine."""
 
     def __init__(self, book, tapes: "Tapes"):
         self.on = bool(getattr(book, "pf_by_step", False) and getattr(book, "pf_step_auto", False))
@@ -591,31 +595,38 @@ class AutoFloors:
             # the signature of the first k orders, built once: a copy is judged on the orders closed before each hour, as the engine compares its rows
             # before the boundary (a Wide base Set and an Exit Set with the same stop trade the same orders until the Wide target is first reached)
             sig, run = [], 0
-            for t_, x_ in zip(tx, pp):
-                run = hash((run, round(t_, 3), round(x_, 10)))
+            symbols = getattr(tapes, "symbols_by_set", {}).get(st.idx)
+            if symbols is None:
+                # An adapter without symbol provenance cannot safely deduplicate
+                # this tape against another exact config.
+                symbols = (f"unknown:{st.id}",) * len(tx)
+            for t_, e_, x_, symbol in zip(tx, te, pp, symbols):
+                run = hash((run, se.auto_evidence_key(t_, symbol, x_, e_, st.side)))
                 sig.append(run)
-            self.sets.append(((book.step_bucket(st), st.side), list(tx), sig, pairs))
+            self.sets.append(((book.auto_step_bucket(st), st.side), list(tx), sig, pairs))
 
     def apply(self, book, now: float) -> bool:
-        """Learn the floors from the orders closed before the hour of `now` and hand them to the book; True when they were (re)learned."""
+        """Learn before the evaluation window, matching native replay; refresh hourly."""
         if not self.on:
             return False
         hour = int(now // 3600) * 3600.0
-        if hour == self.last:
+        boundary = hour - book.lookback * se.BAR_S
+        refresh_key = (hour, book.lookback)
+        if refresh_key == self.last:
             return False
-        self.last = hour
+        self.last = refresh_key
         n_win = int(book.pf_step_auto_n)
         before: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
         seen: set = set()
         for key, tx, sig, pairs in self.sets:
-            cut = bisect.bisect_left(tx, hour)            # orders closed before the hour
+            cut = bisect.bisect_left(tx, boundary)        # native now - lookback; strict close boundary
             if cut <= n_win:
                 continue
             if sig[cut - 1] in seen:
                 continue                                  # a copy of a Set already read, on the orders the engine can see at this hour
             seen.add(sig[cut - 1])
             out = before.setdefault(key, [])
-            out.extend((p_, n_) for (t_, p_, n_) in pairs if t_ < hour)
+            out.extend((p_, n_) for (t_, p_, n_) in pairs if t_ < boundary)
         learned: Dict[Tuple[int, int], float] = {}
         sides = (1, -1) if getattr(book, "direction_split", False) else (0,)
         for side in sides:

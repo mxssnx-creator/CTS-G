@@ -257,16 +257,16 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
     from lanes import _Env, SYM
     from coord_engine import Coordinator
     res = {}
-    for label, stream_pf_ok, floor in (("at the Set's floor 1.04", True, 1.04), ("floor 1.20 above the stream's PF", True, 1.20)):
+    for label, lane, floor in (("at the Set's floor 1.04", "pos", 1.04), ("floor 1.20 above the stream's PF", "pos", 1.20), ("negative lane own floor", "neg", 1.04)):
         with _Env() as env:
             p, pos = env.p, env.pos
             p.equity = 1000
             st = p.sets.by_idx[0]
-            pos.set_id, pos.lane, pos.pack = st.id, "pos", st.pack
+            pos.set_id, pos.lane, pos.pack = st.id, lane, st.pack
             pos.base_entry, pos.base_qty, pos.set_hold_bars = pos.entry, pos.qty, 10
             p.sets.gate_reason = lambda st_: ""
             p.sets.main_on = p.sets.neg_on = p.sets.realst_on = True
-            st.stage = {"pos": True, "negl": False}
+            st.stage = {"pos": lane == "pos", "negl": lane == "neg"}
             p.ensure_controls = lambda pos_: None
             p.block.min_samples, p.block.pause_ratio, p.block.volume_ratio = 3, 0, 1
             import block_rules as _br
@@ -275,10 +275,10 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
             co.load({}, {"positionCostPct": .12, "axisLastEnabled": True, "axisPrevEnabled": False, "axisPauseEnabled": False, "axisContEnabled": False, "minPfLinked": True,
                          "setMinPf": 1.25, "minPf": 1.25})
             p.coord = co
-            p.set_axis_floor = lambda st_: floor
+            p.set_axis_floor = lambda st_, selected_lane="pos": floor if selected_lane == lane else 1.20
             now = time.time()
             pattern = [0.0011, -0.0010] * 8
-            st.exe = [(now - 60 * i, v) for i, v in zip(range(len(pattern), 0, -1), pattern)]
+            st.exe = st.neg = [(now - 60 * i, v) for i, v in zip(range(len(pattern), 0, -1), pattern)]
             for i in range(3):
                 old = replace(pos, client_id=f"history{i}", block_fills=[], block_pending={})
                 p.set_block.observe(old, 100.15, now - 300 + i * 60, p.block, .12, 86400)
@@ -288,8 +288,8 @@ def a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor():
             res[label] = len(pos.block_fills)
             res[label + " pooled"] = co.judge([{"pnl_pct": v + 0.0012} for v in pattern], 0)["allow"]
     keys = list(res)
-    ok = res[keys[0]] == 1 and res[keys[2]] == 0 and res[keys[1]] is False and res[keys[3]] is False
-    return ok, f"adds made by the parent: at floor 1.04 {res[keys[0]]} (want 1), at floor 1.20 {res[keys[2]]} (want 0); the coordinator's own floor would have refused the 1.10 stream: {not res[keys[1]]}"
+    ok = res[keys[0]] == 1 and res[keys[2]] == 0 and res[keys[1]] is False and res[keys[3]] is False and res["negative lane own floor"] == 1
+    return ok, f"adds made by the parent: at floor 1.04 {res[keys[0]]} (want 1), at floor 1.20 {res[keys[2]]} (want 0); negative lane adds {res['negative lane own floor']} (want1); coordinator refuses1.10: {not res[keys[1]]}"
 
 
 def set_lanes_do_not_scratch_unless_asked():
@@ -419,11 +419,46 @@ def trail_pick_by_pack_reaches_only_its_packs():
     return ok, f"general signal opens under: {got}; orders by pack equal the rule: {groups == want}"
 
 
+
+def linked_axes_use_the_exact_positive_or_negative_window():
+    import time
+    from types import SimpleNamespace
+    from dataclasses import replace
+    from coord_engine import Coordinator
+    from trader import _bare_pulse
+    import pulse_trader as pt
+    import stage_eval as sg
+    b = se.SetBook(); b.load(overlay(minPfByStep=False,minPfBySize=True,realGateN=15,
+        lastNByRange={"micro":{"realN":5,"realNegN":50}}, minPfStepAutoHigh=1.05))
+    st = next(s for s in b.by_idx if s.kind == "base" and s.step == 2)
+    co=Coordinator();co.load({}, {"positionCostPct":.12,"axisLastEnabled":True,"axisPrevEnabled":False,
+        "axisContEnabled":False,"axisPauseEnabled":False,"minPfLinked":True,"setMinPf":1.25})
+    p=_bare_pulse();p.sets,p.coord,p.open,p.position_cost_pct=b,co,{},.12
+    assert (p.set_axis_floor(st,"pos"),p.set_axis_floor(st,"neg")) == (1.02,1.5)
+    now=time.time();pattern=[.0011,-.001]*8
+    stream=[(now-60*i,v) for i,v in zip(range(len(pattern),0,-1),pattern)]
+    st.exe,st.neg,st.score_at=stream,stream,now
+    original=sg.lane_stream
+    try:
+        sg.lane_stream=lambda *args:stream
+        assert sg.axis_judge(b,SimpleNamespace(cf=.0012),co,st,now,"pos")[0]
+        assert not sg.axis_judge(b,SimpleNamespace(cf=.0012),co,st,now,"neg")[0]
+    finally:sg.lane_stream=original
+    p.dca=SimpleNamespace(on_sets=False,on_axis=True)
+    b.gate_reason=lambda st_:"";b._execution_lanes=lambda st_:["pos","neg"]
+    pos=pt.Position("X","LONG",1,100,now-600,99,102,100,set_id=st.id,lane="pos",client_id="own",base_entry=100,base_qty=1)
+    assert p.dca_eligible(pos) and not p.dca_eligible(replace(pos,lane="neg"))
+    # Explicit config floors remain authoritative in both lanes, above the Auto cap.
+    b.pack_ranges[st.pack]={"lanePolicy":{"minPfByStep":{"2":1.8},"minPfBySlRatio":{format(st.sl_ratio,"g"):1.9}}}
+    assert {p.set_axis_floor(st,lane) for lane in ("pos","neg")} == {1.9}
+    return True,"own Real5=1.02 and RealNegative50=1.50 reach native/simulator/DCA; explicit1.90 survives Auto cap1.05"
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
     lane_order_decides_which_lane_a_signal_tries_first, trail_pick_decides_how_trailing_sets_compete, trail_pick_by_pack_reaches_only_its_packs,
     hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,
     the_axis_block_and_dca_gates_judge_a_sets_stream_at_that_sets_floor,
+    linked_axes_use_the_exact_positive_or_negative_window,
     lane_rank_stats_equal_the_plain_reading, the_choice_among_valid_sets_reads_the_lanes_own_set,
     a_lane_set_without_orders_ranks_below_one_with_orders_and_the_key_follows_the_floor, simulator_and_engine_rank_valid_sets_the_same_way)]

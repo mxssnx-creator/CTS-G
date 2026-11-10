@@ -1510,6 +1510,15 @@ def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, to
     return {"floor": pick[0], "pf": pick[1], "admitted": pick[2], "bestPf": best, "orders": len(prs), "pfAll": pf_of(g_[-1], l_[-1])}
 
 
+def auto_evidence_key(exit_t, symbol, gross, entry_t, side) -> tuple:
+    """Identity of one causal learning observation, shared by native and replay.
+
+    A different symbol, direction or entry is not a copied tape even when exit
+    timestamps and returns happen to match. Preserve small outcomes exactly.
+    """
+    return (float(exit_t), str(symbol), float(gross), float(entry_t), int(side))
+
+
 def step_pf_ratio(raw: Any) -> float:
     """The configured ratio snapped to its 0.05 grid and bounded to 0.1 .. 1.5; a broken value is the default."""
     try:
@@ -1518,7 +1527,9 @@ def step_pf_ratio(raw: Any) -> float:
         return STEP_PF_RATIO_DEFAULT
     if not math.isfinite(v):
         return STEP_PF_RATIO_DEFAULT
-    v = round(v / STEP_PF_RATIO_STEP) * STEP_PF_RATIO_STEP
+    # Half-up matches the desk, including decimal midpoints not exact in binary.
+    v = max(STEP_PF_RATIO_MIN, min(STEP_PF_RATIO_MAX, v))
+    v = math.floor(v / STEP_PF_RATIO_STEP + 0.5 + 1e-9) * STEP_PF_RATIO_STEP
     return round(max(STEP_PF_RATIO_MIN, min(STEP_PF_RATIO_MAX, v)), 2)
 
 
@@ -3465,10 +3476,20 @@ class SetBook:
         if not self.lookback_auto or self.lookback >= self.lookback_max:
             return
         scored = [st for st in self.by_idx if not st.locked and not st.last_error]
-        if len(scored) < 20 or not self._hist_rows:
+        if not scored or not self._hist_rows:
             return
-        target = min(self.gate_window_max, max(self.gate_min, self.lookback_sample_target))
-        short = sum(1 for st in scored if st.gate_n < target)
+        def sparse(st: SetState) -> bool:
+            # A sibling's long window must not make a complete Last-1 lane
+            # perpetually sparse. Conversely, strict Last-200 must collect
+            # all 200 observations even when the global target is only 12.
+            w = self.win(st)
+            secondary = w.base_short if self.stage_full else min(w.base_short, self.lookback_sample_target)
+            target = max(self.base_need(st), secondary, self.base_min_n,
+                         min(w.base_long, self.lookback_sample_target))
+            counts = st.sample_counts
+            have = counts.get("base", 0) if counts is not None else st.source_n
+            return have < target
+        short = sum(sparse(st) for st in scored)
         if short / len(scored) >= LOOKBACK_SHORT_SHARE:
             self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)
             self._lookback_grown = self.lookback
@@ -3498,14 +3519,16 @@ class SetBook:
             rows = self._tape_rows(st.id, tape_order, float("-inf"), until=until)
             if len(rows) <= n_win:
                 continue
-            sig = hash(tuple((round(finite(r[0]), 3), r[1], round(finite(r[4]), 10)) for r in rows))
+            sig = 0
+            for r in rows:
+                sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
             if sig in seen:
                 continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
             seen.add(sig)
             ts = [finite(r[0]) for r in rows]
             nets = [finite(r[4]) - cf for r in rows]
             gains, losses = prefix_sums(nets)
-            out = pairs.setdefault((self.step_bucket(st), st.side), [])
+            out = pairs.setdefault((self.auto_step_bucket(st), st.side), [])
             for k, r in enumerate(rows):
                 e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
                 if e < n_win:
@@ -3601,6 +3624,14 @@ class SetBook:
             return int(round(float(st.trail_arm) / TP_UNIT_PCT))
         return int(st.step)
 
+    def auto_step_bucket(self, st: "SetState") -> int:
+        """The shared Auto table ends at 3.5%; wider targets use its final bucket.
+
+        Keep step_bucket unchanged: range, explicit policy and lane identities use
+        the actual target, not this bounded learning-table index.
+        """
+        return int(round(step_grid_pct(self.step_bucket(st) * TP_UNIT_PCT) / TP_UNIT_PCT))
+
     def step_floor(self, st: "SetState") -> float:
         """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
         bucket = self.step_bucket(st)
@@ -3610,7 +3641,7 @@ class SetBook:
                 return ranged
         high = self.pf_step_auto_high
         if self.pf_step_auto:
-            learned = self.step_floor_auto.get((bucket, st.side))
+            learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
             if learned is not None:
                 return min(float(learned), high)
         key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot

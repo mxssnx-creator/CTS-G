@@ -168,7 +168,8 @@ export const STEP_PF_TP_MAX = 3.5;
 export const stepPfRatio = (raw: unknown): number => {
   const v = Number(raw);
   if (raw === null || raw === undefined || raw === "" || !Number.isFinite(v)) return STEP_PF_RATIO_DEFAULT;
-  const snapped = Math.round(v / STEP_PF_RATIO_STEP) * STEP_PF_RATIO_STEP;
+  const bounded = Math.max(STEP_PF_RATIO_MIN, Math.min(STEP_PF_RATIO_MAX, v));
+  const snapped = Math.floor(bounded / STEP_PF_RATIO_STEP + 0.5 + 1e-9) * STEP_PF_RATIO_STEP;
   return Math.round(Math.max(STEP_PF_RATIO_MIN, Math.min(STEP_PF_RATIO_MAX, snapped)) * 100) / 100;
 };
 export const stepPfGridPct = (tpPct: number): number =>

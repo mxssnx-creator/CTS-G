@@ -62,5 +62,31 @@ def independent_base_windows():
     return True, "independent minimal Last-3 and per-range short window retain their own counts"
 
 
-CHECKS = [("samples.own-full-window-coverage", own_full_windows),
+def collection_follows_own_windows():
+    def run(n, count, *, strict=True, minimal=0):
+        b = SetBook()
+        b.load(overlay(histLookbackBars=240, histLookbackMax=480,
+                       histLookbackAuto=True, histLookbackTargetN=12,
+                       setGateWindow=30, setGateShortN=0, setGateMinN=minimal,
+                       stageFullWindow=strict, stagesEnabled=True))
+        b.by_idx = b.by_idx[:2]
+        b._hist_rows = {"completed": {}}
+        for st in b.by_idx:
+            b.pack_ranges.setdefault(st.pack, {})["lanePolicy"] = {"lastN": {"baseLong": n}}
+            st.sample_counts = {"base": count}
+            st.gate_n = min(n, count)
+            st.source_n = count
+        b._adapt_lookback()
+        return b.lookback
+    assert run(1, 1) == 240, "a complete own Last-1 ignores global Last-30"
+    assert run(200, 12) == 480, "strict Last-200 cannot stop collecting at 12"
+    assert run(200, 200) == 240
+    assert run(200, 12, strict=False) == 240, "partial mode retains collection target"
+    assert run(1, 1, minimal=3) == 480, "independent minimal needs its own full history"
+    assert run(1, 3, minimal=3) == 240, "read full history rather than truncated gate count"
+    return True, "own policy, strict/partial windows, independent minimal and small populations"
+
+
+CHECKS = [("samples.collection-follows-own-windows", collection_follows_own_windows),
+          ("samples.own-full-window-coverage", own_full_windows),
           ("samples.independent-base-windows", independent_base_windows)]

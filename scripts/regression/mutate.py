@@ -64,7 +64,7 @@ MUTATIONS = [
     ("axis floor: unlinked gates still ask the Set's floor",
      "pulse_trader.py", "or not getattr(coord, \"min_pf_linked\", True) or not isinstance(self.sets, SetBook):", "or not isinstance(self.sets, SetBook):"),
     ("axis floor: DCA on Axis judges the pooled floor",
-     "pulse_trader.py", "min_pf=self.set_axis_floor(st))[\"allow\"])", ")[\"allow\"])"),
+     "pulse_trader.py", "min_pf=self.set_axis_floor(st, lane))[\"allow\"])", ")[\"allow\"])"),
     ("step floor: the learning reads the window it judges",
      "set_engine.py", "until = math.nextafter(float(learn_before), float(\"-inf\"))", "until = float(\"inf\")"),
     ("step floor: a copy of a tape is counted again",
