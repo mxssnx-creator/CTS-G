@@ -2596,11 +2596,13 @@ class Pulse:
         rows = self.list_orders(symbol)
         return [o for o in rows if self.cid_ours(self.order_cid(o))]
 
-    def _oid_in_book(self, order_id: str) -> bool:
+    def _oid_in_book(self, order_id: str, symbol: str = "") -> bool:
         oid = str(order_id or "")
         if not oid:
             return False
         for p in self.open.values():
+            if symbol and p.symbol != symbol:
+                continue
             if oid in (
                 str(p.sl_oid or ""),
                 str(p.tp_oid or ""),
@@ -2623,7 +2625,10 @@ class Pulse:
         if cid and not self.cid_ours(cid):
             log(f"SKIP cancel foreign {symbol} cid={cid[:24]}", every=20.0, key=f"skipc:{symbol}")
             return False
-        if not cid and not self._oid_in_book(order_id):
+        # A matching client-ID prefix alone is not ownership evidence: a
+        # different process can use the same prefix. Only IDs captured in this
+        # position's own book may be canceled.
+        if not self._oid_in_book(order_id, symbol):
             log(f"SKIP cancel unknown {symbol} oid={order_id}", every=20.0, key=f"skipu:{symbol}")
             return False
         r = self.api.delete("/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": order_id})
@@ -2912,7 +2917,7 @@ class Pulse:
                         if side != pos.side:
                             continue
                         live = real_oid(o.get("orderId") or o.get("orderID"))
-                        if not live or not self.control_covers_quantity(pos, o):
+                        if not live or not self._oid_in_book(live, pos.symbol) or not self.control_covers_quantity(pos, o):
                             continue
                         matching = (typ in SL_TYPES or self._cid_kind(o) in ("s", "u")) if is_sl else (typ in TP_TYPES or self._cid_kind(o) in ("t", "v"))
                         if matching:
@@ -2929,29 +2934,10 @@ class Pulse:
                             else:
                                 pos.sec_tp = actual
                             return live
-                    # The venue already holds a close-position control on this side that is not one of ours by id (an earlier entry's, or written
-                    # under another id): adopt it when it covers the position. Otherwise every further form and retry repeats the same refusal; found
-                    # live on x02 (2026-11-03): 110406 every ~10 s until BingX banned the order path ("over 20 error code 110406 within 480000 ms").
-                    for o in self.list_orders(pos.symbol):
-                        typ = str(o.get("type") or "")
-                        if str(o.get("positionSide") or "").upper() != pos.side or str(o.get("closePosition")).lower() not in ("true", "1"):
-                            continue
-                        if not ((typ in SL_TYPES) if is_sl else (typ in TP_TYPES)):
-                            continue
-                        live = real_oid(o.get("orderId") or o.get("orderID"))
-                        try:
-                            actual = float(o.get("stopPrice") or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        if live and math.isfinite(actual) and actual > 0:
-                            pos.close_position = True
-                            pos.ctrl_qty = pos.qty
-                            if is_sl:
-                                pos.sec_sl = actual
-                            else:
-                                pos.sec_tp = actual
-                            log(f"CTRL adopt {pos.symbol} {pos.side} {'sl' if is_sl else 'tp'} {live} @{actual}", every=30.0, key=f"adopt:{pos.symbol}")
-                            return live
+                    # A matching symbol/side is not proof of ownership. Never
+                    # adopt another system's control as protection for our lot.
+                    # Back off to avoid repeated 110406 refusals while leaving
+                    # the unfamiliar order and its position untouched.
                     self.ctrl_skip[pos.symbol] = time.time() + CTRL_EXISTS_BACKOFF_S
                     self.ctrl_exists_until[exists_key] = time.time() + CTRL_EXISTS_BACKOFF_S
                     log(f"CTRL exists {pos.symbol} {pos.side} {'sl' if is_sl else 'tp'}: no control to adopt, backing off {CTRL_EXISTS_BACKOFF_S:.0f}s",
@@ -3334,10 +3320,12 @@ class Pulse:
             if not oid or oid in old_ids:
                 pos.sl, pos.sec_sl = old_price, old_sec
                 return False
+            for old in old_ids:
+                # Keep the previously recorded IDs in the book until their
+                # exact-ID cancellation has been dispatched.
+                self.cancel_order(pos.symbol, old)
             pos.sl_oid = pos.sec_sl_oid = oid
             pos.sl = pos.sec_sl = pos.sec_sl or new_sl
-            for old in old_ids:
-                self.cancel_order(pos.symbol, old)
         want_tp = self.desired_sl_tp(pos)[1]
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))

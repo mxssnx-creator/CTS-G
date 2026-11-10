@@ -474,11 +474,13 @@ class _ExistsVenue(_StubExchange):
 
 def control_already_exists_never_loops():
     """A protective order refused as "already exists" must not be retried every few seconds: found live on x02 (2026-11-03), 110406 every ~10 s until
-    BingX banned the order path. A close-position control on the venue for that side is adopted; with nothing to adopt the symbol backs off
-    CTRL_EXISTS_BACKOFF_S and a second call inside it sends nothing."""
+    BingX banned the order path. A foreign control is never adopted; the symbol backs off CTRL_EXISTS_BACKOFF_S
+    and a second call inside it sends nothing."""
     out = {}
-    for label, listed in (("adopt", [{"orderId": "777", "type": "STOP_MARKET", "positionSide": "LONG", "closePosition": "true", "stopPrice": "95",
-                                       "clientOrderID": "foreign"}]), ("none", [])):
+    for label, listed in (("foreign", [{"orderId": "777", "type": "STOP_MARKET", "positionSide": "LONG", "closePosition": "true", "stopPrice": "95",
+                                       "clientOrderID": "foreign"}]),
+                          ("prefix-only", [{"orderId": "779", "type": "STOP_MARKET", "positionSide": "LONG", "closePosition": "true", "stopPrice": "95",
+                                            "clientOrderID": pt.TAG + "u-foreign"}]), ("none", [])):
         venue = _ExistsVenue(listed)
         saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
         with tempfile.TemporaryDirectory() as td:
@@ -499,9 +501,26 @@ def control_already_exists_never_loops():
                 out[label] = (got, got2, first, venue.refused, round(p.ctrl_skip.get(sym, 0) - pt.time.time()))
             finally:
                 pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
-    a, n = out["adopt"], out["none"]
-    ok = a[0] == "777" and a[1] == "777" and a[2] == 1 and n[0] == "" and n[2] == 1 and n[3] == 1 and n[4] >= pt.CTRL_EXISTS_BACKOFF_S - 2
+    a, b, n = out["foreign"], out["prefix-only"], out["none"]
+    ok = all(result[0] == "" and result[1] == "" and result[2] == 1 and result[3] == 1
+             and result[4] >= pt.CTRL_EXISTS_BACKOFF_S - 2 for result in (a, b, n))
     return ok, f"(returned id, second call, refusals after the first call, after the second, back-off s): {out}"
+
+
+def cancellation_requires_a_recorded_order_id():
+    p = _bare_pulse()
+    pos = pt.Position(symbol='BTC-USDT', side='LONG', qty=1, entry=100, opened_at=1, sl=95, tp=105, peak=100)
+    pos.sl_oid = '123'
+    p.open = {pos.symbol: pos}
+    p._oo_cache = {}
+    p.list_orders = lambda _symbol=None: []
+    calls = []
+    p.api = types.SimpleNamespace(delete=lambda path, body: calls.append((path, body)) or {'code': 0})
+    foreign = p.cancel_order('BTC-USDT', '999', pt.TAG + 'same-prefix')
+    wrong_symbol = p.cancel_order('ETH-USDT', '123', pt.TAG + 'same-prefix')
+    own = p.cancel_order('BTC-USDT', '123', pt.TAG + 'own')
+    ok = not foreign and not wrong_symbol and own and [row[1]['orderId'] for row in calls] == ['123']
+    return ok, f'foreign={foreign} wrong-symbol={wrong_symbol} own={own} deletes={len(calls)}'
 
 
 def a_moved_stop_never_storms_the_order_path():
@@ -3248,6 +3267,7 @@ CHECKS = [
     ("trader.thin-book-entry-is-never-sent", thin_book_entry_is_never_sent),
     ("trader.leverage-keeps-liquidation-beyond-the-stop", leverage_keeps_liquidation_beyond_the_stop),
     ("trader.control-already-exists-never-loops", control_already_exists_never_loops),
+    ("trader.cancellation-requires-recorded-order-id", cancellation_requires_a_recorded_order_id),
     ("trader.leverage-is-always-the-exchange-maximum-by-default", leverage_is_always_the_exchange_maximum_by_default),
     ("trader.a-moved-stop-never-storms-the-order-path", a_moved_stop_never_storms_the_order_path),
     ("trader.an-unsupported-cancel-replace-is-asked-once", an_unsupported_cancel_replace_is_asked_once),

@@ -31,3 +31,7 @@ jobs:
         run: python3 scripts/regression/run.py --jobs 4
       - name: Check VST transport and accounting offline
         run: PYTHONPATH=server/pulse:scripts python3 -m unittest scripts/test_x02_batch.py
+      - name: Check x02 ownership and protection offline
+        run: |
+          python3 scripts/test_x02_native_session.py
+          python3 scripts/test_control_coverage.py
