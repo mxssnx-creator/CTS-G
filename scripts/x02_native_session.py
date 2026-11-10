@@ -89,6 +89,8 @@ class Journal:
         self.api, self.out, self.tag = api, Path(out), tag
         self.phase, self.deadline = "warming", None
         self.intents = []
+        self.owned_clients = set()
+        self.owned_orders = set()
         self.lock = threading.RLock()
         self.original = api._req
         api._req = self.request
@@ -99,25 +101,77 @@ class Journal:
             stream.flush()
             os.fsync(stream.fileno())
 
+    def owns_order(self, symbol, order_id):
+        with self.lock:
+            return (str(symbol), str(order_id)) in self.owned_orders
+
+    def owns_client(self, symbol, client_id):
+        with self.lock:
+            return (str(symbol), str(client_id).lower()) in self.owned_clients
+
+    def remember_order(self, order, requested=None):
+        """Bind a venue ID only to an exact journaled client ID and symbol."""
+        if not isinstance(order, dict):
+            return
+        requested = requested or {}
+        symbol = str(order.get('symbol') or requested.get('symbol') or '')
+        cid = str(order.get('clientOrderID') or order.get('clientOrderId') or '')
+        requested_cid = str(requested.get('clientOrderID') or requested.get('clientOrderId') or '')
+        if cid and requested_cid and cid.lower() != requested_cid.lower():
+            return
+        cid = cid or requested_cid
+        oid = str(order.get('orderId') or order.get('orderID') or '')
+        if symbol and cid and oid.isdigit() and int(oid) > 0 and (symbol, cid.lower()) in self.owned_clients:
+            self.owned_orders.add((symbol, oid))
+
+    def observe_orders(self, path, extra, reply):
+        if not isinstance(reply, dict) or reply.get('error') or str(reply.get('code')) != '0':
+            return
+        data = reply.get('data')
+        if path.endswith('/trade/order') and isinstance(data, dict):
+            order = data.get('order', data)
+            self.remember_order(order, extra)
+        elif path.endswith('/trade/openOrders'):
+            orders = data.get('orders') if isinstance(data, dict) else data
+            if isinstance(orders, list):
+                for order in orders:
+                    self.remember_order(order)
+
     def request(self, method, path, extra=None):
         if self.api.base.rstrip('/') != HOST or not path.startswith('/openApi/') or '://' in path:
             raise RuntimeError('bounded session permits only the fixed BingX VST transport')
         if method == "GET":
-            return self.original(method, path, extra)
+            reply = self.original(method, path, extra)
+            with self.lock:
+                self.observe_orders(path, extra or {}, reply)
+            return reply
         body = dict(extra or {})
+        if method == 'DELETE':
+            if path != '/openApi/swap/v2/trade/order' or not self.owns_order(body.get('symbol'), body.get('orderId')):
+                raise RuntimeError('cancellation requires this session\'s exact journaled venue order ID')
+        elif method != 'POST' or path not in ('/openApi/swap/v2/trade/order', '/openApi/swap/v2/trade/batchOrders'):
+            raise RuntimeError('session forbids account-setting and unrecognized mutations')
         bodies = order_bodies(path, body) if method == "POST" else []
+        if method == 'POST' and not bodies:
+            raise RuntimeError('an identified session order is required')
         for order in bodies:
             cid = str(order.get("clientOrderID") or order.get("clientOrderId") or "")
-            if not cid.lower().startswith(self.tag.lower()):
+            if not order.get('symbol') or not cid.lower().startswith(self.tag.lower()):
                 raise RuntimeError("native order is missing this session's ownership tag")
+            if str(order.get('closePosition', '')).lower() in ('true', '1') or order.get('positionId'):
+                raise RuntimeError('session forbids aggregate position-closing orders')
             if is_entry(order) and (self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline):
                 return {"code": 101209, "error": True, "msg": "session admission paused or deadline reached"}
         with self.lock:
+            identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
+            if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):
+                raise RuntimeError('client order ID was already journaled; reconcile it without resubmission')
             index = len(self.intents)
             row = {"index": index, "at": time.time(), "phase": self.phase, "method": method,
                    "path": path, "body": body, "result": "pending"}
             self.intents.append(row)
             self.append(row)
+            self.owned_clients.update(identities)
             try:
                 reply = self.original(method, path, body)
             except BaseException as exc:
@@ -125,6 +179,11 @@ class Journal:
                 raise
             row["response"] = reply
             self.append({"index": index, "at": time.time(), "result": "response", "response": reply})
+            if method == 'POST' and len(bodies) == 1:
+                self.observe_orders('/openApi/swap/v2/trade/order', bodies[0], reply)
+            elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0' and isinstance(reply.get('data'), list):
+                for order in reply['data']:
+                    self.remember_order(order)
             return reply
 
 
@@ -175,6 +234,22 @@ def require_empty_account(api):
         raise SessionEnd('account isolation lost before observation')
 
 
+def freeze_account_settings(pulse):
+    """The test never changes leverage or margin on a shared demo account.
+
+    Estimate margin conservatively at 1x; actual exchange settings are left
+    alone. This is a test-only execution constraint, not a changed preset.
+    """
+    pulse.set_leverage = lambda: None
+    pulse.ensure_max_leverage = lambda _symbol, force=False: 1
+    pulse.leverage_for = lambda _contract=None: 1
+
+
+def shared_account_protection_verified():
+    """The current native overall controls can close the entire venue position."""
+    return False
+
+
 def capture(pulse, out, label):
     pulse.write_stats(force=True)
     stats_path = Path(sys.modules[pulse.__class__.__module__].STATS_PATH)
@@ -201,7 +276,7 @@ def cleanup(pulse, journal, seconds):
         pulse.sync_own_fills()
         pulse.adopt_exchange_positions()
         for pos in list(pulse.open.values()):
-            if not str(pos.client_id).lower().startswith(journal.tag.lower()):
+            if not journal.owns_client(pos.symbol, pos.client_id):
                 raise RuntimeError("foreign local position prevents owned cleanup")
             pulse.close_pos(pos, pulse.px.get(pos.symbol) or pos.entry, "bounded-session-cleanup")
         unresolved = []
@@ -233,7 +308,7 @@ def cleanup(pulse, journal, seconds):
         positions = checked_positions(pulse.api)
         exposed = [p for p in positions if abs(float(p["positionAmt"])) > 1e-12]
         orders = rows(pulse.api, "/openApi/swap/v2/trade/openOrders", "orders")
-        own = [o for o in orders if str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower().startswith(journal.tag.lower())]
+        own = [o for o in orders if journal.owns_order(o.get('symbol'), o.get('orderId') or o.get('orderID'))]
         if not exposed and not unresolved and not pulse.open:
             for order in own:
                 pulse.api.delete("/openApi/swap/v2/trade/order", {"symbol": order["symbol"], "orderId": str(order["orderId"])})
@@ -277,6 +352,7 @@ def main(argv=None):
               "limitations": ["minute OHLC captures cannot establish tick-identical simulation fills",
                               "external Binance/Bybit indication sources disabled; BingX VST data only",
                               "cleanup closes are reported separately from natural strategy closes",
+                              "leverage and margin settings remain unchanged; margin estimates use 1x",
                               "native shared one-position-per-symbol constraint remains active",
                               "minimum venue lots may exceed nominal volume-factor sizing"],
               "sourceSha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -290,6 +366,16 @@ def main(argv=None):
         save()
         print("Plan saved; no credentials read and no connection started.")
         return 0
+    # The native engine's overall protection uses closePosition, which can
+    # close someone else's same-side aggregate if another process joins this
+    # shared account. Do not open a lot that this session cannot protect under
+    # the requested ownership boundary. Remove this block only after bounded
+    # protection and fill-level isolation are independently verified.
+    if not shared_account_protection_verified():
+        report['stopReason'] = 'native aggregate-closing protection is not isolated on a shared account'
+        save()
+        print(json.dumps({'complete': False, 'executed': False, 'stopReason': report['stopReason']}))
+        return 1
     if not args.credentials or args.credentials.stat().st_mode & 0o077:
         raise ValueError("execute requires a private0600 credential JSON file")
     credentials = json.loads(args.credentials.read_text())
@@ -318,6 +404,7 @@ def main(argv=None):
     if set(contracts) != set(symbols):
         raise RuntimeError("selected symbol contract coverage is incomplete")
     pulse = pt.Pulse(api, contracts)
+    freeze_account_settings(pulse)
     original_cycle = pulse._one_cycle
     warming_since = time.monotonic()
     next_capture = [0.0]
@@ -325,9 +412,9 @@ def main(argv=None):
         now = time.monotonic()
         if (args.out / 'STOP_SESSION').exists():
             raise SessionEnd('requested session stop')
+        if pulse.ignored_foreign:
+            raise SessionEnd('foreign account position detected during session')
         if journal.phase == "warming":
-            if pulse.ignored_foreign:
-                raise SessionEnd('foreign account position detected during warmup')
             if ready(pulse, symbols, required_history, time.time()):
                 require_empty_account(api)
                 capture(pulse, args.out, "ready")

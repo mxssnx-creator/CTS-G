@@ -238,6 +238,18 @@ class Controls(unittest.TestCase):
         self.assertEqual(p.cancelled,["100"])
         self.assertEqual((pos.sl_oid,pos.sl),("102",99.5))
 
+    def test_replacement_cancels_the_previously_recorded_id(self):
+        p,pos=fixture()
+        pos.sl_oid=pos.sec_sl_oid='100'; pos.tp_oid=pos.sec_tp_oid='101'
+        p.place_ctrl=lambda _pos,_kind,price: setattr(_pos,'sec_sl',price) or '102'
+        p.list_orders=lambda _symbol: []
+        calls=[]
+        p.api.delete=lambda path,body: calls.append((path,body['orderId'])) or {'code':0}
+        p.cancel_order=pt.Pulse.cancel_order.__get__(p,pt.Pulse)
+        self.assertTrue(p.replace_sl(pos,99.5))
+        self.assertEqual([oid for _,oid in calls],['100'])
+        self.assertEqual((pos.sl_oid,pos.sec_sl_oid),('102','102'))
+
     def test_atomic_replace_without_an_id_is_unconfirmed_not_old_id_success(self):
         p,pos=fixture()
         pos.sl_oid=pos.sec_sl_oid="100";pos.tp_oid=pos.sec_tp_oid="101"
@@ -257,6 +269,7 @@ class Controls(unittest.TestCase):
 
     def test_exists_recovery_uses_full_quantity_and_actual_reported_price(self):
         p,pos=fixture()
+        pos.sl_oid='100'; pos.sec_sl_oid='102'
         p.api.post=lambda *args:{"code":100,"msg":"order already exists"}
         p.our_orders=lambda sym:[row("LONG","u","100",95,9.6,False),row("LONG","u","102",96,10,False)]
         self.assertEqual(p.place_ctrl(pos,"sec-sl",95),"102")
