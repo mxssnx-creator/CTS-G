@@ -4470,13 +4470,24 @@ class SetBook:
 
     def lane_of(self, st: SetState) -> str:
         """The lane a valid Set executes on: "pos" (Base -> Main -> Real), "neg" (Base -> Main Negative -> Real Negative), "" when it
-        is not valid. The positive lane wins when both are open."""
+        is not valid. A Set open on both lanes executes on the first of them in the book's lane order (laneOrder; the positive lane with the shipped
+        "pos-neg"), the lane pick_any finds it on. A Set open only on a lane outside the order is listed with that lane and never picked."""
         if self.gate_reason(st):
             return ""
         if not (self.main_on or self.neg_on or self.realst_on):
             return "pos"
         lanes = self._execution_lanes(st)
-        return lanes[0] if lanes else ""
+        return next((lane for lane in self.lane_order if lane in lanes), lanes[0] if lanes else "")
+
+    def lane_in(self, st: Optional[SetState], allowed: Sequence[str]) -> str:
+        """The lane a Set executes on when only `allowed` lanes may open: the first lane of the book's order, among the allowed ones, the Set is open on
+        ("" when none). A Set open on both lanes stays available to an allowed lane when the other is closed to it."""
+        if st is None or self.gate_reason(st):
+            return ""
+        if not (self.main_on or self.neg_on or self.realst_on):
+            return "pos" if "pos" in allowed else ""
+        lanes = self._execution_lanes(st)
+        return next((lane for lane in self.lane_order if lane in lanes and lane in allowed), "")
 
     def relation_cell(self, st: SetState) -> Tuple[str, str, str, str, str]:
         """The Set's relation cell (indication, direction, type, TP range, step): every relation lane it belongs to is a projection of it."""

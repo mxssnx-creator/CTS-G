@@ -356,6 +356,39 @@ def lane_order_decides_which_lane_a_signal_tries_first():
     return ok, f"opens under: {got}; live entry walks the book's lane order: {live}"
 
 
+def a_set_open_on_both_lanes_executes_on_the_lane_it_was_picked_for():
+    """A Set whose stages pass on BOTH lanes: lane_of names the first of them in the book's lane order (it named the positive lane whatever the order, so with
+    laneOrder "neg-pos" or "neg" a position picked for the Real Negative lane was opened, scored and ranked as a positive-lane position), and lane_in gives the
+    lane it is still open on when only some lanes may open. The live entry path: with the positive scope of the pack closed and the negative one open, the
+    Set is taken on the negative lane instead of being dropped."""
+    import types
+    got, alt = {}, {}
+    for order in ("pos-neg", "neg-pos", "neg", "pos"):
+        b = _book(laneOrder=order)
+        x = next(s for s in b.by_idx if s.kind == "base" and s.pack == "general")
+        for st in b.by_idx:
+            st.active, st.last_error = False, "off"
+        _force_valid(b, x, 2.0, 100, (60, 2.0, 2.0, 2.0, 0.3), lane="pos")
+        x.stage["negl"] = x.stage["neg"] = True                       # open on the Real Negative lane too
+        x.rank_neg = (60, 2.0, 2.0, 2.0, 0.3)
+        got[order] = (b.lane_of(x), b.lane_in(x, ("neg",)), b.lane_in(x, ("pos",)), b.lane_in(x, ()), b.pick_any("general") is x)
+        only_pos = next(s for s in b.by_idx if s.kind == "base" and s.pack == "general" and s is not x)
+        _force_valid(b, only_pos, 2.0, 100, (60, 2.0, 2.0, 2.0, 0.3), lane="pos")
+        got[order] += (b.lane_of(only_pos),)
+        # the live entry path without an Axis: the pack's positive scope blocks, the negative one allows
+        import pulse_trader as pt
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.sets = b
+        only_pos.active, only_pos.last_error = False, "off"
+        p.coord = types.SimpleNamespace(axes={}, scopes={}, scope_allows=lambda pack, lane: (lane == "neg", "" if lane == "neg" else f"pack:{pack}:pos"))
+        chosen, lane, blocked = p._scope_choice("general", 0)
+        alt[order] = (chosen is x, lane, blocked)
+    want = {"pos-neg": ("pos", "neg", "pos", "", True, "pos"), "neg-pos": ("neg", "neg", "pos", "", True, "pos"),
+            "neg": ("neg", "neg", "", "", True, "pos"), "pos": ("pos", "", "pos", "", True, "pos")}
+    want_alt = {"pos-neg": (True, "neg", ""), "neg-pos": (True, "neg", ""), "neg": (True, "neg", ""), "pos": (False, "", "pack:general:pos")}
+    return got == want and alt == want_alt, f"lane_of / lane_in(neg) / lane_in(pos) / lane_in() / picked / a positive-only Set: {got}; positive scope closed: {alt}"
+
+
 def trail_pick_decides_how_trailing_sets_compete():
     """trailPick: B (a base Set) and T (a trailing Set) are both valid on the positive lane, T ranks higher on its lane's Set, B lower. "after" (the
     shipped rule) opens under B (trailing only when no fixed-exit Set is valid), "together" under T (every kind by rank), "first" under T even when it
@@ -454,7 +487,7 @@ def linked_axes_use_the_exact_positive_or_negative_window():
     return True,"own Real5=1.02 and RealNegative50=1.50 reach native/simulator/DCA; explicit1.90 survives Auto cap1.05"
 
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
-    lane_order_decides_which_lane_a_signal_tries_first, trail_pick_decides_how_trailing_sets_compete, trail_pick_by_pack_reaches_only_its_packs,
+    lane_order_decides_which_lane_a_signal_tries_first, a_set_open_on_both_lanes_executes_on_the_lane_it_was_picked_for, trail_pick_decides_how_trailing_sets_compete, trail_pick_by_pack_reaches_only_its_packs,
     hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,
     a_block_add_on_a_set_parent_is_admitted_at_that_sets_floor,

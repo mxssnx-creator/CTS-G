@@ -391,6 +391,30 @@ def stage_lane_stats(book, tapes: Tapes, st, now: float):
     return lane, se.lane_rank_stats([nets[k] for k in ch[key]], tapes.cf)
 
 
+def other_lanes(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[str, Any]]:
+    """The lanes of the book's order, other than `lane`, this valid Set also passes its stages on, each with the rank key of that lane's own Set:
+    [(lane, rank)]. A Set open on both lanes stays a candidate of the second lane when a per-candidate rule (the Axis) closes the first to it
+    (SetBook.pick_any(allowed_lanes=(lane,)) lists it under every lane it is open on)."""
+    if not (book.main_on or book.neg_on or book.realst_on):
+        return []
+    ch, nets = chain_at(book, tapes, st, now)
+    v = se.stage_verdicts([nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]], ch["short_n"], book.stage_params(st.pack, st))
+    out = []
+    base_rank = None
+    for l_ in getattr(book, "lane_order", ("pos", "neg")):
+        if l_ == lane or not ((l_ == "pos" and v["pos"]) or (l_ == "neg" and v["negl"])):
+            continue
+        if base_rank is None:
+            base_rank = gate_base(book, tapes, st, now)[1]
+        rank = base_rank
+        if getattr(book, "rank_by_lane", False):
+            wn = book.win(st)
+            stats = se.lane_rank_stats([nets[k] for k in ch["realneg" if l_ == "neg" else "real"]], tapes.cf)
+            rank = se.lane_rank_of(stats, book.floor_for(wn.real_neg_n if l_ == "neg" else wn.real_n, st.pack, st), -base_rank[4])
+        out.append((l_, rank))
+    return out
+
+
 def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float]]:
     """(exit t, net) of the Set's Real Set ("pos") or Real Negative Set ("neg") orders closed before now inside the lookback: the stream the engine's
     Axis judges for one Set and lane (Pulse._scope_choice reads st.exe / st.neg in [score_at - lookback, score_at])."""
@@ -697,15 +721,19 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
             return True
         return se.group_verdict(ghist.get(se.set_group(st_.id, lane_), ()), now_, gg[0], gg[1], gg[2], gg[3])[0]
 
+    # with a per-candidate rule (Axis) a Set open on both lanes is a candidate of each, as the engine lists it; without one the first lane always takes it
+    both_lanes = axis_coord is not None or axis_pick is not None
+
     def verdict(st, now: float):
         if not refresh_s:
             c = cache.get(st.idx)
             if c is None or now >= c[0]:
                 ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
-                c = cache[st.idx] = (gate_until(book, tapes, st, now), ok_, key_)
-            return c[1], c[2]
+                extra_ = other_lanes(book, tapes, st, now, ok_) if both_lanes and isinstance(ok_, str) and ok_ else []
+                c = cache[st.idx] = (gate_until(book, tapes, st, now), ok_, key_, extra_)
+            return c[1], c[2], c[3]
         ok_, key_, _, _ = gate_metrics(book, tapes, st, now)
-        return ok_, key_
+        return ok_, key_, (other_lanes(book, tapes, st, now, ok_) if both_lanes and isinstance(ok_, str) and ok_ else [])
 
     def rank_at(now: float):
         ranked_: Dict[Tuple[str, str], List[Any]] = {}
@@ -713,12 +741,14 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
         for st in book.by_idx:
             if only_steps is not None and (st.kind == "trail" or st.step not in only_steps):
                 continue                      # an evaluation of one step's Sets alone
-            ok, key = verdict(st, now)
+            ok, key, extra = verdict(st, now)
             if ok:
                 valid_ += 1
             if ok or control == "all":
                 lane_ = ok if isinstance(ok, str) else "pos"
                 ranked_.setdefault((st.pack, st.kind, lane_), []).append((key, st))
+                for lane2, key2 in extra:
+                    ranked_.setdefault((st.pack, st.kind, lane2), []).append((key2, st))
         for k in ranked_:
             ranked_[k].sort(key=lambda r: r[0], reverse=True)
         return ranked_, valid_

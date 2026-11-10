@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
-import { relationFigures, type LiveStats } from "@/lib/live-stats";
+import { liftRows, relationFigures, type LiveStats } from "@/lib/live-stats";
 import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
 import { executionScopeText, scopeStatus } from "@/lib/execution-scope";
 import { evidencePfText } from "@/lib/evidence-view";
@@ -105,6 +105,7 @@ export function StatsOverview({
       {heroes}
 
       <StagesCard live={live} />
+      <LiftCard live={live} />
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Profit factor after costs">
@@ -200,6 +201,56 @@ function StagesCard({ live }: { live: LiveStats | null | undefined }) {
       </p>
       <WindowsTable live={live} />
       <RelationsTable live={live} />
+    </Card>
+  );
+}
+
+function liftPf(p: { pf: number | null }): string {
+  return p.pf === null ? "—" : p.pf >= 99 ? "no loss" : p.pf.toFixed(2);
+}
+
+/** Executed Set parents without and with each stack type (Block adds, relation raises): the same parents on both sides, so the difference is the stack's own. */
+function LiftCard({ live }: { live: LiveStats | null | undefined }) {
+  const lift = live?.execution?.lift;
+  const rows = liftRows(lift);
+  if (!lift || !rows.length) return null;
+  return (
+    <Card title="Executed · with against without">
+      <table className="w-full text-sm" data-testid="lift-figures">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 text-left font-medium">Stack type</th>
+            <th className="pb-2 text-right font-medium">Parents</th>
+            <th className="pb-2 text-right font-medium">PF without</th>
+            <th className="pb-2 text-right font-medium">PF with</th>
+            <th className="pb-2 text-right font-medium" title="Sum of net returns, percent of one base position">Net without %</th>
+            <th className="pb-2 text-right font-medium">Net with %</th>
+            <th className="pb-2 text-left font-medium pl-3">Basis</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const better = r.with.pf !== null && r.without.pf !== null && r.with.pf > r.without.pf;
+            const worse = r.with.pf !== null && r.without.pf !== null && r.with.pf < r.without.pf;
+            return (
+              <tr key={r.key} className="border-t border-border font-mono text-xs">
+                <td className="py-1.5">{r.label}</td>
+                <td className="py-1.5 text-right">{r.n}</td>
+                <td className="py-1.5 text-right">{liftPf(r.without)}</td>
+                <td className={`py-1.5 text-right ${better ? "text-primary" : worse ? "text-danger" : ""}`}>{liftPf(r.with)}</td>
+                <td className="py-1.5 text-right">{r.without.netPct.toFixed(3)}</td>
+                <td className={`py-1.5 text-right ${r.with.netPct > r.without.netPct ? "text-primary" : r.with.netPct < r.without.netPct ? "text-danger" : ""}`}>{r.with.netPct.toFixed(3)}</td>
+                <td className="py-1.5 pl-3 text-muted">{r.note}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="mt-2 text-xs text-muted">
+        Settled Set parents only, every return on the parent's original base notional (per-order figures, not USDT).{lift.unknown ? ` ${lift.unknown} parents with an unknown base result or cash are in no sum.` : ""}
+        {" "}A stack type that lowers the PF of the same parents is costing money, however its own selection window reads.
+        {live?.execution?.overall?.blocked ? ` Axis held ${live.execution.overall.blocked} entries; what those would have made is measured in the walk-forward study, not here.` : ""}
+      </p>
     </Card>
   );
 }

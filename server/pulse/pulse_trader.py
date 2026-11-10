@@ -981,6 +981,79 @@ class Closed:
     rel_why: str = ""
 
 
+def new_lift() -> Dict[str, float]:
+    """The with / without record of the settled Set parents (lift_note, lift_report)."""
+    return {"parents": 0, "unknown": 0, "addParents": 0, "adds": 0, "raised": 0,
+            "baseG": 0.0, "baseL": 0.0, "withG": 0.0, "withL": 0.0,                  # every counted parent: base only / with its Block adds
+            "addBaseG": 0.0, "addBaseL": 0.0, "addWithG": 0.0, "addWithL": 0.0,      # the parents that carry at least one Block add
+            "relG": 0.0, "relL": 0.0, "relVol": 0.0,                                 # every counted parent weighted by its relation multiple
+            "raisedG": 0.0, "raisedL": 0.0, "plainG": 0.0, "plainL": 0.0}            # unit results of the raised parents / the others
+
+
+def lift_note(agg: Dict[str, float], rec: Any) -> None:
+    """One settled Set parent into the with / without record. Everything is a return on the parent's ORIGINAL base notional (base quantity x base entry):
+      without   the base position alone (base_net_pnl_pct: its own fees, no add)
+      with      all the cash the parent made, Block adds included, over that same base notional; a parent without an add is its base result
+    and, for the relation lanes, the base result once at volume 1 and once at the multiple the entry was raised by. A parent whose base result, cash or base
+    notional is not known is counted as unknown and enters no sum (a partial sample is never shown as the whole)."""
+    base = number(getattr(rec, "base_net_pnl_pct", None))
+    cash = number(getattr(rec, "pnl", None))
+    try:
+        notional = float(getattr(rec, "base_qty", 0) or 0) * float(getattr(rec, "base_entry", 0) or 0)
+    except (TypeError, ValueError):
+        notional = 0.0
+    fills = [f for f in (getattr(rec, "block_fills", None) or []) if isinstance(f, dict)]
+    if base is None or (fills and (cash is None or not (notional > 0 and math.isfinite(notional)))):
+        agg["unknown"] += 1
+        return
+    with_ret = cash / notional if fills else base
+    agg["parents"] += 1
+
+    def put(prefix: str, value: float, weight: float = 1.0) -> None:
+        if value > 0:
+            agg[prefix + "G"] += value * weight
+        elif value < 0:
+            agg[prefix + "L"] -= value * weight
+    put("base", base)
+    put("with", with_ret)
+    if fills:
+        agg["addParents"] += 1
+        agg["adds"] += len(fills)
+        put("addBase", base)
+        put("addWith", with_ret)
+    mult = number(getattr(rec, "rel_mult", 1.0))
+    mult = mult if mult is not None and mult > 1.0 + 1e-9 else 1.0
+    put("rel", base, mult)
+    agg["relVol"] += mult
+    if mult > 1.0:
+        agg["raised"] += 1
+        put("raised", base)
+    else:
+        put("plain", base)
+
+
+def lift_report(agg: Dict[str, float]) -> Dict[str, Any]:
+    """The with / without figures for the statistics: PF (gains over losses; None without a loss and without a gain, 99 without a loss) and net, in
+    percent of one base position, of the same parents without and with each stack type. Block: every counted parent, and the parents that carry an add.
+    Relation lanes: every parent at volume 1 against its multiple, and the unit result of the raised parents next to the others."""
+    def pf(g: float, l_: float) -> Optional[float]:
+        return round(g / l_, 4) if l_ > 0 else (99.0 if g > 0 else None)
+
+    def pair(g: float, l_: float) -> Dict[str, Any]:
+        return {"pf": pf(g, l_), "netPct": round(100.0 * (g - l_), 4)}
+    n = int(agg["parents"])
+    return {"parents": n, "unknown": int(agg["unknown"]),
+            "block": {"parentsWithAdds": int(agg["addParents"]), "adds": int(agg["adds"]),
+                      "without": pair(agg["baseG"], agg["baseL"]), "with": pair(agg["withG"], agg["withL"]),
+                      "addParentsWithout": pair(agg["addBaseG"], agg["addBaseL"]), "addParentsWith": pair(agg["addWithG"], agg["addWithL"])},
+            "relation": {"raised": int(agg["raised"]), "volume": round(agg["relVol"], 4),
+                         "without": pair(agg["baseG"], agg["baseL"]), "with": pair(agg["relG"], agg["relL"]),
+                         "netPerVolumeWithoutPct": round(100.0 * (agg["baseG"] - agg["baseL"]) / n, 5) if n else None,
+                         "netPerVolumeWithPct": round(100.0 * (agg["relG"] - agg["relL"]) / agg["relVol"], 5) if agg["relVol"] > 0 else None,
+                         "raisedUnit": pair(agg["raisedG"], agg["raisedL"]), "notRaisedUnit": pair(agg["plainG"], agg["plainL"])},
+            "basis": "settled Set parents; returns on the original base notional; per-order PF, not USDT"}
+
+
 class Pulse:
     def __init__(self, api: FastBingX, contracts: Dict[str, Contract]) -> None:
         self.api = api
@@ -3623,8 +3696,19 @@ class Pulse:
                 # losing executed group that the group gate already rejected.
                 filters = {"predicate": group_open} if getattr(self.sets, "group_gate", False) else {}
                 alternative = self.sets.pick_any(pack, allowed_lanes=allowed, side=side, **filters)
-                if alternative is not None and (self.sets.lane_of(alternative) or "pos") in allowed:
-                    return alternative, self.sets.lane_of(alternative) or "pos", ""
+                # the lane the alternative was taken on: a Set open on both lanes is on the allowed one here, not on the lane lane_of names first
+                alt_lane = ""
+                if alternative is not None:
+                    lane_in = getattr(self.sets, "lane_in", None)
+                    try:
+                        alt_lane = str(lane_in(alternative, allowed) or "") if callable(lane_in) else ""
+                    except Exception:
+                        alt_lane = ""
+                    if not alt_lane:
+                        named = self.sets.lane_of(alternative) or "pos"
+                        alt_lane = named if named in allowed else ""
+                if alternative is not None and alt_lane:
+                    return alternative, alt_lane, ""
             except (TypeError, AttributeError):
                 pass
         return None, "", blocked_by
@@ -4760,6 +4844,7 @@ class Pulse:
         self.exec_n: Dict[str, int] = {"set": 0, "exit": 0, "wins": 0, "losses": 0, "skipped": 0}
         self.exec_sets: Dict[str, int] = {}
         self.exec_scope: Dict[str, Dict[str, Any]] = {}
+        self.exec_lift: Dict[str, float] = new_lift()
         self.group_exec: Dict[str, Deque[Tuple[float, float]]] = {}
         if not os.path.exists(TRADES_PATH):
             return
@@ -4790,7 +4875,9 @@ class Pulse:
                             set_id=str(rec.get("set_id") or rec.get("setId") or ""),
                             pack=str(rec.get("pack") or ""), lane=str(rec.get("lane") or "pos"),
                             block_fills=list(rec.get("block_fills") or []),
-                            net_pnl_pct=number(rec.get("net_pnl_pct")),
+                            net_pnl_pct=number(rec.get("net_pnl_pct")), base_net_pnl_pct=number(rec.get("base_net_pnl_pct")),
+                            base_entry=number(rec.get("base_entry")) or 0.0, base_qty=number(rec.get("base_qty")) or 0.0,
+                            rel_mult=number(rec.get("rel_mult")) or 1.0, rel_why=str(rec.get("rel_why") or ""),
                             fee_source=str(rec.get("fee_source") or "unknown")))
                     except (ValueError, TypeError, AttributeError):
                         continue
@@ -4818,6 +4905,7 @@ class Pulse:
             self._exec_count(rec.set_id, cash if cash is not None else float("nan"))
             self._exec_inc("blockAddFills", len(getattr(rec, "block_fills", []) or []))
             if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
+                lift_note(self.__dict__.setdefault("exec_lift", new_lift()), rec)      # the same parents without / with Block adds and relation raises
                 lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
                 key = "laneNeg" if lane == "neg" else "lanePos"
                 self._exec_inc(key)
@@ -4926,6 +5014,9 @@ class Pulse:
                        "setsThatTraded": len(self.__dict__.get("exec_sets", {}))},
             # entries never sent: the venue's book was too far from the decision price or too thin (book_allows), or a Real scope blocked
             "entriesSkipped": {"thinBook": int(n.get("skippedThinBook", 0)), "scopeBlocked": int(n.get("scopeBlocked", 0))},
+            # what the stack types made on the settled Set parents, next to the same parents without them
+            "lift": {**lift_report(self.__dict__.get("exec_lift") or new_lift()),
+                     "relationAsked": int(n.get("relationAsked", 0)), "relationRaised": int(n.get("relationRaised", 0))},
         }
 
     def _load_trade_history(self) -> None:
@@ -4963,6 +5054,7 @@ class Pulse:
                     base_qty=float(rec.get("base_qty") or 0),
                     block_fills=list(rec.get("block_fills") or []),
                     net_pnl_pct=rec.get("net_pnl_pct"), base_net_pnl_pct=rec.get("base_net_pnl_pct"),
+                    rel_mult=number(rec.get("rel_mult")) or 1.0, rel_why=str(rec.get("rel_why") or ""),
                     fees_usdt=rec.get("fees_usdt"), fee_source=str(rec.get("fee_source") or "configured-estimate"),
                     entry_slippage=float(rec.get("entry_slippage") or 0), exit_slippage=float(rec.get("exit_slippage") or 0),
                 )

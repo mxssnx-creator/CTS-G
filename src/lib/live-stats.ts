@@ -233,8 +233,38 @@ export type Execution = {
   /** The Real stage's overall strategies per scope ("overall", "lane:pos|neg", "pack:<pack>"), each judged on its own paper stream. */
   overall?: { scopes: Record<string, OverallScope>; blocked: number };
   open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
-  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number };
+  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number; blockAddFills?: number };
+  /** The settled Set parents once without and once with each stack type (server: pulse_trader.lift_report), returns on the original base notional. */
+  lift?: ExecutionLift;
 };
+export type LiftPair = { pf: number | null; netPct: number };
+export type ExecutionLift = {
+  parents: number; unknown: number;
+  block: { parentsWithAdds: number; adds: number; without: LiftPair; with: LiftPair; addParentsWithout: LiftPair; addParentsWith: LiftPair };
+  relation: { raised: number; volume: number; without: LiftPair; with: LiftPair; netPerVolumeWithoutPct: number | null; netPerVolumeWithPct: number | null;
+    raisedUnit: LiftPair; notRaisedUnit: LiftPair };
+  relationAsked?: number; relationRaised?: number; basis?: string;
+};
+export type LiftRow = { key: string; label: string; n: number; without: LiftPair; with: LiftPair; note: string };
+
+/** The with / without rows the desk shows: only stack types that acted on at least one settled parent. A PF of 99 is "no loss"; null = no result. */
+export function liftRows(lift: ExecutionLift | undefined | null): LiftRow[] {
+  if (!lift || !lift.parents) return [];
+  const rows: LiftRow[] = [];
+  if (lift.block.parentsWithAdds > 0) {
+    rows.push({ key: "block-all", label: "Block · every Set parent", n: lift.parents, without: lift.block.without, with: lift.block.with,
+      note: `${lift.block.adds} adds on ${lift.block.parentsWithAdds} parents` });
+    rows.push({ key: "block-add", label: "Block · the parents that got an add", n: lift.block.parentsWithAdds, without: lift.block.addParentsWithout, with: lift.block.addParentsWith,
+      note: "base position alone against base + adds" });
+  }
+  if (lift.relation.raised > 0) {
+    rows.push({ key: "relation-all", label: "Relation lanes · every Set parent", n: lift.parents, without: lift.relation.without, with: lift.relation.with,
+      note: `volume ${lift.relation.volume.toFixed(2)} on ${lift.parents} parents · net per volume ${lift.relation.netPerVolumeWithoutPct ?? "—"} % → ${lift.relation.netPerVolumeWithPct ?? "—"} %` });
+    rows.push({ key: "relation-raised", label: "Relation lanes · raised against not raised (volume 1)", n: lift.relation.raised, without: lift.relation.notRaisedUnit, with: lift.relation.raisedUnit,
+      note: "left: the parents that were not raised · right: the raised parents" });
+  }
+  return rows;
+}
 
 /** Session and machine figures for the desk footer (server: Pulse.system_info). */
 export type SystemInfo = {

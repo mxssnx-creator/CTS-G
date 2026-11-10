@@ -195,7 +195,8 @@ def main() -> int:
     lb = book.lookback * 60.0
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
-    hours = [float(h) for h in range(int(start // 3600 + 1) * 3600, int(end), 3600)]
+    # the first complete hour after the pre-history, as trade_sim counts it (a start exactly on the hour is that hour, not the next)
+    hours = [float(h) for h in range(((int(start) + 3599) // 3600) * 3600, int(end), 3600)]
     if not hours:
         raise ValueError("No complete report hour remains after prehistory")
     split = hours[len(hours) * 2 // 3]
@@ -536,8 +537,9 @@ def main() -> int:
                 fk = (m["st"].idx, hr)
                 if fk not in floor_memo:           # the Auto floor of a Set at an hour never changes between candidates: learn it once
                     auto.apply(book, hr)
-                    floor_memo[fk] = float(book.floor_for(book.win(m["st"]).real_n, m["st"].pack, m["st"]))
-                floor = floor_memo[fk]
+                    wn_ = book.win(m["st"])
+                    floor_memo[fk] = (float(book.floor_for(wn_.real_n, m["st"].pack, m["st"])), float(book.floor_for(wn_.real_neg_n, m["st"].pack, m["st"])))
+                floor = floor_memo[fk][1 if r["lane"] == "neg" else 0]       # the parent's own lane window, as Pulse.set_axis_floor
                 fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
                 if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):
                     continue

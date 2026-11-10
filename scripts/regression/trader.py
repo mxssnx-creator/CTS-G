@@ -784,6 +784,58 @@ def relation_lanes_raise_a_set_entry_and_never_cancel_it():
     return ok, f"entry notional and recorded multiple by case: {out}; lanes handed over {lanes_seen}"
 
 
+def lift_figures_compare_the_same_parents_with_and_without():
+    """execution.lift ("PF related to without"): the settled Set parents once without and once with each stack type, on the parent's original base notional.
+    Block: a parent without an add is its base result on both sides; a parent with adds is its base result against ALL its cash over the base notional, so
+    losing adds lower the "with" side and are never dropped. Relation lanes: every parent at volume 1 against its recorded multiple, and the unit result of
+    the raised parents next to the others. A parent with an unknown base result, or with adds and unknown cash, enters no sum and is counted as unknown.
+    The figures survive a restart: they are rebuilt from the trades file."""
+    C = pt.Closed
+    def rec(base, pnl=None, fills=(), mult=1.0, base_qty=2.0, base_entry=50.0):
+        return C(1.7e9, "A-USDT", "LONG", base_qty, base_entry, 0.0, pnl if pnl is not None else float("nan"), 0.0, "tp", 60.0, set_id="general:L:1m:sl1.00:st20", lane="pos",
+                 base_entry=base_entry, base_qty=base_qty, block_fills=list(fills), base_net_pnl_pct=base, rel_mult=mult)
+    add = {"group": 2, "qty": 1.0, "price": 51.0}
+    rows = [rec(0.010), rec(-0.004), rec(0.020, pnl=3.0, fills=[add]),          # base +2 % of 100 = 2.0; the add made +1.0 more: with = 3 %
+            rec(0.010, pnl=-0.5, fills=[add, add]),                             # base +1 %, the adds lost 1.5: with = -0.5 %
+            rec(-0.010, mult=1.5), rec(0.006, mult=2.0),                        # raised parents: a loss at 1.5 x, a win at 2 x
+            rec(None), rec(0.010, pnl=None, fills=[add])]                       # unknown base result; adds with unknown cash
+    agg = pt.new_lift()
+    for r in rows:
+        pt.lift_note(agg, r)
+    rep = pt.lift_report(agg)
+    b, r_ = rep["block"], rep["relation"]
+    def near(x, y):
+        return x is not None and abs(x - y) < 1e-6
+    block_ok = (rep["parents"] == 6 and rep["unknown"] == 2 and b["parentsWithAdds"] == 2 and b["adds"] == 3
+                and near(b["without"]["pf"], round(0.046 / 0.014, 4)) and near(b["without"]["netPct"], 3.2)
+                and near(b["with"]["pf"], round(0.046 / 0.019, 4)) and near(b["with"]["netPct"], 2.7)
+                and b["addParentsWithout"]["pf"] == 99.0 and near(b["addParentsWithout"]["netPct"], 3.0)
+                and near(b["addParentsWith"]["pf"], 6.0) and near(b["addParentsWith"]["netPct"], 2.5))
+    rel_ok = (r_["raised"] == 2 and near(r_["volume"], 7.5) and near(r_["with"]["pf"], round(0.052 / 0.019, 4)) and near(r_["with"]["netPct"], 3.3)
+              and near(r_["raisedUnit"]["pf"], 0.6) and near(r_["notRaisedUnit"]["pf"], 10.0)
+              and near(r_["netPerVolumeWithoutPct"], round(3.2 / 6, 5)) and near(r_["netPerVolumeWithPct"], round(3.3 / 7.5, 5)))
+    empty = pt.lift_report(pt.new_lift())
+    empty_ok = empty["parents"] == 0 and empty["block"]["with"]["pf"] is None and empty["relation"]["netPerVolumeWithPct"] is None
+    # restart: the same figures from the trades file
+    saved = (pt.TRADES_PATH,)
+    with tempfile.TemporaryDirectory() as td:
+        pt.TRADES_PATH = os.path.join(td, "trades.jsonl")
+        try:
+            with open(pt.TRADES_PATH, "w") as f:
+                for r in rows:
+                    d = dict(r.__dict__)
+                    d["pnl"] = None if d["pnl"] != d["pnl"] else d["pnl"]
+                    d["client_id"] = ""
+                    f.write(json.dumps(d) + "\n")
+            p = _bare_pulse()
+            p.cid_ours = lambda cid: True
+            p._exec_boot()
+            again = pt.lift_report(p.exec_lift)
+        finally:
+            pt.TRADES_PATH = saved[0]
+    return block_ok and rel_ok and empty_ok and again == rep, f"block {b}; relation {r_}; unknown {rep['unknown']}; rebuilt from the trades file equal: {again == rep}"
+
+
 def start_records_whether_the_previous_run_crashed():
     """The desk shows how the previous run ended: a start that finds the run-state file still "running" reports no clean stop (crash, kill or
     machine stop; found after the 2026-11-03 container pause, which left 9 positions unmanaged), a clean stop marks "stopped". system_info carries
@@ -3345,6 +3397,7 @@ CHECKS = [
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.indications-trailing-volume-is-not-multiplied", indications_trailing_volume_is_not_multiplied),
     ("trader.relation-lanes-raise-a-set-entry-and-never-cancel-it", relation_lanes_raise_a_set_entry_and_never_cancel_it),
+    ("trader.lift-figures-compare-the-same-parents-with-and-without", lift_figures_compare_the_same_parents_with_and_without),
     ("trader.start-records-whether-the-previous-run-crashed", start_records_whether_the_previous_run_crashed),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),
     ("trader.partial-close-recorded-at-full-size", partial_close_is_recorded_at_the_full_size),
