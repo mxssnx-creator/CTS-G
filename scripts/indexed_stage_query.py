@@ -1,6 +1,6 @@
 """Exact causal prefix queries for immutable replay tapes.
 
-An opt-in replay accelerator, not a different trading rule. Native stage_chain
+A replay accelerator, not a different trading rule. Native stage_chain
 forms membership once per Set and parameter snapshot. A query exposes only
 closes strictly before its clock and recomputes the current short-window vote
 from that prefix. Expiring context or dynamic tape adapters use the native
@@ -100,7 +100,10 @@ class IndexedStages:
             return self.native['chain_at'](book, tapes, st, now)
         row, chain = got
         end = bisect.bisect_left(row['tx'], now)
-        return chain, list(row['nets'][:end])
+        # Keep the causal prefix read-only and bounded at this query's clock.
+        # Copying every historic float here dominated allocation in large
+        # replay grids, even though callers only read a few indexed windows.
+        return chain, memoryview(row['nets'])[:end].toreadonly()
 
     def lane_stream(self, book, tapes, st, now, lane):
         got = self._chain(book, tapes, st, now)

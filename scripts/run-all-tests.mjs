@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
- * `npm test`: the Node and TypeScript desk tests and both Python engine suites run concurrently.
- *
- * They share no state, so running them in parallel cuts wall time to the slowest of the three. The exit code is
- * nonzero if any of them fails, and each one's output is printed under its own label.
+ * Run desk/source-parity checks first, then the heavy Python suites together.
+ * This bounds CPU contention without dropping checks. Any failed suite makes
+ * the command fail; every suite keeps its complete diagnostic output.
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -12,8 +11,9 @@ import { join } from "node:path";
 const logDirectory = mkdtempSync(join(tmpdir(), "cts-g-tests-"));
 
 const jobs = [
-  {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py"},
+  {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py && python3 -B scripts/test_replay_memo.py && python3 -B scripts/test_x02_native_session.py && python3 -B scripts/test_regression_progress.py"},
   {label:"Tactic/Inverse/volume",cmd:"python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts"},
+  {label:"native process replay",cmd:"python3 -B scripts/test_parallel_native_replay.py"},
   { label: "node", cmd: "node --test scripts/*.test.mjs" },
   { label: "ts", cmd: "node scripts/run-ts-tests.mjs" },
   { label: "python", cmd: "python3 scripts/regression/run.py" },
@@ -44,7 +44,15 @@ function run({ label, cmd }) {
   });
 }
 
-const results = await Promise.all(jobs.map(run));
+// Start source-parity checks before the four-process replay suite. Launching
+// every CPU-heavy child together could starve the TypeScript bridge past its
+// computation deadline and turn available indications into timeout results.
+const sourceParity=jobs.filter(job=>job.label==='Tactic/Inverse/volume');
+const lightweight=jobs.filter(job=>!['python','engine','Tactic/Inverse/volume'].includes(job.label));
+const heavyweight=jobs.filter(job=>['python','engine'].includes(job.label));
+const results = await Promise.all(sourceParity.map(run));
+results.push(...await Promise.all(lightweight.map(run)));
+results.push(...await Promise.all(heavyweight.map(run)));
 let failed = 0;
 for (const r of results) {
   const status = r.code === 0 ? "ok" : `FAILED (exit ${r.code})`;

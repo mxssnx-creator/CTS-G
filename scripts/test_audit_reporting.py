@@ -17,6 +17,20 @@ from fee_policy import cost_policy, paper_cost_pct
 
 
 class AuditReporting(unittest.TestCase):
+    def test_display_projection_keeps_all_used_rows_and_original_evidence(self):
+        from complete_report import display_payload
+        rows=[dict(dimension=d,group='g',enough_samples_pct=80)
+              for d in ['all','type','indication','set']]
+        data=dict(baseline=dict(stage_evaluations=rows,trades=[1]),
+                  breadth=dict(stage_evaluations=rows,configs=[1,2],trades=[3]),checks={'ok':True})
+        projected=display_payload(data)
+        self.assertEqual(projected['breadth']['stage_evaluations'],rows[:2])
+        self.assertNotIn('stage_evaluations',projected['baseline'])
+        self.assertEqual(projected['breadth']['configs'],[1,2])
+        self.assertEqual(projected['breadth']['trades'],[3])
+        self.assertEqual(len(data['baseline']['stage_evaluations']),4)
+        self.assertEqual(len(data['breadth']['stage_evaluations']),4)
+
     def test_block_comparisons_change_real_count_ratios_and_cover_both_stack_types(self):
         from complete_strategy_audit import block_arms
         from block_rules import clean_cfg
