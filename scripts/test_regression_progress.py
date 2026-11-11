@@ -5,8 +5,11 @@ from __future__ import annotations
 from contextlib import redirect_stderr
 import io
 from pathlib import Path
+import json
 import sys
+import tempfile
 import time
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "regression"))
 import run as regression  # noqa: E402
@@ -22,6 +25,13 @@ def fail():
 
 
 def main():
+    with tempfile.TemporaryDirectory() as td:
+        durations=Path(td)/'durations.json'
+        durations.write_text(json.dumps({'a':9,'b':8,'c':2,'d':1}))
+        checks=[(name,slow) for name in ['a','b','c','d']]
+        with patch.object(regression,'DURATIONS_PATH',str(durations)):
+            groups=regression._groups(checks,2)
+        assert groups==[[0,3],[1,2]],groups
     stderr = io.StringIO()
     with redirect_stderr(stderr):
         results = regression._run_parallel([("first", slow), ("second", slow), ("failure", fail)], 2,
@@ -29,6 +39,7 @@ def main():
     assert [r["name"] for r in results] == ["first", "second", "failure"]
     assert [r["status"] for r in results] == ["PASS", "PASS", "FAIL"]
     assert "regression progress:" in stderr.getvalue() and "workers active" in stderr.getvalue()
+    assert 'running ' in stderr.getvalue() and 'slow' not in stderr.getvalue()
     assert "regression early failure: failure" in stderr.getvalue()
     assert "deliberate diagnostic failure" in stderr.getvalue()
     print("parallel regression progress: heartbeat, early failures and ordered results passed")

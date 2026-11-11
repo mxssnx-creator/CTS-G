@@ -175,6 +175,7 @@ MAX_HOLD_S = 21600
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
+TRAIL_CONTROL_INTERVAL_S = 0.5  # at most two stop replacements/s in this runtime
 
 
 def pace_gap_s(cycle_started: float, now: float, scan_s: float) -> float:
@@ -905,6 +906,7 @@ class Position:
     ours: bool = True
     overall: bool = True
     close_position: bool = True
+    ctrl_sync_after: float = 0.0  # successful-update cadence belongs to this exact position
     ctrl_qty: float = 0.0
     sec_sl_oid: str = ""
     sec_tp_oid: str = ""
@@ -946,6 +948,7 @@ class Position:
     rel_why: str = ""
     rounds_mult: float = 1.0         # the volume multiple the Block rounds gave this entry (blockRounds; 1 = none) and the procedures behind it
     rounds_why: str = ""
+    fee_legs: dict = field(default_factory=dict)  # cumulative own order scopes for final commission reconciliation
 
 
 @dataclass
@@ -1246,7 +1249,10 @@ class Pulse:
         # fallback without subtracting paper slippage from the fee.
         is_maker = data.get("isMaker") in (True, "true", "TRUE")
         fallback = policy["makerFeeRate"] if is_maker else policy["takerFeeRate"]
-        return fill_fee(data, qty, price, maker, taker, 200 * fallback)
+        fee, source = fill_fee(data, qty, price, maker, taker, 200 * fallback)
+        from venue_fill_fees import remember_fee_leg
+        remember_fee_leg(pos, data, qty, price, fee, source)
+        return fee, source
 
     @staticmethod
     def note_fee_source(pos, source: str) -> None:
@@ -3303,7 +3309,7 @@ class Pulse:
         def qty_ok(o: Dict[str, Any]) -> bool:
             return self.control_covers_quantity(pos, o)
 
-        can_replace = now >= float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
+        can_replace = now >= pos.ctrl_sync_after and now >= float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
         previous_full, previous_undercovered = pos.close_position, pos.ctrl_undercovered
 
         def refresh(is_sl: bool, rows: List[Dict[str, Any]], want: float):
@@ -3334,7 +3340,7 @@ class Pulse:
                 # SL already exists) and was re-sent every pass until BingX banned the order path (x02 2026-11-03)
                 if self.replace_sl(pos, want):
                     old, price, covered, verified = real_oid(pos.sl_oid) or old, pos.sl or want, True, True
-                    self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
+                    pos.ctrl_sync_after = now + TRAIL_CONTROL_INTERVAL_S
                 replace = False
             if replace:
                 # First obtain the new protection. A failed post must never
@@ -3342,7 +3348,7 @@ class Pulse:
                 oid = real_oid(self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want))
                 if oid and oid != old:
                     old, price, covered, verified, full = oid, (pos.sec_sl if is_sl else pos.sec_tp) or want, True, True, bool(pos.close_position)
-                    self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
+                    pos.ctrl_sync_after = now + TRAIL_CONTROL_INTERVAL_S
             if covered and old:
                 for extra in valid:
                     oid = real_oid(extra.get("orderId") or extra.get("orderID"))
@@ -3385,7 +3391,7 @@ class Pulse:
         """Move the exchange stop to new_sl. True when the protection sits at that level (already there, or placed);
         False when it was throttled or the replacement failed. The caller commits its trail state only on True."""
         now = time.time()
-        if now < self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
+        if now < max(pos.ctrl_sync_after, self.ctrl_skip.get(f"sync:{pos.symbol}", 0), self.__dict__.get("_trail_control_next", 0)):
             return False
         c = self.contracts.get(pos.symbol)
         if c:
@@ -3395,6 +3401,8 @@ class Pulse:
             new_sl = self.desired_sl_tp(pos)[0]
         if pos.sl_oid and abs(float(pos.sl or 0) - new_sl) / max(pos.entry, 1e-9) < 0.00035 and self.sl_legal(pos, pos.sl):
             return True
+        self._trail_control_next = now + TRAIL_CONTROL_INTERVAL_S
+        pos.ctrl_sync_after = now + 12.0  # failures retain the slower retry; success below clears it
         old_oid = real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))
         replaced = False
         if old_oid and hasattr(self.api, "cancel_replace") and getattr(self.api, "cancel_replace_ok", True):
@@ -3442,7 +3450,7 @@ class Pulse:
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))
             pos.tp = want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
-        self.ctrl_skip[f"sync:{pos.symbol}"] = now + 12.0
+        pos.ctrl_sync_after = now + TRAIL_CONTROL_INTERVAL_S
         return bool(real_oid(pos.sl_oid))
 
     def market_close(self, pos: Position) -> Tuple[bool, float]:
@@ -3898,7 +3906,7 @@ class Pulse:
             # own volume per indication, type and range: the volume factor's size x that multiple, never over the hard size ceiling or what the
             # balance carries; the venue minimum lot still applies
             vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}),
-                                 getattr(self, "volume_by_pack_kind", {}))*relational_set_factor(getattr(self,"relational_volume_ratios",None),chosen,sym)*(relational_strategy_weight(getattr(self,"relational_volume_ratios",None),"axis") if any(ax.enabled for ax in self.coord.axes.values()) else 1)
+                                 getattr(self, "volume_by_pack_kind", {}))*relational_set_factor(getattr(self,"relational_volume_ratios",None),chosen,sym,"axis" if any(ax.enabled for ax in self.coord.axes.values()) else None)
             # Block v2 carry (blockCarry, off by default): a Set parent opens at V0 x (1 + the ratios up to the level its relation carries), never above the book
             # room or the hard size ceiling; its adds stay fractions of that parent's own (original) volume
             sb_ = getattr(self, "set_block", None)
@@ -4232,7 +4240,7 @@ class Pulse:
             except ValueError:
                 relate.error = "Relate fill exceeded captured sizing; raises disabled"
                 pos.relate_receipt = {**relate_receipt, "fillUnknown": True}
-        fee, source = self.fill_cost(data, filled, avg, sym)
+        fee, source = self.fill_cost(data, filled, avg, sym, pos)
         pos.fee_maker, pos.fee_taker, _ = self.fee_schedule.rates(sym, c, time.time())
         pos.entry_fee_usdt = pos.base_entry_fee_usdt = fee
         pos.fee_source = ("reported-fee" if source == "reported-fee" else
@@ -4583,6 +4591,8 @@ class Pulse:
             missing_qty = max(0.0, pos.qty - pos.exit_fee_qty)
             if missing_qty:
                 self.record_exit_fee(pos, {}, missing_qty, exit_px)
+            from venue_fill_fees import reconcile_position_fees
+            reconcile_position_fees(pos, getattr(self.api, "reported_fill_fee", None))
             accounted = execution_result(pos.entry, exit_px, pos.qty, pos.side,
                                          pos.entry_fee_usdt, pos.exit_fee_usdt)
             pnl = accounted["net"]

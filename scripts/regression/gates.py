@@ -268,7 +268,7 @@ def main_minimal_window_positive_and_negative():
         "-2 last two losses": reason(base + [W, L, L], mainMinN=2, mainMinMode="negative"),
         "-3 loss loss win": reason(base + [W, L, L, W], mainMinN=3, mainMinMode="negative"),
         "-3 three losses": reason(base + [W, W, L, L, L], mainMinN=3, mainMinMode="negative"),
-        "count held to 3 (9 -> 3)": reason(base + [W, W, W], mainMinN=9, mainMinMode="positive"),
+        "count held to 5 (9 -> 5)": reason(base + [W, W, W, W, W], mainMinN=9, mainMinMode="positive"),
         "both: two wins": reason(base + [L, W, W], mainMinN=2, mainMinMode="both"),
         "both: two losses": reason(base + [W, L, L], mainMinN=2, mainMinMode="both"),
         "both: a win and a loss": reason(base + [W, L, W], mainMinN=2, mainMinMode="both"),
@@ -285,7 +285,7 @@ def main_minimal_window_positive_and_negative():
     }
     want = {"off by default": "", "+1 last win": "", "+1 last loss": "mainminimal", "+2 last win, loss before": "mainminimal", "+2 last two wins": "",
             "-1 last loss": "", "-1 last win": "mainminimal", "-2 last two losses": "", "-3 loss loss win": "mainminimal", "-3 three losses": "",
-            "count held to 3 (9 -> 3)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "mainminimal",
+            "count held to 5 (9 -> 5)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "mainminimal",
             "both: three, one differs": "mainminimal", "Main stage off": "", "stages off": "",
             "avg+2: a win and a smaller loss": "", "avg+2: a loss and a smaller win": "mainminimal", "avg-3: two losses, one smaller win": "",
             "avg-2: a win and a smaller loss": "mainminimal", "avg±2: mean above zero": "", "avg±2: mean below zero": "", "avg±2: mean exactly zero": "mainminimal"}
@@ -302,7 +302,7 @@ def main_minimal_window_positive_and_negative():
     from dataclasses import replace
     v_av = stage_verdicts([W, W], [], [], 8, P)
     v_st = stage_verdicts([W, W], [], [], 8, replace(P, full_window=True))
-    ok = (cases == want and b9.main_min_n == 3 and b0.main_min_n == 0 and b0.main_min_positive and bs.main_min_n == 3 and bo.main_min_n == 0
+    ok = (cases == want and b9.main_min_n == 5 and b0.main_min_n == 0 and b0.main_min_positive and bs.main_min_n == 3 and bo.main_min_n == 0
           and v_av["minimal"] and v_av["minimal_n"] == 2 and not v_st["minimal"])
     return ok, (f"{ {k: v for k, v in cases.items() if v != want[k]} or 'every case as asked'}; count 9 -> {b9.main_min_n}; default {b0.main_min_n}; "
                 f"short window 2, minimal 3 -> {bs.main_min_n} (no cap); Main off -> {bo.main_min_n}; 2 results against 3: available {v_av['minimal']}, strict {v_st['minimal']}")
@@ -335,7 +335,7 @@ def base_minimal_window_positive_and_negative():
         "-2 last two losses": reason(base + [W, L, L], setGateMinN=2, setGateMinMode="negative"),
         "-3 loss loss win": reason(base + [W, L, L, W], setGateMinN=3, setGateMinMode="negative"),
         "-3 three losses": reason(base + [W, L, L, L], setGateMinN=3, setGateMinMode="negative"),
-        "count held to 3 (9 -> 3)": reason(base + [W, W, W], setGateMinN=9, setGateMinMode="positive"),
+        "count held to 5 (9 -> 5)": reason(base + [W, W, W, W, W], setGateMinN=9, setGateMinMode="positive"),
         "both: two wins": reason(base + [L, W, W], setGateMinN=2, setGateMinMode="both"),
         "both: two losses": reason(base + [W, L, L], setGateMinN=2, setGateMinMode="both"),
         "both: a win and a loss": reason(base + [W, L, W], setGateMinN=2, setGateMinMode="both"),
@@ -347,7 +347,7 @@ def base_minimal_window_positive_and_negative():
     }
     want = {"off by default": "", "+1 last win": "", "+1 last loss": "minimal", "+2 last win, loss before": "minimal", "+2 last two wins": "",
             "-1 last loss": "", "-1 last win": "minimal", "-2 last two losses": "", "-3 loss loss win": "minimal", "-3 three losses": "",
-            "count held to 3 (9 -> 3)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "minimal",
+            "count held to 5 (9 -> 5)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "minimal",
             "both: three, one differs": "minimal", "two results, N 3, available": "", "two results, N 3, full window": "minimal", "stages off": ""}
     b9 = SetBook()
     b9.load(overlay(stagesEnabled=True, setGateMinN=9))
@@ -355,7 +355,7 @@ def base_minimal_window_positive_and_negative():
     b0.load(overlay())
     bs = SetBook()
     bs.load(overlay(stagesEnabled=True, setGateShortN=2, setGateMinN=3))          # no ratio rule on the minimal window: 3 stays 3 beside a short window of 2
-    ok = cases == want and b9.base_min_n == 3 and b0.base_min_n == 0 and b0.base_min_positive and bs.base_min_n == 3
+    ok = cases == want and b9.base_min_n == 5 and b0.base_min_n == 0 and b0.base_min_positive and bs.base_min_n == 3
     return ok, f"{ {k: v for k, v in cases.items() if v != want[k]} or 'every case as asked'}; count 9 -> {b9.base_min_n}; default {b0.base_min_n}; short 2, minimal 3 -> {bs.base_min_n} (no cap)"
 
 

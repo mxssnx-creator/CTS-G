@@ -9,6 +9,7 @@ on; 0 = off, the default), max drawdown time below setMaxDdtHours, and a fresh e
 keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
+import copy
 
 import re
 import bisect
@@ -494,6 +495,9 @@ class StageParams:
     neg_windows: Tuple[int, ...]
     real_on: bool                   # Real: the last N (realGateN) of the lane's Real Set
     real_n: int
+    disjoint: bool = False
+    base_short_positive: bool = True
+    main_short_positive: bool = True
     full_window: bool = False       # True: a window judges only once it holds its full N orders (the strict rule); False: the orders it has (at least one)
     base_min_n: int = 0             # Base: the minimal window (setGateMinN, 0 = off): the newest 1-3 results of the Set's own tape must all be positive / negative
     base_min_positive: bool = True  # setGateMinMode: positive = every one of them above zero after PositionCost, negative = every one below zero
@@ -605,23 +609,25 @@ def _main_windows(mt: Sequence[float], mn: Sequence[float], entries: Sequence[fl
     mlo = [bisect.bisect_left(mt, entry - P.lookback_s) for entry in entries]
     loss_ok = [negative_filter_ok(mn[max(lo,e-max(P.negative_filter['windows'])):e], P.negative_filter)
                for e,lo in zip(me,mlo)] if P.negative_filter else None
-    vec: Dict[int, List[bool]] = {}
+    vec: Dict[tuple, List[bool]] = {}
 
-    def passes(w: int) -> List[bool]:
-        if w not in vec:
-            need = w if P.full_window else 1
+    def passes(w: int, offset: int = 0, positive: bool = True) -> List[bool]:
+        key = (w, offset, positive)
+        if key not in vec:
+            need = w if P.full_window or P.disjoint else 1
             floor_w = P.floor_for(w)
             lo_pf, hi_pf = floor_w - 1e-4, floor_w + 1e-4
             result = []
             for j, (e, lo) in enumerate(zip(me, mlo)):
+                e = max(0, e - offset)
                 start = max(lo, e - w)
                 if e - start < need or (loss_ok is not None and not loss_ok[j]):
                     result.append(False)
                     continue
                 value = pf_of(mg[e] - mg[start], ml[e] - ml[start])
-                result.append(value >= hi_pf or (value >= lo_pf and round(value, 4) + 1e-9 >= floor_w))
-            vec[w] = result
-        return vec[w]
+                result.append((mg[e]-mg[start] < ml[e]-ml[start]) if not positive else value >= hi_pf or (value >= lo_pf and round(value, 4) + 1e-9 >= floor_w))
+            vec[key] = result
+        return vec[key]
     return me, mlo, passes
 
 
@@ -632,8 +638,9 @@ def _main_short_choice(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int
     if not (P.main_on and P.short_on):
         return P.main_n, None
 
-    def included(w: int):
-        verdict = passes(w)
+    def included(w: int, primary: bool = False):
+        offset = (P.main_min_n + (max(P.short_windows, default=0) if primary else 0)) if P.disjoint else 0
+        verdict = passes(w, offset, True if primary else P.main_short_positive)
         gains, losses, counts = [0.0], [0.0], [0]
         for i, value in enumerate(mn):
             inc = verdict[i] and (known_entries is None or known_entries[i])
@@ -642,12 +649,12 @@ def _main_short_choice(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int
             counts.append(counts[-1] + int(inc))
         return gains, losses, counts
 
-    ref_g, ref_l, _ = included(P.main_n)
+    ref_g, ref_l, _ = included(P.main_n, True)
     candidates = [(int(w),) + included(int(w)) for w in P.short_windows]
 
     def pick(end: int, lo: int) -> int:
         ref = pf_of(ref_g[end] - ref_g[lo], ref_l[end] - ref_l[lo])
-        best, selected = ref, P.main_n
+        best, selected = ref, (P.short_windows[0] if P.disjoint and P.short_windows else P.main_n)
         for w, gains, losses, counts in candidates:
             if counts[end] - counts[lo] < P.short_min:
                 continue
@@ -678,7 +685,7 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     n = len(ts)
     gpre, lpre = prefix_sums(nets)
     bis = bisect.bisect_left
-    lb, full = P.lookback_s, P.full_window
+    lb, full = P.lookback_s, (P.full_window or P.disjoint)
     bl, bs, bm = P.base_long, P.base_short, P.base_min_n
     gm, floor = (bl if full else P.gate_min), P.floor_for(bl)  # strict means the complete Base window too
     floor_s = P.floor_for(bs) if bs else floor
@@ -692,7 +699,8 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     lo_all = list(map(bis, repeat(ts), [x - lb for x in ents]))
     f_hi, f_lo = floor + 1e-4, floor - 1e-4
     for k in range(n):
-        e, lo = e_all[k], lo_all[k]
+        end, lo = e_all[k], lo_all[k]
+        e = max(0,end-bs-bm) if P.disjoint else end
         s0 = e - bl
         if s0 < lo:
             s0 = lo
@@ -709,15 +717,17 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
         if not _base_tail_ok(ts, nets, gpre, lpre, entry, e, s0, P.max_dd_s, P.consistency):
             continue
         if bs:
+            e = max(0,end-bm) if P.disjoint else end
             t0 = e - bs
             if t0 < lo:
                 t0 = lo
             if e - t0 < s_need:
                 continue
             short_pf = pf_of(gpre[e] - gpre[t0], lpre[e] - lpre[t0])
-            if short_pf < short_lo or (short_pf < short_hi and round(short_pf, 4) + 1e-9 < floor_s):
+            if (gpre[e]-gpre[t0] >= lpre[e]-lpre[t0]) if not P.base_short_positive else (short_pf < short_lo or (short_pf < short_hi and round(short_pf, 4) + 1e-9 < floor_s)):
                 continue
         if bm:
+            e = end
             t0 = e - bm
             if t0 < lo:
                 t0 = lo
@@ -750,7 +760,11 @@ def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float
     if P.main_on:
         pl = passes(P.main_n)
         mmin = main_minimal(mn, me, mlo, P) if P.main_min_n else None
-        real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j]) and (mmin is None or mmin[j])]
+        if P.disjoint:
+            real = [k for j,k in enumerate(main) if passes(P.main_n, (choice[j] if choice is not None else 0)+P.main_min_n)[j]
+                    and (choice is None or passes(choice[j],P.main_min_n,P.main_short_positive)[j]) and (mmin is None or mmin[j])]
+        else:
+            real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j]) and (mmin is None or mmin[j])]
     else:
         real = list(main)
     realneg = []
@@ -804,7 +818,7 @@ def main_minimal(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: 
     (main_min_positive) or all negative; the results it has (at least one) unless full_window."""
     pos_pre, neg_pre = sign_prefix(mn)
     cnt = pos_pre if P.main_min_positive else neg_pre
-    need = P.main_min_n if P.full_window else 1
+    need = P.main_min_n if P.full_window or P.disjoint else 1
     out = []
     for j in range(len(me)):
         e = me[j]
@@ -823,18 +837,19 @@ def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequen
     (the long last N, the short window and the minimal window on the Main Set, each on its own), the Negative entry (the average of
     the last N Main orders below zero for some Negative window), the Real stage on each lane (the last realGateN of its Real Set at
     the minimum PF). pos / neg: the lane is open (a Base-passing Set may execute on it)."""
-    def last_ok(v: Sequence[float], n: int) -> Tuple[bool, float, int]:
-        w = list(v[-n:]) if n > 0 else []
+    def last_ok(v: Sequence[float], n: int, offset: int = 0, positive: bool = True) -> Tuple[bool, float, int]:
+        end = max(0,len(v)-offset)
+        w = list(v[max(0,end-n):end]) if n > 0 else []
         pf = round(pf_of(sum(x for x in w if x > 0), -sum(x for x in w if x < 0)), 4)
-        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor_for(n), pf, len(w)
-    m_ok, m_pf, m_n = last_ok(main, P.main_n)
+        return len(w) >= (n if P.full_window or P.disjoint else 1) and (pf + 1e-9 >= P.floor_for(n) if positive else sum(w)<0), pf, len(w)
+    m_ok, m_pf, m_n = last_ok(main, P.main_n, ((short_n if P.short_on else 0)+P.main_min_n) if P.disjoint else 0)
     main_loss_ok = negative_filter_ok(main, P.negative_filter)
     m_ok = m_ok and main_loss_ok
-    s_ok, s_pf, s_n = last_ok(main, short_n) if P.short_on else (True, m_pf, m_n)
+    s_ok, s_pf, s_n = last_ok(main, short_n, P.main_min_n if P.disjoint else 0, P.main_short_positive) if P.short_on else (True, m_pf, m_n)
     if P.main_min_n:
         mw = list(main[-P.main_min_n:])
         k_n = len(mw)
-        k_ok = k_n >= (P.main_min_n if P.full_window else 1) and sign_ok(mw, P.main_min_positive, P.main_min_both, P.main_min_avg)
+        k_ok = k_n >= (P.main_min_n if P.full_window or P.disjoint else 1) and sign_ok(mw, P.main_min_positive, P.main_min_both, P.main_min_avg)
     else:
         k_ok, k_n = True, 0
     neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)
@@ -1909,8 +1924,8 @@ class SetLane:
 
 BASE_SHORT_N_DEFAULT = 25        # Base: the second last N (setGateShortN; 0 = off): best cell of the 24 h window grid (owner, 2026-10-29)
 MAIN_SHORT_MAX_RATIO = 0.5       # the Main short windows are at most this share of the Main long window (owner 2026-10-29, mainShortMaxRatio; was mainAutoMaxRatio)
-MAIN_MIN_N_MAX = 3               # the Main minimal window: the newest 1-3 results of the Main Set (mainMinN, 0 = off), all positive or all negative (mainMinMode)
-BASE_MIN_N_MAX = 3               # the Base minimal window: the newest 1-3 results (setGateMinN, 0 = off), all positive or all negative (setGateMinMode)
+MAIN_MIN_N_MAX = 5               # the Main minimal window: the newest 1-3 results of the Main Set (mainMinN, 0 = off), all positive or all negative (mainMinMode)
+BASE_MIN_N_MAX = 5               # the Base minimal window: the newest 1-3 results (setGateMinN, 0 = off), all positive or all negative (setGateMinMode)
 BASE_SHORT_MAX_RATIO = 0.5       # the short window is at most this share of the long window (owner 2026-10-29: long 40 -> short at most 20; setGateShortMaxRatio)
 MAIN_SHORT_WINDOWS = (5, 10, 15)  # owner, 2026-10-29: the Main short window, the candidates of each Set's own window (5-15 step 5; was "Auto")
 MAIN_SHORT_MIN_DEFAULT = 1       # orders a candidate needs on the Main Set: none (owner 2026-11-04; measured identical to 8 on window C)
@@ -1998,6 +2013,8 @@ class SetBook:
         self.realst_n = REAL_GATE_N_DEFAULT
         self.last_n_by_range: Dict[str, Dict[str, Any]] = {}   # lastNByRange: per TP range last-N windows (absent: the global ones)
         self.gate_window_max = GATE_WINDOW_DEFAULT
+        self.disjoint = False
+        self.base_short_positive = self.main_short_positive = True
         self.stage_full = False
         self.stages_on = True
         self.min_bars = 120
@@ -2221,8 +2238,11 @@ class SetBook:
         # orders it opened while Base passed: the long last N, the short window and the minimal window; or the Negative lane: the average of
         # the last 5 / 10 Main orders below zero) -> Real (on the lane's Real Set: the last realGateN; then execution and mirroring)
         self.stages_on = bool(ov.get("stagesEnabled", True))     # off: the Base long window alone (no short window, Main, Negative, Real)
+        self.disjoint = bool(ov.get("lastNDisjoint", False))
+        self.base_short_positive = ov.get("setGateShortMode", "positive") != "negative"
+        self.main_short_positive = ov.get("mainShortMode", "positive") != "negative"
         self.short_max_ratio = max(0.1, min(1.0, float(num(ov, "setGateShortMaxRatio", BASE_SHORT_MAX_RATIO))))
-        short_cap = max(1, int(self.gate_window * self.short_max_ratio + 1e-9))       # long 40, ratio 0.5: at most 20
+        short_cap = 200 if self.disjoint else max(1, int(self.gate_window * self.short_max_ratio + 1e-9))       # long 40, ratio 0.5: at most 20
         self.base_short = max(0, min(short_cap, int(num(ov, "setGateShortN", BASE_SHORT_N_DEFAULT)))) if self.stages_on else 0
         # the Base minimal window, a third last-N next to the long and the short one: the newest 1-3 results all positive (or all negative)
         mode = str(ov.get("setGateMinMode") or "positive").strip().lower()
@@ -2239,7 +2259,7 @@ class SetBook:
         sov = {k: _alias(ov, "mainShort" + k, "mainAuto" + k) for k in ("Enabled", "Windows", "MaxRatio", "Min", "Margin")}
         self.short_on = bool(True if sov["Enabled"] is None else sov["Enabled"])
         self.short_ratio = max(0.1, min(1.0, float(MAIN_SHORT_MAX_RATIO if sov["MaxRatio"] is None else sov["MaxRatio"])))
-        short_cap = max(1, int(self.main_n * self.short_ratio + 1e-9))                 # long 25, ratio 0.5: short windows of at most 12
+        short_cap = 200 if self.disjoint else max(1, int(self.main_n * self.short_ratio + 1e-9))                 # long 25, ratio 0.5: short windows of at most 12
         # Do not synthesize the cap as a candidate: it may not be one of the
         # configured windows. If none survive, _main_short_choice retains the
         # long-window reference, as it already does when no candidate wins.
@@ -2259,7 +2279,7 @@ class SetBook:
         self.realst_n = max(1, min(200, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))     # 1..200: the ongoing window may be a single result
         self.last_n_by_range = last_n_by_range_of(ov.get("lastNByRange"))
         self.gate_window_max = max([self.gate_window] + [int(o["baseLong"]) for o in self.last_n_by_range.values() if "baseLong" in o])
-        self.stage_full = bool(ov.get("stageFullWindow", False))      # False (default): every stage window judges the orders it has, at least one
+        self.stage_full = self.disjoint or bool(ov.get("stageFullWindow", False))      # False (default): every stage window judges the orders it has, at least one
         self.min_pf = base_min_pf(ov)          # at least MIN_PF_FLOOR (1.1)
         # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
         cons = ov.get("setGateConsistencyPf")
@@ -2441,7 +2461,7 @@ class SetBook:
             self.trail_min_lock = 0.0
         if self.trail_min_lock > 0:
             self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
-        self.window_basis = "count" if str(ov.get("lastNBasis") or "time").lower() == "count" else "time"
+        self.window_basis = "count" if self.disjoint or str(ov.get("lastNBasis") or "time").lower() == "count" else "time"
         # relation lanes read the chains and change no tape or Set verdict, so they are not part of the evaluation signature. A change of what the lanes ARE
         # (relations, windows, floor) drops the held lanes until the next scoring pass rebuilds them; ratios and the ceiling apply at once.
         rel_cfg = relation_lanes.config_of(ov.get("relationLanes"))
@@ -3186,6 +3206,17 @@ class SetBook:
             with self._lock:
                 gen0 = self._topo_gen
                 lookback0 = self.lookback
+                # Feed refreshes replace bars and clocks while this pass is
+                # running. Keep one coherent frame for every requested symbol
+                # and every peer indication; later symbols must not read bars
+                # that closed after the pass's decision clock. Arrays are
+                # shared read-only, so this does not copy the market history.
+                replay_book = copy.copy(self)
+                replay_book.bars = market
+                replay_book.bar_t = dated
+            prefetch = getattr(self, '_prefetch_replay', None)
+            if prefetch is not None:
+                prefetch(replay_book, names, now)
             sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
@@ -3200,7 +3231,7 @@ class SetBook:
                 per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 replay_bar_at = dated.get(symbol)
                 try:
-                    inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
+                    inputs = replay_book._replay_symbol(symbol, per_set, now, on_step=on_step)
                 except Exception as exc:  # one symbol never stops the others
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
@@ -3582,6 +3613,7 @@ class SetBook:
             secondary = w.base_short if self.stage_full else min(w.base_short, self.lookback_sample_target)
             target = max(self.base_need(st), secondary, self.base_min_n,
                          min(w.base_long, self.lookback_sample_target))
+            if self.disjoint: target = w.base_long+w.base_short+self.base_min_n
             counts = st.sample_counts
             have = counts.get("base", 0) if counts is not None else st.source_n
             return have < target
@@ -3780,9 +3812,10 @@ class SetBook:
         bl = int(o.get("baseLong", g.base_long))
         bs = 0
         if self.stages_on:
-            bs = min(max(1, int(bl * self.short_max_ratio + 1e-9)), int(o["baseShort"])) if "baseShort" in o else min(g.base_short, max(1, int(bl * self.short_max_ratio + 1e-9)))
+            cap = 200 if self.disjoint else max(1, int(bl * self.short_max_ratio + 1e-9))
+            bs = min(cap, int(o.get("baseShort", g.base_short)))
         ml = int(o.get("mainLong", g.main_n))
-        scap = max(1, int(ml * self.short_ratio + 1e-9))
+        scap = 200 if self.disjoint else max(1, int(ml * self.short_ratio + 1e-9))
         sw = tuple(w for w in o.get("mainShort", g.short_windows) if w <= scap)
         rn = int(o.get("realN", g.real_n))
         rnn = int(o["realNegN"]) if "realNegN" in o else (rn if "realN" in o else g.real_neg_n)
@@ -3807,6 +3840,7 @@ class SetBook:
                            consistency=self.consistency_pf, main_on=self.main_on, main_n=w.main_n, short_on=self.short_on,
                            short_windows=w.short_windows, short_min=self.short_min, short_margin=self.short_margin,
                            neg_on=self.neg_on, neg_windows=w.neg_windows, real_on=self.realst_on, real_n=w.real_n, real_neg_n=w.real_neg_n,
+                           disjoint=self.disjoint, base_short_positive=self.base_short_positive, main_short_positive=self.main_short_positive,
                            full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
                            negative_filter=policy.get("negativeFilter"),
                            base_min_both=self.base_min_both, main_min_both=self.main_min_both,
@@ -3999,11 +4033,13 @@ class SetBook:
         st.last15_n = int(last15["count"])
         st.last15_r = float(last15["avgR"])
         w = self.win(st)
-        gate = last_n_cost_pf(tape, w.base_long, self.cost_pct, scan_all=False)
+        base_end = max(0,len(tape)-w.base_short-self.base_min_n) if self.disjoint else len(tape)
+        gate = last_n_cost_pf(tape[:base_end], w.base_long, self.cost_pct, scan_all=False)
         st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
         base_nets = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None]
-        win = base_nets[-w.base_long:]
+        long_end = max(0,len(base_nets)-w.base_short-self.base_min_n) if self.disjoint else len(base_nets)
+        win = base_nets[max(0,long_end-w.base_long):long_end]
         half = len(win) // 2
         if half >= 1:
             def _pf(v: List[float]) -> float:
@@ -4014,7 +4050,8 @@ class SetBook:
             st.gate_pf_old = st.gate_pf_new = 0.0
         st.gate_gp = sum(x for x in win if x > 0)
         st.gate_gl = -sum(x for x in win if x < 0)
-        sw = base_nets[-w.base_short:] if w.base_short else []
+        short_end = max(0,len(base_nets)-self.base_min_n) if self.disjoint else len(base_nets)
+        sw = base_nets[max(0,short_end-w.base_short):short_end] if w.base_short else []
         st.base_short_n = len(sw)
         st.base_short_gp, st.base_short_gl = sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)
         st.base_short_pf = round(pf_of(st.base_short_gp, st.base_short_gl), 4)
@@ -4028,12 +4065,14 @@ class SetBook:
         v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack, st))
         st.stage = v
         st.main_short_win = short_n
-        rw = m_[-w.main_n:]
+        main_end = max(0,len(m_)-(short_n if self.short_on else 0)-self.main_min_n) if self.disjoint else len(m_)
+        rw = m_[max(0,main_end-w.main_n):main_end]
         st.main_n = len(rw)
         st.main_gp = sum(x for x in rw if x > 0)
         st.main_gl = -sum(x for x in rw if x < 0)
         st.main_pf = round(pf_of(st.main_gp, st.main_gl), 4)
-        mrw = m_[-short_n:] if self.short_on else []                  # the Main short window's own orders
+        short_end = max(0,len(m_)-self.main_min_n) if self.disjoint else len(m_)
+        mrw = m_[max(0,short_end-short_n):short_end] if self.short_on else []                  # the Main short window's own orders
         st.main_short_n = len(mrw)
         st.main_short_gp, st.main_short_gl = sum(x for x in mrw if x > 0), -sum(x for x in mrw if x < 0)
         st.main_short_pf = round(pf_of(st.main_short_gp, st.main_short_gl), 4)
@@ -4061,7 +4100,7 @@ class SetBook:
         else:
             st.last25_avg_r = 0.0
             st.last25_avg_pnl = 0.0
-        dd = drawdown_time(tape[-w.base_long:], now=anchor or None)   # the last N positions, not the whole tape
+        dd = drawdown_time(tape[max(0,base_end-w.base_long):base_end], now=anchor or None)   # the last N positions, not the whole tape
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
@@ -4070,7 +4109,7 @@ class SetBook:
         st.base_long_ok = (not self.stop_cap_exceeded(st) and st.gate_n >= self.base_need(st) and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
                            and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
         st.base_short_ok = (bool(w.base_short) and st.base_short_n >= (w.base_short if self.stage_full else 1)
-                            and st.base_short_pf + 1e-9 >= self.floor_for(w.base_short, st.pack, st))
+                            and ((sum(sw)<0) if not self.base_short_positive else st.base_short_pf + 1e-9 >= self.floor_for(w.base_short, st.pack, st)))
         st.source_n = len(tape)
         # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
         st.active = not st.locked
@@ -4138,7 +4177,7 @@ class SetBook:
             return "unstable"        # passed on the whole window but not on both halves of it
         if st.max_dd_s >= self.max_dd_s:
             return "ddt"
-        if w.base_short and (st.base_short_n < (w.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(w.base_short, st.pack, st)):
+        if w.base_short and (st.base_short_n < (w.base_short if self.stage_full else 1) or ((st.base_short_gp >= st.base_short_gl) if not self.base_short_positive else st.base_short_pf + 1e-9 < self.floor_for(w.base_short, st.pack, st))):
             return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
         if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_limit():
             return "stale"
@@ -4173,7 +4212,7 @@ class SetBook:
         policy = range_processing(getattr(self, "processing_overlay", {}), self.processing_range(st))
         if st.kind == "trail" and not policy["trailing"]:
             return "type-disabled"
-        if st.kind == "base" and not policy["normal"] and not additional_processing_enabled(getattr(self, "processing_overlay", {})):
+        if st.kind in ("base", "trail") and not policy["normal"] and not additional_processing_enabled(getattr(self, "processing_overlay", {})):
             return "type-disabled"  # calculation remains available to independently enabled adjustments
         reason = self.base_validation_reason(st)
         if reason:

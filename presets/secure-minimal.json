@@ -503,5 +503,8 @@
     "strategies": {},
     "ranges": {},
     "symbols": {}
-  }
+  },
+  "lastNDisjoint": false,
+  "setGateShortMode": "positive",
+  "mainShortMode": "positive"
 }
