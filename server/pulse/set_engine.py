@@ -2103,6 +2103,7 @@ class SetBook:
         self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
         # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
         self._lock = threading.RLock()
+        self._replay_local = threading.local()
         # bumped whenever the Set map is rebuilt; a replay pass that straddles a rebuild must not score a partial tape
         self._topo_gen = 0
         # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
@@ -3150,6 +3151,19 @@ class SetBook:
         # one origin per minute: every chunk replayed in the same minute shares it, so the rows agree
         now = now if now is not None else float(int(t0 // BAR_S) * BAR_S)
         try:
+            # REST/live ingestion continues during a long replay. Freeze one
+            # market view at its decision clock, including peer indications;
+            # later symbols must not see candles that arrived mid-pass.
+            with self._lock:
+                market = {s: list(rows) for s, rows in self.bars.items()}
+                dated = dict(self.bar_t)
+                for s, rows in market.items():
+                    last = dated.get(s)
+                    if last is not None and last + BAR_S > now + 1e-6:
+                        drop = min(len(rows), max(0, math.ceil((last + BAR_S - now - 1e-6) / BAR_S)))
+                        market[s] = rows[:-drop] if drop else rows
+                        dated[s] = last - drop * BAR_S
+                self._replay_local.market = (market, dated)
             if symbols is None:
                 names = [s for s in self.bars if self.usable(s)]
             else:
@@ -3164,7 +3178,7 @@ class SetBook:
                 pct=1.0,
                 sets_total=len(self.sets),
                 symbols_total=len(names),
-                bars_total=sum(len(self.bars.get(s) or []) for s in names),
+                bars_total=sum(len(market.get(s) or []) for s in names),
                 cycle=self.progress.cycle + 1,
                 detail=f"{len(names)} symbols · {len(self.sets)} sets",
             )
@@ -3184,7 +3198,7 @@ class SetBook:
                 self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
                 per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
-                replay_bar_at = self.bar_t.get(symbol)
+                replay_bar_at = dated.get(symbol)
                 try:
                     inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
                 except Exception as exc:  # one symbol never stops the others
@@ -3218,7 +3232,7 @@ class SetBook:
                         span = min(max(0.0, self._hist_replay_at[symbol] - prev_at), ROTATION_CAP_S)
                         self.rotation_s = span if span > self.rotation_s else 0.8 * self.rotation_s + 0.2 * span
                     self._hist_replay_bar_at[symbol] = replay_bar_at
-                self.progress.bars_done += len(self.bars[symbol])
+                self.progress.bars_done += len(market[symbol])
                 if on_step:
                     on_step()
             self.progress.phase = "score"
@@ -3388,17 +3402,22 @@ class SetBook:
             self.progress.ready = False
             self.progress.error = str(exc)[:220]
         finally:
+            self._replay_local.__dict__.pop('market', None)
             self.progress.last_run_ms = (time.time() - t0) * 1000
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
             self._after_pass()
 
+    def _replay_market(self):
+        return getattr(self._replay_local, 'market', (self.bars, self.bar_t))
+
     def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
-        bars = self.bars[symbol]
+        market, dated = self._replay_market()
+        bars = market[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
-        last_open = self.bar_t.get(symbol)
+        last_open = dated.get(symbol)
         latest_close = float(last_open) + BAR_S if last_open is not None else now
         if latest_close > now + 1e-6:
             raise ValueError("completed bar ends after replay time")
@@ -3409,7 +3428,7 @@ class SetBook:
         settings["portedSymbol"]=symbol
         if _ported_pack_sources(self.packs):
             peer_symbols=_ported_peer_symbols(self.packs)
-            settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<latest_close]} for s,rs in self.bars.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=self.bar_t.get(s)) is not None]
+            settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<latest_close]} for s,rs in market.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=dated.get(s)) is not None]
         signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt)
         cfg = {
             "entry_conf": self.entry_conf,

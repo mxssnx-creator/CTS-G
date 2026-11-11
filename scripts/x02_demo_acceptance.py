@@ -99,10 +99,12 @@ class Client:
 
 
 class Acceptance:
-    def __init__(self,client,out):
+    def __init__(self,client,out,quantity_controls=False):
         self.api=client;self.out=out;self.prefix='Gx02qa'+uuid.uuid4().hex[:12]
+        self.quantity_controls=quantity_controls
         self.seq=0;self.log=[];self.report={'environment':'bingx-x02 VST demo','host':HOST,'runId':self.prefix,
-            'startedUtcMs':int(time.time()*1000),'checks':[],'cases':[],'complete':False}
+            'startedUtcMs':int(time.time()*1000),'checks':[],'cases':[],'complete':False,
+            'protectionMode':'quantity' if quantity_controls else 'aggregate'}
 
     def save(self):
         self.out.mkdir(parents=True,exist_ok=True)
@@ -153,7 +155,8 @@ class Acceptance:
         close_side='SELL' if side=='LONG' else 'BUY';sd=1 if side=='LONG' else -1
         for kind,factor in [('sl',1-sd*.05),('tp',1+sd*.08)]:
             px=f'{entry*factor:.{precision}f}';cid=self.cid()
-            body=ctrl_payload(symbol,side,kind,px,str(qty),cid,close_pos=True)
+            body=ctrl_payload(symbol,side,kind,px,str(qty),cid,
+                              close_pos=not self.quantity_controls,with_qty=self.quantity_controls)
             try:response=self.write('POST',ORDER,body)
             except RuntimeError as exc:
                 # A documented missing-quantity rejection is safe to retry with
@@ -165,7 +168,10 @@ class Acceptance:
             case['controls'].append({'cid':cid,'orderId':oid,'kind':kind,'requested':body})
             self.save()
             order=self.api.order(symbol,cid,oid,pending_control=True)
-            self.check('overall-control',str(order.get('closePosition')).lower() in ('true','1') and
+            scope_ok=(str(order.get('closePosition')).lower() not in ('true','1') and
+                      abs(float(order.get('origQty',order.get('quantity',0)))-float(qty))<1e-9
+                      if self.quantity_controls else str(order.get('closePosition')).lower() in ('true','1'))
+            self.check('quantity-control' if self.quantity_controls else 'overall-control',scope_ok and
                 order.get('positionSide')==side and abs(float(order.get('stopPrice',0))-float(px))<10**-precision,
                 symbol=symbol,side=side,kind=kind,orderId=str(order['orderId']),stopPrice=float(order.get('stopPrice',0)),
                 closePosition=order.get('closePosition'),reportedQuantity=order.get('origQty',order.get('quantity')))
@@ -233,22 +239,25 @@ class Acceptance:
         try:
             order=self.market(symbol,side,'BUY' if side=='LONG' else 'SELL',qty*2);case['fills'].append(order);self.save()
             self.controls(symbol,side,float(order['avgPrice']),qty*2,int(contract['pricePrecision']),case)
-            order=self.market(symbol,side,'BUY' if side=='LONG' else 'SELL',qty);case['fills'].append(order);self.save()
-            total,_=self.api.position(symbol,side);self.check('stack-total',abs(total-float(qty*3))<1e-9,symbol=symbol,side=side,qty=total)
-            for ctrl in case['controls']:
-                control=self.api.order(symbol,ctrl['cid'],ctrl['orderId'],pending_control=True)
-                self.check('overall-covers-growing-position',str(control.get('closePosition')).lower() in ('true','1') and control.get('status')=='NEW',symbol=symbol,side=side,orderId=ctrl['orderId'])
+            if not self.quantity_controls:
+                order=self.market(symbol,side,'BUY' if side=='LONG' else 'SELL',qty);case['fills'].append(order);self.save()
+                total,_=self.api.position(symbol,side);self.check('stack-total',abs(total-float(qty*3))<1e-9,symbol=symbol,side=side,qty=total)
+                for ctrl in case['controls']:
+                    control=self.api.order(symbol,ctrl['cid'],ctrl['orderId'],pending_control=True)
+                    self.check('overall-covers-growing-position',str(control.get('closePosition')).lower() in ('true','1') and control.get('status')=='NEW',symbol=symbol,side=side,orderId=ctrl['orderId'])
             order=self.market(symbol,side,'SELL' if side=='LONG' else 'BUY',qty);case['fills'].append(order);self.save()
             remaining,_=self.api.position(symbol,side)
-            self.check('partial-remainder',abs(remaining-float(qty*2))<1e-9,symbol=symbol,side=side,remaining=remaining)
+            self.check('partial-remainder',abs(remaining-float(qty*(1 if self.quantity_controls else 2)))<1e-9,symbol=symbol,side=side,remaining=remaining)
         finally:self.cleanup(case)
 
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--credentials',type=Path,required=True)
-    ap.add_argument('--out',type=Path,required=True);ap.add_argument('--execute',action='store_true');args=ap.parse_args()
+    ap.add_argument('--out',type=Path,required=True);ap.add_argument('--execute',action='store_true')
+    ap.add_argument('--quantity-controls',action='store_true',help='verify size-bounded protection and partial/final closes, without aggregate closePosition')
+    args=ap.parse_args()
     if args.out.exists():ap.error('preserve the existing journal; choose a new run directory')
-    run=Acceptance(Client(args.credentials),args.out);run.save()
+    run=Acceptance(Client(args.credentials),args.out,args.quantity_controls);run.save()
     try:
         positions=run.api.rows('/openApi/swap/v2/user/positions');orders=run.api.rows('/openApi/swap/v2/trade/openOrders',key='orders')
         run.check('authenticated-demo-read',True,positionRows=len(positions),openOrderRows=len(orders))

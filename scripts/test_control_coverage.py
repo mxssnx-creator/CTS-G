@@ -36,6 +36,54 @@ def row(side,kind,oid,price,qty=10,close_all=True):
 
 
 class Controls(unittest.TestCase):
+    def test_quantity_only_pair_covers_owned_size_without_aggregate_close(self):
+        for side in ("LONG", "SHORT"):
+            p, pos = fixture(side)
+            p.overlay = {"ownedQuantityControls": True}
+            def batch(bodies):
+                p.placed.extend(bodies)
+                return {"code": 0, "data": {"orders": [{**b, "orderId": str(i+100)} for i, b in enumerate(bodies)]}}
+            p.api.batch_place = batch
+            p.place_ctrl_pair(pos)
+            self.assertTrue(pos.controls_ok)
+            self.assertFalse(pos.close_position)
+            self.assertEqual(pos.ctrl_qty, pos.qty)
+            for body in p.placed:
+                self.assertNotIn("closePosition", body)
+                self.assertEqual(float(body["quantity"]), pos.qty)
+                self.assertEqual(body["positionSide"], side)
+            pos.qty += 1
+            self.assertTrue(p.missing_controls(pos))
+
+    def test_quantity_only_single_control_never_tries_aggregate_fallback(self):
+        p, pos = fixture()
+        p.overlay = {"ownedQuantityControls": True}
+        p.errors = 0
+        calls = []
+        def post(path, body):
+            calls.append(body)
+            return {"code": 101400, "msg": "quantity invalid"}
+        p.api.post = post
+        p.place_ctrl(pos, "sec-sl", 95)
+        self.assertTrue(calls)
+        self.assertTrue(all("closePosition" not in b and float(b["quantity"]) == pos.qty for b in calls))
+
+    def test_quantity_only_market_close_never_falls_back_to_position_id(self):
+        p, pos = fixture()
+        p.overlay = {"ownedQuantityControls": True}
+        pos.position_id = "1234"
+        p.seen_fill_cids = set()
+        p.save_open_book = lambda: True
+        p.errors = 0
+        calls = []
+        p.api.post = lambda path, body: calls.append(body) or {"code": 101400, "msg": "quantity is must"}
+        ok, _ = p.market_close(pos)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("closePosition", calls[0])
+        self.assertNotIn("positionId", calls[0])
+        self.assertEqual(calls[0]["quantity"], pos.qty)
+
     def test_refused_close_never_removes_existing_controls(self):
         p,pos=fixture()
         pos.sl_oid=pos.sec_sl_oid="100";pos.tp_oid=pos.sec_tp_oid="101"
