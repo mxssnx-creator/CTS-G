@@ -174,6 +174,7 @@ def main() -> int:
     import replay_cache  # noqa: E402
     from position_cost import MIN_VALIDATION_N, cost_as_frac  # noqa: E402
     t0 = time.time()
+    print('Loading replay configuration', flush=True)
     book = sg.make_book()
     # hold Auto is modelled: stage_eval.build_hold_auto takes each Set's tape from the engine's own lane with the hold chosen from earlier orders
     names = sorted(f[:-5] for f in os.listdir(a.data) if f.endswith("-USDT.json"))[:a.symbols]
@@ -183,9 +184,11 @@ def main() -> int:
     overlay = sg.replay_overlay()
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     loaded_names, bars, times = sg.load_bars(a.data, a.symbols)
+    print(f'Loaded {len(names)} market histories; {len(book.by_idx)} independent Sets', flush=True)
     if loaded_names != names or replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__) != manifest:
         raise ValueError("replay inputs changed while reading market data")
     if os.path.exists(a.cache):
+        print('Checking saved replay provenance', flush=True)
         shadow = replay_cache.load(a.cache, manifest)
     else:
         shadow = sg.build(names, bars, times, a.jobs)
@@ -198,6 +201,7 @@ def main() -> int:
         print(f"cache holds {held} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")
         return 2
     tapes = sg.Tapes(book, names, times, shadow)
+    print('Replay tapes ready', flush=True)
     stage_index = None
     if a.indexed_stage:
         from indexed_stage_query import IndexedStages
@@ -227,7 +231,7 @@ def main() -> int:
     groups = {}            # key -> stats
     by_set_group = {}
     for st in book.by_idx:
-        keys = [("type", f"{st.pack}/{st.kind}"), ("indication", st.pack), ("range", f"{st.pack}/{st.kind}/{range_of(st)}"), ("all", "all"),
+        keys = [("type", f"{st.pack}/{st.kind}"), ("indication", st.pack), ("configuration", st.id), ("range", f"{st.pack}/{st.kind}/{range_of(st)}"), ("all", "all"),
                 ("tprange", f"{st.pack}/{st.kind}/{tp_range_name(st)}"), ("tprange_all", f"{st.kind}/{tp_range_name(st)}"),
                 ("side", f"{st.pack}/{'long' if st.side > 0 else 'short' if st.side < 0 else 'both'}")]
         if st.kind != "trail":
@@ -257,6 +261,8 @@ def main() -> int:
             if a.stage_details:
                 readiness = {}
                 figures = sg.window_figures(book, tapes, st, now, samples=readiness)
+                for key in keys:
+                    groups[key]['full_base_evals'] += bool(readiness.get('baseLong', {}).get('full'))
                 for stage, value in figures.items():
                     if value is None:
                         continue
@@ -359,6 +365,7 @@ def main() -> int:
         g = groups[k]
         bl = blocks(g.get("ex_list") or [])
         return {"group": k[1], "sets": int(g["sets"]),
+                "enough_base_samples_pct": round(100*g['full_base_evals']/g['set_evals'], 3) if a.stage_details and g['set_evals'] else None,
                 "valid_pct": round(100.0 * g["valid_evals"] / g["set_evals"], 2) if g["set_evals"] else 0.0,
                 "executable_pct": round(100.0 * g["executable_evals"] / g["set_evals"], 2) if g["set_evals"] else 0.0,
                 "eff_pf": pf(g["in_gp"], g["in_gl"]), "eff_orders": int(g["in_n"]),
@@ -401,6 +408,9 @@ def main() -> int:
            "all": summary(("all", "all")),
            "types": [summary(k) for k in sorted(groups) if k[0] == "type"],
            "indications": [summary(k) for k in sorted(groups) if k[0] == "indication"],
+           "configurations": [{**summary(('configuration', st.id)), 'pack': st.pack, 'kind': st.kind,
+                               'side': st.side, 'step': st.step, 'sl_ratio': st.sl_ratio,
+                               'trail': st.trail_key, 'trail_sl': st.trail_sl} for st in book.by_idx],
            "ranges": [summary(k) for k in sorted(groups) if k[0] == "range"],
            "sl": [summary(k) for k in sorted(groups) if k[0] == "sl"],
            "tpranges": [summary(k) for k in sorted(groups) if k[0] == "tprange"],

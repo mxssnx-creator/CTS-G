@@ -29,6 +29,7 @@ import argparse
 import bisect
 import heapq
 import json
+import math
 import os
 import sys
 import time
@@ -74,14 +75,15 @@ def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int,
     """events: (exit t, net fraction, weight). PF, net and max drawdown of the weighted results; hours with a positive net."""
     vals = [n * w for _, n, w in events]
     eq = peak = mdd = 0.0
-    for _t, n, w in sorted(events):
+    for _t, n, w in sorted(events, key=lambda row: row[0]):
         eq += n * w
         peak = max(peak, eq)
         mdd = max(mdd, peak - eq)
     def bucket(t):
-        # The final candle closes exactly at the report end. Keep that settled
-        # fill in the last hour so hourly totals reconcile to the portfolio.
-        return float(hours[-1]) if hours and t == hours[-1] + 3600 else float(int(t // 3600) * 3600)
+        # An exit is a completed candle's END: h < exit <= h+1h.
+        # Every exact hour boundary belongs to the preceding hour, not just
+        # the final boundary. This matches the parent replay's settlement.
+        return float((math.ceil(t / 3600.0)-1)*3600)
     by_h: Dict[float, float] = {}
     for t, n, w in events:
         h = bucket(t)

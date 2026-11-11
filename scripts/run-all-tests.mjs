@@ -18,6 +18,8 @@ const jobs = [
 
 function run({ label, cmd }) {
   return new Promise((resolve) => {
+    const started = Date.now();
+    console.log(`Started ${label}`);
     const child = spawn(cmd, { shell: true, stdio: ["ignore", "pipe", "pipe"] });
     const lines = [];
     const collect = (chunk) => {
@@ -25,7 +27,10 @@ function run({ label, cmd }) {
     };
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
-    child.on("close", (code) => resolve({ label, code: code ?? 1, lines }));
+    child.on("close", (code) => {
+      console.log(`Finished ${label}: ${code === 0 ? "ok" : "FAILED"} (${Math.round((Date.now()-started)/1000)}s)`);
+      resolve({ label, code: code ?? 1, lines });
+    });
     child.on("error", (err) => resolve({ label, code: 1, lines: [String(err)] }));
   });
 }

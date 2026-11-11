@@ -17,6 +17,19 @@ from fee_policy import cost_policy, paper_cost_pct
 
 
 class AuditReporting(unittest.TestCase):
+    def test_strategy_hours_match_parent_settlement_at_every_boundary(self):
+        from stack_eval import summarize
+        from trade_sim import settlement_hours
+        clocks=[3600.0,3660.0,7200.0,10800.0]
+        vals=[.01,-.02,.03,-.04];hours=[0.0,3600.0,7200.0]
+        events=list(zip(clocks,vals,[1.0]*4))
+        strategy=summarize(events,4,0,hours)
+        parent=settlement_hours([dict(t=t,t_in=0,net=v)for t,v in zip(clocks,vals)],[],hours)
+        self.assertEqual([r['net_pct']for r in strategy['hourly']],[r['net_pct']for r in parent])
+        self.assertEqual([r['fills']for r in strategy['hourly']],[r['orders']for r in parent])
+        self.assertAlmostEqual(sum(r['net_pct']for r in strategy['hourly']),strategy['net_pct'])
+        # Equal-clock results keep source order, not their numerical value.
+        self.assertEqual(summarize([(1,.02,1),(1,-.01,1)],2,0,[0])['max_dd_pct'],1.0)
     def test_block_add_cannot_use_newly_settled_same_clock_observations(self):
         from block_coordination_study import simulate
         rows=[dict(t_in=0,t=100,net=.03,symbol='S'+str(i),set='same',pack='p',kind='base',lane='pos',side=1,step=3,range='micro',entry=100,exit=103.176,reason='tp',honor_tp=True,tp_costs=10,sl_costs=10,extremes=[(10,3,True,1.01)])for i in range(8)]
