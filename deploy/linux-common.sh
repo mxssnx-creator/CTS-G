@@ -291,7 +291,7 @@ restore_pulse_trader() {
   # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
   # verify both input and output git blob hashes. Runs on every install/update.
   local pt="$PULSE_DIR/pulse_trader.py"
-  local pt_want="030075026e6933b4e1e00e42a9c9915888ea19c1"
+  local pt_want="25a344cb35eb4d2ad43490aa67658b4b061c7fc4"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
   local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then

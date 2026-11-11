@@ -11,13 +11,31 @@ import bisect
 import hashlib
 import json
 from pathlib import Path
+from collections.abc import Sequence
+
+
+class LaneValues(Sequence):
+    """Read-only indexed values: last-N slices visit only the requested rows."""
+    def __init__(self, values, indices):
+        self.values, self.indices = values, indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return LaneValues(self.values, self.indices[key])
+        return self.values[self.indices[key]]
+
+    def __iter__(self):
+        return (self.values[k] for k in self.indices)
 
 
 class IndexedStages:
     def __init__(self, sg):
         self.sg = sg
         self.native = {name: getattr(sg, name) for name in
-                       ('chain_at', 'lane_stream', 'lane_stream_entries')}
+                       ('chain_at', 'lane_stream', 'lane_stream_entries', 'stage_lane_stats', 'other_lanes')}
         self.cache = {}
         self.builds = self.queries = self.fallbacks = 0
 
@@ -115,6 +133,47 @@ class IndexedStages:
             return self.native['lane_stream_entries'](book, tapes, st, now, lane)
         row, chain = got
         return [(row['tx'][k], row['te'][k], row['nets'][k]) for k in chain['realneg' if lane == 'neg' else 'real']]
+
+    def _stage_view(self, book, tapes, st, now):
+        got = self._chain(book, tapes, st, now)
+        if got is None:
+            return None
+        row, chain = got
+        values = {lane: LaneValues(row['nets'], chain[lane]) for lane in ('main', 'real', 'realneg')}
+        verdict = self.sg.se.stage_verdicts(values['main'], values['real'], values['realneg'], chain['short_n'], row['params'])
+        return values, verdict
+
+    def stage_lane_stats(self, book, tapes, st, now):
+        got = self._stage_view(book, tapes, st, now)
+        if got is None:
+            return self.native['stage_lane_stats'](book, tapes, st, now)
+        values, verdict = got
+        lane = next((lane for lane in getattr(book, 'lane_order', ('pos', 'neg'))
+                     if verdict['pos' if lane == 'pos' else 'negl']), '')
+        if not lane and (verdict['pos'] or verdict['negl']):
+            lane = 'pos' if verdict['pos'] else 'neg'
+        return lane, self.sg.se.lane_rank_stats(values['realneg' if lane == 'neg' else 'real'], tapes.cf)
+
+    def other_lanes(self, book, tapes, st, now, lane):
+        if not (book.main_on or book.neg_on or book.realst_on):
+            return []
+        got = self._stage_view(book, tapes, st, now)
+        if got is None:
+            return self.native['other_lanes'](book, tapes, st, now, lane)
+        values, verdict = got
+        result, base_rank = [], None
+        for candidate in getattr(book, 'lane_order', ('pos', 'neg')):
+            if candidate == lane or not verdict['pos' if candidate == 'pos' else 'negl']:
+                continue
+            if base_rank is None:
+                base_rank = self.sg.gate_base(book, tapes, st, now)[1]
+            rank = base_rank
+            if getattr(book, 'rank_by_lane', False):
+                windows = book.win(st)
+                stats = self.sg.se.lane_rank_stats(values['realneg' if candidate == 'neg' else 'real'], tapes.cf)
+                rank = self.sg.se.lane_rank_of(stats, book.floor_for(windows.real_neg_n if candidate == 'neg' else windows.real_n, st.pack, st), -base_rank[4])
+            result.append((candidate, rank))
+        return result
 
     def install(self):
         for name in self.native:

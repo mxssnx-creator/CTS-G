@@ -2,6 +2,7 @@
 import json
 import contextlib
 import io
+import sys
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -14,6 +15,41 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_batch_ack_binds_exact_clients_before_first_rest_order_poll(self):
+        orders = [{'symbol':'S0-USDT','clientOrderID':'G1234sl','orderId':'91'},
+                  {'symbol':'S0-USDT','clientOrderID':'G1234tp','orderId':'92'}]
+        def request(method, path, body):
+            return {'code':0,'data':{'orders':orders}}
+        with tempfile.TemporaryDirectory() as td:
+            api = SimpleNamespace(_req=request,base=session.HOST)
+            journal = session.Journal(api,td,'G1234')
+            journal.phase,journal.deadline='active',float('inf')
+            bodies=[{**o,'side':'SELL','positionSide':'LONG','type':'STOP_MARKET','quantity':'1'} for o in orders]
+            for body in bodies:body.pop('orderId')
+            api._req('POST','/openApi/swap/v2/trade/batchOrders',{'batchOrders':json.dumps(bodies)})
+            self.assertTrue(journal.owns_order('S0-USDT','91'))
+            self.assertTrue(journal.owns_order('S0-USDT','92'))
+            self.assertFalse(journal.owns_order('S1-USDT','91'))
+    def test_startup_fee_collection_publishes_only_measured_symbol_rates(self):
+        sys.path.insert(0, str(session.ROOT / 'server/pulse'))
+        from execution_cost import FeeSchedule
+        calls = []
+        def get(path, params):
+            calls.append((path, params['symbol']))
+            return {'code':0,'data':{'makerCommissionRate':'0.0002','takerCommissionRate':'0.0005'}}
+        pulse = SimpleNamespace(api=SimpleNamespace(get=get), fee_schedule=FeeSchedule())
+        progress = []
+        session.collect_account_fees(pulse, SYMBOLS, lambda: False, float('inf'), lambda *row: progress.append(row))
+        self.assertEqual(sorted(s for _, s in calls), sorted(SYMBOLS))
+        self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS))
+        self.assertTrue(all(path == '/openApi/swap/v2/user/commissionRate' for path, _ in calls))
+        self.assertEqual(progress[-1][:2], (50, 50))
+        for symbol in SYMBOLS:
+            self.assertEqual(pulse.fee_schedule.rates(symbol)[:2], (.0002, .0005))
+        with self.assertRaises(session.SessionEnd):
+            session.collect_account_fees(SimpleNamespace(api=pulse.api, fee_schedule=FeeSchedule()),
+                                         SYMBOLS, lambda: True, float('inf'), lambda *row: None)
+
     def test_overlay_preserves_admission_and_requires_explicit_universe(self):
         raw = {'setMinPf': 1.37, 'stageFullWindow': True, 'lastNByRange': {'micro': {'baseLong': 30}}, 'blockEnabled': False}
         ov = session.frozen_overlay(raw, SYMBOLS)
@@ -70,6 +106,11 @@ class NativeSessionTests(unittest.TestCase):
             _history_snapshot_symbols=set(SYMBOLS), bars={s:[0]*2880 for s in SYMBOLS}, bar_t={s:940 for s in SYMBOLS})
         pulse = SimpleNamespace(sets=book,contracts={},fee_schedule=SimpleNamespace(rates=lambda *args:(.0002,.0005,'account-rate')))
         self.assertTrue(session.ready(pulse,SYMBOLS,2880,1000))
+        book.usable = lambda s: s != SYMBOLS[0]
+        book._history_snapshot_symbols = set(SYMBOLS[1:])
+        self.assertTrue(session.ready(pulse,SYMBOLS,2880,1000), 'native quality exclusion must not deadlock every healthy symbol')
+        book.usable = lambda s: True
+        book._history_snapshot_symbols = set(SYMBOLS)
         book.bars[SYMBOLS[-1]] = [0]*100
         self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
         book.bars[SYMBOLS[-1]] = [0]*2880
@@ -152,13 +193,13 @@ class NativeSessionTests(unittest.TestCase):
         self.assertIsNone(pulse.set_leverage())
         self.assertEqual(pulse.ensure_max_leverage('S0-USDT',force=True),1)
         self.assertEqual(pulse.leverage_for(object()),1)
-        self.assertFalse(session.shared_account_protection_verified())
+        self.assertTrue(session.shared_account_protection_verified())
 
     def test_unbounded_native_protection_blocks_execution_before_credentials(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); symbols=root/'symbols.json'; symbols.write_text(json.dumps(SYMBOLS))
             out=root/'session'
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(session, 'shared_account_protection_verified', return_value=False):
                 result=session.main(['--overlay',str(session.ROOT/'server/pulse/overlay-bingx-x02.json'),
                                      '--symbols',str(symbols),'--out',str(out),'--execute'])
             report=json.loads((out/'session.json').read_text())

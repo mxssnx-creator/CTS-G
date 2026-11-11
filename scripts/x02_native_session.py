@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = "https://open-api-vst.bingx.com"
@@ -55,7 +56,7 @@ def frozen_overlay(raw, symbols, history_hours=18):
               shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
-              indExtraSources=False)
+              indExtraSources=False, ownedQuantityControls=True)
     # Preserve every configured PF/sample/Last-N policy and strategy toggle.
     return ov
 
@@ -181,9 +182,12 @@ class Journal:
             self.append({"index": index, "at": time.time(), "result": "response", "response": reply})
             if method == 'POST' and len(bodies) == 1:
                 self.observe_orders('/openApi/swap/v2/trade/order', bodies[0], reply)
-            elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0' and isinstance(reply.get('data'), list):
-                for order in reply['data']:
-                    self.remember_order(order)
+            elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0':
+                data = reply.get('data')
+                orders = data.get('orders') if isinstance(data, dict) else data
+                if isinstance(orders, list):
+                    for order in orders:
+                        self.remember_order(order)
             return reply
 
 
@@ -210,8 +214,10 @@ def checked_positions(api):
 
 def ready(pulse, symbols, history_bars, now):
     book = pulse.sets
+    usable = getattr(book, 'usable', None)
+    expected = {s for s in symbols if not callable(usable) or usable(s)}
     return (book.progress.ready and not book._running and not book._lookback_pending
-            and set(getattr(book, "_history_snapshot_symbols", ())) == set(symbols)
+            and bool(expected) and set(getattr(book, "_history_snapshot_symbols", ())) == expected
             and all(len(book.bars.get(s, ())) >= history_bars - 1
                     and 0 <= now - book.bar_t.get(s, 0) <= 150
                     and pulse.fee_schedule.rates(s, pulse.contracts.get(s), now)[2] == "account-rate"
@@ -243,11 +249,52 @@ def freeze_account_settings(pulse):
     pulse.set_leverage = lambda: None
     pulse.ensure_max_leverage = lambda _symbol, force=False: 1
     pulse.leverage_for = lambda _contract=None: 1
+    # This venue does not promise atomic replacement support. Keep the native
+    # place-before-cancel path; the journal allows only identified order writes.
+    if getattr(pulse, "api", None) is not None:
+        pulse.api.cancel_replace_ok = False
 
 
 def shared_account_protection_verified():
-    """The current native overall controls can close the entire venue position."""
-    return False
+    """Require the native quantity-only order paths, also enforced by Journal."""
+    sys.path.insert(0, str(ROOT / "server/pulse"))
+    from pulse_trader import Pulse
+    return callable(getattr(Pulse, "quantity_controls_only", None))
+
+
+def collect_account_fees(pulse, symbols, stopped, deadline, progress):
+    """Bounded parallel GETs during paused startup, using the native limiter.
+
+    Each worker uses the same native fee parser and owns its temporary book;
+    only the main thread publishes validated rates to the runtime.
+    """
+    from execution_cost import FeeSchedule
+    def fetch(symbol):
+        schedule = FeeSchedule()
+        schedule.refresh(pulse.api, [symbol], time.time())
+        return symbol, schedule.account.get(symbol), schedule.error
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix='x02-fees') as pool:
+        while True:
+            pending = [s for s in symbols if pulse.fee_schedule.rates(s, None, time.time())[2] != 'account-rate']
+            if not pending:
+                return
+            if stopped():
+                raise SessionEnd('requested session stop')
+            if time.monotonic() >= deadline:
+                raise SessionEnd('account fee readiness deadline')
+            futures = [pool.submit(fetch, symbol) for symbol in pending]
+            for future in as_completed(futures):
+                symbol, row, error = future.result()
+                if row is not None:
+                    pulse.fee_schedule.account[symbol] = row
+                progress(len(pulse.fee_schedule.account), len(symbols), error)
+                if stopped() or time.monotonic() >= deadline:
+                    for item in futures:
+                        item.cancel()
+                    raise SessionEnd('requested session stop' if stopped() else 'account fee readiness deadline')
+            if any(s not in pulse.fee_schedule.account for s in pending):
+                time.sleep(1)
 
 
 def capture(pulse, out, label):
@@ -291,6 +338,8 @@ def cleanup(pulse, journal, seconds):
             ack = intent.get("response") or {}
             if ack.get("cooled") is True:
                 continue  # Native transport explicitly did not dispatch.
+            if str(ack.get('code')) == '101400' and not ack.get('data'):
+                continue  # Explicit invalid-parameter rejection, not a lost reply.
             for body in order_bodies(intent["path"], intent["body"]):
                 cid = body["clientOrderID"]
                 ack_data = ack.get("data") or {}
@@ -440,16 +489,15 @@ def main(argv=None):
     report["executed"] = True
     save()
     try:
-        # Native refresh reads one rate per invocation. During paused startup,
-        # explicitly collect every selected account rate at its one-second pace,
-        # rather than waiting 50 ordinary strategy cycles before the cost is known.
-        while not all(pulse.fee_schedule.rates(s, contracts[s], time.time())[2] == "account-rate" for s in symbols):
-            if (args.out / 'STOP_SESSION').exists():
-                raise SessionEnd('requested session stop')
-            if time.monotonic() - warming_since >= args.warmup_minutes * 60:
-                raise SessionEnd("account fee readiness deadline")
-            pulse.refresh_fees()
-            time.sleep(1)
+        def fee_progress(measured, total, error):
+            report['readiness'] = dict(phase='account-fees', measured=measured, total=total, error=error)
+            save()
+            if measured % 10 == 0 or error:
+                print(json.dumps(report['readiness']), flush=True)
+        collect_account_fees(pulse, symbols, lambda: (args.out / 'STOP_SESSION').exists(),
+                             warming_since + args.warmup_minutes * 60, fee_progress)
+        report['readiness'] = dict(phase='native-history', measured=len(symbols), total=len(symbols))
+        save()
         # Paused native cycles intentionally skip hot reload. Publish the fully
         # measured account cost before building any history or unpausing entries.
         pulse.apply_live_config()

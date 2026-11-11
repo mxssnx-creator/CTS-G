@@ -2976,6 +2976,8 @@ class Pulse:
             {"close_pos": True, "with_qty": False, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
             {"close_pos": False, "with_qty": True, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
         ]
+        if self.quantity_controls_only():
+            forms = [form for form in forms if not form["close_pos"]]
         if is_sec:
             # Overall protection follows the whole position when stacks grow.
             # Quantity fallbacks remain available, but are never called close-all.
@@ -3193,10 +3195,9 @@ class Pulse:
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
-            b["closePosition"] = "true"
-            b["clientOrderID"] = self.cid(ch, pos=pos)
-            if "closePosition" in b:
+            if not self.quantity_controls_only():
                 b["closePosition"] = "true"
+            b["clientOrderID"] = self.cid(ch, pos=pos)
         r = self.api.batch_place([sl_b, tp_b])
         self.did_io = True
         data = r.get("data") or {}
@@ -3232,7 +3233,8 @@ class Pulse:
                     continue
                 pos.tp_oid = pos.sec_tp_oid = oid
                 pos.tp = pos.sec_tp = actual
-        sl_full, tp_full = bool(real_oid(pos.sl_oid)), bool(real_oid(pos.tp_oid))
+        sl_full = bool(real_oid(pos.sl_oid)) and not self.quantity_controls_only()
+        tp_full = bool(real_oid(pos.tp_oid)) and not self.quantity_controls_only()
         if not real_oid(pos.sl_oid):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
@@ -3361,6 +3363,10 @@ class Pulse:
         pos.overall = pos.controls_ok
         pos.close_position = sl[4] and tp[4]
 
+    def quantity_controls_only(self) -> bool:
+        """Isolated runtimes must never close the venue's aggregate position."""
+        return getattr(self, "overlay", {}).get("ownedQuantityControls") is True
+
     def _ctrl_body(self, pos: Position, kind: str, price: float) -> Dict[str, Any]:
         price = self.clamp_ctrl_price(pos, kind, price)
         c = self.contracts.get(pos.symbol)
@@ -3371,8 +3377,8 @@ class Pulse:
             self.fmt_px(c, price),
             self.fmt_qty(c, pos.qty),
             self.cid("u" if kind == "sl" else "v", pos=pos),
-            close_pos=True,
-            with_qty=False,
+            close_pos=not self.quantity_controls_only(),
+            with_qty=self.quantity_controls_only(),
         )
 
     def replace_sl(self, pos: Position, new_sl: float) -> bool:
@@ -3394,7 +3400,8 @@ class Pulse:
         if old_oid and hasattr(self.api, "cancel_replace") and getattr(self.api, "cancel_replace_ok", True):
             body = ctrl_payload(
                 pos.symbol, pos.side, "sl", self.fmt_px(c, new_sl), self.fmt_qty(c, pos.qty),
-                self.cid("u", pos=pos), close_pos=True, with_qty=False,
+                self.cid("u", pos=pos), close_pos=not self.quantity_controls_only(),
+                with_qty=self.quantity_controls_only(),
             )
             body["cancelOrderId"] = old_oid
             r = self.api.cancel_replace(body)
@@ -3472,12 +3479,11 @@ class Pulse:
             self.save_open_book()
             self.last_error = f"close {pos.symbol} partial settled; remainder retained"
             return False, px
-        forms = [
-            {"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)},
-            {"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)},
-        ]
+        forms = [{"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)}]
+        if not self.quantity_controls_only():
+            forms.append({"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)})
         pid = str(getattr(pos, "position_id", "") or "")
-        if pid:
+        if pid and not self.quantity_controls_only():
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
         for f in forms:                       # the manager records this close itself: the fill sync must not count it again
             self.seen_fill_cids.add(f["clientOrderID"])
@@ -7675,10 +7681,13 @@ class Pulse:
             while pending:
                 reqs = []
                 for s in pending:
-                    want = lookback - len(rows_by[s])
+                    # VST can include the boundary candle again despite an
+                    # endTime just before it. Count clocks, not response rows,
+                    # or each page leaves one missing minute of stage context.
+                    want = lookback - len({self._kline_time(row) for row in rows_by[s]})
                     oldest = self._kline_time(rows_by[s][0])
                     if want > 0 and oldest > 0:
-                        reqs.append((path, {"symbol": s, "interval": "1m", "limit": str(min(page, want)), "endTime": str(oldest - 1)}))
+                        reqs.append((path, {"symbol": s, "interval": "1m", "limit": str(min(page, want + 1)), "endTime": str(oldest - 1)}))
                 if not reqs:
                     break
                 pending = []
@@ -7690,10 +7699,14 @@ class Pulse:
                         failed.add(sym)
                         continue
                     old = sorted(body["data"], key=self._kline_time)
+                    previous_oldest = self._kline_time(rows_by[sym][0])
+                    if old and self._kline_time(old[0]) >= previous_oldest:
+                        failed.add(sym)  # no backwards progress: retry later, never loop forever
+                        continue
                     rows_by[sym] = old + rows_by[sym]
                     if len(old) < int(extra["limit"]):
                         exhausted.add(sym)
-                    if len(old) >= int(extra["limit"]) and len(rows_by[sym]) < lookback:
+                    if len(old) >= int(extra["limit"]) and len({self._kline_time(row) for row in rows_by[sym]}) < lookback:
                         pending.append(sym)
                 failed.update(str(extra.get("symbol")) for _p, extra in reqs if str(extra.get("symbol")) not in answered)
             for s in names:

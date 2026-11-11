@@ -10,11 +10,35 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT/'scripts'), str(ROOT/'server/pulse'), str(ROOT/'scripts/regression')]
 import stage_eval as sg
-from indexed_stage_query import IndexedStages
+from indexed_stage_query import IndexedStages, LaneValues
 from common import overlay
 
 
 class IndexedQuery(unittest.TestCase):
+    def test_last_n_views_do_not_scan_older_positions(self):
+        class Counted(list):
+            reads = 0
+            def __getitem__(self, key):
+                self.reads += 1
+                return super().__getitem__(key)
+        values = Counted(range(10000))
+        lane = LaneValues(values, list(range(0, 10000, 2)))
+        self.assertEqual(len(lane), 5000)
+        self.assertEqual(values.reads, 0)
+        self.assertEqual(list(lane[-8:]), list(range(9984, 10000, 2)))
+        self.assertEqual(values.reads, 8)
+        self.assertEqual(list(lane[::-1000]), [9998, 7998, 5998, 3998, 1998])
+
+    def test_lane_verdict_and_rank_tail_equal_native_under_each_lane_order(self):
+        for seed in (17, 31):
+            book, tapes, st, _ = self.fixture(seed, n=2000)
+            adapter = IndexedStages(sg)
+            for order in (('pos', 'neg'), ('neg', 'pos'), ('pos',), ('neg',)):
+                book.lane_order = order
+                for now in tapes.by_set[st.idx][0][::79]:
+                    self.assertEqual(adapter.stage_lane_stats(book, tapes, st, now),
+                                     adapter.native['stage_lane_stats'](book, tapes, st, now))
+
     def fixture(self, seed=17, n=320):
         rng=random.Random(seed)
         tx=sorted(float(1000+30*rng.randrange(n)) for _ in range(n))
