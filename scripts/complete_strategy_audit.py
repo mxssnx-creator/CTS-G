@@ -19,6 +19,23 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0]=[str(HERE),str(HERE.parent/'server/pulse')]
 
 
+def block_arms(shipped):
+    """Declare every relation and stack type with explicit per-count ratios.
+
+    clean_cfg's legacy fallback is not an overlay key: clearing blockCounts
+    and setting blockVolumeRatio alone would silently repeat ratio 0.5.
+    """
+    arms=[('shipped',shipped)]
+    for relation in ['set','symbol','indication','step']:
+        for ratio in [.1,.2,.5]:
+            counts=[dict(step=1.0,ratio=ratio,on=True)for _ in range(3)]
+            arms.append((f'{relation} ratio {ratio}',{**shipped,'blockRelations':[relation],
+                'blockStackType':'additive','blockCounts':counts}))
+            arms.append((f'{relation} shared total {ratio}',{**shipped,'blockRelations':[relation],
+                'blockStackType':'shared','blockSharedTotal':ratio,'blockCounts':counts}))
+    return arms
+
+
 def main():
     ap=argparse.ArgumentParser()
     for name in ['data','cache','parents','patch-file','out']:ap.add_argument('--'+name,required=True)
@@ -97,8 +114,7 @@ def main():
             tp_costs=r['fracs'][1]/cf,sl_costs=r['fracs'][0]/cf,extremes=extremes))
     window=dict(meta=dict(cost_frac=cf),parents=window_parents)
     block_cfg={k:v for k,v in overlay.items()if k.startswith('block')}
-    arms=[('shipped',block_cfg)]+[(f'{rel} ratio {ratio}',{**block_cfg,'blockRelations':[rel],'blockVolumeRatio':ratio,'blockCounts':[]})
-        for rel in ['set','symbol','step']for ratio in [.1,.2,.5]]
+    arms=block_arms(block_cfg)
     for label,cfg in arms:
         captured=[];result=block_sim(window,cfg,capture=captured)
         values=units.copy();counts={}

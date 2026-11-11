@@ -17,6 +17,20 @@ from fee_policy import cost_policy, paper_cost_pct
 
 
 class AuditReporting(unittest.TestCase):
+    def test_block_comparisons_change_real_count_ratios_and_cover_both_stack_types(self):
+        from complete_strategy_audit import block_arms
+        from block_rules import clean_cfg
+        arms=dict(block_arms({}))
+        self.assertEqual(len(arms),25)
+        for relation in ['set','symbol','indication','step']:
+            for ratio in [.1,.2,.5]:
+                additive=clean_cfg(arms[f'{relation} ratio {ratio}'])
+                shared=clean_cfg(arms[f'{relation} shared total {ratio}'])
+                self.assertEqual(additive.relations,(relation,))
+                self.assertEqual([c['ratio']for c in additive.counts],[ratio]*3)
+                self.assertEqual(additive.stack_type,'additive')
+                self.assertEqual(shared.stack_type,'shared')
+                self.assertEqual(shared.shared_total,ratio)
     def test_optional_numpy_fallback_keeps_first_fill_and_excludes_exit_boundary(self):
         from stack_eval import plain_first_hit
         high,low=[100,101,103,104],[99,98,97,96]
