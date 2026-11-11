@@ -11,9 +11,9 @@ import { join } from "node:path";
 const logDirectory = mkdtempSync(join(tmpdir(), "cts-g-tests-"));
 
 const jobs = [
-  {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py && python3 -B scripts/test_replay_memo.py && python3 -B scripts/test_x02_native_session.py && python3 -B scripts/test_regression_progress.py"},
+  {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py && python3 -B scripts/test_replay_memo.py && python3 -B scripts/test_x02_native_session.py && python3 -B scripts/test_regression_progress.py && python3 -B scripts/test_regression_scheduling.py && python3 -B scripts/test_x02_universe.py"},
   {label:"Tactic/Inverse/volume",cmd:"python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts"},
-  {label:"native process replay",cmd:"python3 -B scripts/test_parallel_native_replay.py"},
+  {label:"native process replay",cmd:"python3 -B scripts/test_parallel_native_replay.py && python3 -B scripts/test_regression_memo.py"},
   { label: "node", cmd: "node --test scripts/*.test.mjs" },
   { label: "ts", cmd: "node scripts/run-ts-tests.mjs" },
   { label: "python", cmd: "python3 scripts/regression/run.py" },

@@ -35,7 +35,8 @@ STATS = {"hit": 0, "miss": 0, "verified": 0, "uncacheable": 0}
 
 
 def _key(b: SetBook, symbol: str, now: float):
-    bars = b.bars[symbol]
+    market, dated = b._replay_market()
+    bars = market[symbol]
     digest = hashlib.blake2b(repr(bars).encode(), digest_size=16).hexdigest()
     settings = json.dumps(b.ind_settings, sort_keys=True, default=str)
     sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, getattr(st, 'trail_sl', 0), st.step, st.tp_pct, st.sl_ratio,
@@ -45,9 +46,9 @@ def _key(b: SetBook, symbol: str, now: float):
     # by a different implementation. Admission-only PF/window settings are
     # deliberately absent: every check still runs its own native scoring.
     implementation = (se.pack_signals, se.SetLane.scan, se.SetLane.step, se.hit_exit)
-    peers = tuple((s, b.bar_t.get(s), hashlib.blake2b(repr(rows).encode(), digest_size=16).digest())
-                  for s, rows in sorted(b.bars.items()) if s != symbol) if se._ported_pack_sources(b.packs) else ()
-    return (symbol, digest, float(now), b.bar_t.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
+    peers = tuple((s, dated.get(s), hashlib.blake2b(repr(rows).encode(), digest_size=16).digest())
+                  for s, rows in sorted(market.items()) if s != symbol) if se._ported_pack_sources(b.packs) else ()
+    return (symbol, digest, float(now), dated.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
             b.scratch_s, b.scratch_bars, b.scratch_min, b.cooldown_bars, b.cost_pct, b.min_sl_distance_pct,
             b.pause_mode, b.pause_fixed, tuple(b.pause_candidates), b.pause_auto_min, b.pause_auto_max,
             tuple(sorted(b.pause_pack.items())),
@@ -103,7 +104,7 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
             self.progress.set_id = last[-1].id
     # Replay inputs are read-only in the engine. Use this book's equal bars,
     # while retaining the candidate arrays and index paired with cached rows.
-    return {**cached_inputs, "bars": self.bars[symbol]}
+    return {**cached_inputs, "bars": self._replay_market()[0][symbol]}
 
 
 SetBook._replay_symbol = _replay

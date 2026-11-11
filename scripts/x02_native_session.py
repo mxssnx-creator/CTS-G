@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = "https://open-api-vst.bingx.com"
@@ -57,7 +58,7 @@ def frozen_overlay(raw, symbols, history_hours=18):
               shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
-              indExtraSources=False)
+              indExtraSources=False, ownedQuantityControls=True)
     # Preserve every configured PF/sample/Last-N policy and strategy toggle.
     return ov
 
@@ -87,8 +88,9 @@ def is_entry(body):
 
 
 class Journal:
-    def __init__(self, api, out, tag):
+    def __init__(self, api, out, tag, symbols=None):
         self.api, self.out, self.tag = api, Path(out), tag
+        self.symbols=None if symbols is None else frozenset(symbols)
         # Use native place-then-cancel with exact owned IDs. The atomic
         # replacement path embeds an aggregate-closing control payload.
         api.cancel_replace_ok = False
@@ -201,6 +203,8 @@ class Journal:
         if method == 'POST' and not bodies:
             raise RuntimeError('an identified session order is required')
         for order in bodies:
+            if self.symbols is not None and order.get('symbol') not in self.symbols:
+                raise RuntimeError('order symbol is outside this session selected universe')
             cid = str(order.get("clientOrderID") or order.get("clientOrderId") or "")
             if not order.get('symbol') or not cid.lower().startswith(self.tag.lower()):
                 raise RuntimeError("native order is missing this session's ownership tag")
@@ -227,7 +231,7 @@ class Journal:
                                  'path': path, 'body': body, 'result': 'locally-rejected', 'response': reply})
                     return reply
             if is_entry(order) and (self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline):
-                return {"code": 101209, "error": True, "msg": "session admission paused or deadline reached"}
+                return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
         with self.lock:
             identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
             if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):
@@ -248,9 +252,11 @@ class Journal:
             self.append({"index": index, "at": time.time(), "result": "response", "response": reply})
             if method == 'POST' and len(bodies) == 1:
                 self.observe_orders('/openApi/swap/v2/trade/order', bodies[0], reply)
-            elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0' and isinstance(reply.get('data'), list):
-                for order in reply['data']:
-                    self.remember_order(order)
+            elif method == 'POST' and isinstance(reply, dict) and str(reply.get('code')) == '0':
+                data = reply.get('data')
+                orders = data.get('orders') if isinstance(data, dict) else data
+                if isinstance(orders, list):
+                    for order in orders:self.remember_order(order)
             return reply
 
 
@@ -341,12 +347,27 @@ def checked_positions(api):
 
 def ready(pulse, symbols, history_bars, now):
     book = pulse.sets
+    usable = getattr(book, 'usable', None)
+    expected = {s for s in symbols if not callable(usable) or usable(s)}
+    age_of = getattr(book, '_snapshot_max_age', None)
+    age = max(150.0, float(age_of())) if callable(age_of) else 150.0
+    replay_keys = getattr(book, '_hist_replay_key', None)
+    if replay_keys is not None:
+        # Retained snapshot metadata deliberately requires an entirely usable
+        # requested universe. It is not the completion marker for a normal
+        # first replay when the native quality check excludes a symbol.
+        scope_ready = all(replay_keys.get(s) == (book.lookback, book._topo_gen)
+                          and 0 <= now-book._hist_replay_at.get(s, 0) <= age
+                          for s in expected)
+    else:
+        scope_ready = set(getattr(book, '_history_snapshot_symbols', ())) == expected
     return (book.progress.ready and not book._running and not book._lookback_pending
-            and set(getattr(book, "_history_snapshot_symbols", ())) == set(symbols)
+            and bool(expected) and scope_ready
             and all(len(book.bars.get(s, ())) >= history_bars - 1
-                    and 0 <= now - book.bar_t.get(s, 0) <= 150
+                    and 0 <= now - book.bar_t.get(s, 0) <= age
                     and pulse.fee_schedule.rates(s, pulse.contracts.get(s), now)[2] == "account-rate"
                     for s in symbols))
+
 
 
 def context_requirement(overlay):
@@ -360,9 +381,16 @@ def context_requirement(overlay):
     return count
 
 
-def require_empty_account(api):
-    if any(abs(float(p['positionAmt'])) > 1e-12 for p in checked_positions(api)) or rows(api, '/openApi/swap/v2/trade/openOrders', 'orders'):
+def require_empty_account(api,symbols=None):
+    selected=None if symbols is None else set(symbols)
+    positions=checked_positions(api)
+    orders=rows(api,'/openApi/swap/v2/trade/openOrders','orders')
+    if (any(abs(float(p['positionAmt'])) > 1e-12 and (selected is None or p['symbol'] in selected) for p in positions)
+            or any(selected is None or o.get('symbol') in selected for o in orders)):
         raise SessionEnd('account isolation lost before observation')
+    return {'scope':'selected symbols' if selected is not None else 'account','positions':0,'orders':0,
+            'ignoredForeignPositions':sum(abs(float(p['positionAmt']))>1e-12 for p in positions),
+            'ignoredForeignOrders':len(orders)}
 
 
 def freeze_account_settings(pulse):
@@ -374,6 +402,65 @@ def freeze_account_settings(pulse):
     pulse.set_leverage = lambda: None
     pulse.ensure_max_leverage = lambda _symbol, force=False: 1
     pulse.leverage_for = lambda _contract=None: 1
+    if getattr(pulse,'api',None) is not None:pulse.api.cancel_replace_ok=False
+
+
+
+def native_admission_ready(pulse):
+    """Mirror native qualification; no additional all-symbol sample gate."""
+    book = pulse.sets
+    return (book.progress.ready and not book._running and not book._lookback_pending
+            and any(not book.gate_reason(st) for st in book.by_idx))
+
+
+def shared_account_protection_verified():
+    """Require the native quantity-only order paths, also enforced by Journal."""
+    sys.path.insert(0, str(ROOT / "server/pulse"))
+    from pulse_trader import Pulse
+    return callable(getattr(Pulse, "quantity_controls_only", None))
+
+
+def collect_account_fees(pulse, symbols, stopped, deadline, progress):
+    """Bounded parallel GETs during paused startup, using the native limiter.
+
+    Each worker uses the same native fee parser and owns its temporary book;
+    only the main thread publishes validated rates to the runtime.
+    """
+    from execution_cost import FeeSchedule
+    def fetch(symbol):
+        schedule = FeeSchedule()
+        schedule.refresh(pulse.api, [symbol], time.time())
+        return symbol, schedule.account.get(symbol), schedule.error
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix='x02-fees') as pool:
+        while True:
+            pending = [s for s in symbols if pulse.fee_schedule.rates(s, None, time.time())[2] != 'account-rate']
+            if not pending:
+                return
+            if stopped():
+                raise SessionEnd('requested session stop')
+            if time.monotonic() >= deadline:
+                raise SessionEnd('account fee readiness deadline')
+            futures = [pool.submit(fetch, symbol) for symbol in pending]
+            for future in as_completed(futures):
+                symbol, row, error = future.result()
+                if row is not None:
+                    pulse.fee_schedule.account[symbol] = row
+                progress(len(pulse.fee_schedule.account), len(symbols), error)
+                if stopped() or time.monotonic() >= deadline:
+                    for item in futures:
+                        item.cancel()
+                    raise SessionEnd('requested session stop' if stopped() else 'account fee readiness deadline')
+            if any(s not in pulse.fee_schedule.account for s in pending):
+                time.sleep(1)
+
+
+def prepare_history_warmup(pulse, full_universe=True):
+    """Publish measured costs before the startup-only full-universe policy."""
+    pulse.apply_live_config()
+    if full_universe:
+        pulse.load.partial = False
+
 
 
 def capture(pulse, out, label):
@@ -415,7 +502,7 @@ def cleanup(pulse, journal, seconds):
             if intent["method"] != "POST":
                 continue
             ack = intent.get("response") or {}
-            if ack.get("cooled") is True:
+            if ack.get("cooled") is True or (str(ack.get("code")) == "101400" and not ack.get("data")):
                 continue  # Native transport explicitly did not dispatch.
             for body in order_bodies(intent["path"], intent["body"]):
                 cid = body["clientOrderID"]
@@ -432,15 +519,22 @@ def cleanup(pulse, journal, seconds):
                 if reply.get("error") or str(reply.get("code")) != "0" or not own or not terminal_or_control:
                     unresolved.append(cid)
         positions = checked_positions(pulse.api)
-        exposed = [p for p in positions if abs(float(p["positionAmt"])) > 1e-12]
+        selected=getattr(journal,'symbols',None)
+        exposed = [p for p in positions if abs(float(p["positionAmt"])) > 1e-12
+                   and (selected is None or p['symbol'] in selected)]
         orders = rows(pulse.api, "/openApi/swap/v2/trade/openOrders", "orders")
         own = [o for o in orders if journal.owns_order(o.get('symbol'), o.get('orderId') or o.get('orderID'))]
-        if not exposed and not unresolved and not pulse.open:
+        inventory_flat=all(abs(qty)<=Decimal('1e-12') for qty in getattr(journal,'inventory',{}).values())
+        if not exposed and not unresolved and not pulse.open and inventory_flat:
             for order in own:
                 pulse.api.delete("/openApi/swap/v2/trade/order", {"symbol": order["symbol"], "orderId": str(order["orderId"])})
             final = rows(pulse.api, "/openApi/swap/v2/trade/openOrders", "orders")
-            if not final and not any(abs(float(p["positionAmt"])) > 1e-12 for p in checked_positions(pulse.api)):
-                return {"confirmedFlat": True, "positions": 0, "orders": 0, "unresolvedOrderIntents": 0}
+            final_scoped=[o for o in final if selected is None or o.get('symbol') in selected]
+            final_positions=checked_positions(pulse.api)
+            if not final_scoped and not any(abs(float(p["positionAmt"])) > 1e-12 and (selected is None or p['symbol'] in selected) for p in final_positions):
+                return {"confirmedFlat": True, "positions": 0, "orders": 0, "unresolvedOrderIntents": 0,
+                        'scope':'selected symbols' if selected is not None else 'account',
+                        'ignoredForeignPositions':sum(abs(float(p['positionAmt']))>1e-12 and selected is not None and p['symbol'] not in selected for p in final_positions)}
         time.sleep(1)
     return {"confirmedFlat": False, "localPositions": len(pulse.open), "unresolvedOrderIntents": len(unresolved),
             "reason": "cleanup deadline; unresolved exposure or order evidence; protections retained"}
@@ -462,6 +556,9 @@ def main(argv=None):
     ap.add_argument("--history-hours", type=int, default=18,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument('--admission',choices=('native','full-universe'),default='native')
+    ap.add_argument('--allow-foreign-symbols',action='store_true',
+                    help='allow other positions/orders outside a deliberately disjoint selected universe')
     args = ap.parse_args(argv)
     if not 0 < args.minutes <= 30 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
         ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
@@ -478,7 +575,8 @@ def main(argv=None):
     report = {"schema": "cts-g-native-x02-v1", "host": HOST, "connection": CONN, "tag": tag,
               "createdAt": time.time(), "requestedObservationSeconds": args.minutes * 60, "symbols": symbols,
               "complete": False, "executed": False, "overlay": overlay,
-              "requiredHistoryBars": required_history,
+              "requiredHistoryBars": required_history, "admissionPolicy": args.admission,
+              'accountScope':'selected symbols' if args.allow_foreign_symbols else 'exclusive account',
               "limitations": ["minute OHLC captures cannot establish tick-identical simulation fills",
                               "external Binance/Bybit indication sources disabled; BingX VST data only",
                               "cleanup closes are reported separately from natural strategy closes",
@@ -496,6 +594,10 @@ def main(argv=None):
         save()
         print("Plan saved; no credentials read and no connection started.")
         return 0
+    if not shared_account_protection_verified():
+        report['stopReason']='native aggregate-closing protection is not isolated on a shared account'
+        save()
+        return 1
     if not args.credentials or args.credentials.stat().st_mode & 0o077:
         raise ValueError("execute requires a private0600 credential JSON file")
     credentials = json.loads(args.credentials.read_text())
@@ -515,17 +617,17 @@ def main(argv=None):
     balances = rows(api, "/openApi/swap/v3/user/balance")
     if not any(r.get("asset") == "VST" for r in balances):
         raise RuntimeError("selected authenticated account is not confirmed VST")
-    if any(abs(float(p["positionAmt"])) > 1e-12 for p in checked_positions(api)) or rows(api, "/openApi/swap/v2/trade/openOrders", "orders"):
-        raise RuntimeError("fresh exclusive empty-account preflight failed")
-    report["preflight"] = {"at": time.time(), "virtualCurrency": "VST", "positions": 0, "orders": 0}
-    journal = Journal(api, args.out, tag)
+    account_scope=symbols if args.allow_foreign_symbols else None
+    preflight=require_empty_account(api,account_scope)
+    report["preflight"] = {"at": time.time(), "virtualCurrency": "VST", **preflight}
+    journal = Journal(api, args.out, tag,account_scope)
     Path(pt.PAUSE_PATH).touch()
     contracts = pt.load_contracts(set(symbols))
     if set(contracts) != set(symbols):
         raise RuntimeError("selected symbol contract coverage is incomplete")
     pulse = pt.Pulse(api, contracts)
     report['seededHistorySymbols']=seed_history(pulse.sets,args.history_seed,symbols,time.time())
-    bulk_warmup(pulse,journal)
+    if args.admission=='full-universe':bulk_warmup(pulse,journal)
     if args.fee_cache:
         try:pulse.fee_schedule.account.update(load_fee_cache(args.fee_cache,credentials,time.time()))
         except (OSError,ValueError,TypeError):report['feeCacheIgnored']=True
@@ -538,14 +640,15 @@ def main(argv=None):
         now = time.monotonic()
         if (args.out / 'STOP_SESSION').exists():
             raise SessionEnd('requested session stop')
-        if pulse.ignored_foreign:
+        if pulse.ignored_foreign and not args.allow_foreign_symbols:
             raise SessionEnd('foreign account position detected during session')
         if journal.phase == "warming":
-            if ready(pulse, symbols, required_history, time.time()):
-                require_empty_account(api)
+            if (native_admission_ready(pulse) if args.admission=='native' else ready(pulse, symbols, required_history, time.time())):
+                require_empty_account(api,account_scope)
                 capture(pulse, args.out, "ready")
                 report["activeStartedAt"] = time.time()
                 journal.deadline = time.monotonic() + args.minutes * 60
+                pulse.load.configure(overlay)
                 journal.phase = "active"
                 Path(pt.PAUSE_PATH).unlink(missing_ok=True)
                 save()
@@ -570,32 +673,24 @@ def main(argv=None):
     report["executed"] = True
     save()
     try:
-        # Native refresh reads one rate per invocation. During paused startup,
-        # explicitly collect every selected account rate at its one-second pace,
-        # rather than waiting 50 ordinary strategy cycles before the cost is known.
-        next_fee_report=0.0
-        while not all(pulse.fee_schedule.rates(s, contracts[s], time.time())[2] == "account-rate" for s in symbols):
-            if (args.out / 'STOP_SESSION').exists():
-                raise SessionEnd('requested session stop')
-            if time.monotonic() - warming_since >= args.warmup_minutes * 60:
-                raise SessionEnd("account fee readiness deadline")
-            pulse.refresh_fees()
-            if time.monotonic()>=next_fee_report:
-                report['feeWarmup']={'measured':sum(pulse.fee_schedule.rates(s,contracts[s],time.time())[2]=='account-rate' for s in symbols),
-                                     'required':len(symbols),'error':pulse.fee_schedule.error,'at':time.time()}
-                save_fee_cache(args.fee_cache,credentials,pulse.fee_schedule.account)
-                save()
-                print(json.dumps({'feeWarmup':report['feeWarmup']}),flush=True)
-                next_fee_report=time.monotonic()+10
-            time.sleep(1)
+        next_fee_report=[0.0]
+        def fee_progress(measured,required,error):
+            if time.monotonic()<next_fee_report[0] and measured<required:return
+            report['feeWarmup']={'measured':measured,'required':required,'error':error,'at':time.time()}
+            save_fee_cache(args.fee_cache,credentials,pulse.fee_schedule.account)
+            save()
+            print(json.dumps({'feeWarmup':report['feeWarmup']}),flush=True)
+            next_fee_report[0]=time.monotonic()+10
+        collect_account_fees(pulse,symbols,lambda:(args.out/'STOP_SESSION').exists(),
+                             warming_since+args.warmup_minutes*60,fee_progress)
         save_fee_cache(args.fee_cache,credentials,pulse.fee_schedule.account)
-        # Paused native cycles intentionally skip hot reload. Publish the fully
-        # measured account cost before building any history or unpausing entries.
-        pulse.apply_live_config()
+        # Preserve the critical-memory governor. Strict admission uses the
+        # startup-only bulk history window, and native admission adds no gate.
+        prepare_history_warmup(pulse,full_universe=False)
         report['accountRates']=pulse.fee_schedule.snapshot(time.time(),pulse.active_fee_contracts(),
                                                          pulse.position_cost_pct,pulse.slippage_allowance_pct)
         save()
-        require_empty_account(api)
+        require_empty_account(api,account_scope)
         if args.replay_workers>1:
             from parallel_native_replay import ParallelReplay
             replay_workers=ParallelReplay(pulse.sets,args.replay_workers)

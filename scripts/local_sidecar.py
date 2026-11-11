@@ -21,6 +21,9 @@ def main():
     sidecar.DIR=str(state)
     sidecar.STOP_ALL_PATH=str(state/'STOP')
     sidecar.HTTP_TOKEN=''
+    # This runtime has no service unit. Native STOP/PAUSE files and stats age
+    # still determine liveness; an absent systemd service cannot label it dead.
+    sidecar.HALT_ON_INACTIVE=False
     # Deliberately do not launch heal_loop: a local view must never start a
     # different live service or reload account credentials from shared Redis.
     print(f'Local read-only engine stats: http://127.0.0.1:{args.port}/stats.json?conn=bingx-x02',flush=True)

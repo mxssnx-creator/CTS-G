@@ -87,27 +87,45 @@ def _worker(indices, checks, q):
         q.put(None)
 
 
-def _groups(checks, jobs):
-    """Keep shared replay checks ordered; balance the rest by measured duration."""
+def _groups(checks, jobs, durations=None):
+    """Keep the warm replay chain together and balance remaining work by cost.
+
+    Durations are scheduling hints only: every check still runs exactly once,
+    and the parent emits results in registry order. Unknown checks cost one
+    second; corrupt timing data must never drop a check or break a run.
+    """
+    if not checks:
+        return []
+    if durations is None:
+        try:
+            with open(DURATIONS_PATH, encoding="utf-8") as stream:
+                durations = json.load(stream)
+        except (OSError, ValueError):
+            durations = {}
+    if not isinstance(durations, dict):
+        durations = {}
+
+    def cost(i):
+        import math
+        try:
+            value = float(durations.get(checks[i][0], 1.0))
+            return value if math.isfinite(value) and value > 0 else 1.0
+        except (ValueError, TypeError, OverflowError):
+            return 1.0
+
     chain = [i for i, (_n, fn) in enumerate(checks) if getattr(fn, "__memoized__", False)]
     chain_set = set(chain)
     rest = [i for i in range(len(checks)) if i not in chain_set]
-    spare = max(1, jobs - 1) if chain else jobs
-    groups = [chain] if chain else []
-    buckets = [[] for _ in range(max(1, min(spare, len(rest))))]
-    try:
-        with open(DURATIONS_PATH, encoding='utf-8') as stream:
-            known=json.load(stream)
-    except (OSError, ValueError):
-        known={}
-    weight=lambda i:max(.001,float(known.get(checks[i][0],1.0)))
-    loads=[0.0]*len(buckets)
-    for i in sorted(rest,key=lambda i:-weight(i)):
-        bucket=min(range(len(buckets)),key=lambda j:loads[j])
-        buckets[bucket].append(i)
-        loads[bucket]+=weight(i)
-    groups.extend(b for b in buckets if b)
-    return groups
+    buckets = [[] for _ in range(max(1, min(jobs, len(rest) + bool(chain))))]
+    loads = [0.0] * len(buckets)
+    if chain:
+        buckets[0] = chain
+        loads[0] = sum(cost(i) for i in chain)
+    for i in sorted(rest, key=lambda i: -cost(i)):
+        target = min(range(len(buckets)), key=lambda k: (loads[k], k))
+        buckets[target].append(i)
+        loads[target] += cost(i)
+    return [bucket for bucket in buckets if bucket]
 
 
 def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):

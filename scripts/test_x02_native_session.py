@@ -10,10 +10,46 @@ from unittest.mock import patch
 import x02_native_session as session
 
 
+import sys
+
 SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_shared_account_transport_never_submits_outside_selected_symbols(self):
+        calls=[]
+        with tempfile.TemporaryDirectory() as td:
+            api=SimpleNamespace(_req=lambda *args:calls.append(args),base=session.HOST)
+            journal=session.Journal(api,td,'G1234',{'S0-USDT'})
+            journal.phase,journal.deadline='active',float('inf')
+            with self.assertRaisesRegex(RuntimeError,'selected universe'):
+                api._req('POST','/openApi/swap/v2/trade/order',dict(symbol='OTHER-USDT',clientOrderID='G1234entry',side='BUY',positionSide='LONG',type='MARKET',quantity='1'))
+            self.assertEqual(calls,[])
+
+    def test_selected_symbol_preflight_ignores_other_symbols_and_blocks_overlap(self):
+        def get(path):
+            rows=[{'symbol':'OTHER-USDT','positionSide':'LONG','positionAmt':'3'}]
+            return {'code':0,'data':rows if path.endswith('positions') else {'orders':[{'symbol':'OTHER-USDT','orderId':'9'}]}}
+        api=SimpleNamespace(get=get)
+        result=session.require_empty_account(api,{'S0-USDT'})
+        self.assertEqual(result['ignoredForeignPositions'],1)
+        self.assertEqual(result['ignoredForeignOrders'],1)
+        with self.assertRaises(session.SessionEnd):session.require_empty_account(api,{'OTHER-USDT'})
+        with self.assertRaises(session.SessionEnd):session.require_empty_account(api)
+
+    def test_owned_cleanup_leaves_other_symbol_positions_and_orders_untouched(self):
+        deletes=[]
+        def get(path):
+            return {'code':0,'data':[{'symbol':'OTHER-USDT','positionSide':'LONG','positionAmt':'3'}] if path.endswith('positions') else {'orders':[{'symbol':'OTHER-USDT','orderId':'9'}]}}
+        api=SimpleNamespace(get=get,delete=lambda *args:deletes.append(args))
+        pulse=SimpleNamespace(api=api,open={},sync_own_fills=lambda:None,adopt_exchange_positions=lambda:None)
+        journal=SimpleNamespace(phase='active',symbols={'S0-USDT'},inventory={},intents=[],lock=__import__('threading').RLock(),owns_order=lambda *args:False)
+        result=session.cleanup(pulse,journal,1)
+        self.assertTrue(result['confirmedFlat'])
+        self.assertEqual(result['scope'],'selected symbols')
+        self.assertEqual(result['ignoredForeignPositions'],1)
+        self.assertEqual(deletes,[])
+
     def test_bulk_history_pass_is_limited_to_paused_warmup(self):
         calls=[]
         load=SimpleNamespace(history_window=lambda names,chunk,cursor:calls.append(chunk) or (names[:chunk],cursor+chunk),
@@ -325,6 +361,106 @@ class NativeSessionTests(unittest.TestCase):
         def orders(path):
             return {'code':0,'data':[] if path.endswith('positions') else {'orders':[{'clientOrderID':'foreign'}]}}
         with self.assertRaises(session.SessionEnd): session.require_empty_account(SimpleNamespace(get=orders))
+
+
+    def test_native_admission_requires_a_native_qualified_set(self):
+        book=SimpleNamespace(progress=SimpleNamespace(ready=True),_running=False,_lookback_pending=False,
+                             by_idx=[1,2],gate_reason=lambda st:'real')
+        pulse=SimpleNamespace(sets=book)
+        self.assertFalse(session.native_admission_ready(pulse))
+        book.gate_reason=lambda st:'' if st==2 else 'main'
+        self.assertTrue(session.native_admission_ready(pulse))
+        book._lookback_pending=True
+        self.assertFalse(session.native_admission_ready(pulse))
+        book._lookback_pending=False;book._running=True
+        self.assertFalse(session.native_admission_ready(pulse))
+
+
+    def test_current_quality_checked_replay_does_not_need_a_retained_snapshot(self):
+        book = SimpleNamespace(progress=SimpleNamespace(ready=True), _running=False, _lookback_pending=False,
+            _history_snapshot_symbols=set(),bars={s:[0]*2880 for s in SYMBOLS},bar_t={s:940 for s in SYMBOLS},
+            usable=lambda s:s!=SYMBOLS[0],lookback=1080,_topo_gen=7,
+            _hist_replay_key={s:(1080,7)for s in SYMBOLS[1:]},_hist_replay_at={s:990 for s in SYMBOLS[1:]},
+            _snapshot_max_age=lambda:300)
+        pulse = SimpleNamespace(sets=book,contracts={},fee_schedule=SimpleNamespace(rates=lambda *args:(.0002,.0005,'account-rate')))
+        self.assertTrue(session.ready(pulse,SYMBOLS,2880,1000))
+        book._hist_replay_key[SYMBOLS[-1]]=(1080,6)
+        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
+        book._hist_replay_key[SYMBOLS[-1]]=(1080,7)
+        book._hist_replay_at[SYMBOLS[-1]]=100
+        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
+
+
+    def test_full_universe_warmup_survives_the_measured_cost_reload(self):
+        sys.path.insert(0, str(session.ROOT / 'server/pulse'))
+        from load_engine import LoadGovernor
+        governor = LoadGovernor()
+        pulse = SimpleNamespace(load=governor,apply_live_config=lambda:governor.configure({'loadPartial':True}))
+        session.prepare_history_warmup(pulse)
+        self.assertFalse(governor.partial)
+        selected, _ = governor.history_window(SYMBOLS, 3, 0)
+        self.assertEqual(selected,SYMBOLS)
+        governor.configure({'loadPartial':True})
+        selected, _ = governor.history_window(SYMBOLS, 3, 0)
+        self.assertEqual(len(selected),3)
+
+
+    def test_batch_ack_binds_exact_clients_before_first_rest_order_poll(self):
+        orders = [{'symbol':'S0-USDT','clientOrderID':'G1234sl','orderId':'91'},
+                  {'symbol':'S0-USDT','clientOrderID':'G1234tp','orderId':'92'}]
+        def request(method, path, body):
+            return {'code':0,'data':{'orders':orders}}
+        with tempfile.TemporaryDirectory() as td:
+            api = SimpleNamespace(_req=request,base=session.HOST)
+            journal = session.Journal(api,td,'G1234')
+            journal.phase,journal.deadline='active',float('inf')
+            entry={'symbol':'S0-USDT','clientOrderID':'G1234entry','side':'BUY','positionSide':'LONG','type':'MARKET','quantity':'1'}
+            journal.owned_clients.add(('S0-USDT','g1234entry'))
+            journal.submitted[('S0-USDT','g1234entry')]=entry
+            journal.remember_order({**entry,'orderId':'90','executedQty':'1'})
+            bodies=[{**o,'side':'SELL','positionSide':'LONG','type':'STOP_MARKET','quantity':'1'} for o in orders]
+            for body in bodies:body.pop('orderId')
+            api._req('POST','/openApi/swap/v2/trade/batchOrders',{'batchOrders':json.dumps(bodies)})
+            self.assertTrue(journal.owns_order('S0-USDT','91'))
+            self.assertTrue(journal.owns_order('S0-USDT','92'))
+            self.assertFalse(journal.owns_order('S1-USDT','91'))
+
+
+    def test_startup_fee_collection_publishes_only_measured_symbol_rates(self):
+        sys.path.insert(0, str(session.ROOT / 'server/pulse'))
+        from execution_cost import FeeSchedule
+        calls = []
+        def get(path, params):
+            calls.append((path, params['symbol']))
+            return {'code':0,'data':{'makerCommissionRate':'0.0002','takerCommissionRate':'0.0005'}}
+        pulse = SimpleNamespace(api=SimpleNamespace(get=get), fee_schedule=FeeSchedule())
+        progress = []
+        session.collect_account_fees(pulse, SYMBOLS, lambda: False, float('inf'), lambda *row: progress.append(row))
+        self.assertEqual(sorted(s for _, s in calls), sorted(SYMBOLS))
+        self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS))
+        self.assertTrue(all(path == '/openApi/swap/v2/user/commissionRate' for path, _ in calls))
+        self.assertEqual(progress[-1][:2], (50, 50))
+        for symbol in SYMBOLS:
+            self.assertEqual(pulse.fee_schedule.rates(symbol)[:2], (.0002, .0005))
+        with self.assertRaises(session.SessionEnd):
+            session.collect_account_fees(SimpleNamespace(api=pulse.api, fee_schedule=FeeSchedule()),
+                                         SYMBOLS, lambda: True, float('inf'), lambda *row: None)
+
+
+    def test_unbounded_native_protection_blocks_execution_before_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); symbols=root/'symbols.json'; symbols.write_text(json.dumps(SYMBOLS))
+            out=root/'session'
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(session, 'shared_account_protection_verified', return_value=False):
+                result=session.main(['--overlay',str(session.ROOT/'server/pulse/overlay-bingx-x02.json'),
+                                     '--symbols',str(symbols),'--out',str(out),'--execute'])
+            report=json.loads((out/'session.json').read_text())
+            self.assertEqual(result,1)
+            self.assertFalse(report['executed'])
+            self.assertFalse(report['complete'])
+            self.assertIn('aggregate-closing',report['stopReason'])
+            self.assertFalse((out/'mutation-journal.jsonl').exists())
+
 
 
 if __name__ == '__main__': unittest.main()
