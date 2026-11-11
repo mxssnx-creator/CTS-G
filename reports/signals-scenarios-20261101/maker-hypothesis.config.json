@@ -1,0 +1,111 @@
+{
+  "fees": {
+    "entryLiquidity": "maker",
+    "exitLiquidity": "taker",
+    "maker": 0.0002,
+    "slippagePerLeg": 0.0001,
+    "source": "configured-scenario",
+    "taker": 0.0005
+  },
+  "historyMinutes": 720,
+  "lastNLanes": [
+    {
+      "base": 4,
+      "main": 4,
+      "real": 4
+    },
+    {
+      "base": 12,
+      "main": 8,
+      "real": 4
+    }
+  ],
+  "maxContextDrawdown": 0.04,
+  "minPf": 1.3,
+  "mode": "offline-only",
+  "normalEnabled": true,
+  "protections": [
+    {
+      "holdMinutes": 30,
+      "id": "normal-low",
+      "kind": "normal",
+      "sl": 0.004,
+      "tp": 0.004,
+      "trailArm": 0,
+      "trailGap": 0
+    },
+    {
+      "holdMinutes": 30,
+      "id": "trail-low",
+      "kind": "trailing",
+      "sl": 0.005,
+      "tp": 0.006,
+      "trailArm": 0.003,
+      "trailGap": 0.002
+    },
+    {
+      "holdMinutes": 30,
+      "id": "trail-only-low",
+      "kind": "trailing-only",
+      "sl": 0.005,
+      "tp": 0,
+      "trailArm": 0.003,
+      "trailGap": 0.002
+    },
+    {
+      "holdMinutes": 60,
+      "id": "normal-1pct",
+      "kind": "normal",
+      "sl": 0.01,
+      "tp": 0.01,
+      "trailArm": 0,
+      "trailGap": 0
+    },
+    {
+      "holdMinutes": 60,
+      "id": "trail-1pct",
+      "kind": "trailing",
+      "sl": 0.01,
+      "tp": 0.01,
+      "trailArm": 0.005,
+      "trailGap": 0.003
+    },
+    {
+      "holdMinutes": 60,
+      "id": "trail-only",
+      "kind": "trailing-only",
+      "sl": 0.01,
+      "tp": 0,
+      "trailArm": 0.005,
+      "trailGap": 0.003
+    }
+  ],
+  "ranges": [
+    "short",
+    "medium"
+  ],
+  "risk": {
+    "initialEquity": 1000,
+    "maxDrawdown": 0.02,
+    "maxGrossExposure": 100,
+    "maxHourlyLoss": 0.005,
+    "maxOpen": 4,
+    "notionalPerOrder": 25
+  },
+  "schema": "cts-g-signals-replay-v1",
+  "sources": [
+    "ema-cross",
+    "macd-cross",
+    "rsi-reversal",
+    "ema-trend",
+    "rsi-momentum",
+    "donchian"
+  ],
+  "timeframes": [
+    1,
+    5,
+    15,
+    30
+  ],
+  "trailingEnabled": true
+}

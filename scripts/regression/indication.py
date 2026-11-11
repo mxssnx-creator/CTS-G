@@ -1,0 +1,670 @@
+"""Indication suite: causal signals, the timeframe lanes and their overlay keys, and the combined vote.
+
+The wiring check reads the settings the set signal really receives. It guards a defect found by the
+indication sweep: tf5m / tf15m / tfCombined / tfMinAgree were not in the set engine's indication settings.
+"""
+from __future__ import annotations
+
+from common import SMALL, T0, overlay, synth_bars  # noqa: F401
+from indication_engine import DEFAULT_SETTINGS, aggregate_bars, combine_timeframes, timeframe_evals
+from set_engine import SetBook, indication_signal, pack_signals
+
+
+def causal_signals_ignore_the_future():
+    b = SetBook()
+    b.load(overlay())
+    bars = synth_bars(5, 420, drift=0.0003)
+    m = 330
+    full = pack_signals(bars, b.packs, b.ind_settings, T0, 30)
+    head = pack_signals(bars[:m], b.packs, b.ind_settings, T0, 30)
+    bad = [(p, i) for p in b.packs for i in range(30, m) if full[p][i] != head[p][i]]
+    return not bad, f"packs={len(b.packs)} bars_compared={m - 30} mismatches={len(bad)}"
+
+
+def timeframe_keys_reach_the_set_signal():
+    ov = overlay(tfMinAgree=3, tf5m=False, tf15m=True, tfCombined=False)
+    b = SetBook()
+    b.load(ov)
+    got = {k: b.ind_settings.get(k) for k in ("tfMinAgree", "tf5m", "tf15m", "tfCombined")}
+    want = {"tfMinAgree": 3, "tf5m": False, "tf15m": True, "tfCombined": False}
+    ok = got == want
+    return ok, f"set signal sees {got} want {want}"
+
+
+def timeframe_flag_removes_the_lane():
+    settings = dict(DEFAULT_SETTINGS)
+    settings["tf5m"] = False
+    seen = set()
+    for seed in range(12):
+        bars = synth_bars(40 + seed, 400, drift=0.0006)
+        rows = {"1m": bars[-60:], "5m": aggregate_bars(bars, 5), "15m": aggregate_bars(bars, 15)}
+        for ev in timeframe_evals(rows, settings, T0):
+            seen.add(ev.source_id)
+    ok = "bingx-5m" not in seen
+    return ok, f"lanes seen with tf5m off: {sorted(seen) or 'none'}"
+
+
+def combined_vote_needs_min_agree():
+    bars = synth_bars(77, 400, drift=0.0008)
+    rows = {"1m": bars[-60:], "5m": aggregate_bars(bars, 5), "15m": aggregate_bars(bars, 15)}
+    evs = timeframe_evals(rows, dict(DEFAULT_SETTINGS), T0)
+    too_many = combine_timeframes(evs, len(evs) + 1, dict(DEFAULT_SETTINGS))
+    ok = too_many is None
+    return ok, f"lanes={len(evs)} min_agree={len(evs) + 1} -> {too_many}"
+
+
+def match_names_kind_and_mode():
+    """An entry reason ind:<kind>:<mode>:... names one row. A row with the right kind but the other mode is not it,
+    and the mode decides the direction."""
+    from indication_engine import Indication, IndicationBook
+
+    def row(kind, mode, direction):
+        return Indication(symbol="S", direction=direction, mode=mode, confidence=0.7, strength=0.5, agreement=0.6,
+                          stop_loss_pct=0.01, take_profit_pct=0.02, reward_risk=2.0, last_price=1.0, sources=["a"],
+                          votes_long=1, votes_short=0, primary=False, t=T0, timeframe="1m", kind=kind)
+
+    book = IndicationBook()
+    book.last = {"S": [row("state", "tf_combined", "long"), row("state", "multi_source_consensus", "short")]}
+    short_row = book.match("S", "ind:state:multi_source_consensus:0.60:a2:src")
+    long_row = book.match("S", "ind:state:tf_combined:0.60:a2:src")
+    ok = (short_row is not None and short_row.mode == "multi_source_consensus" and short_row.direction == "short"
+          and long_row is not None and long_row.mode == "tf_combined" and long_row.direction == "long")
+    return ok, f"named_short={getattr(short_row, 'direction', None)} named_long={getattr(long_row, 'direction', None)}"
+
+
+def snapshot_survives_concurrent_writes():
+    """The warm thread writes the book while the main thread takes snapshots: no reader may raise."""
+    import threading
+    from indication_engine import Indication, IndicationBook
+
+    def row(sym, kind):
+        return Indication(symbol=sym, direction="long", mode="tf_combined", confidence=0.7, strength=0.5, agreement=0.6,
+                          stop_loss_pct=0.01, take_profit_pct=0.02, reward_risk=2.0, last_price=1.0, sources=["a"],
+                          votes_long=1, votes_short=0, primary=True, t=T0, timeframe="1m", kind=kind)
+
+    book = IndicationBook()
+    errors, reads = [], []
+    stop = threading.Event()
+
+    def writer():
+        k = 0
+        while not stop.is_set() and k < 20000:
+            sym = f"S{k % 50}"
+            book.last[sym] = [row(sym, "state")]
+            book.last.pop(f"S{(k + 25) % 50}", None)
+            k += 1
+
+    def reader():
+        try:
+            for _ in range(1500):
+                book.snapshot()
+                reads.append(1)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+        finally:
+            stop.set()
+
+    w = threading.Thread(target=writer)
+    r = threading.Thread(target=reader)
+    import sys
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)          # switch threads constantly: a reader that iterates the live dict is then caught every run
+    try:
+        w.start(); r.start()
+        r.join(60); w.join(60)
+    finally:
+        sys.setswitchinterval(old)
+    ok = not errors and not r.is_alive() and len(reads) > 0
+    return ok, f"reads={len(reads)} errors={errors[:1]}"
+
+
+def signal_is_deterministic():
+    b = SetBook()
+    b.load(overlay())
+    bars = synth_bars(9, 400, drift=0.0003)
+    a = pack_signals(bars, b.packs, b.ind_settings, T0, 30)
+    c = pack_signals(bars, b.packs, b.ind_settings, T0, 30)
+    return a == c, "two runs identical" if a == c else "differs between runs"
+
+
+# A window where the Set pack gives all four votes with every switch on (found by search, fixed here).
+SWITCH_BARS = (48, 0.0003)
+SWITCH_TOKEN = {"indTypeSignals": "tf", "indTypeState": "ta", "indTypeDirection": "dir", "indTypeMove": "move"}
+
+
+def set_switches_reach_the_set_signal():
+    """The timeframe and type switches IndicationBook reads are forwarded to the Set pack's settings, unchanged."""
+    off = {"tf1m": False, "indTypeState": False, "indTypeDirection": False, "indTypeMove": False,
+           "indTypeSignals": False, "indTypeActive": False, "indTypeCommon": False}
+    b = SetBook()
+    b.load(overlay(**off))
+    got = {k: b.ind_settings.get(k) for k in ("tf1m", "typeState", "typeDirection", "typeMove", "typeSignals", "typeActive", "typeCommon")}
+    want = {k: False for k in got}
+    return got == want, f"set signal sees {got}"
+
+
+def switched_off_vote_is_absent():
+    """Each type switch removes its own vote from the Set pack, and the other votes stay."""
+    seed, drift = SWITCH_BARS
+    bars = synth_bars(seed, 400, drift=drift)[-420:]
+    on = SetBook()
+    on.load(overlay(indTypeActive=False, indTypeCommon=False))
+    _, _, why_on = indication_signal(bars, on.ind_settings, T0)
+    all_votes = set(why_on.split("+"))
+    if all_votes != {"tf", "ta", "dir", "move"}:
+        return False, f"precondition: the window must give all four votes, got {why_on!r}"
+    problems = []
+    for switch, token in SWITCH_TOKEN.items():
+        book = SetBook()
+        book.load(overlay(indTypeActive=False, indTypeCommon=False, **{switch: False}))
+        _, _, why = indication_signal(bars, book.ind_settings, T0)
+        got = set(why.split("+")) - {""}
+        if token in got or not got <= all_votes:
+            problems.append(f"{switch}=off gave {why!r}")
+    return not problems, "; ".join(problems) or "each switch removes exactly its own vote"
+
+
+def all_switches_off_is_flat():
+    """With every vote switched off the Set pack has no vote, so the signal is flat."""
+    seed, drift = SWITCH_BARS
+    bars = synth_bars(seed, 400, drift=drift)[-420:]
+    book = SetBook()
+    book.load(overlay(indTypeState=False, indTypeDirection=False, indTypeMove=False, indTypeSignals=False,
+                      indTypeActive=False, indTypeCommon=False))
+    direction, _conf, why = indication_signal(bars, book.ind_settings, T0)
+    return direction == 0 and why == "flat", f"direction={direction} why={why!r}"
+
+
+def active_and_common_reach_replay_and_live_signal():
+    """Active's own ranges and Common can each generate the same signal as the indication book in both directions."""
+    from indication_engine import IndicationBook
+    off = {"indTypeState": False, "indTypeDirection": False, "indTypeMove": False, "indTypeSignals": False,
+           "indTypeActive": False, "indTypeCommon": False, "indActiveMovePct": .3,
+           "indActiveThreshold": 1.0, "noise": .05}
+    problems, tried = [], 0
+    for typ, sizes in (("active", (3, 5, 10)), ("common", (10,))):
+        for size in sizes:
+            for direction in (1, -1):
+                prices = [100.0] * 140 + [100.0 + direction * i * .3 for i in range(1, size + 1)]
+                bars = [[p, p * 1.001, p * .999, p, 1000.0] for p in prices]
+                key = "indTypeActive" if typ == "active" else "indTypeCommon"
+                ov = overlay(**{**SMALL, **off, key: True, "activeOutbreakRanges": [size], "stratGeneral": False, "stratTrend": False, "stratBreakout": False})
+                b = SetBook(); b.load(ov)
+                ref = IndicationBook(); ref.load(ov)
+                evaluated = [r for r in ref.process("X", bars[-60:]) if r.kind == typ]
+                signal = indication_signal(bars, b.ind_settings, T0)
+                packed = pack_signals(bars, ["indications"], b.ind_settings, T0 - (len(bars) - 1) * 60, len(bars) - 1)["indications"][-1]
+                b.ingest_bars("X", bars, last_t=T0 - 60)
+                live = b.entry_signal("X", T0 - 60)
+                muted = dict(b.ind_settings, **{"typeActive" if typ == "active" else "typeCommon": False})
+                no_signal = indication_signal(bars, muted, T0)[0] == 0
+                match = (len(evaluated) == 1 and signal[0] == direction and signal[2] == typ
+                         and evaluated[0].direction == ("long" if direction > 0 else "short")
+                         and abs(signal[1] - evaluated[0].confidence) < 1e-12 and signal == packed
+                         and live is not None and live[1:] == signal and no_signal)
+                tried += 1
+                if not match:
+                    problems.append((typ, size, direction, signal, packed, live, len(evaluated)))
+    return not problems, f"{tried} type/range/direction combinations; mismatches={problems[:2]}"
+
+
+def indication_ranges_are_forwarded_to_the_set_signal():
+    b = SetBook()
+    b.load(overlay(indDirRange=7, indMoveRange=13, activeOutbreakRanges=[3, 10], indActiveThreshold=1.4,
+                   indActiveMovePct=.8, noise=.07, volWeight=.25))
+    got = {k: b.ind_settings.get(k) for k in ("dirRange", "moveRange", "activeOutbreak", "activeThreshold",
+                                               "activeMovePct", "activeNoise", "activeVolatilityWeight")}
+    want = {"dirRange": 7, "moveRange": 13, "activeOutbreak": [3, 10], "activeThreshold": 1.4,
+            "activeMovePct": .8, "activeNoise": .07, "activeVolatilityWeight": .25}
+    return got == want, f"settings={got}"
+
+
+def timeframe_1m_switch_removes_the_lane_from_the_set_pack():
+    """tf1m off removes the 1m lane from the timeframe evaluations the Set pack uses."""
+    seed, drift = SWITCH_BARS
+    bars = synth_bars(seed, 400, drift=drift)
+    rows = {"1m": bars[-60:], "5m": aggregate_bars(bars, 5), "15m": aggregate_bars(bars, 15)}
+    book = SetBook()
+    book.load(overlay(tf1m=False))
+    seen = {ev.source_id for ev in timeframe_evals(rows, book.ind_settings, T0)}
+    on = SetBook()
+    on.load(overlay())
+    seen_on = {ev.source_id for ev in timeframe_evals(rows, on.ind_settings, T0)}
+    ok = "bingx-1m" in seen_on and "bingx-1m" not in seen and "bingx-5m" in seen
+    return ok, f"lanes on={sorted(seen_on)} with tf1m off={sorted(seen)}"
+
+
+def extra_book_fetches_a_key_once_while_in_flight():
+    """Two callers ask for the same venue key while the first fetch is still running. The venue must see one request,
+    and both callers must get the same result."""
+    import threading
+    import time as _time
+    from indication_engine import ExtraBook
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    class _Http:
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def get(self, url, *a, **k):
+            with self.lock:
+                self.calls += 1
+            self.entered.set()
+            self.release.wait(10)
+            return _Resp()
+
+    book = ExtraBook()
+    book.http = _Http()
+    out = {}
+    first = threading.Thread(target=lambda: out.__setitem__("a", book.get("binance-usdm", "BTC-USDT")), name="first")
+    first.start()
+    if not book.http.entered.wait(10):
+        return False, "the first fetch never started"
+    second = threading.Thread(target=lambda: out.__setitem__("b", book.get("binance-usdm", "BTC-USDT")), name="second")
+    second.start()
+    _time.sleep(0.2)                         # the second caller reaches get() while the first is still in flight
+    book.http.release.set()
+    first.join(10)
+    second.join(10)
+    calls = book.http.calls
+    ok = calls == 1 and not first.is_alive() and not second.is_alive() and "a" in out and "b" in out
+    return ok, f"venue requests for one in-flight key={calls}; both callers returned={'a' in out and 'b' in out}"
+
+
+def bars_to_entry_reason_round_trip():
+    """Indications end to end: bars go through process, pick_entry chooses the row, the entry reason is built the way the
+    trader builds it, and match returns that same row. A row switched off by its type switch cannot be picked."""
+    from indication_engine import IndicationBook
+
+    bars = synth_bars(48, 400, drift=0.0003)
+    rows = {"1m": bars[-60:], "5m": aggregate_bars(bars, 5), "15m": aggregate_bars(bars, 15)}
+
+    def run(**ov):
+        b = IndicationBook()
+        b.load(overlay(**ov))
+        b.process("BTC-USDT", bars[-60:], pulse_dir=1, pulse_conf=0.7, px=float(bars[-1][3]), sl_pct=0.005,
+                  tp_pct=0.0075, want_extra=False, bars_by_tf=rows)
+        return b
+
+    b = run()
+    got = b.pick_entry("BTC-USDT", 0.5)
+    if got is None:
+        return False, "pick_entry found no row on a clear uptrend"
+    pick, _conf, agree_n = got
+    why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
+    row = b.match("BTC-USDT", why)
+    same = row is not None and row.kind == pick.kind and row.mode == pick.mode and row.direction == pick.direction
+    off = run(indTypeSignals=False, indTypeState=False, indTypeDirection=False, indTypeMove=False,
+              indTypeCommon=False, indTypeActive=False)
+    nothing = off.pick_entry("BTC-USDT", 0.0) is None
+    return same and nothing, f"picked {pick.kind}/{pick.mode} -> matched={same}; all types off -> no pick={nothing}"
+
+
+def match_follows_the_timeframe_lane_of_the_pick():
+    """Rows from different timeframe lanes share kind and mode. The entry reason ends with the pick's sources, and
+    match must return the row of that lane, not the first row of the kind."""
+    from indication_engine import Indication, IndicationBook
+    def row(direction, conf, src):
+        return Indication(symbol="X-USDT", direction=direction, mode="direct_tf", confidence=conf, strength=1.0,
+                          agreement=1.0, stop_loss_pct=1.0, take_profit_pct=2.0, reward_risk=2.0, last_price=1.0,
+                          sources=[src], votes_long=1, votes_short=0, primary=False, t=T0, timeframe="", kind="signals")
+    b = IndicationBook()
+    b.last["X-USDT"] = [row("short", 0.65, "bingx-1m"), row("long", 0.70, "bingx-5m"), row("long", 0.80, "bingx-15m")]
+    got = b.match("X-USDT", "ind:signals:direct_tf:1.00:a1:bingx-15m")
+    return got.direction == "long" and got.sources == ["bingx-15m"], f"matched {got.direction} {got.sources}"
+
+
+def a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca():
+    from exit_engine import ExitBook
+    from dca_engine import DcaBook
+    e = ExitBook()
+    e.on_close({"t": 1.0, "pnl": -0.1, "reason": "exit:peak"})
+    d = DcaBook()
+    d.closes = [{"pnl_pct": None}] * 30
+    sc = d.score()
+    ok = not any(ln.n for ln in e.lanes.values()) and d.active
+    return ok, f"exit lanes scored={[ (k, v.n) for k, v in e.lanes.items()]} dca active={d.active}"
+
+
+def library_memo_never_serves_another_state_of_the_rows():
+    """indication_lib memoises the 5m / 15m aggregation per rows object. A history list that grows, shrinks (a truncation would leak
+    later bars) or replaces its newest row in place must be aggregated again: every library indicator on the mutated list equals the
+    same indicator on a fresh copy; and every signal is well formed ((+1 or -1, confidence 0..1) or None)."""
+    from indication_lib import LIB
+    import random as _r
+    rng = _r.Random(5)
+    bars = [[50.0, 50.1, 49.9, 50.0, 1.0]]
+    for _ in range(460):
+        c = bars[-1][3] * (1 + rng.gauss(0.0002, 0.002))
+        o = bars[-1][3]
+        bars.append([o, max(o, c) * (1 + abs(rng.gauss(0, 0.0007))), min(o, c) * (1 - abs(rng.gauss(0, 0.0007))), c, rng.uniform(0.3, 3.0)])
+    names = sorted(LIB)
+    pick = [n for n in names if n.startswith("g_")] + names[::7]
+    live = bars[:200]                                   # inside the 300-row window (a longer list is sliced, a new object)
+    bad, wrong = [], 0
+    steps = [("grow", 260), ("shrink", 230), ("grow", 300), ("replace", None)]
+    for k in pick:
+        LIB[k](live)                                     # fill the memo with the current state
+    for what, n in steps:
+        if what == "grow":
+            live.extend(bars[len(live):n])
+        elif what == "shrink":
+            del live[n:]
+        else:
+            live[-1] = [x * 1.003 for x in live[-1][:4]] + [live[-1][4]]
+        got = {k: LIB[k](live) for k in pick}            # the mutated list first, then fresh copies
+        for k in pick:
+            a, b = got[k], LIB[k](list(live))
+            if a != b:
+                bad.append((what, k))
+            if a is not None and (a[0] not in (-1, 1) or not 0.0 <= a[1] <= 1.0):
+                wrong += 1
+    return not bad and not wrong, f"{len(pick)} indicators x {len(steps)} in-place changes; stale {len(bad)} {bad[:3]}; malformed {wrong}"
+
+
+def _regime_bars(seed, n):
+    """1m bars with trends, quiet ranges, spikes and varying volume (a constant volume would silence the volume families)."""
+    import random as _r
+    rng = _r.Random(seed)
+    out, c = [], 100.0
+    for i in range(n):
+        phase = (i // 400) % 4
+        drift = (0.0008, 0.0, -0.0008, 0.0)[phase]
+        vol = (0.0015, 0.0004, 0.0015, 0.003)[phase]
+        o = c
+        c = max(1.0, c * (1 + drift + rng.gauss(0, vol)))
+        if rng.random() < 0.01:
+            c *= 1 + rng.choice((-1, 1)) * 0.01
+        out.append([o, max(o, c) * (1 + abs(rng.gauss(0, vol / 2))), min(o, c) * (1 - abs(rng.gauss(0, vol / 2))), c, rng.uniform(0.2, 5.0)])
+    return out
+
+
+def every_name_gets_the_history_its_timeframe_needs():
+    """A name on a higher timeframe reads TF_BARS bars of it (indication_lib.rows_for: 480 rows for 5m, 1440 for 15m; combined and
+    group votes the 15m history); 124 names could never fire on the 300-row window. The band families (bbb, bbrev, vwapz) use a
+    width a close can reach in its own n-bar window (2 sd is out of reach at n = 5); a flat stretch never raises. Names that were
+    dead fire on a long series with trends, ranges and spikes."""
+    from indication_extra import INDICATORS, window_of
+    from indication_lib import _band_k, rows_for
+    import math as _m
+    bad_w = [k for k in INDICATORS if (k.endswith("_t15") or k.startswith("g_")) and window_of(k) < rows_for(15)]
+    bad_w += [k for k in INDICATORS if k.endswith("_t5") and window_of(k) < rows_for(5)]
+    reach = all(_band_k(n) < _m.sqrt(n - 1) for n in (5, 8)) and _band_k(14) == 2.0
+    flat = [[100.0, 100.0, 100.0, 100.0, 1.0]] * 1500
+    raised = []
+    for k in ("bbb_n5_t1", "bbb_n8_t1", "bbrev_n5_t1", "vwapz_n5_t1"):
+        try:
+            INDICATORS[k](flat[-window_of(k):])
+        except Exception as e:      # noqa: BLE001
+            raised.append((k, repr(e)))
+    revived = ("bbb_n5_t1", "bbrev_n5_t1", "vwapz_n5_t1", "vwapz_n8_t1", "adx_n21_t15", "ichi_n14_t15", "trend_n40_t15", "ao_htfpb_n8_t5")
+    bars = _regime_bars(3, 4320)
+    fired = {k: 0 for k in revived}
+    for i in range(1500, len(bars), 7):
+        for k in revived:
+            if INDICATORS[k](bars[i + 1 - window_of(k):i + 1]):
+                fired[k] += 1
+    dead = [k for k, v in fired.items() if not v]
+    ok = not bad_w and reach and not raised and not dead
+    return ok, f"short windows {bad_w[:4]} ({len(bad_w)}); band width reachable={reach}; raised on flat {raised}; fired {fired}"
+
+
+def the_signal_memo_key_covers_every_bar_a_pack_reads():
+    """pack_signals keys its memo on signal_window(packs, settings) bars: a pack whose names read 1440 rows (15m) must not take the
+    memo of another bar whose newest 300 rows are equal but whose older history differs."""
+    import set_engine as se
+    b = SetBook()
+    b.load(overlay(stratTrend=True, trendVariants=["trend_n20_t15", "adx_n21_t15", "ichi_n14_t15"], **SMALL))
+    A = _regime_bars(11, 3200)
+    B = _regime_bars(12, 3200)
+    B[-400:] = [list(r) for r in A[-400:]]           # the newest 400 bars equal, the older history different
+    w = se.signal_window(b.packs, b.ind_settings)
+    cache = {}
+    se.pack_signals(A, b.packs, b.ind_settings, 0.0, 2800, cache=cache, salt=3)
+    got = se.pack_signals(B, b.packs, b.ind_settings, 0.0, 2800, cache=cache, salt=3)["trend"]
+    want = se.pack_signals(B, b.packs, b.ind_settings, 0.0, 2800)["trend"]
+    differ = sum(1 for x, y in zip(se.pack_signals(A, b.packs, b.ind_settings, 0.0, 2800)["trend"][2800:], want[2800:]) if x != y)
+    ok = w >= 1440 and got == want and differ > 0
+    return ok, f"signal window {w}; memo result equals a fresh pass={got == want}; bars where the older history changes the trend signal {differ}"
+
+
+def relations_compose_any_indicator_causally_and_by_their_rules():
+    """indication_rel: <indicator>@<relation>... composes any name with conditions on the market around its signal. An unknown base
+    or relation is an unknown name (never a silent vote); I inverts; T<tf> keeps only signals with the tf trend, t<tf> only against
+    it (on the same bar their fires split the indicator's); K / F split them by whether the bar before gave the same direction;
+    window_of covers every part (a 15m relation reads 1440 rows); the composite reads nothing after the bar (bars[:i] equals the
+    full series cut at i); set_engine keeps composite names in a pack's variant list and drops unknown ones."""
+    import indication_extra as ix
+    import set_engine as se
+    bars = _regime_bars(21, 4200)
+    base = "rsirev_n8_t1"
+    names = {v: f"{base}@{v}" if v else base for v in ("", "I", "T15", "t15", "N15", "K", "F", "M30", "m30", "A", "a", "D", "C", "G", "I@T5")}
+    unknown = [n for n in ("nosuch@T15", f"{base}@Q", f"{base}@T7", f"{base}@T15n99", f"{base}@") if ix.known(n)]
+    cnt = {v: 0 for v in names}
+    bad = []
+    for i in range(2000, len(bars), 3):
+        sig = {v: ix.resolve(n)(bars[i + 1 - ix.window_of(n):i + 1]) for v, n in names.items()}
+        for v, x in sig.items():
+            cnt[v] += 1 if x else 0
+        b0 = sig[""]
+        if (sig["I"] is None) != (b0 is None) or (b0 and sig["I"][0] != -b0[0]):
+            bad.append(("I", i))
+        if b0 and (bool(sig["T15"]) and bool(sig["t15"])):
+            bad.append(("T and t both", i))
+        if b0 and bool(sig["K"]) == bool(sig["F"]):
+            bad.append(("K/F split", i))
+        if not b0 and any(sig[v] for v in names if v not in ("", "I")):
+            bad.append(("relation without the indicator", i))
+    # causality of a composite with long relations: the bar's signal from bars[:i+1] equals the one cut out of a longer series
+    comp = f"{base}@T15@M30@C"
+    w = ix.window_of(comp)
+    caus = all(ix.resolve(comp)(bars[i + 1 - w:i + 1]) == ix.resolve(comp)(list(bars[:i + 1])[-w:]) for i in range(3000, 3400, 7))
+    b = SetBook()
+    b.load(overlay(stratTrend=True, trendVariants=[comp, "nosuch@T15", "trend_x10", "adx_n14_t30"], **SMALL))
+    kept = list(b.ind_settings.get("trendVariants") or [])
+    sw = se.signal_window(b.packs, b.ind_settings)
+    ok = (not unknown and not bad and caus and cnt[""] > 0 and cnt["T15"] + cnt["t15"] <= cnt[""] and cnt["K"] + cnt["F"] == cnt[""]
+          and w >= 1440 and kept == [comp, "trend_x10", "adx_n14_t30"] and sw >= 1920)
+    return ok, f"fires {cnt}; unknown accepted {unknown}; rule breaks {bad[:4]} ({len(bad)}); causal {caus}; window {w}; kept {kept}; signal window {sw}"
+
+
+def thirty_minute_names_fire_and_read_their_history():
+    """The 30m series: <family>_n<range>_t30 for the library, AO and Trend / Break families and the combined votes over 1 / 5 / 15 / 30
+    (<family>_x<range>); each reads 128 bars of 30m (rows_for(30) = ROWS_CAP = 3840 rows, inside the 3-day Set history); the existing
+    _c<range> votes stay over 1 / 5 / 15."""
+    import indication_extra as ix
+    from indication_lib import rows_for
+    t30 = [k for k in ix.INDICATORS if k.endswith("_t30")]
+    x = [k for k in ix.INDICATORS if k.rsplit("_", 1)[-1][:1] == "x" and k.rsplit("_", 1)[-1][1:].isdigit()]
+    wins = {ix.window_of(k) for k in t30 + x}
+    bars = _regime_bars(5, 6400)       # the window is 3,840 rows: as many probe positions after it as the 1,920-row window had before
+    probe = ("adx_n14_t30", "trend_n20_t30", "brk_n10_t30", "ao_cfltrend_n8_t30", "macdh_x8", "trend_x10")
+    from indication_lib import ROWS_CAP
+    fired = {k: sum(1 for i in range(ix.window_of(k) - 1, len(bars), 3) if ix.resolve(k)(bars[i + 1 - ix.window_of(k):i + 1])) for k in probe}
+    ok = (len(t30) >= 200 and len(x) >= 200 and wins == {rows_for(30)} and rows_for(30) == ROWS_CAP == 3840 and all(fired.values())
+          and ix.window_of("adx_c14") == rows_for(15))
+    return ok, f"{len(t30)} _t30 and {len(x)} _x names; windows {sorted(wins)}; fired {fired}"
+
+
+def new_common_families_fire_at_every_range_and_invert():
+    """Added 2026-11-03: willr, stochrsi, supertrend, squeeze, trix, tsi, elder, emax. Every family builds names at the min / med / long ranges
+    (5, 8, 14, 21, 34, 55) on 1 / 5 / 15 / 30m with votes; each family fires on a regime series at a short and at a long range, and "<name>@I" gives
+    the opposite direction on every bar the name fires."""
+    import indication_extra as ix
+    import indication_lib as L
+    fams = ("willr", "stochrsi", "supertrend", "squeeze", "trix", "tsi", "elder", "emax")
+    bars = _regime_bars(7, 6400)
+    built = all(f"{f}_n{n}_t{tf}" in ix.INDICATORS for f in fams for n in (5, 8, 14, 21, 34, 55) for tf in (1, 5, 15, 30))
+    fired, inv_ok = {}, True
+    for f in fams:
+        for name in (f"{f}_n8_t1", f"{f}_n34_t5"):
+            w = ix.window_of(name)
+            hits = 0
+            for i in range(w - 1, len(bars), 4):
+                rows = bars[i + 1 - w:i + 1]
+                a = ix.resolve(name)(rows)
+                if a:
+                    hits += 1
+                    b = ix.resolve(name + "@I")(rows)
+                    inv_ok = inv_ok and bool(b) and b[0] == -a[0]
+            fired[name] = hits
+    ok = built and all(fired.values()) and inv_ok and L.RANGES["long"] == (34, 55)
+    return ok, f"names built={built}; fired {fired}; invert flips every signal={inv_ok}"
+
+
+def market_relations_judge_by_their_rules():
+    """RS / DR / RC / VW / PR / YD / MA (owner 2026-11-03: RSI, drawdown, market price and past relations): each token keeps or drops a signal by its written
+    rule on rows built to sit on one side of it; the upper case asks the condition WITH the direction, the lower case against it; the same rows judged
+    for a long and then a short give the matching answers (the feature memo never serves one direction's value to the other); unknown tokens and
+    out-of-range windows are unknown names; a composite's window covers its longest relation; new families fire in both directions."""
+    import indication_rel as rel
+    import indication_extra as ix
+
+    def rows_of(closes, spread=0.5, vol=100.0):
+        return [[c, c + spread, c - spread, c, vol] for c in closes]
+
+    def judge(tok, rows, d):
+        r = rel._relation(tok)
+        return None if r is None else bool(r[0](rows, d, lambda x: None, d)[0])
+
+    flat = [100.0] * 400
+    top_then_drop = [100.0 + 0.5 * i for i in range(100)] + [150.0 - 1.0 * i for i in range(60)] + [90.0] * 100       # far under the 240-bar high
+    at_high = [100.0 + 0.1 * i for i in range(400)]
+    mid_range = [100.0] * 100 + [110.0] * 100 + [100.0] * 100 + [105.0 + (i % 2) * 0.01 for i in range(100)]            # close ~ 0.5 up a 100..110 range
+    at_low = [100.0] * 100 + [110.0] * 100 + [100.2] * 200                                                              # a 100..110 range, the close at its bottom
+    rise = [100.0 + 0.2 * i for i in range(400)]
+    fall = [180.0 - 0.2 * i for i in range(400)]
+    wavy_up = [100.0 + 0.05 * i + (0.6 if i % 2 else -0.5) for i in range(400)]
+    wavy_down = [140.0 - 0.25 * i + (0.3 if i % 2 else -0.3) for i in range(400)]
+    slow_rise = [100.0 + 0.01 * i for i in range(400)]                                                                  # about 1.2 ATR above its VWAP
+    got = {
+        "DR deep long": judge("DR240", rows_of(top_then_drop), 1), "DR at high long": judge("DR240", rows_of(at_high), 1), "dr at high long": judge("dr240", rows_of(at_high), 1),
+        "DR deep short": judge("DR240", rows_of(top_then_drop), -1),                                   # no 240-bar low under the close: not a deep short drawdown
+        "RC mid long": judge("RC240", rows_of(mid_range), 1), "rc low long": judge("rc240", rows_of(at_low), 1), "RC low long": judge("RC240", rows_of(at_low), 1),
+        "VW above long": judge("VW240", rows_of(slow_rise), 1), "VW above short": judge("VW240", rows_of(slow_rise), -1), "vw above short": judge("vw240", rows_of(slow_rise), -1),
+        "vw above long": judge("vw240", rows_of(slow_rise), 1), "VW far long": judge("VW240", rows_of(rise), 1),
+        "YD up long": judge("YD240", rows_of(rise), 1), "yd up long": judge("yd240", rows_of(rise), 1), "YD up short": judge("YD240", rows_of(rise), -1), "yd up short": judge("yd240", rows_of(rise), -1),
+        "MA rising long": judge("MA60", rows_of(rise), 1), "MA rising short": judge("MA60", rows_of(rise), -1), "ma stretched long": judge("ma60", rows_of(fall[:-1] + [fall[-1] - 6.0]), 1),
+        "RS rising long": judge("RS1", rows_of(wavy_up), 1), "rs falling long": judge("rs1", rows_of(wavy_down), 1), "rs rising long": judge("rs1", rows_of(wavy_up), 1),
+    }
+    # PR: the last 30 bars wide against a quiet past (active), and quiet against a wide past
+    quiet = [100.0] * 300
+    wide_tail = rows_of(quiet, 0.2) [:-30] + rows_of(quiet, 3.0)[-30:]
+    wide_past = rows_of(quiet, 3.0)[:-30] + rows_of(quiet, 0.2)[-30:]
+    got["PR active"], got["pr active"] = judge("PR200", wide_tail, 1), judge("pr200", wide_tail, 1)
+    got["PR quiet"], got["pr quiet"] = judge("PR200", wide_past, 1), judge("pr200", wide_past, 1)
+    want = {"DR deep long": True, "DR at high long": False, "dr at high long": True, "DR deep short": False,
+            "RC mid long": True, "rc low long": True, "RC low long": False,
+            "VW above long": True, "VW above short": False, "vw above short": True, "vw above long": False, "VW far long": False,
+            "YD up long": True, "yd up long": False, "YD up short": False, "yd up short": True,
+            "MA rising long": True, "MA rising short": False, "ma stretched long": True,
+            "RS rising long": True, "rs falling long": True, "rs rising long": False,
+            "PR active": True, "pr active": False, "PR quiet": False, "pr quiet": True}
+    bad = {k: (got[k], want[k]) for k in want if got[k] != want[k]}
+    unknown = [t for t in ("RS7", "DR10", "YD100", "MA5", "PR10", "XX5", "VW5000") if rel._relation(t) is not None]
+    win = rel.window_of("rsidiv_n21_t5@RS15@DR240@YD1440")
+    both = {}
+    import random as _random
+    rnd = _random.Random(3)
+    price, syn = 100.0, []
+    for _ in range(3000):
+        o_ = price
+        price *= 1.0 + rnd.gauss(0.0, 0.004)
+        syn.append([o_, max(o_, price) * (1 + abs(rnd.gauss(0, 0.002))), min(o_, price) * (1 - abs(rnd.gauss(0, 0.002))), price, 100.0 + rnd.random() * 50.0])
+    for fam in ("rsidiv", "rsishort", "rsireg", "ibs"):
+        up = dn = 0
+        for n in (5, 14, 34, 55):
+            f = ix.INDICATORS[f"{fam}_n{n}_t1"]
+            w = ix.window_of(f"{fam}_n{n}_t1")
+            for i in range(w, len(syn), 9):
+                sig = f(syn[i - w + 1:i + 1])
+                if sig:
+                    up += sig[0] > 0
+                    dn += sig[0] < 0
+        both[fam] = (up, dn)
+    fam_ok = all(u > 0 and d_ > 0 for u, d_ in both.values())
+    ok = not bad and not unknown and win >= 1442 and fam_ok
+    return ok, f"{len(want) - len(bad)}/{len(want)} relation cases as written{(' bad ' + str(bad)) if bad else ''}; unknown tokens accepted {unknown}; composite window {win}; families long/short {both}"
+
+
+def micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone():
+    """Owner 2026-11-04 (micro tactics): each new family fires on the pattern it is named for, in the direction written, ignores rows after the signal bar, and the
+    voted groups (g_trend_*, g_break_*, g_revert_*, g_volume_*, g_all_*) keep exactly the members they had."""
+    import random
+    import indication_lib as L
+    flat = [[100.0, 100.05, 99.95, 100.0, 1000.0] for _ in range(60)]
+    down = [[100 - i * 0.1, 100 - i * 0.1 + 0.02, 100 - i * 0.1 - 0.12, 100 - i * 0.1 - 0.1, 1000.0] for i in range(40)]
+    last = down[-1][3]
+    drift = [[100 - i * 0.02, 100 - i * 0.02 + 0.01, 100 - i * 0.02 - 0.03, 100 - i * 0.02 - 0.02, 1000.0] for i in range(60)]
+    random.seed(3)
+    noisy, p = [], 100.0
+    for _ in range(80):
+        o = p
+        p *= 1 + random.gauss(0, 0.0006)
+        noisy.append([o, max(o, p) * 1.0003, min(o, p) * 0.9997, p, 1000.0])
+    o = noisy[-1][3]
+    cases = [
+        ("sweep_n8_t1", flat + [[100.0, 100.05, 99.0, 100.1, 1500.0]], 1),
+        ("sweep_n8_t1", flat + [[100.0, 101.0, 99.95, 99.9, 1500.0]], -1),
+        ("wickrev_n8_t1", flat + [[100.0, 100.1, 98.8, 100.05, 1500.0]], 1),
+        ("volclimax_n8_t1", drift + [[98.8, 99.2, 98.6, 99.1, 5000.0]], 1),
+        ("burstgo_n8_t1", noisy + [[o, o * 1.012, o, o * 1.011, 3000.0]], 1),
+        ("burstfade_n8_t1", noisy + [[o, o, o * 0.985 * 0.999, o * 0.985, 900.0]], 1),
+        ("exhaust_n8_t1", down + [[last, last + 0.2, last - 0.01, last + 0.15, 1000.0]], 1),
+    ]
+    bad = []
+    for name, rows, want in cases:
+        got = L.LIB[name](rows)
+        if not got or got[0] != want or not 0.0 < got[1] <= 0.95:
+            bad.append((name, want, got))
+        later = rows + [[rows[-1][3], rows[-1][3] * 1.5, rows[-1][3] * 0.5, rows[-1][3], 9e9]]
+        if L.LIB[name](rows) != got or L.LIB[name](rows[:]) != got or got != L.LIB[name](list(later[:-1])):
+            bad.append((name, "not causal", got))
+    # every micro name exists at every range and timeframe, and the voted groups hold none of them
+    micro = [f for f, (g, _) in L.FAMILIES.items() if g.startswith("micro")]
+    missing = [f"{f}_{suf}" for f in micro for suf in ("n5_t1", "n8_t5", "n14_t15", "n21_t30", "c8", "x14") if f"{f}_{suf}" not in L.LIB]
+    members = {g: sorted(f for f, (gg, _) in L.FAMILIES.items() if gg == g) for g in ("trend", "break", "revert", "volume")}
+    leaked = [f for f in micro if any(f in m for m in members.values())]
+    # the all-family vote is built without the micro families: its member count equals the voted groups' families
+    voted = sum(len(m) for m in members.values()) + sum(1 for f, (g, _) in L.FAMILIES.items() if g in ("price",))
+    allfam = sum(1 for f, (g, _) in L.FAMILIES.items() if not g.startswith("micro"))
+    ok = not bad and not missing and not leaked and len(micro) == 9 and voted == allfam
+    return ok, f"{len(cases)} patterns fire as written{(' bad ' + str(bad)) if bad else ''}; {len(micro)} micro families at every range/timeframe (missing {missing[:3]}); voted groups unchanged (leaked {leaked}); all-vote families {allfam}"
+
+
+CHECKS = [
+    ("indication.active-and-common-reach-replay-and-live-signal", active_and_common_reach_replay_and_live_signal),
+    ("indication.ranges-forwarded-to-set-signal", indication_ranges_are_forwarded_to_the_set_signal),
+    ("indication.match-follows-timeframe-lane", match_follows_the_timeframe_lane_of_the_pick),
+    ("indication.missing-pnl-pct-is-not-a-loss", a_close_without_pnl_pct_is_not_a_loss_in_exits_and_dca),
+    ("indication.bars-to-entry-reason-round-trip", bars_to_entry_reason_round_trip),
+    ("indication.extra-book-fetches-once-in-flight", extra_book_fetches_a_key_once_while_in_flight),
+    ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
+    ("indication.library-memo-never-stale", library_memo_never_serves_another_state_of_the_rows),
+    ("indication.every-name-gets-its-timeframe-history", every_name_gets_the_history_its_timeframe_needs),
+    ("indication.signal-memo-key-covers-the-window", the_signal_memo_key_covers_every_bar_a_pack_reads),
+    ("indication.relations-compose-by-their-rules", relations_compose_any_indicator_causally_and_by_their_rules),
+    ("indication.thirty-minute-names-fire", thirty_minute_names_fire_and_read_their_history),
+    ("indication.new-common-families-fire-at-every-range-and-invert", new_common_families_fire_at_every_range_and_invert),
+    ("indication.market-relations-judge-by-their-rules", market_relations_judge_by_their_rules),
+    ("indication.micro-tactics-fire-on-their-pattern-and-leave-group-votes-alone", micro_tactics_fire_on_their_pattern_are_causal_and_leave_group_votes_alone),
+    ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
+    ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
+    ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),
+    ("indication.match-names-kind-and-mode", match_names_kind_and_mode),
+    ("indication.snapshot-survives-concurrent-writes", snapshot_survives_concurrent_writes),
+    ("indication.signal-deterministic", signal_is_deterministic),
+    ("indication.set-switches-reach-the-set-signal", set_switches_reach_the_set_signal),
+    ("indication.switched-off-vote-is-absent", switched_off_vote_is_absent),
+    ("indication.all-switches-off-is-flat", all_switches_off_is_flat),
+    ("indication.tf1m-switch-removes-the-set-lane", timeframe_1m_switch_removes_the_lane_from_the_set_pack),
+]

@@ -2,77 +2,32 @@
 """Serve per-connection stats/config. Lanes run independently; overall aggregates."""
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
+import tempfile
 import subprocess
-import sys
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlparse, unquote
-from position_cost import POSITION_COST_PCT_DEFAULT, LAST_N_DEFAULT, POSITIVE_PF, clears_pf, evaluation_windows, last_n_cost_pf
-from user_presets import UserPresetStore
-from storage_paths import (
-    DATA_DIR,
-    MAX_RETAINED_FILE_BYTES,
-    append_bounded_line,
-    atomic_write,
-    path_for,
-    storage_info,
-)
-from runtime_scope import redis_key
-from redis_coordination import coordinator as redis_config
-from set_overview import merge_overviews
-from system_settings import calculation_overlay
-from runtime_statistics import StatisticsStore, lane_directory, read_status, redis_health
-from sqlite_memory import memory_request, owner_guard, recover_durable_journal
+from urllib.parse import parse_qs, urlparse
+from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 
-DIR = str(DATA_DIR)
-STOP_ALL_PATH = path_for("STOP")
-CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g")) or "cts-g"
-MAX_REQUEST_BYTES = 256 * 1024
-MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
-MAX_HTML_RESPONSE_BYTES = 8 * 1024 * 1024
-STATS_READ_MAX_BYTES = 24 * 1024 * 1024
-_STATS_CACHE: dict = {}
-_STATS_CACHE_LOCK = threading.Lock()
-_OVERLAY_LOCKS = {cid: threading.RLock() for cid in ("bingx-x01", "bingx-x02")}
-
-
-def _flag(name: str) -> bool:
-    return str(os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def env_listen_port(name: str = "PULSE_PORT", default: int = 3015) -> int:
-    """Coerce an empty/invalid listen port. systemd EnvironmentFile can set PULSE_PORT=."""
-    raw = str(os.environ.get(name) or "").strip()
-    try:
-        port = int(raw, 10)
-    except (TypeError, ValueError):
-        port = int(default)
-    if port < 1024 or port > 65535:
-        return int(default)
-    return port
-
-
-def _live_start_allowed(cid: str) -> bool:
-    """Live (x01) trading is on by default. Tests/operators can opt out."""
-    if cid != "bingx-x01":
-        return True
-    return not _flag("CTS_DISABLE_LIVE_START")
-
-
-def _live_heal_allowed(cid: str) -> bool:
-    if cid != "bingx-x01":
-        return True
-    return not _flag("CTS_DISABLE_LIVE_HEAL")
-
-
-def engine_unit(cid: str) -> str:
-    """Return the install-scoped engine unit; never control generic grok-* units."""
-    return f"{CTS_G_NAME}-pulse@{cid}"
+DIR = "/opt/grok-x01-pulse"
+STOP_ALL_PATH = os.path.join(DIR, "STOP")
+# The sidecar listens on loopback by default. The mutating routes need PULSE_HTTP_TOKEN in X-Pulse-Token: the desk's
+# Vite proxy adds it server-side, and a web page cannot read it. Without the token a page could still send a
+# text/plain POST to loopback, so the token, not the bind address, is what stops that.
+HTTP_HOST = os.environ.get("PULSE_HTTP_HOST", "127.0.0.1")
+HTTP_PORT = int(os.environ.get("PULSE_HTTP_PORT", "3015"))
+HTTP_TOKEN = os.environ.get("PULSE_HTTP_TOKEN", "")
+CORS_ORIGINS = {o.strip() for o in os.environ.get("PULSE_HTTP_CORS_ORIGINS", "").split(",") if o.strip()}
+# 0 on hosts without systemd: the unit is not consulted, so "service inactive" never halts the desk. Liveness is
+# then the stats-file age check (stats stale after 20 s), which still halts a dead or frozen engine.
+HALT_ON_INACTIVE = os.environ.get("PULSE_HALT_ON_INACTIVE", "1") != "0"
+MUTATING_PATHS = ("/control.json", "/control", "/config.json", "/config")
+CONFIG_LOCK = threading.Lock()   # one config save at a time: load, merge and write as one step
 
 # Display type → redis connection id. Independent processes write stats-{id}.json.
 LANES = [
@@ -86,11 +41,25 @@ SLOTS = [
 ]
 TYPE_TO_ID = {l["type"]: l["id"] for l in LANES}
 ID_TO_LANE = {l["id"]: l for l in LANES}
-PRESET_STORE = UserPresetStore(
-    os.path.join(DIR, "user-presets.json"),
-    write_overlay=lambda cid, ov: write_overlay(cid, ov),
-    lane_ids=[l["id"] for l in LANES],
-)
+
+
+def _extra_lanes() -> list:
+    """Bybit connections the operator has set up (credential file or an engine stats file in the pulse directory). They are
+    their own lanes: selectable and controllable one by one, but never summed into Overall, never started by an Overall
+    Start and never revived by the watchdog (a second venue with its own money is started on purpose)."""
+    out = []
+    for conn, typ, label, ex in (("bybit-x01", "bybit", "Bybit", "Bybit"), ("bybit-x02", "bybit-demo", "Bybit demo", "Bybit demo")):
+        if any(os.path.exists(os.path.join(DIR, f)) for f in (f"cred-{conn}.json", f"stats-{conn}.json")):
+            out.append({"type": typ, "id": conn, "label": label, "unit": "USDT", "exchange": ex})
+    return out
+
+
+EXTRA_LANES = _extra_lanes()
+TYPE_TO_ID.update({l["type"]: l["id"] for l in EXTRA_LANES})
+ID_TO_LANE.update({l["id"]: l for l in EXTRA_LANES})
+for _slot in SLOTS:
+    if _slot["type"] == "bybit":
+        _slot["ready"] = bool(EXTRA_LANES)
 
 
 def _short_err(msg) -> str:
@@ -104,8 +73,6 @@ def _short_err(msg) -> str:
         return ""
     if "cooling" in low or "position not exist" in low:
         return ""
-    if "109420" in low or "rate limit" in low or "rate-limit" in low or "too many request" in low or "requests within" in low or "request limit" in low:
-        return ""
     if "quantity or stopprice" in low or "parameter quantity" in low:
         return ""
     if "order size must be less" in low or "available amount" in low:
@@ -116,8 +83,6 @@ def _short_err(msg) -> str:
 
 
 DETAIL_KEYS = (
-    "forcedConfigs",
-    "configEvidence",
     "coord",
     "pulse",
     "indications",
@@ -128,10 +93,6 @@ DETAIL_KEYS = (
     "dca",
     "api",
     "coverage",
-    "activity",
-    "events",
-    "byIndication",
-    "byStrategy",
     "klinesTf",
     "tests",
     "signals",
@@ -149,13 +110,6 @@ DETAIL_KEYS = (
     "tpPct",
     "targetNotional",
     "volumeFactor",
-    "sizingMode",
-    "targetNotionalPct",
-    "sizingEquity",
-    "baseNotional",
-    "effectiveNotional",
-    "sizingSource",
-    "balanceAt",
     "cts",
     "pfCost",
     "profitFactor",
@@ -199,462 +153,24 @@ def resolve_conn(raw: str) -> str:
     return raw.replace("connection:", "")
 
 
-def redis_hgetall(key: str) -> dict:
-    try:
-        redis_config.configure(load_overlay(key.rsplit(":", 1)[-1]))
-        return redis_config.read_hash(key)
-    except Exception:
-        return {}
-
-
-def redis_hset(key: str, mapping: dict) -> bool:
-    try:
-        redis_config.configure(load_overlay(key.rsplit(":", 1)[-1]))
-        return redis_config.write_hash(key, mapping)
-    except Exception:
-        return False
-
-
-def mask_key(k: str) -> str:
-    k = (k or "").strip()
-    if not k:
-        return ""
-    if len(k) <= 8:
-        return "••••"
-    return k[:4] + "…" + k[-4:]
-
-
-def _conn_type_of(cid: str, raw: dict) -> str:
-    if cid == "bingx-x02":
-        return "vst"
-    if cid == "bingx-x01":
-        return "mainnet"
-    test = str(raw.get("is_testnet") or "").strip().lower()
-    if test in ("1", "true", "yes") or "vst" in str(raw.get("base_url") or "").lower():
-        return "vst"
-    return "mainnet"
-
-
-def connection_public(cid: str) -> dict:
-    if cid == "overall":
-        live = connection_public("bingx-x01")
-        vst = connection_public("bingx-x02")
-        return {
-            "ok": True,
-            "conn": "overall",
-            "connType": "overall",
-            "connectionType": "mainnet",
-            "connectionMethod": live.get("connectionMethod") or "library",
-            "exchange": "BingX",
-            "baseUrl": live.get("baseUrl") or "https://open-api.bingx.com",
-            "isTestnet": False,
-            "liveTradeEnabled": True,
-            "apiKeyMasked": live.get("apiKeyMasked") or "",
-            "apiKeySet": bool(live.get("apiKeySet")),
-            "apiSecretSet": bool(live.get("apiSecretSet")),
-            "lastTestStatus": live.get("lastTestStatus") or "",
-            "defaultMainnet": True,
-            "lanes": [live, vst],
-        }
-    if cid not in ID_TO_LANE:
-        return {"ok": False, "conn": cid, "detail": "unknown connection"}
-    raw = redis_hgetall(f"connection:{cid}")
-    ctype = _conn_type_of(cid, raw)
-    method = (raw.get("connection_method") or "library").strip() or "library"
-    default_url = "https://open-api-vst.bingx.com" if ctype == "vst" else "https://open-api.bingx.com"
-    live_en = str(raw.get("live_trade_enabled") or "").strip().lower()
-    return {
-        "ok": True,
-        "conn": cid,
-        "connType": "vst" if "x02" in cid else "live",
-        "connectionType": ctype,
-        "connectionMethod": method,
-        "exchange": "BingX",
-        "baseUrl": (raw.get("base_url") or default_url).rstrip("/"),
-        "isTestnet": ctype == "vst",
-        "liveTradeEnabled": live_en in ("1", "true", "yes") or ctype in ("mainnet", "vst"),
-        "apiKeyMasked": mask_key(raw.get("api_key") or ""),
-        "apiKeySet": bool((raw.get("api_key") or "").strip()),
-        "apiSecretSet": bool((raw.get("api_secret") or "").strip()),
-        "lastTestStatus": raw.get("last_test_status") or "",
-        "defaultMainnet": cid == "bingx-x01",
-    }
-
-
-def save_connection(cid: str, body: dict) -> tuple:
-    body = body if isinstance(body, dict) else {}
-    if cid not in ("", "overall", *ID_TO_LANE):
-        return False, "unknown connection", connection_public(cid)
-    as_default = body.get("as_default_mainnet")
-    if as_default is None:
-        as_default = body.get("asDefaultMainnet")
-    if as_default is None:
-        as_default = cid in ("overall", "bingx-x01", "")
-    as_default = bool(as_default)
-    ctype = str(body.get("connection_type") or body.get("connectionType") or "").strip().lower()
-    method = str(body.get("connection_method") or body.get("connectionMethod") or "library").strip() or "library"
-    if method not in ("library", "rest", "hmac"):
-        method = "library"
-    key = str(body.get("api_key") or body.get("apiKey") or "").strip()
-    secret = str(body.get("api_secret") or body.get("apiSecret") or "").strip()
-    if as_default or ctype == "mainnet" or cid in ("overall", "bingx-x01", ""):
-        target = "bingx-x01"
-        write_type = "mainnet"
-    else:
-        target = cid if cid in TYPE_TO_ID.values() else ("bingx-x02" if "x02" in (cid or "") or ctype == "vst" else "bingx-x01")
-        write_type = "vst" if target == "bingx-x02" else "mainnet"
-        if ctype in ("mainnet", "vst"):
-            write_type = ctype
-            target = "bingx-x02" if write_type == "vst" else "bingx-x01"
-    cur = redis_hgetall(f"connection:{target}")
-    if not key:
-        key = (cur.get("api_key") or "").strip()
-    if not secret:
-        secret = (cur.get("api_secret") or "").strip()
-    if not key or not secret:
-        return False, "api_key and api_secret required", connection_public(target)
-    if write_type == "vst":
-        mapping = {
-            "api_key": key,
-            "api_secret": secret,
-            "is_testnet": "1",
-            "base_url": "https://open-api-vst.bingx.com",
-            "live_trade_enabled": "1",
-            "connection_method": method,
-            "connection_type": "vst",
-            "last_test_status": "saved",
-            "updated_at": str(int(time.time())),
-        }
-    else:
-        mapping = {
-            "api_key": key,
-            "api_secret": secret,
-            "is_testnet": "0",
-            "base_url": "https://open-api.bingx.com",
-            "live_trade_enabled": "1",
-            "connection_method": method,
-            "connection_type": "mainnet",
-            "last_test_status": "saved",
-            "updated_at": str(int(time.time())),
-        }
-    if not redis_hset(f"connection:{target}", mapping):
-        return False, "redis write failed", connection_public(target)
-    pub = connection_public(target)
-    pub["detail"] = f"saved {target} as {write_type} default" if write_type == "mainnet" else f"saved {target}"
-    return True, pub["detail"], pub
-
-
 def overlay_path(conn: str) -> str:
-    cid = resolve_conn(conn)
-    if cid not in ID_TO_LANE:
-        return os.path.join(DIR, "__invalid-connection-overlay__.json")
-    p = os.path.join(DIR, f"overlay-{cid}.json")
+    p = os.path.join(DIR, f"overlay-{conn}.json")
     if os.path.exists(p):
         return p
     return os.path.join(DIR, "overlay.json")
 
 
-_MAJOR_USDT = (
-    "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
-    "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
-    "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
-    "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
-    "ETC-USDT", "LDO-USDT", "HBAR-USDT", "TIA-USDT", "WLD-USDT", "JUP-USDT",
-    "RENDER-USDT", "FET-USDT", "TAO-USDT", "SEI-USDT", "WIF-USDT", "1000PEPE-USDT",
-    "STX-USDT", "IMX-USDT", "GRT-USDT", "ALGO-USDT", "VET-USDT", "EOS-USDT",
-    "THETA-USDT", "AXS-USDT", "SAND-USDT", "MANA-USDT", "CRV-USDT", "MKR-USDT",
-    "SNX-USDT", "COMP-USDT",
-)
-_MAJOR_SET = set(_MAJOR_USDT)
-_SYMBOL_RE = re.compile(r"[A-Z0-9]{1,20}-USDT")
-
-
-def guard_runtime_overlay(cid: str, cur: dict) -> dict:
-    """Keep Block on and normalize saved values. Never flatten lots.
-
-    Operator choices are honored: DCA, Block stack, symbol cap (0 means
-    unlimited), Test Historic and explicit symbol lists. Defaults apply only
-    when a key is absent; only malformed symbol names are dropped.
-    """
-    out = dict(cur or {})
-    out["blockEnabled"] = True
-    out["blockOverall"] = True
-    out["blockActive"] = True
-    # Operator rules: exchange SL/TP protection and max leverage are not switchable.
-    out["controlOrders"] = True
-    out["useMaxLeverage"] = True
-    for key in ("dcaEnabled", "dcaOverall", "stratDca"):
-        out.setdefault(key, True)
-    try:
-        stack = int(out["blockMaxStack"]) if out.get("blockMaxStack") is not None else 6
-    except (TypeError, ValueError):
-        stack = 6
-    out["blockMaxStack"] = max(1, min(6, stack or 6))  # 0 means the full 6, as in block_engine.clamp_stack
-    raw = out.get("symbols")
-    names = [str(s).strip().upper() for s in raw] if isinstance(raw, list) else []
-    wild = bool(out.get("symbolsAll")) or any(s in ("*", "ALL", "UNLIMITED") for s in names)
-    valid = list(dict.fromkeys(s for s in names if _SYMBOL_RE.fullmatch(s)))
-    if wild:
-        out["symbols"] = ["*"]
-        out["symbolsAll"] = True
-    elif valid:
-        out["symbols"] = valid
-        out["symbolsAll"] = False
-    elif isinstance(raw, list):
-        # Nothing usable was selected: fall back to the lane default book.
-        out["symbols"] = ["*"] if cid == "bingx-x01" else list(_MAJOR_USDT)
-        out["symbolsAll"] = cid == "bingx-x01"
-    try:
-        cap = int(out["symbolCap"]) if out.get("symbolCap") is not None else 50
-    except (TypeError, ValueError):
-        cap = 50
-    out["symbolCap"] = max(0, cap)
-    try:
-        validate_cap = int(out.get("histTestValidateCap") or 0)
-    except (TypeError, ValueError):
-        validate_cap = 0
-    out["histTestValidateCap"] = max(validate_cap, 250) if validate_cap else 250
-    try:
-        hist_target = int(out.get("histTestTargetCount") or 0)
-    except (TypeError, ValueError):
-        hist_target = 0
-    if not hist_target:
-        out["histTestTargetCount"] = 50
-    else:
-        out["histTestTargetCount"] = max(1, min(250, hist_target))
-    out.setdefault("histTestEnabled", True)
-    out.setdefault("histTestAutoAssign", True)
-    return out
-
-
-def write_overlay(conn: str, overlay: dict) -> dict:
-    cid = resolve_conn(conn) if conn not in ("", "overall") else conn
-    if cid not in ID_TO_LANE:
-        raise ValueError("pick a known lane")
-    if not isinstance(overlay, dict):
-        raise ValueError("overlay must be an object")
-    # Validate before any persistent mutation. JSON's default NaN/Infinity
-    # extension otherwise leaves settings that browsers cannot parse.
-    json.dumps(overlay, allow_nan=False)
-    dest = os.path.join(DIR, f"overlay-{cid}.json")
-    # Concurrent partial saves must serialize the complete read/merge/write,
-    # not just rename. A common .tmp also collided between HTTP threads.
-    with _OVERLAY_LOCKS[cid]:
-        cur = load_overlay(cid)
-        # A partial save to any legacy PF/window control updates the canonical
-        # setting before merging, so an older persisted alias cannot win.
-        from position_cost import PF_SETTING_KEYS, shared_pf_settings
-        if any(k in overlay for k in PF_SETTING_KEYS):
-            overlay = {**overlay, **{k: v for k, v in shared_pf_settings(overlay).items() if k in PF_SETTING_KEYS}}
-        if "baseEvalPosCount" in overlay or "setPfWindow" in overlay:
-            overlay = dict(overlay)
-            overlay["baseEvalPosCount"] = overlay.get("baseEvalPosCount", overlay.get("setPfWindow"))
-            overlay["setPfWindow"] = overlay["baseEvalPosCount"]
-            overlay.setdefault("setMinSamples", overlay["baseEvalPosCount"])
-        cur.update(overlay)
-        cur = calculation_overlay(cur)
-        cur = guard_runtime_overlay(cid, cur)
-        atomic_write(dest, cur)
-    return cur
-
-
 def cts_path(conn: str) -> str:
-    cid = resolve_conn(conn)
-    if cid not in ID_TO_LANE:
-        return os.path.join(DIR, "__invalid-connection-settings__.json")
-    return os.path.join(DIR, f"cts-settings-{cid}.json")
+    return os.path.join(DIR, f"cts-settings-{conn}.json")
 
 
 def stats_path(conn: str) -> str:
-    cid = resolve_conn(conn)
-    if cid not in ID_TO_LANE:
-        return os.path.join(DIR, "__invalid-connection-stats__.json")
-    return os.path.join(DIR, f"stats-{cid}.json")
-
-
-def _hist_test_on(ht: Any) -> bool:
-    if not isinstance(ht, dict):
-        return False
-    if ht.get("enabled") is False or ht.get("ownsCatalog") is False or ht.get("phase") == "off":
-        return False
-    return bool(ht.get("enabled") is True or ht.get("ownsCatalog") is True)
-
-
-def _hist_test_running(ht: Any) -> bool:
-    if not isinstance(ht, dict):
-        return False
-    phase = str(ht.get("phase") or "")
-    if ht.get("running") or ht.get("paused") or phase == "paused":
-        return True
-    return phase in ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
-
-
-def _inflight_remaining(out: dict) -> int:
-    """Sets still being scored. Live-order processing stays separate and is not clamped away."""
-    if not isinstance(out, dict):
-        return 0
-    sets = out.get("sets") if isinstance(out.get("sets"), dict) else {}
-    prog = out.get("progress") if isinstance(out.get("progress"), dict) else {}
-    nested = sets.get("progress") if isinstance(sets.get("progress"), dict) else {}
-    ht = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
-    phase = str(prog.get("phase") or nested.get("phase") or out.get("progressPhase") or "")
-    busy_phases = {
-        "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
-        "gap", "incremental", "queued", "partial", "catalog", "rank", "evaluate", "hist-test",
-    }
-    busy = phase in busy_phases or _hist_test_running(ht)
-    if not busy:
-        return 0
-
-    def _n(value: Any) -> int:
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    job_proc = 0
-    if _hist_test_running(ht):
-        job_proc = _n(ht.get("processingCount"))
-        job_total = _n(ht.get("setsTotal"))
-        job_done = _n(ht.get("setsDone"))
-        if job_total > job_done:
-            job_proc = max(job_proc, job_total - job_done)
-    total = max(_n(prog.get("setsTotal")), _n(nested.get("setsTotal")))
-    done_src = prog if _n(prog.get("setsTotal")) >= _n(nested.get("setsTotal")) else nested
-    done = _n(done_src.get("setsDone"))
-    catalog_remain = total - done if total > done else 0
-    # A 1-set intern heartbeat must not hide a catalog score that is actually moving.
-    best = max(job_proc, catalog_remain)
-    if best > 0:
-        return best
-    if busy and not prog.get("ready") and phase not in ("ready", ""):
-        return 1
-    return 0
-
-
-def _apply_effective_set_counts(out: dict) -> None:
-    """Intern counts replace the catalog only while Test Historic is actually on.
-
-    A live run shows its own set total and processing. It is not clamped back
-    to the intern book, which is what froze overviews at 1 / 0.
-    """
-    if not isinstance(out, dict):
-        return
-    sets = out.get("sets") if isinstance(out.get("sets"), dict) else None
-    if not sets:
-        return
-    ht = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
-    catalog = int(sets.get("catalogSetCount") or 0) or int(sets.get("setCount") or 0)
-    if catalog:
-        sets["catalogSetCount"] = catalog
-    if _hist_test_on(ht):
-        intern = int(sets.get("internSetCount") or 0)
-        if intern <= 0:
-            intern = int(ht.get("internSetCount") or 0)
-        if intern <= 0:
-            intern = int(ht.get("validatedCount") or 0)
-        sets["internSetCount"] = intern
-        running = _hist_test_running(ht)
-        try:
-            job_total = int(ht.get("setsTotal") or 0)
-        except (TypeError, ValueError):
-            job_total = 0
-        prog_for_count = out.get("progress") if isinstance(out.get("progress"), dict) else {}
-        if not prog_for_count and isinstance(sets.get("progress"), dict):
-            prog_for_count = sets["progress"]
-        try:
-            prog_total = int((prog_for_count or {}).get("setsTotal") or 0)
-        except (TypeError, ValueError):
-            prog_total = 0
-        prog_phase = str((prog_for_count or {}).get("phase") or out.get("progressPhase") or "")
-        catalog_scoring = prog_total > max(job_total, intern, 1) and prog_phase in (
-            "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
-            "gap", "incremental", "partial", "catalog",
-        )
-        if catalog_scoring:
-            if catalog > int(sets.get("setCount") or 0):
-                sets["setCount"] = catalog
-        elif running and job_total > intern:
-            sets["setCount"] = job_total
-        else:
-            sets["setCount"] = intern
-        if sets.get("validatedCount") is None:
-            sets["validatedCount"] = 0
-        proc = sets.get("processingCount")
-        if proc is None:
-            proc = ht.get("processingCount")
-        try:
-            proc = int(proc or 0)
-        except (TypeError, ValueError):
-            proc = 0
-        if running:
-            try:
-                proc = max(proc, int(ht.get("processingCount") or 0))
-            except (TypeError, ValueError):
-                pass
-        elif intern and proc > intern:
-            proc = intern
-        sets["processingCount"] = proc
-        job_syms = ht.get("symbols") if isinstance(ht.get("symbols"), list) else []
-        if job_syms:
-            sets["internSymbolCount"] = len(job_syms)
-    try:
-        proven = int(ht.get("validatedCount") or 0)
-    except (TypeError, ValueError):
-        proven = 0
-    try:
-        intern_reported = int(ht.get("internSetCount") or 0)
-    except (TypeError, ValueError):
-        intern_reported = 0
-    try:
-        cur_valid = int(sets.get("validatedCount") or 0)
-    except (TypeError, ValueError):
-        cur_valid = 0
-    # Last-15 proven is a subset of the intern book. A legacy blob that stuffed
-    # the intern size into validatedCount (proven == intern, or no intern) must
-    # not be painted as validated.
-    if proven > cur_valid and intern_reported and proven < intern_reported:
-        sets["validatedCount"] = proven
-    inflight = _inflight_remaining(out)
-    try:
-        current_proc = int(sets.get("processingCount") or 0)
-    except (TypeError, ValueError):
-        current_proc = 0
-    if inflight > current_proc:
-        sets["processingCount"] = inflight
-    cov = out.get("coverage") if isinstance(out.get("coverage"), dict) else None
-    if isinstance(cov, dict):
-        cov_sets = dict(cov.get("sets") or {})
-        for key in ("setCount", "validatedCount", "activeCount", "processingCount", "internSetCount", "catalogSetCount", "histFills", "internSymbolCount"):
-            if sets.get(key) is not None:
-                cov_sets[key] = sets.get(key)
-        cov["sets"] = cov_sets
+    return os.path.join(DIR, f"stats-{conn}.json")
 
 
 def slim_for_ui(st: dict) -> dict:
     """Keep switch/UI payloads small: open book + progress, not 500-tile dumps."""
     out = dict(st or {})
-    groups = _position_group_count(out, default=-1)
-    orders = _real_order_count(out, default=-1)
-    live_groups = _live_position_count(out, default=-1)
-    if groups >= 0:
-        out["realPositionCount"] = groups
-        out["realPositionGroupCount"] = groups
-    if orders >= 0:
-        out["realOrderCount"] = orders
-    if live_groups >= 0:
-        out["livePositionCount"] = live_groups
-    evidence = out.get("executionEvidence")
-    if isinstance(evidence, dict):
-        evidence = dict(evidence)
-        if groups >= 0:
-            evidence["realPositionCount"] = groups
-            evidence["realPositionGroupCount"] = groups
-            evidence["internalPositionGroups"] = groups
-        if orders >= 0:
-            evidence["realOrderCount"] = orders
-            evidence["internalOrderCount"] = orders
-        out["executionEvidence"] = evidence
     opens = out.get("open") or []
     open_syms = [p.get("symbol") for p in opens if p.get("symbol")]
     px = out.get("prices") or {}
@@ -683,311 +199,26 @@ def slim_for_ui(st: dict) -> dict:
     if isinstance(out.get("signals"), list):
         out["signals"] = out["signals"][:8]
     closed = out.get("closed") or []
-    if isinstance(closed, list):
-        out["closedN"] = int(out.get("closedN") or len(closed))
-        if closed and not out.get("pfStats"):
-            try:
-                from combo_eval import evaluate_fills
-                min_pf = float(((out.get("coord") or {}) if isinstance(out.get("coord"), dict) else {}).get("minPf") or POSITIVE_PF)
-                policy = out.get("pfCost") if isinstance(out.get("pfCost"), dict) else {}
-                combo = evaluate_fills(
-                    closed,
-                    min_pf=min_pf or POSITIVE_PF,
-                    cost_pct=_report_number(policy.get("costPct"), POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT,
-                    pf_n=int(_report_number(policy.get("n"), LAST_N_DEFAULT)) or LAST_N_DEFAULT,
-                )
-                out["pfStats"] = combo.get("pfStats")
-                out["withWithout"] = combo.get("withWithout")
-                out["comboMatrix"] = combo.get("matrix")
-                out["successfulConfigs"] = combo.get("successful")
-                out["combo"] = combo.get("meta")
-            except Exception:
-                pass
-        if len(closed) > 80:
-            out["closed"] = closed[:80]
-    ht = out.get("histTest")
-    if isinstance(ht, dict):
-        ht = dict(ht)
-        if isinstance(ht.get("internSymbols"), list):
-            ht["internSymbols"] = ht["internSymbols"][:50]
-        if isinstance(ht.get("symbols"), list):
-            ht["symbols"] = ht["symbols"][:50]
-        if isinstance(ht.get("runningSets"), list):
-            ht["runningSets"] = ht["runningSets"][:24]
-        try:
-            from hist_test import selected_coordinations
-            ht["selectedCoordinations"] = selected_coordinations({
-                "successfulConfigs": ht.get("successfulConfigs") or [],
-                "comboMatrix": ht.get("comboMatrix") or [],
-                "selectedCoordinations": ht.get("selectedCoordinations") or [],
-            })[:24]
-        except Exception:
-            coords = ht.get("selectedCoordinations") if isinstance(ht.get("selectedCoordinations"), list) else []
-            ht["selectedCoordinations"] = [
-                c for c in coords
-                if isinstance(c, dict) and c.get("validated") is True
-                and str(c.get("strategy") or "") in ("normal", "trailing", "axis", "block", "dca")
-                and str(c.get("indication") or "") in ("general", "combined", "state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
-                and ":" in str(c.get("id") or c.get("setId") or "")
-            ][:24]
-        if isinstance(ht.get("comboMatrix"), list):
-            ht["comboMatrix"] = ht["comboMatrix"][:40]
-        if isinstance(ht.get("successfulConfigs"), list):
-            ht["successfulConfigs"] = ht["successfulConfigs"][:24]
-        out["histTest"] = ht
-        if ht.get("enabled") or ht.get("ownsCatalog"):
-            if ht.get("withWithout"):
-                out["withWithout"] = ht["withWithout"]
-            if ht.get("comboMatrix"):
-                out["comboMatrix"] = ht["comboMatrix"]
-            if ht.get("successfulConfigs"):
-                out["successfulConfigs"] = ht["successfulConfigs"]
-            if ht.get("pfStats"):
-                out["pfStats"] = ht["pfStats"]
-            if ht.get("combo"):
-                out["combo"] = ht["combo"]
-            if ht.get("selectedCoordinations"):
-                out["selectedCoordinations"] = ht["selectedCoordinations"]
-    _apply_effective_set_counts(out)
-    if isinstance(opens, list) and len(opens) > 256:
-        out["openCountReported"] = len(opens)
-        out["openTruncated"] = True
-        out["open"] = opens[:256]
-    cov = dict(out.get("coverage") or {})
-    if cov:
-        coord = dict(cov.get("coord") or {})
-        if coord:
-            variants = dict(coord.get("variants") or {})
-            if variants:
-                rows = variants.get("rows")
-                parents = variants.get("parents")
-                if isinstance(rows, list):
-                    variants["rowCount"] = variants.get("rowCount") or len(rows)
-                    variants.pop("rows", None)
-                if isinstance(parents, list):
-                    variants["parentCount"] = variants.get("parentCount") or len(parents)
-                    variants.pop("parents", None)
-                qch = variants.get("qualifiedChildren")
-                if isinstance(qch, list):
-                    variants["qualifiedChildCount"] = len(qch)
-                    variants.pop("qualifiedChildren", None)
-                ids = variants.get("parentSetIds")
-                if isinstance(ids, list) and len(ids) > 32:
-                    variants["parentSetIdCount"] = len(ids)
-                    variants["parentSetIds"] = ids[:32]
-                coord["variants"] = variants
-            cov["coord"] = coord
-        hist = dict(cov.get("history") or {})
-        if hist and isinstance(hist.get("rows"), list) and len(hist["rows"]) > 24:
-            hist = dict(hist)
-            hist["rowCount"] = len(hist["rows"])
-            hist["rows"] = hist["rows"][:24]
-            cov["history"] = hist
-        out["coverage"] = cov
-    historic = dict(out.get("historic") or {})
-    if isinstance(historic.get("rows"), list) and len(historic["rows"]) > 40:
-        historic = dict(historic)
-        historic["rowCount"] = len(historic["rows"])
-        historic["rows"] = historic["rows"][:40]
-        out["historic"] = historic
-    sets = dict(out.get("sets") or {})
-    if sets:
-        nested_cov = dict(sets.get("coverage") or {})
-        if nested_cov:
-            qualified = nested_cov.get("qualifiedParentIds")
-            if isinstance(qualified, dict):
-                counts = {}
-                sample = {}
-                for stage, ids in qualified.items():
-                    if isinstance(ids, list):
-                        counts[str(stage)] = len(ids)
-                        sample[str(stage)] = ids[:64]
-                    else:
-                        sample[str(stage)] = ids
-                nested_cov["qualifiedParentIdCounts"] = counts
-                nested_cov["qualifiedParentIds"] = sample
-            elif isinstance(qualified, list) and len(qualified) > 128:
-                nested_cov["qualifiedParentIdCount"] = len(qualified)
-                nested_cov["qualifiedParentIds"] = qualified[:128]
-            processing_ids = nested_cov.get("processingSetIds")
-            if isinstance(processing_ids, list) and len(processing_ids) > 256:
-                nested_cov["processingSetIdCount"] = len(processing_ids)
-                nested_cov["processingSetIds"] = processing_ids[:256]
-            intern_ids = nested_cov.get("internSetIds")
-            if isinstance(intern_ids, list) and len(intern_ids) > 256:
-                nested_cov["internSetIdCount"] = nested_cov.get("internSetIdCount") or len(intern_ids)
-                nested_cov["internSetIds"] = intern_ids[:256]
-            sets["coverage"] = nested_cov
-        intern_ids = sets.get("internSetIds")
-        if isinstance(intern_ids, list) and len(intern_ids) > 256:
-            sets["internSetIdCount"] = sets.get("internSetIdCount") or len(intern_ids)
-            sets["internSetIds"] = intern_ids[:256]
-        proc_ids = sets.get("processingSetIds")
-        if isinstance(proc_ids, list) and len(proc_ids) > 256:
-            sets["processingSetIdCount"] = sets.get("processingSetIdCount") or len(proc_ids)
-            sets["processingSetIds"] = proc_ids[:256]
-        if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
-            sets["rowCount"] = len(sets["rows"])
-            sets["rows"] = sets["rows"][:40]
-        out["sets"] = sets
-    lev = out.get("leverageMap")
-    if isinstance(lev, dict) and len(lev) > 40:
-        keep_lev_syms = set(open_syms) | set((out.get("symbols") or [])[:25])
-        out["leverageMap"] = {s: lev[s] for s in keep_lev_syms if s in lev}
-        out["leverageMapCount"] = len(lev)
-    lev_m = out.get("leverageMax")
-    if isinstance(lev_m, dict) and len(lev_m) > 40:
-        keep_syms = set(open_syms) | set((out.get("symbols") or [])[:25])
-        out["leverageMax"] = {s: lev_m[s] for s in keep_syms if s in lev_m}
+    if isinstance(closed, list) and len(closed) > 80:   # the engine keeps 80; counts and windows need them all
+        out["closed"] = closed[:80]
     return out
 
 
-_CALC_BUSY = {
-    "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
-    "gap", "incremental", "queued", "partial", "catalog",
-}
-
-
-def _surface_hist_calc(out: dict, progress: dict, conn: str) -> None:
-    """On a host with no trading service, show the historic job as lane progress.
-
-    A ready or in-flight catalog calc must stay visible. This does not start
-    trading and does not change the on-disk Test Historic job.
-    """
+def _cost_pct_of(st: dict) -> float:
+    """The PositionCost (percent) a lane's engine runs with, so PF figures here match the engine's own; the library
+    default only when the lane reports none."""
     try:
-        from hist_calc import read_job
-        job = read_job(conn)
-    except Exception:
-        return
-    if not isinstance(job, dict) or not job.get("phase"):
-        return
-    phase = str(job.get("phase") or "")
-    cov = job.get("coverage") if isinstance(job.get("coverage"), dict) else {}
-    sets_cov = cov.get("sets") if isinstance(cov.get("sets"), dict) else {}
-    sym_cov = cov.get("symbols") if isinstance(cov.get("symbols"), dict) else {}
-    bar_cov = cov.get("bars") if isinstance(cov.get("bars"), dict) else {}
-    rows = job.get("rows") if isinstance(job.get("rows"), list) else []
-    ready = phase == "ready" and bool(job.get("winner") or job.get("rowCount") or rows or sets_cov)
-    if phase not in _CALC_BUSY and not ready:
-        return
-    cur = str(progress.get("phase") or "")
-    detail = str(progress.get("detail") or "")
-    engine_busy = cur in _CALC_BUSY and "skip full catalog" not in detail
-    if engine_busy and phase not in _CALC_BUSY:
-        return
-    if engine_busy and cur == phase:
-        return
-    checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-
-    def _n(value: Any) -> int:
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    try:
-        pct = float(job.get("pct") if job.get("pct") is not None else (100 if ready else 0))
+        c = float(((st or {}).get("pfCost") or {}).get("costPct") or 0)
     except (TypeError, ValueError):
-        pct = 100.0 if ready else 0.0
-    progress.update({
-        "phase": phase,
-        "pct": pct,
-        "detail": str(job.get("detail") or ""),
-        "ready": bool(job.get("ready") or ready),
-        "symbol": str(checkpoint.get("symbol") or job.get("symbol") or ""),
-        "symbolsDone": _n(sym_cov.get("completed")),
-        "symbolsTotal": _n(sym_cov.get("requested")),
-        "setsDone": _n(sets_cov.get("completed") or job.get("setsDone")),
-        "setsTotal": _n(sets_cov.get("requested") or job.get("setsTotal")),
-        "barsDone": _n(bar_cov.get("completed")),
-        "barsTotal": _n(bar_cov.get("requested")),
-        "elapsedMs": job.get("elapsedMs") or 0,
-        "error": str(job.get("error") or "")[:180],
-    })
-    out["historic"] = {
-        "phase": phase,
-        "pct": pct,
-        "detail": progress["detail"],
-        "ready": progress["ready"],
-        "hours": job.get("hours"),
-        "rowCount": int(job.get("rowCount") or len(rows) or 0),
-        "winner": job.get("winner") if isinstance(job.get("winner"), dict) else None,
-        "symbols": list(job.get("symbols") or [])[:50],
-    }
-    if phase in _CALC_BUSY:
-        out["running"] = True
-        out["halted"] = False
-        out["alive"] = True
-        # A running historic calc says nothing about the trading lane's
-        # balance and positions: their staleness is kept as measured.
-        out["haltReason"] = ""
-        out["mode"] = "HIST"
-        ht = dict(out.get("histTest") or {})
-        if not ht.get("running"):
-            ht["enabled"] = False
-            ht["ownsCatalog"] = False
-            ht["catalogSkipped"] = False
-            out["histTest"] = ht
-    sets_out = dict(out.get("sets") or {})
-    requested = _n(sets_cov.get("requested") or job.get("rowCount"))
-    if requested:
-        sets_out["catalogSetCount"] = requested
-        sets_out["setCount"] = requested
-        sets_out["validatedCount"] = _n(job.get("validatedCount"))
-        sets_out["processingCount"] = 0 if phase not in _CALC_BUSY else max(0, requested - _n(sets_cov.get("completed")))
-        out["sets"] = sets_out
-    symbols = job.get("symbols") if isinstance(job.get("symbols"), list) else []
-    if symbols:
-        out["symbols"] = symbols[:50]
-        out["symbolCount"] = len(symbols)
-    for src, dest in (
-        ("symbol", "progressSymbol"),
-        ("symbolsDone", "progressSymbolsDone"),
-        ("symbolsTotal", "progressSymbolsTotal"),
-        ("setsDone", "progressSetsDone"),
-        ("setsTotal", "progressSetsTotal"),
-        ("barsDone", "progressBarsDone"),
-        ("barsTotal", "progressBarsTotal"),
-        ("elapsedMs", "progressElapsedMs"),
-        ("pct", "progressPct"),
-    ):
-        out[dest] = progress.get(src)
+        c = 0.0
+    return c if c > 0 else POSITION_COST_PCT_DEFAULT
 
 
-def _spawn_offline_calc(body: dict, conn: str) -> None:
-    """Run the catalog when no trading service exists to consume the queue.
-
-    A live host keeps the request for the engine. This path is only the
-    preview / offline host, where systemd is not installed.
-    """
-    cid = resolve_conn(conn)
-    if unit_state(cid) != "unknown":
-        return
-    try:
-        from hist_calc import is_running
-        if is_running():
-            return
-    except Exception:
-        pass
-    code_dir = os.path.dirname(os.path.abspath(__file__))
-    env = os.environ.copy()
-    env["PULSE_CONN"] = cid
-    env["PYTHONPATH"] = code_dir + os.pathsep + env.get("PYTHONPATH", "")
-    log_path = os.path.join(DIR, f"hist-calc-{cid}.log")
-    try:
-        log = open(log_path, "a", encoding="utf-8")
-    except OSError:
-        log = subprocess.DEVNULL
-    subprocess.Popen(
-        [sys.executable, "-c",
-         "import os\nfrom hist_calc import read_request, run_calc\n"
-         "run_calc(read_request(os.environ.get('PULSE_CONN')) or {}, persist=True)\n"],
-        cwd=code_dir,
-        env=env,
-        start_new_session=True,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
+def _sum_or_none(a: dict, b: dict, key: str):
+    """The sum of a field over two lanes, or None when either lane does not report it."""
+    if key not in a or key not in b or a.get(key) is None or b.get(key) is None:
+        return None
+    return round(float(a[key]) + float(b[key]), 4)
 
 
 def stamp_stats(st: dict, conn: str) -> dict:
@@ -997,62 +228,12 @@ def stamp_stats(st: dict, conn: str) -> dict:
     out["connType"] = lane.get("type") or out.get("connType") or ("vst" if "x02" in conn else "live")
     out["unit"] = lane.get("unit") or out.get("unit")
     out["exchange"] = lane.get("exchange") or out.get("exchange")
-    # Same progress schema on every connection. Values stay unique per lane.
-    sets = out.get("sets") if isinstance(out.get("sets"), dict) else {}
-    nested = dict(sets.get("progress") or {}) if isinstance(sets, dict) else {}
-    hist = out.get("historic") if isinstance(out.get("historic"), dict) else {}
-
-    def _pick(*vals):
-        for v in vals:
-            if v is None or v == "":
-                continue
-            return v
-        return None
-
-    progress = {
-        "connection": conn,
-        "connType": out["connType"],
-        "phase": _pick(out.get("progressPhase"), nested.get("phase"), hist.get("phase"), "idle"),
-        "pct": _pick(out.get("progressPct"), nested.get("pct"), hist.get("pct"), 0),
-        "detail": _pick(out.get("progressDetail"), nested.get("detail"), hist.get("detail"), ""),
-        "ready": bool(_pick(out.get("progressReady"), nested.get("ready"), hist.get("ready"), False)),
-        "symbol": _pick(out.get("progressSymbol"), nested.get("symbol"), "") or "",
-        "setId": _pick(out.get("progressSetId"), nested.get("setId"), "") or "",
-        "symbolsDone": _pick(out.get("progressSymbolsDone"), nested.get("symbolsDone"), 0) or 0,
-        "symbolsTotal": _pick(out.get("progressSymbolsTotal"), nested.get("symbolsTotal"), 0) or 0,
-        "setsDone": _pick(out.get("progressSetsDone"), nested.get("setsDone"), 0) or 0,
-        "setsTotal": _pick(out.get("progressSetsTotal"), nested.get("setsTotal"), 0) or 0,
-        "barsDone": _pick(out.get("progressBarsDone"), nested.get("barsDone"), 0) or 0,
-        "barsTotal": _pick(out.get("progressBarsTotal"), nested.get("barsTotal"), 0) or 0,
-        "elapsedMs": _pick(out.get("progressElapsedMs"), nested.get("elapsedMs"), 0) or 0,
-        "lastRunMs": _pick(out.get("progressLastRunMs"), nested.get("lastRunMs"), 0) or 0,
-        "cycle": _pick(out.get("progressCycle"), nested.get("cycle"), 0) or 0,
-        "error": _pick(out.get("progressError"), nested.get("error"), "") or "",
-        "validSymbols": list(nested.get("validSymbols") or []),
-        "gappedSymbols": list(nested.get("gappedSymbols") or []),
-        "missingSymbols": list(nested.get("missingSymbols") or []),
-    }
-    out["progress"] = progress
-    out["progressPhase"] = progress["phase"]
-    out["progressPct"] = progress["pct"]
-    out["progressDetail"] = progress["detail"]
-    out["progressReady"] = progress["ready"]
-    out["progressSymbol"] = progress["symbol"]
-    out["progressSetId"] = progress["setId"]
-    out["progressSymbolsDone"] = progress["symbolsDone"]
-    out["progressSymbolsTotal"] = progress["symbolsTotal"]
-    out["progressSetsDone"] = progress["setsDone"]
-    out["progressSetsTotal"] = progress["setsTotal"]
-    out["progressBarsDone"] = progress["barsDone"]
-    out["progressBarsTotal"] = progress["barsTotal"]
-    out["progressElapsedMs"] = progress["elapsedMs"]
-    out["progressLastRunMs"] = progress["lastRunMs"]
-    out["progressCycle"] = progress["cycle"]
-    out["progressError"] = progress["error"]
-    if out.get("symbolCap") is None:
-        out["symbolCap"] = (out.get("engine") or {}).get("symbolCap") if isinstance(out.get("engine"), dict) else None
     paused = bool(out.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{conn}"))
     out["paused"] = paused
+    if paused:
+        out["halted"] = True
+        out["running"] = False
+        out["haltReason"] = out.get("haltReason") or "paused"
     # Ground truth: STOP file + systemd state beat a stale stats file, so a
     # stopped/crashed desk never keeps showing its last "running" snapshot.
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{conn}")) or os.path.exists(STOP_ALL_PATH)
@@ -1063,44 +244,20 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["halted"] = True
         out["running"] = False
         out["haltReason"] = "stopped"
-        progress.update(phase="stopped", detail="engine stopped; historic snapshot retained")
-    elif paused:
-        out["halted"] = True
-        out["running"] = False
-        out["haltReason"] = out.get("haltReason") or "paused"
-        progress.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
-    if state == "unknown":
-        # Preview / offline host: trust the snapshot, then the historic job.
-        _surface_hist_calc(out, progress, conn)
-    elif state != "active":
+    if state != "active":
         out["running"] = False
         out["alive"] = False
         out["stale"] = True
         if not out.get("halted"):
             out["halted"] = True
             out["haltReason"] = "service failed" if state == "failed" else "service inactive"
-        progress.update(phase="error" if state == "failed" else "deferred", detail=out["haltReason"])
     elif out["statsAgeS"] > 20:
+        # a frozen engine is not running: the desk must not show LIVE for a stats file that stopped moving
         out["stale"] = True
-    out["progress"] = progress
-    out["progressPhase"] = progress["phase"]
-    out["progressDetail"] = progress["detail"]
-    out["progressReady"] = progress["ready"]
-    out["progressError"] = progress["error"]
-    eng = out.get("engine") if isinstance(out.get("engine"), dict) else {}
-    load = out.get("load") if isinstance(out.get("load"), dict) else None
-    if not load:
-        load = eng.get("load") if isinstance(eng, dict) else None
-    cov = out.get("coverage") if isinstance(out.get("coverage"), dict) else {}
-    if not load and isinstance(cov, dict):
-        load = cov.get("load") if isinstance(cov.get("load"), dict) else None
-    if isinstance(load, dict) and load:
-        out["load"] = load
-        out["loadLevel"] = load.get("level") or out.get("loadLevel")
-        if isinstance(cov, dict):
-            cov = dict(cov)
-            cov["load"] = load
-            out["coverage"] = cov
+        out["running"] = False
+        if not out.get("halted"):
+            out["halted"] = True
+            out["haltReason"] = "stats stale"
     return out
 
 
@@ -1124,107 +281,6 @@ def _sysctl(*args: str, timeout: float = 25.0) -> tuple:
         return 99, str(e)[:160]
 
 
-def _cancel_hist(cid: str) -> None:
-    for name in (f"hist-calc-req-{cid}.json", f"hist-calc-{cid}.pid"):
-        _unlink(os.path.join(DIR, name))
-    if cid not in ("bingx-x01", "bingx-x02"):
-        return
-    try:
-        from hist_calc import stop_job
-        stop_job(cid)
-    except Exception:
-        pass
-
-
-def _kill_conn_procs(cid: str) -> int:
-    """SIGKILL leftover pulse_trader/hist_calc workers for this connection only."""
-    me = os.getpid()
-    killed = 0
-    proc = "/proc"
-    try:
-        names = os.listdir(proc)
-    except OSError:
-        return 0
-    for name in names:
-        if not name.isdigit():
-            continue
-        pid = int(name)
-        if pid <= 1 or pid == me:
-            continue
-        try:
-            env = open(os.path.join(proc, name, "environ"), "rb").read().split(b"\0")
-        except OSError:
-            continue
-        conn = ""
-        for item in env:
-            if item.startswith(b"PULSE_CONN="):
-                conn = item.split(b"=", 1)[-1].decode("utf-8", "ignore")
-                break
-        if conn != cid:
-            continue
-        try:
-            cmd = open(os.path.join(proc, name, "cmdline"), "rb").read()
-        except OSError:
-            continue
-        if b"pulse_http" in cmd:
-            continue
-        if b"pulse_trader" not in cmd and b"hist_calc" not in cmd:
-            continue
-        try:
-            os.kill(pid, 9)
-            killed += 1
-        except OSError:
-            pass
-    return killed
-
-
-def _mark_stats_stopped(cid: str) -> None:
-    path = stats_path(cid)
-    st = load_json(path)
-    st["running"] = False
-    st["halted"] = True
-    st["paused"] = False
-    st["alive"] = False
-    st["haltReason"] = "stopped"
-    try:
-        atomic_write(path, st)
-        with _STATS_CACHE_LOCK:
-            _STATS_CACHE.pop(path, None)
-    except Exception:
-        pass
-
-
-def _force_stop_lane(cid: str, unit: str) -> str:
-    """STOP file first, then systemd stop, then SIGKILL leftovers so Start is clean.
-
-    Exchange positions stay. Heal cannot revive while STOP exists.
-    """
-    bits = []
-    _cancel_hist(cid)
-    rc, out = _sysctl("stop", unit, timeout=12)
-    if rc != 0 and out:
-        bits.append(f"stop {out[:80]}")
-    st = unit_state(cid, fresh=True)
-    if st in ("active", "activating", "deactivating", "failed", "unknown"):
-        _sysctl("kill", "-s", "SIGKILL", "--kill-who=all", unit, timeout=8)
-        leftover = _kill_conn_procs(cid)
-        if leftover:
-            time.sleep(0.25)
-        rc2, out2 = _sysctl("stop", unit, timeout=8)
-        st = unit_state(cid, fresh=True)
-        bits.append("forced")
-        if leftover:
-            bits.append(f"killed {leftover}")
-        if rc2 != 0 and out2:
-            bits.append(out2[:60])
-    _sysctl("reset-failed", unit, timeout=8)
-    _STATE_CACHE.pop(cid, None)
-    _mark_stats_stopped(cid)
-    st = unit_state(cid, fresh=True)
-    extra = (" " + " ".join(bits)) if bits else ""
-    return f"{cid} stop rc={rc} state={st}{extra}"
-
-
 _STATE_CACHE: dict = {}
 
 # Single global control mutex: every start/stop/pause/resume — from the desk
@@ -1237,17 +293,13 @@ CONTROL_LOCK = threading.Lock()
 
 def unit_state(cid: str, fresh: bool = False) -> str:
     """systemd is-active state, cached briefly — the desk polls several times a second."""
+    if not HALT_ON_INACTIVE:
+        return "active"
     now = time.time()
     hit = _STATE_CACHE.get(cid)
     if not fresh and hit and now - hit[0] < 3.0:
         return hit[1]
-    rc, out = _sysctl("is-active", engine_unit(cid), timeout=6)
-    # No systemd in this process (desktop preview, tests, restricted hosts).
-    # That is not a crashed trading service.
-    if rc >= 90:
-        state = "unknown"
-        _STATE_CACHE[cid] = (now, state)
-        return state
+    rc, out = _sysctl("is-active", f"grok-pulse@{cid}", timeout=6)
     state = (out.splitlines() or [""])[0].strip() if out else ""
     if state not in ("active", "inactive", "failed", "activating", "deactivating"):
         state = "failed" if rc not in (0,) and state == "" else (state or "unknown")
@@ -1260,33 +312,6 @@ def stats_age(conn: str) -> float:
         return time.time() - os.path.getmtime(stats_path(conn))
     except Exception:
         return 1e9
-
-
-def control_state(cid: str) -> dict:
-    """Return post-action lane truth from markers, systemd, and the last stats file."""
-    state = unit_state(cid, fresh=True)
-    paused = os.path.exists(os.path.join(DIR, f"PAUSE-{cid}"))
-    stopped = os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH)
-    stats = load_stats(cid)
-    if stopped:
-        reason = "stopped"
-    elif paused:
-        reason = "paused"
-    elif state != "active":
-        reason = "service failed" if state == "failed" else "service inactive"
-    else:
-        reason = stats.get("haltReason")
-    return {
-        "connection": cid,
-        "unit": engine_unit(cid),
-        "state": state,
-        "serviceActive": state == "active",
-        "running": state == "active" and bool(stats.get("running")) and not paused and not stopped,
-        "paused": paused,
-        "stopped": stopped,
-        "haltReason": reason,
-        "statsAgeS": round(stats_age(cid), 1),
-    }
 
 
 def apply_control(conn: str, action: str) -> tuple:
@@ -1302,89 +327,74 @@ def apply_control(conn: str, action: str) -> tuple:
 def _apply_control_locked(conn: str, action: str) -> tuple:
     ids = [l["id"] for l in LANES] if conn in ("", "overall") else [conn]
     notes = []
-    outcomes = []
+    all_ok = True
     for cid in ids:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
         reset_eq = os.path.join(DIR, f"reset-eq-{cid}")
-        unit = engine_unit(cid)
+        unit = f"grok-pulse@{cid}"
         if action == "pause":
             _unlink(stop)
             _touch(pause)
-            state = control_state(cid)
-            outcomes.append(bool(state["paused"]))
-            notes.append(f"{cid} pause state={state['state']} paused={int(state['paused'])}")
+            notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
         elif action in ("start", "resume"):
-            if not _live_start_allowed(cid):
-                outcomes.append(False)
-                notes.append(f"{cid} start blocked: CTS_DISABLE_LIVE_START")
-                continue
-            _unlink(pause)
-            _unlink(stop)
-            _unlink(STOP_ALL_PATH)
-            # Explicit Start = fresh session: engine re-baselines session equity
-            # on the next balance tick, so a latched drawdown/equity halt clears.
-            if action == "start":
-                _touch(reset_eq)
-            _sysctl("enable", unit, timeout=8)
-            # start is a no-op when the unit is already active, so an in-memory
-            # "stopped" latch would stick. Restart always picks up cleared flags.
-            verb = "restart" if action == "start" else "start"
-            rc, out = _sysctl(verb, unit)
+            rc, out = _sysctl("start", unit)
             if rc != 0:
                 # start-limit-hit after a crash loop blocks start — reset and retry once.
                 _sysctl("reset-failed", unit, timeout=8)
-                _sysctl("enable", unit, timeout=8)
-                rc, out = _sysctl(verb, unit)
-            state = control_state(cid)
-            action_ok = state["state"] in ("active", "activating") and not state["stopped"]
-            outcomes.append(bool(action_ok))
-            notes.append(f"{cid} {action} rc={rc} state={state['state']} running={int(state['running'])}" + ("" if rc == 0 else f" {out[:80]}"))
+                rc, out = _sysctl("start", unit)
+            st = unit_state(cid, fresh=True)
+            started = rc == 0 and st == "active"
+            all_ok = all_ok and started
+            if started:
+                # Do not release entry halts or reset equity on a failed start.
+                # Active is only service acknowledgement, not exchange readiness;
+                # the stats view separately checks the engine's fresh heartbeat.
+                _touch(reset_eq)
+                _unlink(pause)
+                _unlink(stop)
+            notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
             _unlink(pause)
+            # stop only halts new entries (the STOP file). The process keeps managing open positions, so its local
+            # SL, TP, trail and time exits keep running. Killing the service left them unmanaged.
             _touch(stop)
-            detail = _force_stop_lane(cid, unit)
-            state = control_state(cid)
-            # The marker is the safety barrier even while systemd finishes a
-            # deactivation; expose the real state in the response/detail.
-            outcomes.append(bool(state["stopped"]))
-            notes.append(detail + f" paused={int(state['paused'])}")
-    return bool(outcomes) and all(outcomes), "; ".join(notes)
+            st = unit_state(cid, fresh=True)
+            notes.append(f"{cid} stop (entries halted, exits still managed) state={st}")
+    if action in ("start", "resume") and all_ok and os.path.exists(STOP_ALL_PATH):
+        # Clearing a global halt for one lane must not resume the other lanes.
+        # Materialize their equivalent per-lane halt before removing the global one.
+        for lane in LANES + EXTRA_LANES:
+            if lane["id"] not in ids:
+                _touch(os.path.join(DIR, f"STOP-{lane['id']}"))
+        _unlink(STOP_ALL_PATH)
+    return all_ok, "; ".join(notes)
 
 
 def load_json(path: str) -> dict:
-    return load_json_bounded(path, MAX_RETAINED_FILE_BYTES)
-
-
-def load_json_bounded(path: str, max_bytes: int) -> dict:
     try:
-        if not path or not os.path.exists(path):
-            return {}
-        size = os.path.getsize(path)
-        if size <= 0:
-            return {}
-        limit = max(int(max_bytes or 0), MAX_RETAINED_FILE_BYTES)
-        with open(path, "rb") as f:
-            raw = f.read(limit + 1)
-        if len(raw) > limit:
-            return {}
-        data = json.loads(raw.decode("utf-8"))
+        with open(path) as f:
+            data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
 def load_cts(conn: str) -> dict:
-    conn = resolve_conn(conn)
-    if conn not in ID_TO_LANE:
-        return {}
     path = cts_path(conn)
     if os.path.exists(path):
         data = load_json(path)
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    out = {k: parse_val(v) for k, v in redis_hgetall(key).items()}
+    try:
+        p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True, timeout=5)
+        lines = (p.stdout or "").splitlines()
+    except Exception:   # a hung or missing redis must not hold the request handler
+        lines = []
+    out = {}
+    for i in range(0, len(lines) - 1, 2):
+        out[lines[i]] = parse_val(lines[i + 1])
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -1400,698 +410,56 @@ def load_overlay(conn: str) -> dict:
 
 
 def load_stats(conn: str) -> dict:
-    path = stats_path(conn)
-    try:
-        st = os.stat(path)
-    except OSError:
-        return {}
-    key = path
-    mtime = st.st_mtime
-    size = st.st_size
-    with _STATS_CACHE_LOCK:
-        hit = _STATS_CACHE.get(key)
-        if hit and hit[0] == mtime and hit[1] == size:
-            return hit[2]
-    data = load_json_bounded(path, STATS_READ_MAX_BYTES)
-    if not data:
-        return {}
-    slim = slim_for_ui(data)
-    with _STATS_CACHE_LOCK:
-        _STATS_CACHE[key] = (mtime, size, slim)
-        if len(_STATS_CACHE) > 8:
-            for old in list(_STATS_CACHE)[: len(_STATS_CACHE) - 4]:
-                _STATS_CACHE.pop(old, None)
-    return slim
-
-
-def _report_number(value, default=0.0) -> float:
-    try:
-        number = float(value)
-        return number if number == number else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _sum_known_int(values, unknown: int = -1) -> int:
-    """Sum confirmed counts. Unknown/negative values are skipped, not treated as zero."""
-    known = []
-    for value in values:
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-        if number >= 0:
-            known.append(number)
-    return sum(known) if known else unknown
-
-
-def _known_int(value, default: int = -1) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    return number if number >= 0 else default
-
-
-def _snapshot_oid(value) -> str:
-    raw = str(value or "").strip()
-    if not raw or raw.lower() in {"exists", "none", "null", "0", "true", "false"}:
-        return ""
-    return raw
-
-
-def _working_order_count_from_snapshot(state) -> int:
-    """Unique protection oids plus pending intents from a stats snapshot."""
-    if not isinstance(state, dict):
-        return -1
-    oids = set()
-    for row in state.get("open") or []:
-        if not isinstance(row, dict) or row.get("ours") is False:
-            continue
-        for key in ("slOid", "tpOid", "secSlOid", "secTpOid", "sl_oid", "tp_oid", "sec_sl_oid", "sec_tp_oid"):
-            oid = _snapshot_oid(row.get(key))
-            if oid:
-                oids.add(oid)
-    pending = state.get("pendingOrders") or state.get("pending") or []
-    if isinstance(pending, dict):
-        pending = list(pending.values())
-    pending_without_oid = 0
-    if isinstance(pending, list):
-        for row in pending:
-            if not isinstance(row, dict):
-                pending_without_oid += 1
-                continue
-            oid = _snapshot_oid(row.get("orderId") or row.get("order_id") or row.get("orderid"))
-            if oid:
-                oids.add(oid)
-            else:
-                pending_without_oid += 1
-    count = len(oids) + pending_without_oid
-    return count if count > 0 or oids or pending_without_oid else -1
-
-
-def _symbol_direction_count_from_snapshot(state, exchange_only: bool = False) -> int:
-    """Unique (symbol, LONG|SHORT) parents from the open tape.
-
-    3 symbols both long and short = 6. One of those only short = 5.
-    Config/set lanes on the same parent collapse. Proxies and zero-qty dust
-    are ignored. ``exchange_only`` keeps rows with venue qty. Rows from
-    different connections (merged Overall tape) never share a parent.
-    """
-    if not isinstance(state, dict):
-        return -1
-    rows = state.get("open") or []
-    if not isinstance(rows, list):
-        return -1
-    groups = set()
-    saw_exchange_qty = False
-    for row in rows:
-        if not isinstance(row, dict) or row.get("ours") is False:
-            continue
-        if row.get("_overall_proxy") or row.get("overallProxy"):
-            continue
-        try:
-            qty = float(row.get("qty") or 0)
-        except (TypeError, ValueError):
-            continue
-        if qty <= 0:
-            continue
-        if exchange_only:
-            raw = row.get("exchangeQty")
-            if raw is None:
-                raw = row.get("exchange_qty")
-            if raw is None:
-                continue
-            try:
-                if float(raw or 0) <= 0:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            saw_exchange_qty = True
-        symbol = str(row.get("symbol") or "").strip()
-        side = str(row.get("side") or "").strip().upper()
-        if not symbol or side not in ("LONG", "SHORT"):
-            continue
-        groups.add((str(row.get("connection") or ""), symbol, side))
-    if groups:
-        return len(groups)
-    if exchange_only and not saw_exchange_qty:
-        return -1
-    if not rows:
-        return 0
-    return -1
-
-
-def _position_group_count(state, default: int = -1) -> int:
-    """Unique Real Positions: symbol+direction groups, never config-lane openCount."""
-    if not isinstance(state, dict):
-        return default
-    evidence = state.get("executionEvidence") if isinstance(state.get("executionEvidence"), dict) else {}
-    published = -1
-    for value in (
-        state.get("realPositionGroupCount"),
-        evidence.get("internalPositionGroups"),
-        evidence.get("realPositionGroupCount"),
-        state.get("realPositionCount"),
-    ):
-        number = _known_int(value)
-        if number >= 0:
-            published = number
-            break
-    snapshot = _symbol_direction_count_from_snapshot(state)
-    lanes = _known_int(state.get("logicalPositionCount", state.get("openCount")))
-    if published >= 0 and lanes >= 0 and published == lanes:
-        published = -1
-    if snapshot >= 0 and (published < 0 or published < snapshot):
-        return snapshot
-    if published >= 0:
-        return published
-    return snapshot if snapshot >= 0 else default
-
-
-def _live_position_count(state, default: int = -1) -> int:
-    """Unique Live Positions: venue symbol+direction groups, never lane count."""
-    if not isinstance(state, dict):
-        return default
-    evidence = state.get("executionEvidence") if isinstance(state.get("executionEvidence"), dict) else {}
-    published = default
-    for value in (
-        state.get("livePositionCount"),
-        evidence.get("livePositionCount"),
-        state.get("exchangeOwnOpenCount"),
-        evidence.get("exchangeOwnOpen"),
-        state.get("exchangePositionGroupCount"),
-        evidence.get("exchangePositionGroups"),
-        state.get("exchangeOpenCount"),
-    ):
-        number = _known_int(value)
-        if number >= 0:
-            published = number
-            break
-    snapshot = _symbol_direction_count_from_snapshot(state, exchange_only=True)
-    if snapshot >= 0 and (published < 0 or published < snapshot):
-        return snapshot
-    if published >= 0:
-        return published
-    return snapshot if snapshot >= 0 else default
-
-
-def _real_order_count(state, default: int = -1) -> int:
-    """Internal working orders we own. Live is the exchange snapshot — keep them apart."""
-    if not isinstance(state, dict):
-        return default
-    evidence = state.get("executionEvidence") if isinstance(state.get("executionEvidence"), dict) else {}
-    published = -1
-    for value in (
-        state.get("realOrderCount"),
-        evidence.get("internalOrderCount"),
-        evidence.get("realOrderCount"),
-    ):
-        number = _known_int(value)
-        if number >= 0:
-            published = number
-            break
-    snapshot = _working_order_count_from_snapshot(state)
-    live = _known_int(state.get("liveOrderCount"))
-    if live < 0:
-        live = _known_int(evidence.get("liveOrderCount"))
-    lanes = _known_int(state.get("logicalPositionCount", state.get("openCount")))
-    groups = _position_group_count(state)
-    # Older engines copied lane/openCount or position groups onto realOrderCount.
-    copied = published >= 0 and (
-        (lanes >= 0 and published == lanes) or (groups >= 0 and published == groups and live >= 0 and live != published)
-    )
-    if copied:
-        published = -1
-    if published >= 0:
-        return published
-    if snapshot >= 0:
-        return snapshot
-    if live >= 0:
-        return live
-    return default
-
-
-
-def _report_row_in_scope(row: dict, state: dict) -> bool:
-    """Keep overall reports limited to the lane's proven system ownership."""
-    if not isinstance(row, dict) or row.get("ours") is False:
-        return False
-    expected = str(state.get("trackingScope") or "").strip().lower()
-    actual = str(row.get("trackingScope") or row.get("tracking_scope") or "").strip().lower()
-    system_id = str(state.get("systemId") or "").strip().lower()
-    connection = str(state.get("connection") or "").strip().lower()
-    row_system = str(row.get("systemId") or row.get("system_id") or "").strip().lower()
-    row_connection = str(row.get("connection") or row.get("conn") or "").strip().lower()
-    if expected and actual:
-        if actual != expected:
-            return False
-        if row_system and system_id and row_system != system_id:
-            return False
-        if row_connection and connection and row_connection != connection:
-            return False
-        return True
-    if expected and (row_system or row_connection):
-        return bool(system_id and connection and row_system == system_id and row_connection == connection)
-    prefix = str(state.get("trackPrefix") or "").strip().lower()
-    client_id = str(row.get("clientId") or row.get("client_id") or "").strip().lower()
-    if prefix and client_id:
-        return client_id.startswith(prefix)
-    return bool(row_connection and row_connection == connection and not expected)
-
-
-def merge_indication_types(coverages) -> dict:
-    """Union every published kind; a kind is on when any desk runs it."""
-    coverages = [c for c in coverages if isinstance(c, dict)]
-    keys = {key for coverage in coverages for key in ((coverage.get("indicationTypes") or coverage.get("types") or {}))}
-    return {
-        key: any(bool((coverage.get("indicationTypes") or coverage.get("types") or {}).get(key)) for coverage in coverages)
-        for key in keys
-    }
-
-
-def _merge_kind_hits(blobs) -> dict:
-    out: dict = {}
-    for blob in blobs:
-        for key, value in (blob or {}).items():
-            out[key] = out.get(key, 0) + int(_report_number(value))
-    return out
-
-
-def _merge_kind_live(blobs) -> dict:
-    out: dict = {}
-    for blob in blobs:
-        for kind, live in (blob or {}).items():
-            if not isinstance(live, dict):
-                continue
-            row = out.setdefault(kind, {"hits": 0, "symbols": 0, "long": 0, "short": 0, "enabled": False})
-            for key in ("hits", "symbols", "long", "short"):
-                row[key] += int(_report_number(live.get(key)))
-            row["enabled"] = row["enabled"] or live.get("enabled", True) is not False
-    return out
-
-
-_UNIT_AMOUNT_KEYS = ("gp", "gl", "net", "gpNetCost", "glNetCost", "netAfterCost")
-
-
-def _split_unit_amounts(merged: dict, per_unit: dict) -> dict:
-    """USDT (live) and VST amounts are never summed: expose them per unit."""
-    units = [unit for unit, blobs in per_unit.items() if any(int((b or {}).get("n") or 0) for b in blobs.values())]
-    for key, blob in merged.items():
-        if not isinstance(blob, dict):
-            continue
-        blob["byUnit"] = {
-            unit: {"n": int((blobs.get(key) or {}).get("n") or 0),
-                   **{k: (blobs.get(key) or {}).get(k) for k in _UNIT_AMOUNT_KEYS}}
-            for unit, blobs in per_unit.items()
-        }
-        if len(units) > 1:
-            for k in _UNIT_AMOUNT_KEYS:
-                blob[k] = None
-            blob["unit"] = "MIXED"
-        elif units:
-            blob["unit"] = units[0]
-    return merged
-
-
-def overall_kind_strategy(stats_by_id: dict, lanes=None, *, cost: float = POSITION_COST_PCT_DEFAULT, detail_st: dict | None = None, sets_rows=None) -> tuple:
-    """Overall byIndication/byStrategy from every desk's full close tape.
-
-    n / pf / wr count every close of every desk (byIndication[k].n is the sum of
-    the per-desk values); hits/types are merged from both desks; money amounts
-    stay per unit because USDT and VST must not be added together."""
-    from stats_report import by_indication, by_strategy, merge_kind_stats, merge_strategy_stats
-    lanes = lanes or LANES
-    detail_st = detail_st or {}
-    closed: list = []
-    by_unit: dict = {}
-    states = []
-    for lane in lanes:
-        st = stats_by_id.get(lane["id"]) or {}
-        if not st:
-            continue
-        states.append(st)
-        rows = [{**c, "connection": lane["id"], "unit": lane["unit"]} for c in (st.get("closed") or []) if isinstance(c, dict)]
-        closed.extend(rows)
-        by_unit.setdefault(lane["unit"], []).extend(rows)
-    closed.sort(key=lambda r: r.get("t") or 0)
-    covs = [st.get("coverage") or {} for st in states]
-    inds = [st.get("indications") or {} for st in states]
-    types = merge_indication_types([
-        {"indicationTypes": {**(ind.get("types") or {}), **(cov.get("indicationTypes") or {})}}
-        for cov, ind in zip(covs, inds)
-    ])
-    hits = _merge_kind_hits([(cov.get("indicationHits") or ind.get("typeHits") or {}) for cov, ind in zip(covs, inds)])
-    by_ind = merge_kind_stats(closed, cost, gate={}, hits=hits, types=types,
-                              kind_live=_merge_kind_live(ind.get("kindStats") or {} for ind in inds))
-    by_strat = merge_strategy_stats(
-        closed, cost,
-        coverage=detail_st.get("coverage") or {},
-        block=detail_st.get("block") or {},
-        dca=detail_st.get("dca") or {},
-        exits=detail_st.get("exits") or {},
-        sets_rows=sets_rows or [],
-    )
-    _split_unit_amounts(by_ind, {u: by_indication(rows, cost) for u, rows in by_unit.items()})
-    _split_unit_amounts(by_strat, {u: by_strategy(rows, cost) for u, rows in by_unit.items()})
-    return by_ind, by_strat, closed
-
-
-def overall_pf_policy(states) -> dict:
-    policies = [state.get("pfCost") or {} for state in states]
-    pf_window = max(int(_report_number(policy.get("n"), LAST_N_DEFAULT)) for policy in policies)
-    pf_floor = max(POSITIVE_PF, *(float(_report_number(policy.get("minPf"), POSITIVE_PF)) for policy in policies))
-    required_samples = max(int(_report_number(policy.get("requiredSamples"), pf_window)) for policy in policies)
-    position_cost = next((_report_number(policy.get("costPct"), POSITION_COST_PCT_DEFAULT)
-                          for policy in policies if policy.get("costPct") is not None), POSITION_COST_PCT_DEFAULT)
-    return dict(n=pf_window, costPct=position_cost, minPf=pf_floor, requiredSamples=required_samples)
-
-
-def overall_report_state(live: dict, vst: dict) -> dict:
-    """Build a safe combined input for the canonical stats report renderer."""
-    states = (live, vst)
-    closed = [
-        row
-        for state in states
-        for row in (state.get("closed") or [])
-        if _report_row_in_scope(row, state)
-    ]
-    open_positions = [
-        row
-        for state in states
-        for row in (state.get("open") or [])
-        if _report_row_in_scope(row, state)
-    ]
-    set_rows = []
-    set_count = active_count = validated_count = hist_fills = 0
-    for state in states:
-        sets = state.get("sets") or {}
-        if not isinstance(sets, dict):
-            continue
-        set_rows.extend(row for row in (sets.get("rows") or []) if isinstance(row, dict))
-        set_count += int(_report_number(sets.get("setCount")))
-        active_count += int(_report_number(sets.get("activeCount")))
-        validated_count += int(_report_number(sets.get("validatedCount")))
-        hist_fills += int(_report_number(sets.get("histFills")))
-    symbols = sorted({
-        str(symbol)
-        for state in states
-        for symbol in (state.get("symbols") or [])
-        if symbol
-    })
-    # Lane counters are the persistent totals (same as merge_overall); the
-    # retained tape is only each lane's newest rows.
-    wins = sum(int(_report_number(state.get("wins"))) for state in states)
-    losses = sum(int(_report_number(state.get("losses"))) for state in states)
-    if not (wins or losses):
-        wins = sum(1 for row in closed if _report_number(row.get("pnl")) > 0)
-        losses = sum(1 for row in closed if _report_number(row.get("pnl")) < 0)
-    coverages = [state.get("coverage") or {} for state in states]
-    strategies = {
-        key: any(bool((coverage.get("strategies") or {}).get(key)) for coverage in coverages)
-        for key in {key for coverage in coverages for key in (coverage.get("strategies") or {})}
-    }
-    indication_types = merge_indication_types(coverages)
-    historic_states = [state.get("historic") or {} for state in states]
-    selected_symbols = sorted({
-        str(symbol)
-        for historic in historic_states
-        for symbol in (historic.get("selectedSymbols") or [])
-        if symbol
-    })
-    valid_symbols = sorted({
-        str(symbol)
-        for historic in historic_states
-        for symbol in (historic.get("validSymbols") or [])
-        if symbol
-    })
-    gapped_symbols = sorted({
-        str(symbol)
-        for historic in historic_states
-        for symbol in (historic.get("gappedSymbols") or [])
-        if symbol
-    })
-    last_watermark = {}
-    for index, historic in enumerate(historic_states):
-        for symbol, watermark in (historic.get("lastPublishedWatermark") or historic.get("watermark") or {}).items():
-            last_watermark[f"lane{index}:{symbol}"] = watermark
-    historic_bars = [(historic.get("coverage") or {}).get("bars") or {} for historic in historic_states]
-    historic_requested_bars = sum(int(_report_number(bars.get("requested"))) for bars in historic_bars if isinstance(bars, dict))
-    historic_completed_bars = sum(int(_report_number(bars.get("completed"))) for bars in historic_bars if isinstance(bars, dict))
-    historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
-    has_historic = any(bool(historic) for historic in historic_states)
-    logical_position_count = sum(
-        int(_report_number(state.get("logicalPositionCount", state.get("openCount",
-            sum(_report_row_in_scope(row, state) for row in (state.get("open") or []))))))
-        for state in states
-    )
-    exchange_group_values = [
-        int(_report_number(state.get("exchangePositionGroupCount", state.get("exchangeOwnOpenCount", state.get("exchangeOpenCount", -1)))))
-        for state in states
-    ]
-    exchange_position_group_count = sum(exchange_group_values) if all(value >= 0 for value in exchange_group_values) else -1
-    real_position_count = _sum_known_int(_position_group_count(state) for state in states)
-    real_position_group_count = real_position_count
-    real_order_count = _sum_known_int((_real_order_count(state) for state in states), unknown=0)
-    live_position_count = _sum_known_int(_live_position_count(state) for state in states)
-    live_order_count = _sum_known_int(state.get("liveOrderCount") for state in states)
-    live_total_order_count = _sum_known_int(state.get("liveTotalOrderCount") for state in states)
-    sim_open_count = _sum_known_int(state.get("simOpenCount") for state in states)
-    entry_candidate_count = sum(
-        int(_report_number((state.get("pulse") or {}).get("entryCandidateCount")))
-        for state in states
-        if isinstance(state.get("pulse") or {}, dict)
-    )
-    control_modes = set()
-    for state in states:
-        coverage = state.get("coverage") or {}
-        controls = coverage.get("controls") if isinstance(coverage, dict) else None
-        controls = controls if isinstance(controls, dict) else {}
-        pulse = state.get("pulse") or {}
-        mode = controls.get("mode")
-        if mode not in ("per-config", "aggregate"):
-            mode = "aggregate" if isinstance(pulse, dict) and pulse.get("controlOrdersPerConfig") is False else "per-config"
-        control_modes.add(mode)
-    control_mode = next(iter(control_modes)) if len(control_modes) == 1 else "mixed"
-    # Money is reported in one unit: the Mainnet desks when any exist, else VST.
-    live_states = [state for state in states if str(state.get("connType") or "") == "live"]
-    money = live_states or states
-    money_unit = "USDT" if live_states else "VST"
-    return {
-        "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
-        "mode": "MULTI_DESK",
-        "systemId": CTS_G_NAME,
-        "connection": "overall",
-        "trackingScope": "overall",
-        "trackPrefix": "mixed",
-        "unit": money_unit,
-        "moneyUnit": money_unit,
-        "equity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in money),
-        "systemEquity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in money),
-        "systemStartEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in money),
-        "startEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in money),
-        "walletEquity": sum(_report_number(state.get("walletEquity")) for state in money),
-        "available": sum(_report_number(state.get("available")) for state in money),
-        "usedMargin": sum(_report_number(state.get("usedMargin")) for state in money),
-        "sessionPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in money),
-        "systemPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in money),
-        "realizedPnl": sum(_report_number(state.get("systemRealized", state.get("realizedPnl"))) for state in money),
-        "unrealized": sum(_report_number(state.get("systemUnrealized", state.get("unrealized"))) for state in money),
-        "foreignUnrealized": sum(_report_number(state.get("foreignUnrealized")) for state in money),
-        "foreignRealized": sum(_report_number(state.get("foreignRealized")) for state in money),
-        "foreignExposure": sum(_report_number(state.get("foreignExposure")) for state in money),
-        "foreignPositionCount": sum(int(_report_number(state.get("foreignPositionCount"))) for state in money),
-        "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
-        "wins": wins,
-        "losses": losses,
-        "winRate": round(wins / (wins + losses) * 100, 1) if wins + losses else 0.0,
-        "openCount": logical_position_count,
-        "logicalPositionCount": logical_position_count,
-        "realPositionCount": real_position_count if real_position_count >= 0 else 0,
-        "realPositionGroupCount": real_position_group_count if real_position_group_count >= 0 else 0,
-        "realOrderCount": real_order_count if real_order_count >= 0 else 0,
-        "exchangePositionGroupCount": exchange_position_group_count,
-        "exchangeOpenCount": live_position_count,
-        "livePositionCount": live_position_count,
-        "liveOrderCount": live_order_count,
-        "liveTotalOrderCount": live_total_order_count,
-        "simOpenCount": sim_open_count,
-        "open": open_positions,
-        "closed": closed,
-        "symbols": symbols,
-        "pfCost": overall_pf_policy(states),
-        "historic": {
-            "phase": "aggregate" if has_historic else "offline",
-            "coordinationComplete": has_historic and all(bool(historic.get("coordinationComplete")) for historic in historic_states),
-            "selectedSymbols": selected_symbols,
-            "validSymbols": valid_symbols,
-            "gappedSymbols": gapped_symbols,
-            "lastPublishedWatermark": last_watermark,
-            "lastCompleteRun": max((_report_number(historic.get("lastCompleteRun")) for historic in historic_states), default=0),
-            "nextRunAt": min((value for value in (_report_number(historic.get("nextRunAt")) for historic in historic_states) if value > 0), default=0),
-            "coverage": {
-                "symbols": {"completed": len(valid_symbols), "valid": len(selected_symbols), "gapped": len(gapped_symbols)},
-                "bars": {"requested": historic_requested_bars, "completed": historic_completed_bars, "missing": historic_missing_bars},
-            },
-        },
-        "sets": {
-            "rows": set_rows,
-            "setCount": set_count,
-            "activeCount": active_count,
-            "validatedCount": validated_count,
-            "entryCandidateCount": entry_candidate_count,
-            "histFills": hist_fills,
-        },
-        "coverage": {
-            "symbols": len(symbols),
-            "px": sum(int(_report_number(coverage.get("px"))) for coverage in coverages),
-            "wsOk": all(coverage.get("wsOk") is not False for coverage in coverages),
-            "controlsMissing": sum(int(_report_number(coverage.get("controlsMissing"))) for coverage in coverages),
-            "qaPass": sum(int(_report_number(coverage.get("qaPass"))) for coverage in coverages),
-            "qaFail": sum(int(_report_number(coverage.get("qaFail"))) for coverage in coverages),
-            "strategies": strategies,
-            "indicationTypes": indication_types,
-            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "entryCandidateCount": entry_candidate_count, "histFills": hist_fills},
-            "controls": {
-                "mode": control_mode,
-                "open": logical_position_count,
-                "logicalOpen": logical_position_count,
-                "exchangePositionGroups": exchange_position_group_count,
-                "groupCount": logical_position_count,
-                "pairCount": logical_position_count,
-                "expectedPairs": logical_position_count,
-            },
-        },
-        "coord": {"gate": {"allow": all(bool((state.get("coord") or {}).get("gate", {}).get("allow")) for state in states)}},
-    }
+    return load_json(stats_path(conn))
 
 
 def _sets_lane(lane: dict, st: dict) -> dict:
     sets = st.get("sets") or {}
-    prog = _lane_progress(st)
+    prog = sets.get("progress") or {}
     return {
         "type": lane["type"],
         "id": lane["id"],
         "label": lane["label"],
         "progress": prog,
         "activeCount": sets.get("activeCount") or 0,
-        "validatedCount": sets.get("validatedCount") or 0,
         "setCount": sets.get("setCount") or 0,
-        "internSetCount": sets.get("internSetCount") or 0,
-        "catalogSetCount": sets.get("catalogSetCount") or 0,
-        "internSymbolCount": sets.get("internSymbolCount") or 0,
         "ready": bool(sets.get("ready") or prog.get("ready")),
         "histFills": sets.get("histFills") or 0,
-        "processingCount": sets.get("processingCount") or 0,
         "running": bool(st.get("running")),
         "halted": bool(st.get("halted")),
     }
 
 
-def _num_max(*vals):
-    nums = []
-    for v in vals:
-        if v is None:
-            continue
-        try:
-            nums.append(float(v))
-        except (TypeError, ValueError):
-            continue
-    return max(nums) if nums else None
-
-
-def _lane_progress(st: dict) -> dict:
+def lane_summary(lane: dict) -> dict:
+    st = load_stats(lane["id"])
+    gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
+    gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
+    pf_usdt = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)   # gross, on the USDT pnl field: display only
+    # the decision PF is cost-based and needs pnl_pct; rows without it are not guessed (None, not 0)
+    cost_rows = [c for c in (st.get("closed") or []) if c.get("pnl_pct") is not None]
+    pf = last_n_cost_pf(cost_rows, len(cost_rows) or 1, _cost_pct_of(st))["pf"] if cost_rows else None
     sets = st.get("sets") or {}
-    prog = dict(sets.get("progress") or {})
-    hist = st.get("historic") or {}
-    nested_detail = str(prog.get("detail") or hist.get("detail") or "")
-    top_detail = str(st.get("progressDetail") or "")
-    detail = nested_detail if ("slice " in nested_detail or "continuing " in nested_detail) else (top_detail or nested_detail)
-    if st.get("progressPhase"):
-        return {
-            "pct": _num_max(st.get("progressPct"), prog.get("pct"), hist.get("pct")),
-            "phase": st.get("progressPhase") or prog.get("phase") or hist.get("phase"),
-            "detail": detail,
-            "ready": bool(st.get("progressReady") or prog.get("ready") or hist.get("ready")),
-            "symbol": st.get("progressSymbol") or prog.get("symbol") or "",
-            "setId": st.get("progressSetId") or prog.get("setId") or "",
-            "symbolsDone": _num_max(st.get("progressSymbolsDone"), prog.get("symbolsDone")),
-            "symbolsTotal": _num_max(st.get("progressSymbolsTotal"), prog.get("symbolsTotal")),
-            "setsDone": _num_max(st.get("progressSetsDone"), prog.get("setsDone")),
-            "setsTotal": _num_max(st.get("progressSetsTotal"), prog.get("setsTotal")),
-            "barsDone": _num_max(st.get("progressBarsDone"), prog.get("barsDone")),
-            "barsTotal": _num_max(st.get("progressBarsTotal"), prog.get("barsTotal")),
-            "elapsedMs": _num_max(st.get("progressElapsedMs"), prog.get("elapsedMs")),
-            "lastRunMs": _num_max(st.get("progressLastRunMs"), prog.get("lastRunMs")),
-            "cycle": _num_max(st.get("progressCycle"), prog.get("cycle")),
-            "error": st.get("progressError") or prog.get("error") or "",
-        }
-    hist_phase = str(hist.get("phase") or "")
-    if hist_phase in ("backfill", "fetch", "gap", "initial", "catalog", "replay", "score", "partial") and str(prog.get("phase") or "idle") in ("idle", "ready", ""):
-        prog = {
-            **prog,
-            "phase": hist.get("phase"),
-            "pct": hist.get("pct") if hist.get("pct") is not None else prog.get("pct"),
-            "detail": hist.get("detail") or prog.get("detail"),
-            "ready": hist.get("ready") if hist.get("ready") is not None else prog.get("ready"),
-        }
-    return prog
-
-
-def lane_summary(lane: dict, st: dict | None = None) -> dict:
-    if st is None:
-        st = load_stats(lane["id"])
-    gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) > 0)
-    gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) < 0))
-    pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
-    sets = st.get("sets") or {}
+    prog = sets.get("progress") or {}
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{lane['id']}")) or os.path.exists(STOP_ALL_PATH)
-    paused = bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}"))
     state = unit_state(lane["id"])
-    prog = dict(_lane_progress(st))
-    # No systemd here: a historic calc is the lane, not a dead trading service.
-    if state == "unknown" and not stopped and not paused:
-        stamped = stamp_stats(st, lane["id"])
-        running = bool(stamped.get("running"))
-        halted = False
-        halt_reason = ""
-        prog = dict(stamped.get("progress") or prog)
-        alive = True
-        if isinstance(stamped.get("sets"), dict) and stamped.get("sets"):
-            sets = stamped["sets"]
-        if stamped.get("symbolCount"):
-            st = dict(st)
-            st["symbolCount"] = stamped.get("symbolCount")
-            if stamped.get("symbols"):
-                st["symbols"] = stamped.get("symbols")
-    else:
-        running = bool(st.get("running")) and state == "active" and not stopped and not paused
-        halted = bool(st.get("halted")) or stopped or paused or state != "active"
-        halt_reason = st.get("haltReason")
-        alive = bool(st) and state == "active"
-        if stopped:
-            halt_reason = "stopped"
-            prog.update(phase="stopped", detail="engine stopped; historic snapshot retained")
-        elif paused:
-            halt_reason = "paused"
-            prog.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
-        elif state != "active" and not halt_reason:
-            halt_reason = "service failed" if state == "failed" else "service inactive"
-            prog.update(phase="error" if state == "failed" else "deferred", detail=halt_reason)
-    groups = _position_group_count(st, default=0)
-    orders = _real_order_count(st, default=0)
-    live_groups = _live_position_count(st, default=-1)
+    age = stats_age(lane["id"])
+    stale = age > 20
+    running = bool(st.get("running")) and state == "active" and not stopped and not stale
+    halted = bool(st.get("halted")) or stopped or state != "active" or stale
+    halt_reason = st.get("haltReason")
+    if stopped:
+        halt_reason = "stopped"
+    elif stale and not halt_reason:
+        halt_reason = "stats stale"
+    elif state != "active" and not halt_reason:
+        halt_reason = "service failed" if state == "failed" else "service inactive"
     return {
         "type": lane["type"],
         "id": lane["id"],
         "label": lane["label"],
-        "systemId": st.get("systemId") or CTS_G_NAME,
-        "connection": lane["id"],
-        "trackingScope": st.get("trackingScope") or f"{CTS_G_NAME}:{lane['id']}",
-        "trackPrefix": st.get("trackPrefix") or (st.get("engine") or {}).get("trackPrefix") or "",
         "unit": lane["unit"],
         "exchange": st.get("exchange") or lane["exchange"],
         "mode": st.get("mode"),
@@ -2099,52 +467,26 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "halted": halted,
         "haltReason": halt_reason,
         "svcActive": state == "active",
-        "statsAgeS": round(stats_age(lane["id"]), 1),
-        "equity": _report_number(st.get("systemEquity", st.get("equity"))),
-        "systemEquity": _report_number(st.get("systemEquity", st.get("equity"))),
-        "systemStartEquity": _report_number(st.get("systemStartEquity", st.get("startEquity"))),
-        "walletEquity": _report_number(st["walletEquity"]) if st.get("walletEquity") is not None else None,
-        "walletOwnEquity": st.get("walletOwnEquity"),
-        "accountNetSinceStart": st.get("accountNetSinceStart"),
-        "modelVsAccountGap": st.get("modelVsAccountGap"),
-        "returnOnEquityPct": st.get("returnOnEquityPct"),
-        "balanceAgeS": st.get("balanceAgeS"),
-        "stale": bool(st.get("stale")),
-        "available": _report_number(st.get("available")),
-        "usedMargin": _report_number(st.get("usedMargin")),
-        "unrealized": _report_number(st.get("systemUnrealized", st.get("unrealized"))),
-        "systemUnrealized": _report_number(st.get("systemUnrealized", st.get("unrealized"))),
-        "walletUnrealized": _report_number(st.get("walletUnrealized", st.get("unrealized"))),
-        "realizedPnl": _report_number(st.get("systemRealized", st.get("realizedPnl"))),
-        "systemRealized": _report_number(st.get("systemRealized", st.get("realizedPnl"))),
+        "statsAgeS": round(age, 1),
+        "stale": stale,
+        "equity": st.get("equity") or 0,
+        "available": st.get("available") or 0,
+        # None when the lane does not report margin: the overall view must not turn a missing field into 0
+        "usedMargin": st.get("usedMargin"),
         "pnlPct": st.get("pnlPct"),
-        "tradedNotional": st.get("tradedNotional"),
-        "foreignRealized": st.get("foreignRealized") or 0,
-        "foreignUnrealized": st.get("foreignUnrealized") or 0,
-        "foreignExposure": st.get("foreignExposure") or 0,
-        "foreignPositionCount": st.get("foreignPositionCount") or 0,
-        "foreignOpenOrderCount": st.get("foreignOpenOrderCount") or 0,
+        "drawdownPct": st.get("drawdownPct"),
+        "maxOpen": st.get("maxOpen"),
+        "unrealized": st.get("unrealized") or 0,
         "openCount": st.get("openCount") or 0,
-        "realPositionCount": groups,
-        "realPositionGroupCount": groups,
-        "realOrderCount": orders if orders >= 0 else 0,
-        "exchangeOpenCount": st.get("exchangeOpenCount", -1),
-        "livePositionCount": live_groups if live_groups >= 0 else st.get("livePositionCount", st.get("exchangeOwnOpenCount", st.get("exchangeOpenCount", -1))),
-        "liveOrderCount": st.get("liveOrderCount", -1),
-        "liveTotalOrderCount": st.get("liveTotalOrderCount", -1),
-        "simOpenCount": st.get("simOpenCount", -1),
-        "simUPnl": st.get("simUPnl", 0),
         "wins": st.get("wins") or 0,
         "losses": st.get("losses") or 0,
         "sessionPnl": st.get("sessionPnl") or 0,
-        "systemPnl": st.get("systemPnl") or st.get("sessionPnl") or 0,
-        "systemGrow": st.get("systemGrow") or 0,
-        "systemLoss": st.get("systemLoss") or 0,
-        "pf": round(pf, 3),
+        "pf": round(pf, 3) if pf is not None else None,
+        "pfUsdt": round(pf_usdt, 3),
         "scanMs": st.get("scanMs"),
         "rssMb": st.get("rssMb"),
         "errors": st.get("errors") or 0,
-        "alive": alive,
+        "alive": bool(st) and state == "active",
         "paused": bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}")),
         "progressPct": prog.get("pct"),
         "progressPhase": prog.get("phase"),
@@ -2161,115 +503,25 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "progressElapsedMs": prog.get("elapsedMs"),
         "progressLastRunMs": prog.get("lastRunMs"),
         "progressCycle": prog.get("cycle"),
-        "validatedSetCount": sets.get("validatedCount") or 0,
-        "setCount": sets.get("setCount") or 0,
-        "entryPolicy": (st.get("pulse") or {}).get("entryPolicy") or sets.get("entryPolicy"),
-        "executionEvidence": st.get("executionEvidence") or {},
         "progressError": prog.get("error") or "",
+        "progressErrors": prog.get("errors") or 0,
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
-        "pfCost": pc.get("ratio"),
+        "pfCost": pc.get("pf"),
+        "pfDetail": pc or None,   # the lane's own PF block: a lane view must not inherit the overall one
+        "costModel": st.get("costModel"),
         "controlsOk": cov.get("ok") or 0,
         "controlsMissing": cov.get("missing") or 0,
-        "controlPairsOk": cov.get("protectedPairs") if cov.get("protectedPairs") is not None else cov.get("ok") or 0,
-        "controlPairsExpected": cov.get("expectedPairs") if cov.get("expectedPairs") is not None else cov.get("pairCount") or 0,
-        "controlPairsMissing": cov.get("pairGaps") if cov.get("pairGaps") is not None else cov.get("missing") or 0,
-        "controlMemberOk": cov.get("memberProtected") if cov.get("memberProtected") is not None else cov.get("ok") or 0,
-        "controlMemberMissing": cov.get("memberMissing") if cov.get("memberMissing") is not None else cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
         "symbolCount": st.get("symbolCount") or len(st.get("symbols") or []),
-        "symbolCap": int(st.get("symbolCap") or st.get("symbolMax") or 0),
-        "maxOpen": int(st.get("maxOpen") or 0),
-        "drawdownPct": _report_number(st.get("drawdownPct")),
         "lastError": _short_err(st.get("lastError")),
+        "trackPrefix": eng.get("trackPrefix"),
         "cycle": st.get("cycle"),
-        "loadLevel": (st.get("load") or {}).get("level") if isinstance(st.get("load"), dict) else (eng.get("load") or {}).get("level") if isinstance(eng.get("load"), dict) else st.get("loadLevel"),
-        "load": st.get("load") if isinstance(st.get("load"), dict) else (eng.get("load") if isinstance(eng.get("load"), dict) else {}),
     }
 
 
-def merge_activity_summaries(summaries: list) -> dict:
-    """Aggregate committed event ledgers without re-counting event tails."""
-    scalar_keys = (
-        "eventCount", "grossPnl", "fees", "duplicateCount", "requestCount", "responseCount",
-        "fillCount", "openEventCount", "closeEventCount", "protectionEventCount", "cancellationCount",
-        "errorCount", "internalClosed", "pendingCount", "recoveredCount", "discrepantCount",
-    )
-    out = {key: 0 for key in scalar_keys}
-    out.update({"internalOpen": 0, "internalPositionGroups": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
-    exchange_known = True
-    parity_bad = False
-    parity_pending = False
-
-    def add_map(target: dict, source: object) -> None:
-        if not isinstance(source, dict):
-            return
-        for key, value in source.items():
-            if isinstance(value, dict):
-                bucket = target.setdefault(str(key), {})
-                for name, amount in value.items():
-                    try:
-                        bucket[str(name)] = int(bucket.get(str(name), 0) or 0) + int(amount or 0)
-                    except Exception:
-                        continue
-            else:
-                try:
-                    target[str(key)] = int(target.get(str(key), 0) or 0) + int(value or 0)
-                except Exception:
-                    continue
-
-    for summary in summaries:
-        if not isinstance(summary, dict):
-            continue
-        for key in scalar_keys:
-            try:
-                out[key] += float(summary.get(key) or 0) if key in ("grossPnl", "fees") else int(summary.get(key) or 0)
-            except Exception:
-                continue
-        try:
-            out["internalOpen"] += int(summary.get("internalOpen") or 0)
-            out["internalPositionGroups"] += int(summary.get("internalPositionGroups", summary.get("internalOpen")) or 0)
-        except Exception:
-            pass
-        try:
-            exchange = int(summary.get("exchangeOpen", -1))
-        except Exception:
-            exchange = -1
-        if exchange < 0:
-            exchange_known = False
-        else:
-            out["exchangeOpen"] += exchange
-        add_map(out["byType"], summary.get("byType"))
-        add_map(out["byStatus"], summary.get("byStatus"))
-        add_map(out["responseCodes"], summary.get("responseCodes"))
-        add_map(out["byIndication"], summary.get("byIndication"))
-        add_map(out["byStrategy"], summary.get("byStrategy"))
-        add_map(out["byAxis"], summary.get("byAxis"))
-        if summary.get("parity") == "discrepant":
-            parity_bad = True
-        elif summary.get("parity") == "pending":
-            parity_pending = True
-        tail = summary.get("tail")
-        if isinstance(tail, list):
-            out["tail"].extend(row for row in tail if isinstance(row, dict))
-    out["eventCount"] = int(out["eventCount"])
-    out["duplicateCount"] = int(out["duplicateCount"])
-    out["internalOpen"] = int(out["internalOpen"])
-    out["exchangeOpen"] = int(out["exchangeOpen"]) if exchange_known else -1
-    out["grossPnl"] = round(float(out["grossPnl"]), 8)
-    out["fees"] = round(float(out["fees"]), 8)
-    out["tail"] = sorted(out["tail"], key=lambda row: float(row.get("ts") or 0), reverse=True)[:32]
-    if parity_bad:
-        out["parity"] = "discrepant"
-    elif not exchange_known or parity_pending:
-        out["parity"] = "pending"
-    else:
-        out["parity"] = "match" if out["internalPositionGroups"] == out["exchangeOpen"] else "discrepant"
-    return out
-
-
-def _pick_detail(lane_defs: list, stats_by_id: dict | None = None) -> tuple:
-    loaded = [(lane, stats_by_id[lane["id"]] if stats_by_id is not None else load_stats(lane["id"])) for lane in lane_defs]
+def _pick_detail(lane_defs: list) -> tuple:
+    loaded = [(lane, load_stats(lane["id"])) for lane in lane_defs]
     for lane, st in loaded:
         if st and st.get("running") and not st.get("halted"):
             return lane, st
@@ -2279,37 +531,19 @@ def _pick_detail(lane_defs: list, stats_by_id: dict | None = None) -> tuple:
     return lane_defs[0], {}
 
 
-def merge_axis_enablement(states) -> dict:
-    """Overall visibility follows every lane's flags, never one chosen desk."""
-    axes = {}
-    for state in states:
-        runtime = (state.get("coord") or {}).get("axes")
-        if runtime is None:
-            runtime = ((state.get("coverage") or {}).get("coord") or {}).get("axes") or {}
-        for key, value in runtime.items():
-            axes.setdefault(key, {"enabled": False})
-            axes[key]["enabled"] = axes[key]["enabled"] or value.get("enabled") is True
-    return axes
-
-
 def merge_overall() -> dict:
-    # Read each desk once: counts, rows and progress belong to the same snapshot.
-    stats_by_id = {lane["id"]: load_stats(lane["id"]) for lane in LANES}
-    lanes = [lane_summary(l, stats_by_id[l["id"]]) for l in LANES]
+    lanes = [lane_summary(l) for l in LANES]
     opens = []
     closed = []
     tests = []
     wins = losses = errors = 0
-    running_any = any(l.get("running") and not l.get("halted") for l in lanes)
-    activity_summaries = []
+    running_any = False
+    stats_by_id = {}
     for lane in LANES:
-        st = stats_by_id[lane["id"]]
+        st = load_stats(lane["id"])
+        stats_by_id[lane["id"]] = st
         if not st:
             continue
-        if isinstance(st.get("activity"), dict):
-            activity_summaries.append(st["activity"])
-        elif isinstance((st.get("coverage") or {}).get("activity"), dict):
-            activity_summaries.append((st.get("coverage") or {})["activity"])
         wins += int(st.get("wins") or 0)
         losses += int(st.get("losses") or 0)
         errors += int(st.get("errors") or 0)
@@ -2325,522 +559,82 @@ def merge_overall() -> dict:
             q["connType"] = lane["type"]
             q["unit"] = lane["unit"]
             closed.append(q)
-        tests.extend({**test, "connection": lane["id"]} for test in (st.get("tests") or []) if isinstance(test, dict))
-    tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
+        tests.extend(st.get("tests") or [])
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
-    policy = overall_pf_policy(stats_by_id.values())
-    # PF / evaluation windows / kind+strategy stats read every desk's full
-    # close tape; only the displayed list is trimmed.
-    full_closed = list(reversed(closed))
-    closed = closed[:max(150, int(policy["n"] or LAST_N_DEFAULT))]
+    # live only when a lane is running, not halted and its stats are fresh: the lane summary already weighs file age
+    running_any = any(bool(x.get("running")) and not x.get("halted") and not x.get("stale") for x in lanes)
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
-    pc = last_n_cost_pf(full_closed, policy["n"], policy["costPct"])
-    pc["minPf"] = policy["minPf"]
-    pc["requiredSamples"] = policy["requiredSamples"]
-    pc["pass"] = bool(pc["count"] >= pc["requiredSamples"] and clears_pf(pc["ratio"], pc["minPf"]))
-    eval_need = max((int(_report_number((st.get("sets") or {}).get("enableNeed"))) for st in stats_by_id.values()), default=0)
-    pc["evaluationWindows"] = evaluation_windows(full_closed, policy["costPct"], required_samples=eval_need or policy["requiredSamples"])
-    detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
+    cost_pct = next((_cost_pct_of(stats_by_id[x["id"]]) for x in lanes if x["type"] == "live" and stats_by_id.get(x["id"])),
+                    POSITION_COST_PCT_DEFAULT)
+    pc = last_n_cost_pf([c for c in reversed(closed) if c.get("pnl_pct") is not None], 15, cost_pct)
+    pc["minPf"] = GATE_MIN_PF_DEFAULT
+    pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= GATE_MIN_PF_DEFAULT)
+    detail_lane, detail_st = _pick_detail(LANES)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
-    activity = merge_activity_summaries(activity_summaries)
     sets = dict(detail_st.get("sets") or {})
     sets["lanes"] = sets_lanes
-    # One desk's intern gate is not Overall evidence (PF is never merged across desks).
-    sets.pop("indGate", None)
-    overview = merge_overviews([(lane["label"], (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("overview")) for lane in LANES])
-    if overview is not None:
-        sets["overview"] = overview
-    # Each desk owns an independent catalog: valid/active numerators and the
-    # catalog/intern denominators are summed over the same lanes.
-    for key in ("setCount", "activeCount", "histFills", "liveFills", "liveProcessed", "liveActive"):
-        sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
-    valid_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("validatedCount") or 0) for lane in LANES]
-    shared_hist = any(
-        _hist_test_running((stats_by_id.get(lane["id"], {}) or {}).get("histTest") or {})
-        for lane in LANES
-    )
-    if shared_hist and valid_vals and max(valid_vals) == min(valid_vals):
-        # One Test Historic proof copied onto every desk. Do not add it twice.
-        sets["validatedCount"] = valid_vals[0]
-    else:
-        sets["validatedCount"] = sum(valid_vals)
-    intern_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("internSetCount") or 0) for lane in LANES]
-    catalog_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("catalogSetCount") or (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("setCount") or 0) for lane in LANES]
-    if shared_hist and intern_vals and max(intern_vals) == min(intern_vals):
-        # Same Test Historic intern book mirrored onto every desk.
-        sets["internSetCount"] = intern_vals[0]
-    else:
-        sets["internSetCount"] = sum(intern_vals)
-    sets["catalogSetCount"] = sum(catalog_vals)
-    lane_proc = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("processingCount") or 0) for lane in LANES]
-    # Both desks mirror one Test Historic run. Summing that copy paints 2x processing on Overall.
-    sets["processingCount"] = (max(lane_proc) if lane_proc else 0) if shared_hist else sum(lane_proc)
-    if not sets.get("setCount"):
-        # Offline historic jobs publish counts on the lane, not in a stats file.
-        sets["setCount"] = sum(int(l.get("setCount") or 0) for l in lanes)
-        sets["catalogSetCount"] = sets["catalogSetCount"] or sets["setCount"]
-        sets["validatedCount"] = sum(int(l.get("validatedSetCount") or 0) for l in lanes)
-    # Money is never summed across units: USDT (Mainnet) and VST (demo funds)
-    # are different currencies. The Overall money fields are the Mainnet lanes
-    # when one exists, else the VST lanes; both stay available per unit.
-    live_lanes = [l for l in lanes if str(l.get("type") or "") == "live"]
-    money_lanes = live_lanes or [l for l in lanes if str(l.get("type") or "") != "live"]
-    money_unit = "USDT" if live_lanes else "VST"
-    system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in money_lanes)
-    wallet_equity = sum(_report_number(l.get("walletEquity")) for l in money_lanes)
-    session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in money_lanes)
-    system_grow = sum(_report_number(l.get("systemGrow")) for l in money_lanes)
-    system_loss = sum(_report_number(l.get("systemLoss")) for l in money_lanes)
-    # Overall PnL % = system PnL over traded notional of the same unit. A lane
-    # with PnL but no published notional makes the ratio unknown, not 0%.
-    traded = 0.0
-    for l in money_lanes:
-        if l.get("tradedNotional") is None:
-            if _report_number(l.get("systemPnl", l.get("sessionPnl"))):
-                traded = None
-                break
-            continue
-        traded += _report_number(l.get("tradedNotional"))
-    pnl_pct = round(session_pnl / traded * 100.0, 3) if traded and traded > 1e-12 else None
-    caps = [int(l.get("maxOpen") or 0) for l in lanes]
-    max_open = 0 if any(c <= 0 for c in caps) else sum(caps)
-    symbol_cap = max((int(l.get("symbolCap") or 0) for l in lanes), default=0)
-    symbols = []
-    seen = set()
-    for st in stats_by_id.values():
-        if not isinstance(st, dict):
-            continue
-        for sym in st.get("symbols") or []:
-            if sym and sym not in seen:
-                seen.add(sym)
-                symbols.append(sym)
-    symbol_count = len(symbols) if symbols else max((int(l.get("symbolCount") or 0) for l in lanes), default=0)
-    if symbol_count > symbol_cap:
-        symbol_cap = symbol_count
     out = {
         "running": running_any,
         "mode": "OVERALL",
         "connection": "overall",
         "connType": "overall",
-        "unit": money_unit,
-        "moneyUnit": money_unit,
-        "moneyLanes": [l.get("id") for l in money_lanes],
+        "unit": "MIXED",
         "exchange": "All",
         "lanes": lanes,
         "slots": SLOTS,
-        "equity": system_equity,
-        "systemEquity": system_equity,
-        "walletEquity": wallet_equity,
-        "equityLive": _report_number(live.get("equity")),
-        "equityVst": _report_number(vst.get("equity")),
-        "walletEquityLive": _report_number(live.get("walletEquity")),
-        "walletEquityVst": _report_number(vst.get("walletEquity")),
-        "available": sum(_report_number(l.get("available")) for l in money_lanes),
-        "availableLive": _report_number(live.get("available")),
-        "availableVst": _report_number(vst.get("available")),
-        "usedMargin": sum(_report_number(l.get("usedMargin")) for l in money_lanes),
-        "unrealized": sum(_report_number(l.get("unrealized")) for l in money_lanes),
-        "stale": any(bool(l.get("stale")) for l in money_lanes),
-        "sessionPnl": session_pnl,
-        "systemPnl": session_pnl,
-        "systemGrow": system_grow,
-        "systemLoss": system_loss,
-        "sessionPnlLive": _report_number(live.get("systemPnl", live.get("sessionPnl"))),
-        "sessionPnlVst": _report_number(vst.get("systemPnl", vst.get("sessionPnl"))),
-        "systemGrowLive": _report_number(live.get("systemGrow")),
-        "systemLossLive": _report_number(live.get("systemLoss")),
-        "systemGrowVst": _report_number(vst.get("systemGrow")),
-        "systemLossVst": _report_number(vst.get("systemLoss")),
-        "pnlPct": pnl_pct,
-        "drawdownPct": max((_report_number(l.get("drawdownPct")) for l in money_lanes), default=0),
-        "foreignUnrealized": sum(_report_number(l.get("foreignUnrealized")) for l in money_lanes),
-        "foreignRealized": sum(_report_number(l.get("foreignRealized")) for l in money_lanes),
-        "foreignExposure": sum(_report_number(l.get("foreignExposure")) for l in money_lanes),
-        "foreignPositionCount": sum(int(_report_number(l.get("foreignPositionCount"))) for l in lanes),
-        "foreignOpenOrderCount": sum(int(_report_number(l.get("foreignOpenOrderCount"))) for l in lanes),
+        "equity": live.get("equity") or 0,
+        "equityLive": live.get("equity") or 0,
+        "equityVst": vst.get("equity") or 0,
+        "available": live.get("available") or 0,
+        "usedMargin": _sum_or_none(live, vst, "usedMargin"),
+        "unrealized": (live.get("unrealized") or 0) + (vst.get("unrealized") or 0),
+        "sessionPnl": (live.get("sessionPnl") or 0) + (vst.get("sessionPnl") or 0),
+        "sessionPnlLive": live.get("sessionPnl") or 0,
+        "sessionPnlVst": vst.get("sessionPnl") or 0,
+        # computed from the lanes, or null when a lane does not report the value (never a fake zero)
+        "pnlPct": round(100.0 * ((live.get("sessionPnl") or 0) + (vst.get("sessionPnl") or 0))
+                        / ((live.get("equity") or 0) + (vst.get("equity") or 0)), 4)
+                  if ((live.get("equity") or 0) + (vst.get("equity") or 0)) > 0 else None,
+        "drawdownPct": None,
         "wins": wins,
         "losses": losses,
         "winRate": round(wr, 1),
         "openCount": len(opens),
-        "realPositionCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
-        "realPositionGroupCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
-        "realOrderCount": _sum_known_int((l.get("realOrderCount") for l in lanes), unknown=0),
-        "exchangeOpenCount": _sum_known_int(_live_position_count(l) for l in lanes),
-        "livePositionCount": _sum_known_int(_live_position_count(l) for l in lanes),
-        "liveOrderCount": _sum_known_int(l.get("liveOrderCount") for l in lanes),
-        "liveTotalOrderCount": _sum_known_int(l.get("liveTotalOrderCount") for l in lanes),
-        "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
-        "simUPnl": round(sum(float(l.get("simUPnl") or 0) for l in lanes), 4),
-        "maxOpen": max_open,
-        "symbolCount": symbol_count,
-        "symbolCap": symbol_cap,
-        "symbolMax": symbol_cap,
+        "maxOpen": None,   # no account-wide cap: each lane has its own
         "open": opens,
         "closed": closed[:80],
-        "tests": tests[:24],
-        "activity": activity,
-        "events": activity.get("tail") or [],
+        "tests": tests[-24:],
         "errors": errors,
         "halted": not running_any,
+        "stale": bool(lanes) and all(bool(x.get("stale")) for x in lanes),
         "paused": any(bool(x.get("paused")) for x in lanes),
-        "symbols": symbols,
+        "symbols": sorted({str(p.get("symbol")) for p in opens if p.get("symbol")}),
         "now": __import__("time").time(),
         "pfCost": pc,
-        "profitFactor": pc.get("ratio"),
-        "pf": pc.get("ratio"),
+        "profitFactor": pc.get("pf"),
+        "pf": pc.get("pf"),
         "pfNeutral": 1.0,
         "pfPlus1xCost": 1.1,
         "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
         "detailConn": detail_lane.get("id"),
         "detailType": detail_lane.get("type"),
         "sets": sets,
-        "coord": {"axes": merge_axis_enablement(stats_by_id.values())},
     }
-    try:
-        cost = float((detail_st.get("pfCost") or {}).get("costPct") or POSITION_COST_PCT_DEFAULT)
-        out["byIndication"], out["byStrategy"], _ = overall_kind_strategy(
-            stats_by_id, cost=cost, detail_st=detail_st, sets_rows=sets.get("rows") or [],
-        )
-    except Exception:
-        pass
-    # Per-desk lanes that never mix: the 1h lane and the live edge guard
-    # (each judged on its own connection's exchange results).
-    out["htfByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("htf") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("htf")}
-    out["liveEdgeByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("liveEdge") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("liveEdge")}
-    out["sizingByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("sizing") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("sizing")}
-    for k in ("htf", "liveEdge", "sizing"):
-        if detail_st.get(k) is not None:
-            out[k] = detail_st.get(k)
     for k in DETAIL_KEYS:
-        if k in ("tests", "activity", "events"):
+        if k == "tests":
             continue
         if k in ("pfCost", "profitFactor", "pf", "pfNeutral", "pfPlus1xCost", "pfScale"):
             continue
-        if k in (
-            "coverage", "coord", "pulse", "indications", "engine", "variants",
-            "exits", "block", "dca", "api", "byIndication", "byStrategy",
-            "klinesTf", "signals", "prices", "regime", "cycle", "scanMs", "rssMb",
-            "forcedConfigs", "configEvidence", "lastError",
-        ):
-            continue
         if detail_st.get(k) is not None:
             out[k] = detail_st.get(k)
-    # Unique per-lane progress; overall follows the in-flight desk, not a blank "lanes" bar.
-    # Halted Live must not keep Overall in "waiting" while VST is ready.
-    _BUSY = {
-        "queued", "rank", "evaluate", "fetch", "replay", "score", "catalog",
-        "backfill", "gap", "partial", "initial", "incremental", "starting", "hist-test",
-    }
-    active_lanes = [l for l in lanes if l.get("running") and not l.get("halted")]
-    ready_lanes = [l for l in lanes if str(l.get("progressPhase") or "") == "ready"]
-    busy_lanes = [l for l in active_lanes if str(l.get("progressPhase") or "") in _BUSY]
-
-    def _lane_pct(row: dict):
-        try:
-            val = row.get("progressPct")
-            return float(val) if val is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    focus = None
-    if busy_lanes:
-        focus = min(
-            busy_lanes,
-            key=lambda row: (_lane_pct(row) is None, _lane_pct(row) if _lane_pct(row) is not None else 0.0),
-        )
-    elif active_lanes:
-        focus = active_lanes[0]
-    elif ready_lanes:
-        focus = ready_lanes[0]
-    overall_ready = all(bool(l.get("progressReady")) for l in active_lanes) if active_lanes else bool(ready_lanes)
-    if focus:
-        overall_phase = focus.get("progressPhase") or "ready"
-        overall_pct = _lane_pct(focus)
-        overall_detail = focus.get("progressDetail") or "per-connection"
-        overall_sets_done = focus.get("progressSetsDone")
-        overall_sets_total = focus.get("progressSetsTotal")
-        overall_symbols_done = focus.get("progressSymbolsDone")
-        overall_symbols_total = focus.get("progressSymbolsTotal")
-    else:
-        overall_phase = "lanes"
-        overall_pct = None
-        overall_detail = "per-connection"
-        overall_sets_done = None
-        overall_sets_total = None
-        overall_symbols_done = None
-        overall_symbols_total = None
-    if ready_lanes and not running_any:
-        out["halted"] = False
-        out["haltReason"] = ""
-    out["progress"] = {
-        "connection": "overall",
-        "connType": "overall",
-        "phase": overall_phase,
-        "pct": overall_pct,
-        "detail": overall_detail,
-        "ready": overall_ready,
-        "symbol": "",
-        "setId": "",
-        "symbolsDone": overall_symbols_done,
-        "symbolsTotal": overall_symbols_total,
-        "setsDone": overall_sets_done,
-        "setsTotal": overall_sets_total,
-        "barsDone": None,
-        "barsTotal": None,
-        "elapsedMs": None,
-        "lastRunMs": None,
-        "cycle": None,
-        "error": "",
-        "lanes": [
-            {
-                "connection": l.get("id"),
-                "connType": l.get("type"),
-                "phase": l.get("progressPhase"),
-                "pct": l.get("progressPct"),
-                "detail": l.get("progressDetail"),
-                "ready": l.get("progressReady"),
-                "symbolsDone": l.get("progressSymbolsDone"),
-                "symbolsTotal": l.get("progressSymbolsTotal"),
-                "setsDone": l.get("progressSetsDone"),
-                "setsTotal": l.get("progressSetsTotal"),
-            }
-            for l in lanes
-        ],
-    }
-    sets["progress"] = dict(out["progress"])
-    out["progressPhase"] = overall_phase
-    out["progressPct"] = overall_pct
-    out["progressDetail"] = overall_detail
-    out["progressReady"] = overall_ready
-    out["progressSetsDone"] = overall_sets_done
-    out["progressSetsTotal"] = overall_sets_total
-    try:
-        from hist_test import job_progress_view, off_progress_view
-        existing = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
-        on_blob = None
-        off_blob = None
-        for st in [existing] + [stats_by_id.get(lane["id"]) or {} for lane in LANES]:
-            if not isinstance(st, dict):
-                continue
-            blob = st if st is existing else (st.get("histTest") if isinstance(st.get("histTest"), dict) else {})
-            if not blob:
-                continue
-            if blob.get("enabled") is True or blob.get("ownsCatalog") is True:
-                on_blob = blob
-                break
-            if blob.get("enabled") is False or blob.get("ownsCatalog") is False or blob.get("phase") == "off":
-                if off_blob is None:
-                    off_blob = blob
-        if on_blob:
-            view = dict(on_blob)
-            try:
-                fresh = job_progress_view()
-            except Exception:
-                fresh = {}
-            if fresh:
-                for key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "positive", "ready", "detail", "byIndication", "byStrategy"):
-                    if fresh.get(key) is not None:
-                        view[key] = fresh.get(key)
-            if view.get("running") or not view.get("runningSets"):
-                try:
-                    if not fresh:
-                        fresh = job_progress_view()
-                    for key in ("phase", "pct", "detail", "validatedCount", "internSetCount", "runningSets", "symbols", "internSymbols", "positive", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy", "ready", "ownsCatalog", "enabled", "catalogSkipped", "running"):
-                        if fresh.get(key) is None:
-                            continue
-                        existing = view.get(key)
-                        if key == "processingCount" and existing is not None:
-                            continue
-                        if key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "positive", "ready", "detail", "byIndication", "byStrategy"):
-                            view[key] = fresh.get(key)
-                            continue
-                        if key in ("internSymbols", "symbols") and existing not in (None, [], ""):
-                            continue
-                        view[key] = fresh.get(key)
-                except Exception:
-                    pass
-            if fresh:
-                for key in ("ownsCatalog", "enabled", "catalogSkipped", "running"):
-                    if key in fresh and fresh.get(key) is not None:
-                        view[key] = fresh.get(key)
-            calc_busy = str(out.get("progressPhase") or "") in (
-                "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
-                "gap", "incremental", "queued", "partial", "catalog",
-            )
-            # A live catalog replay is the progress source. An idle Test Historic
-            # view must not paint "skip full catalog" over it, and a stopped
-            # empty test must not keep a stale ownsCatalog flag.
-            if (calc_busy and not view.get("running")) or (view.get("ownsCatalog") is False and not view.get("running")):
-                view["enabled"] = False
-                view["ownsCatalog"] = False
-                view["catalogSkipped"] = False
-                out["histTest"] = view
-                if isinstance(sets, dict):
-                    sets["histTest"] = view
-                detail_now = str(out.get("progressDetail") or "")
-                if "skip full catalog" in detail_now:
-                    out["progressDetail"] = str(view.get("detail") or "full catalog in play")
-                    out["progressReady"] = False
-                    out["progressPhase"] = "initial"
-                    prog = dict(out.get("progress") or {})
-                    prog["detail"] = out["progressDetail"]
-                    prog["ready"] = False
-                    prog["phase"] = "initial"
-                    out["progress"] = prog
-                    if isinstance(sets, dict):
-                        sets["progress"] = dict(prog)
-            else:
-                view["enabled"] = True
-                view["ownsCatalog"] = True
-                out["histTest"] = view
-                if isinstance(sets, dict):
-                    sets["histTest"] = view
-                # A running Test Historic replaces a frozen skip-catalog bar.
-                # An idle view must not hide a live catalog replay.
-                detail_now = str(out.get("progressDetail") or "")
-                phase_now = str(out.get("progressPhase") or "")
-                engine_scoring = phase_now in (
-                    "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
-                    "gap", "incremental", "partial", "catalog",
-                )
-                # A live catalog score stays on the bar. Test Historic only
-                # replaces a frozen ready / skip-catalog placeholder.
-                if view.get("running") and not engine_scoring and (
-                    "skip full catalog" in detail_now or phase_now in ("ready", "hist-test", "idle", "")
-                ):
-                    out["progressPhase"] = view.get("phase") or out.get("progressPhase")
-                    out["progressPct"] = view.get("pct") if view.get("pct") is not None else out.get("progressPct")
-                    out["progressDetail"] = view.get("detail") or out.get("progressDetail")
-                    out["progressReady"] = False
-                    prog = dict(out.get("progress") or {})
-                    prog["phase"] = out["progressPhase"]
-                    prog["pct"] = out["progressPct"]
-                    prog["detail"] = out["progressDetail"]
-                    prog["ready"] = False
-                    if view.get("setsDone") is not None:
-                        prog["setsDone"] = view.get("setsDone")
-                        out["progressSetsDone"] = view.get("setsDone")
-                    if view.get("setsTotal") is not None:
-                        prog["setsTotal"] = view.get("setsTotal")
-                        out["progressSetsTotal"] = view.get("setsTotal")
-                    out["progress"] = prog
-                    if isinstance(sets, dict):
-                        sets["progress"] = dict(prog)
-        else:
-            out["histTest"] = off_blob or off_progress_view()
-            if isinstance(sets, dict):
-                sets["histTest"] = out["histTest"]
-    except Exception:
-        pass
-    _attach_overall_surfaces(out, stats_by_id, LANES)
     return slim_for_ui(out)
 
 
-def _attach_overall_surfaces(out: dict, stats_by_id: dict, lanes: list) -> None:
-    """Overall is a desk, not a blank merge. Strategy flags, coverage and the
-    engine summary come from the lanes so the overview is not empty."""
-    if not isinstance(out, dict):
-        return
-    blobs = []
-    for lane in lanes:
-        st = stats_by_id.get(lane.get("id")) if isinstance(lane, dict) else None
-        if isinstance(st, dict):
-            blobs.append(st)
-    if not blobs:
-        return
-    if not isinstance(out.get("pulse"), dict):
-        pulses = [st.get("pulse") for st in blobs if isinstance(st.get("pulse"), dict)]
-        if pulses:
-            pulse = dict(pulses[0])
-            flags = (
-                "stratIndications", "stratGeneral", "stratBlock", "stratTrailing",
-                "stratDca", "dcaEnabled", "normalExecutionEnabled",
-            )
-            for flag in flags:
-                vals = [p.get(flag) for p in pulses if flag in p]
-                if not vals:
-                    continue
-                pulse[flag] = False if all(v is False for v in vals) else any(v is True for v in vals)
-            out["pulse"] = pulse
-    if not isinstance(out.get("coverage"), dict) or not out.get("coverage"):
-        covs = [st.get("coverage") for st in blobs if isinstance(st.get("coverage"), dict) and st.get("coverage")]
-        if covs:
-            def _px(cov: dict) -> int:
-                scan = cov.get("scan") if isinstance(cov.get("scan"), dict) else {}
-                try:
-                    return int(scan.get("px") or cov.get("px") or 0)
-                except (TypeError, ValueError):
-                    return 0
-            base = dict(max(covs, key=_px))
-            controls = dict(base.get("controls") or {})
-            for key in (
-                "ok", "missing", "open", "security", "pairCount", "groupCount", "mergedMembers",
-                "protectedPairs", "expectedPairs", "pairGaps", "memberProtected", "memberMissing",
-            ):
-                total = 0
-                seen = False
-                for cov in covs:
-                    ctrl = cov.get("controls") if isinstance(cov.get("controls"), dict) else {}
-                    if ctrl.get(key) is None:
-                        continue
-                    try:
-                        total += int(ctrl.get(key) or 0)
-                        seen = True
-                    except (TypeError, ValueError):
-                        continue
-                if seen:
-                    controls[key] = total
-            if controls:
-                base["controls"] = controls
-            strat: dict = {}
-            for cov in covs:
-                raw = cov.get("strategies") if isinstance(cov.get("strategies"), dict) else {}
-                for key, value in raw.items():
-                    strat[key] = bool(strat.get(key)) or bool(value)
-            if strat:
-                base["strategies"] = strat
-            if any(isinstance(cov.get("indicationTypes"), dict) for cov in covs):
-                base["indicationTypes"] = merge_indication_types(covs)
-            if any(isinstance(cov.get("indicationHits"), dict) for cov in covs):
-                base["indicationHits"] = _merge_kind_hits(cov.get("indicationHits") or {} for cov in covs)
-            recs =[cov.get("recon") for cov in covs if isinstance(cov.get("recon"), dict)]
-            if recs:
-                base["recon"] = {
-                    "ok": all(rec.get("ok") is not False for rec in recs) and not any(rec.get("pending") for rec in recs),
-                    "pending": any(bool(rec.get("pending")) for rec in recs),
-                    "detail": " · ".join(str(rec.get("detail") or "") for rec in recs if rec.get("detail"))[:180],
-                    "exchangePositionGroups": sum(int(rec.get("exchangePositionGroups") or 0) for rec in recs),
-                }
-            sets = dict(base.get("sets") or {})
-            for fat in ("qualifiedParentIds", "processingSetIds", "internSetIds", "byTrail", "bySl"):
-                sets.pop(fat, None)
-            base["sets"] = sets
-            for fat in ("history", "events", "activity"):
-                base.pop(fat, None)
-            out["coverage"] = base
-    for key in ("engine", "variants", "indications", "api", "exits", "block", "dca"):
-        if out.get(key) is not None:
-            continue
-        for st in blobs:
-            blob = st.get(key)
-            if not isinstance(blob, dict) or not blob:
-                continue
-            copied = dict(blob)
-            if key == "engine":
-                copied.pop("scanKeep", None)
-                load = copied.get("load")
-                if isinstance(load, dict):
-                    load = dict(load)
-                    load.pop("scanKeep", None)
-                    copied["load"] = load
-            out[key] = copied
-            break
-
-
 def connections_blob() -> dict:
-    lanes = [lane_summary(l) for l in LANES]
+    base_lanes = [lane_summary(l) for l in LANES]
+    lanes = base_lanes + [lane_summary(l) for l in EXTRA_LANES]
     return {
         "selectedDefault": "overall",
         "types": [
@@ -2848,21 +642,10 @@ def connections_blob() -> dict:
                 "type": "overall",
                 "label": "Overall",
                 "blurb": "All desks in parallel",
-                "running": any(l["running"] and not l["halted"] for l in lanes),
-                "openCount": sum(l["openCount"] for l in lanes),
-                "realPositionCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
-                "realPositionGroupCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
-                "realOrderCount": _sum_known_int((l.get("realOrderCount") for l in lanes), unknown=0),
-                "exchangeOpenCount": _sum_known_int(_live_position_count(l) for l in lanes),
-                "livePositionCount": _sum_known_int(_live_position_count(l) for l in lanes),
-                "liveOrderCount": _sum_known_int(l.get("liveOrderCount") for l in lanes),
-                "liveTotalOrderCount": _sum_known_int(l.get("liveTotalOrderCount") for l in lanes),
-                "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
-                "halted": all(l["halted"] or not l["running"] for l in lanes),
-                "progressReady": (
-                    all(bool(l.get("progressReady")) for l in lanes if l.get("running") and not l.get("halted"))
-                    if any(l.get("running") and not l.get("halted") for l in lanes) else False
-                ),
+                "running": any(l["running"] and not l["halted"] for l in base_lanes),
+                "openCount": sum(l["openCount"] for l in base_lanes),
+                "halted": all(l["halted"] or not l["running"] for l in base_lanes),
+                "progressReady": all(bool(l.get("progressReady")) for l in base_lanes) if base_lanes else False,
             },
             *[
                 {
@@ -2876,34 +659,15 @@ def connections_blob() -> dict:
                     "paused": l.get("paused"),
                     "equity": l["equity"],
                     "openCount": l["openCount"],
-                    # lane_summary already derived these from the raw snapshot.
-                    "realPositionCount": l["realPositionGroupCount"],
-                    "realPositionGroupCount": l["realPositionGroupCount"],
-                    "realOrderCount": l["realOrderCount"],
-                    "exchangeOpenCount": _live_position_count(l, default=-1),
-                    "livePositionCount": _live_position_count(l, default=-1),
-                    "liveOrderCount": l.get("liveOrderCount", -1),
-                    "liveTotalOrderCount": l.get("liveTotalOrderCount", -1),
-                    "simOpenCount": l.get("simOpenCount", -1),
-                    "simUPnl": l.get("simUPnl", 0),
                     "alive": l["alive"],
                     "progressPct": l.get("progressPct"),
                     "progressPhase": l.get("progressPhase"),
                     "progressReady": l.get("progressReady"),
-                    "progressDetail": l.get("progressDetail"),
-                    "progressSymbolsDone": l.get("progressSymbolsDone"),
-                    "progressSymbolsTotal": l.get("progressSymbolsTotal"),
-                    "progressSetsDone": l.get("progressSetsDone"),
-                    "progressSetsTotal": l.get("progressSetsTotal"),
                     "hotMs": l.get("hotMs"),
                     "pfCost": l.get("pfCost"),
                     "controlsOk": l.get("controlsOk"),
                     "controlsMissing": l.get("controlsMissing"),
-                    "entryPolicy": l.get("entryPolicy"),
-                    "executionEvidence": l.get("executionEvidence"),
                     "symbolCount": l.get("symbolCount"),
-                    "symbolCap": l.get("symbolCap"),
-                    "maxOpen": l.get("maxOpen"),
                     "haltReason": l.get("haltReason"),
                 }
                 for l in lanes
@@ -2920,30 +684,27 @@ class Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         msg = fmt % args
-        if "GET /stats.json" in msg or "GET /universe.json" in msg or "GET /connections.json" in msg or "GET /connection.json" in msg:
+        if "GET /stats.json" in msg or "GET /universe.json" in msg or "GET /connections.json" in msg:
             return
         try:
             path = os.path.join(DIR, "http.log")
-            append_bounded_line(path, "%s - %s\n" % (self.address_string(), msg))
+            with open(path, "a") as f:
+                f.write("%s - %s\n" % (self.address_string(), msg))
         except Exception:
             pass
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # no wildcard: only the origins named in PULSE_HTTP_CORS_ORIGINS are echoed back
+        origin = (self.headers.get("Origin") or "") if getattr(self, "headers", None) else ""
+        if origin and origin in CORS_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Pulse-Token")
         self.send_header("Cache-Control", "no-store")
 
     def _json(self, obj, code=200):
-        try:
-            blob = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
-        except ValueError:  # NaN/Infinity is not JSON; browsers reject the whole payload
-            from stats_report import finite_json
-            blob = json.dumps(finite_json(obj), separators=(",", ":"), allow_nan=False).encode()
-        if len(blob) > MAX_JSON_RESPONSE_BYTES:
-            obj = {"ok": False, "detail": "response exceeds bounded payload limit"}
-            code = 500
-            blob = json.dumps(obj, separators=(",", ":")).encode()
+        blob = json.dumps(obj, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(blob)))
@@ -2962,233 +723,79 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        normalized_path = "/" + os.path.normpath(unquote(path)).lstrip("/")
-        if normalized_path == "/statistics" or normalized_path.startswith("/statistics/"):
-            self._json({"ok": False, "detail": "statistics files are private; use the status endpoint"}, 404)
-            return
         conn = resolve_conn(qs(self.path).get("conn", ""))
-        if path == "/system.json":
-            if conn == "overall":
-                self._json({"connection": "overall", "lanes": [read_status(DIR, lane["id"]) for lane in LANES], "sharedDatabase": redis_health()})
-            elif conn in ID_TO_LANE:
-                self._json({**read_status(DIR, conn), "sharedDatabase": redis_health()})
-            else:
-                self._json({"ok": False, "detail": "pick a known connection"}, 400)
-            return
         if path in ("/connections.json", "/connections"):
             self._json(connections_blob())
             return
-        if path in ("/connection.json", "/connection"):
-            self._json(connection_public(conn))
-            return
-        if path in ("/results-export.json", "/results-export", "/results-export.md", "/results-export.html"):
-            ext = ".html" if path.endswith(".html") else ".md" if path.endswith(".md") else ".json"
-            if conn != "overall" and conn not in ID_TO_LANE:
-                self._json({"ok": False, "detail": "unknown connection"}, 404)
-                return
-
-            raw: bytes
+        if path in ("/results-export.json", "/results-export", "/results-export.md"):
+            ext = ".md" if path.endswith(".md") else ".json"
             if conn == "overall":
                 live = load_stats("bingx-x01")
                 vst = load_stats("bingx-x02")
-                if ext == ".html" or ext == ".md":
-                    from stats_report import build as build_report, render_html, render_md
-                    state = overall_report_state(live, vst)
-                    cost_pct = _report_number((state.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
-                    report = build_report(state, cost_pct=cost_pct, conn="overall")
-                    raw = (render_html(report) if ext == ".html" else render_md(report)).encode("utf-8")
-                else:
-                    blob = {
-                        "conn": "overall",
-                        "connType": "overall",
-                        "live": {
-                            "connection": "bingx-x01",
-                            "openCount": live.get("openCount") or 0,
-                            "exchangeOpenCount": live.get("exchangeOpenCount", -1),
-                            "simOpenCount": live.get("simOpenCount", -1),
-                            "equity": live.get("equity"),
-                            "pfCost": live.get("pfCost"),
-                            "open": live.get("open") or [],
-                            "closed": live.get("closed") or [],
-                        },
-                        "vst": {
-                            "connection": "bingx-x02",
-                            "openCount": vst.get("openCount") or 0,
-                            "exchangeOpenCount": vst.get("exchangeOpenCount", -1),
-                            "simOpenCount": vst.get("simOpenCount", -1),
-                            "equity": vst.get("equity"),
-                            "pfCost": vst.get("pfCost"),
-                            "open": vst.get("open") or [],
-                            "closed": vst.get("closed") or [],
-                        },
-                    }
-                    raw = json.dumps(blob, separators=(",", ":")).encode()
-            else:
-                cid = conn
-                p = os.path.join(DIR, f"results-export-{cid}{ext}")
+                blob = {
+                    "conn": "overall",
+                    "connType": "overall",
+                    "live": {
+                        "connection": "bingx-x01",
+                        "openCount": live.get("openCount") or 0,
+                        "equity": live.get("equity"),
+                        "pfCost": live.get("pfCost"),
+                        "open": live.get("open") or [],
+                        "closed": live.get("closed") or [],
+                    },
+                    "vst": {
+                        "connection": "bingx-x02",
+                        "openCount": vst.get("openCount") or 0,
+                        "equity": vst.get("equity"),
+                        "pfCost": vst.get("pfCost"),
+                        "open": vst.get("open") or [],
+                        "closed": vst.get("closed") or [],
+                    },
+                }
+                raw = json.dumps(blob, separators=(",", ":")).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Disposition", 'attachment; filename="pulse-results-overall.json"')
+                self.send_header("Content-Length", str(len(raw)))
+                self._cors()
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            cid = conn
+            p = os.path.join(DIR, f"results-export-{cid}{ext}")
+            if not os.path.exists(p):
                 st = load_stats(cid)
-                if os.path.exists(p):
-                    with open(p, "rb") as export_file:
-                        raw = export_file.read()
-                elif not st:
+                if not st:
                     self._json({"ok": False, "detail": "no export yet"}, 404)
                     return
-                elif ext == ".html" or ext == ".md":
-                    from stats_report import build as build_report, render_html, render_md
-                    cost_pct = _report_number((st.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
-                    report = build_report(st, cost_pct=cost_pct, conn=cid)
-                    raw = (render_html(report) if ext == ".html" else render_md(report)).encode("utf-8")
-                else:
-                    raw = json.dumps({
-                        "conn": cid,
-                        "connType": "vst" if "x02" in cid else "live",
-                        "openCount": st.get("openCount") or 0,
-                        "exchangeOpenCount": st.get("exchangeOpenCount", -1),
-                        "simOpenCount": st.get("simOpenCount", -1),
-                        "equity": st.get("equity"),
-                        "pfCost": st.get("pfCost"),
-                        "open": st.get("open") or [],
-                        "closed": st.get("closed") or [],
-                        "sets": st.get("sets"),
-                        "block": st.get("block"),
-                        "coverage": st.get("coverage"),
-                    }, separators=(",", ":")).encode()
-
-            max_bytes = MAX_HTML_RESPONSE_BYTES if ext == ".html" else MAX_JSON_RESPONSE_BYTES
-            if len(raw) > max_bytes:
-                self._json({"ok": False, "detail": "export exceeds bounded payload limit"}, 500)
+                raw = json.dumps({
+                    "conn": cid,
+                    "connType": "vst" if "x02" in cid else "live",
+                    "openCount": st.get("openCount") or 0,
+                    "equity": st.get("equity"),
+                    "pfCost": st.get("pfCost"),
+                    "open": st.get("open") or [],
+                    "closed": st.get("closed") or [],
+                    "sets": st.get("sets"),
+                    "block": st.get("block"),
+                    "coverage": st.get("coverage"),
+                }, separators=(",", ":")).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Disposition", f'attachment; filename="pulse-results-{cid}.json"')
+                self.send_header("Content-Length", str(len(raw)))
+                self._cors()
+                self.end_headers()
+                self.wfile.write(raw)
                 return
-            content_type = {
-                ".html": "text/html; charset=utf-8",
-                ".md": "text/markdown; charset=utf-8",
-                ".json": "application/json",
-            }[ext]
-            disposition = "inline" if ext == ".html" else "attachment"
-            filename = f"pulse-results-{conn}{ext}"
+            raw = open(p, "rb").read()
             self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
+            self.send_header("Content-Type", "text/markdown" if ext == ".md" else "application/json")
+            self.send_header("Content-Disposition", f'attachment; filename="pulse-results-{cid}{ext}"')
             self.send_header("Content-Length", str(len(raw)))
             self._cors()
             self.end_headers()
-            try:
-                self.wfile.write(raw)
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                return
-            return
-        if path in ("/user-presets.json", "/user-presets"):
-            try:
-                rows = PRESET_STORE.list()
-            except Exception:
-                rows = []
-            self._json({"ok": True, "presets": rows, "system": True, "max": 24})
-            return
-        if path in ("/hist-test.json", "/hist-test"):
-            try:
-                from hist_test import read_job, job_is_running, job_is_paused, job_progress_view
-                blob = read_job()
-                view = job_progress_view(blob)
-                blob["ok"] = True
-                blob["running"] = job_is_running(blob)
-                blob["paused"] = job_is_paused(blob)
-                blob["independent"] = True
-                blob["shared"] = False
-                if view.get("internSetCount") is not None:
-                    blob["internSetCount"] = view.get("internSetCount")
-                if view.get("validatedCount") is not None:
-                    blob["validatedCount"] = view.get("validatedCount")
-                intern_syms = [str(s).strip().upper() for s in (view.get("internSymbols") or []) if str(s or "").strip()]
-                intern_keys = {s.upper() for s in intern_syms}
-                if intern_syms:
-                    # internSymbols is the engine's intern pool; "symbols" and
-                    # "positive" stay what this run evaluated and validated.
-                    blob["internSymbols"] = intern_syms
-                    raw_pos = blob.get("positive") or []
-                    if isinstance(raw_pos, list):
-                        kept = []
-                        for item in raw_pos:
-                            name = item if isinstance(item, str) else (item.get("symbol") if isinstance(item, dict) else "")
-                            if str(name or "").strip().upper() in intern_keys:
-                                kept.append(item if isinstance(item, str) else name)
-                        blob["positive"] = kept
-                    raw_rej = blob.get("rejected") or []
-                    if isinstance(raw_rej, list):
-                        cleaned = []
-                        for item in raw_rej:
-                            name = item if isinstance(item, str) else (item.get("symbol") if isinstance(item, dict) else "")
-                            if str(name or "").strip().upper() in intern_keys:
-                                cleaned.append(item)
-                        blob["rejected"] = cleaned
-                elif view.get("internSymbols") is not None:
-                    blob["internSymbols"] = view.get("internSymbols")
-                if view.get("ready") is not None:
-                    blob["ready"] = view.get("ready")
-                for key in ("byIndication", "byStrategy", "selectedCoordinations", "runningSets", "processingCount", "internSymbols", "pfStats", "processedSetCount"):
-                    if view.get(key) is not None and (key in ("internSymbols", "processedSetCount", "processingCount") or not blob.get(key)):
-                        blob[key] = view.get(key)
-                if view.get("detail"):
-                    blob["detail"] = view.get("detail")
-                self._json(blob)
-            except Exception as exc:
-                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)
-            return
-        if path in ("/hist-calc.json", "/hist-calc"):
-            try:
-                from hist_calc import public_presets, read_job, job_is_running
-                blob = read_job(conn)
-                if not blob.get("presets"):
-                    blob["presets"] = public_presets()
-                blob["ok"] = True
-                blob["connection"] = conn
-                blob["shared"] = True
-                blob["independent"] = False
-                blob["running"] = job_is_running(blob)
-                blob["continuous"] = bool(blob.get("continuous") or blob.get("nextRunAt") or blob.get("ready"))
-                self._json(blob)
-            except Exception as exc:
-                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
-            return
-        if path in ("/progress.json", "/progress"):
-            if conn == "overall":
-                progress_lanes = []
-                for lane in LANES:
-                    lane_stats = stamp_stats(load_stats(lane["id"]), lane["id"])
-                    progress_lanes.append(lane_stats.get("progress") or {})
-                self._json({
-                    "ok": True,
-                    "connection": "overall",
-                    "phase": "aggregate",
-                    "ready": bool(progress_lanes) and all(bool(item.get("ready")) for item in progress_lanes),
-                    "lanes": progress_lanes,
-                })
-                return
-            if conn not in ID_TO_LANE:
-                self._json({"ok": False, "detail": "pick a known connection"}, 400)
-                return
-            raw_progress_stats = load_stats(conn)
-            if not raw_progress_stats:
-                self._json({"ok": False, "connection": conn, "phase": "offline", "ready": False}, 404)
-                return
-            progress_stats = stamp_stats(raw_progress_stats, conn)
-            progress = dict(progress_stats.get("progress") or {})
-            sets = progress_stats.get("sets") if isinstance(progress_stats.get("sets"), dict) else {}
-            pulse = progress_stats.get("pulse") if isinstance(progress_stats.get("pulse"), dict) else {}
-            progress.update({
-                "connection": conn,
-                "setCount": sets.get("setCount"),
-                "activeSetCount": sets.get("activeCount"),
-                "validatedSetCount": sets.get("validatedCount"),
-                "histFills": sets.get("histFills"),
-                "entryPolicy": pulse.get("entryPolicy") or sets.get("entryPolicy"),
-                "entryPolicyMinLiveSamples": (
-                    pulse.get("entryPolicyMinLiveSamples")
-                    if pulse.get("entryPolicyMinLiveSamples") is not None
-                    else sets.get("entryPolicyMinLiveSamples")
-                ),
-                "statsAgeS": progress_stats.get("statsAgeS"),
-                "stale": bool(progress_stats.get("stale")),
-            })
-            self._json(progress)
+            self.wfile.write(raw)
             return
         if path in ("/config.json", "/config"):
             if conn == "overall":
@@ -3202,33 +809,7 @@ class Handler(SimpleHTTPRequestHandler):
                     ],
                 })
                 return
-            ov = load_overlay(conn)
-            entry_candidate_cap = ov.get("entryPolicyMaxCandidates")
-            if entry_candidate_cap is None:
-                entry_candidate_cap = ov.get("liveTestCandidates")
-            self._json({
-                "cts": load_cts(conn),
-                "overlay": ov,
-                "conn": conn,
-                "connType": "vst" if "x02" in conn else "live",
-                "symbolCap": ov.get("symbolCap"),
-                "symbolsAll": ov.get("symbolsAll"),
-                "histLookbackBars": ov.get("histLookbackBars"),
-                "maxOpen": ov.get("maxOpen"),
-                "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
-                "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
-                "entryPolicyMaxCandidates": entry_candidate_cap,
-                "entryPolicyMinLiveSamples": (
-                    ov.get("entryPolicyMinLiveSamples")
-                    if ov.get("entryPolicyMinLiveSamples") is not None
-                    else ov.get("liveTestMinSamples")
-                ),
-                "controlOrders": ov.get("controlOrders"),
-                "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
-                "dcaEnabled": ov.get("dcaEnabled"),
-                "blockActive": ov.get("blockActive"),
-                "blockOverall": ov.get("blockOverall"),
-            })
+            self._json({"cts": load_cts(conn), "overlay": load_overlay(conn), "conn": conn})
             return
         if path in ("/stats.json", "/live-stats.json"):
             if conn == "overall":
@@ -3245,195 +826,27 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path in MUTATING_PATHS:
+            if not HTTP_TOKEN:
+                self.close_connection = True
+                self._json({"ok": False, "detail": "PULSE_HTTP_TOKEN is not set on the sidecar"}, 403)
+                return
+            if not _token_ok(self.headers.get("X-Pulse-Token", "")):
+                self.close_connection = True
+                self._json({"ok": False, "detail": "missing or wrong X-Pulse-Token"}, 403)
+                return
         conn = resolve_conn(qs(self.path).get("conn", ""))
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except (TypeError, ValueError):
-            self.send_error(400, "invalid content length")
-            return
-        if n < 0 or n > MAX_REQUEST_BYTES:
-            self._json({"ok": False, "detail": "request exceeds bounded payload limit"}, 413)
-            return
+        n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode() or "{}")
         except Exception:
             self.send_error(400, "invalid json")
             return
-        if path == "/system.json":
-            # The dashboard proxy is local. Reject direct cross-origin browser
-            # writes to this maintenance endpoint even though old GETs use CORS.
-            origin = self.headers.get("Origin", "")
-            host = self.headers.get("Host", "").split(":", 1)[0]
-            if origin and urlparse(origin).hostname != host:
-                self._json({"ok": False, "detail": "same-origin maintenance required"}, 403)
-                return
-            if conn not in ID_TO_LANE or not isinstance(body, dict):
-                self._json({"ok": False, "detail": "select one connection for maintenance"}, 400)
-                return
-            if not (lane_directory(DIR, conn) / "statistics.sqlite3").exists():
-                self._json({"ok": False, "detail": "statistics database has not been initialized"}, 409)
-                return
-            store = None
-            try:
-                action = body.get("action")
-                if action not in ("backup", "compact", "reset"):
-                    raise ValueError("choose backup, compact or reset")
-                result = memory_request(DIR, conn, body)
-                if result is not None:
-                    self._json(result)
-                    return
-                # Maintenance may wait briefly for the telemetry writer. This
-                # does not change the short timeout on the engine's own store.
-                with owner_guard(DIR, conn):
-                    recover_durable_journal(DIR, conn, guarded=True)
-                    store = StatisticsStore(DIR, conn, load_overlay(conn), timeout=2.0)
-                    try:
-                        if action == "reset":
-                            result = store.reset(body.get("scope"), body.get("confirmation"))
-                        elif action == "backup":
-                            result = {"ok": True, "detail": "Verified statistics backup saved", "backup": store.backup()}
-                        else:
-                            store.maintain()
-                            result = {"ok": True, "detail": "Expired details pruned and database compacted; totals preserved"}
-                    finally:
-                        store.close()
-                        store = None
-                self._json(result)
-            except ValueError as exc:
-                self._json({"ok": False, "detail": str(exc)}, 400)
-            except Exception as exc:
-                self._json({"ok": False, "detail": f"Maintenance response unavailable: {type(exc).__name__}; check database status before retrying"}, 503)
-            finally:
-                if store:
-                    store.close()
-            return
         if path in ("/control.json", "/control"):
             action = str((body or {}).get("action") or "").lower().strip()
-            target = conn or "overall"
-            ok, detail = apply_control(target, action)
-            ids = [l["id"] for l in LANES] if target == "overall" else ([target] if target in ID_TO_LANE else [])
-            states = [control_state(cid) for cid in ids]
-            payload = {
-                "ok": ok,
-                "detail": detail,
-                "conn": target,
-                "action": action,
-                "lanes": states,
-            }
-            if len(states) == 1:
-                payload["state"] = states[0]
-            self._json(payload, 200 if ok else 400)
-            return
-        if path in ("/connection.json", "/connection"):
-            ok, detail, pub = save_connection(conn or "overall", body if isinstance(body, dict) else {})
-            blob = dict(pub or {})
-            blob["ok"] = ok
-            blob["detail"] = detail
-            self._json(blob, 200 if ok else 400)
-            return
-        if path in ("/user-presets.json", "/user-presets"):
-            body = body if isinstance(body, dict) else {}
-            action = str(body.get("action") or "save").lower().strip()
-            try:
-                if action in ("save", "create", "update"):
-                    row = PRESET_STORE.save(
-                        overlay=body.get("overlay") if isinstance(body.get("overlay"), dict) else {},
-                        name=str(body.get("name") or ""),
-                        calc_opt=body.get("calcOpt") if isinstance(body.get("calcOpt"), dict) else {},
-                        preset_id=str(body.get("id") or "") or None,
-                    )
-                    self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": f"saved {row.get('name')}"})
-                    return
-                if action in ("save_default", "default"):
-                    row = PRESET_STORE.save_default(
-                        overlay=body.get("overlay") if isinstance(body.get("overlay"), dict) else {},
-                        calc_opt=body.get("calcOpt") if isinstance(body.get("calcOpt"), dict) else {},
-                    )
-                    self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": "saved Default"})
-                    return
-                if action == "rename":
-                    row = PRESET_STORE.rename(str(body.get("id") or ""), str(body.get("name") or ""))
-                    if not row:
-                        self._json({"ok": False, "detail": "preset not found"}, 404)
-                        return
-                    self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": f"renamed {row.get('name')}"})
-                    return
-                if action == "delete":
-                    okd = PRESET_STORE.delete(str(body.get("id") or ""))
-                    detail = "deleted" if okd else "Default is protected or preset not found"
-                    self._json({"ok": okd, "presets": PRESET_STORE.list(), "detail": detail}, 200 if okd else 400)
-                    return
-                if action in ("delete_except_default", "cleanup"):
-                    removed = PRESET_STORE.delete_all_except_default()
-                    self._json({"ok": True, "removed": removed, "presets": PRESET_STORE.list(), "detail": f"deleted {removed} presets; Default kept"})
-                    return
-                if action == "load":
-                    row, applied = PRESET_STORE.apply(str(body.get("id") or ""), apply_all=body.get("applyAll") is not False)
-                    if not row:
-                        self._json({"ok": False, "detail": "preset not found"}, 404)
-                        return
-                    self._json({
-                        "ok": True,
-                        "preset": row,
-                        "overlay": row.get("overlay") or {},
-                        "calcOpt": row.get("calcOpt") or {},
-                        "applied": applied,
-                        "detail": f"loaded {row.get('name')}" + (" · Live + VST" if applied else ""),
-                    })
-                    return
-                self._json({"ok": False, "detail": f"unknown action {action}"}, 400)
-            except ValueError as exc:
-                self._json({"ok": False, "detail": str(exc)[:160]}, 400)
-            except Exception as exc:
-                self._json({"ok": False, "detail": str(exc)[:200]}, 200)
-            return
-        if path in ("/hist-test.json", "/hist-test"):
-            try:
-                from hist_test import start_test, stop_test, pause_test, resume_test, read_job, job_is_running, job_is_paused
-                action = str((body or {}).get("action") or "start").lower().strip()
-                if action == "stop":
-                    job = stop_test()
-                elif action == "pause":
-                    job = pause_test()
-                elif action == "resume":
-                    job = resume_test(body if isinstance(body, dict) else {})
-                else:
-                    start_body = dict(body) if isinstance(body, dict) else {}
-                    if not start_body.get("connection") and qs(self.path).get("conn"):
-                        start_body["connection"] = conn
-                    job = start_test(start_body)
-                    if job.get("ok") is False:
-                        self._json({**job, "independent": True, "shared": False}, 200)
-                        return
-                job["ok"] = True
-                job["running"] = job_is_running(job)
-                job["paused"] = job_is_paused(job)
-                job["independent"] = True
-                job["shared"] = False
-                self._json(job)
-            except Exception as exc:
-                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)
-            return
-        if path in ("/hist-calc.json", "/hist-calc"):
-            try:
-                from hist_calc import read_job, start_job, stop_job, job_is_running
-                action = str((body or {}).get("action") or "start").lower().strip()
-                if action == "stop":
-                    stop_result = stop_job(connection=conn)
-                    job = read_job(conn)
-                    job["ok"] = True
-                    job["running"] = False
-                    job["detail"] = "historic calculation stopped" if stop_result.get("killed") else "historic calculation stop requested"
-                    self._json(job)
-                    return
-                job = start_job(body if isinstance(body, dict) else {}, connection=conn)
-                job["ok"] = True
-                job["running"] = job_is_running(job)
-                _spawn_offline_calc(body if isinstance(body, dict) else {}, conn)
-                self._json(job)
-            except Exception as exc:
-                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
+            ok, detail = apply_control(conn or "overall", action)
+            self._json({"ok": ok, "detail": detail, "conn": conn or "overall", "action": action}, 200 if ok else 400)
             return
         if path not in ("/config.json", "/config"):
             self.send_error(404)
@@ -3442,117 +855,70 @@ class Handler(SimpleHTTPRequestHandler):
             self._json({"ok": False, "detail": "pick Live or VST to save overlay"}, 400)
             return
         overlay = body.get("overlay") if isinstance(body, dict) else None
-        if isinstance(body, dict) and "overlay" in body and not isinstance(overlay, dict):
-            self._json({"ok": False, "detail": "overlay must be an object"}, 400)
-            return
         if not isinstance(overlay, dict):
             overlay = body if isinstance(body, dict) else {}
-        try:
-            cur = write_overlay(conn, overlay)
-        except Exception as exc:
-            self._json({"ok": False, "detail": str(exc)[:160]}, 400)
-            return
-        dest = os.path.join(DIR, f"overlay-{resolve_conn(conn)}.json")
-        try:
-            applied_at = os.path.getmtime(dest)
-        except Exception:
-            applied_at = time.time()
-        self._json({
-            "ok": True,
-            "overlay": cur,
-            "conn": conn,
-            "appliedAt": applied_at,
-            "reload": "queued",
-            "symbolCap": cur.get("symbolCap"),
-            "maxOpen": cur.get("maxOpen"),
-            "normalExecutionEnabled": cur.get("normalExecutionEnabled"),
-            "controlOrders": cur.get("controlOrders"),
-            "dcaEnabled": cur.get("dcaEnabled"),
-            "blockActive": cur.get("blockActive"),
-            "blockOverall": cur.get("blockOverall"),
-        })
+        dest = os.path.join(DIR, f"overlay-{conn}.json")
+        with CONFIG_LOCK:
+            cur = load_overlay(conn)
+            cur.update(overlay)
+            fd, tmp = tempfile.mkstemp(dir=DIR, prefix=f".overlay-{conn}.", suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                json.dump(cur, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, dest)
+        self._json({"ok": True, "overlay": cur, "conn": conn})
 
 
-def _heal_hist_test() -> None:
-    """One sidecar owns the worker. Engines must not each call start_test."""
-    now = time.time()
-    last = float(getattr(_heal_hist_test, "last", 0) or 0)
-    if now - last < 30.0:
-        return
-    setattr(_heal_hist_test, "last", now)
-    try:
-        from hist_test import resume_after_restart, thread_alive
-        if thread_alive():
-            return
-        resume_after_restart()
-    except Exception:
-        pass
+def _token_ok(sent: str) -> bool:
+    return bool(HTTP_TOKEN) and hmac.compare_digest(str(sent or "").encode(), HTTP_TOKEN.encode())
 
 
 def heal_loop() -> None:
-    """Restart crashed lanes, and a continuous Test Historic worker whose thread died."""
+    """Recover enabled, inactive/failed engines only; never override a disabled lane.
+    A host without systemd uses heartbeat-only liveness and no service recovery.
+    """
+    if not HALT_ON_INACTIVE:
+        return
     last: dict = {}
-    last_trim: dict = {}
     while True:
-        try:
-            _heal_hist_test()
-        except Exception:
-            pass
         try:
             for lane in LANES:
                 cid = lane["id"]
-                if not _live_heal_allowed(cid):
-                    continue
                 # Same mutex as apply_control: the STOP-file check and the
                 # start are atomic against a manual stop/pause click, so the
                 # watchdog can never revive a lane the user just stopped.
                 with CONTROL_LOCK:
                     if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
                         continue
-                    if os.path.exists(os.path.join(DIR, f"PAUSE-{cid}")):
-                        continue
+                    unit = f"grok-pulse@{cid}"
+                    rc, enabled = _sysctl("is-enabled", unit, timeout=6)
+                    if rc != 0 or enabled.strip() not in ("enabled", "enabled-runtime"):
+                        continue  # --no-vst, masked, static or unavailable manager: no automatic start
                     state = unit_state(cid, fresh=True)
-                    now = time.time()
-                    age = stats_age(cid)
-                    if state == "active":
-                        if age > 75.0:
-                            trim_path = os.path.join(DIR, f"HEAL-TRIM-{cid}")
-                            if now - float(last_trim.get(cid, 0) or 0) >= 60.0:
-                                last_trim[cid] = now
-                                try:
-                                    with open(trim_path, "a"):
-                                        pass
-                                    append_bounded_line(os.path.join(DIR, "http.log"), f"heal-trim {cid} statsAge={age:.0f}s\n")
-                                except Exception:
-                                    pass
-                        if age > 300.0 and now - float(last.get(cid, 0) or 0) >= 180.0:
-                            last[cid] = now
-                            unit = engine_unit(cid)
-                            _sysctl("reset-failed", unit, timeout=8)
-                            rc, out = _sysctl("restart", unit)
-                            try:
-                                append_bounded_line(os.path.join(DIR, "http.log"), f"heal-stuck {cid} age={age:.0f}s rc={rc} {out[:120]}\n")
-                            except Exception:
-                                pass
+                    if state not in ("inactive", "failed"):
                         continue
+                    now = time.time()
                     if now - float(last.get(cid, 0) or 0) < 150.0:
                         continue
-                    suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()
-                    env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
-                    if not env_key:
-                        try:
-                            env_key = redis_hgetall(f"connection:{cid}").get("api_key", "").strip()
-                        except Exception:
-                            env_key = ""
-                    if not env_key:
-                        continue  # no keys — engine would exit instantly
+                    try:
+                        credentials_ok = True
+                        for field in ("api_key", "api_secret"):
+                            p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", field], capture_output=True, text=True, timeout=6)
+                            if p.returncode != 0 or (p.stdout or "").strip() in ("", "(nil)"):
+                                credentials_ok = False
+                                break
+                        if not credentials_ok:
+                            continue  # no complete credentials — engine would exit instantly
+                    except Exception:
+                        continue
                     last[cid] = now
-                    unit = engine_unit(cid)
-                    _sysctl("enable", unit, timeout=8)
-                    _sysctl("reset-failed", unit, timeout=8)
-                    rc, out = _sysctl("start", unit)
+                    rc, out = _sysctl("reset-failed", unit, timeout=8)
+                    if rc == 0:
+                        rc, out = _sysctl("start", unit)
                 try:
-                    append_bounded_line(os.path.join(DIR, "http.log"), f"heal {cid} rc={rc} {out[:120]}\n")
+                    with open(os.path.join(DIR, "http.log"), "a") as f:
+                        f.write(f"heal {cid} rc={rc} {out[:120]}\n")
                 except Exception:
                     pass
         except Exception:
@@ -3563,12 +929,4 @@ def heal_loop() -> None:
 if __name__ == "__main__":
     os.chdir(DIR)
     threading.Thread(target=heal_loop, name="heal", daemon=True).start()
-    try:  # the Test Historic worker thread died with the previous process
-        from hist_test import resume_after_restart
-        resume_after_restart()
-    except Exception:
-        pass
-    ThreadingHTTPServer(
-        (str(os.environ.get("PULSE_HOST") or "127.0.0.1").strip() or "127.0.0.1", env_listen_port()),
-        Handler,
-    ).serve_forever()
+    ThreadingHTTPServer((HTTP_HOST, HTTP_PORT), Handler).serve_forever()

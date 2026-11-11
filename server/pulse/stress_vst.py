@@ -39,7 +39,7 @@ def stress_cpu_mem(out: List[Tuple[str, bool, str]]) -> None:
     r0 = rss_mb()
     t0 = time.perf_counter()
     book = SetBook()
-    book.load({"histLookbackBars": 240, "setMinSamples": 5, "setMaxActive": 12, "exitIgnoreTp": True})
+    book.load({"histLookbackBars": 240, "setMinSamples": 5, "exitIgnoreTp": True})
     for i, px in enumerate((40.0, 12.0, 8.0, 3.0, 1.2, 0.4)):
         book.ingest_bars(f"S{i}-USDT", synth_trend(240, px, 0.12 if i % 2 == 0 else -0.1, 0.04))
     times = []
@@ -73,10 +73,10 @@ def stress_cpu_mem(out: List[Tuple[str, bool, str]]) -> None:
         blob = json.dumps(book.snapshot(), separators=(",", ":"))
         blob_n = len(blob)
         snap_ms.append((time.perf_counter() - t3) * 1000)
-    rec("stress-snap-200", sorted(snap_ms)[100] < 40.0, f"p50={sorted(snap_ms)[100]:.2f}ms bytes={blob_n} rows={len(book.snapshot().get('rows') or [])}", out)
+    rec("stress-snap-200", sorted(snap_ms)[100] < 8.0, f"p50={sorted(snap_ms)[100]:.2f}ms bytes={blob_n} rows={len(book.snapshot().get('rows') or [])}", out)
 
     r2 = rss_mb()
-    rec("stress-rss-cap", r2 < 120 and (r2 - r0) < 80, f"start={r0:.1f} end={r2:.1f} Δ={r2-r0:.1f}", out)
+    rec("stress-rss-cap", r2 < 90 and (r2 - r0) < 25, f"start={r0:.1f} end={r2:.1f} Δ={r2-r0:.1f}", out)
     rec("stress-wall", (time.perf_counter() - t0) < 20, f"{(time.perf_counter()-t0):.2f}s", out)
 
 
@@ -98,10 +98,7 @@ def stress_api(out: List[Tuple[str, bool, str]]) -> None:
         from bingx_fast import FastBingX, ErrorLog
 
         def redis_hget(field: str) -> str:
-            import shutil
             import subprocess
-            if not shutil.which("redis-cli"):
-                return ""
             conn = os.environ.get("PULSE_CONN", "bingx-x02")
             r = subprocess.run(["redis-cli", "hget", f"connection:{conn}", field], capture_output=True, text=True)
             return (r.stdout or "").strip()
@@ -109,11 +106,7 @@ def stress_api(out: List[Tuple[str, bool, str]]) -> None:
     key = redis_hget("api_key")
     secret = redis_hget("api_secret")
     if not key or not secret:
-        rec("stress-api-keys", True, "skip-offline-no-redis", out)
-        rec("stress-ticker", True, "skip-offline", out)
-        rec("stress-klines-batch8", True, "skip-offline", out)
-        rec("stress-rate-burst12", True, "skip-offline", out)
-        rec("stress-err-quiet", True, "skip-offline", out)
+        rec("stress-api-keys", False, "missing redis creds", out)
         return
     rec("stress-api-keys", True, "ok", out)
     base = redis_hget("base_url") or "https://open-api-vst.bingx.com"

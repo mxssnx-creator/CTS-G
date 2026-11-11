@@ -1,0 +1,484 @@
+{
+  "protocol": "eight symbols; exactly 12h prehistory + 12h trading; PF>=2.2; preserve all seven arms",
+  "selection": "frozen arms use only strictly earlier exact Base/Main/Real closes; all ongoing gates retained",
+  "status": "retrospective diagnostic, not untouched OOS or production-approved",
+  "results": [
+    {
+      "name": "existing-six",
+      "frozenPrehistory": false,
+      "file": "reports/signals-categories-20261101/existing-six.json.gz",
+      "contexts": 4608,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 4608,
+            "passed": 87,
+            "pct": 1.8880208333333333,
+            "chainPassed": 87,
+            "windowSamples": 412,
+            "pooledWindowPf": 4.339520219207096,
+            "pooledWindowState": "finite",
+            "insufficient": 3877
+          },
+          "main": {
+            "evaluated": 4608,
+            "passed": 4,
+            "pct": 0.08680555555555555,
+            "chainPassed": 4,
+            "windowSamples": 24,
+            "pooledWindowPf": 2.9222860293537285,
+            "pooledWindowState": "finite",
+            "insufficient": 4484
+          },
+          "real": {
+            "evaluated": 4608,
+            "passed": 2,
+            "pct": 0.043402777777777776,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.3087336629164708,
+            "pooledWindowState": "finite",
+            "insufficient": 4576
+          }
+        }
+      },
+      "execution": {
+        "n": 45,
+        "gain": 0.12753888801988764,
+        "loss": 0.15703958843144022,
+        "pf": 0.8121448183466687,
+        "pfState": "finite",
+        "net": -0.02950070041155259,
+        "maxReturnDrawdown": 0.09064296354106716
+      },
+      "orders": {
+        "ordersOpened": 46,
+        "ordersSettled": 45,
+        "ordersOpen": 1,
+        "positionsOpened": 46,
+        "positionsSettled": 45,
+        "positionsOpen": 1
+      },
+      "hourly": {
+        "flat": 2,
+        "positive": 4,
+        "negative": 6
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0025069885034761396,
+      "performance": {
+        "wallSeconds": 2.6636896159907337,
+        "peakRssKiB": 64664
+      }
+    },
+    {
+      "name": "nine-dynamic",
+      "frozenPrehistory": false,
+      "file": "reports/signals-categories-20261101/nine-dynamic.json.gz",
+      "contexts": 6912,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 6912,
+            "passed": 156,
+            "pct": 2.2569444444444446,
+            "chainPassed": 156,
+            "windowSamples": 720,
+            "pooledWindowPf": 4.329892577179091,
+            "pooledWindowState": "finite",
+            "insufficient": 5612
+          },
+          "main": {
+            "evaluated": 6912,
+            "passed": 12,
+            "pct": 0.1736111111111111,
+            "chainPassed": 11,
+            "windowSamples": 56,
+            "pooledWindowPf": 3.6701201268524497,
+            "pooledWindowState": "finite",
+            "insufficient": 6701
+          },
+          "real": {
+            "evaluated": 6912,
+            "passed": 2,
+            "pct": 0.028935185185185185,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.3087336629164708,
+            "pooledWindowState": "finite",
+            "insufficient": 6870
+          }
+        }
+      },
+      "execution": {
+        "n": 49,
+        "gain": 0.15420665002339762,
+        "loss": 0.1939334275734347,
+        "pf": 0.7951525013139152,
+        "pfState": "finite",
+        "net": -0.03972677755003709,
+        "maxReturnDrawdown": 0.0962675956950217
+      },
+      "orders": {
+        "ordersOpened": 50,
+        "ordersSettled": 49,
+        "ordersOpen": 1,
+        "positionsOpened": 50,
+        "positionsSettled": 49,
+        "positionsOpen": 1
+      },
+      "hourly": {
+        "flat": 2,
+        "positive": 4,
+        "negative": 6
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0026128162671411074,
+      "performance": {
+        "wallSeconds": 5.128467277987511,
+        "peakRssKiB": 89724
+      }
+    },
+    {
+      "name": "nine-frozen",
+      "frozenPrehistory": true,
+      "file": "reports/signals-categories-20261101/nine-frozen.json.gz",
+      "contexts": 6912,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 6912,
+            "passed": 156,
+            "pct": 2.2569444444444446,
+            "chainPassed": 156,
+            "windowSamples": 720,
+            "pooledWindowPf": 4.329892577179091,
+            "pooledWindowState": "finite",
+            "insufficient": 5612
+          },
+          "main": {
+            "evaluated": 6912,
+            "passed": 12,
+            "pct": 0.1736111111111111,
+            "chainPassed": 11,
+            "windowSamples": 56,
+            "pooledWindowPf": 3.6701201268524497,
+            "pooledWindowState": "finite",
+            "insufficient": 6701
+          },
+          "real": {
+            "evaluated": 6912,
+            "passed": 2,
+            "pct": 0.028935185185185185,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.3087336629164708,
+            "pooledWindowState": "finite",
+            "insufficient": 6870
+          }
+        }
+      },
+      "execution": {
+        "n": 0,
+        "gain": 0.0,
+        "loss": -0.0,
+        "pf": null,
+        "pfState": "empty",
+        "net": 0.0,
+        "maxReturnDrawdown": 0.0
+      },
+      "orders": {
+        "ordersOpened": 0,
+        "ordersSettled": 0,
+        "ordersOpen": 0,
+        "positionsOpened": 0,
+        "positionsSettled": 0,
+        "positionsOpen": 0
+      },
+      "hourly": {
+        "flat": 12
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0,
+      "performance": {
+        "wallSeconds": 4.905100635995041,
+        "peakRssKiB": 89676
+      }
+    },
+    {
+      "name": "new-three-frozen",
+      "frozenPrehistory": true,
+      "file": "reports/signals-categories-20261101/new-three-frozen.json.gz",
+      "contexts": 4608,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 4608,
+            "passed": 121,
+            "pct": 2.6258680555555554,
+            "chainPassed": 121,
+            "windowSamples": 572,
+            "pooledWindowPf": 4.178381205286029,
+            "pooledWindowState": "finite",
+            "insufficient": 3239
+          },
+          "main": {
+            "evaluated": 4608,
+            "passed": 8,
+            "pct": 0.1736111111111111,
+            "chainPassed": 7,
+            "windowSamples": 32,
+            "pooledWindowPf": 6.375175275946555,
+            "pooledWindowState": "finite",
+            "insufficient": 4453
+          },
+          "real": {
+            "evaluated": 4608,
+            "passed": 0,
+            "pct": 0.0,
+            "chainPassed": 0,
+            "windowSamples": 0,
+            "pooledWindowPf": null,
+            "pooledWindowState": "empty",
+            "insufficient": 4598
+          }
+        }
+      },
+      "execution": {
+        "n": 0,
+        "gain": 0.0,
+        "loss": -0.0,
+        "pf": null,
+        "pfState": "empty",
+        "net": 0.0,
+        "maxReturnDrawdown": 0.0
+      },
+      "orders": {
+        "ordersOpened": 0,
+        "ordersSettled": 0,
+        "ordersOpen": 0,
+        "positionsOpened": 0,
+        "positionsSettled": 0,
+        "positionsOpen": 0
+      },
+      "hourly": {
+        "flat": 12
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0,
+      "performance": {
+        "wallSeconds": 3.188149156005238,
+        "peakRssKiB": 72472
+      }
+    },
+    {
+      "name": "wide-dynamic",
+      "frozenPrehistory": false,
+      "file": "reports/signals-categories-20261101/wide-dynamic.json.gz",
+      "contexts": 11520,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 11520,
+            "passed": 246,
+            "pct": 2.1354166666666665,
+            "chainPassed": 246,
+            "windowSamples": 1024,
+            "pooledWindowPf": 3.900904757170786,
+            "pooledWindowState": "finite",
+            "insufficient": 9832
+          },
+          "main": {
+            "evaluated": 11520,
+            "passed": 50,
+            "pct": 0.4340277777777778,
+            "chainPassed": 44,
+            "windowSamples": 204,
+            "pooledWindowPf": 3.765668514609728,
+            "pooledWindowState": "finite",
+            "insufficient": 11301
+          },
+          "real": {
+            "evaluated": 11520,
+            "passed": 9,
+            "pct": 0.078125,
+            "chainPassed": 9,
+            "windowSamples": 36,
+            "pooledWindowPf": 3.0960874132808223,
+            "pooledWindowState": "finite",
+            "insufficient": 11497
+          }
+        }
+      },
+      "execution": {
+        "n": 12,
+        "gain": 0.04973533714841355,
+        "loss": 0.06724821420334084,
+        "pf": 0.7395785559156564,
+        "pfState": "finite",
+        "net": -0.017512877054927295,
+        "maxReturnDrawdown": 0.054325652119660145
+      },
+      "orders": {
+        "ordersOpened": 15,
+        "ordersSettled": 12,
+        "ordersOpen": 3,
+        "positionsOpened": 15,
+        "positionsSettled": 12,
+        "positionsOpen": 3
+      },
+      "hourly": {
+        "flat": 7,
+        "positive": 2,
+        "negative": 3
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0017962013792883601,
+      "performance": {
+        "wallSeconds": 8.061207781007397,
+        "peakRssKiB": 125992
+      }
+    },
+    {
+      "name": "wide-frozen",
+      "frozenPrehistory": true,
+      "file": "reports/signals-categories-20261101/wide-frozen.json.gz",
+      "contexts": 11520,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 11520,
+            "passed": 246,
+            "pct": 2.1354166666666665,
+            "chainPassed": 246,
+            "windowSamples": 1024,
+            "pooledWindowPf": 3.900904757170786,
+            "pooledWindowState": "finite",
+            "insufficient": 9832
+          },
+          "main": {
+            "evaluated": 11520,
+            "passed": 50,
+            "pct": 0.4340277777777778,
+            "chainPassed": 44,
+            "windowSamples": 204,
+            "pooledWindowPf": 3.765668514609728,
+            "pooledWindowState": "finite",
+            "insufficient": 11301
+          },
+          "real": {
+            "evaluated": 11520,
+            "passed": 9,
+            "pct": 0.078125,
+            "chainPassed": 9,
+            "windowSamples": 36,
+            "pooledWindowPf": 3.0960874132808223,
+            "pooledWindowState": "finite",
+            "insufficient": 11497
+          }
+        }
+      },
+      "execution": {
+        "n": 0,
+        "gain": 0.0,
+        "loss": -0.0,
+        "pf": null,
+        "pfState": "empty",
+        "net": 0.0,
+        "maxReturnDrawdown": 0.0
+      },
+      "orders": {
+        "ordersOpened": 0,
+        "ordersSettled": 0,
+        "ordersOpen": 0,
+        "positionsOpened": 0,
+        "positionsSettled": 0,
+        "positionsOpen": 0
+      },
+      "hourly": {
+        "flat": 12
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0,
+      "performance": {
+        "wallSeconds": 7.411144266006886,
+        "peakRssKiB": 126104
+      }
+    },
+    {
+      "name": "nine-stress",
+      "frozenPrehistory": false,
+      "file": "reports/signals-categories-20261101/nine-stress.json.gz",
+      "contexts": 6912,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 6912,
+            "passed": 88,
+            "pct": 1.2731481481481481,
+            "chainPassed": 88,
+            "windowSamples": 400,
+            "pooledWindowPf": 5.3049768196484335,
+            "pooledWindowState": "finite",
+            "insufficient": 5615
+          },
+          "main": {
+            "evaluated": 6912,
+            "passed": 6,
+            "pct": 0.08680555555555555,
+            "chainPassed": 6,
+            "windowSamples": 28,
+            "pooledWindowPf": 3.291200119831032,
+            "pooledWindowState": "finite",
+            "insufficient": 6778
+          },
+          "real": {
+            "evaluated": 6912,
+            "passed": 0,
+            "pct": 0.0,
+            "chainPassed": 0,
+            "windowSamples": 0,
+            "pooledWindowPf": null,
+            "pooledWindowState": "empty",
+            "insufficient": 6895
+          }
+        }
+      },
+      "execution": {
+        "n": 14,
+        "gain": 0.023461173277548774,
+        "loss": 0.10566343080000011,
+        "pf": 0.2220368305280198,
+        "pfState": "finite",
+        "net": -0.08220225752245133,
+        "maxReturnDrawdown": 0.08220225752245133
+      },
+      "orders": {
+        "ordersOpened": 14,
+        "ordersSettled": 14,
+        "ordersOpen": 0,
+        "positionsOpened": 14,
+        "positionsSettled": 14,
+        "positionsOpen": 0
+      },
+      "hourly": {
+        "flat": 6,
+        "negative": 4,
+        "positive": 2
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.00205505643806066,
+      "performance": {
+        "wallSeconds": 4.438955079996958,
+        "peakRssKiB": 89076
+      }
+    }
+  ]
+}

@@ -1,0 +1,199 @@
+{
+  "totalSeries": 7072,
+  "changedSeries": 15,
+  "changedSources": [
+    "bb-walk",
+    "bollinger",
+    "cci",
+    "r-bb-adx",
+    "s2-range-shift",
+    "sig-coord-v2-r60-n3-i1-brb7f16q855gqwbnqzfnj",
+    "sig-coord-v2-r65-n3-i1-brb7f16q855gqwbnqzfnj",
+    "sig-coord-v2-r75-n3-i3-brb7f16q855gqwbnqzfnj",
+    "sig-coord-v2-r80-n3-i3-brb7f16q855gqwbnqzfnj",
+    "zscore"
+  ],
+  "changes": [
+    {
+      "identity": {
+        "symbol": "ADA-USDT",
+        "source": "bollinger",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 415,
+      "new": 415,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "ADA-USDT",
+        "source": "zscore",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 415,
+      "new": 416,
+      "changedEvents": 1
+    },
+    {
+      "identity": {
+        "symbol": "ADA-USDT",
+        "source": "bb-walk",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 190,
+      "new": 189,
+      "changedEvents": 1
+    },
+    {
+      "identity": {
+        "symbol": "ADA-USDT",
+        "source": "s2-range-shift",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 354,
+      "new": 354,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "ADA-USDT",
+        "source": "r-bb-adx",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 196,
+      "new": 196,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "ADA-USDT",
+        "source": "r-bb-adx",
+        "sourceRange": "medium",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 144,
+      "new": 144,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "AVAX-USDT",
+        "source": "cci",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 757,
+      "new": 757,
+      "changedEvents": 4
+    },
+    {
+      "identity": {
+        "symbol": "AVAX-USDT",
+        "source": "sig-coord-v2-r60-n3-i1-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "dominating"
+      },
+      "old": 383,
+      "new": 383,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "AVAX-USDT",
+        "source": "sig-coord-v2-r65-n3-i1-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "dominating"
+      },
+      "old": 414,
+      "new": 415,
+      "changedEvents": 1
+    },
+    {
+      "identity": {
+        "symbol": "BCH-USDT",
+        "source": "cci",
+        "sourceRange": "medium",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 171,
+      "new": 172,
+      "changedEvents": 1
+    },
+    {
+      "identity": {
+        "symbol": "BNB-USDT",
+        "source": "cci",
+        "sourceRange": "medium",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 168,
+      "new": 169,
+      "changedEvents": 1
+    },
+    {
+      "identity": {
+        "symbol": "DOGE-USDT",
+        "source": "cci",
+        "sourceRange": "short",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 752,
+      "new": 752,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "DOGE-USDT",
+        "source": "cci",
+        "sourceRange": "medium",
+        "tf": 1,
+        "coordination": "source"
+      },
+      "old": 180,
+      "new": 180,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "DOGE-USDT",
+        "source": "sig-coord-v2-r75-n3-i3-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "combined",
+        "tf": 1,
+        "coordination": "dominating"
+      },
+      "old": 787,
+      "new": 787,
+      "changedEvents": 2
+    },
+    {
+      "identity": {
+        "symbol": "DOGE-USDT",
+        "source": "sig-coord-v2-r80-n3-i3-brb7f16q855gqwbnqzfnj",
+        "sourceRange": "combined",
+        "tf": 1,
+        "coordination": "dominating"
+      },
+      "old": 913,
+      "new": 913,
+      "changedEvents": 2
+    }
+  ],
+  "newGenerationSeconds": 3.6350174699999998
+}

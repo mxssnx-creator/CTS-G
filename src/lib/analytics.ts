@@ -1,6 +1,7 @@
 /** CTS live-trading analytics: profit factor windows + drawdown-time average. */
+import type { PfEvidence } from "./live-stats.ts";
 
-export type PfRow = { pnl: number; t: number; symbol?: string; notional?: number; pnl_pct?: number };
+export type PfRow = { pnl: number; t: number; notional?: number; pnl_pct?: number; net_pnl_pct?: number | null };
 
 export type ProfitFactorMetric = {
   trades: number;
@@ -28,22 +29,23 @@ export type DrawdownTimeMetric = {
   inDrawdown: boolean;
 };
 
-export type CostPfMetric = {
+export type CostPfMetric = PfEvidence & {
   n: number;
   count: number;
   avgR: number;
   ratio: number;
-  classicPf: number;
+  pf: number;
   costPct: number;
+  /** Mean net result per position, percent (netSumPct / count). */
   netPct: number;
   grossPct: number;
-  netAvg?: number;
-  costSubtracted?: boolean;
+  /** Net result of the window, summed over its positions (percent of one position): the net the PF divides. */
+  netSumPct: number;
   minPf: number;
   pass: boolean;
 };
 
-export const POSITION_COST_PCT_DEFAULT = 0.10;
+export const POSITION_COST_PCT_DEFAULT = 0.12;
 export const COST_RATIO_SCALE = 0.1;
 
 function finite(v: unknown): number {
@@ -96,61 +98,12 @@ export function calculateDrawdownTime(
   lookbackDays = 3,
 ): DrawdownTimeMetric {
   const cutoff = now - lookbackDays * 24 * 60 * 60 * 1000;
-  // stats.closed arrives newest-first. Restore arrival order before the stable
-  // sort so tied timestamps resolve exactly like the engine's chronological tape.
-  const ordered = [...rows]
-    .reverse()
+  const ordered = rows
     .filter((row) => {
-      const ts = timestampMs(row.t);
+      const ts = row.t < 10_000_000_000 ? row.t * 1000 : row.t;
       return ts >= cutoff && ts <= now;
     })
-    .sort((a, b) => timestampMs(a.t) - timestampMs(b.t));
-
-  const symbols = new Set(ordered.map((row) => row.symbol || "?"));
-  if (symbols.size > 1) {
-    const parts = [...symbols].map((symbol) =>
-      calculateDrawdownTimeSingle(
-        ordered.filter((row) => (row.symbol || "?") === symbol),
-        now,
-        lookbackDays,
-      ),
-    );
-    const totalDurationMs = parts.reduce((sum, part) => sum + part.totalDurationMs, 0);
-    const episodes = parts.reduce((sum, part) => sum + part.episodes, 0);
-    return {
-      lookbackDays,
-      samples: ordered.length,
-      episodes,
-      maxDurationMs: Math.max(0, ...parts.map((part) => part.maxDurationMs)),
-      averageDurationMs: episodes ? Math.round(totalDurationMs / episodes) : 0,
-      currentDurationMs: Math.max(0, ...parts.map((part) => part.currentDurationMs)),
-      totalDurationMs,
-      maxDepth: round(Math.max(0, ...parts.map((part) => part.maxDepth))),
-      currentDepth: round(Math.max(0, ...parts.map((part) => part.currentDepth))),
-      inDrawdown: parts.some((part) => part.inDrawdown),
-    };
-  }
-  return calculateDrawdownTimeSingle(ordered, now, lookbackDays);
-}
-
-function timestampMs(value: number): number {
-  return value < 10_000_000_000 ? value * 1000 : value;
-}
-
-function rowEquityPnl(row: PfRow, costPct = POSITION_COST_PCT_DEFAULT): number {
-  const pnl = finite(row.pnl);
-  if (row.pnl != null && Math.abs(pnl) > 1e-15) return pnl;
-  if (row.pnl_pct != null) return netPnlPct(finite(row.pnl_pct), costPct);
-  return pnl;
-}
-
-function calculateDrawdownTimeSingle(
-  ordered: PfRow[],
-  now: number,
-  lookbackDays: number,
-): DrawdownTimeMetric {
-  const lastTs = ordered.length ? timestampMs(ordered[ordered.length - 1].t) : 0;
-  const observationNow = lastTs > 0 && now - lastTs > 3_600_000 ? lastTs : now;
+    .sort((a, b) => a.t - b.t);
 
   let equity = 0;
   let peak = 0;
@@ -161,8 +114,8 @@ function calculateDrawdownTimeSingle(
   let episodes = 0;
 
   for (const row of ordered) {
-    const closedAt = timestampMs(row.t);
-    equity += rowEquityPnl(row);
+    const closedAt = row.t < 10_000_000_000 ? row.t * 1000 : row.t;
+    equity += finite(row.pnl);
     if (equity >= peak) {
       if (drawdownStartedAt !== null) {
         const duration = Math.max(0, closedAt - drawdownStartedAt);
@@ -181,7 +134,7 @@ function calculateDrawdownTimeSingle(
   }
 
   const currentDurationMs =
-    drawdownStartedAt === null ? 0 : Math.max(0, observationNow - drawdownStartedAt);
+    drawdownStartedAt === null ? 0 : Math.max(0, now - drawdownStartedAt);
   if (drawdownStartedAt !== null) {
     maxDurationMs = Math.max(maxDurationMs, currentDurationMs);
     totalDurationMs += currentDurationMs;
@@ -201,18 +154,7 @@ function calculateDrawdownTimeSingle(
   };
 }
 
-/** CTS Main-trade scale: 1.00 = Neutral after cost, 1.10 = +1× PositionCost net.
- * PositionCost is a percent; only legacy fractions strictly below 0.02 pass through
- * (same threshold as the engine's `position_cost.cost_as_frac`). */
-export function costAsFrac(costPct = POSITION_COST_PCT_DEFAULT): number {
-  const c = Math.max(0, finite(costPct));
-  return c >= 0.02 ? c / 100 : c;
-}
-
-export function netPnlPct(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
-  return finite(pnlPctFraction) - costAsFrac(costPct);
-}
-
+/** CTS Main-trade scale: 1.00 = Neutral after cost, 1.10 = +1× PositionCost net. */
 export function signedResultR(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
   const cost = Math.max(1e-9, finite(costPct));
   return (finite(pnlPctFraction) * 100 - cost) / cost;
@@ -222,72 +164,78 @@ export function ratioFromR(signedR: number): number {
   return 1 + finite(signedR) * COST_RATIO_SCALE;
 }
 
+export function rowNetPnlPct(row: PfRow, costPct = POSITION_COST_PCT_DEFAULT): number {
+  return row.net_pnl_pct != null && Number.isFinite(Number(row.net_pnl_pct))
+    ? Number(row.net_pnl_pct) : finite(row.pnl_pct) - Math.max(0, finite(costPct)) / 100;
+}
+
 export function lastNCostPf(
   rows: PfRow[],
   n = 15,
   costPct = POSITION_COST_PCT_DEFAULT,
   minPf = 1.1,
 ): CostPfMetric {
-  const window = [...rows]
-    .sort((a, b) => timestampMs(b.t) - timestampMs(a.t))
-    .slice(0, Math.max(1, n));
+  // The newest n closes by time, the same window as position_cost.last_n_cost_pf on the engine tape.
+  // a close without pnl_pct is skipped, as on the engine: a missing value is not a loss
+  const usable = rows.filter((r) => r.pnl_pct !== null && r.pnl_pct !== undefined && Number.isFinite(Number(r.pnl_pct)));
+  const newest = [...usable].sort((x, y) => finite(y.t) - finite(x.t)).slice(0, Math.max(1, n));
   const rs: number[] = [];
-  const nets: number[] = [];
   let gp = 0;
   let gl = 0;
-  for (const row of window) {
-    rs.push(signedResultR(finite(row.pnl_pct), costPct));
-    const net = row.pnl_pct != null ? netPnlPct(finite(row.pnl_pct), costPct) : finite(row.pnl);
-    nets.push(net);
+  for (const row of newest) {
+    // Recorded execution net already includes fees and fill-price slippage.
+    const net = rowNetPnlPct(row, costPct);
+    rs.push(net / Math.max(1e-9, finite(costPct) / 100));
     if (net > 0) gp += net;
     else if (net < 0) gl += Math.abs(net);
   }
   const count = rs.length;
   const avgR = count ? rs.reduce((a, b) => a + b, 0) / count : 0;
   const ratio = count ? ratioFromR(avgR) : 1;
-  const classic = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
-  const netAvg = count ? nets.reduce((a, b) => a + b, 0) / count : 0;
+  // pf is the decision metric; ratio = 1 + 0.10 x avgR is display only
+  // PF neutral = 1: closes that all net exactly zero read 1.0 (server: position_cost.last_n_cost_pf); an empty window 0
+  const pf = gl > 0 ? gp / gl : gp > 0 ? 99 : count ? 1 : 0;
   return {
     n,
     count,
     avgR: round(avgR),
     ratio: round(ratio),
-    classicPf: round(classic),
+    pf: round(pf),
+    pfFinite: gl > 0 ? gp / gl : null,
+    pfState: count === 0 ? "empty" : gl > 0 ? "finite" : gp > 0 ? "no-loss" : "flat",
+    netGain: gp,
+    netLoss: gl,
     costPct,
-    netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
-    grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),
-    netAvg: round(netAvg, 6),
-    costSubtracted: true,
+    netPct: count ? round(100 * (gp - gl) / count) : 0,
+    grossPct: count ? round(100 * newest.reduce((sum, row) => sum + finite(row.pnl_pct), 0) / count) : 0,
+    netSumPct: round(100 * (gp - gl)),
     minPf,
-    pass: count < 8 || ratio + 1e-9 >= minPf,
+    pass: count < 8 || pf + 1e-9 >= minPf,
   };
 }
 
-export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITION_COST_PCT_DEFAULT) {
-  const newestFirst = [...rows].sort((a, b) => timestampMs(b.t) - timestampMs(a.t));
+export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITION_COST_PCT_DEFAULT, minPf = 1.1) {
+  const newestFirst = [...rows].sort((a, b) => b.t - a.t);
   const withinHours = (hours: number) =>
     newestFirst.filter((row) => {
-      const ts = timestampMs(row.t);
+      const ts = row.t < 10_000_000_000 ? row.t * 1000 : row.t;
       return ts >= now - hours * 60 * 60 * 1000 && ts <= now;
     });
-  const cost = Number.isFinite(costPct) && costPct > 0 ? costPct : POSITION_COST_PCT_DEFAULT;
   return {
     generatedAt: now,
-    last4: lastNCostPf(newestFirst, 4, cost),
-    costPf: lastNCostPf(newestFirst, 15, cost, 1.1),
+    last4: lastNCostPf(newestFirst, 4, costPct, minPf),
+    costPf: lastNCostPf(newestFirst, 15, costPct, minPf),
     positionWindows: {
-      "12": lastNCostPf(newestFirst, 12, cost),
-      "15": lastNCostPf(newestFirst, 15, cost),
-      "25": lastNCostPf(newestFirst, 25, cost),
-      "30": lastNCostPf(newestFirst, 30, cost),
-      "50": lastNCostPf(newestFirst, 50, cost),
-      "75": lastNCostPf(newestFirst, 75, cost),
-      "150": lastNCostPf(newestFirst, 150, cost),
+      "12": lastNCostPf(newestFirst, 12, costPct, minPf),
+      "15": lastNCostPf(newestFirst, 15, costPct, minPf),
+      "25": lastNCostPf(newestFirst, 25, costPct, minPf),
+      "75": lastNCostPf(newestFirst, 75, costPct, minPf),
+      "150": lastNCostPf(newestFirst, 150, costPct, minPf),
     } as const,
     timeWindows: {
-      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1, cost),
-      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1, cost),
-      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1, cost),
+      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1, costPct, minPf),
+      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1, costPct, minPf),
+      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1, costPct, minPf),
     } as const,
     drawdown3d: calculateDrawdownTime(newestFirst, now, 3),
     drawdownAll: calculateDrawdownTime(newestFirst, now, 3650),

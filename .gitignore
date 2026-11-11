@@ -1,8 +1,4 @@
 node_modules/
-.venv/
-deploy/units/
-deploy/instance.json
-.cts-deps.sha256
 .vercel/
 .tanstack/
 .nitro/
@@ -17,15 +13,8 @@ screenshots/
 *.pyo
 .env
 .env.*
-!.env.example
 *.pem
 *.key
-*.auth
-ssh-chisel.txt
-snet-ln-deb01.txt
-xssnetlnx-cts-kex.txt
-.local/
-deploy/remote-access.env
 public/live-stats.json
 .project_id
 .node_modules.lock
@@ -35,22 +24,4 @@ public/live-stats.json
 /tmp/
 .preview.pid
 preview.log
-server/pulse/hist-calc.json
-server/pulse/hist-calc-req.json
-server/pulse/hist-calc.log
-server/pulse/hist-calc.pid
-
-# Timestamped overlay snapshots; keep the latest copy in git
-backups/overlays/*/
-!backups/overlays/latest/
-!backups/overlays/latest/**
-
-# Local Claude Code settings (per-user, never committed)
 .claude/settings.local.json
-# Claude Code agent worktrees live inside the checkout; never commit or lint them
-.claude/worktrees/
-
-# Walk-forward research cache (public BingX history), never committed
-.research-data/
-# sim_12h_account default runtime data dir
-.sim-data/

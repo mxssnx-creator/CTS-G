@@ -1,0 +1,244 @@
+{
+  "scope": "single cold paper replay of the unchanged x01 overlay; not venue/funded execution or forward profitability",
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "dataStart": 1791964800.0,
+  "decisionTime": 1792270800.0,
+  "availableHours": 85.0,
+  "fullRequestedContextAvailable": false,
+  "initialConfiguration": {
+    "sets": 1654,
+    "packs": [
+      "indications",
+      "general",
+      "shortrange"
+    ],
+    "lookbackBars": 1920,
+    "contextBars": 6510,
+    "baseLong": 50,
+    "baseShort": 25,
+    "minimumSamples": 1,
+    "mainLong": 25,
+    "mainShortCandidates": [
+      5,
+      10
+    ],
+    "realLastN": 15,
+    "lastNMode": "one selected Main short candidate per Set, not independent candidate lanes",
+    "signalSourcePacks": [],
+    "costPct": 0.12
+  },
+  "finalLookbackBars": 1920,
+  "historyPending": false,
+  "progress": {
+    "phase": "ready",
+    "pct": 100.0,
+    "symbol": "ETH-USDT",
+    "set_id": "shortrange:1m:tr0.72:0.72",
+    "bars_done": 40800,
+    "bars_total": 40800,
+    "sets_done": 1654,
+    "sets_total": 1654,
+    "symbols_done": 8,
+    "symbols_total": 8,
+    "elapsed_ms": 212303.46202850342,
+    "last_run_ms": 212303.46202850342,
+    "cycle": 1,
+    "detail": "1654/1654 active \u00b7 446710 hist fills",
+    "ready": true,
+    "error": "",
+    "errors": 0
+  },
+  "postBaseValidatedPct": 0.060459492140266025,
+  "stages": {
+    "base": {
+      "sets": 1,
+      "pctAll": 0.060459492140266025,
+      "n": 50,
+      "gain": 0.04071572142815133,
+      "loss": 0.02346062249707393,
+      "pf": 1.735491947548685,
+      "pfState": "finite"
+    },
+    "main": {
+      "sets": 0,
+      "pctAll": 0.0,
+      "n": 0,
+      "gain": 0,
+      "loss": 0,
+      "pf": null,
+      "pfState": "empty"
+    },
+    "real": {
+      "sets": 0,
+      "pctAll": 0.0,
+      "n": 0,
+      "gain": 0,
+      "loss": 0,
+      "pf": null,
+      "pfState": "empty"
+    },
+    "realNegative": {
+      "sets": 0,
+      "pctAll": 0.0,
+      "n": 0,
+      "gain": 0,
+      "loss": 0,
+      "pf": null,
+      "pfState": "empty"
+    }
+  },
+  "baseRejectionReasons": {
+    "pf<min": 1632,
+    "short": 21,
+    "pass": 1
+  },
+  "entryRejectionReasons": {
+    "pf<min": 1632,
+    "short": 21,
+    "main": 1
+  },
+  "paperRows": 446710,
+  "paperScopes": {
+    "overall": {
+      "n": 200,
+      "gain": 0.07864002264542952,
+      "loss": 1.1151091732537435,
+      "pf": 0.0705222632291403,
+      "pfState": "finite"
+    },
+    "lane:pos": {
+      "n": 200,
+      "gain": 0.04968696996624653,
+      "loss": 1.4539275905902984,
+      "pf": 0.03417430846475201,
+      "pfState": "finite"
+    },
+    "lane:neg": {
+      "n": 200,
+      "gain": 0.09638899726522328,
+      "loss": 0.6816912430557215,
+      "pf": 0.14139685414345926,
+      "pfState": "finite"
+    },
+    "pack:indications": {
+      "n": 200,
+      "gain": 0.07864002264542952,
+      "loss": 1.1151091732537435,
+      "pf": 0.0705222632291403,
+      "pfState": "finite"
+    },
+    "pack:indications:pos": {
+      "n": 200,
+      "gain": 0.04968696996624653,
+      "loss": 1.4539275905902984,
+      "pf": 0.03417430846475201,
+      "pfState": "finite"
+    },
+    "pack:indications:neg": {
+      "n": 200,
+      "gain": 0.1351487284067231,
+      "loss": 0.7506308797963533,
+      "pf": 0.1800468539788678,
+      "pfState": "finite"
+    },
+    "pack:general": {
+      "n": 200,
+      "gain": 0.03989694706712316,
+      "loss": 2.038842078870702,
+      "pf": 0.019568434201251015,
+      "pfState": "finite"
+    },
+    "pack:general:pos": {
+      "n": 200,
+      "gain": 0.03336638217819149,
+      "loss": 1.7201479913146447,
+      "pf": 0.019397390426093987,
+      "pfState": "finite"
+    },
+    "pack:general:neg": {
+      "n": 200,
+      "gain": 0.08583888312620797,
+      "loss": 0.5377298106702826,
+      "pf": 0.15963199626074184,
+      "pfState": "finite"
+    },
+    "pack:shortrange": {
+      "n": 200,
+      "gain": 0.4652322295936223,
+      "loss": 1.402929916617708,
+      "pf": 0.331614732912133,
+      "pfState": "finite"
+    },
+    "pack:shortrange:pos": {
+      "n": 200,
+      "gain": 0.4961800956571547,
+      "loss": 0.6810195550008847,
+      "pf": 0.7285842117360494,
+      "pfState": "finite"
+    },
+    "pack:shortrange:neg": {
+      "n": 175,
+      "gain": 0.37285870369893787,
+      "loss": 0.8344103616168234,
+      "pf": 0.4468529165630873,
+      "pfState": "finite"
+    }
+  },
+  "scopeMilliseconds": 15.555990001303144,
+  "coldReplaySeconds": 212.30361640099727,
+  "peakRssKiB": 1309692,
+  "engineSha256": {
+    "bingx_fast.py": "0d7181a26d94c795a10c9a57266d11efff0cb218aae8741fa4c9de2392636a93",
+    "block_engine.py": "5cfb247d3bc60445912ee4c53ded93a6ed265dba35758e9eda0b0c37083fbe8f",
+    "bybit_fast.py": "b39281725959166bd6a1e71eb465d8a482176200d0f3b16e2172f1f35e12523c",
+    "bybit_limits.py": "a2c9a926de0cb20c31c1625e01a89ffd45eb3c414447e2ca9125caef28861be0",
+    "config_num.py": "292ee052a21d70195b13c2c9686fcd2e1b9315c42e8fa9ef95b4da8be5ded6d7",
+    "conn_guard.py": "574a94e1b629b1574d18e359833548e1d0ecab923e1abe79aec922ab3e495d94",
+    "coord_engine.py": "2d82afb23702f98c0bb7f125c6f0a730717d297d2f136985ec87191fa2608c94",
+    "dca_engine.py": "71adf6a48f23517ea6a0d67c65a8c3680f2c37c804605074a7b4f8bd14d52072",
+    "execution_cost.py": "33d9b0bd32cca00a11b390f64c212c3b07083edd0e14ec7a60647d0b50815e84",
+    "exit_engine.py": "bf02171d2c9497fe1f2aec972180c6e6f0f53d32d10c190c0fa7fafdd7485c0a",
+    "indication_ao.py": "d583eb2f6b67dd3cb8d0c6d45d4f5d873317f3ecb1b051305679af99affa18ee",
+    "indication_engine.py": "875099b554228e8d8c61e6762574ae3fcd587e136181aecc5ab4c37eeff54947",
+    "indication_extra.py": "e253592637590089c674bedf3b0f80dc3ea9fc509b484469321b0296ac85c2ff",
+    "indication_lib.py": "7878e3ff3df5a28d587c1ab5e9184515621110870156bb3b6b9cab729317fcaa",
+    "indication_rel.py": "bba7a415f59447f591873f06e282920fe5011f2e32ebdf424b4dde9065f320d1",
+    "load_engine.py": "f17fcf445bbcba0346879d4a6e7140b86e06db9870c7ae67d583a534ab9498cd",
+    "market_features.py": "d764e5f1f12435e4bc0c2d9632d1e43289580a16be754f01f2067615e8bfa3dd",
+    "modules.py": "a1293d215e4d52d7d8ce4c468602c87524b7c2294f5b2559a3ac47e7ce379e58",
+    "position_cost.py": "e644c41ce57b89a6bcccd9055e8c6d10b60773e03503356ce790a1e59c48fcf7",
+    "pulse_http.py": "b6bd5c4d3d5a301c93765d6c20ed7027345065357fc260d42af78bbcc27b3df9",
+    "pulse_trader.py": "11d3ee8d42c953c297e49a4aa31e2c4156367b1a16d2dee26e89c619a16aea2a",
+    "risk_variants.py": "5b62b73563c4cd4798cb993aa12e67a5f475e5becde8cf33a0229f23b36cb508",
+    "set_block.py": "f0f42483598c8f7cd49772c89c7d29d78fb6b660a0af29ce43af1737f5e30a29",
+    "set_engine.py": "ea5b0292d2290faad3f169f98adf9586a643bc5443f248f947a897ca507bbe89",
+    "stats_report.py": "d311990cca1dd4bbbf761c87417d97c774020415563418e0b819b808d729ba16",
+    "stress_vst.py": "7b01463701af5c45542cf047751e5a0e5bc4b4d841999e831afb40c75b045b73",
+    "vst_live_qa.py": "993fccb5611c88bee404985deaea202ae4b330b4126f3684c33e6e90335b192f",
+    "overlay-bingx-x01.json": "59978ddb7f5e65839b4139b79ad7a7ff1b43ca583e30b500e2f82031e08af7b3"
+  },
+  "dataSha256": {
+    "ADA-USDT": "ca60264d069e21004b1cc1aa5d23d3be98682cd2b3fb8602b1d6884f09439262",
+    "AVAX-USDT": "85d73cad1dd2bb13db9f08807517c1d68f51f8e29f5a2ab8878d2146f69dcfc6",
+    "BCH-USDT": "dfe5420ac19ab25626d785d2afd1305d5e2615db86c02ca894a919299949c2b4",
+    "BNB-USDT": "a40e2599c8aa43ca912602d5591485ff03190efe602d55ca9c83a41232aac202",
+    "BTC-USDT": "92c7d52158bdcaa0d97207b134e9a13b18f744593f6e6ea2264582420d6483a9",
+    "DOGE-USDT": "8c61c5f5790539f11fce630019601b903e72a6c9afa0ee25c86b540d90c0a0d9",
+    "DOT-USDT": "5316a50ddd410af41ce7a11e611bbd8936001a54c2ef9aa60c496c17815c0e32",
+    "ETH-USDT": "a86103dbe2e45360e2d4a5a03b4a437c764e2f65b7115f12d972d252eef3ccd4"
+  },
+  "execution": {
+    "tested": false,
+    "ordersSent": 0,
+    "livePf": null
+  }
+}

@@ -4,22 +4,15 @@ Independent BingX pulse desks — **Live mainnet (X01)** and **VST demo (X02)** 
 
 This is the current CTS-G product. Previous CTS trees (keys, SSH dumps, old settings JSON) are not part of this repo.
 
-Operations, recovery, remote-access and backup rules are documented in
-[`INFO.md`](INFO.md). In managed workspaces the Chisel client must use the
-workspace's configured HTTP/HTTPS proxy; the verified local SSH endpoint is
-`127.0.0.1:2222` (forwarded to the VPS SSH service on port `22`).
-
 ## What it does
 
 - **Overall / Live / VST** — three views, no identity bleed. Live and VST keep their own overlay, universe, tape, and control orders.
-- **Indications** — state, direction, move, active, common, signals, trend and break; independent 1m / 5m / 15m lanes plus combined eval.
+- **Indications** — state, direction, move, active, common, signals; independent 1m / 5m / 15m lanes plus combined eval.
 - **Sets** — pack × SL:TP × trail × step product, historic replay, CID tracking (`Gx01` / `Gx02`).
 - **Coordination stages** — intern / main / real / last / prev as advisory gates.
 - **Block, DCA, trailing, exits, rearrange** — each pack independently enabled.
 - **Universe rank** — max exchange leverage first, then Volatility 1H (or 24h / quote volume / abs change). Dynamic book keeps the top names that still fit margin.
 - **Controls** — SL + TP (and security SL/TP) on every ours position. Foreign / leftover / other-desk positions are never flattened.
-- **Own orders only** — the engine cancels, closes and re-protects only orders and positions it placed (client-ID tag `Gx01` / `Gx02`). Orders and positions from other sources are never cancelled or closed, a stop or close never uses `closePosition` next to another source's lot on the same symbol and side, and leverage / margin mode are left alone on any symbol another source holds a position or order on.
-- **Order throughput** — BingX allows 10 order placements per second per IP, so each lane is paced at 4.0 orders/s (3.0/s for ordinary orders) and 2.0 batch calls/s (`systemOrderRps`, `systemBatchRps`, both capped there; Mainnet and VST can share one IP). Entry candidates keep the coordinated order (confidence ranking, side balance, cheapest first when margin is short). With `entryBatchOrders` on (Settings, Pulse overlay; seeded on for VST, off for live) up to five entries go out per `batchOrders` call: every lot keeps its own client id, pending intent and fill booking, a refused batch falls back to single orders (and switches batching off after three refusals in a row), a lost response is resolved by client id before anything is re-sent, and Block-active entries still run one by one after the Normal lots. Try it on VST first.
 
 ## Layout
 
@@ -31,7 +24,7 @@ workspace's configured HTTP/HTTPS proxy; the verified local SSH endpoint is
 | `server/pulse/overlay-bingx-x02.json` | VST overlay (full USDT-M universe) |
 | `deploy/install-linux.sh` | First-time Linux install (packages, systemd, Redis, desk + engines) |
 | `deploy/update-linux.sh` | In-place Linux update (keeps overlays and open positions) |
-| `deploy/grok-pulse@.service` | template rendered as `<name>-pulse@.service` |
+| `deploy/grok-pulse@.service` | systemd unit for a connection slot |
 | `scripts/` | test / smoke / PWA / preview helpers |
 
 Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They are never stored in this repo.
@@ -41,8 +34,8 @@ Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They 
 On the VPS (`/opt/cts-g`, desk **:3102**). Unattended — no prompts. `--port` and `--name` are optional. Packages are installed only if missing.
 
 ```bash
-sudo /opt/cts-g/deploy/install-linux.sh --enable-live
-sudo /opt/cts-g/deploy/install-linux.sh --enable-live --port 3102 --name cts-g
+sudo /opt/cts-g/deploy/install-linux.sh
+sudo /opt/cts-g/deploy/install-linux.sh --port 3102 --name cts-g
 ```
 
 ```bash
@@ -53,33 +46,29 @@ sudo /opt/cts-g/deploy/install-linux.sh --from-dir /opt/cts-g
 From this tree, if SSH works:
 
 ```bash
-./deploy/remote-install.sh --enable-live --host 152.53.114.112 --user root
+./deploy/remote-install.sh --host 152.53.114.112 --user root
 ```
 
-If direct SSH is unavailable, establish the documented Chisel tunnel first;
-see [Remote access](INFO.md#remote-access-canonical-solution). Do not put its
-credentials or SSH private keys in this repository.
-
-Installs Node 22, Python 3, Redis, the scoped pulse engine at `/opt/cts-g-pulse`, and the desk at `/opt/cts-g` for the default `cts-g` name. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`). Unit names are scoped to the install name so another checkout cannot overwrite CTS-G.
+Installs Node 22, Python 3, Redis, pulse engine at `/opt/grok-x01-pulse`, desk at `/opt/cts-g`. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`).
 
 | Unit | Role |
 |---|---|
-| `cts-g-pulse-http` | Stats/control sidecar on :3015 |
-| `cts-g-desk` | Desk UI on :3102 |
-| `cts-g-pulse@bingx-x02` | VST engine |
-| `cts-g-pulse@bingx-x01` | Live engine (enabled and started by default when keys exist; `--no-live` for tests) |
+| `grok-pulse-http` | Stats/control sidecar on :3015 |
+| `grok-desk` | Desk UI on :3102 |
+| `grok-pulse@bingx-x02` | VST engine |
+| `grok-pulse@bingx-x01` | Live engine (starts when Redis keys exist, or pass `--start-live`) |
 
 ```bash
 sudo /opt/cts-g/deploy/update-linux.sh          # git pull, restart, keep overlays + opens
 sudo /opt/cts-g/deploy/update-linux.sh --force  # match origin/main exactly
 ```
 
-Credentials stay in the protected `/etc/cts-g/credentials.env` and the matching Redis connection hash, never in git. Live (X01) starts by default whenever keys are present. Pause/Stop remain available as a temporary disable; `--no-live` skips Live start for tests:
+Keys stay in Redis, never in git:
 
 ```bash
 redis-cli HSET connection:bingx-x01 api_key '…' api_secret '…'
 redis-cli HSET connection:bingx-x02 api_key '…' api_secret '…'
-sudo /opt/cts-g/deploy/update-linux.sh --no-live   # tests only
+sudo systemctl restart grok-pulse@bingx-x01
 ```
 
 `update-linux.sh` does not flatten exchange positions.

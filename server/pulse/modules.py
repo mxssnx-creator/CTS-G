@@ -16,7 +16,7 @@ DEFAULT_FLAGS = {
     "exchange.bingx": True,
     "strategy.block": True,
     "strategy.trailing": True,
-    "strategy.dca": True,
+    "strategy.dca": False,  # DCA off by default — overlay dcaEnabled=true turns it on
     "strategy.indications": True,
     "strategy.coord": True,
     "feed.signals": True,
@@ -34,6 +34,12 @@ DEFAULT_FLAGS = {
 }
 
 
+def trailing_enabled(overlay: Dict[str, Any]) -> bool:
+    """Both controls authorize trailing; an explicit disable always wins."""
+    mods = overlay.get("modules") if isinstance(overlay.get("modules"), dict) else {}
+    return bool(overlay.get("stratTrailing", True)) and bool(mods.get("strategy.trailing", True))
+
+
 def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
     flags = dict(DEFAULT_FLAGS)
     mods = overlay.get("modules") if isinstance(overlay.get("modules"), dict) else {}
@@ -41,18 +47,15 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags[str(k)] = bool(v)
     if "blockEnabled" in overlay:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
-    if "dcaEnabled" in overlay or "stratDca" in overlay:
-        flags["strategy.dca"] = bool(overlay.get("stratDca", True))
-    # SL/TP protection is always on; a stored false can no longer disable it.
-    flags["exec.controls"] = True
+    # DCA is an opt-in lane: off unless the overlay switches it on (and the build-time kill switch is not set)
+    from dca_engine import DCA_HARD_OFF
+    flags["strategy.dca"] = bool(overlay.get("dcaEnabled", False)) and not DCA_HARD_OFF
+    if "controlOrders" in overlay:
+        flags["exec.controls"] = bool(overlay["controlOrders"])
     if "rearrange" in overlay:
         flags["strategy.rearrange"] = bool(overlay["rearrange"])
     if "indEnabled" in overlay:
         flags["strategy.indications"] = bool(overlay["indEnabled"])
-    if "stratIndications" in overlay and not overlay["stratIndications"]:
-        # The Indications pack switch also gates live indication entries:
-        # effective = indEnabled && stratIndications.
-        flags["strategy.indications"] = False
     if "tf1m" in overlay:
         flags["feed.tf1m"] = bool(overlay["tf1m"])
     if "tf5m" in overlay:
@@ -65,10 +68,8 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags["risk.slTpRatios"] = True
     if "trailAuto" in overlay:
         flags["strategy.trailRecalc"] = bool(overlay.get("trailAuto", True))
-    if "stratTrailing" in overlay:
-        flags["strategy.trailing"] = bool(overlay["stratTrailing"])
-        if "trailAuto" not in overlay:
-            flags["strategy.trailRecalc"] = bool(overlay["stratTrailing"])
+    flags["strategy.trailing"] = trailing_enabled(overlay)
+    flags["strategy.trailRecalc"] = flags["strategy.trailRecalc"] and flags["strategy.trailing"]
     if "exitEnabled" in overlay:
         flags["strategy.exits"] = bool(overlay["exitEnabled"])
     if "histEnabled" in overlay:

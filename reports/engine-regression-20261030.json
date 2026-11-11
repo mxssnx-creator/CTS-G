@@ -1,0 +1,2125 @@
+{
+  "summary": {
+    "PASS": 422,
+    "FAIL": 0,
+    "SKIP": 0
+  },
+  "elapsed_s": 450.56661796569824,
+  "checks": [
+    {
+      "name": "logistics.node-floor-covers-vite-and-nitro",
+      "status": "PASS",
+      "seconds": 0.0006275177001953125
+    },
+    {
+      "name": "logistics.zero-is-a-value-not-a-default",
+      "status": "PASS",
+      "seconds": 0.019051790237426758
+    },
+    {
+      "name": "logistics.overlays-share-grid-contract",
+      "status": "PASS",
+      "seconds": 0.0003483295440673828
+    },
+    {
+      "name": "logistics.desk-defaults-match-engine",
+      "status": "PASS",
+      "seconds": 0.0009534358978271484
+    },
+    {
+      "name": "logistics.desk-defaults-equal-shipped-overlay",
+      "status": "PASS",
+      "seconds": 0.0013840198516845703
+    },
+    {
+      "name": "logistics.desk-default-overlay-equals-shipped-x01",
+      "status": "PASS",
+      "seconds": 0.0006844997406005859
+    },
+    {
+      "name": "logistics.shipped-overlays-run-the-base-gate",
+      "status": "PASS",
+      "seconds": 0.00046539306640625
+    },
+    {
+      "name": "logistics.desk-symbols-equal-engine-fixed-list",
+      "status": "PASS",
+      "seconds": 0.0007863044738769531
+    },
+    {
+      "name": "logistics.desk-cards-read-effective-overlay",
+      "status": "PASS",
+      "seconds": 0.003003835678100586
+    },
+    {
+      "name": "logistics.engine-absent-defaults-agree",
+      "status": "PASS",
+      "seconds": 0.0034728050231933594
+    },
+    {
+      "name": "logistics.no-ratio-as-pf",
+      "status": "PASS",
+      "seconds": 0.017704010009765625
+    },
+    {
+      "name": "logistics.conn-pinned-per-connection",
+      "status": "PASS",
+      "seconds": 0.001371145248413086
+    },
+    {
+      "name": "logistics.no-fabricated-pass-and-one-entry-conf",
+      "status": "PASS",
+      "seconds": 0.0015087127685546875
+    },
+    {
+      "name": "logistics.dca-on-with-set-and-axis-options-off",
+      "status": "PASS",
+      "seconds": 0.0005369186401367188
+    },
+    {
+      "name": "logistics.deploy-pin-matches-engine",
+      "status": "PASS",
+      "seconds": 0.005249738693237305
+    },
+    {
+      "name": "logistics.restore-patch-reproduces-pin",
+      "status": "PASS",
+      "seconds": 0.031192541122436523
+    },
+    {
+      "name": "logistics.no-leftover-zest-names",
+      "status": "PASS",
+      "seconds": 0.02447676658630371
+    },
+    {
+      "name": "logistics.no-secret-literals",
+      "status": "PASS",
+      "seconds": 0.28221869468688965
+    },
+    {
+      "name": "logistics.package-scripts-exist",
+      "status": "PASS",
+      "seconds": 0.0012803077697753906
+    },
+    {
+      "name": "logistics.engine-modules-compile",
+      "status": "PASS",
+      "seconds": 0.3423759937286377
+    },
+    {
+      "name": "exchange.gather-without-bridge-uses-threads",
+      "status": "PASS",
+      "seconds": 0.30150485038757324
+    },
+    {
+      "name": "exchange.batch-orders-carry-numbers",
+      "status": "PASS",
+      "seconds": 0.0001983642578125
+    },
+    {
+      "name": "exchange.signature-raw-values-encoded-query",
+      "status": "PASS",
+      "seconds": 0.0005519390106201172
+    },
+    {
+      "name": "exchange.public-cooldown-blocks-http",
+      "status": "PASS",
+      "seconds": 0.0011167526245117188
+    },
+    {
+      "name": "exchange.public-ok-path-not-blocked",
+      "status": "PASS",
+      "seconds": 0.0003287792205810547
+    },
+    {
+      "name": "exchange.token-bucket-reserve-never-sleeps",
+      "status": "PASS",
+      "seconds": 1.6450881958007812e-05
+    },
+    {
+      "name": "exchange.async-bridge-honours-cooldown",
+      "status": "PASS",
+      "seconds": 0.0013566017150878906
+    },
+    {
+      "name": "exchange.async-bridge-waits-on-loop",
+      "status": "PASS",
+      "seconds": 0.053536415100097656
+    },
+    {
+      "name": "sidecar.default-bind-is-loopback",
+      "status": "PASS",
+      "seconds": 2.0265579223632812e-05
+    },
+    {
+      "name": "sidecar.control-refused-without-token",
+      "status": "PASS",
+      "seconds": 0.017492294311523438
+    },
+    {
+      "name": "sidecar.control-refused-with-wrong-token",
+      "status": "PASS",
+      "seconds": 0.027269363403320312
+    },
+    {
+      "name": "sidecar.control-accepted-with-token",
+      "status": "PASS",
+      "seconds": 0.01659703254699707
+    },
+    {
+      "name": "sidecar.token-unset-refuses-every-post",
+      "status": "PASS",
+      "seconds": 0.016067028045654297
+    },
+    {
+      "name": "sidecar.cors-is-not-a-wildcard",
+      "status": "PASS",
+      "seconds": 0.012565851211547852
+    },
+    {
+      "name": "sidecar.config-save-atomic",
+      "status": "PASS",
+      "seconds": 0.012277603149414062
+    },
+    {
+      "name": "sidecar.stale-engine-is-not-running",
+      "status": "PASS",
+      "seconds": 0.0006074905395507812
+    },
+    {
+      "name": "sidecar.overall-view-has-no-fake-zeros",
+      "status": "PASS",
+      "seconds": 0.001039266586303711
+    },
+    {
+      "name": "contract.overall-keys-declared",
+      "status": "PASS",
+      "seconds": 0.0009982585906982422
+    },
+    {
+      "name": "contract.lane-keys-declared",
+      "status": "PASS",
+      "seconds": 0.0006630420684814453
+    },
+    {
+      "name": "contract.nullable-overall-fields",
+      "status": "PASS",
+      "seconds": 0.0006470680236816406
+    },
+    {
+      "name": "contract.closed-rows-name-their-lane",
+      "status": "PASS",
+      "seconds": 0.0002834796905517578
+    },
+    {
+      "name": "bybit.requests-signed-over-exact-query-and-body",
+      "status": "PASS",
+      "seconds": 0.0009338855743408203
+    },
+    {
+      "name": "bybit.symbols-and-tickers-map-both-ways",
+      "status": "PASS",
+      "seconds": 0.0004975795745849609
+    },
+    {
+      "name": "bybit.contracts-follow-instrument-filters",
+      "status": "PASS",
+      "seconds": 0.0007724761962890625
+    },
+    {
+      "name": "bybit.klines-oldest-first-in-trader-shape",
+      "status": "PASS",
+      "seconds": 0.0001735687255859375
+    },
+    {
+      "name": "bybit.balance-and-positions-bingx-shape",
+      "status": "PASS",
+      "seconds": 0.0006623268127441406
+    },
+    {
+      "name": "bybit.entry-body-and-fill-report",
+      "status": "PASS",
+      "seconds": 0.0007598400115966797
+    },
+    {
+      "name": "bybit.protective-batch-conditional-reduce-only",
+      "status": "PASS",
+      "seconds": 0.0013327598571777344
+    },
+    {
+      "name": "bybit.batch-per-item-result-and-single-form-fallback",
+      "status": "PASS",
+      "seconds": 0.0007357597351074219
+    },
+    {
+      "name": "bybit.stop-moves-by-amend",
+      "status": "PASS",
+      "seconds": 0.000659942626953125
+    },
+    {
+      "name": "bybit.open-orders-typed-by-direction-and-paged",
+      "status": "PASS",
+      "seconds": 0.0006554126739501953
+    },
+    {
+      "name": "bybit.cancel-and-status-lookup",
+      "status": "PASS",
+      "seconds": 0.0008444786071777344
+    },
+    {
+      "name": "bybit.errors-carry-trader-words",
+      "status": "PASS",
+      "seconds": 9.107589721679688e-05
+    },
+    {
+      "name": "bybit.leverage-and-modes-set-once",
+      "status": "PASS",
+      "seconds": 0.0004968643188476562
+    },
+    {
+      "name": "bybit.rate-headers-drive-the-endpoint-gate",
+      "status": "PASS",
+      "seconds": 0.00029587745666503906
+    },
+    {
+      "name": "bybit.rate-limit-error-backs-off-to-the-reset",
+      "status": "PASS",
+      "seconds": 0.0014896392822265625
+    },
+    {
+      "name": "bybit.ip-ban-stops-every-request-ten-minutes",
+      "status": "PASS",
+      "seconds": 0.0003204345703125
+    },
+    {
+      "name": "bybit.local-pace-far-below-the-ip-limit",
+      "status": "PASS",
+      "seconds": 1.049041748046875e-05
+    },
+    {
+      "name": "bybit.batches-chunked-and-only-failed-items-retried",
+      "status": "PASS",
+      "seconds": 0.0014448165893554688
+    },
+    {
+      "name": "bybit.batch-lost-reply-resolved-by-link-id",
+      "status": "PASS",
+      "seconds": 0.0005590915679931641
+    },
+    {
+      "name": "bybit.retry-never-opens-a-second-position",
+      "status": "PASS",
+      "seconds": 0.001766204833984375
+    },
+    {
+      "name": "bybit.batch-item-with-a-used-link-id-resolves-to-the-existing-order",
+      "status": "PASS",
+      "seconds": 0.0006363391876220703
+    },
+    {
+      "name": "bybit.timestamp-resync",
+      "status": "PASS",
+      "seconds": 0.00019168853759765625
+    },
+    {
+      "name": "bybit.circuit-breaker-holds-entries-only",
+      "status": "PASS",
+      "seconds": 0.0017459392547607422
+    },
+    {
+      "name": "bybit.error-classes",
+      "status": "PASS",
+      "seconds": 0.5016970634460449
+    },
+    {
+      "name": "bybit.reads-retry-writes-do-not",
+      "status": "PASS",
+      "seconds": 0.00019621849060058594
+    },
+    {
+      "name": "bybit.hedge-mode-asked-again-after-rate-limit",
+      "status": "PASS",
+      "seconds": 0.0005090236663818359
+    },
+    {
+      "name": "bybit.batch-cancel-and-amend-per-item",
+      "status": "PASS",
+      "seconds": 0.001920461654663086
+    },
+    {
+      "name": "bybit.price-stream-merges-snapshot-and-delta",
+      "status": "PASS",
+      "seconds": 3.266334533691406e-05
+    },
+    {
+      "name": "bybit.price-hub-shards-subscribes-pings",
+      "status": "PASS",
+      "seconds": 0.00033473968505859375
+    },
+    {
+      "name": "bybit.trader-lifecycle-entry-controls-venue-tp-close",
+      "status": "PASS",
+      "seconds": 0.027727365493774414
+    },
+    {
+      "name": "bybit.own-closing-fills-synced-with-pnl",
+      "status": "PASS",
+      "seconds": 0.0002796649932861328
+    },
+    {
+      "name": "bybit.demo-reads-market-data-from-mainnet",
+      "status": "PASS",
+      "seconds": 0.00013327598571777344
+    },
+    {
+      "name": "bybit.bring-up-script-private-credentials-no-secret-output",
+      "status": "PASS",
+      "seconds": 0.11368203163146973
+    },
+    {
+      "name": "bybit.connection-name-picks-the-venue",
+      "status": "PASS",
+      "seconds": 0.0010960102081298828
+    },
+    {
+      "name": "bybit.tag-contracts-and-pins-per-connection",
+      "status": "PASS",
+      "seconds": 0.4821019172668457
+    },
+    {
+      "name": "bybit.sidecar-lists-bybit-lanes-apart-from-overall",
+      "status": "PASS",
+      "seconds": 0.0003464221954345703
+    },
+    {
+      "name": "trader.no-untagged-order-when-set-disappears",
+      "status": "PASS",
+      "seconds": 0.02302694320678711
+    },
+    {
+      "name": "trader.entry-selection-keeps-packs-and-axis-lanes-independent",
+      "status": "PASS",
+      "seconds": 0.0005748271942138672
+    },
+    {
+      "name": "trader.completed-minutes-do-not-bridge-gaps-or-bad-rows",
+      "status": "PASS",
+      "seconds": 0.00020766258239746094
+    },
+    {
+      "name": "trader.live-entry-is-the-replays-signal",
+      "status": "PASS",
+      "seconds": 0.7644557952880859
+    },
+    {
+      "name": "trader.lanes-every-stage-on-its-own-lane",
+      "status": "PASS",
+      "seconds": 0.0293276309967041
+    },
+    {
+      "name": "trader.real-overall-strategies-per-scope",
+      "status": "PASS",
+      "seconds": 0.04737281799316406
+    },
+    {
+      "name": "trader.lanes-set-close-waits-only-its-own-cooldown",
+      "status": "PASS",
+      "seconds": 0.05107903480529785
+    },
+    {
+      "name": "trader.entry-loop-places-the-set-signal",
+      "status": "PASS",
+      "seconds": 0.06102776527404785
+    },
+    {
+      "name": "trader.entry-mirrors-set-signal-without-last-n-validation",
+      "status": "PASS",
+      "seconds": 0.04821944236755371
+    },
+    {
+      "name": "trader.only-completed-minutes-reach-set-history",
+      "status": "PASS",
+      "seconds": 7.009506225585938e-05
+    },
+    {
+      "name": "trader.exit-set-never-takes-tp-base-always",
+      "status": "PASS",
+      "seconds": 0.023775100708007812
+    },
+    {
+      "name": "trader.drawdown-halt-follows-its-setting",
+      "status": "PASS",
+      "seconds": 0.10434627532958984
+    },
+    {
+      "name": "trader.drawdown-halt-measures-from-the-active-session",
+      "status": "PASS",
+      "seconds": 0.09442400932312012
+    },
+    {
+      "name": "trader.size-follows-balance-and-volume-factor",
+      "status": "PASS",
+      "seconds": 9.751319885253906e-05
+    },
+    {
+      "name": "trader.venue-ban-pauses-flatten-and-refusal-logged",
+      "status": "PASS",
+      "seconds": 0.0215451717376709
+    },
+    {
+      "name": "trader.lanes-no-other-lane-touches-a-set-position",
+      "status": "PASS",
+      "seconds": 0.026124000549316406
+    },
+    {
+      "name": "trader.lanes-set-position-gets-no-add-on-lane",
+      "status": "PASS",
+      "seconds": 0.04191184043884277
+    },
+    {
+      "name": "trader.no-entry-on-a-failed-data-check",
+      "status": "PASS",
+      "seconds": 2.5510787963867188e-05
+    },
+    {
+      "name": "trader.history-thread-fetches-at-start",
+      "status": "PASS",
+      "seconds": 16.60587167739868
+    },
+    {
+      "name": "trader.restored-book-drop-needs-two-reads",
+      "status": "PASS",
+      "seconds": 0.0002713203430175781
+    },
+    {
+      "name": "trader.history-kept-offline-and-topped-up",
+      "status": "PASS",
+      "seconds": 0.40213656425476074
+    },
+    {
+      "name": "trader.departed-symbol-leaves-set-history",
+      "status": "PASS",
+      "seconds": 18.744035720825195
+    },
+    {
+      "name": "trader.credentials-from-private-file",
+      "status": "PASS",
+      "seconds": 0.00064849853515625
+    },
+    {
+      "name": "trader.set-lane-does-not-read-the-exit-strategies",
+      "status": "PASS",
+      "seconds": 0.1425323486328125
+    },
+    {
+      "name": "trader.set-position-closed-only-by-its-lane",
+      "status": "PASS",
+      "seconds": 0.01603841781616211
+    },
+    {
+      "name": "trader.set-lane-scratch-and-time-follow-replay",
+      "status": "PASS",
+      "seconds": 0.09745478630065918
+    },
+    {
+      "name": "trader.set-lane-honours-tp-as-the-replay-does",
+      "status": "PASS",
+      "seconds": 0.15485334396362305
+    },
+    {
+      "name": "trader.set-trails-only-with-its-trailing-set",
+      "status": "PASS",
+      "seconds": 0.01386117935180664
+    },
+    {
+      "name": "trader.exit-lane-scores-only-its-own-closes",
+      "status": "PASS",
+      "seconds": 0.05205392837524414
+    },
+    {
+      "name": "trader.cids-round-trip-to-their-own-set",
+      "status": "PASS",
+      "seconds": 0.28591442108154297
+    },
+    {
+      "name": "trader.signal-needs-its-own-pack",
+      "status": "PASS",
+      "seconds": 4.291534423828125e-05
+    },
+    {
+      "name": "trader.venue-order-of-another-symbol-is-not-the-exit",
+      "status": "PASS",
+      "seconds": 9.131431579589844e-05
+    },
+    {
+      "name": "trader.manager-close-not-counted-twice",
+      "status": "PASS",
+      "seconds": 0.019657135009765625
+    },
+    {
+      "name": "trader.set-fill-keeps-its-sl-and-tp",
+      "status": "PASS",
+      "seconds": 0.011693000793457031
+    },
+    {
+      "name": "trader.slpct-tppct-are-percent",
+      "status": "PASS",
+      "seconds": 0.000370025634765625
+    },
+    {
+      "name": "trader.history-fetched-in-pages",
+      "status": "PASS",
+      "seconds": 0.25951671600341797
+    },
+    {
+      "name": "trader.history-growth-fetches-three-days",
+      "status": "PASS",
+      "seconds": 0.047930240631103516
+    },
+    {
+      "name": "trader.history-growth-retries-failed-pages",
+      "status": "PASS",
+      "seconds": 0.17791318893432617
+    },
+    {
+      "name": "trader.history-chunks-rotate-fairly",
+      "status": "PASS",
+      "seconds": 0.00014472007751464844
+    },
+    {
+      "name": "trader.failed-close-keeps-position-protected",
+      "status": "PASS",
+      "seconds": 0.015674114227294922
+    },
+    {
+      "name": "trader.partial-close-recorded-at-full-size",
+      "status": "PASS",
+      "seconds": 0.04172801971435547
+    },
+    {
+      "name": "trader.lost-entry-answer-remembered",
+      "status": "PASS",
+      "seconds": 0.03101491928100586
+    },
+    {
+      "name": "trader.symbol-cap-applies-under-a-wildcard",
+      "status": "PASS",
+      "seconds": 0.0003829002380371094
+    },
+    {
+      "name": "trader.partial-close-closes-the-remainder",
+      "status": "PASS",
+      "seconds": 0.05145525932312012
+    },
+    {
+      "name": "trader.entry-lifecycle-stub-exchange",
+      "status": "PASS",
+      "seconds": 0.015244245529174805
+    },
+    {
+      "name": "trader.partial-fill-sized-from-executed",
+      "status": "PASS",
+      "seconds": 1.5020370483398438e-05
+    },
+    {
+      "name": "trader.indicator-sees-only-real-bars",
+      "status": "PASS",
+      "seconds": 0.00016570091247558594
+    },
+    {
+      "name": "trader.cycles-start-at-least-scan-apart",
+      "status": "PASS",
+      "seconds": 3.7670135498046875e-05
+    },
+    {
+      "name": "trader.slow-cycle-is-not-padded",
+      "status": "PASS",
+      "seconds": 4.76837158203125e-06
+    },
+    {
+      "name": "trader.main-loop-does-not-wait-on-ticks",
+      "status": "PASS",
+      "seconds": 0.14247560501098633
+    },
+    {
+      "name": "trader.overlay-reads-leverage-settings",
+      "status": "PASS",
+      "seconds": 1.5020370483398438e-05
+    },
+    {
+      "name": "trader.max-toggle-decides-the-target",
+      "status": "PASS",
+      "seconds": 8.344650268554688e-06
+    },
+    {
+      "name": "trader.order-leverage-follows-the-target",
+      "status": "PASS",
+      "seconds": 2.6464462280273438e-05
+    },
+    {
+      "name": "trader.padding-is-not-readiness",
+      "status": "PASS",
+      "seconds": 5.626678466796875e-05
+    },
+    {
+      "name": "trader.only-main-loop-pings-watchdog",
+      "status": "PASS",
+      "seconds": 0.1804051399230957
+    },
+    {
+      "name": "trader.lanes-parity-rule-by-rule",
+      "status": "PASS",
+      "seconds": 0.3382453918457031
+    },
+    {
+      "name": "trader.configured-scratch-reaches-replay-and-live",
+      "status": "PASS",
+      "seconds": 0.06066274642944336
+    },
+    {
+      "name": "trader.trailing-intrabar-order-is-causal",
+      "status": "PASS",
+      "seconds": 0.0003514289855957031
+    },
+    {
+      "name": "trader.lanes-parity-random-series",
+      "status": "PASS",
+      "seconds": 2.8918607234954834
+    },
+    {
+      "name": "trader.lanes-own-stop-level",
+      "status": "PASS",
+      "seconds": 0.039780616760253906
+    },
+    {
+      "name": "trader.lanes-venue-order-left-to-fill",
+      "status": "PASS",
+      "seconds": 0.08453750610351562
+    },
+    {
+      "name": "trader.lanes-venue-close-recorded",
+      "status": "PASS",
+      "seconds": 0.0787668228149414
+    },
+    {
+      "name": "trader.lanes-recovered-set-keeps-its-lane",
+      "status": "PASS",
+      "seconds": 0.0448758602142334
+    },
+    {
+      "name": "processing.explicit-trail-variants-keep-their-arm",
+      "status": "PASS",
+      "seconds": 0.0006918907165527344
+    },
+    {
+      "name": "processing.stable-sets-with-many-orders-first",
+      "status": "PASS",
+      "seconds": 0.001026153564453125
+    },
+    {
+      "name": "processing.replay-starts-with-the-most-orders",
+      "status": "PASS",
+      "seconds": 6.537676572799683
+    },
+    {
+      "name": "processing.scoring-independent-of-replay-order",
+      "status": "PASS",
+      "seconds": 13.296323299407959
+    },
+    {
+      "name": "processing.desk-index-reproduces-pooled-pf",
+      "status": "PASS",
+      "seconds": 13.419252872467041
+    },
+    {
+      "name": "trader.badfill-closed-and-symbol-rests",
+      "status": "PASS",
+      "seconds": 0.030231952667236328
+    },
+    {
+      "name": "trader.symbol-backoff-grows-with-losses",
+      "status": "PASS",
+      "seconds": 0.0003371238708496094
+    },
+    {
+      "name": "trader.size-has-a-hard-ceiling",
+      "status": "PASS",
+      "seconds": 2.2172927856445312e-05
+    },
+    {
+      "name": "trader.block-carried-parent-and-partial-add",
+      "status": "PASS",
+      "seconds": 0.04554390907287598
+    },
+    {
+      "name": "block.one-partial-ratio-per-valid-group",
+      "status": "PASS",
+      "seconds": 0.004657268524169922
+    },
+    {
+      "name": "block.one-partial-per-order",
+      "status": "PASS",
+      "seconds": 0.0005581378936767578
+    },
+    {
+      "name": "trader.per-step-hold-same-in-replay-and-live",
+      "status": "PASS",
+      "seconds": 0.13335680961608887
+    },
+    {
+      "name": "trader.block-samples-own-and-independent-of-windows",
+      "status": "PASS",
+      "seconds": 0.0496823787689209
+    },
+    {
+      "name": "trader.invalid-set-keeps-open-position-handled-and-counted",
+      "status": "PASS",
+      "seconds": 0.024364233016967773
+    },
+    {
+      "name": "trader.drawdown-halt-settings-from-the-overlay",
+      "status": "PASS",
+      "seconds": 0.09517407417297363
+    },
+    {
+      "name": "trader.lane-step-leaves-on-the-sets-own-hold",
+      "status": "PASS",
+      "seconds": 0.0012764930725097656
+    },
+    {
+      "name": "trader.auto-hold-same-in-replay-and-live",
+      "status": "PASS",
+      "seconds": 0.07126569747924805
+    },
+    {
+      "name": "trader.dca-auto-keeps-stop-manual-follows-average",
+      "status": "PASS",
+      "seconds": 0.036145925521850586
+    },
+    {
+      "name": "dca.overlay-switch-reaches-the-module",
+      "status": "PASS",
+      "seconds": 1.1920928955078125e-05
+    },
+    {
+      "name": "trader.dca-optin-lane-leaves-the-set-lane-alone",
+      "status": "PASS",
+      "seconds": 0.08611392974853516
+    },
+    {
+      "name": "block.stack-capped-at-six-groups",
+      "status": "PASS",
+      "seconds": 0.005540370941162109
+    },
+    {
+      "name": "processing.history-not-truncated-by-live-rows",
+      "status": "PASS",
+      "seconds": 0.0019197463989257812
+    },
+    {
+      "name": "block.threshold-rises-with-valid-groups",
+      "status": "PASS",
+      "seconds": 0.00037598609924316406
+    },
+    {
+      "name": "block.stack-stays-until-net-is-back-to-equal",
+      "status": "PASS",
+      "seconds": 0.0056002140045166016
+    },
+    {
+      "name": "block.win-never-carries-memory-survives",
+      "status": "PASS",
+      "seconds": 0.001651763916015625
+    },
+    {
+      "name": "block.carried-stack-survives-a-restart",
+      "status": "PASS",
+      "seconds": 0.0014176368713378906
+    },
+    {
+      "name": "trader.block-stacks-only-on-its-own-proven-lane",
+      "status": "PASS",
+      "seconds": 0.020604372024536133
+    },
+    {
+      "name": "trader.block-adds-only-into-strength",
+      "status": "PASS",
+      "seconds": 0.05161023139953613
+    },
+    {
+      "name": "trader.block-fill-updates-position-and-stop",
+      "status": "PASS",
+      "seconds": 0.020325899124145508
+    },
+    {
+      "name": "trader.block-lane-resets-and-ignores-set-closes",
+      "status": "PASS",
+      "seconds": 0.015246152877807617
+    },
+    {
+      "name": "trader.block-stack-inside-book-cap",
+      "status": "PASS",
+      "seconds": 0.015472650527954102
+    },
+    {
+      "name": "trader.block-min-order-bump-inside-book-cap",
+      "status": "PASS",
+      "seconds": 0.020219802856445312
+    },
+    {
+      "name": "trader.lanes-differential-independence",
+      "status": "PASS",
+      "seconds": 1.5706968307495117
+    },
+    {
+      "name": "trader.lanes-set-stats-own-closes-only",
+      "status": "PASS",
+      "seconds": 1.9839015007019043
+    },
+    {
+      "name": "trader.lanes-effective-pf-is-validated-pool",
+      "status": "PASS",
+      "seconds": 12.947036981582642
+    },
+    {
+      "name": "grid.tp-steps-2-30",
+      "status": "PASS",
+      "seconds": 4.291534423828125e-06
+    },
+    {
+      "name": "grid.sl-ratios-0.5-3.5",
+      "status": "PASS",
+      "seconds": 1.4066696166992188e-05
+    },
+    {
+      "name": "grid.default-1654-sets",
+      "status": "PASS",
+      "seconds": 0.014633417129516602
+    },
+    {
+      "name": "grid.ids-unique-contiguous",
+      "status": "PASS",
+      "seconds": 0.015164613723754883
+    },
+    {
+      "name": "grid.trail-give-le-arm-min3",
+      "status": "PASS",
+      "seconds": 0.022153854370117188
+    },
+    {
+      "name": "grid.trail-min-step-clamp",
+      "status": "PASS",
+      "seconds": 0.04275107383728027
+    },
+    {
+      "name": "grid.trail-grid-pure",
+      "status": "PASS",
+      "seconds": 0.0003147125244140625
+    },
+    {
+      "name": "grid.setstep-clamp",
+      "status": "PASS",
+      "seconds": 0.039617300033569336
+    },
+    {
+      "name": "units.tp-equals-k-times-cost",
+      "status": "PASS",
+      "seconds": 2.6226043701171875e-05
+    },
+    {
+      "name": "units.cost-and-net",
+      "status": "PASS",
+      "seconds": 3.1948089599609375e-05
+    },
+    {
+      "name": "units.sl-snap",
+      "status": "PASS",
+      "seconds": 3.409385681152344e-05
+    },
+    {
+      "name": "units.set-id-format",
+      "status": "PASS",
+      "seconds": 4.291534423828125e-06
+    },
+    {
+      "name": "lane.sl-wins-same-bar-long",
+      "status": "PASS",
+      "seconds": 0.00021505355834960938
+    },
+    {
+      "name": "lane.tp-only-hit-long",
+      "status": "PASS",
+      "seconds": 0.00047397613525390625
+    },
+    {
+      "name": "lane.sl-wins-same-bar-short",
+      "status": "PASS",
+      "seconds": 0.0002961158752441406
+    },
+    {
+      "name": "lane.tp-ignored-when-honor-off",
+      "status": "PASS",
+      "seconds": 0.00026988983154296875
+    },
+    {
+      "name": "lane.time-exit-after-time-bars",
+      "status": "PASS",
+      "seconds": 0.00015974044799804688
+    },
+    {
+      "name": "lane.scratch-exit-positive-move",
+      "status": "PASS",
+      "seconds": 0.00014781951904296875
+    },
+    {
+      "name": "lane.cooldown-blocks-reentry",
+      "status": "PASS",
+      "seconds": 0.00011920928955078125
+    },
+    {
+      "name": "lane.entry-confidence-and-direction",
+      "status": "PASS",
+      "seconds": 0.0001728534698486328
+    },
+    {
+      "name": "lane.entry-levels-around-close",
+      "status": "PASS",
+      "seconds": 0.00011849403381347656
+    },
+    {
+      "name": "lane.trail-arms-then-gives-back",
+      "status": "PASS",
+      "seconds": 0.0003800392150878906
+    },
+    {
+      "name": "lane.explicit-trail-list-obeys-minimum-distance",
+      "status": "PASS",
+      "seconds": 0.00013756752014160156
+    },
+    {
+      "name": "gate.boundary-pf-and-sample",
+      "status": "PASS",
+      "seconds": 0.00011396408081054688
+    },
+    {
+      "name": "gate.window-caps-sample",
+      "status": "PASS",
+      "seconds": 0.00069427490234375
+    },
+    {
+      "name": "gates.minimal-coordination-is-not-pf-validation",
+      "status": "PASS",
+      "seconds": 0.04926729202270508
+    },
+    {
+      "name": "gates.every-window-asks-the-minimum-pf-of-its-size",
+      "status": "PASS",
+      "seconds": 0.05128145217895508
+    },
+    {
+      "name": "gates.base-minimal-window-positive-and-negative",
+      "status": "PASS",
+      "seconds": 0.3632967472076416
+    },
+    {
+      "name": "gates.main-short-windows-are-at-most-half-of-the-long-window",
+      "status": "PASS",
+      "seconds": 0.18050146102905273
+    },
+    {
+      "name": "gates.main-minimal-window-positive-and-negative",
+      "status": "PASS",
+      "seconds": 0.42747998237609863
+    },
+    {
+      "name": "gates.short-window-is-at-most-half-of-the-long-window",
+      "status": "PASS",
+      "seconds": 0.17163705825805664
+    },
+    {
+      "name": "gates.stage-short-window-judges-the-orders-it-has",
+      "status": "PASS",
+      "seconds": 0.09540367126464844
+    },
+    {
+      "name": "gates.stage-windows-accept-one-and-two",
+      "status": "PASS",
+      "seconds": 0.06747579574584961
+    },
+    {
+      "name": "gates.minimum-order-count-off-judges-on-available-orders",
+      "status": "PASS",
+      "seconds": 0.11801743507385254
+    },
+    {
+      "name": "gates.default-max-drawdown-time-is-24-hours",
+      "status": "PASS",
+      "seconds": 0.09229111671447754
+    },
+    {
+      "name": "gates.pf-gate-boundary",
+      "status": "PASS",
+      "seconds": 0.014085531234741211
+    },
+    {
+      "name": "gates.ddt-gate-strictly-lower",
+      "status": "PASS",
+      "seconds": 0.014561176300048828
+    },
+    {
+      "name": "gates.ddt-open-drawdown-to-clock",
+      "status": "PASS",
+      "seconds": 3.075599670410156e-05
+    },
+    {
+      "name": "gates.lock-blocks-at-once",
+      "status": "PASS",
+      "seconds": 0.02102971076965332
+    },
+    {
+      "name": "lifecycle.coverage-counts-sum-to-grid",
+      "status": "PASS",
+      "seconds": 0.0329585075378418
+    },
+    {
+      "name": "lifecycle.interval-never-back-to-back",
+      "status": "PASS",
+      "seconds": 0.015225410461425781
+    },
+    {
+      "name": "lifecycle.every-set-evaluated-valid-passes-gate",
+      "status": "PASS",
+      "seconds": 7.436314344406128
+    },
+    {
+      "name": "lifecycle.failing-set-isolated",
+      "status": "PASS",
+      "seconds": 7.024006605148315
+    },
+    {
+      "name": "lifecycle.invalid-recovers-without-reset",
+      "status": "PASS",
+      "seconds": 0.04299783706665039
+    },
+    {
+      "name": "lifecycle.lock-blocks-at-once",
+      "status": "PASS",
+      "seconds": 0.0171968936920166
+    },
+    {
+      "name": "lifecycle.entries-per-set-no-global-gate",
+      "status": "PASS",
+      "seconds": 0.03287363052368164
+    },
+    {
+      "name": "lifecycle.stale-set-not-valid-live",
+      "status": "PASS",
+      "seconds": 0.0189971923828125
+    },
+    {
+      "name": "lifecycle.counts-match-states-and-reasons",
+      "status": "PASS",
+      "seconds": 0.017705202102661133
+    },
+    {
+      "name": "lifecycle.snapshot-counts-match-book",
+      "status": "PASS",
+      "seconds": 6.712042331695557
+    },
+    {
+      "name": "lifecycle.retired-config-keys-gone",
+      "status": "PASS",
+      "seconds": 0.013454914093017578
+    },
+    {
+      "name": "lifecycle.trader-reads-existing-attributes",
+      "status": "PASS",
+      "seconds": 0.014162778854370117
+    },
+    {
+      "name": "indication.active-and-common-reach-replay-and-live-signal",
+      "status": "PASS",
+      "seconds": 0.01919269561767578
+    },
+    {
+      "name": "indication.ranges-forwarded-to-set-signal",
+      "status": "PASS",
+      "seconds": 0.014328718185424805
+    },
+    {
+      "name": "indication.match-follows-timeframe-lane",
+      "status": "PASS",
+      "seconds": 3.266334533691406e-05
+    },
+    {
+      "name": "indication.missing-pnl-pct-is-not-a-loss",
+      "status": "PASS",
+      "seconds": 6.699562072753906e-05
+    },
+    {
+      "name": "indication.bars-to-entry-reason-round-trip",
+      "status": "PASS",
+      "seconds": 0.0015180110931396484
+    },
+    {
+      "name": "indication.extra-book-fetches-once-in-flight",
+      "status": "PASS",
+      "seconds": 0.20092558860778809
+    },
+    {
+      "name": "indication.causal-signals-ignore-future",
+      "status": "PASS",
+      "seconds": 1.1144821643829346
+    },
+    {
+      "name": "indication.library-memo-never-stale",
+      "status": "PASS",
+      "seconds": 0.10700178146362305
+    },
+    {
+      "name": "indication.every-name-gets-its-timeframe-history",
+      "status": "PASS",
+      "seconds": 0.6228821277618408
+    },
+    {
+      "name": "indication.signal-memo-key-covers-the-window",
+      "status": "PASS",
+      "seconds": 4.731894254684448
+    },
+    {
+      "name": "indication.relations-compose-by-their-rules",
+      "status": "PASS",
+      "seconds": 0.4027371406555176
+    },
+    {
+      "name": "indication.thirty-minute-names-fire",
+      "status": "PASS",
+      "seconds": 1.9123148918151855
+    },
+    {
+      "name": "indication.timeframe-keys-reach-set-signal",
+      "status": "PASS",
+      "seconds": 0.01546788215637207
+    },
+    {
+      "name": "indication.timeframe-flag-removes-lane",
+      "status": "PASS",
+      "seconds": 0.006466388702392578
+    },
+    {
+      "name": "indication.combined-vote-needs-min-agree",
+      "status": "PASS",
+      "seconds": 0.0006577968597412109
+    },
+    {
+      "name": "indication.match-names-kind-and-mode",
+      "status": "PASS",
+      "seconds": 3.719329833984375e-05
+    },
+    {
+      "name": "indication.snapshot-survives-concurrent-writes",
+      "status": "PASS",
+      "seconds": 0.24750733375549316
+    },
+    {
+      "name": "indication.signal-deterministic",
+      "status": "PASS",
+      "seconds": 1.3874902725219727
+    },
+    {
+      "name": "indication.set-switches-reach-the-set-signal",
+      "status": "PASS",
+      "seconds": 0.04284787178039551
+    },
+    {
+      "name": "indication.switched-off-vote-is-absent",
+      "status": "PASS",
+      "seconds": 0.14978957176208496
+    },
+    {
+      "name": "indication.all-switches-off-is-flat",
+      "status": "PASS",
+      "seconds": 0.013749122619628906
+    },
+    {
+      "name": "indication.tf1m-switch-removes-the-set-lane",
+      "status": "PASS",
+      "seconds": 0.03242182731628418
+    },
+    {
+      "name": "extra.hand-computed-rsi-and-atr",
+      "status": "PASS",
+      "seconds": 2.9325485229492188e-05
+    },
+    {
+      "name": "extra.only-the-tail-is-read",
+      "status": "PASS",
+      "seconds": 0.8497343063354492
+    },
+    {
+      "name": "extra.outputs-stay-in-domain",
+      "status": "PASS",
+      "seconds": 38.055481910705566
+    },
+    {
+      "name": "extra.fixtures-fire-both-ways",
+      "status": "PASS",
+      "seconds": 0.00023555755615234375
+    },
+    {
+      "name": "extra.failing-indicator-isolated",
+      "status": "PASS",
+      "seconds": 7.82012939453125e-05
+    },
+    {
+      "name": "extra.overlay-list-reaches-vote",
+      "status": "PASS",
+      "seconds": 0.038428544998168945
+    },
+    {
+      "name": "extra.short-range-grid-steps-2-6",
+      "status": "PASS",
+      "seconds": 0.02005171775817871
+    },
+    {
+      "name": "extra.short-range-signal-cancels-opposites",
+      "status": "PASS",
+      "seconds": 3.910064697265625e-05
+    },
+    {
+      "name": "extra.minimum-stop-and-trail-follow-cost-plus-steps",
+      "status": "PASS",
+      "seconds": 5.53131103515625e-05
+    },
+    {
+      "name": "extra.low-range-state-hand-values",
+      "status": "PASS",
+      "seconds": 0.00034356117248535156
+    },
+    {
+      "name": "extra.low-range-fade-both-ways",
+      "status": "PASS",
+      "seconds": 0.0014793872833251953
+    },
+    {
+      "name": "extra.low-range-break-and-trendbreak-both-ways",
+      "status": "PASS",
+      "seconds": 0.0030930042266845703
+    },
+    {
+      "name": "extra.nr7-and-inside-bar-both-ways",
+      "status": "PASS",
+      "seconds": 0.0006694793701171875
+    },
+    {
+      "name": "extra.low-range-levels-add-the-position-cost",
+      "status": "PASS",
+      "seconds": 0.0005354881286621094
+    },
+    {
+      "name": "extra.relation-indicators-both-ways-and-quiet-when-flat",
+      "status": "PASS",
+      "seconds": 0.0048313140869140625
+    },
+    {
+      "name": "extra.prior-move-continuation-vs-reversal",
+      "status": "PASS",
+      "seconds": 0.001600027084350586
+    },
+    {
+      "name": "extra.family-registered-every-range-and-timeframe",
+      "status": "PASS",
+      "seconds": 7.486343383789062e-05
+    },
+    {
+      "name": "extra.family-hand-computed-fit-and-aggregate",
+      "status": "PASS",
+      "seconds": 2.7179718017578125e-05
+    },
+    {
+      "name": "extra.trend-family-both-ways-quiet-on-noise",
+      "status": "PASS",
+      "seconds": 0.0037593841552734375
+    },
+    {
+      "name": "extra.breakout-family-both-ways-needs-close-and-volume",
+      "status": "PASS",
+      "seconds": 0.002454519271850586
+    },
+    {
+      "name": "extra.combined-needs-agreement",
+      "status": "PASS",
+      "seconds": 1.3113021850585938e-05
+    },
+    {
+      "name": "extra.family-wires-into-the-set-vote",
+      "status": "PASS",
+      "seconds": 0.014599084854125977
+    },
+    {
+      "name": "extra.lib-registered-every-family-range-timeframe",
+      "status": "PASS",
+      "seconds": 0.0009114742279052734
+    },
+    {
+      "name": "extra.lib-trend-both-ways",
+      "status": "PASS",
+      "seconds": 0.021538257598876953
+    },
+    {
+      "name": "extra.lib-breakout-both-ways",
+      "status": "PASS",
+      "seconds": 0.003149747848510742
+    },
+    {
+      "name": "extra.lib-reversion-both-ways",
+      "status": "PASS",
+      "seconds": 0.002310514450073242
+    },
+    {
+      "name": "extra.lib-volume-both-ways",
+      "status": "PASS",
+      "seconds": 0.0017619132995605469
+    },
+    {
+      "name": "extra.lib-mirror-symmetric-and-flat-quiet",
+      "status": "PASS",
+      "seconds": 0.10555481910705566
+    },
+    {
+      "name": "extra.lib-group-votes-need-agreement",
+      "status": "PASS",
+      "seconds": 0.02504873275756836
+    },
+    {
+      "name": "extra.ao-registered-and-windowed",
+      "status": "PASS",
+      "seconds": 0.0006337165832519531
+    },
+    {
+      "name": "extra.ao-both-ways",
+      "status": "PASS",
+      "seconds": 0.028339385986328125
+    },
+    {
+      "name": "extra.ao-mirror-symmetric-and-flat-quiet",
+      "status": "PASS",
+      "seconds": 0.10517072677612305
+    },
+    {
+      "name": "report.minimal-grid-reports-coordination-without-pf",
+      "status": "PASS",
+      "seconds": 0.007546424865722656
+    },
+    {
+      "name": "report.window-grid-html-has-heatmap-and-best-cell",
+      "status": "PASS",
+      "seconds": 0.01693892478942871
+    },
+    {
+      "name": "report.window-grid-files-merge-into-one-report",
+      "status": "PASS",
+      "seconds": 0.03764533996582031
+    },
+    {
+      "name": "report.window-grid-negative-off-and-minimal-both",
+      "status": "PASS",
+      "seconds": 0.03191876411437988
+    },
+    {
+      "name": "report.hand-computed-pf",
+      "status": "PASS",
+      "seconds": 2.0503997802734375e-05
+    },
+    {
+      "name": "report.summary-pools-sets-and-picks",
+      "status": "PASS",
+      "seconds": 8.487701416015625e-05
+    },
+    {
+      "name": "report.page-embeds-json-and-valid-script",
+      "status": "PASS",
+      "seconds": 0.06298255920410156
+    },
+    {
+      "name": "calc.last-n-window-without-a-full-scan-equals-the-full-scan",
+      "status": "PASS",
+      "seconds": 0.01187896728515625
+    },
+    {
+      "name": "calc.net-sum-mean-and-pf-share-one-basis",
+      "status": "PASS",
+      "seconds": 0.003919363021850586
+    },
+    {
+      "name": "calc.stage-summary-orders-pf-net-and-hours-share-one-basis",
+      "status": "PASS",
+      "seconds": 8.034706115722656e-05
+    },
+    {
+      "name": "calc.net-is-gross-minus-one-cost",
+      "status": "PASS",
+      "seconds": 0.0006923675537109375
+    },
+    {
+      "name": "calc.cost-deducted-exactly-once",
+      "status": "PASS",
+      "seconds": 4.291534423828125e-06
+    },
+    {
+      "name": "calc.r-formula-and-identity",
+      "status": "PASS",
+      "seconds": 0.0006282329559326172
+    },
+    {
+      "name": "calc.ratio-definition-and-example",
+      "status": "PASS",
+      "seconds": 0.00016307830810546875
+    },
+    {
+      "name": "calc.pf-matches-reference",
+      "status": "PASS",
+      "seconds": 0.0006656646728515625
+    },
+    {
+      "name": "calc.pf-edge-cases",
+      "status": "PASS",
+      "seconds": 6.079673767089844e-05
+    },
+    {
+      "name": "calc.one-positioncost-is-neutral",
+      "status": "PASS",
+      "seconds": 5.7220458984375e-06
+    },
+    {
+      "name": "calc.cost-inputs-are-percent",
+      "status": "PASS",
+      "seconds": 9.5367431640625e-06
+    },
+    {
+      "name": "calc.exit-and-dca-settings-percent",
+      "status": "PASS",
+      "seconds": 3.314018249511719e-05
+    },
+    {
+      "name": "calc.gate-default-single-constant",
+      "status": "PASS",
+      "seconds": 9.5367431640625e-05
+    },
+    {
+      "name": "calc.set-floors-follow-cost",
+      "status": "PASS",
+      "seconds": 0.0005779266357421875
+    },
+    {
+      "name": "calc.trail-stop-named-constant",
+      "status": "PASS",
+      "seconds": 0.0010046958923339844
+    },
+    {
+      "name": "calc.lane-records-from-prices",
+      "status": "PASS",
+      "seconds": 0.014042377471923828
+    },
+    {
+      "name": "calc.same-pf-in-every-module",
+      "status": "PASS",
+      "seconds": 0.0003943443298339844
+    },
+    {
+      "name": "calc.payload-pf-fields-are-pf-not-ratio",
+      "status": "PASS",
+      "seconds": 7.4040446281433105
+    },
+    {
+      "name": "calc.report-window-is-chronological",
+      "status": "PASS",
+      "seconds": 0.0014128684997558594
+    },
+    {
+      "name": "processing.untimed-live-closes-are-skipped",
+      "status": "PASS",
+      "seconds": 0.0009043216705322266
+    },
+    {
+      "name": "processing.small-results-keep-pf-precision",
+      "status": "PASS",
+      "seconds": 0.0013654232025146484
+    },
+    {
+      "name": "processing.executed-window-bounded-cost-correct",
+      "status": "PASS",
+      "seconds": 0.023036718368530273
+    },
+    {
+      "name": "processing.axis-paper-scopes-bounded-and-time-correct",
+      "status": "PASS",
+      "seconds": 0.0011107921600341797
+    },
+    {
+      "name": "processing.axis-pause-uses-costed-results-per-scope",
+      "status": "PASS",
+      "seconds": 0.0004470348358154297
+    },
+    {
+      "name": "processing.main-short-isolated-from-live-close",
+      "status": "PASS",
+      "seconds": 0.002384662628173828
+    },
+    {
+      "name": "processing.main-short-matches-paper-oracle-with-live-closes",
+      "status": "PASS",
+      "seconds": 0.18816781044006348
+    },
+    {
+      "name": "processing.live-scoring-obeys-lookback-and-event-clock",
+      "status": "PASS",
+      "seconds": 0.0011665821075439453
+    },
+    {
+      "name": "processing.replay-uses-each-symbols-last-completed-bar",
+      "status": "PASS",
+      "seconds": 2.519144058227539
+    },
+    {
+      "name": "processing.simulator-validates-at-entry-and-refreshes-at-boundary",
+      "status": "PASS",
+      "seconds": 0.0030269622802734375
+    },
+    {
+      "name": "processing.hold-adapter-uses-selected-sets-tape",
+      "status": "PASS",
+      "seconds": 0.0010368824005126953
+    },
+    {
+      "name": "processing.live-windows-preserve-owner-and-lane-history",
+      "status": "PASS",
+      "seconds": 0.0978090763092041
+    },
+    {
+      "name": "processing.sim-gate-equals-the-engine-for-every-window-configuration",
+      "status": "PASS",
+      "seconds": 5.433995723724365
+    },
+    {
+      "name": "processing.stage-figures-average-the-valid-sets-and-report-the-validated-share",
+      "status": "PASS",
+      "seconds": 5.281421422958374
+    },
+    {
+      "name": "processing.few-order-sets-judged-when-the-minimum-is-off",
+      "status": "PASS",
+      "seconds": 13.45560359954834
+    },
+    {
+      "name": "processing.broken-or-flat-series-not-replayed",
+      "status": "PASS",
+      "seconds": 1.1999256610870361
+    },
+    {
+      "name": "processing.base-lane-lookup-equals-walk",
+      "status": "PASS",
+      "seconds": 0.38012146949768066
+    },
+    {
+      "name": "processing.scratch-lookup-keeps-exact-level",
+      "status": "PASS",
+      "seconds": 0.0012693405151367188
+    },
+    {
+      "name": "processing.consistency-both-halves",
+      "status": "PASS",
+      "seconds": 0.002466440200805664
+    },
+    {
+      "name": "processing.legacy-pick-prefers-judged-sets",
+      "status": "PASS",
+      "seconds": 0.0012121200561523438
+    },
+    {
+      "name": "processing.step-adapt-waits-for-the-pass",
+      "status": "PASS",
+      "seconds": 2.077176094055176
+    },
+    {
+      "name": "processing.short-range-trailing-inside-its-steps",
+      "status": "PASS",
+      "seconds": 0.022649049758911133
+    },
+    {
+      "name": "processing.effective-pf-rolling-window",
+      "status": "PASS",
+      "seconds": 2.3412113189697266
+    },
+    {
+      "name": "processing.short-range-own-pf-floor",
+      "status": "PASS",
+      "seconds": 0.0018815994262695312
+    },
+    {
+      "name": "processing.base-gate-always-on",
+      "status": "PASS",
+      "seconds": 0.0019347667694091797
+    },
+    {
+      "name": "processing.pf-progress-history",
+      "status": "PASS",
+      "seconds": 2.5159430503845215
+    },
+    {
+      "name": "processing.pack-change-keeps-memo-sound",
+      "status": "PASS",
+      "seconds": 4.317246198654175
+    },
+    {
+      "name": "processing.signal-memo-one-entry-per-bar",
+      "status": "PASS",
+      "seconds": 7.26957106590271
+    },
+    {
+      "name": "processing.effective-pf-pooled-over-valid-sets",
+      "status": "PASS",
+      "seconds": 5.9658613204956055
+    },
+    {
+      "name": "processing.pick-any-no-gap-between-lookups",
+      "status": "PASS",
+      "seconds": 2.187999725341797
+    },
+    {
+      "name": "processing.departed-symbols-leave-caches",
+      "status": "PASS",
+      "seconds": 17.836692094802856
+    },
+    {
+      "name": "processing.snapshot-waits-for-writer",
+      "status": "PASS",
+      "seconds": 4.509681940078735
+    },
+    {
+      "name": "processing.rebuild-mid-pass-no-partial-tape",
+      "status": "PASS",
+      "seconds": 26.5191490650177
+    },
+    {
+      "name": "processing.live-close-stays-counted-through-replay",
+      "status": "PASS",
+      "seconds": 2.4256694316864014
+    },
+    {
+      "name": "processing.live-dedupe-and-history-bounded",
+      "status": "PASS",
+      "seconds": 2.749830722808838
+    },
+    {
+      "name": "processing.all-sets-processed-full-grid",
+      "status": "PASS",
+      "seconds": 34.996039628982544
+    },
+    {
+      "name": "processing.ingest-keeps-history-on-live-refresh",
+      "status": "PASS",
+      "seconds": 0.017456769943237305
+    },
+    {
+      "name": "processing.trades-produced",
+      "status": "PASS",
+      "seconds": 33.92675256729126
+    },
+    {
+      "name": "processing.trade-invariants",
+      "status": "PASS",
+      "seconds": 32.839606285095215
+    },
+    {
+      "name": "processing.deterministic-replay",
+      "status": "PASS",
+      "seconds": 35.5224130153656
+    },
+    {
+      "name": "processing.continuous-across-refreshes",
+      "status": "PASS",
+      "seconds": 6.150174856185913
+    },
+    {
+      "name": "processing.due-cadence",
+      "status": "PASS",
+      "seconds": 2.2209439277648926
+    },
+    {
+      "name": "processing.symbol-failure-isolated-and-recovers",
+      "status": "PASS",
+      "seconds": 49.151042461395264
+    },
+    {
+      "name": "processing.set-failure-isolated",
+      "status": "PASS",
+      "seconds": 17.299907207489014
+    },
+    {
+      "name": "processing.chunked-refresh-equals-full",
+      "status": "PASS",
+      "seconds": 15.731891870498657
+    },
+    {
+      "name": "processing.hold-auto-picks-each-sets-own-best-hold-from-its-last-orders",
+      "status": "PASS",
+      "seconds": 0.08222770690917969
+    },
+    {
+      "name": "processing.hold-auto-replay-assigns-holds-and-judges-the-chosen-tape",
+      "status": "PASS",
+      "seconds": 39.99903583526611
+    },
+    {
+      "name": "processing.hold-auto-tape-is-causal",
+      "status": "PASS",
+      "seconds": 0.0002391338348388672
+    },
+    {
+      "name": "processing.validation-windows-follow-overall-n-floor-8-gates-only",
+      "status": "PASS",
+      "seconds": 0.10633516311645508
+    },
+    {
+      "name": "processing.real-gate-per-set-at-the-base-minimum-pf",
+      "status": "PASS",
+      "seconds": 0.3761777877807617
+    },
+    {
+      "name": "processing.no-gate-asks-less-than-pf-1.1",
+      "status": "PASS",
+      "seconds": 0.0493772029876709
+    },
+    {
+      "name": "processing.stage-pools-count-every-set-that-passed-base",
+      "status": "PASS",
+      "seconds": 9.49002742767334
+    },
+    {
+      "name": "processing.effective-pf-per-entry-counts-each-entry-once",
+      "status": "PASS",
+      "seconds": 0.005475044250488281
+    },
+    {
+      "name": "processing.every-validation-gate-asks-the-base-minimum-pf",
+      "status": "PASS",
+      "seconds": 0.04001116752624512
+    },
+    {
+      "name": "processing.pre-history-grows-when-sets-lack-orders",
+      "status": "PASS",
+      "seconds": 36.59239935874939
+    },
+    {
+      "name": "processing.history-collection-target-independent-of-admission",
+      "status": "PASS",
+      "seconds": 0.10497617721557617
+    },
+    {
+      "name": "processing.history-growth-waits-for-every-symbol",
+      "status": "PASS",
+      "seconds": 0.0074765682220458984
+    },
+    {
+      "name": "processing.scratch-setting-invalidates-history",
+      "status": "PASS",
+      "seconds": 0.0024030208587646484
+    },
+    {
+      "name": "processing.live-close-once-and-gate",
+      "status": "PASS",
+      "seconds": 2.231560707092285
+    },
+    {
+      "name": "processing.concurrent-replay-and-live-closes",
+      "status": "PASS",
+      "seconds": 6.913858413696289
+    },
+    {
+      "name": "processing.ready-carried-across-refresh",
+      "status": "PASS",
+      "seconds": 38.309245586395264
+    },
+    {
+      "name": "processing.out-of-grid-sets-retired-and-closes-counted",
+      "status": "PASS",
+      "seconds": 24.676814317703247
+    },
+    {
+      "name": "processing.unmatched-pnl-pct-skipped-not-a-loss",
+      "status": "PASS",
+      "seconds": 0.00013375282287597656
+    },
+    {
+      "name": "stages.replay-and-current-verdict-use-same-pf-rounding",
+      "status": "PASS",
+      "seconds": 0.030435562133789062
+    },
+    {
+      "name": "stages.negative-lane-does-not-pollute-main-passing-pf",
+      "status": "PASS",
+      "seconds": 0.0010504722595214844
+    },
+    {
+      "name": "stages.every-window-is-judged-on-its-own",
+      "status": "PASS",
+      "seconds": 0.21320033073425293
+    },
+    {
+      "name": "stages.window-figures-pool-exactly-the-orders-each-window-reads",
+      "status": "PASS",
+      "seconds": 0.04492521286010742
+    },
+    {
+      "name": "stages.the-plain-reading-equals-the-chain",
+      "status": "PASS",
+      "seconds": 0.13206934928894043
+    },
+    {
+      "name": "stages.the-debug-trace-equals-the-engine",
+      "status": "PASS",
+      "seconds": 0.035585880279541016
+    },
+    {
+      "name": "stages.the-chain-is-causal",
+      "status": "PASS",
+      "seconds": 0.016116857528686523
+    },
+    {
+      "name": "stages.a-negative-window-of-cancelling-results-is-not-negative",
+      "status": "PASS",
+      "seconds": 0.04576516151428223
+    },
+    {
+      "name": "stages.the-chain-is-neutral-without-persistence-and-lifts-it-with",
+      "status": "PASS",
+      "seconds": 0.366696834564209
+    },
+    {
+      "name": "stages.a-set-verdict-ignores-every-other-set",
+      "status": "PASS",
+      "seconds": 0.0586848258972168
+    },
+    {
+      "name": "stages.the-statistics-relations-hold",
+      "status": "PASS",
+      "seconds": 0.03582596778869629
+    },
+    {
+      "name": "stages.set-and-lane-ids-never-collide",
+      "status": "PASS",
+      "seconds": 0.0662684440612793
+    },
+    {
+      "name": "stages.costs-are-applied-once-and-lanes-sit-at-their-distances",
+      "status": "PASS",
+      "seconds": 11.672209739685059
+    },
+    {
+      "name": "golden.replay-fingerprint",
+      "status": "PASS",
+      "seconds": 15.745301485061646
+    },
+    {
+      "name": "correctness.paper-actual-isolation",
+      "status": "PASS",
+      "seconds": 0.009912252426147461
+    },
+    {
+      "name": "correctness.config-change-invalidates-old-evidence",
+      "status": "PASS",
+      "seconds": 0.0016946792602539062
+    },
+    {
+      "name": "correctness.executed-restart-and-base-attribution",
+      "status": "PASS",
+      "seconds": 0.02265024185180664
+    },
+    {
+      "name": "correctness.axis-continuation-and-set-isolation",
+      "status": "PASS",
+      "seconds": 0.0034890174865722656
+    },
+    {
+      "name": "correctness.block-independent-evidence-and-restart",
+      "status": "PASS",
+      "seconds": 0.004497528076171875
+    },
+    {
+      "name": "correctness.block-actual-and-paper-costs",
+      "status": "PASS",
+      "seconds": 0.00113677978515625
+    },
+    {
+      "name": "correctness.block-pause-count-and-zero-are-respected",
+      "status": "PASS",
+      "seconds": 0.0006861686706542969
+    },
+    {
+      "name": "correctness.block-parent-unchanged-end-to-end",
+      "status": "PASS",
+      "seconds": 0.020461320877075195
+    },
+    {
+      "name": "correctness.drawdown-plain-oracle",
+      "status": "PASS",
+      "seconds": 0.0006883144378662109
+    },
+    {
+      "name": "correctness.flat-rsi-and-relation-names",
+      "status": "PASS",
+      "seconds": 0.0013742446899414062
+    },
+    {
+      "name": "correctness.fifty-symbol-processing",
+      "status": "PASS",
+      "seconds": 286.2681293487549
+    },
+    {
+      "name": "correctness.balance-sizing-and-block-budget",
+      "status": "PASS",
+      "seconds": 2.9325485229492188e-05
+    },
+    {
+      "name": "correctness.frozen-hold-and-block-intent-failure",
+      "status": "PASS",
+      "seconds": 0.020291566848754883
+    },
+    {
+      "name": "cost-accounting.fee-and-slippage-oracle",
+      "status": "PASS",
+      "seconds": 4.982948303222656e-05
+    },
+    {
+      "name": "cost-accounting.net-result-survives-consumers-and-cost-changes",
+      "status": "PASS",
+      "seconds": 0.0007555484771728516
+    },
+    {
+      "name": "cost-accounting.rate-lookup-and-bybit-translation",
+      "status": "PASS",
+      "seconds": 5.626678466796875e-05
+    },
+    {
+      "name": "cost-accounting.pulse-fill-to-stats",
+      "status": "PASS",
+      "seconds": 0.01768350601196289
+    },
+    {
+      "name": "cost-accounting.partial-close-retry-and-unfilled-close",
+      "status": "PASS",
+      "seconds": 0.01843571662902832
+    },
+    {
+      "name": "cost-accounting.execution-outcomes-survive-caps-and-emergency-closes",
+      "status": "PASS",
+      "seconds": 0.022675037384033203
+    },
+    {
+      "name": "cost-accounting.unattributed-aggregate-fee-does-not-score-base",
+      "status": "PASS",
+      "seconds": 0.0007109642028808594
+    },
+    {
+      "name": "cost-accounting.execution-scope-counts-survive-restart",
+      "status": "PASS",
+      "seconds": 0.000457763671875
+    },
+    {
+      "name": "cost-accounting.acknowledged-close-waits-for-the-same-order",
+      "status": "PASS",
+      "seconds": 0.01619124412536621
+    },
+    {
+      "name": "cost-accounting.pending-close-survives-position-refresh-and-restart",
+      "status": "PASS",
+      "seconds": 0.020465850830078125
+    },
+    {
+      "name": "cost-accounting.pending-partial-is-settled-once-then-manager-closes-remainder",
+      "status": "PASS",
+      "seconds": 0.015462398529052734
+    },
+    {
+      "name": "cost-accounting.restart-does-not-seed-foreign-exit-lanes",
+      "status": "PASS",
+      "seconds": 0.0003108978271484375
+    },
+    {
+      "name": "monitoring.exact-get-and-no-controls",
+      "status": "PASS",
+      "seconds": 0.00015354156494140625
+    },
+    {
+      "name": "monitoring.rejects-credentials-and-control-urls",
+      "status": "PASS",
+      "seconds": 6.4849853515625e-05
+    },
+    {
+      "name": "monitoring.stale-identity-symbols-and-halt",
+      "status": "PASS",
+      "seconds": 3.0040740966796875e-05
+    },
+    {
+      "name": "monitoring.stalls-and-recovers-without-pf-clamping",
+      "status": "PASS",
+      "seconds": 5.245208740234375e-05
+    },
+    {
+      "name": "monitoring.error-increases-only",
+      "status": "PASS",
+      "seconds": 4.315376281738281e-05
+    },
+    {
+      "name": "monitoring.unavailable-and-response-limit",
+      "status": "PASS",
+      "seconds": 0.0004017353057861328
+    },
+    {
+      "name": "selftest.set_engine",
+      "status": "PASS",
+      "seconds": 4.997695207595825
+    },
+    {
+      "name": "selftest.indication_engine",
+      "status": "PASS",
+      "seconds": 0.001958608627319336
+    },
+    {
+      "name": "selftest.dca_engine",
+      "status": "PASS",
+      "seconds": 0.0019605159759521484
+    },
+    {
+      "name": "selftest.position_cost",
+      "status": "PASS",
+      "seconds": 0.022172927856445312
+    },
+    {
+      "name": "selftest.exit_engine",
+      "status": "PASS",
+      "seconds": 0.002799510955810547
+    },
+    {
+      "name": "selftest.risk_variants",
+      "status": "PASS",
+      "seconds": 0.002259492874145508
+    },
+    {
+      "name": "selftest.stats_report",
+      "status": "PASS",
+      "seconds": 0.0005166530609130859
+    },
+    {
+      "name": "selftest.coord_engine",
+      "status": "PASS",
+      "seconds": 6.151199340820312e-05
+    }
+  ],
+  "production_blobs": {
+    "server/pulse/set_engine.py": "6b65cd8d2add893c4773ae058c9e247269547e46",
+    "server/pulse/pulse_trader.py": "c958c1a3360e9edfb0cf157174a4e2dd55f01bb5"
+  },
+  "note": "offline engine regression on the committed production files; no exchange connections"
+}

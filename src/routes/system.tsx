@@ -1,5 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { startPolling } from "@/lib/polling";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Blocks, Plug, Radio, Shield } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
@@ -12,7 +11,7 @@ import {
   saveOverlay,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
 import {
   LAYERS,
   MODULES,
@@ -33,32 +32,26 @@ function SystemPage() {
   dirtyRef.current = dirty;
 
   useEffect(() => {
+    let alive = true;
     setStats(null);
-    setMsg(null);
-    setDirty(false);
-    dirtyRef.current = false;
-    setOverlay(overlayFromCts({}, loadLocalOverlay(conn) || {}));
-    const statsRef = { current: null as LiveStats | null };
-    const delay = () => deskPollMs(statsRef.current, document.hidden);
-    const statsPoll = startPolling(async (signal) => {
-      const s = await fetchLiveStats(conn, signal);
-      if (signal.aborted || !s) return;
-      const view = pickView(s, conn);
-      if (view && !statsUnchanged(statsRef.current, view)) {
-        statsRef.current = view;
-        setStats(view);
-      }
-    }, delay);
-    const configPoll = startPolling(async (signal) => {
-      const c = await fetchCtsBundle(conn, signal);
-      if (!signal.aborted && c.ok && !dirtyRef.current) {
+    const pull = async () => {
+      const [c, s] = await Promise.all([fetchCtsBundle(conn), fetchLiveStats(conn)]);
+      if (!alive) return;
+      setStats(pickView(s, conn));
+      if (!dirtyRef.current) {
         const local = loadLocalOverlay(conn);
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(local || {}), ...(c.overlay || {}) }));
       }
-    }, delay);
+    };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const chain = async () => {
+      await pull();
+      if (alive) timer = setTimeout(chain, 4000);
+    };
+    void chain();
     return () => {
-      statsPoll.stop();
-      configPoll.stop();
+      alive = false;
+      if (timer) clearTimeout(timer);
     };
   }, [conn]);
 
@@ -81,11 +74,10 @@ function SystemPage() {
 
   return (
     <DeskShell
-      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
-      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
-      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
-      halted={stats ? Boolean(stats.halted) : undefined}
-      alive={stats ? stats.alive !== false : undefined}
+      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
+      stale={Boolean(stats?.stale)}
+      mode={stats?.paused ? "PAUSED" : stats?.mode}
+      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
     >
       <section className="grid gap-3 sm:grid-cols-3">
         <Stat k="Live packs" v={String(liveN)} s="wired into the core" />
@@ -152,7 +144,7 @@ function SystemPage() {
                       <button
                         type="button"
                         className={`min-h-11 shrink-0 rounded-full px-3 text-xs font-medium ${
-                          on ? "bg-primary-dim text-white" : "bg-surface2 text-muted"
+                          on ? "bg-primary-dim text-primary" : "bg-surface2 text-muted"
                         }`}
                         onClick={() => toggle(m.id, !on)}
                       >

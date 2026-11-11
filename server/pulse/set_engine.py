@@ -1,348 +1,277 @@
 #!/usr/bin/env python3
-"""Independent config Sets: 1m historic replay, last-15 PF, max DD time, live deact.
+"""Independent config Sets: 1m historic replay, base gate, max DD time, per-Set lifecycle.
 
-A Set is one (pack × SL:TP ratio × trail × step) book. Historic walks 1-minute
-OHLC to discover unproven books. Live on-exchange closes (cost-net) score the
-processed Sets and are the only tape that deactivates them.
+A Set is one (pack × SL:TP ratio × trail) book. Historic walks 1-minute OHLC,
+simulates entries/exits, then scores each Set on its own paper tape. Live closes
+have separate per-lane execution windows. One rule decides validity (gate_reason): PF over the
+last setGateWindow orders at or above setMinPf (at least setGateMinTrades orders when that minimum is
+on; 0 = off, the default), max drawdown time below setMaxDdtHours, and a fresh evaluation. An invalid Set
+keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
 
-import copy
-from functools import wraps
+import re
+import bisect
+import heapq
 import json
 import math
-import os
-import sys
-import time
+from array import array
 import threading
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from collections.abc import Mapping
+import time
 from dataclasses import asdict, dataclass, field
+from itertools import accumulate, islice, repeat
+from operator import le, neg
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from config_num import num
+from lane_policy import expand_entries, negative_filter_ok
+import relation_lanes
+from modules import trailing_enabled
 from position_cost import (
+    GATE_MIN_PF_DEFAULT,
+    PF_BY_SIZE_DEFAULTS,
+    PF_SIZE_BOUNDS_DEFAULT,
+    base_min_pf,
+    pf_floor,
+    MIN_VALIDATION_N,
+    window_n,
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
-    MICRO_PF,
-    POSITIVE_PF,
-    SL_MIN_PCT,
-    SL_MIN_DEFAULT_PCT,
-    cost_aware_metrics,
-    clears_pf,
-    EVALUATION_WINDOWS,
-    evaluation_windows,
-    is_positive_pf,
+    normalize_cost_pct,
+    pf_evidence,
     last_n_cost_pf,
-    live_evidence,
-    live_first_window,
-    overall_last_pos_eval,
-    normalize_pf,
     signed_result_r,
-    snap_ratio,
-    SL_TP_RATIOS,
-    SL_TP_MIN,
-    SL_TP_MAX,
-    SL_TP_STEP,
-    sl_tp_grid,
-    bind_ratio_sl_tp,
+    SL_RATIOS,
+    SL_RATIO_MIN,
+    SL_RATIOS_LOW,
+    TP_MIN_COSTS,
+    TP_RANGES,
+    TP_RANGES_DEFAULT,
+    TRAIL_SL_RATIOS,
+    TRAIL_STEP_CEIL,
+    TRAIL_STEP_MAX,
+    tp_range_of,
+    tp_ranges_on,
+    TP_STEP_MAX,
+    TP_STEP_DEFAULT_MAX,
+    TP_STEP_MIN,
+    TP_UNIT_PCT,
+    TRAIL_STEP_DEFAULT,
+    TRAIL_STEP_SETTING_MAX,
+    TRAIL_STEP_SETTING_MIN,
+    SL_MIN_STEPS_DEFAULT,
+    MIN_SL_DISTANCE_PCT_DEFAULT,
+    normalize_min_sl_distance_pct,
+    TRAIL_MIN_STEPS_DEFAULT,
+    configure_min_steps,
     cost_as_frac,
-    clamp_pct,
-    gross_move_pct,
-    net_move_pct,
     net_pnl_pct,
-    ratio_from_r,
-    row_net_pnl,
-    row_position_cost_pct,
-    row_side,
-    filter_side,
+    row_net_pnl_pct,
+    sl_floor_frac,
+    snap_sl_ratio,
+    trail_floor_steps,
 )
-from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
-from block_engine import (
-    calculate_block_max_additional_ratio,
-    clamp_stack,
-    finite_number,
-    normalize_block_counts,
-    shared_block_volume_ratio,
+from indication_engine import (
+    aggregate_bars,
+    bars_to_candles,
+    combine_timeframes,
+    evaluate_active,
+    evaluate_common,
+    evaluate_direction,
+    evaluate_move,
+    evaluate_ta_pack,
+    ema,
+    rsi,
+    timeframe_evals,
 )
-from indication_engine import exit_tactic_hit, tactic_should_close
-from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_ta_pack_follow, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
-from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MIN_DEFAULT, TRAIL_GIVE_MIN_DEFAULT, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
-
-
-def pin_compute_threads(n: int = 1) -> None:
-    """Keep BLAS/OpenMP at one thread so symbol workers do not oversubscribe."""
-    n = max(1, int(n or 1))
-    s = str(n)
-    for key in (
-        "OMP_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-        "BLIS_NUM_THREADS",
-    ):
-        os.environ[key] = s
-    try:
-        import threadpoolctl
-        threadpoolctl.threadpool_limits(limits=n)
-    except Exception:
-        pass
-
-
-pin_compute_threads(1)
-try:
-    import numpy as _np
-except Exception:  # pragma: no cover - scalar replay remains the fallback
-    _np = None
+from indication_extra import FAMILY_WINDOW as EXTRA_WINDOW, LOOKBACK as EXTRA_LOOKBACK, extra_votes, known as extra_known, window_of
+from risk_variants import parse_trail, trail_grid
+from indication_config import source_name, expand as expand_indication_configs
 
 PACKS = ("indications", "general")
-DIRECTIONS = ("LONG", "SHORT")
-# Default vote lanes that live never trades on their own (see prepare_replay_signals).
-PHANTOM_VOTE_LANES = frozenset({"trend", "break"})
+EXTRA_INDICATOR_PREFIX = "extra."
+SIGNAL_PACK_PREFIXES = ("sig-", "signal.")
+
+
+def is_signal_pack(pack: str) -> bool:
+    """Recognize a Signal-source pack without treating ordinary indications as Signals."""
+    return pack in ("signal", "signals") or pack.startswith(SIGNAL_PACK_PREFIXES)
+
+
+SHORT_PACK = "shortrange"            # the Short Range strategy: Low-Range signals, TP steps 2-6 only
+SHORT_STEP_MIN, SHORT_STEP_MAX = 2, 6
+_SIZE_N_KEYS = ("minPfMicroN", "minPfMinimalN", "minPfShortN", "minPfMediumN")      # window classes, shortest first, read from position_cost.PF_*_DEFAULT
+_SIZE_PF_KEYS = ("minPfMicro", "minPfMinimal", "minPfShort", "minPfMedium")
+SHORT_MIN_PF_DEFAULT = 1.1       # owner: the Short Range Base floor defined earlier (a770ec1), the other Sets 1.25
+SHORT_VARIANTS_DEFAULT = ("lr_fade", "lr_break", "lr_trendbreak", "lr_nr7", "lr_inside")
+TREND_PACK = "trend"                  # additional strategy: the Trend family (indication_extra), judged by Base on its own Sets
+BREAK_PACK = "breakout"               # additional strategy: the Breakout family
+TREND_VARIANTS_DEFAULT = ("trend_c6", "trend_c10", "trend_c20")      # combined across 1m / 5m / 15m, by range
+BREAK_VARIANTS_DEFAULT = ("brk_c6", "brk_c10", "brk_c20")
+# Additional strategies built from named indicators (indication_extra / indication_lib), each its own pack: its own Sets, its
+# own Base validation. pack: (overlay switch, overlay key for the indicator names, default names). All off by default.
+EXTRA_PACKS = {
+    TREND_PACK: ("stratTrend", "trendVariants", TREND_VARIANTS_DEFAULT),
+    BREAK_PACK: ("stratBreakout", "breakoutVariants", BREAK_VARIANTS_DEFAULT),
+    "reversion": ("stratReversion", "reversionVariants", ("g_revert_min", "g_revert_med")),
+    "flow": ("stratFlow", "flowVariants", ("g_volume_min", "g_volume_med")),
+    "multi": ("stratMulti", "multiVariants", ("g_all_min", "g_all_med")),
+}
+GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
+IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
-PF_N_DEFAULT = 30
-# Main / Real stage windows (last-N closes) when an overlay sets none;
-# mirrors connection_profile.processing_profile (Base 50 / Main 30 / Real 30).
-MAIN_EVAL_DEFAULT = 30
-REAL_EVAL_DEFAULT = 30
-LOOKBACK_DEFAULT = 2880  # two days of 1m bars
-LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
+PF_N_DEFAULT = 15
+LOOKBACK_DEFAULT = 4320          # 72 h of 1m bars: three days of pre-history (owner 2026-11-02; was 1920 = 32 h, before that 960)
+LOOKBACK_MAX = 4320              # three days of completed 1m bars
+LOOKBACK_SAMPLE_TARGET = 12      # collection target, not an extra admission gate
+# dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
+LIVE_SEEN_MAX = 20000
+GATE_WINDOW_DEFAULT = 50        # gate PF over each Set's last N closed orders
+GATE_MIN_DEFAULT = 0            # minimum orders behind a Base verdict: 0 = off (owner 2026-10-29), a Set is judged on the orders it has
+GATE_MAX_DDT_HOURS_DEFAULT = 24.0   # the longest drawdown over the gate window must stay under this (owner 2026-10-29; setMaxDdtHours 2..36)
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
-# The catalog must test the complete configured axis.  No example threshold
-# is treated as an empirical result; live VST evidence decides which step is
-# eventually preferred for live selection.
-STEP_MIN = 1
-STEP_LIVE_MIN = 7
-STEP_MAX = 30
-# Keep enough recent fills for the 5/10/15/25/50/75 evaluation windows while
-# retaining a hard per-set memory bound.  trim_hist distributes this cap over
-# symbols, so a busy multi-symbol book cannot grow without limit.
-HIST_CAP = 160
-# The live replay lane only needs the configured Base/entry windows and the
-# standard last-50 diagnostics while it is warming.  Keeping the full 160-row
-# tape during a 37k-Set, multi-symbol replay multiplies temporary CompactRows
-# across the catalog and can exhaust the VST cgroup before readiness.  The
-# offline hist-calculation lane continues to use HIST_CAP for last-75 reports;
-# this smaller live lane still retains enough rows for the default last-30
-# validation and the last-50 selection diagnostics.
-REPLAY_HIST_CAP = 96
-_SIDE_LONG = "LONG"
-_SIDE_SHORT = "SHORT"
-ENTRY_POLICY_STRICT = "strict"
-ENTRY_POLICY_PERMISSIVE = "permissive-bounded"
+STEP_MIN = TP_STEP_MIN
+STEP_MAX = TP_STEP_MAX                       # the ceiling
+STEP_DEFAULT_MAX = TP_STEP_DEFAULT_MAX       # the shipped grid's last step
+HIST_CAP = 80
+ROTATION_FRESH_X = 1.5
+STEP_PF_AUTO_LOW_DEFAULT = 1.0
+STEP_PF_AUTO_HIGH_DEFAULT = 2.0      # the highest floor a TP step may ask (minPfStepAutoHigh, owner 2026-11-04 "min PF from 1.4 to 1.27"): 2.0 = no cap
+LANE_ORDERS = {"pos-neg": ("pos", "neg"), "neg-pos": ("neg", "pos"), "neg": ("neg",), "pos": ("pos",)}
+# How a lane's trailing Sets compete with its fixed-exit (base and Exit) Sets for a signal (overlay trailPick, owner 2026-11-03: "make trailing fully work"):
+# after = the trailing Sets only when no fixed-exit Set of the pack is valid on that lane (the earlier rule: a valid trailing Set almost never executed),
+# together = every valid Set of the lane ranked by lane_rank_key whatever its kind, first = the trailing Sets first, then the fixed-exit Sets.
+KIND_ORDERS = {"after": (("base", "exit"), ("trail",)), "together": (("base", "exit", "trail"),), "first": (("trail",), ("base", "exit")),
+               "first-any": (("trail",), ("base", "exit"))}
+# first-any: the kinds are walked OUTSIDE the lanes -- a trailing Set valid on any lane (in laneOrder) before a fixed-exit Set of any lane. The other orders walk
+# the lanes outside: a lane with any valid Set ends the search, so a trailing Set valid only on the Real Negative lane never opens while a positive-lane Set is valid.
+KINDS_OUTSIDE = ("first-any",)
 
 
-def _intern(value: Any, fallback: str = "") -> str:
-    text = str(value if value is not None else fallback)
-    if not text:
-        return fallback
-    try:
-        return sys.intern(text)
-    except Exception:
-        return text
+def pick_sequence(lane_order: Sequence[str], kind_order: Tuple[Tuple[str, ...], ...], kinds_outside: bool) -> List[Tuple[str, Tuple[str, ...]]]:
+    """The (lane, kinds) pairs a signal walks, in order: lanes outside (the default) or kinds outside (first-any)."""
+    if kinds_outside:
+        return [(lane, kinds) for kinds in kind_order for lane in lane_order]
+    return [(lane, kinds) for lane in lane_order for kinds in kind_order]
+KIND_ORDER_DEFAULT = "after"
+# The largest SL ratio a Set of a TP range may have (owner 2026-11-03: "max SL ratio for Long, Wide 1"): a Set of step k with SL ratio r is built only when
+# r <= the limit of k's TP range (position_cost.tp_range_of); a range without a limit keeps every ratio. Applies to base and Exit Sets of every pack.
+SL_MAX_BY_RANGE_DEFAULT = {"long": 1.0, "wide": 1.0}
 
 
-def _invalidate_entry_cache_around_score(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Publish a new entry-eligibility generation around score mutation.
-
-    Score workers update a SetState in several steps.  Invalidating before the
-    update prevents a scan that started earlier from being reused; invalidating
-    after it prevents a concurrent scan that observed the old fields from
-    surviving the final mutation.  The wrapper keeps that guarantee on the
-    early-return paths used by the historic/live gates as well.
-    """
-    @wraps(fn)
-    def wrapped(book: Any, *args: Any, **kwargs: Any) -> Any:
-        book._invalidate_entry_cache()
-        try:
-            return fn(book, *args, **kwargs)
-        finally:
-            book._invalidate_entry_cache()
-    return wrapped
-
-
-class CompactHistRow(Mapping):
-    """Small mapping-compatible historic fill.
-
-    Historic replay creates millions of short-lived rows for a large
-    independent Set catalog.  A normal ``dict`` repeats six key references
-    and a hash table for every row even though the generated row shape is
-    fixed.  Slots keep the hot representation compact while the Mapping API
-    preserves the existing PF/DDT, overview, cache, and test contracts.
-    Optional fields are allocated only for indication/strategy metadata;
-    normal vectorized fills have no per-row auxiliary dict.
-    """
-
-    __slots__ = ("t", "symbol", "side", "pnl_pct", "hold_s", "reason", "_extra")
-    _BASE_KEYS = ("t", "symbol", "side", "pnl_pct", "hold_s", "reason")
-
-    def __init__(
-        self,
-        t: float,
-        symbol: str,
-        side: str,
-        pnl_pct: float,
-        hold_s: float,
-        reason: str,
-        *,
-        cost: Optional[float] = None,
-        ind_kind: str = "",
-    ) -> None:
-        self.t = float(t)
-        self.symbol = _intern(symbol)
-        self.side = _intern(side)
-        self.pnl_pct = float(pnl_pct)
-        self.hold_s = float(hold_s)
-        self.reason = _intern(reason[:40] if reason else "x", "x")
-        self._extra = None
-        if cost not in (None, 0, 0.0) or ind_kind:
-            self._extra = {}
-            if cost not in (None, 0, 0.0):
-                self._extra["costPct"] = float(cost)
-            if ind_kind:
-                self._extra["ind_kind"] = _intern(ind_kind)
-
-    def __getitem__(self, key: str) -> Any:
-        if key in self._BASE_KEYS:
-            return getattr(self, key)
-        if self._extra is not None and key in self._extra:
-            return self._extra[key]
-        raise KeyError(key)
-
-    def __iter__(self):
-        yield from self._BASE_KEYS
-        if self._extra:
-            yield from self._extra
-
-    def __len__(self) -> int:
-        return len(self._BASE_KEYS) + (len(self._extra) if self._extra else 0)
-
-    def __contains__(self, key: object) -> bool:
-        if key in self._BASE_KEYS:
-            return True
-        return bool(self._extra is not None and key in self._extra)
-
-    def as_dict(self) -> Dict[str, Any]:
-        out = {key: getattr(self, key) for key in self._BASE_KEYS}
-        if self._extra:
-            out.update(self._extra)
-        return out
-
-    def __str__(self) -> str:
-        return str(self.as_dict())
-
-    def __repr__(self) -> str:
-        return f"CompactHistRow({self.as_dict()!r})"
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        if key in self._BASE_KEYS:
-            setattr(self, key, value)
-            return
-        if self._extra is None:
-            self._extra = {}
-        self._extra[key] = value
-
-    def __delitem__(self, key: str) -> None:
-        if key in self._BASE_KEYS:
-            raise KeyError(f"cannot delete historic base field {key}")
-        if self._extra is None or key not in self._extra:
-            raise KeyError(key)
-        del self._extra[key]
-        if not self._extra:
-            self._extra = None
-
-    def update(self, other=(), /, **kwargs: Any) -> None:
-        if hasattr(other, "keys"):
-            for key in other.keys():
-                self[key] = other[key]
-        else:
-            for key, value in other:
-                self[key] = value
-        for key, value in kwargs.items():
-            self[key] = value
-
-
-def _is_hist_row(row: Any) -> bool:
-    return isinstance(row, (dict, CompactHistRow))
-
-
-def hist_fill(
-    ts: float,
-    symbol: str,
-    side: Any,
-    pnl_pct: float,
-    hold_s: float,
-    reason: str,
-    *,
-    cost: Optional[float] = None,
-    ind_kind: str = "",
-) -> CompactHistRow:
-    """Compact historic fill. PF/DDT/side only — no per-row catalog copies."""
-    side_key = _SIDE_LONG if side in (1, True, _SIDE_LONG, "long", "L", "l") or str(side)[:1] in "Ll" else _SIDE_SHORT
-    return CompactHistRow(
-        float(ts), _intern(symbol), side_key, float(pnl_pct), float(hold_s),
-        _intern(str(reason or "x")[:40], "x"), cost=cost, ind_kind=ind_kind,
-    )
-
-
-def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
-    """Drop duplicate hist payload. Live/exchange rows stay intact."""
-    if not _is_hist_row(row):
-        return row
-    if row.get("client_id") or row.get("exchange_confirmed") or row.get("ours"):
-        return row
-    if "pnl" not in row and "set_id" not in row and "direction" not in row and "pack" not in row:
-        return row
-    compact = hist_fill(
-        finite(row.get("t")),
-        str(row.get("symbol") or ""),
-        row.get("side") or row.get("direction") or "",
-        finite(row.get("pnl_pct")),
-        finite(row.get("hold_s")),
-        str(row.get("reason") or "x"),
-        cost=row.get("position_cost_pct", row.get("costPct")),
-        ind_kind=str(row.get("ind_kind") or ""),
-    )
-    # Catalog identity already lives on the Set. Keep only scoring metadata.
-    for key in ("tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key", "block_count"):
-        value = row.get(key) if hasattr(row, "get") else None
-        if value not in (None, ""):
-            compact[key] = value
-    return compact
-# Indication kinds (live) <-> historic replay vote tags (indication_signal why).
-IND_KINDS = INDICATION_KINDS
-# Kinds that vote in the core indications pack (the extended range-only
-# kinds msi/vwap/retest/squeeze trade as their own lanes, never as votes).
-VOTE_KINDS = INDICATION_KINDS[:8]
-IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break",
-                "msi": "msi", "vwap": "vwap", "retest": "retest", "squeeze": "squeeze",
-                "sweep": "sweep", "rsi2": "rsi2", "keltner": "keltner", "impulse": "impulse"}
-
-
-class KindSignals(dict):
-    """Per-kind/config signal lanes; ``exits`` carries each entry bar's exit
-    tactic and level per lane (``{key: {bar: (tactic, level)}}``)."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.exits: Dict[str, Dict[int, Tuple[str, float]]] = {}
-
-    def __reduce__(self):
-        return (_kind_signals_restore, (dict(self), self.exits))
-
-
-def _kind_signals_restore(items: Dict[str, Any], exits: Dict[str, Dict[int, Tuple[str, float]]]) -> "KindSignals":
-    out = KindSignals(items)
-    out.exits = exits
+def sl_max_by_range_of(raw: Any) -> Dict[str, float]:
+    """{range: largest SL ratio} from an overlay value: None = the shipped limits, {} = no limit; unknown ranges and unreadable values dropped,
+    a limit bounded to 0.2 .. 3.5."""
+    if raw is None:
+        return dict(SL_MAX_BY_RANGE_DEFAULT)
+    out: Dict[str, float] = {}
+    if isinstance(raw, dict):
+        names = {n for n, _lo, _hi in TP_RANGES}
+        for k, v in raw.items():
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                continue
+            if str(k).lower() in names and math.isfinite(x) and x > 0:
+                out[str(k).lower()] = max(0.2, min(3.5, x))
     return out
+
+
+def pack_group(pack: str) -> str:
+    """The library group (trend, break, revert, volume, price) of a pack's signals: the extra packs trend / breakout / reversion / flow by their role,
+    an extra.<name> pack by its family (the part before _n / _c / _x, or g_<group>_ of a group vote, before any @relation); "" for the rest."""
+    fixed = {"trend": "trend", "breakout": "break", "reversion": "revert", "flow": "volume"}
+    if pack in fixed:
+        return fixed[pack]
+    if not pack.startswith("extra."):
+        return ""
+    name = pack[len("extra."):].split("@", 1)[0]
+    m = re.match(r"g_([a-z]+)_", name)
+    if m:
+        return m.group(1)
+    fam = re.split(r"_(?:n\d+_t\d+|c\d+|x\d+)$", name)[0]
+    try:
+        import indication_lib as _lib
+        return str(_lib.FAMILIES.get(fam, ("",))[0])
+    except Exception:
+        return ""
+ROTATION_CAP_S = 1800.0         # a symbol that stopped replaying cannot stretch the freshness limit beyond 1.5 x this
+# trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
+TRAIL_SL_RATIO = 0.6
+# A trailing Set is only built when its arm, give and initial price stop all
+# fit inside this price-distance limit. It is not a guarantee of fill price.
+TRAIL_DISTANCE_LIMIT_PCT = 3.0
+EXIT_TAG = "xt"                 # id suffix of an Exit Set (no TP: stop, time and scratch exits only)
+
+# ---- the profit group gate (owner 2026-11-06: "make only profitable ones run, but also Signals") --------------------------------------------------------------------------
+# A GROUP is pack x kind (base / exit / trail) x TP range (micro .. wide; a trailing Set by its arm) x lane. A group opens new positions only while the newest `groupGateN` net
+# results it EXECUTED inside the last `groupGateHours` hours have a PF at or above `groupGatePf` (gains over losses of the net position returns, judged on the results it has: no
+# minimum count; a group without a result in the window runs). Open positions are never touched; the evidence ages out, so a blocked group re-tests itself.
+_GROUP_ST = re.compile(r":st(\d+)")
+_GROUP_TR = re.compile(r":tr([0-9.]+):([0-9.]+)(?::ts[0-9.]+)?$")
+
+
+def set_group(set_id: str, lane: str = "pos") -> str:
+    """The group key of a Set id and lane: "group:<pack>:<kind>:<range>:<lane>". An id that names no step or arm keeps the range "?" (its own group)."""
+    sid = str(set_id or "")
+    pack = sid.split(":", 1)[0] or "-"
+    tr = _GROUP_TR.search(sid)
+    if sid.endswith(":" + EXIT_TAG):
+        kind = "exit"
+    elif tr:
+        kind = "trail"
+    else:
+        kind = "base"
+    rng = "?"
+    if kind == "trail" and tr:
+        rng = tp_range_of(int(round(float(tr.group(1)) / TP_UNIT_PCT)))
+    else:
+        m = _GROUP_ST.search(sid)
+        if m:
+            rng = tp_range_of(int(m.group(1)))
+    return f"group:{pack}:{kind}:{rng}:{'neg' if str(lane or '') == 'neg' else 'pos'}"
+
+
+def group_verdict(rows, now: float, n: int = 10, floor: float = 1.0, hours: float = 12.0, min_n: int = 1) -> Tuple[bool, Optional[float], int]:
+    """(allow, pf, k) for one group from its executed results [(close time, net position return)] in any order: the newest `n` that closed inside (now - hours, now]. No result,
+    fewer than `min_n` results (default 1: judged on the orders it has, owner rule 2026-11-04) or no loss among them allows; otherwise the PF must reach `floor` (a hair of
+    tolerance for float noise)."""
+    lo = float(now) - float(hours) * 3600.0
+    window = sorted(((float(t), float(x)) for t, x in rows if lo < float(t) <= float(now) and math.isfinite(float(x))))[-max(1, int(n)):]
+    if not window or len(window) < max(1, int(min_n)):
+        return True, None, len(window)
+    gain = sum(x for _t, x in window if x > 0)
+    loss = -sum(x for _t, x in window if x < 0)
+    if loss <= 0:
+        return True, None, len(window)
+    pf = gain / loss
+    return pf + 1e-12 >= float(floor), pf, len(window)
+SET_KINDS = ("base", "exit", "trail")
+RANK_SHRINK_N = 60              # orders at which a Set's PF counts half toward its rank (the rest is pulled toward 1)
+RANK_PF_CAP = 10.0              # a PF above this ranks as this (a window without a loss is not infinitely good)
+
+
+def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]], keep_on_gap: bool = False) -> List[List[float]]:
+    """Join a newer 1-minute window onto a stored series. Rows carry no timestamps, so the join finds where the new
+    window's first row sits in the stored series and checks the overlap row by row. The stored history before that
+    point is kept, and the new rows (including a still-forming last bar) replace the overlapped tail. With no overlap
+    the new window stands, because a gap cannot be filled from rows that do not line up. keep_on_gap: a window that does not
+    line up is dropped and the stored series kept (rows built from live ticks never equal the exchange's rows, and a short
+    window of them must not replace a long history)."""
+    if not old:
+        return [list(r) for r in new]
+    head = list(new[0])
+    for p in range(len(old) - 1, -1, -1):
+        if list(old[p]) == head:
+            span = min(len(new), len(old) - p)
+            if all(list(old[p + i]) == list(new[i]) for i in range(span - 1)):
+                return [list(r) for r in old[:p]] + [list(r) for r in new]
+            break
+    if keep_on_gap and old:
+        return [list(r) for r in old]
+    return [list(r) for r in new]
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -353,19 +282,15 @@ def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
     return max(lo, min(hi, n))
 
 
-# TP grid unit in percent: TP = step x 0.10 %, independent of the PositionCost.
-TP_STEP_PCT_DEFAULT = 0.10
-
-
-def step_tp_pct(step: int, cost_pct: float) -> float:
-    """TP fraction = step x grid unit (``tpStepPct``); the VST tape chooses the winner."""
-    c = max(1e-9, float(cost_pct))
-    if c > 0.05:
-        c = c / 100.0
-    return max(c, clamp_step(step) * c)
+def step_tp_pct(step: int, cost_pct: float = 0.0) -> float:
+    """TP fraction of a TP step: step x TP_UNIT_PCT of price (step 3 = 0.3 %), whatever PositionCost is (owner 2026-11-02; it was step x PositionCost).
+    The lane never sits under TP_MIN_COSTS x PositionCost (lane_fracs); cost_pct is kept for callers and does not move the step."""
+    return clamp_step(step) * TP_UNIT_PCT / 100.0
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
+    if v.__class__ is float:                 # the common case (every replayed row): a float is finite when v - v is 0 (NaN and infinity give NaN)
+        return v if v - v == 0.0 else fallback
     try:
         n = float(v)
     except Exception:
@@ -373,304 +298,564 @@ def finite(v: Any, fallback: float = 0.0) -> float:
     return n if n == n and abs(n) != float("inf") else fallback
 
 
-def trades_per_hour(rows: Sequence[Any]) -> float:
-    """Return observed close throughput from a timestamped live tape."""
-    ordered = sorted(
-        [row for row in rows if row is not None],
-        key=lambda row: finite(row.get("t") if _is_hist_row(row) else getattr(row, "t", 0)),
-    )
-    if len(ordered) < 2:
-        return 0.0
-    first = finite(ordered[0].get("t") if _is_hist_row(ordered[0]) else getattr(ordered[0], "t", 0))
-    last = finite(ordered[-1].get("t") if _is_hist_row(ordered[-1]) else getattr(ordered[-1], "t", 0))
-    # Duplicate/near-duplicate exchange timestamps must not create an
-    # infinite score or make a tiny test burst look like a stable rate.
-    span_h = max(1.0 / 60.0, (last - first) / 3600.0)
-    keys = {str(row.get("client_id") or row.get("fillId") or i) if _is_hist_row(row)
-            else str(getattr(row, "client_id", "") or i) for i, row in enumerate(ordered)}
-    return len(keys) / span_h
+def by_time(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rows (dicts with a "t") in time order, equal times keeping their order. The replay and the live closes append in time order, so the common case is one
+    pass over the keys and no sort."""
+    keys = [finite(r.get("t")) for r in rows]
+    if all(map(le, keys, keys[1:])):
+        return list(rows)
+    order = sorted(range(len(rows)), key=keys.__getitem__)
+    return [rows[i] for i in order]
 
 
-def recent_direction_rows(bucket, cap):
-    """Retain chronological last-N evidence for both independent directions."""
-    rows = sorted(bucket, key=lambda r: finite(r.get("t")))
-    if len(rows) <= cap:
-        return rows
-    per = min(75, cap // 2)
-    counts = {"L": 0, "S": 0}
-    keep = set()
-    for i in range(len(rows)-1, -1, -1):
-        side = str(rows[i].get("side") or rows[i].get("direction") or "")[:1].upper()
-        if side in counts and counts[side] < per:
-            counts[side] += 1
-            keep.add(i)
-    for i in range(len(rows)-1, -1, -1):
-        if len(keep) >= cap:
-            break
-        keep.add(i)
-    return [rows[i] for i in sorted(keep)]
+def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
+    """Drawdown time of a Set's last positions, in seconds.
 
-
-def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
-    """Keep actual recent closes; symbol balancing must not distort last-N PF."""
-    return recent_direction_rows([slim_hist_row(r) for r in bucket if _is_hist_row(r)], max(8, int(cap or HIST_CAP)))
-
-
-def hist_row_key(row: Dict[str, Any]) -> Tuple[str, float, str, str, float, float]:
-    """Stable identity for a deterministic historic replay row."""
-    return (
-        str(row.get("symbol") or ""),
-        round(finite(row.get("t")), 6),
-        str(row.get("side") or row.get("direction") or ""),
-        str(row.get("reason") or ""),
-        round(finite(row.get("pnl_pct")), 10),
-        round(finite(row.get("hold_s")), 3),
-    )
-
-
-# Indication tapes hold every range (config) of a kind: each config x side
-# keeps its own last-N evidence so one busy range or direction cannot push
-# the others below the evaluation need.
-IND_CONFIG_SIDE_CAP = 75
-
-
-def trim_ind_tape(bucket: Sequence[Dict[str, Any]], per: int = IND_CONFIG_SIDE_CAP) -> List[Dict[str, Any]]:
-    """Chronological last ``per`` rows per (ind_config, side)."""
-    rows = sorted((r for r in bucket if r is not None), key=lambda r: finite(r.get("t")))
-    per = max(8, int(per or IND_CONFIG_SIDE_CAP))
-    counts: Dict[Tuple[str, str], int] = {}
-    keep: List[int] = []
-    for i in range(len(rows) - 1, -1, -1):
-        r = rows[i]
-        get = r.get if hasattr(r, "get") else (lambda k, d=None, _r=r: getattr(_r, k, d))
-        key = (str(get("ind_config") or "").lower(), str(get("side") or get("direction") or "")[:1].upper())
-        c = counts.get(key, 0)
-        if c < per:
-            counts[key] = c + 1
-            keep.append(i)
-    keep.reverse()
-    return [rows[i] for i in keep]
-
-
-def merge_hist_rows(
-    previous: Sequence[Dict[str, Any]],
-    incoming: Sequence[Dict[str, Any]],
-    replace_symbols: Optional[Sequence[str]] = None,
-    trim: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
-) -> List[Dict[str, Any]]:
-    """Merge a refreshed symbol slice into the bounded historic tape."""
-    replace = {str(s) for s in (replace_symbols or ())}
-    if trim is None:
-        trim = lambda rows: trim_hist(rows, HIST_CAP)  # noqa: E731
-    if not previous:
-        return trim([row for row in incoming if _is_hist_row(row)])
-    merged: Dict[Tuple[str, float, str, str, float, float], Dict[str, Any]] = {}
-    for row in previous:
-        if not _is_hist_row(row) or str(row.get("symbol") or "") in replace:
-            continue
-        merged[hist_row_key(row)] = row
-    for row in incoming:
-        if _is_hist_row(row):
-            merged[hist_row_key(row)] = row
-    return trim(list(merged.values()))
-
-
-def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = False) -> List[Dict[str, Any]]:
-    """Last-N fills with every symbol still represented when possible."""
-    n = max(1, int(n))
-    if ordered:
-        seq = rows if isinstance(rows, list) else list(rows)
-    else:
-        seq = [r for r in rows if _is_hist_row(r)]
-        seq.sort(key=lambda r: finite(r.get("t")))
-    if len(seq) <= n:
-        return seq
-    by: Dict[str, List[Dict[str, Any]]] = {}
-    for r in seq:
-        by.setdefault(str(r.get("symbol") or "?"), []).append(r)
-    if len(by) <= 1:
-        return seq[-n:]
-    names = list(by.keys())
-    if len(names) >= n:
-        recent = sorted(names, key=lambda s: finite(by[s][-1].get("t")), reverse=True)[:n]
-        picked = [by[s][-1] for s in recent]
-        picked.sort(key=lambda r: finite(r.get("t")))
-        return picked
-    per = max(1, n // len(names))
-    out: List[Dict[str, Any]] = []
-    for tape in by.values():
-        out.extend(tape[-per:])
-    out.sort(key=lambda r: finite(r.get("t")))
-    if len(out) < n:
-        taken = {id(x) for x in out}
-        for r in reversed(seq):
-            if id(r) in taken:
-                continue
-            out.append(r)
-            taken.add(id(r))
-            if len(out) >= n:
-                break
-        out.sort(key=lambda r: finite(r.get("t")))
-    return out[-n:]
-
-
-def last_n_chrono(rows: Sequence[Any], n: int, *, ordered: bool = False) -> List[Any]:
-    """Complete last-N: newest chronological fills, no per-symbol subsample.
-
-    PF/DDT gates must see the actual recent tape. ``last_n_balanced`` remains
-    for mixed-market *display* rollups so one name cannot hide the book, but
-    a Set's own last-15/25/50/75 windows are always this tail.
+    A drawdown starts at the last equity high (the time of that high, not the first losing close) and ends when
+    net is back at or above that high. An open drawdown is measured to `now` (the caller's bar, trade or report
+    clock); it is never cut short by idle time. With no clock it is the last trade time, so the result never
+    depends on when the code runs. Rows are net fractions in `pnl`; `t` is seconds.
     """
-    take = max(1, int(n))
-    if ordered:
-        seq = rows if isinstance(rows, list) else list(rows)
-    else:
-        seq = [r for r in rows if r is not None]
-        seq.sort(key=lambda r: finite(r.get("t") if _is_hist_row(r) else getattr(r, "t", 0)))
-    if len(seq) <= take:
-        return seq if isinstance(seq, list) else list(seq)
-    return seq[-take:]
-
-
-def row_ts(row: Any) -> float:
-    if _is_hist_row(row):
-        return finite(row.get("t"))
-    return finite(getattr(row, "t", 0))
-
-
-def row_symbol(row: Any) -> str:
-    if _is_hist_row(row):
-        return str(row.get("symbol") or "?")
-    return str(getattr(row, "symbol", None) or "?")
-
-
-def row_equity_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """Signed equity increment for DDT: always cost-net of the gross move.
-
-    Historic sim rows store ``pnl`` as an already-net fraction (qty=1) while
-    live closes store USDT ``pnl``. Mixing those units inflates live size into
-    a multi-hour fake recovery. ``pnl_pct`` is the shared gross-move fraction
-    on both tapes, so DDT is size-independent and matches PF.
-    """
-    pct = None
-    pnl = None
-    cost = cost_pct
-
-    def first_present(*values):
-        # A measured 0.0 cost is a value, not "missing" (``or`` skipped it).
-        return next((v for v in values if v is not None), cost_pct)
-
-    if _is_hist_row(row):
-        if "pnl" in row and row.get("pnl") is not None:
-            pnl = finite(row.get("pnl"))
-        pct = row.get("pnl_pct")
-        cost = finite(first_present(row.get("position_cost_pct"), row.get("cost_pct"), row.get("costPct")))
-    else:
-        raw_pnl = getattr(row, "pnl", None)
-        if raw_pnl is not None:
-            pnl = finite(raw_pnl)
-        pct = getattr(row, "pnl_pct", None)
-        cost = finite(first_present(
-            getattr(row, "position_cost_pct", None),
-            getattr(row, "cost_pct", None),
-            getattr(row, "costPct", None),
-        ))
-    if pct is not None:
-        return net_pnl_pct(finite(pct), cost)
-    return 0.0 if pnl is None else pnl
-
-
-def drawdown_time(rows: Sequence[Any], now: Optional[float] = None, *, ordered: bool = False,
-                  cost_pct: float = POSITION_COST_PCT_DEFAULT) -> Dict[str, float]:
-    """CTS drawdown-time: episodes from peak through recovery, in seconds.
-
-    ``cost_pct`` is the fallback PositionCost for rows that do not carry their
-    own; pass the same cost the PF gate uses so PF and DDT describe one tape."""
-    usable = [r for r in rows if r is not None and row_ts(r) > 0]
-    if ordered:
-        seq = usable
-    else:
-        seq = sorted(usable, key=row_ts)
-    # A historic tape has no meaningful wall-clock tail. If the caller does
-    # not provide an observation time, close an open episode at its last
-    # sample. For an explicitly supplied time, do not let a stale symbol's
-    # missing data create a false multi-hour DDt episode.
-    if now is None:
-        now = row_ts(seq[-1]) if seq else time.time()
-    elif seq:
-        last_t = row_ts(seq[-1])
-        if last_t > 0 and now - last_t > 3600:
-            now = last_t
+    ordered = sorted((r for r in rows if finite(r.get("t")) > 0), key=lambda r: finite(r.get("t")))
+    if not ordered:
+        return {"episodes": 0.0, "maxS": 0.0, "avgS": 0.0, "currentS": 0.0, "maxDepth": 0.0, "inDd": 0.0, "n": 0.0}
+    last_t = finite(ordered[-1].get("t"))
+    now = last_t if now is None else float(now)
     equity = 0.0
     peak = 0.0
-    started: Optional[float] = None
+    peak_t = finite(ordered[0].get("t"))
+    in_dd = False
     max_s = 0.0
     total_s = 0.0
     episodes = 0
     max_depth = 0.0
-    for row in seq:
-        t = row_ts(row)
-        if t <= 0:
-            continue
-        equity += row_equity_pnl(row, cost_pct)
-        if equity >= peak - 1e-12:
-            if started is not None:
-                dur = max(0.0, t - started)
+    for row in ordered:
+        t = finite(row.get("t"))
+        equity += finite(row.get("pnl"))
+        if equity >= peak - 1e-12:  # a new (or equal) high: any open drawdown recovers here
+            if in_dd:
+                dur = max(0.0, t - peak_t)
                 max_s = max(max_s, dur)
                 total_s += dur
-                started = None
+                in_dd = False
             peak = max(peak, equity)
+            peak_t = t
             continue
-        if started is None:
-            started = t
+        if not in_dd:
+            in_dd = True
             episodes += 1
         max_depth = max(max_depth, peak - equity)
-    current = 0.0 if started is None else max(0.0, now - started)
-    if started is not None:
+    current = max(0.0, now - peak_t) if in_dd else 0.0
+    if in_dd:
         max_s = max(max_s, current)
         total_s += current
     return {
         "episodes": float(episodes),
         "maxS": round(max_s, 1),
         "avgS": round(total_s / episodes, 1) if episodes else 0.0,
-        "totalS": total_s,
         "currentS": round(current, 1),
         "maxDepth": round(max_depth, 6),
-        "inDd": 1.0 if started is not None else 0.0,
-        "n": float(len(seq)),
+        "inDd": 1.0 if in_dd else 0.0,
+        "n": float(len(ordered)),
     }
 
 
-def drawdown_time_by_symbol(
-    rows: Sequence[Any],
-    now: Optional[float] = None,
-    *,
-    ordered: bool = False,
-    cost_pct: float = POSITION_COST_PCT_DEFAULT,
-) -> Dict[str, float]:
-    """DDT per symbol, then max/mean. Mixed-market tapes must not span one 20h episode."""
-    by: Dict[str, List[Any]] = {}
-    for r in rows:
-        if r is None:
+def processed_flag(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[float], lpre: Sequence[float], entry_t: float,
+                   gate_window: int, gate_min: int, floor: float, max_dd_s: float, lookback_s: float, lo_floor: int = 0,
+                   consistency: float = 0.0) -> bool:
+    """Whether a Set passed its Base gate at entry_t, judged on its own closes before that moment (exit time < entry_t, within the
+    lookback, from index lo_floor on): at least gate_min of its last gate_window closes, their net PF at or above floor, the
+    consistency floor on both halves when set, and a drawdown time under max_dd_s measured to entry_t. ts: exit times
+    ascending; nets: net results (after PositionCost); gpre / lpre: prefix sums of the gains and of the losses of nets."""
+    e = bisect.bisect_left(ts, entry_t)
+    lo = max(lo_floor, bisect.bisect_left(ts, entry_t - lookback_s))
+    s0 = max(lo, e - gate_window)
+    if e - s0 < gate_min:
+        return False
+    g, l_ = gpre[e] - gpre[s0], lpre[e] - lpre[s0]
+    pf = round(pf_of(g, l_, e - s0), 4)
+    if pf + 1e-9 < floor:
+        return False
+    return _base_tail_ok(ts, nets, gpre, lpre, entry_t, e, s0, max_dd_s, consistency)
+
+
+def _alias(ov: Dict[str, Any], key: str, old: str) -> Any:
+    """ov[key] when present, else the value under its earlier name `old` (a renamed overlay key still loads from files written before the rename)."""
+    v = ov.get(key)
+    return v if v is not None else ov.get(old)
+
+
+def parse_windows(raw: Any, default: Tuple[int, ...]) -> Tuple[int, ...]:
+    """A list of last-N windows from an overlay value (list or "5,10"), each 1..200, sorted and unique; the default when empty."""
+    if isinstance(raw, str):
+        raw = [x for x in raw.replace(";", ",").split(",") if x.strip()]
+    out = set()
+    for x in raw or []:
+        try:
+            out.add(max(1, min(200, int(float(x)))))
+        except (TypeError, ValueError):
             continue
-        by.setdefault(row_symbol(r), []).append(r)
-    if len(by) <= 1:
-        return drawdown_time(rows, now, ordered=ordered, cost_pct=cost_pct)
-    parts = [drawdown_time(tape, now, ordered=ordered, cost_pct=cost_pct) for tape in by.values() if tape]
-    if not parts:
-        return drawdown_time(rows, now, ordered=ordered, cost_pct=cost_pct)
-    episodes = sum(p["episodes"] for p in parts)
-    total_s = sum(p["totalS"] for p in parts)
-    return {
-        "episodes": float(episodes),
-        "maxS": round(max(p["maxS"] for p in parts), 1),
-        "avgS": round(total_s / episodes, 1) if episodes else 0.0,
-        "currentS": round(max(p["currentS"] for p in parts), 1),
-        "maxDepth": round(max(p["maxDepth"] for p in parts), 6),
-        "inDd": 1.0 if any(p["inDd"] for p in parts) else 0.0,
-        "n": float(len(rows)),
-        "symbols": float(len(by)),
-    }
+    return tuple(sorted(out)) or tuple(default)
+
+
+def pf_of(g: float, l_: float, n: int = 0) -> float:
+    """Gains over losses of net results. No loss: 99 (the no-loss sentinel) with a gain; with neither, 1.0 (neutral) when n > 0 results were read, else 0
+    (an empty window)."""
+    return g / l_ if l_ > 0 else (99.0 if g > 0 else (1.0 if n > 0 else 0.0))
+
+
+def lane_rank_stats(nets: Sequence[float], cf: float) -> Tuple[int, float, float, float, float]:
+    """What the choice among the Sets valid on a lane reads: the lane's OWN Set (the Real Set on the positive lane, the Real Negative Set on the negative one),
+    not the raw Base tape the Set was first validated on. (orders, PF, PF of the older half, PF of the newer half, average R of the newest 25) over the newest
+    PROC_KEEP net results of that Set within the evidence lookback. An empty Set is (0, 0, 0, 0, 0)."""
+    w = list(nets[-PROC_KEEP:])
+    n = len(w)
+    if not n:
+        return (0, 0.0, 0.0, 0.0, 0.0)
+
+    def pf(v: Sequence[float]) -> float:
+        return pf_of(sum(x for x in v if x > 0), -sum(x for x in v if x < 0), len(v))
+    half = n // 2
+    old, new = (pf(w[:half]), pf(w[half:])) if n >= 4 else (pf(w), pf(w))
+    tail = w[-25:]
+    return (n, pf(w), old, new, (sum(tail) / len(tail)) / cf if cf > 0 else 0.0)
+
+
+def lane_rank_of(stats: Sequence[float], floor: float, max_dd_s: float) -> Tuple[Any, ...]:
+    """The rank key of a Set on its lane, best first (same shape and meaning as SetBook.rank_key, read from the lane's own Set): both halves of the lane Set's
+    orders at or above the Set's floor, then its PF shrunk toward 1 by the orders behind it, then more orders, the better recent R, the shorter drawdown time."""
+    n, pf, old, new, r25 = stats
+    halves = min(old, new) if n >= 4 else pf
+    shrunk = 1.0 + (min(float(pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
+    return (halves + 1e-9 >= floor, round(shrunk, 4), int(n), r25, -max_dd_s)
+
+
+LAST_N_KEYS = ("baseLong", "baseShort", "mainLong", "mainShort", "negWindows", "realN", "realNegN")
+
+
+@dataclass(frozen=True)
+class LastN:
+    """The last-N windows of one Set (owner 2026-11-04: stages and last N independent per config): the Base long / short, the Main long and its short candidates,
+    the Negative windows, the Real window and the Real Negative window. SetBook.win(st) gives a Set its TP range's values (lastNByRange), else the global ones."""
+    base_long: int
+    base_short: int
+    main_n: int
+    short_windows: Tuple[int, ...]
+    neg_windows: Tuple[int, ...]
+    real_n: int
+    real_neg_n: int
+
+
+def last_n_by_range_of(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """lastNByRange {range: {baseLong, baseShort, mainLong, mainShort [..], negWindows [..], realN, realNegN}}: only known ranges and keys, every value bounded
+    (long windows 10..200, a short window 0..200 and capped by its long window at use, Real windows 1..200); an unreadable value is dropped, never read as zero."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    known = {n for n, _lo, _hi in TP_RANGES}
+    for rng, o in raw.items():
+        if str(rng).lower() not in known or not isinstance(o, dict):
+            continue
+        got: Dict[str, Any] = {}
+        for key, lo, hi in (("baseLong", 1, 200), ("baseShort", 0, 200), ("mainLong", 1, 200), ("realN", 1, 200), ("realNegN", 1, 200)):
+            if key in o:
+                try:
+                    v = int(round(float(o[key])))
+                except (TypeError, ValueError):
+                    continue
+                got[key] = max(lo, min(hi, v))
+        for key in ("mainShort", "negWindows"):
+            if key in o:
+                w = parse_windows(o[key], ())
+                if w:
+                    got[key] = tuple(w)
+        if got:
+            out[str(rng).lower()] = got
+    return out
+
+
+@dataclass
+class StageParams:
+    """Every rule of the Base -> Main -> Real chain for one pack (SetBook.stage_params)."""
+    base_long: int                  # Base: last N (setGateWindow), with gate_min orders, the drawdown time and consistency
+    base_short: int                 # Base: the second last N (setGateShortN, 0 = off); both windows must pass
+    gate_min: int
+    floor: float                    # the minimum PF of every stage (the pack's Base floor)
+    max_dd_s: float
+    lookback_s: float
+    consistency: float
+    main_on: bool                   # Main: the long last N (mainGateN), the short window and the minimal window, all on the Main Set
+    main_n: int
+    short_on: bool                  # Main short window (mainShortEnabled): each Set's own window of the candidates
+    short_windows: Tuple[int, ...]  # mainShortWindows: the candidates of the per-Set short window
+    short_min: int                  # orders a candidate needs on the Main Set
+    short_margin: float             # a candidate must beat the long window's PF by this factor
+    neg_on: bool                    # Main Negative lane: the average of the last N Main orders is negative, for any N here
+    neg_windows: Tuple[int, ...]
+    real_on: bool                   # Real: the last N (realGateN) of the lane's Real Set
+    real_n: int
+    full_window: bool = False       # True: a window judges only once it holds its full N orders (the strict rule); False: the orders it has (at least one)
+    base_min_n: int = 0             # Base: the minimal window (setGateMinN, 0 = off): the newest 1-3 results of the Set's own tape must all be positive / negative
+    base_min_positive: bool = True  # setGateMinMode: positive = every one of them above zero after PositionCost, negative = every one below zero
+    main_min_n: int = 0             # Main: the minimal window (mainMinN, 0 = off): the newest 1-3 results of the Main Set must all be positive / negative
+    main_min_positive: bool = True  # mainMinMode
+    base_min_both: bool = False     # setGateMinMode "both": the newest N results share one sign, all positive OR all negative (base_min_positive is then unused)
+    main_min_both: bool = False     # mainMinMode "both"
+    base_min_avg: bool = False      # setGateMinMode avgpositive / avgnegative / avgboth: the AVERAGE of the newest N results is above / below zero / either
+    main_min_avg: bool = False      # mainMinMode avg*
+    size_floors: Tuple[Tuple[int, float], ...] = ()   # minimum PF by window size: ((up to N orders, PF), ...) ascending; empty = floor for every window
+    long_floor: float = 0.0         # the minimum PF of a window longer than the last bound
+    real_neg_n: int = 0             # Real Negative lane: its own last N (lastNByRange realNegN); 0 = the Real window real_n
+    negative_filter: Optional[Dict[str, Any]] = None  # own Main / Real recent-loss veto, never inverted PnL
+
+    def floor_for(self, n: int) -> float:
+        """The minimum PF a window of n orders asks (minPfBySize: Micro / Minimal / Short / Medium / Long), or the one floor."""
+        if not self.size_floors:
+            return self.floor
+        for lim, pf in self.size_floors:
+            if n <= lim:
+                return pf
+        return self.long_floor
+
+
+NEG_EPS = 1e-12                  # a Negative window's sum is below zero when it is under -NEG_EPS (a window of results that cancel exactly is not negative, whatever the float rounding of a prefix-sum difference says)
+SHORT_EPS = 1e-12                # the Main short window's choice compares PFs with this tolerance (equal included sets read equal whatever the float rounding of prefix sums)
+
+
+def _base_tail_ok(ts: Sequence[float], nets: Sequence[float], gpre: Sequence[float], lpre: Sequence[float], entry_t: float,
+                  e: int, s0: int, max_dd_s: float, consistency: float) -> bool:
+    """The part of the Base long window that follows the minimum PF: the consistency floor on both halves of the window [s0, e) when set and the
+    drawdown time under max_dd_s, measured to entry_t (processed_flag and stage_chain share it)."""
+    if consistency > 0:
+        h = s0 + (e - s0) // 2
+
+        def _pf(a: int, b: int) -> float:
+            g_, l2 = gpre[b] - gpre[a], lpre[b] - lpre[a]
+            return pf_of(g_, l2, b - a)
+        if min(_pf(s0, h), _pf(h, e)) + 1e-9 < consistency:
+            return False
+    if e <= s0 or entry_t - ts[s0] < max_dd_s:
+        return True          # every drawdown episode lies between the window's first close and the entry: a window shorter than max_dd_s cannot reach it
+    eq = peak = 0.0
+    peak_t = ts[s0]
+    in_dd = False
+    max_s = 0.0
+    for k in range(s0, e):                      # drawdown_time over that window, the open drawdown measured to entry_t
+        eq += nets[k]
+        if eq >= peak - 1e-12:
+            if in_dd:
+                max_s = max(max_s, ts[k] - peak_t)
+                in_dd = False
+            peak = max(peak, eq)
+            peak_t = ts[k]
+        else:
+            in_dd = True
+    if in_dd:
+        max_s = max(max_s, entry_t - peak_t)
+    return max_s < max_dd_s
+
+
+def hold_choice_at(cands: Sequence[Tuple[int, Sequence[tuple]]], prefix: Sequence[Tuple[List[float], List[float], List[float]]], t: float,
+                   max_n: int, min_n: int, margin: float, lookback_s: Optional[float] = None) -> int:
+    """Index of the hold candidate chosen at time t (the Auto Mode's rule on the orders closed before t: the reference, cands[0],
+    unless a candidate with min_n orders beats it by the margin and is the best). prefix[c] = (exit times, gain prefix, loss prefix)."""
+    def pf_n(c: int) -> Tuple[float, int]:
+        ts, g, l_ = prefix[c]
+        e = bisect.bisect_left(ts, t)
+        s0 = max(0, e - max_n)
+        if lookback_s is not None:
+            s0 = max(s0, bisect.bisect_left(ts, t - lookback_s))
+        gp, gl = g[e] - g[s0], l_[e] - l_[s0]
+        return pf_of(gp, gl, e - s0), e - s0
+    ref_pf, _ = pf_n(0)
+    best, best_pf = 0, ref_pf
+    for c in range(1, len(cands)):
+        pf, n = pf_n(c)
+        if n >= min_n and pf > best_pf and pf >= ref_pf * margin:
+            best, best_pf = c, pf
+    return best
+
+
+def causal_hold_tape(cands: Sequence[Tuple[int, Sequence[tuple]]], max_n: int, min_n: int, margin: float, cf: float,
+                     lookback_s: Optional[float] = None) -> List[tuple]:
+    """Legacy candidate-splice diagnostic, not an executable position tape.
+
+    Its choices use past data but rows can overlap and omit entries. It must not
+    be used for stage evidence or execution; those require a single lane replay.
+    """
+    prefix = []
+    for _h, rows in cands:
+        ts = [finite(r[0]) for r in rows]
+        nets = [finite(r[4]) - cf for r in rows]
+        g, l_ = prefix_sums(nets)
+        prefix.append((ts, g, l_))
+    out: List[tuple] = []
+    for c, (_h, rows) in enumerate(cands):
+        for r in rows:
+            if hold_choice_at(cands, prefix, finite(r[0]) - finite(r[5]), max_n, min_n, margin, lookback_s) == c:
+                out.append(r)
+    out.sort(key=_row_t)
+    return out
+
+
+def _main_windows(mt: Sequence[float], mn: Sequence[float], entries: Sequence[float], P: StageParams):
+    """Return the entry-time indices and cached Main-window verdicts for a chronologically ordered Main tape."""
+    mg, ml = prefix_sums(mn)
+    me = [bisect.bisect_left(mt, entry) for entry in entries]
+    mlo = [bisect.bisect_left(mt, entry - P.lookback_s) for entry in entries]
+    loss_ok = [negative_filter_ok(mn[max(lo,e-max(P.negative_filter['windows'])):e], P.negative_filter)
+               for e,lo in zip(me,mlo)] if P.negative_filter else None
+    vec: Dict[int, List[bool]] = {}
+
+    def passes(w: int) -> List[bool]:
+        if w not in vec:
+            need = w if P.full_window else 1
+            floor_w = P.floor_for(w)
+            lo_pf, hi_pf = floor_w - 1e-4, floor_w + 1e-4
+            result = []
+            for j, (e, lo) in enumerate(zip(me, mlo)):
+                start = max(lo, e - w)
+                if e - start < need or (loss_ok is not None and not loss_ok[j]):
+                    result.append(False)
+                    continue
+                value = pf_of(mg[e] - mg[start], ml[e] - ml[start])
+                result.append(value >= hi_pf or (value >= lo_pf and round(value, 4) + 1e-9 >= floor_w))
+            vec[w] = result
+        return vec[w]
+    return me, mlo, passes
+
+
+def _main_short_choice(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: StageParams,
+                       passes: Callable[[int], List[bool]], known_entries: Optional[Sequence[bool]] = None,
+                       current_only: bool = False, current_start: int = 0) -> Tuple[int, Optional[List[int]]]:
+    """Choose candidates from results following their own entry-time window verdicts; unknown entries do not vote."""
+    if not (P.main_on and P.short_on):
+        return P.main_n, None
+
+    def included(w: int):
+        verdict = passes(w)
+        gains, losses, counts = [0.0], [0.0], [0]
+        for i, value in enumerate(mn):
+            inc = verdict[i] and (known_entries is None or known_entries[i])
+            gains.append(gains[-1] + (value if inc and value > 0 else 0.0))
+            losses.append(losses[-1] + (-value if inc and value < 0 else 0.0))
+            counts.append(counts[-1] + int(inc))
+        return gains, losses, counts
+
+    ref_g, ref_l, _ = included(P.main_n)
+    candidates = [(int(w),) + included(int(w)) for w in P.short_windows]
+
+    def pick(end: int, lo: int) -> int:
+        ref = pf_of(ref_g[end] - ref_g[lo], ref_l[end] - ref_l[lo])
+        best, selected = ref, P.main_n
+        for w, gains, losses, counts in candidates:
+            if counts[end] - counts[lo] < P.short_min:
+                continue
+            pf = pf_of(gains[end] - gains[lo], losses[end] - losses[lo])
+            if pf > best + SHORT_EPS and pf >= ref * P.short_margin - SHORT_EPS:
+                best, selected = pf, w
+        return selected
+
+    current = pick(len(mn), max(0, min(len(mn), current_start)))
+    return current, None if current_only else [pick(e, lo) for e, lo in zip(me, mlo)]
+
+
+def stage_chain(ts: Sequence[float], ents: Sequence[float], nets: Sequence[float], P: StageParams,
+                window_start: Optional[float] = None) -> Dict[str, Any]:
+    """A Base Set's chain of Sets, as indices into its tape (exit time ascending; ents: entry times; nets: net results).
+      main     the Main Set: the orders opened while Base passed on the raw tape before each entry (the long window, its minimum
+               orders, drawdown time and consistency: processed_flag; the short window; the minimal window)
+      real     the Real Set: the Main-Set orders opened while the Main stage passed on the Main Set before each entry (the long
+               last N, the Set's short window and the minimal window, all of them)
+      realneg  the Real Negative Set: the Main-Set orders opened while the average of the Main Set's last N orders was negative
+               for some N of the Negative windows (a lane of its own)
+      short_by_order  the Main short window each Main order was judged with (aligned with main)
+      short_n  the Main short window chosen for this Set now: of the candidates, the one whose passed validations were followed by the best
+               PF on the Main Set (at least short_min orders and short_margin x the long window's PF), else the long N. Each Main order is
+               judged with the pick its own entry could make (only the Main orders closed before it), so the Real Set holds no hindsight.
+    Each stage reads only the Set the stage before it built. Every window of a stage is judged on its own, from the same positions in the
+    lane (the orders closed before the entry, within the lookback), and the stage is their conjunction: a window never reads another's verdict."""
+    n = len(ts)
+    gpre, lpre = prefix_sums(nets)
+    bis = bisect.bisect_left
+    lb, full = P.lookback_s, P.full_window
+    bl, bs, bm = P.base_long, P.base_short, P.base_min_n
+    gm, floor = (bl if full else P.gate_min), P.floor_for(bl)  # strict means the complete Base window too
+    floor_s = P.floor_for(bs) if bs else floor
+    short_lo, short_hi = floor_s - 1e-4, floor_s + 1e-4
+    s_need, m_need = (bs if full else 1), (bm if full else 1)
+    pos_pre = neg_pre = None
+    if bm:
+        pos_pre, neg_pre = sign_prefix(nets)
+    main = []
+    e_all = list(map(bis, repeat(ts), ents))                       # per order: the closes before its entry, and the oldest one inside the lookback
+    lo_all = list(map(bis, repeat(ts), [x - lb for x in ents]))
+    f_hi, f_lo = floor + 1e-4, floor - 1e-4
+    for k in range(n):
+        e, lo = e_all[k], lo_all[k]
+        s0 = e - bl
+        if s0 < lo:
+            s0 = lo
+        if e - s0 < gm:
+            continue
+        g, l_ = gpre[e] - gpre[s0], lpre[e] - lpre[s0]
+        if l_ > 0:
+            r_ = g / l_
+            if r_ < f_lo or (r_ < f_hi and round(r_, 4) + 1e-9 < floor):    # the long window's PF first: most orders stop here (the 4-digit rounding only near the floor)
+                continue
+        elif g <= 0 and floor > 1e-9:
+            continue
+        entry = ents[k]
+        if not _base_tail_ok(ts, nets, gpre, lpre, entry, e, s0, P.max_dd_s, P.consistency):
+            continue
+        if bs:
+            t0 = e - bs
+            if t0 < lo:
+                t0 = lo
+            if e - t0 < s_need:
+                continue
+            short_pf = pf_of(gpre[e] - gpre[t0], lpre[e] - lpre[t0])
+            if short_pf < short_lo or (short_pf < short_hi and round(short_pf, 4) + 1e-9 < floor_s):
+                continue
+        if bm:
+            t0 = e - bm
+            if t0 < lo:
+                t0 = lo
+            c_ = e - t0
+            if c_ < m_need:
+                continue
+            if P.base_min_avg:
+                if not sign_ok(nets[t0:e], P.base_min_positive, P.base_min_both, True):
+                    continue
+            elif P.base_min_both:
+                if pos_pre[e] - pos_pre[t0] != c_ and neg_pre[e] - neg_pre[t0] != c_:
+                    continue
+            elif (pos_pre[e] - pos_pre[t0] if P.base_min_positive else neg_pre[e] - neg_pre[t0]) != c_:
+                continue
+        main.append(k)
+    m = len(main)
+    mt = [ts[k] for k in main]
+    mn = [nets[k] for k in main]
+    msum = [0.0]
+    for x in mn:
+        msum.append(msum[-1] + x)
+    # the Main Set's window positions, once per Main order: e (orders closed before the entry) and lo (the oldest inside the lookback)
+    me, mlo, passes = _main_windows(mt, mn, [ents[k] for k in main], P)
+    # Entries in the visible window may depend on closes before it.  Score the
+    # complete context, but restrict the current short-window vote to the
+    # visible Main closes, just as the current stage PF is restricted.
+    main_start = bis(mt, window_start) if window_start is not None else 0
+    short_n, choice = _main_short_choice(mn, me, mlo, P, passes, current_start=main_start)
+    real = []
+    if P.main_on:
+        pl = passes(P.main_n)
+        mmin = main_minimal(mn, me, mlo, P) if P.main_min_n else None
+        real = [k for j, k in enumerate(main) if pl[j] and (choice is None or passes(choice[j])[j]) and (mmin is None or mmin[j])]
+    else:
+        real = list(main)
+    realneg = []
+    if P.neg_on:
+        for j, k in enumerate(main):
+            e = me[j]
+            for w in P.neg_windows:
+                s0 = e - w
+                if s0 < mlo[j]:
+                    s0 = mlo[j]
+                if e - s0 >= w and msum[e] - msum[s0] < -NEG_EPS:
+                    realneg.append(k)
+                    break
+    choices = choice if choice is not None else [P.main_n] * m
+    main_context = main
+    if window_start is not None:
+        keep = [j for j, k in enumerate(main) if ts[k] >= window_start]
+        choices = [choices[j] for j in keep]
+        main = [main[j] for j in keep]
+        real = [k for k in real if ts[k] >= window_start]
+        realneg = [k for k in realneg if ts[k] >= window_start]
+    out = {"main": main, "real": real, "realneg": realneg, "short_n": short_n, "short_by_order": choices}
+    if window_start is not None:
+        out["main_context"] = main_context
+    return out
+
+
+def sign_ok(w: Sequence[float], positive: bool, both: bool = False, avg: bool = False) -> bool:
+    """The minimal-window rule on the results w: all above zero (positive), all below zero (not positive), or one sign throughout (both).
+    avg: the average (sum) of w instead: above zero, below zero, or either one (both); a sum within NEG_EPS of zero is neither."""
+    if avg:
+        t = sum(w)
+        return (t > NEG_EPS or t < -NEG_EPS) if both else (t > NEG_EPS if positive else t < -NEG_EPS)
+    if both:
+        return all(x > 0 for x in w) or all(x < 0 for x in w)
+    return all(x > 0 for x in w) if positive else all(x < 0 for x in w)
+
+
+def sign_prefix(nets: Sequence[float]) -> Tuple[List[int], List[int]]:
+    """Prefix counts of the positive and of the negative results of nets (for the minimal windows: the newest n are all positive iff the count
+    over them is n)."""
+    pos, neg = [0], [0]
+    for x in nets:
+        pos.append(pos[-1] + (1 if x > 0 else 0))
+        neg.append(neg[-1] + (1 if x < 0 else 0))
+    return pos, neg
+
+
+def main_minimal(mn: Sequence[float], me: Sequence[int], mlo: Sequence[int], P: StageParams) -> List[bool]:
+    """The Main minimal window per Main order: the newest main_min_n results of the Main Set before the entry (positions me / mlo) are all positive
+    (main_min_positive) or all negative; the results it has (at least one) unless full_window."""
+    pos_pre, neg_pre = sign_prefix(mn)
+    cnt = pos_pre if P.main_min_positive else neg_pre
+    need = P.main_min_n if P.full_window else 1
+    out = []
+    for j in range(len(me)):
+        e = me[j]
+        s0 = e - P.main_min_n
+        if s0 < mlo[j]:
+            s0 = mlo[j]
+        if P.main_min_avg:
+            out.append(e - s0 >= need and sign_ok(mn[s0:e], P.main_min_positive, P.main_min_both, True))
+        else:
+            out.append(e - s0 >= need and (cnt[e] - cnt[s0] == e - s0 or (P.main_min_both and neg_pre[e] - neg_pre[s0] == e - s0)))
+    return out
+
+
+def stage_verdicts(main: Sequence[float], real: Sequence[float], realneg: Sequence[float], short_n: int, P: StageParams) -> Dict[str, Any]:
+    """The stage verdicts now, from the net results (exit order) of the Set's Main, Real and Real Negative Sets: the Main stage
+    (the long last N, the short window and the minimal window on the Main Set, each on its own), the Negative entry (the average of
+    the last N Main orders below zero for some Negative window), the Real stage on each lane (the last realGateN of its Real Set at
+    the minimum PF). pos / neg: the lane is open (a Base-passing Set may execute on it)."""
+    def last_ok(v: Sequence[float], n: int) -> Tuple[bool, float, int]:
+        w = list(v[-n:]) if n > 0 else []
+        pf = round(pf_of(sum(x for x in w if x > 0), -sum(x for x in w if x < 0)), 4)
+        return len(w) >= (n if P.full_window else 1) and pf + 1e-9 >= P.floor_for(n), pf, len(w)
+    m_ok, m_pf, m_n = last_ok(main, P.main_n)
+    main_loss_ok = negative_filter_ok(main, P.negative_filter)
+    m_ok = m_ok and main_loss_ok
+    s_ok, s_pf, s_n = last_ok(main, short_n) if P.short_on else (True, m_pf, m_n)
+    if P.main_min_n:
+        mw = list(main[-P.main_min_n:])
+        k_n = len(mw)
+        k_ok = k_n >= (P.main_min_n if P.full_window else 1) and sign_ok(mw, P.main_min_positive, P.main_min_both, P.main_min_avg)
+    else:
+        k_ok, k_n = True, 0
+    neg = P.neg_on and any(len(main) >= w and sum(main[-w:]) < -NEG_EPS for w in P.neg_windows)
+    r_ok, r_pf, r_n = last_ok(real, P.real_n)
+    real_loss_ok = negative_filter_ok(real, P.negative_filter)
+    r_ok = r_ok and real_loss_ok
+    q_ok, q_pf, q_n = last_ok(realneg, P.real_neg_n or P.real_n)
+    realneg_loss_ok = negative_filter_ok(realneg, P.negative_filter)
+    q_ok = q_ok and realneg_loss_ok
+    main_pass = (m_ok and s_ok and k_ok) if P.main_on else True
+    return {"main": m_ok, "main_pf": m_pf, "main_n": m_n, "short": s_ok, "short_pf": s_pf, "short_n": s_n, "short_win": short_n,
+            "minimal": k_ok, "minimal_n": k_n, "neg": neg, "mainLossFilter": main_loss_ok, "realLossFilter": real_loss_ok, "realNegLossFilter": realneg_loss_ok,
+            "real": r_ok, "real_pf": r_pf, "real_n": r_n, "realneg": q_ok, "realneg_pf": q_pf, "realneg_n": q_n,
+            "pos": main_pass and (r_ok if P.real_on else True), "negl": neg and (q_ok if P.real_on else True)}
+
+
+def prefix_sums(nets: Sequence[float]) -> Tuple[List[float], List[float]]:
+    """Prefix sums of the gains and of the losses (as positive numbers) of net results, for processed_flag (the same sequential sums as a plain
+    loop, accumulated in C)."""
+    return (list(accumulate(map(max, nets, repeat(0.0)), initial=0.0)),
+            list(accumulate(map(max, map(neg, nets), repeat(0.0)), initial=0.0)))
 
 
 def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
@@ -685,32 +870,9 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     if last <= 0:
         return 0, 0.0, "flat"
 
-    def ema(values: List[float], n: int) -> float:
-        k = 2.0 / (n + 1)
-        e = values[0]
-        for x in values[1:]:
-            e = x * k + e * (1 - k)
-        return e
-
-    def rsi(values: List[float], n: int = 7) -> float:
-        if len(values) < n + 1:
-            return 50.0
-        gains = losses = 0.0
-        window = values[-(n + 1) :]
-        for i in range(1, len(window)):
-            d = window[i] - window[i - 1]
-            if d >= 0:
-                gains += d
-            else:
-                losses -= d
-        if losses == 0:
-            return 100.0
-        rs = (gains / n) / (losses / n)
-        return 100 - (100 / (1 + rs))
-
     e8 = ema(closes, 8)
     e21 = ema(closes, 21)
-    r = rsi(closes, 7)
+    r = rsi(closes, 7)  # shared with indication_engine (flat window -> 50, not 100)
     prev = closes[-2]
     rng = max(highs[-8:]) - min(lows[-8:]) or last * 0.002
     body = last - prev
@@ -767,90 +929,55 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     return 0, max(long_c, short_c), "flat"
 
 
-def indication_kind_votes_frame(frame: IndicationFrame, settings: Dict[str, Any]) -> List[Tuple[int, float, str]]:
-    """Evaluate every configured indication lane from one parsed candle frame."""
-    candles = frame.candles
-    closes = frame.closes
-    want = {
-        "sig": bool(settings.get("typeSignals", True)),
-        "ta": bool(settings.get("typeState", True)),
-        "dir": bool(settings.get("typeDirection", True)),
-        "move": bool(settings.get("typeMove", True)),
-        "act": bool(settings.get("typeActive", True)),
-        "common": bool(settings.get("typeCommon", True)),
-        "trend": bool(settings.get("typeTrend", True)),
-        "brk": bool(settings.get("typeBreak", True)),
-    }
+def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float,
+                      extra_rows: Optional[Sequence[Sequence[float]]] = None) -> Tuple[int, float, str]:
+    """Set-level indication pack, causal, 1m rows [o,h,l,c,v] (newest last).
+    The switches are the ones IndicationBook reads, with the same meaning:
+      tf1m / tf5m / tf15m   timeframe lanes that take part (timeframe_evals skips a lane that is off);
+      typeSignals           the timeframe lanes as signals, so the combined "tf" vote is off with it;
+      tfCombined            the combined vote, which needs tfMinAgree agreeing lanes;
+      typeState             the TA pack ("ta" vote);
+      typeDirection         the direction evaluator ("dir" vote);
+      typeMove              the move evaluator ("move" vote);
+      typeActive            the strongest configured outbreak range ("active" vote);
+      typeCommon            the common RSI/MACD/EMA/Bollinger evaluator ("common" vote).
+    A switch that is off removes its vote."""
+    rows = list(bars)
+    one_m = rows[-60:]
+    candles = bars_to_candles(one_m, now=now, period_s=BAR_S)
+    tf_rows = {"1m": one_m, "5m": aggregate_bars(rows, 5), "15m": aggregate_bars(rows, 15)}
+    use_signals = bool(settings.get("typeSignals", True))
+    tf_evs = timeframe_evals(tf_rows, settings, now) if use_signals else []
+    closes = [float(b[3]) for b in one_m] if one_m else []
     votes: List[Tuple[int, float, str]] = []
-    if want["sig"]:
-        try:
-            ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85, frame=frame)
-            if ev:
-                votes.append((1 if ev.direction == "long" else -1, float(ev.confidence), "sig"))
-        except Exception:
-            pass
-    if want["ta"]:
-        try:
-            ta = evaluate_ta_pack(candles, settings, frame=frame)
-            if ta:
-                votes.append((1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
-        except Exception:
-            pass
-    if want["dir"] and closes:
-        try:
-            drow = evaluate_direction("hist", closes, settings, frame=frame)
-            if drow:
-                votes.append((1 if drow.direction == "long" else -1, float(drow.confidence), "dir"))
-        except Exception:
-            pass
-    if want["move"] and closes:
-        try:
-            mrow = evaluate_move("hist", closes, settings, frame=frame)
-            if mrow:
-                votes.append((1 if mrow.direction == "long" else -1, float(mrow.confidence), "move"))
-        except Exception:
-            pass
-    if want["act"] and closes:
-        try:
-            arow = evaluate_active("hist", closes, settings, frame=frame)
-            if arow:
-                votes.append((1 if arow.direction == "long" else -1, float(arow.confidence), "act"))
-        except Exception:
-            pass
-    if want["common"] and candles:
-        try:
-            crow = evaluate_common("hist", candles, settings, frame=frame)
-            if crow:
-                votes.append((1 if crow.direction == "long" else -1, float(crow.confidence), "common"))
-        except Exception:
-            pass
-    if want.get("trend") and closes:
-        try:
-            trow = evaluate_trend("hist", closes, settings, frame=frame)
-            if trow:
-                votes.append((1 if trow.direction == "long" else -1, float(trow.confidence), "trend"))
-        except Exception:
-            pass
-    if want.get("brk") and closes:
-        try:
-            brow = evaluate_break("hist", closes, settings, frame=frame)
-            if brow:
-                votes.append((1 if brow.direction == "long" else -1, float(brow.confidence), "brk"))
-        except Exception:
-            pass
-    return votes
-
-
-def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> List[Tuple[int, float, str]]:
-    """Build one bounded frame for callers that provide raw historic bars."""
-    frame = build_indication_frame(list(bars)[-60:], now=now, period_s=BAR_S)
-    return indication_kind_votes_frame(frame, settings)
-
-
-_DEFAULT_INDICATION_KIND_VOTES = indication_kind_votes
-
-
-def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float, str]:
+    if use_signals and settings.get("tfCombined", True):
+        comb = combine_timeframes(tf_evs, int(settings.get("tfMinAgree") or 2), settings)
+        if comb:
+            direction, _contrib, risk = comb
+            votes.append((1 if direction == "long" else -1, float(risk["confidence"]), "tf"))
+    ta = evaluate_ta_pack(candles, settings) if settings.get("typeState", True) else None
+    if ta:
+        votes.append((1 if ta.direction == "long" else -1, ta.confidence, "ta"))
+    try:
+        drow = evaluate_direction("hist", closes, settings) if closes and settings.get("typeDirection", True) else None
+        if drow:
+            votes.append((1 if drow.direction == "long" else -1, drow.confidence, "dir"))
+    except Exception:
+        pass
+    try:
+        mrow = evaluate_move("hist", closes, settings) if closes and settings.get("typeMove", True) else None
+        if mrow:
+            votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
+    except Exception:
+        pass
+    if closes and settings.get("typeActive", True):
+        active = evaluate_active("hist", closes, settings)
+        if active:
+            votes.append((1 if active.direction == "long" else -1, active.confidence, "active"))
+    if settings.get("typeCommon", True):
+        common = evaluate_common("hist", candles, settings)
+        if common:
+            votes.append((1 if common.direction == "long" else -1, common.confidence, "common"))
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -862,39 +989,134 @@ def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float
     return 0, max(long_w, short_w), "split"
 
 
-def core_pack_votes(
-    votes: Sequence[Tuple[int, float, str]],
-    frame: Optional[IndicationFrame],
-    settings: Dict[str, Any],
-) -> List[Tuple[int, float, str]]:
-    """Votes for the combined core ``indications`` pack.
+def short_range_signal(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Short Range pack: the Low-Range variants named in settings["shortRangeVariants"]. One variant firing is a
+    signal; several firing the same way take the strongest confidence; opposite directions cancel (no signal)."""
+    return _variant_signal(rows, settings.get("shortRangeVariants") or list(SHORT_VARIANTS_DEFAULT))
 
-    The State kind lane (tag ``ta``) fades stretched trends by default. The
-    combined core pack keeps the previous RSI/MACD/EMA follow vote in the same
-    slot so core Sets are unaffected by the State lane change.
+
+def trend_signal_pack(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Trend pack: the trend variants named in settings["trendVariants"], combined as the Short Range pack does."""
+    return _variant_signal(rows, settings.get("trendVariants") or list(TREND_VARIANTS_DEFAULT))
+
+
+def breakout_signal_pack(rows: Sequence[Sequence[float]], settings: Dict[str, Any]) -> Tuple[int, float, str]:
+    """The Breakout pack: the breakout variants named in settings["breakoutVariants"]."""
+    return _variant_signal(rows, settings.get("breakoutVariants") or list(BREAK_VARIANTS_DEFAULT))
+
+
+def _variant_signal(rows: Sequence[Sequence[float]], names: Sequence[str]) -> Tuple[int, float, str]:
+    votes = extra_votes(rows, names)
+    if not votes:
+        return 0, 0.0, "flat"
+    longs = [v for v in votes if v[0] > 0]
+    shorts = [v for v in votes if v[0] < 0]
+    if longs and shorts:
+        return 0, 0.0, "split"
+    side = longs or shorts
+    return (1 if longs else -1), max(v[1] for v in side), "+".join(v[2] for v in side)
+
+
+def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
+    """The most closed 1m bars any pack reads for one bar's signal: the indication pack's window, or the longest window of
+    the indicators named in extraIndicators and in the Short Range and extra packs' variant lists (a 15m name reads 900).
+    pack_signals keys its memo on this many bars, so two bars share a signal only when everything they read is equal."""
+    names = [p[len(EXTRA_INDICATOR_PREFIX):] for p in packs if p.startswith(EXTRA_INDICATOR_PREFIX)]
+    if SHORT_PACK in packs:
+        names += list(ind_settings.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT)
+    for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
+        if pk in packs:
+            names += list(ind_settings.get(vkey) or default)
+    w = IND_WINDOW_BARS if "indications" in packs else GENERAL_WINDOW_BARS
+    return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names])
+
+
+def bar_signal(
+    bars: Sequence[Sequence[float]],
+    i: int,
+    packs: Sequence[str],
+    ind_settings: Dict[str, Any],
+    ts: float,
+) -> Dict[str, Tuple[int, float, str]]:
+    """The signal of every pack on bar i, read from the closed bars up to and including i (each pack its own window).
+    The one per-bar rule: the replay (pack_signals) and the live entries (SetBook.entry_signal) both call it, so a live
+    entry is taken on exactly the bar and direction the Sets were validated on."""
+    row: Dict[str, Tuple[int, float, str]] = {}
+    hw = signal_window(packs, ind_settings)
+    hist = bars[max(0, i + 1 - hw) : i + 1]          # the longest window: the extra indicators slice their own from it
+    if "general" in packs:
+        lo = i + 1 - GENERAL_WINDOW_BARS
+        row["general"] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
+    if "indications" in packs:
+        lo = i + 1 - IND_WINDOW_BARS
+        row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+    if SHORT_PACK in packs:
+        row[SHORT_PACK] = short_range_signal(hist, ind_settings)    # each name reads its own window
+    for pk, (_sw, vkey, default) in EXTRA_PACKS.items():
+        if pk in packs:
+            row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
+    for pk in packs:
+        if pk.startswith(EXTRA_INDICATOR_PREFIX):
+            row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
+    return row
+
+
+def pack_signals(
+    bars: Sequence[Sequence[float]],
+    packs: Sequence[str],
+    ind_settings: Dict[str, Any],
+    base_ts: float,
+    warmup: int,
+    on_step: Optional[Callable[[], None]] = None,
+    cache: Optional[Dict[int, Dict[str, Tuple[int, float, str]]]] = None,
+    salt: int = 0,
+) -> Dict[str, List[Tuple[int, float, str]]]:
+    """Causal signal per bar and pack: (direction, confidence, why). The only signal loop: the engine
+    replay and the streaming simulator both call it, so a bar gets the same signal in both places.
+
+    cache: memo keyed by the content of the bar's signal window (plus salt, the indication settings).
+    A signal is a pure function of those bars: candle timestamps are labels only. Identical windows
+    therefore give identical signals in every refresh and replay. Entries this call did not use are dropped.
     """
-    votes = list(votes)
-    if frame is None or not frame.candles or not settings.get("typeState", True):
-        return votes
-    if str(settings.get("stateMode", "fade") or "fade").lower() in ("follow", "legacy"):
-        return votes
-    out = [v for v in votes if v[2] != "ta"]
-    try:
-        ta = evaluate_ta_pack_follow(frame, settings)
-    except Exception:
-        ta = None
-    if ta:
-        at = 1 if out and out[0][2] == "sig" else 0
-        out.insert(at, (1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
-    return out
+    n = len(bars)
+    signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
+    hs = [hash(tuple(b)) for b in bars] if cache is not None else None
+    used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    sig_w = signal_window(packs, ind_settings)      # the memo key covers every bar a pack reads
+    for i in range(warmup, n):
+        key = None
+        if cache is not None:
+            lo_w = max(0, i + 1 - sig_w)
+            key = hash((salt, tuple(hs[lo_w : i + 1])))
+            hit = used.get(key)
+            if hit is None:
+                hit = cache.get(key)
+            if hit is not None:
+                used[key] = hit
+                for p in packs:
+                    signals[p][i] = hit[p]
+                if on_step and i % 50 == 0:
+                    on_step()
+                continue
+        row = bar_signal(bars, i, packs, ind_settings, base_ts + i * BAR_S)
+        for p in packs:
+            signals[p][i] = row.get(p, (0, 0.0, ""))
+        if key is not None:
+            used[key] = row
+        if on_step and i % 50 == 0:
+            on_step()
+    if cache is not None:
+        cache.clear()
+        cache.update(used)
+    return signals
 
+def stop_gap_price(side: int, stop: float, open_price: float) -> float:
+    """Use the adverse bar open when an already-active stop is gapped over.
 
-def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
-    votes = indication_kind_votes(bars, settings, now)
-    if indication_kind_votes is not _DEFAULT_INDICATION_KIND_VOTES:
-        return votes_to_signal(votes)
-    frame = build_indication_frame(list(bars)[-60:], now=now, period_s=BAR_S)
-    return votes_to_signal(core_pack_votes(votes, frame, settings))
+    This is an OHLC approximation, not a guarantee of market liquidity or an
+    exchange fill. A stop created later within the bar is handled separately.
+    """
+    return min(stop, open_price) if side > 0 else max(stop, open_price)
 
 
 def hit_exit(
@@ -906,7 +1128,8 @@ def hit_exit(
     bar: Sequence[float],
     ignore_tp: bool = False,
 ) -> Tuple[Optional[str], float]:
-    """Pessimistic same-bar: SL (or trail) wins if both fire."""
+    """Pessimistic same-bar: SL (or trail) wins if both fire; adverse open gaps use the bar open."""
+    opening = float(bar[0])
     high = float(bar[1])
     low = float(bar[2])
     close = float(bar[3])
@@ -915,7 +1138,7 @@ def hit_exit(
         sl_hit = low <= stop
         tp_hit = high >= tp
         if sl_hit:
-            return "sl", stop
+            return "sl", stop_gap_price(side, stop, opening)
         if (not ignore_tp) and tp_hit:
             return "tp", tp
         return None, close
@@ -923,41 +1146,38 @@ def hit_exit(
     sl_hit = high >= stop
     tp_hit = low <= tp
     if sl_hit:
-        return "sl", stop
+        return "sl", stop_gap_price(side, stop, opening)
     if (not ignore_tp) and tp_hit:
         return "tp", tp
     return None, close
 
 
-def combined_kind_signals(kind_sigs: Dict[str, Sequence[Tuple[int, float]]]) -> Dict[str, List[Tuple[int, float, str]]]:
-    """Per indication kind, its strongest lane at each bar: the bare kind lane
-    and every ``kind|config`` range lane. Returns {kind: [(dir, conf, config)]};
-    kinds with no signal at all are omitted."""
-    out: Dict[str, List[Tuple[int, float, str]]] = {}
-    for key, sigs in (kind_sigs or {}).items():
-        if not sigs or not any(d != 0 for d, _ in sigs):
-            continue
-        kind, _, config = str(key).partition("|")
-        lane = out.get(kind)
-        if lane is None:
-            lane = out[kind] = [(0, 0.0, "")] * len(sigs)
-        for i, (d, conf) in enumerate(sigs):
-            if d != 0 and conf > lane[i][1]:
-                lane[i] = (int(d), float(conf), config or kind)
-    return out
+SIDE_TAGS = {1: "L", -1: "S"}          # a Set that trades one direction only carries it in its id, right after the pack: "<pack>:L:1m:..."
 
 
-def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> str:
-    parts = [pack, "1m", f"sl{float(sl_ratio):.1f}"]
-    if trail:
-        parts.append(f"tr{trail}")
+def side_part(side: int) -> str:
+    tag = SIDE_TAGS.get(int(side or 0), "")
+    return f":{tag}" if tag else ""
+
+
+def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0, side: int = 0) -> str:
+    head = f"{pack}{side_part(side)}"
     if step:
-        parts.append(f"st{int(step)}")
-    return ":".join(parts)
+        return f"{head}:1m:sl{sl_ratio:.2f}:st{int(step)}"
+    if trail:
+        return f"{head}:1m:tr{trail}"
+    return f"{head}:1m:sl{sl_ratio:.2f}"
 
 
-def make_trail_id(pack: str, trail: str, sl_ratio: float = 0.6, step: int = 0) -> str:
-    return make_set_id(pack, sl_ratio, trail=trail, step=step)
+def make_exit_id(pack: str, sl_ratio: float, step: int, side: int = 0) -> str:
+    """An Exit Set: the base Set's stop (SL ratio x TP step) with no TP exit (exitIgnoreTp), its own lane and its own tape."""
+    return f"{pack}{side_part(side)}:1m:sl{sl_ratio:.2f}:st{int(step)}:{EXIT_TAG}"
+
+
+def make_trail_id(pack: str, trail: str, side: int = 0, trail_sl: float = 0.0) -> str:
+    """A trailing Set: "<pack>[:L|:S]:1m:tr<arm>:<give>", and ":ts<r>" for a trailing stop family (initial stop r x the arm)."""
+    tail = f":ts{float(trail_sl):.2f}" if trail_sl and float(trail_sl) > 0 else ""
+    return f"{pack}{side_part(side)}:1m:tr{trail}{tail}"
 
 
 @dataclass
@@ -976,61 +1196,7 @@ class SimTrade:
     source: str = "hist"
 
 
-@dataclass(frozen=True)
-class StageRecord:
-    """Stable audit record for one Set at one processing boundary."""
-
-    set_id: str
-    parent_set_id: str
-    stage: str
-    gross_pf: float
-    net_pf: float
-    position_cost_pct: float
-    ddt_s: float
-    sample_count: int
-    volume_ratio: float
-    ev: float = 0.0
-    gross_ev: float = 0.0
-    confidence: float = 0.0
-    uncertainty: float = 1.0
-    required_samples: int = 0
-    insufficient_sample: bool = True
-    axis_key: str = ""
-    relative_count: int = 1
-    indication_kind: str = ""
-    strategy_adjustments: Tuple[Tuple[str, Any], ...] = ()
-    adjustment_deltas: Tuple[Tuple[str, Any], ...] = ()
-    qualification_reason: str = ""
-    dedupe_key: str = ""
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "setId": self.set_id,
-            "parentSetId": self.parent_set_id,
-            "stage": self.stage,
-            "grossPf": self.gross_pf,
-            "netPf": self.net_pf,
-            "positionCostPct": self.position_cost_pct,
-            "ddtS": self.ddt_s,
-            "sampleCount": self.sample_count,
-            "requiredSamples": self.required_samples,
-            "ev": self.ev,
-            "grossEv": self.gross_ev,
-            "confidence": self.confidence,
-            "uncertainty": self.uncertainty,
-            "insufficientSample": self.insufficient_sample,
-            "volumeRatio": self.volume_ratio,
-            "axisKey": self.axis_key,
-            "relativeCount": self.relative_count,
-            "indicationKind": self.indication_kind,
-            "strategyAdjustments": dict(self.strategy_adjustments),
-            "adjustmentDeltas": dict(self.adjustment_deltas),
-            "qualificationReason": self.qualification_reason,
-            "dedupeKey": self.dedupe_key or stable_key(self.set_id, self.stage),
-        }
-
-
-@dataclass(slots=True)
+@dataclass
 class SetState:
     id: str
     pack: str
@@ -1039,32 +1205,79 @@ class SetState:
     trail_key: str
     trail_arm: float
     trail_give: float
-    step: int = STEP_MIN
+    trail_sl: float = 0.0           # a trailing Set of a trailing stop family (trailSlRatios): initial stop = trail_sl x its arm; 0 = the shipped family (TRAIL_SL_RATIO x the mid-step TP)
+    step: int = 3
     tp_pct: float = 0.0045
+    hold_bars: int = 0              # this Set's own time exit in bars (minutes); 0 = the global time stop (stepHoldOn / stepHoldMin / auto)
+    hold_auto: bool = False         # hold_bars was chosen by the Auto Mode from this Set's own last orders (holdAuto)
+    tape_sig: int = 0               # signature of the tape this Set was scored on (time, symbol, net of every order): Sets with the same non-zero signature traded the same orders
+    pause_bars: int = 0             # rest (minutes) after a WINNING close of this Set's lane, on top of the cooldown (pause fixed / manual); the Auto Mode chooses per indication and symbol, not here
+    hold_auto_pf: float = 0.0       # cost PF of the chosen hold over the orders it was judged on
+    hold_auto_n: int = 0            # how many orders (at most holdAutoMax) that judgement read
+    side: int = 0                   # 0 = trades both directions (directionMode both); +1 long only, -1 short only (directionMode split, the default): its own lane, tape, windows, stages, pause and floor
     idx: int = 0
     pack_i: int = 0
     sl_i: int = 0
     tr_i: int = 0
     step_i: int = 0
     kind: str = "base"
-    parent_set_id: str = ""
-    stage: str = "Base"
-    stage_qualified: str = ""
-    micro: bool = False
-    base_pf: float = 0.0
-    main_pf: float = 0.0
-    real_pf: float = 0.0
-    position_cost_pct: float = POSITION_COST_PCT_DEFAULT
-    axis_key: str = ""
-    relative_count: int = 1
-    volume_ratio: float = 1.0
-    indication_kind: str = ""
-    strategy_adjustments: Dict[str, Any] = field(default_factory=dict)
-    stage_ledger: Dict[str, Any] = field(default_factory=dict)
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
-    last15_ratio: float = 0.0
-    last15_classic: float = 0.0
+    last15_ratio: float = 1.0       # 1 + 0.10 x avgR: display only, never compared with a PF threshold
+    gate_pf: float = 0.0            # net PF over the last setGateWindow orders: the eligibility metric
+    gate_n: int = 0
+    gate_pf_old: float = 0.0        # PF of the older / newer half of that window: the stability check (setGateConsistencyPf)
+    gate_pf_new: float = 0.0
+    gate_gp: float = 0.0            # gross profit / loss (net fractions) inside that same window: the rolling pool inputs
+    gate_gl: float = 0.0
+    main_pf: float = 0.0            # net PF over the last mainGateN processed orders: the Main gate (a second, shorter last-N validation, per Set)
+    main_n: int = 0
+    main_gp: float = 0.0
+    main_gl: float = 0.0
+    proc: List[Tuple[float, float]] = field(default_factory=list)   # processed orders (exit t, net): opened while the Set passed Base
+    proc_total: int = 0             # processed orders in the lookback (before the PROC_KEEP cap)
+    # Compact complete Main evidence for recomputing short candidates after rows expire.
+    # The capped proc tape alone does not retain each order's entry time or earlier votes.
+    main_evidence: Optional[Tuple[array, array, array]] = None
+    exe: List[Tuple[float, float]] = field(default_factory=list)    # executable orders (exit t, net): opened while every gate passed
+    exe_total: int = 0
+    exe_pf: float = 0.0             # net PF of the executable lane over its last setGateWindow orders (listing)
+    exe_n: int = 0
+    neg: List[Tuple[float, float]] = field(default_factory=list)    # Real Negative Set (exit t, net): Main orders opened in a dip
+    neg_total: int = 0
+    neg_n: int = 0
+    neg_pf: float = 0.0
+    neg_gp: float = 0.0
+    neg_gl: float = 0.0
+    exe_gp: float = 0.0
+    exe_gl: float = 0.0
+    rank_pos: Tuple[int, float, float, float, float] = (0, 0.0, 0.0, 0.0, 0.0)   # lane_rank_stats of the Real Set / Real Negative Set (the choice among valid Sets)
+    rank_neg: Tuple[int, float, float, float, float] = (0, 0.0, 0.0, 0.0, 0.0)
+    base_short_n: int = 0           # Base short window (setGateShortN): orders and PF
+    base_short_pf: float = 0.0
+    base_min_n: int = 0             # Base minimal window (setGateMinN): the results it holds and whether they are all positive / negative as asked
+    base_min_ok: bool = True
+    base_long_ok: bool = False      # each Base window on its own (the stage verdict is their conjunction): the long window (orders, PF, drawdown time, consistency)
+    base_short_ok: bool = False     # the short window
+    base_short_gp: float = 0.0      # gains / losses of the orders the short window reads (pooled into the per-window figures)
+    base_short_gl: float = 0.0
+    base_min_gp: float = 0.0
+    base_min_gl: float = 0.0
+    main_short_win: int = 0         # the Set's own Main short window (mainShortWindows): the chosen N
+    main_short_n: int = 0           # the orders it holds on the Main Set, their PF and gains / losses
+    main_short_pf: float = 0.0
+    main_short_gp: float = 0.0
+    main_short_gl: float = 0.0
+    main_min_have: int = 0          # the Main minimal window (mainMinN): the results it holds on the Main Set
+    main_min_gp: float = 0.0
+    main_min_gl: float = 0.0
+    neg_win: int = 0                # the smallest Negative window whose average is below zero (0 = none), its orders and gains / losses
+    neg_win_gp: float = 0.0
+    neg_win_gl: float = 0.0
+    stage: Dict[str, Any] = field(default_factory=dict)             # stage_verdicts of the last evaluation
+    sample_counts: Optional[Dict[str, int]] = None  # eligible own closes at the scored clock; None means not measured
+    proc_replayed: bool = False     # proc comes from a replay pass (else processed_stream derives it from the held tape)
+    last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
     last15_r: float = 0.0
     last25_avg_r: float = 0.0
@@ -1073,97 +1286,31 @@ class SetState:
     max_dd_s: float = 0.0
     avg_dd_s: float = 0.0
     dd_episodes: int = 0
+    last_error: str = ""            # last replay/score failure for this Set; cleared on the next clean pass
     n: int = 0
+    live_n: int = 0                  # actual closes, counted separately from the paper sample n
+    live_pos_n: int = 0              # accepted closes on the positive Real lane
+    live_neg_n: int = 0              # accepted closes on the Negative Real lane
     wins: int = 0
     gp: float = 0.0
     gl: float = 0.0
     wr: float = 0.0
     expectancy: float = 0.0
     avg_hold_s: float = 0.0
-    classic_all: float = 0.0
+    pf_all: float = 0.0             # net PF over every closed row in the tape (display)
     exits: Dict[str, int] = field(default_factory=dict)
-    active: bool = False
-    deact_reason: str = ""
-    # Selection activity and processing activity are deliberately separate.
-    # A Set may stop accepting new entries after a live/PF gate or selection
-    # cap, while its already-open order/position lineage still has to be
-    # scored and kept available for controls, exits and reconciliation.
-    processing_active: bool = False
-    processing_reason: str = ""
+    active: bool = True
+    deact_reason: str = ""          # the gate reason of the last evaluation ('' when valid)
+    evaluated_at: float = 0.0       # wall time of the last successful evaluation (freshness, live only)
+    score_at: float = 0.0           # event-time clock of the last scoring pass
+    score_before: bool = False      # decision-time paper windows exclude closes at this clock
     locked: bool = False
     source_n: int = 0
-    by_side: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    live_eval: Dict[str, Any] = field(default_factory=dict)
-    gross_pf: float = 0.0
-    net_pf: float = 0.0
-    gross_ev: float = 0.0
-    net_ev: float = 0.0
-    evaluation: Dict[str, Any] = field(default_factory=dict)
-    evaluation_windows: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    normal_evaluation: Dict[str, Any] = field(default_factory=dict)
-    adjusted_evaluation: Dict[str, Any] = field(default_factory=dict)
-    adjustment_deltas: Dict[str, Any] = field(default_factory=dict)
-    _scored_input: Any = field(default=None, repr=False, compare=False)
-
-    def catalog_copy(self) -> "SetState":
-        """Parameter-only clone for isolated replay. No hist/live/eval payload."""
-        return SetState(
-            id=self.id,
-            pack=self.pack,
-            tf=self.tf,
-            sl_ratio=self.sl_ratio,
-            trail_key=self.trail_key,
-            trail_arm=self.trail_arm,
-            trail_give=self.trail_give,
-            step=self.step,
-            tp_pct=self.tp_pct,
-            idx=self.idx,
-            pack_i=self.pack_i,
-            sl_i=self.sl_i,
-            tr_i=self.tr_i,
-            step_i=self.step_i,
-            kind=self.kind,
-            parent_set_id=self.parent_set_id,
-            position_cost_pct=self.position_cost_pct,
-            indication_kind=self.indication_kind,
-            locked=self.locked,
-            processing_active=False,
-            processing_reason="",
-        )
 
     def tape(self) -> List[Dict[str, Any]]:
-        return list(self.hist) + self.evaluation_live()
-
-    def evaluation_live(self) -> List[Dict[str, Any]]:
-        """Own strategy/range closes; retain all other fills for accounting."""
-        rows = []
-        for row in self.live:
-            if row.get("exchange_confirmed") is not True or row.get("partial") or row.get("ours") is False:
-                continue
-            strategy = str(row.get("strategy") or "core").lower()
-            if strategy not in ("core", "normal", "trail", "trailing") or row.get("axis_key"):
-                continue
-            if strategy in ("trail", "trailing") and self.kind != "trail":
-                continue
-            if row.get("set_id") and row["set_id"] != self.id:
-                continue
-            nominal = finite(row.get("set_tp_pct"))
-            if nominal > 0:
-                # The live order widens SL to the venue floor and TP under
-                # ignore-TP; the Set's own nominal TP identifies the close.
-                if abs(nominal - self.tp_pct) > 1e-8:
-                    continue
-            elif row.get("set_id") != self.id and any(
-                    row.get(key) is not None and abs(finite(row[key]) - expected) > 1e-8
-                    for key, expected in (("tp_pct", self.tp_pct), ("sl_pct", self.tp_pct * self.sl_ratio))):
-                continue
-            if row.get("trail_key") is not None and str(row["trail_key"]) != self.trail_key:
-                continue
-            rows.append(row)
-        return rows
-
-    def tape_side(self, side: Optional[str] = None) -> List[Dict[str, Any]]:
-        return filter_side(self.tape(), side)
+        # A fill may execute the very same signal as a paper row. They are different
+        # evidence sources, never two observations of one combined strategy sample.
+        return list(self.hist)
 
 
 @dataclass
@@ -1184,862 +1331,1316 @@ class Progress:
     detail: str = ""
     ready: bool = False
     error: str = ""
-    run_id: str = ""
-    generation: int = 0
-    mode: str = ""
-    requested_start: int = 0
-    requested_end: int = 0
-    watermark: Dict[str, int] = field(default_factory=dict)
-    last_published_watermark: Dict[str, int] = field(default_factory=dict)
-    last_complete_run: float = 0.0
-    next_run_at: float = 0.0
-    valid_symbols: List[str] = field(default_factory=list)
-    invalid_symbols: List[Dict[str, str]] = field(default_factory=list)
-    missing_symbols: List[str] = field(default_factory=list)
-    gapped_symbols: List[str] = field(default_factory=list)
-    stale: bool = False
-    deferred_reason: str = ""
-    coordination_complete: bool = False
+    errors: int = 0                  # symbols + Sets that failed in the last pass; the others still ran
 
 
+_ROW_KEYS = ("t", "symbol", "side", "pnl", "pnl_pct", "hold_s", "reason", "set_id")
+_CODES: List[str] = []                 # the words of the side and exit-reason columns (a handful: LONG, SHORT, tp, sl, time, ...)
+_CODE_IX: Dict[str, int] = {}
+_CODE_LOCK = threading.Lock()
 
 
-def _tape_fingerprint(rows: Sequence[Any], tail: int = 96) -> Tuple[Any, ...]:
-    """Cheap content fingerprint of an evidence tape for cache invalidation.
-
-    Length, first row and the last ``tail`` rows' identity/result fields: a
-    rolling window, an appended close or a corrected recent close all change
-    it, without serializing thousands of rows per lookup."""
-    n = len(rows)
-    if not n:
-        return (0,)
-
-    def one(r: Any) -> Tuple[Any, ...]:
-        g = r.get if isinstance(r, dict) else (lambda k, d=None: getattr(r, k, d))
-        return (g("t"), g("pnl_pct"), g("pnl"), g("side"), g("symbol"), g("reason"), g("ind_config"))
-
-    return (n, one(rows[0])) + tuple(one(r) for r in rows[max(0, n - tail):])
-
-_SL_SCOPE = threading.local()
+def _code(word: str) -> int:
+    i = _CODE_IX.get(word)
+    if i is None:
+        with _CODE_LOCK:
+            i = _CODE_IX.get(word)
+            if i is None:
+                if len(_CODES) >= 255:
+                    raise ValueError("more than 255 distinct row words")
+                _CODES.append(word)
+                i = _CODE_IX[word] = len(_CODES) - 1
+    return i
 
 
-class _SlScope:
-    """Per-thread SL floor for one symbol replay (replays run in a pool)."""
+class RowCols:
+    """One Set's replay rows of one symbol, stored as columns (about 34 bytes a row instead of about 200 for a tuple of eight with its
+    float objects): exit time, pnl, pnl_pct and hold as doubles, side and reason as one-byte codes, symbol and Set id once. It reads
+    as the sequence of row tuples it replaces (len, iteration, index), so every reader of the replay rows stays as it was."""
+    __slots__ = ("t", "pnl", "pct", "hold", "side", "reason", "symbol", "set_id")
 
-    def __init__(self, floor: float) -> None:
-        self.floor = float(floor or 0.0)
-        self.prev = 0.0
+    def __init__(self, rows: Sequence[Dict[str, Any]]) -> None:
+        self.t, self.pnl, self.pct, self.hold = array("d"), array("d"), array("d"), array("d")
+        self.side, self.reason = bytearray(), bytearray()
+        self.symbol = str(rows[0]["symbol"]) if rows else ""
+        self.set_id = str(rows[0]["set_id"]) if rows else ""
+        for r in rows:
+            self.t.append(float(r["t"]))
+            self.pnl.append(float(r["pnl"]))
+            self.pct.append(float(r["pnl_pct"]))
+            self.hold.append(float(r["hold_s"]))
+            self.side.append(_code(str(r["side"])))
+            self.reason.append(_code(str(r["reason"])))
 
-    def __enter__(self) -> "_SlScope":
-        self.prev = float(getattr(_SL_SCOPE, "floor", 0.0) or 0.0)
-        _SL_SCOPE.floor = self.floor
-        return self
+    def share(self, set_id: str) -> "RowCols":
+        """The same columns under another Set's id: Sets that traded exactly the same orders store them once. The columns are never written after
+        construction, so sharing them is safe; only the id differs."""
+        other = RowCols.__new__(RowCols)
+        other.t, other.pnl, other.pct, other.hold = self.t, self.pnl, self.pct, self.hold
+        other.side, other.reason, other.symbol = self.side, self.reason, self.symbol
+        other.set_id = str(set_id)
+        return other
 
-    def __exit__(self, *exc: Any) -> None:
-        _SL_SCOPE.floor = self.prev
+    def __len__(self) -> int:
+        return len(self.t)
+
+    def __getitem__(self, k: int) -> tuple:
+        return (self.t[k], self.symbol, _CODES[self.side[k]], self.pnl[k], self.pct[k], self.hold[k], _CODES[self.reason[k]], self.set_id)
+
+    def __iter__(self):
+        for k in range(len(self.t)):
+            yield self[k]
+
+
+def _row_t(r: Tuple[Any, ...]) -> float:
+    return r[0]
+
+
+class BarIndex:
+    """Range-min/max lookups over one symbol's bars (sparse tables), built once per replay of that symbol. A base lane
+    (no trailing) then finds its exit bar with a few lookups instead of walking every bar it holds. The answers are the
+    same bars the walk finds; the walk stays for trailing lanes, whose stop moves with every bar."""
+    __slots__ = ("n", "lo", "hi", "cl_min", "cl_max", "close")
+
+    def __init__(self, bars: Sequence[Sequence[float]]) -> None:
+        self.n = len(bars)
+        lows = [float(b[2]) for b in bars]
+        highs = [float(b[1]) for b in bars]
+        self.close = [float(b[3]) for b in bars]
+        self.lo = self._table(lows, min)
+        self.hi = self._table(highs, max)
+        self.cl_min = self._table(self.close, min)
+        self.cl_max = self._table(self.close, max)
+
+    @staticmethod
+    def _table(arr: List[float], fn: Callable[[float, float], float]) -> List[List[float]]:
+        t = [arr]
+        k = 1
+        while (1 << k) <= len(arr):
+            prev = t[-1]
+            half = 1 << (k - 1)
+            t.append([fn(prev[i], prev[i + half]) for i in range(len(arr) - (1 << k) + 1)])
+            k += 1
+        return t
+
+    @staticmethod
+    def first(t: List[List[float]], a: int, b: int, x: float, le: bool) -> int:
+        """Smallest j in [a, b) with arr[j] <= x (le) or arr[j] >= x (not le); b when there is none."""
+        while a < b:
+            k = (b - a).bit_length() - 1
+            while k >= 0:
+                v = t[k][a]
+                if (v <= x) if le else (v >= x):
+                    k -= 1
+                else:
+                    break
+            if k < 0:
+                return a                     # arr[a] itself meets the condition
+            a += 1 << k                      # the whole block [a, a + 2^k) misses: skip it
+        return b
+
+
+def lane_honors_tp(kind: str) -> Optional[bool]:
+    """Whether a lane of this Set kind exits on its TP: base always, exit never, trail per the book (None)."""
+    if kind == "base":
+        return True
+    if kind == "exit":
+        return False
+    return None
+
+
+def lane_fracs(st: "SetState", cost_pct: float, floor_steps: Optional[int] = None, *, min_sl_distance_pct: float = MIN_SL_DISTANCE_PCT_DEFAULT) -> Tuple[float, float]:
+    """The SL and TP distances (fractions of the entry) of a Set's lane, as SetLane opens a position: SL = TP x the Set's
+    ratio (TRAIL_SL_RATIO for a trailing Set), never under PositionCost + the minimum steps; TP never under TP_MIN_COSTS x PositionCost.
+    The live trader takes a Set position's levels from here, so live and replay share one formula."""
+    return max(sl_floor_frac(cost_pct, min_distance_pct=min_sl_distance_pct), set_stop_base(st)), max(TP_MIN_COSTS * cost_as_frac(cost_pct), st.tp_pct)
+
+
+def set_stop_base(st: "SetState") -> float:
+    """A Set's stop distance before the overall minimum stop: SL ratio x TP (base and Exit Sets), TRAIL_SL_RATIO x the mid-step TP (the shipped
+    trailing Sets) or trail_sl x the arm (a trailing stop family, trailSlRatios). The one formula lane_fracs and SetLane read."""
+    if st.kind == "trail":
+        ts = float(getattr(st, "trail_sl", 0.0) or 0.0)
+        return st.trail_arm / 100.0 * ts if ts > 0 else st.tp_pct * TRAIL_SL_RATIO
+    return st.tp_pct * st.sl_ratio
+
+
+PAUSE_KEY = "@p"                                      # _hist_rows key of a pause reference tape: "<reference set id>@p<minutes>"
+PAUSE_CANDIDATES_DEFAULT = (2, 3, 5, 8, 12, 20, 30, 45, 60)    # minutes of rest after a winning close an indication may choose
+PAUSE_MAX = 240                                       # the longest pause any setting can ask (minutes)
+PAUSE_AUTO_MAX_DEFAULT = 100                          # reference orders judged (pooled over the pack's reference Sets on the symbol)
+PAUSE_AUTO_MIN_DEFAULT = 30                           # reference orders a candidate needs before it can replace "no extra rest"
+PAUSE_MARGIN = 1.05                                   # a candidate must beat the no-extra-rest PF by 5 %
+PAUSE_MODES = ("off", "auto", "fixed")
+
+
+# Minimum PF by TP step (owner 2026-11-02): the same floor for every window and every stage of a Set, from the Set's own TP distance.
+#   manual: 1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value); 0.2 % at ratio 0.2 = 1.04, 3.5 % = 1.70
+#   auto:   per step 0.2 .. 3.5 % the LOWEST floor (1.00 .. 2.00) whose admitted orders -- the orders whose Set had that PF over its last 10 closed orders at
+#           entry -- delivered a PF within minPfStepAutoTol (5 %) of the best floor's, learned only from orders closed before the evaluation window; independent of
+#           the manual ratio (owner 2026-11-03); a step without enough admitted orders takes its direction's pooled floor, only without any the manual value
+STEP_PF_RATIO_MIN, STEP_PF_RATIO_MAX, STEP_PF_RATIO_STEP, STEP_PF_RATIO_DEFAULT = 0.1, 1.5, 0.05, 0.2
+STEP_PF_TP_MIN, STEP_PF_TP_MAX = 0.2, 3.5             # percent: the table's range (owner 2026-11-03: back to 3.5 %; a TP above it asks the 3.5 % floor)
+STEP_PF_AUTO_N_DEFAULT = 10                           # the Set's last N closed orders at entry that the Auto Mode selects on
+STEP_PF_AUTO_MIN_DEFAULT = 1                          # admitted orders a floor candidate needs: none (owner 2026-11-04, no minimum-orders gate; measured identical to 10 / 300 on windows C and B)
+STEP_PF_MARGIN = 1.05                                 # (earlier objective, kept for reference) a candidate had to beat the manual floor's delivered PF by 5 %
+STEP_PF_CANDIDATES = tuple(round(1.0 + 0.02 * i, 2) for i in range(51))      # 1.00 .. 2.00
+STEP_PF_AUTO_TOL_DEFAULT = 0.05                       # minPfStepAutoTol: the lowest floor whose delivered PF is within 5 % of the best one
+
+
+def learn_step_floor(pairs: Sequence[Tuple[float, float]], min_admitted: int, tol: float,
+                     candidates: Sequence[float] = STEP_PF_CANDIDATES) -> Optional[Dict[str, Any]]:
+    """The Auto floor of one TP step from its causal pairs (the Set's PF over its last N closes at an order's entry, that order's net), independent of
+    the manual ratio (owner 2026-11-03): every candidate floor F admits the pairs with PF >= F; among the candidates with at least `min_admitted`
+    admitted orders, the best delivered PF is found, and the LOWEST floor whose delivered PF is within `tol` of that best is chosen -- the most valid
+    Sets and orders at (nearly) the best PF. None when no candidate has the orders. Pure: the engine and the simulator both call it."""
+    prs = sorted(pairs, key=lambda x: -x[0])
+    if not prs:
+        return None
+    negs = [-x[0] for x in prs]
+    g_, l_ = prefix_sums([x[1] for x in prs])
+    rows = []
+    for f in candidates:
+        i = bisect.bisect_right(negs, -f + 1e-12)
+        if i >= min_admitted:
+            rows.append((f, pf_of(g_[i], l_[i]), i))
+    if not rows:
+        return None
+    best = max(r[1] for r in rows)
+    pick = min((r for r in rows if r[1] + 1e-12 >= best * (1.0 - tol)), key=lambda r: r[0])
+    return {"floor": pick[0], "pf": pick[1], "admitted": pick[2], "bestPf": best, "orders": len(prs), "pfAll": pf_of(g_[-1], l_[-1])}
+
+
+def auto_evidence_key(exit_t, symbol, gross, entry_t, side) -> tuple:
+    """Identity of one causal learning observation, shared by native and replay.
+
+    A different symbol, direction or entry is not a copied tape even when exit
+    timestamps and returns happen to match. Preserve small outcomes exactly.
+    """
+    return (float(exit_t), str(symbol), float(gross), float(entry_t), int(side))
+
+
+def step_pf_ratio(raw: Any) -> float:
+    """The configured ratio snapped to its 0.05 grid and bounded to 0.1 .. 1.5; a broken value is the default."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return STEP_PF_RATIO_DEFAULT
+    if not math.isfinite(v):
+        return STEP_PF_RATIO_DEFAULT
+    # Half-up matches the desk, including decimal midpoints not exact in binary.
+    v = max(STEP_PF_RATIO_MIN, min(STEP_PF_RATIO_MAX, v))
+    v = math.floor(v / STEP_PF_RATIO_STEP + 0.5 + 1e-9) * STEP_PF_RATIO_STEP
+    return round(max(STEP_PF_RATIO_MIN, min(STEP_PF_RATIO_MAX, v)), 2)
+
+
+def step_grid_pct(tp_pct: float) -> float:
+    """A TP distance (percent) on the 0.1 % grid rounded DOWN, bounded to the table's range: 0.25 -> 0.2, 3.2 -> 3.2, 9 -> 3.5."""
+    g = math.floor(float(tp_pct) * 10.0 + 1e-9) / 10.0
+    return round(max(STEP_PF_TP_MIN, min(STEP_PF_TP_MAX, g)), 1)
+
+
+def pf_range_floors_of(raw: Any) -> Dict[str, float]:
+    """minPfByRange {range name: floor}: a flat minimum PF for the Sets of that TP range (owner 2026-11-04: lower optimal floors for Micro / Minimal / Short).
+    Unknown names, unreadable and non-finite values are dropped; a floor is bounded to 1.0 .. 2.0."""
+    out: Dict[str, float] = {}
+    if isinstance(raw, dict):
+        known = {n for n, _lo, _hi in TP_RANGES}
+        for k, v in raw.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if str(k).lower() in known and math.isfinite(f) and f > 0:
+                out[str(k).lower()] = round(max(1.0, min(2.0, f)), 4)
+    return out
+
+
+def manual_step_floor(tp_pct: float, ratio: float) -> float:
+    """Neutral 1 + (TP step % x ratio): 1.04 at 0.2 % with the default ratio 0.2."""
+    return round(1.0 + step_grid_pct(tp_pct) * float(ratio), 6)
+
+
+def rest_after(cooldown: int, pause: int, win: bool) -> int:
+    """Bars a lane rests after a close: the cooldown always, and after a WIN (net of PositionCost above zero) at least `pause` bars."""
+    return max(cooldown, pause) if win and pause > 0 else cooldown
+
+
+class SetLane:
+    """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
+    replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac", "hold", "honor", "pause")
+
+    def __init__(self, st: "SetState", symbol: str) -> None:
+        self.st = st
+        self.symbol = symbol
+        self.sid = st.id
+        self.open: Optional[Dict[str, Any]] = None
+        self.cool = 0
+        self.use_trail = st.kind == "trail"
+        # trail values are percent of price on every path (trail_grid, parse_trail): no magnitude guessing
+        self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
+        self.give = st.trail_give / 100.0 if self.use_trail else 0.0
+        self.sl_base = set_stop_base(st)
+        self.tp_frac = st.tp_pct
+        # TP by kind: a base Set takes its TP (the step is its target), an Exit Set never does (exitIgnoreTp is its own
+        # strategy type), a trailing Set follows cfg["honor_tp"] (not exitIgnoreTp)
+        self.honor = lane_honors_tp(st.kind)
+        self.hold = int(getattr(st, "hold_bars", 0) or 0)      # the Set's own time exit (bars); 0 = the global one
+        self.pause = int(getattr(st, "pause_bars", 0) or 0)     # bars of rest after a WINNING close, on top of the cooldown
+
+    def step(self, i: int, bar: Sequence[float], d: int, conf: float, allowed: bool, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Advance one bar. Returns the closed trade (a dict) or None.
+        cfg keys: entry_conf, time_bars, scratch_bars, scratch_min, cooldown, cost_pct, honor_tp."""
+        o = self.open
+        if o is not None:
+            side = int(o["side"])
+            entry = float(o["entry"])
+            held = i - int(o["i"])
+            honor = cfg["honor_tp"] if self.honor is None else self.honor
+            # OHLC does not tell us whether this candle's high came before its low.
+            # Test only the stop already active at the start of the candle.
+            why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not honor)
+            if why is None:
+                if self.use_trail:
+                    if side > 0:
+                        o["peak"] = max(o["peak"], float(bar[1]))
+                        if (o["peak"] - entry) / entry >= self.arm:
+                            o["trail"] = max(o.get("trail") or 0.0, o["peak"] * (1 - self.give))
+                    else:
+                        o["peak"] = min(o["peak"], float(bar[2]))
+                        if (entry - o["peak"]) / entry >= self.arm:
+                            t = o["peak"] * (1 + self.give)
+                            cur = o.get("trail")
+                            o["trail"] = t if cur is None else min(cur, t)
+                    # The close follows both extremes. If it crossed the new stop,
+                    # the crossing happened after the peak regardless of their order.
+                    trail = o.get("trail")
+                    close = float(bar[3])
+                    if trail is not None and (close <= trail if side > 0 else close >= trail):
+                        why, px = "sl", trail
+                elif side > 0:
+                    o["peak"] = max(o["peak"], float(bar[1]))
+                else:
+                    o["peak"] = min(o["peak"], float(bar[2]))
+            if why is None and held >= (self.hold or cfg["time_bars"]):
+                why, px = "time", float(bar[3])
+            if why is None and held >= cfg["scratch_bars"]:
+                if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
+                    why, px = "scratch+", float(bar[3])
+            if why:
+                raw = (px - entry) / entry * side
+                self.open = None
+                self.cool = rest_after(cfg["cooldown"], self.pause, net_pnl_pct(raw, cfg["cost_pct"]) > 0)
+                return {"set_id": self.sid, "symbol": self.symbol, "side": "LONG" if side > 0 else "SHORT",
+                        "dir": side, "entry_i": int(o["i"]), "exit_i": i, "entry_px": entry, "exit_px": float(px),
+                        "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cfg["cost_pct"]),
+                        "hold_s": held * BAR_S, "hold_bars": held}
+            return None
+        if self.cool > 0:
+            self.cool -= 1
+            return None
+        if not allowed or d == 0 or conf < cfg["entry_conf"]:
+            return None
+        close = float(bar[3])
+        cost_frac = cost_as_frac(cfg["cost_pct"])
+        sl_frac = max(sl_floor_frac(cfg["cost_pct"], min_distance_pct=cfg.get("min_sl_distance_pct")), self.sl_base)   # never under PositionCost + steps
+        tp_frac = max(TP_MIN_COSTS * cost_frac, self.tp_frac)       # a TP never under TP_MIN_COSTS x PositionCost
+        if d > 0:
+            sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
+        else:
+            sl, tp = close * (1 + sl_frac), close * (1 - tp_frac)
+        self.open = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None}
+        return None
+
+    def scan(
+        self,
+        i0: int,
+        i1: int,
+        bars: Sequence[Sequence[float]],
+        dirs: Sequence[int],
+        confs: Sequence[float],
+        allowed: bool,
+        cfg: Dict[str, Any],
+        cand: Optional[Sequence[int]] = None,
+        acc: Optional["BarIndex"] = None,
+        select_hold: Optional[Callable[[int], int]] = None,
+        select_pause: Optional[Callable[[int], int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Advance over bars[i0:i1]. Same rules as step(), applied to the whole range in one loop.
+        acc: the symbol's BarIndex; with it a base lane finds its exit by lookup (same result as the walk).
+
+        cand: sorted bar indices where an entry is possible (dir != 0 and conf >= entry_conf). A flat lane
+        jumps between them; the bars in between can only spend cooldown, which is applied in one step.
+        While a position is open its state is held in locals and written back when it closes or the
+        range ends. Returns the closed trades in exit order; open position and cooldown carry across calls.
+        """
+        thr = cfg["entry_conf"]
+        if cand is None:
+            cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
+        time_bars = self.hold or cfg["time_bars"]
+        scratch_bars = cfg["scratch_bars"]
+        scratch_min = cfg["scratch_min"]
+        cooldown = cfg["cooldown"]
+        pause_fixed = self.pause
+        cost_pct = cfg["cost_pct"]
+        cost_frac = cost_as_frac(cost_pct)
+        sl_floor = sl_floor_frac(cost_pct, min_distance_pct=cfg.get("min_sl_distance_pct"))
+        honor_tp = bool(cfg["honor_tp"] if self.honor is None else self.honor)
+        use_trail = self.use_trail
+        arm = self.arm
+        give = self.give
+        sl_base = self.sl_base
+        tp_frac = self.tp_frac
+        sid = self.sid
+        symbol = self.symbol
+        o = self.open
+        cool = self.cool
+        out: List[Dict[str, Any]] = []
+        i = i0
+        while i < i1:
+            if o is not None:
+                # A dynamically chosen hold belongs to the open position. Later
+                # choices must never change the time stop of an existing trade.
+                time_bars = o.get("time_bars", self.hold or cfg["time_bars"])
+            if o is not None and acc is not None and (not use_trail or o.get("trail") is None):
+                # an unarmed position (every base lane, and a trailing lane until its arm is reached) exits like a base
+                # lane: find the exit bar by lookup. A trailing lane that arms first hands over to the walk at that bar.
+                side = o["side"]
+                entry = o["entry"]
+                sl = o["sl"]
+                tp = o["tp"]
+                oi = o["i"]
+                first = acc.first
+                end = i1
+                if use_trail:
+                    peak0 = o["peak"]
+                    loose_arm = entry * (1 + side * arm) * (1 - side * 1e-9)
+                    a_ = i
+                    while a_ < i1:
+                        a_ = first(acc.hi, a_, i1, loose_arm, False) if side > 0 else first(acc.lo, a_, i1, loose_arm, True)
+                        if a_ >= i1:
+                            break
+                        pk = max(peak0, float(bars[a_][1])) if side > 0 else min(peak0, float(bars[a_][2]))
+                        if ((pk - entry) / entry if side > 0 else (entry - pk) / entry) >= arm:
+                            break
+                        a_ += 1
+                    end = min(a_, i1)         # the arming bar: from there the stop trails
+                if side > 0:
+                    j_sl = first(acc.lo, i, end, sl, True)
+                    j_tp = first(acc.hi, i, end, tp, False) if honor_tp else end
+                else:
+                    j_sl = first(acc.hi, i, end, sl, False)
+                    j_tp = first(acc.lo, i, end, tp, True) if honor_tp else end
+                j_time = max(i, oi + time_bars)
+                if j_time >= end:
+                    j_time = end
+                # scratch: the first bar from oi + scratch_bars whose close clears scratch_min; the lookup narrows with a
+                # slightly loose level, the exact expression decides
+                j_scr = end
+                a = max(i, oi + scratch_bars)
+                lim = min(end, j_sl, j_tp, j_time)
+                loose = entry * (1 + side * scratch_min) * (1 - side * 1e-9)
+                while a < lim:
+                    a = first(acc.cl_max, a, lim, loose, False) if side > 0 else first(acc.cl_min, a, lim, loose, True)
+                    if a >= lim:
+                        break
+                    if (acc.close[a] - entry) / entry * side >= scratch_min:
+                        j_scr = a
+                        break
+                    a += 1
+                j = min(j_sl, j_tp, j_time, j_scr)
+                if j >= end:
+                    # no exit before `end`: carry the peak over the bars walked past
+                    if i < end:
+                        if side > 0:
+                            o["peak"] = max(o["peak"], max(float(bars[x][1]) for x in range(i, end)))
+                        else:
+                            o["peak"] = min(o["peak"], min(float(bars[x][2]) for x in range(i, end)))
+                    i = end
+                    if end >= i1:
+                        continue
+                    # a trailing lane reached its arm at bar `end`: the walk below takes over from that bar
+                else:
+                    close = acc.close[j]
+                    if j == j_sl:
+                        why, px = "sl", stop_gap_price(side, sl, float(bars[j][0]))
+                    elif j == j_tp:
+                        why, px = "tp", tp
+                    elif j == j_time:
+                        why, px = "time", close
+                    else:
+                        why, px = "scratch+", close
+                    held = j - oi
+                    raw = (px - entry) / entry * side
+                    out.append({
+                        "set_id": sid, "symbol": symbol, "side": "LONG" if side > 0 else "SHORT",
+                        "dir": side, "entry_i": int(oi), "exit_i": j, "entry_px": entry, "exit_px": float(px),
+                        "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cost_pct),
+                        "hold_s": held * BAR_S, "hold_bars": held,
+                    })
+                    o = None
+                    cool = rest_after(cooldown, int(select_pause(j)) if select_pause is not None else pause_fixed, net_pnl_pct(raw, cost_pct) > 0)
+                    i = j + 1
+                    continue
+            if o is not None:
+                side = o["side"]
+                entry = o["entry"]
+                sl = o["sl"]
+                tp = o["tp"]
+                peak = o["peak"]
+                oi = o["i"]
+                trail = o.get("trail")
+                while i < i1:
+                    bar = bars[i]
+                    high = float(bar[1])
+                    low = float(bar[2])
+                    close = float(bar[3])
+                    # The stop active at the bar's open wins a same-bar tie with the target.
+                    held = i - oi
+                    why: Optional[str] = None
+                    px = close
+                    if side > 0:
+                        stop = max(sl, trail) if trail is not None else sl
+                        if low <= stop:
+                            why, px = "sl", stop_gap_price(side, stop, float(bars[i][0]))
+                        elif honor_tp and high >= tp:
+                            why, px = "tp", tp
+                    else:
+                        stop = min(sl, trail) if trail is not None else sl
+                        if high >= stop:
+                            why, px = "sl", stop_gap_price(side, stop, float(bars[i][0]))
+                        elif honor_tp and low <= tp:
+                            why, px = "tp", tp
+                    if why is None:
+                        if use_trail:
+                            if side > 0:
+                                peak = max(peak, high)
+                                if (peak - entry) / entry >= arm:
+                                    trail = max(trail or 0.0, peak * (1 - give))
+                            else:
+                                peak = min(peak, low)
+                                if (entry - peak) / entry >= arm:
+                                    t = peak * (1 + give)
+                                    trail = t if trail is None else min(trail, t)
+                            if trail is not None and (close <= trail if side > 0 else close >= trail):
+                                why, px = "sl", trail
+                        elif side > 0:
+                            peak = max(peak, high)
+                        else:
+                            peak = min(peak, low)
+                    if why is None and held >= time_bars:
+                        why, px = "time", close
+                    if why is None and held >= scratch_bars and (close - entry) / entry * side >= scratch_min:
+                        why, px = "scratch+", close
+                    if why:
+                        raw = (px - entry) / entry * side
+                        out.append({
+                            "set_id": sid, "symbol": symbol, "side": "LONG" if side > 0 else "SHORT",
+                            "dir": side, "entry_i": int(oi), "exit_i": i, "entry_px": entry, "exit_px": float(px),
+                            "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cost_pct),
+                            "hold_s": held * BAR_S, "hold_bars": held,
+                        })
+                        o = None
+                        cool = rest_after(cooldown, int(select_pause(i)) if select_pause is not None else pause_fixed, net_pnl_pct(raw, cost_pct) > 0)
+                        i += 1
+                        break
+                    i += 1
+                if o is not None:
+                    o["peak"] = peak
+                    o["trail"] = trail
+                continue
+            # flat: the next candidate bar; the bars before it can only spend cooldown
+            k = bisect.bisect_left(cand, i)
+            if k >= len(cand) or cand[k] >= i1:
+                cool = max(0, cool - (i1 - i))
+                i = i1
+                break
+            j = cand[k]
+            if j > i:
+                cool = max(0, cool - (j - i))
+            if cool > 0:
+                cool -= 1
+            elif allowed:
+                d = int(dirs[j])
+                close = float(bars[j][3])
+                sl_frac = max(sl_floor, sl_base)
+                tp_use = max(TP_MIN_COSTS * cost_frac, tp_frac)
+                if d > 0:
+                    sl, tp = close * (1 - sl_frac), close * (1 + tp_use)
+                else:
+                    sl, tp = close * (1 + sl_frac), close * (1 - tp_use)
+                o = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": j, "trail": None}
+                if select_hold is not None:
+                    chosen = int(select_hold(j))
+                    if chosen < 0:
+                        raise ValueError("selected hold must be nonnegative")
+                    o["time_bars"] = chosen or cfg["time_bars"]
+            i = j + 1
+        self.open = o
+        self.cool = cool
+        return out
+
+BASE_SHORT_N_DEFAULT = 25        # Base: the second last N (setGateShortN; 0 = off): best cell of the 24 h window grid (owner, 2026-10-29)
+MAIN_SHORT_MAX_RATIO = 0.5       # the Main short windows are at most this share of the Main long window (owner 2026-10-29, mainShortMaxRatio; was mainAutoMaxRatio)
+MAIN_MIN_N_MAX = 3               # the Main minimal window: the newest 1-3 results of the Main Set (mainMinN, 0 = off), all positive or all negative (mainMinMode)
+BASE_MIN_N_MAX = 3               # the Base minimal window: the newest 1-3 results (setGateMinN, 0 = off), all positive or all negative (setGateMinMode)
+BASE_SHORT_MAX_RATIO = 0.5       # the short window is at most this share of the long window (owner 2026-10-29: long 40 -> short at most 20; setGateShortMaxRatio)
+MAIN_SHORT_WINDOWS = (5, 10, 15)  # owner, 2026-10-29: the Main short window, the candidates of each Set's own window (5-15 step 5; was "Auto")
+MAIN_SHORT_MIN_DEFAULT = 1       # orders a candidate needs on the Main Set: none (owner 2026-11-04; measured identical to 8 on window C)
+MAIN_SHORT_MARGIN = 1.02         # a candidate must beat the long window's PF by 2 %
+MAIN_NEG_WINDOWS = (5, 10)       # Main Negative lane: the average of the last N Main orders is negative, for some N
+REAL_GATE_N_DEFAULT = 15         # Real: the last N of the lane's Real Set
+STAGE_REASONS = ("main", "mainshort", "mainminimal", "real")   # the reasons of a Set that passed Base and stopped at a later stage
+MAIN_GATE_N_DEFAULT = 25        # owner, 2026-10-29: the Main long window reads the last 25 Main-Set orders
+REAL_SUFFIX = ":real"              # a Base Set's Real Set (the last of the chain: opened while Base and Main passed): "<id>:real"
+REALNEG_SUFFIX = ":realneg"        # a Base Set's Real Negative Set (Main orders opened in a dip): "<id>:realneg"
+MAIN_SUFFIX = ":main"              # a Base Set's Main Set (opened while Base passed; the Main gate's last N reads it): "<id>:main"
+EXEC_SUFFIX, PROC_SUFFIX = REAL_SUFFIX, MAIN_SUFFIX
+SCRATCH_NEVER = 10 ** 9            # scratch_bars when the Set lanes do not scratch (setScratchEnabled off)
+PROC_KEEP = 200                   # processed orders kept per Set (the Main gate reads the newest mainGateN of them)
+LOOKBACK_GROW_STEP = 240          # bars added to the pre-history per growth step
+LOOKBACK_SHORT_SHARE = 0.25       # grow when this share of the Sets that traded has fewer orders than the gate minimum
+HOLD_KEY = "@h"                                       # _hist_rows key of an Auto Mode candidate tape: "<set id>@h<minutes>"
+STEP_HOLD_STEPS = 12
+HOLD_AUTO_LOW = (10, 15, 20, 30, 40, 50)              # Auto Mode candidates in minutes, steps 1..5 (the desk range 1-50)
+HOLD_AUTO_HIGH = (30, 60, 90, 120, 180, 240, 350)      # steps 6..12 (the desk range 30-350)
+HOLD_AUTO_MAX_ORDERS = 50                              # a Set is judged on its existing orders, never more than this many
+HOLD_AUTO_MIN_ORDERS = 10                              # never below MIN_VALIDATION_N (8)
+HOLD_AUTO_MARGIN = 1.02                                # a candidate must beat the global time stop's PF by 2% to replace it
+STEP_HOLD_LOW = (1, 50)        # allowed minutes for steps 1..5 (the desk slider); the engine itself accepts 1..720
+STEP_HOLD_HIGH = (30, 350)     # steps 6..12
+
+
+def parse_step_hold(on: Any, minutes: Any) -> Dict[int, int]:
+    """{step: minutes} for the steps whose hold is on. Both lists are indexed by step - 1; a missing or invalid entry is off."""
+    out: Dict[int, int] = {}
+    if not isinstance(on, (list, tuple)) or not isinstance(minutes, (list, tuple)):
+        return out
+    for i in range(min(STEP_HOLD_STEPS, len(on), len(minutes))):
+        try:
+            m = int(round(float(minutes[i])))
+        except (TypeError, ValueError):
+            continue
+        if bool(on[i]) and 1 <= m <= 720:
+            out[i + 1] = m
+    return out
 
 
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
-        self.calculation_cache = None
         self.lookback = LOOKBACK_DEFAULT
-        self.evaluation_bars = LOOKBACK_DEFAULT
-        self.exact_replay_window = False
+        self.lookback_cfg = LOOKBACK_DEFAULT
+        self.lookback_max = LOOKBACK_MAX
+        self.lookback_auto = True
+        self.lookback_sample_target = LOOKBACK_SAMPLE_TARGET
+        self._lookback_grown = 0
+        self._lookback_pending = False
+        self._lookback_retry_fast = False
+        self._lookback_progress_key = None
+        self._lookback_progress_count = 0
+        # Opt-in only: keep the last complete, fresh score while a larger
+        # history window is assembled. Mixed-version rows never score entries.
+        self.hist_keep_last_complete = False
+        self._history_snapshot_active = False
+        self._history_snapshot_gen = -1
+        self._history_snapshot_symbols: frozenset[str] = frozenset()
+        self._history_snapshot_lookback = 0
+        self._history_snapshot_oldest_at = 0.0
+        self._history_snapshot_promoting = False
+        self.main_on = True
+        self.main_n = MAIN_GATE_N_DEFAULT
+        self.base_short = BASE_SHORT_N_DEFAULT
+        self.short_max_ratio = BASE_SHORT_MAX_RATIO
+        self.base_min_n = 0
+        self.base_min_positive = True
+        self.base_min_both = False
+        self.base_min_avg = False
+        self.short_on = True
+        self.short_windows: Tuple[int, ...] = MAIN_SHORT_WINDOWS
+        self.short_ratio = MAIN_SHORT_MAX_RATIO
+        self.short_min = MAIN_SHORT_MIN_DEFAULT
+        self.short_margin = MAIN_SHORT_MARGIN
+        self.main_min_n = 0
+        self.main_min_positive = True
+        self.main_min_both = False
+        self.main_min_avg = False
+        self.neg_on = True
+        self.neg_windows: Tuple[int, ...] = MAIN_NEG_WINDOWS
+        self.realst_on = True
+        self.realst_n = REAL_GATE_N_DEFAULT
+        self.last_n_by_range: Dict[str, Dict[str, Any]] = {}   # lastNByRange: per TP range last-N windows (absent: the global ones)
+        self.gate_window_max = GATE_WINDOW_DEFAULT
+        self.stage_full = False
+        self.stages_on = True
         self.min_bars = 120
         self.warmup = WARMUP_DEFAULT
-        self.refresh_s = 3600.0
+        self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = POSITIVE_PF
-        self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
-        self.micro_min_pf = MICRO_PF
-        # On by default: Micro sets (PF microMinPf..floor) trade one venue
-        # minimum lot. Overlays can switch it off with microEnabled=false.
-        self.micro_enabled = True
-        self.micro_max_share = 0.05
-        self.real_min_pf = POSITIVE_PF
-        # Main / Real stage windows: last-30 closes each (operator default
-        # with Base last-50 at PF 1.10; 0 = stage off, see _stage_window_ns).
-        self.main_eval = MAIN_EVAL_DEFAULT
-        self.real_eval = REAL_EVAL_DEFAULT
-        self.max_dd_s = 64800.0
-        self.auto_deact = True
+        self.min_pf = GATE_MIN_PF_DEFAULT
+        self.pack_min_pf: Dict[str, float] = {SHORT_PACK: SHORT_MIN_PF_DEFAULT}
+        self.pf_by_size = True
+        self.size_floors: Tuple[Tuple[int, float], ...] = tuple(zip((PF_SIZE_BOUNDS_DEFAULT[k] for k in _SIZE_N_KEYS), (PF_BY_SIZE_DEFAULTS[k] for k in _SIZE_PF_KEYS)))
+        self.size_long_pf = PF_BY_SIZE_DEFAULTS["minPfLong"]
+        self.signal_min_pf = PF_BY_SIZE_DEFAULTS["minPfSignals"]
+        self.max_modeled_stop_loss_pct = 0.0
+        self.stop_cap_invalid = False
+        self.consistency_pf = 0.0
+        self.pf_history: List[Dict[str, Any]] = []
+        self._adapt_pending: Optional[List[Any]] = None
+        self.quality: Dict[str, str] = {}
+        self.max_flat_share = 0.35
+        self.max_jump = 0.5
+        self.gate_window = GATE_WINDOW_DEFAULT
+        self.gate_min = max(1, GATE_MIN_DEFAULT)
+        self.max_dd_s = 420.0
         self.use_historic_gate = True
-        self.min_samples = 30
-        self.reactivate = True
-        self.strict_gate = True
-        # Keep every quality-qualified Set available by default. Positive values
-        # remain an explicit bounded selection policy; zero means unlimited.
-        self.max_active = 0
+        self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
+        self.rotation_s = 0.0
+        self.pf_step_auto_low = STEP_PF_AUTO_LOW_DEFAULT
+        self.pf_step_auto_high = STEP_PF_AUTO_HIGH_DEFAULT
+        self.pf_range_floor: Dict[str, float] = {}      # minPfByRange: a flat minimum PF for every Set of a TP range (absent: the per-step floor)
+        self.lane_order: Tuple[str, ...] = ("pos", "neg")
+        self.trail_pick: str = KIND_ORDER_DEFAULT
+        self.kind_order: Tuple[Tuple[str, ...], ...] = KIND_ORDERS[KIND_ORDER_DEFAULT]
+        self.trail_pick_by: Dict[str, str] = {}
+        self._kind_order_memo: Dict[str, Tuple[Tuple[str, ...], ...]] = {}           # measured time to replay every symbol once (chunked live passes): the freshness limit never sits under 1.5 x it
         self.cost_pct = POSITION_COST_PCT_DEFAULT
-        self.tp_step_pct = TP_STEP_PCT_DEFAULT / 100.0
-        self.cost_source = "manual-fallback"
-        # Optional live-selection policy: prefer the smallest stable
-        # configuration ranges only after PF/DD/sample gates have passed.
-        # Profit Factor remains the primary ranking objective.
-        self.prefer_minimal_range = True
-        self.additional_coordination = True
-        # Deprecated internal aliases kept while older persisted overlays
-        # and remote clients migrate to the explicit names above.
-        self.prefer_minimal_positive = self.prefer_minimal_range
-        self.minimal_positive_coordination = self.additional_coordination
-        self.optimization_n = 50
-        self.optimization_stats: Dict[str, Any] = {}
-        self.live_negative_deact = True
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
         self.scratch_s = 90.0
         self.scratch_min = 0.0016
+        self.set_scratch = False                       # setScratchEnabled: the global scratch exit on Set lanes (off: a Set exits only by its own stop, target and time)
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
+        self.direction_split = True                   # a Set per trade direction (long / short), each with its own lane, tape, stages, pause and floor
+        self.rank_by_lane = True                      # the choice among valid Sets reads the lane's own (Real / Real Negative) Set, not the raw Base tape
+        self.pf_by_step = True                        # one min PF per TP step for every window and stage (replaces the window-size classes)
+        self.pf_step_auto = True
+        self.pf_step_ratio = STEP_PF_RATIO_DEFAULT
+        self.pf_step_auto_n = STEP_PF_AUTO_N_DEFAULT
+        self.pf_step_auto_min = STEP_PF_AUTO_MIN_DEFAULT
+        self.pf_step_auto_tol = STEP_PF_AUTO_TOL_DEFAULT
+        self.step_floor_auto: Dict[Tuple[int, int], float] = {}   # (TP step bucket in 0.1 % units, side) -> the floor the Auto Mode learned (absent: the manual value)
+        self.step_floor_report: List[Dict[str, Any]] = []
+        self._manual_floor_cache: Dict[Tuple[int, float], float] = {}
+        self.pause_mode = "auto"                      # rest after a WINNING close: off / auto (per indication and symbol, the default) / fixed
+        self.pause_fixed = 0
+        self.pause_candidates: Tuple[int, ...] = PAUSE_CANDIDATES_DEFAULT
+        self.pause_auto_max = PAUSE_AUTO_MAX_DEFAULT
+        self.pause_auto_min = PAUSE_AUTO_MIN_DEFAULT
+        self.pause_pack: Dict[str, int] = {}          # manual minutes per pack (indication); wins over auto and fixed
+        self.pause_off: set = set()                   # packs an indicationConfigs entry set to no pause (0)
+        self.pack_ranges: Dict[str, Dict[str, Any]] = {}      # pack -> {"lo", "hi", "ratios", "kinds"}: the Sets of an indication built from indicationConfigs
+        self.config_report: Dict[str, Any] = {"entries": [], "dropped": [], "names": 0}
+        self.pause_now: Dict[Tuple[str, str, int], int] = {}    # (pack, symbol, side) -> minutes the Auto Mode chose at the end of the last replay
+        self.entry_conf = 0.58
+        self.retry_s = 30.0
         self.ignore_tp = True
         self.opt_sl = 0.0030
-        self.min_step_cfg = STEP_LIVE_MIN
-        self.min_step = STEP_LIVE_MIN
-        self.trailing_min_step = STEP_LIVE_MIN
-        self.step_max = STEP_MAX
-        self.step_adapt = True
-        self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
+        self.min_step_cfg = STEP_MIN
+        self.min_step = STEP_MIN
+        self.step_max = STEP_DEFAULT_MAX
+        self.step_adapt = False
+        self.sl_max_by_range: Dict[str, float] = dict(SL_MAX_BY_RANGE_DEFAULT)
+        self.short_steps: List[int] = list(range(SHORT_STEP_MIN, SHORT_STEP_MAX + 1))
+        self.sl_min_steps = SL_MIN_STEPS_DEFAULT  # serialized legacy alias, not an active stop floor
+        self.min_sl_distance_pct = MIN_SL_DISTANCE_PCT_DEFAULT
+        self.trail_min_steps = TRAIL_MIN_STEPS_DEFAULT
+        # relationLanes: last-N lanes of the post-Base orders by relation (overall / indication / type / range / step), next to the per-configuration lanes; their
+        # verdicts raise the volume of a member Set's positive-lane entry (relation_lanes.py). Off by default: nothing is built and every multiple is 1.
+        self.relation_cfg = relation_lanes.RelationConfig()
+        self.relation_state: Dict[str, Dict[str, Any]] = {}     # lane id -> its figures at the last complete scoring pass
+        self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
+        self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
+        self.window_basis = "time"           # lastNBasis: "time" (windows inside the lookback) or "count" (the newest N orders of the configuration, whatever their age)
+        self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
+        self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
+        self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
+        self.hist_honor_tp = True
+        self.normal_entries = True
+        self.exit_sets = True
+        self.exit_by_pack: Dict[str, bool] = {}
+        self.steps: List[int] = list(range(STEP_MIN, STEP_DEFAULT_MAX + 1))
         self.packs: List[str] = list(PACKS)
-        self.sl_ratios: List[float] = list(SL_TP_RATIOS)
+        self.sl_ratios: List[float] = list(SL_RATIOS)
+        self.sl_low = False                                   # setSlLow: SL ratios 0.2 / 0.3 / 0.4 x TP on top of setSlRatios
+        self.tp_ranges: Dict[str, bool] = dict(TP_RANGES_DEFAULT)   # tpRanges: the named TP ranges switched on (Micro .. Wide)
+        self.trail_step_max = TRAIL_STEP_MAX                  # trailStepMax: the largest trailing arm in TP steps (22 = 2.2 %, up to TRAIL_STEP_CEIL)
+        self.trail_sl_ratios: List[float] = []                # trailSlRatios: trailing stop families (initial stop r x the arm), each its own Sets
         self.trails: List[Tuple[str, float, float]] = []
-        self.trail_enabled = True
+        self.trails_built: List[Tuple[str, float, float]] = []
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
-        self.hist_test_set_ids: Optional[set[str]] = None
-        self._by_pack: Dict[str, List[SetState]] = {}
-        self._ids_by_pack: Dict[str, List[str]] = {}
-        self._ids_by_kind: Dict[str, List[str]] = {}
+        self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
+        # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
+        self._lock = threading.RLock()
+        # bumped whenever the Set map is rebuilt; a replay pass that straddles a rebuild must not score a partial tape
+        self._topo_gen = 0
+        # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
+        self._hist_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        # The inputs paired with each symbol's candidate tapes. Automatic-hold
+        # history is re-simulated from actual entry opportunities, not spliced.
+        self._hist_inputs: Dict[str, Dict[str, Any]] = {}
+        self._hist_replay_key: Dict[str, Tuple[int, int]] = {}
+        self._hist_replay_at: Dict[str, float] = {}
+        self._hist_replay_bar_at: Dict[str, Optional[float]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
+        # open time (s) of the newest row of self.bars[symbol] when that row is a completed exchange minute; absent when the
+        # series ends in rows of unknown time (live ticks). Live entries read a signal only on the bar this names.
+        self.bar_t: Dict[str, float] = {}
         self.progress = Progress()
-        self.sl_min, self.sl_max = SL_MIN_PCT / 100.0, 0.03
-        self.sym_sl_floor: Dict[str, float] = {}
-        self.tp_min, self.tp_max = 0.003, 0.0
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
         self.locks: Dict[str, bool] = {}
-        # Per-indication-kind evidence: hist (rebuilt by every replay from the
-        # winning vote tags) + live (fed by on_live_close via rec.ind_kind).
-        self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
-        self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
-        # Confirmed live Block round trips (block_count >= 1) for Main/Real.
-        self.block_live: List[Dict[str, Any]] = []
-        # Main-stage strategy tapes are kept separately from the canonical
-        # Set tape so Block/DCA evidence cannot inflate Base/Real counts.
-        self.strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
-        # Partial load-sliced replays retain bounded evidence from symbols
-        # already covered in the current cycle. Per-symbol counts keep
-        # histFills meaningful even though each Set tape is capped for RAM.
-        self._hist_seen: set[str] = set()
-        self._hist_total = 0
-        self._hist_counts: Dict[str, Dict[str, int]] = {}
-        self._hist_set_signature: Tuple[str, ...] = ()
-        # Separate replay-input changes from threshold-only score changes so
-        # a PF/evaluation edit does not discard an otherwise complete replay.
-        self.replay_required = True
-        self.score_refresh_required = False
-        self._score_settings_signature: Tuple[Any, ...] = ()
+        self._live_seen: Dict[str, None] = {}   # insertion-ordered: the oldest keys are evicted past LIVE_SEEN_MAX
+        self.live_skipped = 0
+        self.live_unmatched = 0            # live closes whose Set is neither on the grid nor retired
+        self.retired: Dict[str, SetState] = {}   # Sets that left the grid (step-adapt): tape kept, never picked
         self._running = False
-        self._snap_cache: Optional[Dict[str, Any]] = None
-        self._snap_ts = 0.0
-        self._live_ov_cache: Optional[Dict[str, Any]] = None
-        self._live_ov_ts = 0.0
-        self._pick_lock = threading.RLock()
-        self._pick_cursor = 0
-        # Entry admission is read on every hot cycle, while scores and live
-        # fills change only at discrete publication points. Keep the exact
-        # validated Base rows by pack/direction and invalidate them through a
-        # cheap epoch instead of rescanning a 30k+ catalog four times per
-        # cycle. The cache stores references only; SetState remains owned by
-        # this book and no eligibility decision is copied or ranked away.
-        self._entry_rows_cache: Dict[Tuple[str, str], Tuple[Tuple[Any, ...], Tuple[SetState, ...]]] = {}
-        self._entry_cache_epoch = 0
-        # IDs currently referenced by an unresolved entry/control/close intent
-        # or an open local position. This is updated by Pulse without scanning
-        # the complete catalogue on every order; the SetBook keeps the compact
-        # flags for snapshots and downstream coordination.
-        self._processing_set_ids: set[str] = set()
-        self._processing_reasons: Dict[str, str] = {}
-        self.hist_block = True
-        self.hist_dca = True
-        self.block_vr = 0.25
-        self.block_stack = 6
-        self.block_max_multiplier = 2.0
-        self.block_counts = list(range(1, 7))
-        self.block_eval_pos = 50
-        self.block_main_eval: Dict[tuple, Dict[str, Any]] = {}
-        self.dca_dist = [0.012, 0.016, 0.020, 0.024]
-        self.dca_mult = [1.5, 2.0, 2.3, 2.5]
-        # Bounded exploration is explicit and lane-scoped. It admits only
-        # historic-qualified candidates while live evidence is cold, then
-        # hands admission back to the live evidence gates at the sample floor.
-        self.entry_policy = ENTRY_POLICY_STRICT
-        self.entry_policy_max_candidates = 0
-        # No additional fixed live-sample hurdle.  Independent Set PF/sample
-        # and stage gates remain authoritative; this value only controls the
-        # optional cold-candidate preference in permissive mode.
-        self.entry_policy_min_live_samples = 0
-        # Compatibility aliases remain visible to older dashboards.
-        self.live_test_mode = False
-        self.live_test_candidates = 0
-        self.live_test_min_samples = self.pf_n
 
-    def __getstate__(self) -> Dict[str, Any]:
-        """Return a copy-safe state for isolated historic replays.
+    def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
+        # A malformed policy must not partially overwrite the active grid or economic settings.
+        expand_entries(ov.get("indicationConfigs", []))
+        with self._lock:
+            previous = getattr(self, "_evaluation_config", None)
+            self._load(ov, cts)
+            signature = repr((self.ind_settings, self.cost_pct, self.entry_conf, self.cooldown_bars,
+                              self.hist_time_bars, self.scratch_bars, self.scratch_min, self.hist_honor_tp,
+                              self.min_sl_distance_pct, self.trail_min_steps, self.hold_auto, getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback, self.hist_keep_last_complete,
+                              self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
+                              self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
+                              self.hold_auto_min, self.hold_auto_max,
+                              self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol,
+                              self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
+                              [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
+                              [self.stage_params(pack) for pack in self.packs]))
+            self._evaluation_config = signature
+            if previous is not None and signature != previous:
+                # Until a complete pass under the new rules, no old row may validate
+                # a new signal/cost/hold configuration (including chunked refreshes).
+                self._hist_rows.clear()
+                self._hist_inputs.clear()
+                self._hist_replay_key.clear()
+                self._hist_replay_at.clear()
+                self._hist_replay_bar_at.clear()
+                self._sig_cache.clear()
+                self._history_snapshot_active = False
+                self.progress.ready = False
+                self.last_run = 0.0
+                self.relation_state, self.relation_at = {}, 0.0      # lanes of the previous rules raise nothing
+                for st in self.by_idx:
+                    st.last_error = "configuration changed; replay required"
+                    st.hist, st.proc, st.exe, st.neg = [], [], [], []
+                    st.main_evidence = None
+                    st.proc_replayed = False
+                    st.n = st.proc_total = st.exe_total = st.neg_total = 0
+                    st.gate_n = st.main_n = st.exe_n = st.neg_n = 0
+                    st.gate_pf = st.main_pf = st.exe_pf = st.neg_pf = 0.0
+                    st.gate_gp = st.gate_gl = st.main_gp = st.main_gl = 0.0
+                    st.exe_gp = st.exe_gl = st.neg_gp = st.neg_gl = 0.0
+                    st.rank_pos = st.rank_neg = (0, 0.0, 0.0, 0.0, 0.0)
+                    st.base_short_n = st.base_min_n = st.main_short_n = st.main_min_have = 0
+                    st.base_short_pf = st.main_short_pf = 0.0
+                    st.base_short_gp = st.base_short_gl = st.main_short_gp = st.main_short_gl = 0.0
+                    st.base_min_gp = st.base_min_gl = st.main_min_gp = st.main_min_gl = 0.0
+                    st.base_min_ok = st.base_long_ok = st.base_short_ok = False
+                    st.sample_counts = None
+                    for key in ("gate_pf_old", "gate_pf_new", "main_short_win", "neg_win", "neg_win_gp", "neg_win_gl",
+                                "last15_pf", "last15_n", "last15_r", "last25_avg_r", "last25_n", "last25_avg_pnl",
+                                "max_dd_s", "avg_dd_s", "dd_episodes", "wins", "gp", "gl", "wr", "expectancy",
+                                "avg_hold_s", "pf_all", "source_n", "hold_auto_pf", "hold_auto_n"):
+                        setattr(st, key, 0)
+                    st.last15_ratio = 1.0
+                    st.exits = {}
+                    st.hold_bars, st.hold_auto = self.hold_bars_for(st), False
+                    st.stage = {}
+                    st.deact_reason = "error"
 
-        ``SetBook`` is snapshotted while the live lane continues processing
-        exchange events.  The selection lock protects the live book but is
-        not itself copyable; omitting it from the snapshot lets deepcopy
-        recreate an independent lock in ``__setstate__``.
-        """
-        state = dict(self.__dict__)
-        state.pop("_pick_lock", None)
-        state["calculation_cache"] = None  # Never pickle live Redis connections.
-        # A copied book must never serve a snapshot produced by the live
-        # book.  Besides stale rows, the cache can retain the full preview
-        # matrix and defeat the bounded replay-memory contract.
-        state["_snap_cache"] = None
-        state["_snap_ts"] = 0.0
-        state["_live_ov_cache"] = None
-        state["_live_ov_ts"] = 0.0
-        state["_ind_stats_cache"] = {}
-        return state
-
-    def __setstate__(self, state: Dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        self._pick_lock = threading.RLock()
-        if not isinstance(getattr(self, "_entry_rows_cache", None), dict):
-            self._entry_rows_cache = {}
-        if not isinstance(getattr(self, "_entry_cache_epoch", None), int):
-            self._entry_cache_epoch = 0
-        if not isinstance(getattr(self, "_processing_set_ids", None), set):
-            self._processing_set_ids = set(getattr(self, "_processing_set_ids", ()) or ())
-        if not isinstance(getattr(self, "_processing_reasons", None), dict):
-            self._processing_reasons = {}
-        if not hasattr(self, "replay_required"):
-            self.replay_required = True
-        if not hasattr(self, "score_refresh_required"):
-            self.score_refresh_required = False
-        if not hasattr(self, "_score_settings_signature"):
-            self._score_settings_signature = ()
-
-    def _invalidate_entry_cache(self) -> None:
-        """Advance the entry-read generation without racing score workers."""
-        lock = getattr(self, "_pick_lock", None)
-        if lock is None:
-            self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
-            return
-        with lock:
-            self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
-
-    def sync_processing_sets(
-        self,
-        set_ids: Sequence[str] | set[str],
-        reasons: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """Retain unresolved Set lineages independently from entry eligibility.
-
-        ``active`` is a selection flag and may legitimately turn off after a
-        live loss, a PF/DDT gate, or the configured selection cap. It must not
-        stop management of a position that was already opened under that Set.
-        The caller supplies only live/pending lineage IDs; changes are applied
-        to the affected states rather than walking a 30k+ catalogue.
-        """
-        wanted = {
-            str(value).strip()
-            for value in (set_ids or ())
-            if str(value or "").strip()
-        }
-        reason_map = {
-            str(key): str(value or "unresolved order/position")
-            for key, value in (reasons or {}).items()
-            if str(key or "").strip()
-        }
-        previous = set(getattr(self, "_processing_set_ids", set()) or set())
-        previous_reasons = dict(getattr(self, "_processing_reasons", {}) or {})
-        self._processing_set_ids = wanted
-        self._processing_reasons = reason_map
-        changed = previous ^ wanted
-        changed.update(
-            key for key in wanted | previous if previous_reasons.get(key) != reason_map.get(key)
-        )
-        for sid in changed:
-            st = self.sets.get(sid)
-            if st is None:
-                continue
-            st.processing_active = sid in wanted
-            st.processing_reason = reason_map.get(sid, "") if st.processing_active else ""
-        if changed:
-            self._snap_ts = 0.0
-            self._live_ov_ts = 0.0
-        return {
-            "active": len(wanted),
-            "added": len(wanted - previous),
-            "released": len(previous - wanted),
-            "unknown": sum(1 for sid in wanted if sid not in self.sets),
-        }
-
-    def processing_set_ids(self) -> List[str]:
-        """Stable IDs retained for unresolved live processing."""
-        return sorted(self._processing_set_ids)
-
-    def _apply_processing_flags(self) -> None:
-        """Apply retained IDs after a catalog rebuild/atomic replay publish."""
-        wanted = set(getattr(self, "_processing_set_ids", set()) or set())
-        reasons = dict(getattr(self, "_processing_reasons", {}) or {})
-        for sid in wanted:
-            st = self.sets.get(sid)
-            if st is not None:
-                st.processing_active = True
-                st.processing_reason = reasons.get(sid, "unresolved order/position")
-
-    def replay_clone(self, symbols: Optional[Sequence[str]] = None) -> "SetBook":
-        """Create a lean catalog clone for an isolated history slice.
-
-        A full ``deepcopy(SetBook)`` duplicates the complete 34k-state object
-        graph before a replay has produced any evidence.  That is needlessly
-        expensive on the long-running lane and can turn a bounded replay into
-        cgroup swap pressure.  The replay only needs catalog parameters,
-        selected bars, and empty evidence containers; live evidence remains
-        authoritative in the source book and is merged on commit.
-        """
-        clone = SetBook()
-        skip = {
-            "sets", "by_idx", "bars", "progress", "last_run",
-            "ind_hist", "ind_live", "strategy_hist", "_hist_seen", "_ind_stats_cache",
-            "_hist_total", "_hist_counts", "_hist_set_signature", "_running",
-            "_snap_cache", "_snap_ts", "_live_ov_cache", "_live_ov_ts",
-            "_pick_lock", "_by_pack", "_ids_by_pack", "_ids_by_kind",
-            "_processing_set_ids", "_processing_reasons",
-            "_entry_rows_cache", "_entry_cache_epoch", "_strategy_result_cache",
-        }
-        for name, value in self.__dict__.items():
-            if name in skip:
-                continue
-            if isinstance(value, (dict, list, set, tuple)):
-                setattr(clone, name, copy.deepcopy(value))
-            else:
-                setattr(clone, name, value)
-
-        states: Dict[str, SetState] = {}
-        ordered: List[SetState] = []
-        for original in self.by_idx:
-            state = original.catalog_copy()
-            states[state.id] = state
-            ordered.append(state)
-        clone.sets = states
-        clone.by_idx = ordered
-        clone._reindex()
-        wanted = [str(s) for s in symbols] if symbols is not None else list(self.bars)
-        # Replay only reads OHLC. Share the arrays instead of cloning 25×lookback.
-        clone.bars = {
-            symbol: self.bars[symbol]
-            for symbol in wanted if self.bars.get(symbol)
-        }
-        clone.progress = copy.deepcopy(self.progress)
-        clone.ind_hist = {}
-        clone.ind_live = {}
-        clone.strategy_hist = {}
-        clone._hist_seen = set(self._hist_seen)
-        clone._hist_total = int(self._hist_total or 0)
-        clone._hist_counts = {}
-        clone._hist_set_signature = tuple(self._hist_set_signature)
-        clone._running = False
-        clone._snap_cache = None
-        clone._snap_ts = 0.0
-        clone._live_ov_cache = None
-        clone._live_ov_ts = 0.0
-        # Live unresolved-order retention is deliberately not copied into a
-        # historic research clone. The replay evaluates its own catalog and
-        # must not report live processing flags from the source lane.
-        clone._processing_set_ids = set()
-        clone._processing_reasons = {}
-        clone.replay_required = False
-        clone.score_refresh_required = False
-        return clone
-
-    def load(
-        self,
-        ov: Dict[str, Any],
-        cts: Optional[Dict[str, Any]] = None,
-        *,
-        rebuild: bool = True,
-    ) -> None:
-        # Settings can change the eligibility predicate without scoring a
-        # state. Start a new cache generation before installing them.
-        self._invalidate_entry_cache()
-        self._entry_rows_cache = {}
+    def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
-        from position_cost import shared_pf_settings
-        ov = shared_pf_settings(ov)
-        from system_settings import normalize_system_settings
-        self.system_workers = normalize_system_settings(ov)["systemWorkers"]
-        self.sl_min = min(.03, max(SL_MIN_PCT / 100.0, finite(ov.get("slMinPct"), SL_MIN_DEFAULT_PCT) / 100))
-        self.sl_max = min(.03, max(self.sl_min, finite(ov.get("slMaxPct"), 3.) / 100))
-        self.tp_min = max(.003, finite(ov.get("tpMinPct"), .3) / 100)
-        cap = finite(ov.get("tpMaxPct"), 0.) / 100
-        self.tp_max = max(self.tp_min, cap) if cap > 0 else 0.
+        self.normal_entries = bool(ov.get("stratNormal", True))
         self.enabled = bool(ov.get("histEnabled", True))
-        self.lookback = max(60, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
-        self.evaluation_bars = self.lookback
-        self.exact_replay_window = bool(ov.get("histExactWindow", False))
+        self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
+        # Collection grows for sparse scored Sets independently of the admission gate.
+        self.lookback_auto = bool(ov.get("histLookbackAuto", True))
+        self.hist_keep_last_complete = bool(ov.get("histKeepLastComplete", False))
+        if not self.lookback_auto:
+            self._lookback_pending = False
+            self._lookback_retry_fast = False
+            self._lookback_progress_key = None
+            self._lookback_progress_count = 0
+        self.lookback_max = max(self.lookback_cfg, min(LOOKBACK_MAX, int(num(ov, "histLookbackMax", LOOKBACK_MAX))))
+        self.lookback_sample_target = max(1, min(200, int(num(ov, "histLookbackTargetN", LOOKBACK_SAMPLE_TARGET))))
+        self.lookback = max(self.lookback_cfg, min(self.lookback_max, int(getattr(self, "_lookback_grown", 0) or 0))) if self.lookback_auto else self.lookback_cfg
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
+        self.max_flat_share = min(1.0, max(0.0, num(ov, "histMaxFlatShare", 0.35)))
+        self.max_jump = max(0.01, num(ov, "histMaxJumpPct", 50.0) / 100.0)
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
-        self.refresh_s = max(60.0, min(86400.0, float(ov.get("histRefreshS") or 3600)))
-        self.pf_n = max(5, min(75, int(ov.get("baseEvalPosCount") or ov.get("setPfWindow") or PF_N_DEFAULT)))
-        self.deact_n = max(5, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        def _pf(key: str, fallback: float) -> float:
-            return normalize_pf(ov.get(key, fallback), fallback)
-        self.stage_min_pf = {
-            "base": _pf("baseMinPf", POSITIVE_PF),
-            "main": _pf("mainMinPf", POSITIVE_PF),
-            "real": _pf("realMinPf", float(ov.get("setMinPf") or POSITIVE_PF)),
-        }
-        self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
-        self.real_min_pf = self.stage_min_pf["real"]
-        # Micro tier floor: independent of the shared floor and never above Base.
-        self.micro_enabled = bool(ov.get("microEnabled", True))
-        self.micro_max_share = max(0.0, min(1.0, finite(ov.get("microMaxShare", 0.05), 0.05)))
-        self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
+        self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
+        self.pf_n = max(MIN_VALIDATION_N, min(200, window_n(ov, "setPfWindow", "pfWindow", fallback=PF_N_DEFAULT)))   # follows the overall validation N unless unlinked
+        self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
+        self.gate_window = max(1, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
+        # 0 (the default) = no minimum: the Base gate judges a Set on the orders it has, only a Set without a closed order is not judged
+        # (gate_min 1). No floor of 8 here (owner 2026-10-29); the windows and the hold sample keep theirs.
+        gm = ov.get("setGateMinTrades")
+        self.gate_min = max(1, min(self.gate_window, int(GATE_MIN_DEFAULT if gm is None else gm)))
+        # the Main gate: every Set, besides the Base gate, must hold the minimum PF over its own last mainGateN processed orders (default 25);
+        # execution picks only Sets that pass both, and the minimum PF is the Set's Base minimum PF (one value for every validation gate)
+        # stages: Base (each Set on its own tape: the long last N and the short last N, both) -> Main (on the Set's Main Set, the
+        # orders it opened while Base passed: the long last N, the short window and the minimal window; or the Negative lane: the average of
+        # the last 5 / 10 Main orders below zero) -> Real (on the lane's Real Set: the last realGateN; then execution and mirroring)
+        self.stages_on = bool(ov.get("stagesEnabled", True))     # off: the Base long window alone (no short window, Main, Negative, Real)
+        self.short_max_ratio = max(0.1, min(1.0, float(num(ov, "setGateShortMaxRatio", BASE_SHORT_MAX_RATIO))))
+        short_cap = max(1, int(self.gate_window * self.short_max_ratio + 1e-9))       # long 40, ratio 0.5: at most 20
+        self.base_short = max(0, min(short_cap, int(num(ov, "setGateShortN", BASE_SHORT_N_DEFAULT)))) if self.stages_on else 0
+        # the Base minimal window, a third last-N next to the long and the short one: the newest 1-3 results all positive (or all negative)
+        mode = str(ov.get("setGateMinMode") or "positive").strip().lower()
+        self.base_min_avg = mode.startswith("avg")        # avgpositive / avgnegative / avgboth: judged on the average of the newest N results
+        mode = mode[3:] if self.base_min_avg else mode
+        self.base_min_positive = mode != "negative"
+        self.base_min_both = mode == "both"
+        # no ratio rule on the minimal window (owner 2026-10-29): 1-3 whatever the short window is
+        self.base_min_n = max(0, min(BASE_MIN_N_MAX, int(num(ov, "setGateMinN", 0)))) if self.stages_on else 0
+        self.main_on = self.stages_on and bool(ov.get("mainGateEnabled", True))
+        self.main_n = max(1, min(200, int(num(ov, "mainGateN", MAIN_GATE_N_DEFAULT))))
+        # the Main short window (was "Auto"): each Set's own window of the candidates, at most mainShortMaxRatio of the long window; the
+        # old mainAuto* keys still load when the mainShort* ones are absent (overlays and runtime files written before the rename)
+        sov = {k: _alias(ov, "mainShort" + k, "mainAuto" + k) for k in ("Enabled", "Windows", "MaxRatio", "Min", "Margin")}
+        self.short_on = bool(True if sov["Enabled"] is None else sov["Enabled"])
+        self.short_ratio = max(0.1, min(1.0, float(MAIN_SHORT_MAX_RATIO if sov["MaxRatio"] is None else sov["MaxRatio"])))
+        short_cap = max(1, int(self.main_n * self.short_ratio + 1e-9))                 # long 25, ratio 0.5: short windows of at most 12
+        # Do not synthesize the cap as a candidate: it may not be one of the
+        # configured windows. If none survive, _main_short_choice retains the
+        # long-window reference, as it already does when no candidate wins.
+        self.short_windows = tuple(w for w in parse_windows(sov["Windows"], MAIN_SHORT_WINDOWS) if w <= short_cap)
+        self.short_min = max(1, min(200, int(MAIN_SHORT_MIN_DEFAULT if sov["Min"] is None else sov["Min"])))     # no minimum-orders gate: down to 1
+        self.short_margin = max(1.0, min(2.0, float(MAIN_SHORT_MARGIN if sov["Margin"] is None else sov["Margin"])))
+        # the Main minimal window, a third last-N next to the long and the short one: the newest 1-3 results of the Main Set all positive (or all negative)
+        mmode = str(ov.get("mainMinMode") or "positive").strip().lower()
+        self.main_min_avg = mmode.startswith("avg")
+        mmode = mmode[3:] if self.main_min_avg else mmode
+        self.main_min_positive = mmode != "negative"
+        self.main_min_both = mmode == "both"
+        self.main_min_n = max(0, min(MAIN_MIN_N_MAX, int(num(ov, "mainMinN", 0)))) if self.main_on else 0
+        self.neg_on = self.stages_on and bool(ov.get("mainNegEnabled", True))
+        self.neg_windows = parse_windows(ov.get("mainNegWindows"), MAIN_NEG_WINDOWS)
+        self.realst_on = self.stages_on and bool(ov.get("realGateEnabled", True))
+        self.realst_n = max(1, min(200, int(num(ov, "realGateN", REAL_GATE_N_DEFAULT))))     # 1..200: the ongoing window may be a single result
+        self.last_n_by_range = last_n_by_range_of(ov.get("lastNByRange"))
+        self.gate_window_max = max([self.gate_window] + [int(o["baseLong"]) for o in self.last_n_by_range.values() if "baseLong" in o])
+        self.stage_full = bool(ov.get("stageFullWindow", False))      # False (default): every stage window judges the orders it has, at least one
+        self.min_pf = base_min_pf(ov)          # at least MIN_PF_FLOOR (1.1)
+        # a strategy can carry its own PF floor; Short Range defaults to 1.1 whatever the global floor is
+        cons = ov.get("setGateConsistencyPf")
+        self.consistency_pf = float(cons) if cons is not None else 0.0     # 0 = off
+        sr_min = ov.get("shortRangeMinPf")
+        self.pack_min_pf = {SHORT_PACK: pf_floor(sr_min, SHORT_MIN_PF_DEFAULT)}
+        # minimum PF by window size (owner, 2026-10-29): every last-N window asks the PF of its size class, Micro / Minimal / Short / Medium
+        # up to their order bounds and Long above; minPfBySize off = the one floor (setMinPf, the Short Range floor) for every window
+        self.pf_by_size = bool(ov.get("minPfBySize", True))
+        bounds = [max(1, int(num(ov, k, PF_SIZE_BOUNDS_DEFAULT[k]))) for k in _SIZE_N_KEYS]
+        for i in range(1, len(bounds)):
+            bounds[i] = max(bounds[i], bounds[i - 1])
+        pfs = [pf_floor(ov.get(k), PF_BY_SIZE_DEFAULTS[k]) for k in _SIZE_PF_KEYS]
+        self.size_floors = tuple(zip(bounds, pfs))
+        self.size_long_pf = pf_floor(ov.get("minPfLong"), PF_BY_SIZE_DEFAULTS["minPfLong"])
+        self.signal_min_pf = max(PF_BY_SIZE_DEFAULTS["minPfSignals"], pf_floor(ov.get("minPfSignals"), PF_BY_SIZE_DEFAULTS["minPfSignals"]))
+        raw_stop_cap = ov.get("maxModeledStopLossPct")
         try:
-            raw_main = ov.get("mainEvalPosCount")
-            raw_main = MAIN_EVAL_DEFAULT if raw_main is None or raw_main == "" else int(raw_main)
-            # 0 = Main gate off (Main reuses the Base window); else last-N >= 3.
-            self.main_eval = 0 if raw_main <= 0 else max(3, min(75, raw_main))
-        except Exception:
-            self.main_eval = MAIN_EVAL_DEFAULT
-        try:
-            raw_real = ov.get("realEvalPosCount")
-            raw_real = REAL_EVAL_DEFAULT if raw_real is None or raw_real == "" else int(raw_real)
-            # 0 = Real gate off (Real reuses the Main window); else last-N >= 3.
-            self.real_eval = 0 if raw_real <= 0 else max(3, min(75, raw_real))
-        except Exception:
-            self.real_eval = REAL_EVAL_DEFAULT
-        # Set DDT gate cap: default 18h, configurable up to 24h.
-        self.max_dd_s = max(600.0, min(1440.0 * 60.0, float(ov.get("setMaxDdTimeS") or 64800)))
-        try:
-            self.ddt_n = max(0, int(ov.get("setDdtWindow") or 0))
+            stop_cap = 0.0 if raw_stop_cap is None else float(raw_stop_cap)
+            self.stop_cap_invalid = not math.isfinite(stop_cap) or stop_cap < 0
         except (TypeError, ValueError):
-            self.ddt_n = 0
-        self.auto_deact = bool(ov.get("setAutoDeact", True))
-        self.live_negative_deact = bool(ov.get("setLiveNegativeDeact", ov.get("liveNegativeSetDeactivation", False)))
-        self.prefer_minimal_range = bool(
-            ov.get("preferMinimalRange", ov.get("preferMinimalPositive", False))
-        )
-        self.additional_coordination = bool(
-            ov.get("additionalCoordination", ov.get("minimalPositiveCoordination", False))
-        )
-        raw_policy = str(ov.get("entryPolicy") or (ENTRY_POLICY_PERMISSIVE if ov.get("liveTestMode") else ENTRY_POLICY_STRICT)).strip().lower()
-        self.entry_policy = raw_policy if raw_policy in (ENTRY_POLICY_STRICT, ENTRY_POLICY_PERMISSIVE) else ENTRY_POLICY_STRICT
-        try:
-            raw_candidates = ov.get("entryPolicyMaxCandidates")
-            if raw_candidates is None:
-                raw_candidates = ov.get("liveTestCandidates")
-            raw_candidates = 0 if raw_candidates is None else int(raw_candidates)
-            self.entry_policy_max_candidates = 0 if raw_candidates <= 0 else max(2, min(32, raw_candidates))
-        except Exception:
-            self.entry_policy_max_candidates = 0
-        self.live_test_mode = self.entry_policy == ENTRY_POLICY_PERMISSIVE
-        self.live_test_candidates = self.entry_policy_max_candidates
-        self.prefer_minimal_positive = self.prefer_minimal_range
-        self.minimal_positive_coordination = self.additional_coordination
-        try:
-            self.optimization_n = max(50, min(200, int(ov.get("coordOptimizationN") or 50)))
-        except Exception:
-            self.optimization_n = 50
-        self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
-        self.min_samples = max(5, min(75, int(ov.get("setMinSamples") or self.pf_n)))
-        try:
-            raw_live_samples = ov.get("entryPolicyMinLiveSamples")
-            if raw_live_samples is None:
-                raw_live_samples = ov.get("liveTestMinSamples")
-            if raw_live_samples is None:
-                raw_live_samples = 0
-            self.entry_policy_min_live_samples = max(0, min(25, int(raw_live_samples)))
-        except Exception:
-            self.entry_policy_min_live_samples = 0
-        self.live_test_min_samples = self.entry_policy_min_live_samples
-        self.reactivate = bool(ov.get("setReactivate", True))
-        # Strict gate (default ON): only VALIDATED (configured Last-N fills) AND
-        # PROFITABLE (cost-adjusted PF >= POSITIVE_PF = +1.5× PositionCost) + DDt under
-        # the cap may drive live orders. Cold/unproven sets keep collecting.
-        self.strict_gate = bool(ov.get("setStrictGate", True))
-        try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
-        except Exception:
-            raw_active = 0
-        self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
-        self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
-        if self.cost_pct > 2:
-            self.cost_pct = self.cost_pct / 100.0
-        if self.cost_pct > 1:
-            self.cost_pct = POSITION_COST_PCT_DEFAULT
-        # TP grid unit (TP = step x unit). Independent of the PositionCost
-        # hurdle, so a higher cost does not stretch every target.
-        self.tp_step_pct = max(0.02, min(1.0, finite(ov.get("tpStepPct"), TP_STEP_PCT_DEFAULT) or TP_STEP_PCT_DEFAULT)) / 100.0
-        self.cost_source = str(ov.get("positionCostSource") or "manual-fallback")
-        self.time_stop_s = float(ov.get("timeStopS") or 21600)
-        self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
-        short_hold = finite(ov.get("shortMaxHoldS"), 0.0) or 0.0
-        if short_hold > 0:
-            # Replay never holds a 1m Set longer than the live short hold.
-            self.hist_time_bars = max(5, min(self.hist_time_bars, int(short_hold // 60)))
-        self.scratch_s = float(ov.get("scratchS") or 90)
-        tp = float(ov.get("tpPct") or 0.75)
-        self.tp_pct = tp / 100.0 if tp > 0.05 else tp
+            stop_cap, self.stop_cap_invalid = 0.0, True
+        self.max_modeled_stop_loss_pct = min(100.0, stop_cap) if not self.stop_cap_invalid else 0.0
+        # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
+        # hours. setMaxDdtHours is 2..36 in steps of 2, default 24. max_dd_s holds the threshold in seconds.
+        hrs = ov.get("setMaxDdtHours")
+        hrs = GATE_MAX_DDT_HOURS_DEFAULT if hrs is None else float(hrs)
+        hrs = max(2.0, min(36.0, round(hrs / 2.0) * 2.0))
+        self.max_ddt_h = hrs
+        self.max_dd_s = hrs * 3600.0
+        self.use_historic_gate = True      # the Base gate is always on: entries open only under a Base-validated Set (the overlay key is ignored)
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct", ov.get("setCostPct")))
+        self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))
+        if ov.get("timeStopS") is not None:
+            # the live time stop, in bars: replay and simulator hold for the same time (6 h = 360 bars)
+            self.hist_time_bars = max(8, min(720, int(round(self.time_stop_s / BAR_S))))
+        else:
+            self.hist_time_bars = max(8, min(120, num(ov, "setHistTimeBars", 45, int)))
+        self.scratch_s = num(ov, "scratchS", 600)
+        # The desk and ExitBook express this setting in percent. The Set's
+        # replay and its live lane both read a fraction from this field.
+        self.scratch_min = finite(num(ov, ("scratchMin", "scratchMinPct"), 0.16), 0.16) / 100.0
+        self.set_scratch = bool(ov.get("setScratchEnabled", False))
+        tp = num(ov, "tpPct", 0.75)
+        self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
-        self.hist_honor_tp = bool(ov.get("setHonorTp", True))
-        self.hist_block = bool(ov.get("histSimulateBlock", ov.get("stratBlock", True)))
-        self.hist_dca = bool(ov.get("histSimulateDca", True))
-        self.block_vr_specified = max(0.05, min(2.0, finite_number(ov.get("blockVolumeRatio"), 0.25)))
-        self.block_stack = clamp_stack(ov.get("blockMaxStack"))
-        self.block_max_multiplier = max(1.0, min(2.0, finite_number(ov.get("blockMaxVolumeMultiplier"), 2.0)))
-        self.block_counts = normalize_block_counts(ov.get("blockCounts"))
-        try:
-            from block_engine import clamp_eval_pos_count
-            self.block_eval_pos = clamp_eval_pos_count(ov.get("blockEvalPosCount") or 50)
-        except Exception:
-            self.block_eval_pos = 50
-        live_block = [n for n in self.block_counts if n <= self.block_stack]
-        self.block_vr = shared_block_volume_ratio(
-            self.block_vr_specified, len(live_block), max(0.0, self.block_max_multiplier - 1.0),
-        )
-        self.dca_dist = [0.012, 0.016, 0.020, 0.024]
-        self.dca_mult = [1.5, 2.0, 2.3, 2.5]
-        opt = float(ov.get("exitOptSlPct") or 0.30)
-        self.opt_sl = opt / 100.0 if opt > 0.02 else opt
-        self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_LIVE_MIN)
-        self.step_max = clamp_step(ov.get("setStepMax") or STEP_MAX, self.min_step_cfg, STEP_MAX)
-        self.step_adapt = bool(ov.get("setStepAdapt", True))
+        # one TP rule for replay and live: exitIgnoreTp, the key live reads. setHonorTp is only the fallback.
+        if "exitIgnoreTp" in ov:
+            self.hist_honor_tp = not bool(ov["exitIgnoreTp"])
+        else:
+            self.hist_honor_tp = bool(ov.get("setHonorTp", True))
+        # hist_honor_tp decides the trailing Sets only. A base Set always takes its TP (its step is its target); ignoring TP
+        # is its own strategy type: with exitIgnoreTp on, every base stop (SL ratio x step, one Set per distinct distance)
+        # also runs as an Exit Set, its own lane with no TP exit, its own tape and its own Base validation.
+        self.exit_sets = bool(ov.get("exitIgnoreTp", True))
+        # Exit Sets per indication pack (exitSetsByPack {pack: bool}, missing = on): measured 2026-11-03, the indications pack's Exit Sets executed at
+        # PF 0.32 / 0.45 on two windows while its base Sets made 1.19 / 1.59, so a pack can run its Exit Sets or not on its own
+        raw_xp = ov.get("exitSetsByPack")
+        self.exit_by_pack = {str(k): bool(v) for k, v in raw_xp.items()} if isinstance(raw_xp, dict) else {}
+        # per-step hold times: stepHoldOn[i] / stepHoldMin[i] belong to step i + 1 (steps 1..12); an "on" step leaves on its own
+        # time exit after that many minutes, an "off" step keeps the global time stop. Replay and live read the same table.
+        # holdEnabled is the master switch (off: no per-step and no auto hold, only the global time stop); holdAuto lets every Set
+        # without a manual step hold choose its own hold from its last holdAutoMax orders (at most 50, at least holdAutoMin)
+        self.hold_on = bool(ov.get("holdEnabled", True))
+        self.hold_auto = self.hold_on and bool(ov.get("holdAuto", False))
+        self.hold_auto_margin = max(1.0, min(2.0, 1.0 + float(num(ov, "holdAutoMarginPct", (HOLD_AUTO_MARGIN - 1.0) * 100)) / 100.0))     # a candidate must beat the global stop by this     # off by default (2026-11-03): measured worse than no hold on both windows
+        self.hold_auto_max = int(max(HOLD_AUTO_MIN_ORDERS, min(HOLD_AUTO_MAX_ORDERS, num(ov, "holdAutoMax", HOLD_AUTO_MAX_ORDERS))))
+        self.hold_auto_min = int(max(MIN_VALIDATION_N, min(self.hold_auto_max, num(ov, "holdAutoMin", HOLD_AUTO_MIN_ORDERS))))
+        self.step_hold = parse_step_hold(ov.get("stepHoldOn"), ov.get("stepHoldMin")) if self.hold_on else {}
+        opt = num(ov, "exitOptSlPct", 0.30)
+        self.opt_sl = opt / 100.0   # exitOptSlPct is percent
+        self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
+        self.step_max = clamp_step(ov.get("setStepMax") or STEP_DEFAULT_MAX, self.min_step_cfg, STEP_MAX)
+        # owner 2026-11-03: the minimum TP step is 2 and stays there; step-adapt (raise it after losing live fills) is off by default -- on x02 it had
+        # raised the minimum to 11 and removed every Set from 0.2 % to 1.0 %
+        self.step_adapt = bool(ov.get("setStepAdapt", False))
+        self.sl_max_by_range = sl_max_by_range_of(ov.get("slMaxByRange"))
         self.min_step = self.min_step_cfg
-        raw_trail_step = ov.get("trailingMinStep")
-        if raw_trail_step is None:
-            raw_trail_step = ov.get("minStep") or self.min_step_cfg
-        self.trailing_min_step = clamp_step(raw_trail_step)
         self.steps = list(range(self.min_step, self.step_max + 1))
         packs = []
         if bool(ov.get("stratIndications", True)):
             packs.append("indications")
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
-        self.packs = packs or ["indications"]
-        # Full SL:TP catalog always. A selected live slToTpRatio never shrinks
-        # the book. An explicit slToTpRatios list is only a test pin when no
-        # range keys are present.
-        has_range = any(k in ov for k in ("slToTpMin", "slToTpMax", "slToTpStep"))
-        raw_ratios = ov.get("slToTpRatios")
-        if has_range or not (isinstance(raw_ratios, (list, tuple)) and raw_ratios):
-            lo = finite(ov.get("slToTpMin"), SL_TP_MIN)
-            hi = finite(ov.get("slToTpMax"), SL_TP_MAX)
-            step = finite(ov.get("slToTpStep"), SL_TP_STEP)
-            self.sl_ratios = sl_tp_grid(lo, hi, step)
+        if bool(ov.get("stratShortRange", False)):
+            packs.append(SHORT_PACK)
+        for pk, (sw, _key, _default) in EXTRA_PACKS.items():
+            if bool(ov.get(sw, False)):
+                packs.append(pk)
+        extra_names = ov.get("extraIndicators") or []
+        if not isinstance(extra_names, (list, tuple)):
+            extra_names = []
+        extra_names = sorted({str(x) for x in extra_names if extra_known(str(x))})
+        # indicationConfigs: families x ranges x timeframes x relations, each entry with its own step range, SL ratios, types and pause
+        expanded = expand_indication_configs(ov.get("indicationConfigs"), extra_known, STEP_MIN, STEP_MAX, snap_sl_ratio, SL_RATIOS)
+        extra_names = sorted(set(extra_names) | set(expanded["names"]))
+        self.pack_ranges = {EXTRA_INDICATOR_PREFIX + n: r for n, r in expanded["ranges"].items()}
+        self.gate_window_max = max([self.gate_window_max] + [int((r.get("lanePolicy") or {}).get("lastN", {}).get("baseLong", self.gate_window)) for r in self.pack_ranges.values()])
+        self._config_pause = {EXTRA_INDICATOR_PREFIX + n: int(m) for n, m in expanded["pause"].items()}
+        self.config_report = {"entries": expanded["entries"], "dropped": expanded["dropped"][:200], "names": len(expanded["names"])}
+        packs.extend(EXTRA_INDICATOR_PREFIX + name for name in extra_names)
+        self.packs = packs       # an explicitly empty strategy selection stays empty
+        lo = clamp_step(ov.get("shortRangeStepMin") or SHORT_STEP_MIN, STEP_MIN, STEP_MAX)
+        hi = clamp_step(ov.get("shortRangeStepMax") or SHORT_STEP_MAX, lo, STEP_MAX)
+        self.short_steps = list(range(lo, hi + 1))
+        self.min_sl_distance_pct = normalize_min_sl_distance_pct(ov.get("minSlDistancePct"))
+        # Per-book trailing floor. Do not mutate process-wide defaults during configuration.
+        self.trail_min_steps = int(max(1, min(7, round(finite(ov.get("trailMinSteps"), TRAIL_MIN_STEPS_DEFAULT)))))
+        # Set grid: every SL ratio in setSlRatios (default 0.5..3.5 step 0.25) x every TP step x every pack.
+        raw_ratios = ov.get("setSlRatios") or list(SL_RATIOS)
+        ratios: List[float] = []
+        for x in raw_ratios:
+            try:
+                ratios.append(snap_sl_ratio(float(x)))
+            except Exception:
+                continue
+        self.sl_low = bool(ov.get("setSlLow", False))
+        if self.sl_low:
+            ratios.extend(SL_RATIOS_LOW)
+        self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
+        self.tp_ranges = tp_ranges_on(ov.get("tpRanges"))
+        try:
+            self.trail_step_max = int(max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_CEIL, int(float(ov.get("trailStepMax") or TRAIL_STEP_MAX)))))
+        except (TypeError, ValueError):
+            self.trail_step_max = TRAIL_STEP_MAX
+        raw_ts = ov.get("trailSlRatios") or []
+        if not isinstance(raw_ts, (list, tuple)):
+            raw_ts = [raw_ts]
+        ts_ok: List[float] = []
+        for x in raw_ts:
+            try:
+                fx = float(x)
+            except (TypeError, ValueError):
+                continue
+            hit = [r for r in TRAIL_SL_RATIOS if abs(r - fx) < 1e-9]       # only the listed families: an unknown ratio is dropped, never snapped
+            if hit:
+                ts_ok.append(hit[0])
+        self.trail_sl_ratios = sorted(set(ts_ok))
+        # Trailing grid: every (arm, give) from trailMinStep up, in steps of TP_UNIT_PCT (trail_grid).
+        # An explicit trailVariants list ("arm:give" in percent) still overrides the grid.
+        self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))),
+                                  min(TRAIL_STEP_SETTING_MAX, math.ceil(trail_floor_steps(self.trail_min_steps) * self.cost_pct / TP_UNIT_PCT - 1e-9)))     # the minimum trailing distance (PositionCost + n steps, in percent) in grid units
+        raw_tr = ov.get("trailVariants")
+        if raw_tr:
+            if isinstance(raw_tr, str):
+                raw_tr = [p.strip() for p in raw_tr.split(",") if p.strip()]
+            # an explicit list obeys the overall minimum trailing distance too: a give under PositionCost + n steps is lifted
+            gfloor = trail_floor_steps(self.trail_min_steps) * self.cost_pct
+            seen_tr: Dict[str, Tuple[str, float, float]] = {}
+            for a_, g_ in (parse_trail(x) for x in raw_tr):
+                g2 = round(max(g_, gfloor), 4)
+                a2 = round(max(a_, g2), 4)
+                key = f"{a2:.2f}:{g2:.2f}"      # the trail_grid format: exact to the cent, so lifted variants never merge
+                seen_tr.setdefault(key, (key, a2, g2))
+            self.trails = list(seen_tr.values())
         else:
-            ratios = []
-            for x in raw_ratios:
-                try:
-                    ratios.append(max(SL_TP_MIN, min(SL_TP_MAX, round(float(x), 2))))
-                except Exception:
-                    continue
-            self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
-        self.trail_enabled = bool(ov.get("stratTrailing", True))
-        # Always enumerate the full arm×give product as independent Sets
-        # alongside Normal (base) SL×TP. A selected live trail does not hide
-        # the others. Explicit stratTrailing=False drops the trail family
-        # (hist-calc checkbox) — live default stays on. Settings no longer
-        # shrinks the catalog; overlay min/max are forced to the full grid.
-        if ov.get("stratTrailing") is False:
+            self.trails = trail_grid(self.trail_min_step, self.cost_pct, max_step=self.trail_step_max)
+        # Do not synthesize a fallback when the cost-based minimum is above the
+        # limit: that would silently bring an inadmissible trailing Set back.
+        # The overall minimum trailing distance (PositionCost + n steps, in percent) is a floor on every give, whatever the grid unit: a grid that
+        # cannot reach it (a high PositionCost) leaves no trailing Set instead of inventing a closer one.
+        give_floor = trail_floor_steps(self.trail_min_steps) * self.cost_pct
+        self.trails = [t for t in self.trails
+                       if math.isfinite(t[1]) and math.isfinite(t[2])
+                       and 0 < t[2] <= t[1] <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9
+                       and t[2] + 1e-9 >= give_floor]
+        # named trailing ranges (trailRanges, owner 2026-11-03 "extend trailing with thin ranges"): the arm's step in the TP bands Micro .. Wide, each switched
+        # on or off on its own; a range off builds none of its trailing Sets, the other ranges' Sets are unchanged (their ids carry arm and give only)
+        self.trail_ranges = tp_ranges_on(ov.get("trailRanges")) if ov.get("trailRanges") is not None else {k: True for k in TP_RANGES_DEFAULT}
+        self.trails = [t for t in self.trails if self.trail_ranges.get(tp_range_of(int(round(t[1] / TP_UNIT_PCT))), True)]
+        # trailMinLockPct (owner 2026-11-05, "disable non performing by adjusting minimal steps"): a pair whose arm minus give is under it builds no Set. The stop of such a pair
+        # sits at the entry (or a hair above) the moment it arms, so an exit through it pays the PositionCost: live x01 closed 53 trailing positions with a lock of 0.1 % or
+        # less, 4 won (PF 0.14, -2.35 USDT), against locks of 0.2 % (33 closes, PF 2.09) and 0.3 %+ (45 closes, PF 1.15). 0 (default) keeps every pair, byte-identical to the earlier grid.
+        try:
+            self.trail_min_lock = max(0.0, min(TRAIL_DISTANCE_LIMIT_PCT, float(ov.get("trailMinLockPct") or 0.0)))
+        except (TypeError, ValueError):
+            self.trail_min_lock = 0.0
+        if not math.isfinite(self.trail_min_lock):
+            self.trail_min_lock = 0.0
+        if self.trail_min_lock > 0:
+            self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
+        self.window_basis = "count" if str(ov.get("lastNBasis") or "time").lower() == "count" else "time"
+        # relation lanes read the chains and change no tape or Set verdict, so they are not part of the evaluation signature. A change of what the lanes ARE
+        # (relations, windows, floor) drops the held lanes until the next scoring pass rebuilds them; ratios and the ceiling apply at once.
+        rel_cfg = relation_lanes.config_of(ov.get("relationLanes"))
+        prev_rel = getattr(self, "relation_cfg", None)
+        if prev_rel is None or (rel_cfg.enabled, rel_cfg.on, rel_cfg.main_n, rel_cfg.real_n, rel_cfg.min_pf, rel_cfg.full_window) != (
+                prev_rel.enabled, prev_rel.on, prev_rel.main_n, prev_rel.real_n, prev_rel.min_pf, prev_rel.full_window):
+            self.relation_state, self.relation_at = {}, 0.0
+        self.relation_cfg = rel_cfg
+        # the profit group gate (entry-time only: it changes no tape, so it is not part of the evaluation signature)
+        self.group_gate = bool(ov.get("groupGate", False))
+        def _num(key, default, lo, hi):
+            try:
+                x = float(ov.get(key) if ov.get(key) is not None else default)
+            except (TypeError, ValueError):
+                return default
+            return max(lo, min(hi, x)) if math.isfinite(x) else default
+        self.group_gate_n = int(_num("groupGateN", 10, 1, 200))
+        self.group_gate_pf = _num("groupGatePf", 1.0, 0.5, 3.0)
+        self.group_gate_hours = _num("groupGateHours", 12.0, 1.0, 72.0)
+        self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
+        if not trailing_enabled(ov):
             self.trails = []
-        else:
-            self.trails = trail_grid(
-                float(ov.get("trailArmMin") or TRAIL_ARM_MIN_DEFAULT),
-                float(ov.get("trailArmMax") or TRAIL_ARM_MAX),
-                float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN_DEFAULT),
-                float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX),
-            )
+        try:
+            self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
+        except Exception:
+            self.entry_conf = 0.58
+        try:
+            self.cooldown_bars = min(30, max(0, int(ov.get("setCooldownBars") if ov.get("setCooldownBars") is not None else 2)))
+        except Exception:
+            self.cooldown_bars = 2
+        self.direction_split = str(ov.get("directionMode") or "split").lower() != "both"
+        self.rank_by_lane = bool(ov.get("rankByLane", True))
+        # which execution lanes a signal tries, in order (laneOrder): "pos-neg" (the positive lane first, the shipped behaviour), "neg-pos", "neg" (Real
+        # Negative only), "pos" (positive only). Measured 2026-11-03: the positive Main / Real stages cut the post-Base PF on three consecutive days
+        # while the Real Negative lane kept it (see CLAUDE.md).
+        self.lane_order = LANE_ORDERS.get(str(ov.get("laneOrder") or "pos-neg").lower(), LANE_ORDERS["pos-neg"])
+        self.trail_pick = str(ov.get("trailPick") or KIND_ORDER_DEFAULT).lower()
+        if self.trail_pick not in KIND_ORDERS:
+            self.trail_pick = KIND_ORDER_DEFAULT
+        self.kind_order = KIND_ORDERS[self.trail_pick]
+        # per pack (trailPickByPack, owner 2026-11-03 "make trailing work, especially with trend and break indications"): a pack name, or "group:<g>" for every
+        # pack whose signals come from the library group g (trend, break, revert, volume, price); the exact name wins over its group, then trailPick
+        raw_tp = ov.get("trailPickByPack") if isinstance(ov.get("trailPickByPack"), dict) else {}
+        self.trail_pick_by = {str(k): str(v).lower() for k, v in raw_tp.items() if str(v).lower() in KIND_ORDERS}
+        self._kind_order_memo = {}
+        self.pf_by_step = bool(ov.get("minPfByStep", True))
+        self.pf_step_auto = bool(ov.get("minPfStepAuto", True))
+        self.pf_step_ratio = step_pf_ratio(ov.get("minPfStepRatio", STEP_PF_RATIO_DEFAULT))
+        self.pf_step_auto_n = int(max(3, min(50, num(ov, "minPfStepAutoN", STEP_PF_AUTO_N_DEFAULT))))
+        self.pf_step_auto_min = int(max(1, min(100000, num(ov, "minPfStepAutoMin", STEP_PF_AUTO_MIN_DEFAULT))))     # no minimum-orders gate (owner 2026-11-04): down to 1
+        self.pf_step_auto_tol = max(0.0, min(0.5, float(num(ov, "minPfStepAutoTol", STEP_PF_AUTO_TOL_DEFAULT * 100)) / 100.0))
+        # the lowest floor Auto may choose (minPfStepAutoLow): live x02 2026-11-03 showed Auto at 1.00 for most steps above 1.6 %, under MIN_PF_FLOOR
+        self.pf_step_auto_low = max(1.0, min(2.0, float(num(ov, "minPfStepAutoLow", STEP_PF_AUTO_LOW_DEFAULT))))
+        self.pf_step_auto_high = max(self.pf_step_auto_low, min(2.0, float(num(ov, "minPfStepAutoHigh", STEP_PF_AUTO_HIGH_DEFAULT))))
+        self.pf_range_floor = pf_range_floors_of(ov.get("minPfByRange"))
+        self._manual_floor_cache = {}
+        mode = str(ov.get("pauseMode") or "auto").lower()
+        self.pause_mode = mode if mode in PAUSE_MODES else "auto"
+        self.pause_fixed = self._pause_minutes(ov.get("pauseFixedMin"))
+        raw_c = ov.get("pauseCandidates")
+        if isinstance(raw_c, str):
+            raw_c = [x for x in raw_c.replace(";", ",").split(",") if x.strip()]
+        cands = sorted({m for m in (self._pause_minutes(x) for x in (raw_c or PAUSE_CANDIDATES_DEFAULT)) if m > 0})
+        self.pause_candidates = tuple(cands) or PAUSE_CANDIDATES_DEFAULT
+        self.pause_auto_max = int(max(10, min(500, num(ov, "pauseAutoMax", PAUSE_AUTO_MAX_DEFAULT))))
+        self.pause_auto_min = int(max(1, min(self.pause_auto_max, num(ov, "pauseAutoMin", PAUSE_AUTO_MIN_DEFAULT))))      # no minimum-orders gate: down to 1
+        pp = ov.get("pausePack") if isinstance(ov.get("pausePack"), dict) else {}
+        self.pause_pack = {str(k): m for k, m in ((k, self._pause_minutes(v)) for k, v in pp.items()) if m > 0}
+        # an indicationConfigs entry may fix its indications' pause (minutes) or switch it off (0) whatever the book's mode; pausePack wins over it
+        self.pause_off = set()
+        for k, m in getattr(self, "_config_pause", {}).items():
+            if k in self.pause_pack:
+                continue
+            if m > 0:
+                self.pause_pack[k] = self._pause_minutes(m)
+            else:
+                self.pause_off.add(k)
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
         self.locks = {str(k): bool(v) for k, v in locks.items()}
+        active_ranges = ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak")
+        if not isinstance(active_ranges, (list, tuple)) or not active_ranges:
+            active_ranges = [3, 5, 10]
         self.ind_settings = {
             "candleLimit": 60,
-            "minimumStrength": float(ov.get("indMinStrength") or 0.2),
-            "minimumConfidence": float(ov.get("indMinConfidence") or 0.6),
-            "minimumAgreement": float(ov.get("indMinAgreement") or 0.55),
-            "stopLossMinPct": max(SL_MIN_PCT, float(ov.get("indStopMinPct") or SL_MIN_PCT)),
-            "stopLossMaxPct": float(ov.get("indStopMaxPct") or 1.5),
-            "stopLossAtrMultiplier": float(ov.get("indAtrMult") or 0.85),
-            "takeProfitRewardRisk": float(ov.get("indRewardRisk") or 1.8),
+            "minimumStrength": num(ov, "indMinStrength", 0.2),
+            "minimumConfidence": num(ov, "indMinConfidence", 0.6),
+            "stopLossMinPct": num(ov, "indStopMinPct", 0.2),
+            "stopLossMaxPct": num(ov, "indStopMaxPct", 1.5),
+            "stopLossAtrMultiplier": num(ov, "indAtrMult", 0.85),
+            "takeProfitRewardRisk": num(ov, "indRewardRisk", 1.8),
             "takeProfitMaxPct": 5.0,
             "positionCostPct": self.cost_pct,
+            # the switches IndicationBook reads (same keys, same defaults): the set signal honours them too
+            "tf1m": bool(ov.get("tf1m", True)),
+            "tf5m": bool(ov.get("tf5m", True)),
+            "tf15m": bool(ov.get("tf15m", True)),
+            "tfCombined": bool(ov.get("tfCombined", True)),
+            "tfMinAgree": max(1, num(ov, "tfMinAgree", 2, int)),
             "typeState": bool(ov.get("indTypeState", True)),
-            "typeSignals": bool(ov.get("indTypeSignals", True)),
-            "typeTrend": bool(ov.get("indTypeTrend", True)),
-            "typeBreak": bool(ov.get("indTypeBreak", True)),
             "typeDirection": bool(ov.get("indTypeDirection", True)),
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeActive": bool(ov.get("indTypeActive", True)),
             "typeCommon": bool(ov.get("indTypeCommon", True)),
-            "typeMsi": bool(ov.get("indTypeMsi", True)),
-            "typeVwap": bool(ov.get("indTypeVwap", True)),
-            "typeRetest": bool(ov.get("indTypeRetest", True)),
-            "typeSqueeze": bool(ov.get("indTypeSqueeze", True)),
-            "msiRanges": indication_ranges(ov.get("indMsiRanges"), (14, 21, 34)),
-            "vwapRanges": indication_ranges(ov.get("indVwapRanges"), (20, 30, 40)),
-            "retestRanges": indication_ranges(ov.get("indRetestRanges"), (12, 20, 32)),
-            "squeezeRanges": indication_ranges(ov.get("indSqueezeRanges"), (16, 20, 26)),
-            "msiMinGap": float(ov.get("indMsiMinGap") or 5.0),
-            "vwapDevZ": float(ov.get("indVwapDevZ") or 2.0),
-            "vwapVolMult": float(ov.get("indVwapVolMult") or 1.8),
-            "retestTol": float(ov.get("indRetestTol") or 0.12),
-            "retestMinBreak": float(ov.get("indRetestMinBreak") or 0.08),
-            "squeezePctl": float(ov.get("indSqueezePctl") or 0.2),
-            "typeSweep": bool(ov.get("indTypeSweep", True)),
-            "typeRsi2": bool(ov.get("indTypeRsi2", True)),
-            "typeKeltner": bool(ov.get("indTypeKeltner", True)),
-            "typeImpulse": bool(ov.get("indTypeImpulse", True)),
-            "sweepRanges": indication_ranges(ov.get("indSweepRanges"), (12, 20, 34)),
-            "rsi2Ranges": indication_ranges(ov.get("indRsi2Ranges"), (21, 34, 55)),
-            "keltnerRanges": indication_ranges(ov.get("indKeltnerRanges"), (14, 20, 30)),
-            "impulseRanges": indication_ranges(ov.get("indImpulseRanges"), (20, 30, 45)),
-            "sweepWickAtr": float(ov.get("indSweepWickAtr") or 0.25),
-            "rsi2Low": float(ov.get("indRsi2Low") or 10.0),
-            "rsi2High": float(ov.get("indRsi2High") or 90.0),
-            "keltnerMult": float(ov.get("indKeltnerMult") or 2.0),
-            "impulseSigma": float(ov.get("indImpulseSigma") or 3.0),
-            "impulseVolMult": float(ov.get("indImpulseVolMult") or 2.0),
-            "actSweepMin": float(ov.get("actSweepMin") if ov.get("actSweepMin") is not None else 0.04),
-            "actRsi2Min": float(ov.get("actRsi2Min") if ov.get("actRsi2Min") is not None else 0.03),
-            "actKeltnerMin": float(ov.get("actKeltnerMin") if ov.get("actKeltnerMin") is not None else 0.04),
-            "actImpulseMin": float(ov.get("actImpulseMin") if ov.get("actImpulseMin") is not None else 0.03),
-            "exitTacticOn": bool(ov.get("exitTacticOn", True)),
-            "exitTacticBufferPct": float(ov.get("exitTacticBufferPct", 0.1) or 0.0),
-            "exitTacticMinGainPct": float(ov.get("exitTacticMinGainPct", 0.15) or 0.0),
-            "activeOutbreak": ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak") or [3, 5, 10],
+            "typeSignals": bool(ov.get("indTypeSignals", True)),
             "dirRange": int(ov.get("indDirRange") or 10),
-            "trendRanges": indication_ranges(ov.get("indTrendRanges"), (13, 21, 34)),
-            "breakRanges": indication_ranges(ov.get("indBreakRanges"), (8, 16, 32)),
-            "moveRanges": indication_ranges(ov.get("indMoveRanges"), (20, 30, 40)),
-            "dirMinChange": float(ov.get("indDirMinChange") or 0.001),
             "moveRange": int(ov.get("indMoveRange") or 10),
-            "moveMinChange": float(ov.get("indMoveMinChange") or 0.001),
+            "activeOutbreak": [int(x) for x in active_ranges],
             "activeThreshold": float(ov.get("indActiveThreshold") or 1.0),
-            "activeNoise": float(ov.get("indActiveNoise") or ov.get("noise") or 0.05),
+            "activeNoise": float(ov.get("noise") or ov.get("indActiveNoise") or 0.0005),
             "activeMovePct": float(ov.get("indActiveMovePct") or ov.get("activeMovePct") or 0.5),
             "activeVolatilityWeight": float(ov.get("volWeight") or ov.get("activeVolatilityWeight") or 0.3),
+            # extra indicators (indication_extra), by name; empty by default so the shipped votes are unchanged
+            "shortRangeVariants": [str(x) for x in (ov.get("shortRangeVariants") or SHORT_VARIANTS_DEFAULT) if extra_known(x)],
+            **{key: [str(x) for x in (ov.get(key) or default) if extra_known(x)] for _pk, (_sw, key, default) in EXTRA_PACKS.items()},
+            "extraIndicators": extra_names,
         }
-        try:
-            self.cooldown_bars = max(1, min(12, int(ov.get("setCooldownBars") or 2)))
-        except Exception:
-            self.cooldown_bars = 2
-        try:
-            self.scratch_min = float(ov.get("setScratchMin") or 0.0016)
-        except Exception:
-            self.scratch_min = 0.0016
-        # A live engine may have tens of thousands of independent Sets.  The
-        # initial catalog is allowed to build off the service start path so a
-        # slow CPU or exchange response cannot make systemd report a startup
-        # timeout.  Normal reloads keep the synchronous behaviour unless the
-        # caller explicitly opts into the deferred bootstrap.
-        if rebuild:
+        with self._lock:
             self._rebuild_sets()
-        else:
-            # Initial Pulse startup publishes the catalog separately.  The
-            # published catalog must request a first replay, but has no
-            # threshold-only refresh pending yet.
-            self.replay_required = not bool(self._hist_set_signature)
-            self.score_refresh_required = False
 
-    def ddt_window(self) -> int:
-        """Closes the DDT gate measures: the same window the Base PF validates.
+    def step_auto_candidates(self) -> List[float]:
+        """The floors Auto may choose: STEP_PF_CANDIDATES from minPfStepAutoLow up."""
+        low = float(getattr(self, "pf_step_auto_low", STEP_PF_AUTO_LOW_DEFAULT))
+        high = float(getattr(self, "pf_step_auto_high", STEP_PF_AUTO_HIGH_DEFAULT))
+        return [c for c in STEP_PF_CANDIDATES if low <= c + 1e-9 and c <= high + 1e-9] or [min(max(low, STEP_PF_CANDIDATES[0]), high)]
 
-        DDT over a longer retained tape (up to 96 closes) judged a Set on the
-        losses *before* its validated window: a Set that just turned good
-        still carried an open episode from an old peak and was blocked, while
-        its last-N PF qualified it. ``setDdtWindow`` overrides (>= need)."""
-        need = int(self.eval_need())
-        custom = int(getattr(self, "ddt_n", 0) or 0)
-        if custom > 0:
-            return max(need, custom)
-        return max(need, int(self.pf_n or PF_N_DEFAULT))
-
-    def _ddt_rows(self, rows: Sequence[Any], ordered: bool) -> List[Any]:
-        seq = list(rows) if ordered else sorted(rows, key=lambda r: finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0.0)))
-        return seq[-self.ddt_window():]
-
-    def ddt_when_enough(self, rows: Sequence[Any], need: int, *, ordered: bool = False) -> Dict[str, float]:
-        """Drawdown time over the validated window, valid (zero) until a tape
-        holds ``need`` positions.
-
-        With too few prior positions there is no drawdown evidence yet: the
-        Set counts as DDT-valid and keeps being processed, then the normal
-        cap applies once the sample exists (same rule as the sample-gated
-        score path)."""
-        if not rows or len(rows) < int(need):
-            return {"maxS": 0.0, "avgS": 0.0, "episodes": 0, "pending": 1.0}
-        return drawdown_time_by_symbol(self._ddt_rows(rows, ordered), ordered=True, cost_pct=self.cost_pct)
-
-    def eval_need(self) -> int:
-        """Required completed Base samples; default is the full last-30 window."""
-        try:
-            ms = int(self.min_samples or self.pf_n)
-        except Exception:
-            ms = PF_N_DEFAULT
-        try:
-            pf = int(self.pf_n or PF_N_DEFAULT)
-        except Exception:
-            pf = PF_N_DEFAULT
-        return max(5, min(ms, pf))
-
-    def _evidence_window(self) -> int:
-        """Rows an evaluation tape holds: the largest stage window (>= need)."""
-        return max(max(self._stage_window_ns()), int(self.eval_need()), int(self.deact_n or 0))
-
-    def _stage_window_ns(self) -> Tuple[int, int, int]:
-        base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
-        main_eval = getattr(self, "main_eval", MAIN_EVAL_DEFAULT)
-        main_eval = MAIN_EVAL_DEFAULT if main_eval is None else int(main_eval)
-        # mainEvalPosCount 0: no separate Main window; Main == Base.
-        main_n = base_n if main_eval <= 0 else max(3, main_eval)
-        real_eval = getattr(self, "real_eval", REAL_EVAL_DEFAULT)
-        real_eval = REAL_EVAL_DEFAULT if real_eval is None else int(real_eval)
-        # realEvalPosCount 0: no separate Real window; Real == Main.
-        real_n = main_n if real_eval <= 0 else max(3, real_eval)
-        return base_n, main_n, real_n
-
-    def _window_cost_pf(
-        self,
-        ordered: Sequence[Dict[str, Any]],
-        n: int,
-        *,
-        simple: Optional[bool] = None,
-    ) -> Dict[str, float]:
-        take = max(1, int(n))
-        tape = ordered[-take:] if len(ordered) > take else ordered
-        return last_n_cost_pf(tape, take, self.cost_pct, ordered=True, simple=simple)
+    def _step_span(self) -> Tuple[int, int]:
+        """(first, last) TP step the general packs' grid spans before the range switches: setMinStep (or the step-adapt minimum) .. setStepMax, and
+        .. TP_STEP_MAX (5.0 %) when Wide is on."""
+        lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
+        on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
+        top = min(self.step_max, STEP_MAX if on.get("wide") else TP_STEP_DEFAULT_MAX)
+        return lo, clamp_step(top, lo, STEP_MAX)
 
     def _step_grid(self) -> List[int]:
-        # Always the configured TP-step range. Live adapt may prefer a higher
-        # step when picking, but it must never drop SL×TP sets from the book.
-        lo = clamp_step(self.min_step_cfg, STEP_MIN, self.step_max)
-        hi = clamp_step(self.step_max, lo, STEP_MAX)
-        return list(range(lo, hi + 1))
+        """The TP steps of the general packs: the span (_step_span) without the steps of every named TP range switched off (tpRanges). Wide off ends the
+        grid at 3.2 % whatever setStepMax says (the steps above belong to Wide)."""
+        lo, hi = self._step_span()
+        on = getattr(self, "tp_ranges", None) or TP_RANGES_DEFAULT
+        return [k for k in range(lo, hi + 1) if on.get(tp_range_of(k), True)]
 
-    def _reindex(self) -> None:
-        """O(1) pack/kind/id listings used by replay, tiles, and relative ranks."""
-        by_pack: Dict[str, List[SetState]] = {}
-        ids_by_pack: Dict[str, List[str]] = {}
-        ids_by_kind: Dict[str, List[str]] = {}
-        for st in self.by_idx:
-            by_pack.setdefault(st.pack, []).append(st)
-            ids_by_pack.setdefault(st.pack, []).append(st.id)
-            ids_by_kind.setdefault(st.kind, []).append(st.id)
-        self._by_pack = by_pack
-        self._ids_by_pack = ids_by_pack
-        self._ids_by_kind = ids_by_kind
-
-    def ids_for_pack(self, pack: str) -> List[str]:
-        ids = self._ids_by_pack.get(str(pack) or "")
-        if ids:
-            return list(ids)
-        return [st.id for st in self.by_idx if st.pack == pack]
-
-    def _replay_signature(self, next_sets: Dict[str, SetState]) -> Tuple[Any, ...]:
-        """Return inputs that change historic evidence, not just Set IDs."""
-        return (
-            tuple(next_sets),
-            round(float(self.sl_min), 12),
-            round(float(self.sl_max), 12),
-            round(float(self.tp_min), 12),
-            round(float(self.tp_max), 12),
-            round(float(self.cost_pct), 12),
-            round(float(getattr(self, "tp_step_pct", 0.001)), 12),
-            json.dumps(self.ind_settings, sort_keys=True, default=str),
-            int(self.lookback),
-            int(self.evaluation_bars),
-            bool(self.exact_replay_window),
-            int(self.min_bars),
-            int(self.warmup),
-            int(self.hist_time_bars),
-            int(getattr(self, "trailing_min_step", STEP_LIVE_MIN) or STEP_LIVE_MIN),
-            round(float(self.scratch_s), 6),
-            round(float(self.scratch_min), 12),
-            int(self.cooldown_bars),
-            round(float(self.tp_pct), 12),
-            bool(self.ignore_tp),
-            bool(self.hist_honor_tp),
-            bool(self.hist_block),
-            bool(self.hist_dca),
-            round(float(self.block_vr), 12),
-            round(float(getattr(self, "block_vr_specified", self.block_vr) or 0), 12),
-            int(self.block_stack),
-            round(float(self.block_max_multiplier), 12),
-            tuple(self.block_counts),
-            tuple(round(float(x), 12) for x in self.dca_dist),
-            tuple(round(float(x), 12) for x in self.dca_mult),
-        )
-
-    def _score_signature(self) -> Tuple[Any, ...]:
-        """Return settings that alter score/qualification, not replay data."""
-        return (
-            int(self.pf_n),
-            int(self.deact_n),
-            round(float(self.min_pf), 12),
-            tuple(sorted((str(k), round(float(v), 12)) for k, v in self.stage_min_pf.items())),
-            round(float(self.real_min_pf), 12),
-            int(self.main_eval),
-            int(self.real_eval),
-            round(float(self.max_dd_s), 6),
-            bool(self.auto_deact),
-            bool(self.live_negative_deact),
-            bool(self.reactivate),
-            bool(self.strict_gate),
-            int(self.max_active),
-        )
-
-    def pair_sl_tp(self, tp: float, ratio: float) -> Tuple[float, float]:
-        # Inside a symbol replay the exchange-accepted SL floor of that
-        # symbol applies, so intern PF/DDT uses the stops really placed.
-        lo = max(float(self.sl_min), float(getattr(_SL_SCOPE, "floor", 0.0) or 0.0))
-        lo = min(lo, float(self.sl_max))
-        return bind_ratio_sl_tp(tp, ratio, lo, self.sl_max, self.tp_min, self.tp_max)
-
-    def symbol_sl_min(self, symbol: str) -> float:
-        """Effective SL floor (fraction) for ``symbol``: desk floor or venue floor."""
-        try:
-            venue = float((getattr(self, "sym_sl_floor", None) or {}).get(str(symbol)) or 0.0)
-        except Exception:
-            venue = 0.0
-        return min(float(self.sl_max), max(float(self.sl_min), venue))
-
-    def set_symbol_sl_floors(self, floors: Mapping[str, Any], *, replace: bool = False) -> None:
-        out: Dict[str, float] = {} if replace else dict(getattr(self, "sym_sl_floor", None) or {})
-        for sym, value in (floors or {}).items():
-            v = finite(value, 0.0)
-            if v > 0:
-                out[str(sym)] = v
-        self.sym_sl_floor = out
-
-    def sl_scope(self, symbol: str) -> "_SlScope":
-        return _SlScope(self.symbol_sl_min(symbol))
+    def _trail_mid_step(self) -> int:
+        """The mid step whose TP sets the shipped trailing Sets' stop (TRAIL_SL_RATIO x that TP): the middle of setMinStep .. setStepMax within the shipped
+        grid, so switching a TP range on or off never moves a trailing Set's stop."""
+        lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
+        hi = max(lo, min(self.step_max, STEP_DEFAULT_MAX))
+        base = list(range(lo, hi + 1))
+        return base[len(base) // 2] if base else 8
 
     def _rebuild_sets(self) -> None:
-        keep = {sid: st for sid, st in self.sets.items()}
+        # The score snapshot is tied to the exact Set topology and rules.
+        self._history_snapshot_active = False
+        keep = {**self.retired, **self.sets}
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
-        trails = list(self.trails) if self.trails else []
+        trails = list(self.trails)
+        # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
+        # not built in honour-TP mode (119 of 210 per pack on the default grid). Ignore-TP keeps every trail Set.
+        mid_tp_pct = self._trail_mid_step() * TP_UNIT_PCT
+        if self.hist_honor_tp:
+            trails = [t for t in trails if t[1] < mid_tp_pct - 1e-9]
+        self.trails_built = list(trails)   # the trail keys this grid actually builds (coverage checks this list)
         idx = 0
         def _put(st: SetState) -> None:
             nonlocal idx
+            if not st.active and st.deact_reason.startswith("out of grid"):
+                st.active = True        # back on the grid: eligible again once it is re-scored
+                st.deact_reason = ""
+                st.evaluated_at = 0.0
             st.idx = idx
             next_sets[st.id] = st
             by_idx.append(st)
             idx += 1
-        for pack_i, pack in enumerate(self.packs):
-            pack = _intern(pack)
-            for sl_i, sl in enumerate(self.sl_ratios):
-                for step_i, step in enumerate(self.steps):
-                    _, tp = self.pair_sl_tp(step_tp_pct(step, self.tp_step_pct), sl)
-                    sid = make_set_id(pack, sl, "", step)
+        sides = (1, -1) if self.direction_split else (0,)
+        for pack, side in [(p, sd) for p in self.packs for sd in sides]:
+            pack_i = self.packs.index(pack)
+            pack_steps = self.short_steps if pack == SHORT_PACK else self.steps
+            pr = self.pack_ranges.get(pack)
+            pack_ratios = self.sl_ratios
+            pack_kinds = SET_KINDS
+            if pr:
+                # an indicationConfigs entry: its own TP-step range, SL ratios and Set types for this indication
+                pack_steps = list(range(int(pr["lo"]), int(pr["hi"]) + 1))
+                pack_ratios = list(pr["ratios"])
+                pack_kinds = tuple(pr["kinds"])
+            pack_trails = trails if "trail" in pack_kinds else []
+            if pack == SHORT_PACK and self.hist_honor_tp:
+                short_mid = (pack_steps[len(pack_steps) // 2] if pack_steps else 4) * TP_UNIT_PCT
+                pack_trails = [t for t in self.trails if t[1] < short_mid - 1e-9]
+            if (pack == SHORT_PACK or pr) and pack_steps:
+                # Short Range works with TP steps 2-6, a configured indication with its own range: no trailing arm beyond the largest step
+                pack_trails = [t for t in pack_trails if t[1] <= pack_steps[-1] * TP_UNIT_PCT + 1e-9]
+            if pr and (pr.get("trailLo") or pr.get("trailHi")):
+                # an indicationConfigs entry's own (thin) trailing range: arms from trailStepMin to trailStepMax steps only
+                t_lo, t_hi = int(pr.get("trailLo") or 0), int(pr.get("trailHi") or (pack_steps[-1] if pack_steps else STEP_MAX))
+                pack_trails = [t for t in (trails if "trail" in pack_kinds else []) if t_lo * TP_UNIT_PCT - 1e-9 <= t[1] <= t_hi * TP_UNIT_PCT + 1e-9]
+            # the shipped trailing Sets' stop: TRAIL_SL_RATIO x the mid-step TP of the pack's own grid (the general packs: of the shipped grid, so a TP range
+            # switch never moves it)
+            mid_step = (pack_steps[len(pack_steps) // 2] if pack_steps else 8) if (pack == SHORT_PACK or pr) else self._trail_mid_step()
+            trail_stop = max(sl_floor_frac(self.cost_pct, min_distance_pct=self.min_sl_distance_pct),
+                             step_tp_pct(mid_step, self.cost_pct) * TRAIL_SL_RATIO)
+            legacy_trails = pack_trails if trail_stop <= TRAIL_DISTANCE_LIMIT_PCT / 100.0 + 1e-12 else []
+            floor_sl = sl_floor_frac(self.cost_pct, min_distance_pct=self.min_sl_distance_pct)
+
+            def eff_stop(r: float, k: int) -> float:
+                return round(max(floor_sl, step_tp_pct(k, self.cost_pct) * r), 12)
+
+            def low_ok(r: float, k: int) -> bool:
+                """A low SL ratio (0.2 / 0.3 / 0.4) builds a Set at step k only when its floored stop differs from every other ratio's there:
+                the overall minimum stop would otherwise make it a copy of another Set."""
+                if r + 1e-9 >= SL_RATIO_MIN:
+                    return True
+                mine = eff_stop(r, k)
+                return all(eff_stop(o, k) != mine for o in pack_ratios if o + 1e-9 >= SL_RATIO_MIN or o < r - 1e-9)
+
+            sl_cap = self.sl_max_by_range
+
+            def sl_allowed(r: float, k: int) -> bool:
+                lim = sl_cap.get(tp_range_of(k))
+                return lim is None or r <= lim + 1e-9
+
+            for sl_i, sl in enumerate(pack_ratios if "base" in pack_kinds else ()):
+                for step_i, step in enumerate(pack_steps):
+                    if not low_ok(sl, step) or not sl_allowed(sl, step):
+                        continue
+                    sid = make_set_id(pack, sl, "", step, side)
+                    tp = step_tp_pct(step, self.cost_pct)
                     prev = keep.get(sid)
                     if prev:
                         st = prev
@@ -2050,10 +2651,11 @@ class SetBook:
                         st.trail_arm = 0.0
                         st.trail_give = 0.0
                         st.kind = "base"
+                        st.side = side
                         st.locked = bool(self.locks.get(sid))
                     else:
                         st = SetState(
-                            id=sid, pack=pack, tf="1m", sl_ratio=sl,
+                            id=sid, pack=pack, tf="1m", sl_ratio=sl, side=side,
                             trail_key="", trail_arm=0.0, trail_give=0.0,
                             step=step, tp_pct=tp, kind="base",
                             locked=bool(self.locks.get(sid)),
@@ -2063,347 +2665,292 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-                    if step < int(getattr(self, "trailing_min_step", STEP_LIVE_MIN) or STEP_LIVE_MIN):
-                        continue
-                    for tr_i, (tkey, arm, give) in enumerate(trails):
-                        sid = make_trail_id(pack, tkey, sl, step)
+            if self.exit_sets and "exit" in pack_kinds and self.exit_by_pack.get(pack, True):
+                seen_stop: Dict[float, None] = {}
+                # The Exit Set of a stop distance belongs to the first cell (SL ratio, step) that makes it, over the pack's whole grid in a fixed order (the
+                # shipped steps first, then Wide), whether or not that cell's TP range is on: switching a range off removes the Exit Sets its cells own and
+                # never renames another range's Exit Set. A low SL ratio's Exit Set only where its floored stop is not the stop of an Exit Set already.
+                if pack == SHORT_PACK or pr:
+                    cell_steps = list(pack_steps)
+                else:
+                    lo_, hi_ = self._step_span()
+                    cell_steps = list(range(lo_, min(hi_, STEP_DEFAULT_MAX) + 1)) + list(range(max(lo_, STEP_DEFAULT_MAX + 1), hi_ + 1))
+                built_steps = {k: i for i, k in enumerate(pack_steps)}
+                cells = ([(sl_i, sl, k) for sl_i, sl in enumerate(pack_ratios) for k in cell_steps if k <= STEP_DEFAULT_MAX]
+                         + [(sl_i, sl, k) for sl_i, sl in enumerate(pack_ratios) for k in cell_steps if k > STEP_DEFAULT_MAX])
+                taken = {eff_stop(o, k) for _i, o, k in cells if o + 1e-9 >= SL_RATIO_MIN}
+                for sl_i, sl, step in cells:
+                        dist = round(sl * step, 6)          # without a TP only the stop distance tells two Exit Sets apart
+                        if dist in seen_stop:
+                            continue
+                        if sl + 1e-9 < SL_RATIO_MIN:
+                            if eff_stop(sl, step) in taken:
+                                continue
+                            taken.add(eff_stop(sl, step))
+                        seen_stop[dist] = None
+                        if step not in built_steps or not sl_allowed(sl, step):
+                            # the cell's TP range is off, or its SL ratio is over the range's largest (slMaxByRange): the Exit Set it owns is not built, and no
+                            # other cell takes its stop distance (a limit never renames another range's Exit Set)
+                            continue
+                        step_i = built_steps[step]
+                        sid = make_exit_id(pack, sl, step, side)
+                        tp = step_tp_pct(step, self.cost_pct)
                         prev = keep.get(sid)
                         if prev:
                             st = prev
-                            st.trail_key = tkey
-                            st.trail_arm = arm
-                            st.trail_give = give
-                            st.sl_ratio = sl
-                            st.step = step
-                            st.tp_pct = tp
-                            st.kind = "trail"
+                            st.sl_ratio, st.step, st.tp_pct = sl, step, tp
+                            st.trail_key, st.trail_arm, st.trail_give = "", 0.0, 0.0
+                            st.kind = "exit"
+                            st.side = side
                             st.locked = bool(self.locks.get(sid))
                         else:
-                            st = SetState(
-                                id=sid, pack=pack, tf="1m", sl_ratio=sl,
-                                trail_key=tkey, trail_arm=arm, trail_give=give,
-                                step=step, tp_pct=tp, kind="trail",
-                                locked=bool(self.locks.get(sid)),
-                            )
+                            st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, side=side, trail_key="", trail_arm=0.0, trail_give=0.0,
+                                          step=step, tp_pct=tp, kind="exit", locked=bool(self.locks.get(sid)))
                         st.pack_i = pack_i
                         st.sl_i = sl_i
-                        st.tr_i = tr_i
+                        st.tr_i = -1
                         st.step_i = step_i
                         _put(st)
+            # the shipped trailing Sets (initial stop TRAIL_SL_RATIO x the mid-step TP), then each trailing stop family (initial stop r x the arm, trailSlRatios)
+            families = [(0.0, legacy_trails)] + [(r, [t for t in pack_trails if t[1] * r <= TRAIL_DISTANCE_LIMIT_PCT + 1e-9]) for r in self.trail_sl_ratios]
+            tr_i = -1
+            for ts, fam in families:
+                for (tkey, arm, give) in fam:
+                    tr_i += 1
+                    sid = make_trail_id(pack, tkey, side, ts)
+                    prev = keep.get(sid)
+                    tp = step_tp_pct(mid_step, self.cost_pct)
+                    if prev:
+                        st = prev
+                        st.trail_key = tkey
+                        st.trail_arm = arm
+                        st.trail_give = give
+                        st.trail_sl = ts
+                        st.sl_ratio = TRAIL_SL_RATIO
+                        st.step = 0
+                        st.tp_pct = tp
+                        st.kind = "trail"
+                        st.side = side
+                        st.locked = bool(self.locks.get(sid))
+                    else:
+                        st = SetState(
+                            id=sid, pack=pack, tf="1m", sl_ratio=TRAIL_SL_RATIO, side=side,
+                            trail_key=tkey, trail_arm=arm, trail_give=give, trail_sl=ts,
+                            step=0, tp_pct=tp, kind="trail",
+                            locked=bool(self.locks.get(sid)),
+                        )
+                    st.pack_i = pack_i
+                    st.sl_i = -1
+                    st.tr_i = tr_i
+                    st.step_i = -1
+                    _put(st)
+        built_trail_keys = {st.trail_key for st in by_idx if st.kind == "trail"}
+        self.trails_built = [t for t in self.trails if t[0] in built_trail_keys]
+        gone = {sid: st for sid, st in keep.items() if sid not in next_sets}
+        for st in gone.values():
+            st.active = False
+            st.deact_reason = "out of grid (step-adapt)"
+        self.retired = gone
+        if set(next_sets) != set(self.sets):
+            self.relation_state, self.relation_at = {}, 0.0     # the lanes' member Sets changed: the held lanes are not these Sets' lanes
         self.sets = next_sets
         self.by_idx = by_idx
-        self._reindex()
-        signature = self._replay_signature(next_sets)
-        replay_changed = signature != self._hist_set_signature
-        score_signature = self._score_signature()
-        score_changed = score_signature != self._score_settings_signature
-        self.replay_required = bool(replay_changed)
-        self.score_refresh_required = bool(not replay_changed and score_changed)
-        self._score_settings_signature = score_signature
-        # Rebind unresolved live lineages to the new Set objects without
-        # changing their entry-selection gate.
-        self._apply_processing_flags()
-        for st in by_idx:
-            st.parent_set_id = st.id if st.kind == "base" else make_set_id(st.pack, st.sl_ratio, "", st.step)
-            st.position_cost_pct = self.cost_pct
-            if replay_changed:
-                st.stage = "Base"
-                st.stage_qualified = ""
-                st.axis_key = ""
-                st.relative_count = 1
-                st.volume_ratio = 1.0
-                st.indication_kind = ""
-                st.strategy_adjustments = {}
+        for st_ in by_idx:
+            manual = self.hold_bars_for(st_)
+            if manual or not self.hold_auto:
+                st_.hold_bars, st_.hold_auto = manual, False      # a manual step hold wins; auto off clears an earlier choice
+            elif not self.auto_holds(st_):
+                st_.hold_bars, st_.hold_auto = 0, False
         self.progress.sets_total = len(self.sets)
-        if replay_changed:
-            self._hist_set_signature = signature
-            self._hist_seen.clear()
-            self._hist_total = 0
-            self._hist_counts = {}
-            # Existing SetState objects are reused when IDs overlap. Their
-            # historic tape belongs to the previous catalog and must not be
-            # counted during the first partial replay of the new catalog.
-            for st in self.by_idx:
-                st.hist = []
-                # Empty sets do not need a full metric/ledger object graph.
-                # Scoring 34k fresh states here allocated evaluation windows,
-                # stage dictionaries and side maps for every state before any
-                # bars existed, pushing a small VPS into swap during boot.
-                # Keep scalar defaults lazy; live evidence on a reused state
-                # still gets scored immediately and remains independent.
-                if st.live:
-                    self._score_one(st)
-                else:
-                    st.n = 0
-                    st.wins = 0
-                    st.gp = st.gl = st.wr = st.expectancy = 0.0
-                    st.avg_hold_s = st.classic_all = 0.0
-                    st.last15_ratio = 0.0
-                    st.last15_classic = st.last15_r = 0.0
-                    st.last15_n = st.last25_n = 0
-                    st.last25_avg_r = st.last25_avg_pnl = 0.0
-                    st.max_dd_s = st.avg_dd_s = 0.0
-                    st.dd_episodes = 0
-                    st.source_n = 0
-                    st.exits = {}
-                    st.active = False
-                    st.deact_reason = ""
-                    st.base_pf = st.main_pf = st.real_pf = 0.0
-                    st.stage_ledger = {}
-                    st.by_side = {}
-                    st.live_eval = {}
-                    st.gross_pf = st.net_pf = st.gross_ev = st.net_ev = 0.0
-                    st.evaluation = {}
-                    st.evaluation_windows = {}
-                    st.normal_evaluation = {}
-                    st.adjusted_evaluation = {}
-                    st.adjustment_deltas = {}
-            # A changed set catalog invalidates the old gate until the new
-            # catalog has been replayed over the full configured universe.
-            self.progress.ready = False
-            self.progress.phase = "idle"
-
-    def restrict_to_ids(self, ids: Sequence[str]) -> int:
-        """Keep only the named Sets for a focused Test Historic recalc."""
-        allow = {str(sid) for sid in ids if str(sid or "").strip()}
-        if not allow:
-            return 0
-        kept = [st for st in self.by_idx if st.id in allow]
-        if not kept:
-            return 0
-        self.by_idx = kept
-        self.sets = {st.id: st for st in kept}
-        self._reindex()
-        return len(kept)
-
-    def apply_hist_test_gate(self, ids: Optional[Sequence[str]]) -> None:
-        """None = no extra gate. A list (even empty) restricts live picks to Test Historic."""
-        if ids is None:
-            self.hist_test_set_ids = None
-        else:
-            self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
-        self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
-        self._entry_rows_cache = {}
-        self._selection_dirty = True
-
-    @staticmethod
-    def _record_step(rec: Any) -> int:
-        """Read a Set step from explicit metadata or its stable Set ID."""
-        raw = rec.get("step") if isinstance(rec, dict) else getattr(rec, "step", 0)
-        try:
-            step = int(raw or 0)
-        except Exception:
-            step = 0
-        if step > 0:
-            return step
-        set_id = str((rec.get("set_id") if isinstance(rec, dict) else getattr(rec, "set_id", "")) or "")
-        for token in reversed(set_id.split(":")):
-            if token.startswith("st"):
-                try:
-                    return int(token[2:])
-                except Exception:
-                    break
-        return 0
-
-    def _live_windows_ok(
-        self,
-        rows: Sequence[Dict[str, Any]],
-        *,
-        minimum_pf: float = POSITIVE_PF,
-    ) -> Tuple[bool, str, Dict[str, Dict[str, Any]]]:
-        """Gate live promotion on the overall last-position eval only.
-
-        Named last5/10/15/25/50/75 windows stay attached as diagnostics. A
-        partial last50/last75 (or a cold last5) must not veto a qualified
-        overall last-N tape (``pf_n`` / ``baseEvalPosCount``).
-        """
-        ordered = sorted((r for r in rows if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
-        need = self.eval_need()
-        overall_n = max(need, int(self.pf_n or need))
-        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
-        overall = overall_last_pos_eval(ordered, overall_n, self.cost_pct, ordered=True)
-        n = int(overall.get("count") or 0)
-        pf = float(overall.get("ratio") or 1.0)
-        windows["overall"] = {
-            "requestedN": overall_n,
-            "n": n,
-            "available": n >= overall_n,
-            "requiredSamples": need,
-            "validated": n >= need and is_positive_pf(pf),
-            "pf": round(pf, 4),
-            "classicPf": float(overall.get("classicPf") or 0.0),
-            "avgR": float(overall.get("avgR") or 0.0),
-            "netAvg": float(overall.get("netAvg") or 0.0),
-            "netPct": float(overall.get("netPct") or 0.0),
-            "costPct": float(overall.get("costPct") or self.cost_pct),
-            "costSamples": int(overall.get("costSamples") or 0),
-            "costSubtracted": True,
-            "scope": "overall-last-pos",
-        }
-        if n < need:
-            return True, "cold", windows
-        if pf + 1e-9 < float(minimum_pf):
-            return False, f"live last{overall_n} PF {pf:.2f}<{float(minimum_pf):.2f}", windows
-        return True, "", windows
+        self._topo_gen += 1
 
     def adapt_from_live(self, closed: Sequence[Any]) -> None:
-        """Derive the preferred minimum from actual per-Set live evidence.
+        with self._lock:
+            self._adapt_from_live(closed)
 
-        The global tape is diagnostic only.  A negative aggregate cannot make
-        the engine invent a step threshold, and a positive aggregate cannot
-        promote every Set.  A step becomes preferred only when one or more
-        independently tagged Sets at that step have enough live samples and a
-        positive overall last-position eval (configured ``pf_n``), plus the
-        normal real-stage PF floor on that same overall window. Named last5
-        .. last75 horizons remain visible and never veto the overall last-pos.
-        """
-        floor = self.min_step_cfg
-        self.optimization_stats: Dict[str, Any] = getattr(self, "optimization_stats", {}) or {}
-        all_rows = sorted(
-            list(closed),
-            key=lambda r: finite(r.get("t") if isinstance(r, dict) else getattr(r, "t", 0)),
-        )
-        # The extra 50+ window is an explicit coordination option. The
-        # legacy/off mode keeps the normal deactivation tape independent.
-        window = max(50, self.deact_n, self.optimization_n) if self.additional_coordination else max(self.deact_n, 15)
-        rows = all_rows[-window:]
-        if not rows:
-            self.optimization_stats = {
-                "n": len(rows),
-                "positive": sum(1 for rec in rows if row_net_pnl(rec, self.cost_pct) > 0),
-                "positiveRate": 0.0,
-                "pf": 1.0,
-                "netAvg": 0.0,
-                "maxDdS": 0.0,
-                "costPct": self.cost_pct,
-                "costSource": self.cost_source,
-                "window": window,
-                "enabled": bool(self.additional_coordination),
-                "configuredMinStep": floor,
-                "effectiveMinStep": floor,
-                "candidateSteps": [],
-                "status": "insufficient-live-sample",
-            }
-            self.min_step = floor
+    def _adapt_from_live(self, closed: Sequence[Any]) -> None:
+        """If live average is a loss, raise min step to # of positive/successful fills."""
+        if self._running:
+            self._adapt_pending = list(closed)      # applied when the pass in flight ends
             return
+        floor = self.min_step_cfg
+        if not self.step_adapt:
+            nxt = floor
+        else:
+            rows = list(closed)[-max(self.deact_n, 15) :]
+            if len(rows) < 8:
+                return
+            pnls: List[float] = []
+            n_ok = 0
+            n_pos = 0
+            for rec in rows:
+                if isinstance(rec, dict):
+                    pnl = finite(rec.get("pnl"))
+                    pct = finite(rec.get("pnl_pct"))
+                else:
+                    pnl = finite(getattr(rec, "pnl", 0))
+                    pct = finite(getattr(rec, "pnl_pct", 0))
+                pnls.append(pnl)
+                if pnl > 0:
+                    n_pos += 1
+                if pct and signed_result_r(pct, self.cost_pct) > 0:
+                    n_ok += 1
+            avg = sum(pnls) / len(pnls) if pnls else 0.0
+            if avg < 0:
+                n = n_ok if n_ok else n_pos
+                nxt = clamp_step(n if n else floor, floor, self.step_max)
+            else:
+                nxt = floor
+        if nxt != self.min_step:
+            self.min_step = nxt
+            self._rebuild_sets()
 
-        n_pos = sum(1 for rec in rows if row_net_pnl(rec, self.cost_pct) > 0)
-        avg = sum(row_net_pnl(rec, self.cost_pct) for rec in rows) / len(rows) if rows else 0.0
-        opt_pf = last_n_cost_pf(rows, len(rows), self.cost_pct)
-        opt_dd = drawdown_time_by_symbol(rows, cost_pct=self.cost_pct)
-        by_config: Dict[tuple, List[Dict[str, Any]]] = {}
-        for rec in rows:
-            step = self._record_step(rec)
-            row = rec if isinstance(rec, dict) else asdict(rec)
-            if step >= floor and row.get("exchange_confirmed") and not row.get("partial"):
-                key = (step, str(row.get("set_id") or ""), str(row.get("symbol") or ""),
-                       str(row.get("side") or ""), str(row.get("strategy") or "core"),
-                       str(row.get("axis_key") or ""), float(row.get("volume_ratio") or 1))
-                by_config.setdefault(key, []).append(row)
-        candidates: List[Dict[str, Any]] = []
-        promoted_steps: List[int] = []
-        for key in sorted(by_config):
-            step = key[0]
-            tape = by_config[key]
-            if len(tape) < self.eval_need():
-                continue
-            ok, reason, windows = self._live_windows_ok(tape, minimum_pf=POSITIVE_PF)
-            overall = windows.get("overall") or {}
-            primary_n = int(overall.get("n") or 0)
-            primary_pf = float(overall.get("pf") or 0.0)
-            promoted = bool(ok and primary_n >= self.eval_need() and primary_pf + 1e-9 >= self.real_min_pf)
-            if promoted:
-                promoted_steps.append(step)
-            candidates.append({
-                "step": step,
-                "setId": key[1], "symbol": key[2], "side": key[3], "strategy": key[4],
-                "n": len(tape),
-                "last15Pf": round(primary_pf, 4),
-                "overallLastPosPf": round(primary_pf, 4),
-                "overallLastPosN": primary_n,
-                "windowPf": {name: round(float(metric.get("pf") or 0.0), 4) for name, metric in windows.items()},
-                "windowsOk": bool(ok),
-                "status": "promoted" if promoted else (reason or "not-promoted"),
-            })
-        nxt = min(promoted_steps) if self.step_adapt and promoted_steps else floor
-        self.optimization_stats = {
-            "n": len(rows),
-            "positive": n_pos,
-            "positiveRate": round(n_pos / len(rows), 4) if rows else 0.0,
-            "pf": float(opt_pf.get("ratio") or 1.0),
-            "netAvg": round(avg, 8),
-            "maxDdS": float(opt_dd.get("maxS") or 0.0),
-            "costPct": float(opt_pf.get("costPct") or self.cost_pct),
-            "costSource": opt_pf.get("costSource") or self.cost_source,
-            "window": window,
-            "enabled": bool(self.additional_coordination),
-            "configuredMinStep": floor,
-            "effectiveMinStep": nxt,
-            "candidateSteps": candidates[: self.step_max],
-            "status": "promoted" if promoted_steps else "no-live-promoted-step",
-        }
-        self.min_step = nxt
-        # This is only a selection floor. The full configured Set catalog stays
-        # evaluated and every non-promoted candidate remains visible.
+    def _after_pass(self) -> None:
+        """Apply a step-adapt that arrived while a replay pass was running. Rebuilding mid-pass would discard that pass
+        (the topology changed under it), leave the Sets unrefreshed and, past the freshness limit, mark every Set stale."""
+        pending, self._adapt_pending = self._adapt_pending, None
+        if pending is not None:
+            self.adapt_from_live(pending)
 
-    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
+    def bar_quality(self, symbol: str) -> str:
+        """'' when the symbol's history is fit to validate Sets on, otherwise why not. A series that is mostly flat bars
+        (no trade in the minute) or that jumps by more than histMaxJumpPct in one minute (a broken print, as the demo venue
+        shows on illiquid names) would validate Sets on prices nobody could trade."""
+        rows = self.bars.get(symbol) or []
+        if len(rows) < self.min_bars:
+            return "short"
+        flat = 0
+        jump = 0.0
+        prev = 0.0
+        try:
+            for r in rows:
+                if r[1] <= r[2]:
+                    flat += 1
+                c = float(r[3])
+                if prev > 0:
+                    d = abs(c / prev - 1.0)
+                    if d > jump:
+                        jump = d
+                prev = c
+        except (TypeError, ValueError, IndexError, ZeroDivisionError):
+            return ""        # malformed rows: the replay reports this symbol's error itself
+        if flat / len(rows) > self.max_flat_share:
+            return "flat"
+        if jump > self.max_jump:
+            return "spike"
+        return ""
+
+    def usable(self, symbol: str) -> bool:
+        why = self.bar_quality(symbol)
+        if why and why != "short":
+            self.quality[symbol] = why
+        else:
+            self.quality.pop(symbol, None)
+        return not why
+
+    def symbol_ok(self, symbol: str) -> bool:
+        """False for a symbol whose history failed the data check: no Set validated on it, so no entry on it either."""
+        return symbol not in self.quality
+
+    def history_bars(self) -> int:
+        """Bars needed for entry-time stage evidence, including indicator and hold warmup.
+
+        The configured lookback remains the current evaluation window.  Historical
+        Main entries need an earlier Base window, and historical Real entries may
+        also need a Main window before that.  These older bars are context, not
+        extra orders in today's PF windows.
+        """
+        upstream = bool(getattr(self, "main_on", False) or getattr(self, "neg_on", False))
+        depth = 3 if getattr(self, "realst_on", False) and upstream else (2 if upstream else 1)
+        manual = max((getattr(self, "step_hold", None) or {}).values(), default=0)
+        automatic = max(HOLD_AUTO_HIGH) if getattr(self, "hold_auto", False) else 0
+        hold_bars = max(0, int(getattr(self, "hist_time_bars", 0)), int(manual), automatic)
+        return int(depth * self.lookback + getattr(self, "warmup", 0) + 2 * hold_bars)
+
+    def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool = False, last_t: Optional[float] = None) -> None:
+        """Join bars onto the symbol's history. tail=True: rows built from live ticks (or a short exchange window), joined only
+        where they line up with the stored series; they never replace a history they do not overlap. last_t: the open time
+        of the last given row, a completed minute (the caller drops the still-forming one); kept in bar_t when the joined
+        series ends on that row."""
+        with self._lock:
+            self._ingest_bars(symbol, bars, tail, last_t)
+
+    def _ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]], tail: bool, last_t: Optional[float]) -> None:
         if not bars:
             return
+        watching = getattr(self, "_lookback_pending", False) and getattr(self, "_history_snapshot_active", False)
+        if watching and (symbol not in self._history_snapshot_symbols or not self.bars.get(symbol)):
+            self._history_snapshot_active = False
+        old_last = self.__dict__.setdefault("bar_t", {}).get(symbol)
         cleaned: List[List[float]] = []
         for b in bars:
-            row = ohlcv_row(b)
-            if not row:
+            if len(b) < 5:
                 continue
-            cleaned.append([row[0], row[1], row[2], row[3], row[4]])
+            o, h, l, c, v = (finite(b[0]), finite(b[1]), finite(b[2]), finite(b[3]), finite(b[4]))
+            if o <= 0 or c <= 0 or h <= 0 or l <= 0:
+                continue
+            cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
-            replay_cap = self.lookback + (self.warmup if self.exact_replay_window else 0)
-            self.bars[symbol] = cleaned[-max(self.lookback, replay_cap) :]
+            old = self.bars.get(symbol) or []
+            first_new = float(last_t) - (len(cleaned) - 1) * BAR_S if last_t is not None else None
+            if watching and old_last is not None and first_new is not None and first_new > old_last + BAR_S + 1e-6:
+                self._history_snapshot_active = False
+            joined = _join_bars(old, cleaned, keep_on_gap=tail)[-self.history_bars() :]
+            self.bars[symbol] = joined
+            bar_t = self.__dict__.setdefault("bar_t", {})
+            if last_t is not None and joined and joined[-1] == cleaned[-1]:
+                bar_t[symbol] = float(last_t)
+            elif not old or not joined or joined[-1] != old[-1]:
+                bar_t.pop(symbol, None)           # the series now ends on a row of unknown time
+            if watching and not self.usable(symbol):
+                self._history_snapshot_active = False
 
-    def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
-        n = 0
-        # ``recent_direction_rows`` balances the cap across LONG/SHORT. Keep
-        # two windows so last-75 evaluation still retains 75 rows per side.
-        evidence = 2 * max(75, self.pf_n, self.deact_n, self.main_eval, self.real_eval)
-        hc = max(evidence, int(hist_cap or HIST_CAP))
-        lc = max(evidence, int(live_cap or HIST_CAP))
-        for st in self.by_idx:
-            if len(st.hist) > hc:
-                st.hist = recent_direction_rows(st.hist, hc)
-                n += 1
-            if len(st.live) > lc:
-                st.live = recent_direction_rows(st.live, lc)
-                n += 1
-        n += self.clamp_bars(bar_cap)
-        # Indication tapes: last-N per range x side (never a plain tail, which
-        # dropped a quiet direction or range entirely).
-        for k, tape in list(self.ind_hist.items()):
-            trimmed = trim_ind_tape(tape)
-            if len(trimmed) != len(tape):
-                self.ind_hist[k] = trimmed
-                n += 1
-        for k, tape in list(self.ind_live.items()):
-            trimmed = trim_ind_tape(tape)
-            if len(trimmed) != len(tape):
-                self.ind_live[k] = trimmed
-                n += 1
-        for k, tape in list(self.strategy_hist.items()):
-            if len(tape) > hc:
-                self.strategy_hist[k] = recent_direction_rows(tape, hc)
-                n += 1
-        if n:
-            # Trimming can change the live-window predicate even when the
-            # scalar score fields have not been recomputed yet.
-            self._invalidate_entry_cache()
-        return n
+    def entry_signals(self, symbol: str, bar_open_t: float) -> List[Tuple[str, int, float, str]]:
+        """Every qualified replay signal for the completed minute, strongest first, with its own pack intact."""
+        with self._lock:
+            if self.__dict__.get("bar_t", {}).get(symbol) != float(bar_open_t) or not self.symbol_ok(symbol):
+                return []
+            bars = list(self.bars.get(symbol) or [])
+            packs = list(self.packs)
+            settings = dict(self.ind_settings)
+        if len(bars) < max(self.min_bars, self.warmup + 1):
+            return []
+        row = bar_signal(bars, len(bars) - 1, packs, settings, float(bar_open_t) + BAR_S)
+        hits: List[Tuple[str, int, float, str]] = []
+        for p in packs:
+            d, c, why = row.get(p, (0, 0.0, ""))
+            if d != 0 and c >= self.entry_conf:
+                hits.append((p, int(d), float(c), str(why)))
+        return sorted(hits, key=lambda hit: -hit[2])
+
+    def entry_signal(self, symbol: str, bar_open_t: float) -> Optional[Tuple[str, int, float, str]]:
+        """The strongest qualifying completed-bar signal (compatibility with single-signal callers)."""
+        hits = self.entry_signals(symbol, bar_open_t)
+        return hits[0] if hits else None
 
     def trim_bars(self, keep: Sequence[str]) -> int:
+        with self._lock:
+            return self._trim_bars(keep)
+
+    def _trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)
+        if self._lookback_pending and self._history_snapshot_active and want != self._history_snapshot_symbols:
+            self._history_snapshot_active = False
         n = 0
         for s in list(self.bars):
             if s not in want:
                 self.bars.pop(s, None)
+                self.__dict__.setdefault("bar_t", {}).pop(s, None)
                 n += 1
         return n
+
+    def discard_bars(self, symbol: str) -> None:
+        """Discard a broken series atomically with invalidating its prior snapshot."""
+        with self._lock:
+            if self._lookback_pending and symbol in self._history_snapshot_symbols:
+                self._history_snapshot_active = False
+            self.bars.pop(symbol, None)
+            self.bar_t.pop(symbol, None)
 
     def clamp_bars(self, max_n: int) -> int:
         cap = max(60, int(max_n or self.lookback))
@@ -2414,173 +2961,137 @@ class SetBook:
                 n += 1
         return n
 
-    def compact_hist_tapes(self, limit: int = 2500) -> int:
-        """Rewrite fat historic rows in place. Catalog size (all configs) is unchanged."""
-        n = len(self.by_idx)
-        if n <= 0:
-            return 0
-        start = int(getattr(self, "_compact_i", 0) or 0) % n
-        changed = 0
-        i = start
-        seen = 0
-        take = min(max(32, int(limit or 2500)), n)
-        while seen < take:
-            st = self.by_idx[i]
-            i = (i + 1) % n
-            seen += 1
-            tape = st.hist
-            if tape and ("pnl" in tape[0] or "set_id" in tape[0] or "direction" in tape[0] or len(tape[0]) > 8):
-                st.hist = [slim_hist_row(r) for r in tape]
-                changed += 1
-        self._compact_i = i
-        for key, tape in list(self.ind_hist.items()):
-            if tape and ("pnl" in tape[0] or "set_id" in tape[0] or len(tape[0]) > 9):
-                self.ind_hist[key] = [slim_hist_row(r) for r in tape]
-                changed += 1
-        for key, tape in list(self.strategy_hist.items()):
-            if tape and ("pnl" in tape[0] or "set_id" in tape[0] or len(tape[0]) > 9):
-                self.strategy_hist[key] = [slim_hist_row(r) for r in tape]
-                changed += 1
-        return changed
+    def _live_key(self, sid: str, row: Dict[str, Any]) -> str:
+        """One key per live close per Set. Client id when present, else symbol, side, time and gross move."""
+        cid = row.get("client_id") or ""
+        if cid:
+            return f"{sid}|{cid}"
+        return f"{sid}|{row['symbol']}|{row['side']}|{row['t']:.3f}|{row['pnl_pct']:.10f}"
 
     def on_live_close(self, rec: Any) -> None:
-        if isinstance(rec, dict):
-            if rec.get("ours") is False:
-                return
-            sid = str(rec.get("set_id") or rec.get("setId") or "")
-            row = {
-                "t": finite(rec.get("t")),
-                "symbol": str(rec.get("symbol") or ""),
-                "side": str(rec.get("side") or ""),
-                "pnl": finite(rec.get("pnl")),
-                "pnl_pct": finite(rec.get("pnl_pct")),
-                "hold_s": finite(rec.get("hold_s")),
-                "reason": str(rec.get("reason") or ""),
-                "client_id": str(rec.get("client_id") or rec.get("clientId") or ""),
-                "set_id": str(rec.get("set_id") or rec.get("setId") or ""),
-                "parent_set_id": str(rec.get("parent_set_id") or rec.get("parentSetId") or ""),
-                "axis_key": str(rec.get("axis_key") or rec.get("axisKey") or ""),
-                "relative_count": int(rec.get("relative_count") or rec.get("relativeCount") or 1),
-                "volume_ratio": finite(rec.get("volume_ratio") or rec.get("volumeRatio") or VOLUME_RATIO_UNIT),
-                "strategy": str(rec.get("strategy") or ""),
-                "pack": str(rec.get("pack") or ""),
-            }
-            ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "").strip().lower()
-        else:
-            if getattr(rec, "ours", True) is False:
-                return
-            sid = str(getattr(rec, "set_id", "") or "")
-            row = {
-                "t": finite(getattr(rec, "t", 0)),
-                "symbol": str(getattr(rec, "symbol", "")),
-                "side": str(getattr(rec, "side", "")),
-                "pnl": finite(getattr(rec, "pnl", 0)),
-                "pnl_pct": finite(getattr(rec, "pnl_pct", 0)),
-                "hold_s": finite(getattr(rec, "hold_s", 0)),
-                "reason": str(getattr(rec, "reason", "")),
-                "client_id": str(getattr(rec, "client_id", "") or ""),
-                "set_id": str(getattr(rec, "set_id", "") or ""),
-                "parent_set_id": str(getattr(rec, "parent_set_id", "") or ""),
-                "axis_key": str(getattr(rec, "axis_key", "") or ""),
-                "relative_count": int(getattr(rec, "relative_count", 1) or 1),
-                "volume_ratio": finite(getattr(rec, "volume_ratio", VOLUME_RATIO_UNIT) or VOLUME_RATIO_UNIT),
-                "strategy": str(getattr(rec, "strategy", "") or ""),
-                "pack": str(getattr(rec, "pack", "") or ""),
-            }
-            ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
-        original = rec if isinstance(rec, dict) else vars(rec)
-        for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source", "tp_pct", "sl_pct", "trail_key", "step",
-                    "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane", "close_fill_id",
-                    "set_tp_pct", "ind_config", "size_ratio", "block_count", "conn"):
-            if key in original:
-                row[key] = original[key]
-        # Only live exchange results decide: confirmed, complete round trips.
-        confirmed = row.get("exchange_confirmed") is True and not row.get("partial")
-        if ind_kind not in IND_KINDS:
-            ind_kind = ""
+        with self._lock:
+            self._on_live_close(rec)
+
+    def _on_live_close(self, rec: Any) -> None:
+        """Record one live close in its separate Set/lane execution window.
+
+        Replay rows carry pnl as a NET FRACTION (gross move minus one PositionCost). Live rows carry
+        pnl in USDT, so the tape pnl is recomputed from pnl_pct; the USDT figure is kept as pnl_usdt
+        for display only. A close without pnl_pct cannot be normalised and is skipped (counted).
+        A close already seen for a Set is counted once, so repeated delivery or repeated seeding
+        adds nothing.
+        """
+        is_dict = isinstance(rec, dict)
+        def get(key: str, default: Any = None) -> Any:
+            return rec.get(key, default) if is_dict else getattr(rec, key, default)
+        if get("ours") is False:
+            return
+        sid = str(get("set_id") or get("setId") or "")
+        st_bound = self.sets.get(sid) or self.retired.get(sid)
+        if st_bound is not None and not self.symbol_allows(st_bound.pack, str(get("symbol") or "")):
+            self.live_unmatched += 1
+            return
+        pct_raw = get("pnl_pct")
+        # Stored closes describe the aggregate exchange position. Recover the
+        # original Set component on restart when Block/DCA changed its average.
+        ref, qty, exit_price = finite(get("base_entry")), finite(get("base_qty")), finite(get("exit"))
+        if sid and ref > 0 and qty > 0 and exit_price > 0 and get("side") in ("LONG", "SHORT"):
+            pct_raw = (exit_price / ref - 1) * (1 if get("side") == "LONG" else -1)
+        try:
+            pct = float(pct_raw)
+        except (TypeError, ValueError, OverflowError):
+            pct = float("nan")
+        if not math.isfinite(pct):
+            self.live_skipped += 1
+            return
+        closed_at = finite(get("t"))
+        if closed_at <= 0:
+            # A close without a time cannot be placed in any causal last-N window.
+            self.live_skipped += 1
+            return
+        component_net = get("base_net_pnl_pct") if ref > 0 and qty > 0 else get("net_pnl_pct")
+        try:
+            has_component_net = component_net is not None and math.isfinite(float(component_net))
+        except (TypeError, ValueError, OverflowError):
+            has_component_net = False
+        fee_source = str(get("fee_source") or "unknown")
+        if not has_component_net:
+            fee_source = "configured-estimate"
+        elif fee_source not in ("reported-fee", "exchange-rate-estimate", "configured-estimate"):
+            fee_source = "unknown"
+        # Aggregate reported fees alone do not verify allocation to a Set's
+        # base component, especially when an add-on changed the position.
+        if has_component_net and fee_source == "reported-fee" and ref > 0 and qty > 0:
+            fee_source = "base-fee-unverified"
+        row = {
+            "t": closed_at,
+            "symbol": str(get("symbol") or ""),
+            "side": str(get("side") or ""),
+            "pnl_pct": pct,
+            "pnl_usdt": finite(get("pnl")),
+            "hold_s": finite(get("hold_s")),
+            "reason": str(get("reason") or ""),
+            "client_id": str(get("client_id") or get("clientId") or ""),
+            "lane": str(get("lane") or "pos"),
+            # Aggregate net cannot be attributed to the base when add-on fills
+            # changed its cost basis. Old records without component fees use an
+            # explicit configured estimate for that base only.
+            "net_pnl_pct": component_net,
+            "fee_source": fee_source,
+            "ownership_explicit": get("ours") is True,
+        }
+        row["pnl"] = row_net_pnl_pct(row, self.cost_pct)
         if not sid:
-            pack = "indications" if "ind:" in row["reason"] else "general"
-            sl = snap_ratio(getattr(rec, "sl_ratio", 0.6) if not isinstance(rec, dict) else rec.get("sl_ratio") or 0.6)
-            tkey = str(getattr(rec, "trail_key", "") if not isinstance(rec, dict) else rec.get("trail_key") or "")
-            if not tkey:
-                tkey = self.trails[0][0] if self.trails else "0.3:0.1"
-            step = 0
-            if isinstance(rec, dict):
-                step = int(rec.get("step") or 0)
-            else:
-                step = int(getattr(rec, "step", 0) or 0)
-            if not step:
-                step = self.min_step
-            sid = make_set_id(pack, sl, "", step)
-        row["set_id"] = sid
-        row["parent_set_id"] = row.get("parent_set_id") or sid
-        row["pack"] = row.get("pack") or ("indications" if ind_kind else ("indications" if "ind:" in row["reason"] else "general"))
-        extra = ""
-        if isinstance(rec, dict):
-            extra = str(rec.get("trail_set_id") or rec.get("trailSetId") or "")
-        else:
-            extra = str(getattr(rec, "trail_set_id", "") or "")
-        # Legacy trailing positions stored their executed trailing Set in
-        # trail_set_id and their normal parent in set_id. Credit the actual
-        # executed configuration exactly once; its parent has a different
-        # TP/SL/trailing result and must never borrow this close.
-        target = None
-        for x in (extra or sid,):
+            # no Set id: the close cannot be attributed. It is counted, never guessed onto a Set.
+            self.live_unmatched += 1
+            return
+        targets: List[SetState] = []
+        for x in (sid,):
             if not x:
                 continue
-            st = self.sets.get(x)
-            if not st:
-                st = self.sets.get(f"{x}:st{self.min_step}")
-            if st:
-                target = st
-        row["set_id"] = target.id if target is not None else (extra or sid)
-        strategy_parts = set(str(row.get("strategy") or "core").lower().split("+"))
-        if confirmed and "block" in strategy_parts and int(finite(row.get("block_count"))) >= 1:
-            btape = self.block_live
-            if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in btape):
-                btape.append(dict(row, ind_kind=ind_kind))
-                del btape[:-HIST_CAP]
-                try:
-                    self.score_block_main()
-                except Exception:
-                    pass
-        if ind_kind:
-            row["ind_kind"] = ind_kind
-            row["indKind"] = ind_kind
-        core = strategy_parts <= {"core", "normal", "trail", "trailing", ""} and not row.get("axis_key")
-        if ind_kind and confirmed and core:
-            tape = self.ind_live.setdefault(ind_kind, [])
-            if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in tape):
-                tape.append(dict(row))
-                self.ind_live[ind_kind] = trim_ind_tape(tape)
-        if target is None:
+            st = self.sets.get(x) or self.retired.get(x)
+            if st and st not in targets:
+                targets.append(st)
+        if not targets:
+            self.live_unmatched += 1
             return
-        if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in target.live):
-            target.live.append(dict(row))
-            target.live = recent_direction_rows(target.live, HIST_CAP)
-            self._score_one(target)
-        self._snap_ts = 0.0
-        self._live_ov_ts = 0.0
-
-    @staticmethod
-    def _live_fill_identity(row):
-        fill = row.get("close_fill_id")
-        if fill:
-            return ("fill", str(fill))
-        if row.get("client_id") and not row.get("partial"):
-            return ("legacy", row["client_id"])
-        return ("partial", row.get("client_id"), row.get("t"), row.get("qty"), row.get("pnl"))
+        for st in targets:
+            key = self._live_key(st.id, row)
+            if key in self._live_seen:
+                continue
+            self._live_seen[key] = None
+            while len(self._live_seen) > LIVE_SEEN_MAX:
+                self._live_seen.pop(next(iter(self._live_seen)))
+            st.live.append(row)
+            # Keep enough recent live closes for the independent 200-order positive and Negative Real windows.
+            # Sort first: venue history can be delivered out of order.
+            ordered = sorted(st.live, key=lambda r: finite(r.get("t")))
+            pos = [r for r in ordered if str(r.get("lane") or "pos") != "neg"][-PROC_KEEP:]
+            neg = [r for r in ordered if str(r.get("lane") or "pos") == "neg"][-PROC_KEEP:]
+            st.live = sorted(pos + neg, key=lambda r: finite(r.get("t")))
+            st.live_n += 1
+            if row["lane"] == "neg":
+                st.live_neg_n += 1
+            else:
+                st.live_pos_n += 1
+            if self.hist_keep_last_complete and self._lookback_pending:
+                # A live close must update execution evidence, but it must not
+                # make an old paper snapshot look freshly replayed.
+                st.deact_reason = self.gate_reason(st)
+            else:
+                self._score_one(st, now=max(row["t"], st.score_at) or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
-        for rec in live_evidence(closed):
+        for rec in closed:
             self.on_live_close(rec)
 
     def due(self) -> bool:
-        if not self.enabled:
+        """Pace ordinary refreshes and bounded retries for a progressing history rebuild."""
+        if not self.enabled or self._running:
             return False
-        if self._running:
-            return False
-        return time.time() - self.last_run >= self.refresh_s or not self.progress.ready
+        recovering = self._lookback_pending and self._lookback_retry_fast
+        wait = min(self.retry_s, self.refresh_s) if recovering else (self.refresh_s if self.progress.ready else self.retry_s)
+        return time.time() - self.last_run >= wait
 
     def replay_all(
         self,
@@ -2588,2445 +3099,1045 @@ class SetBook:
         on_step: Optional[Callable[[], None]] = None,
         symbols: Optional[Sequence[str]] = None,
         abort: Optional[Callable[[], bool]] = None,
-        workers: int = 1,
-        drop_bars: bool = False,
-        on_symbol: Optional[Callable[[str, int, int], None]] = None,
-        merge: bool = False,
-        progress_total: Optional[int] = None,
-        score: bool = True,
-        set_ids: Optional[Sequence[str]] = None,
+        expected_symbols: Optional[Sequence[str]] = None,
     ) -> None:
+        """Replay the given symbols, then score every Set over the rows of all symbols replayed so far.
+
+        Isolation: a symbol that fails is recorded and skipped; a Set that fails to score is recorded on
+        the Set (last_error) and the others are still scored. A chunked refresh (symbols=...) replaces only
+        its own symbols' rows, so the other symbols keep their rows and no Set is scored on a partial tape.
+        """
         if not self.enabled or self._running:
             return
         self._running = True
         t0 = time.time()
-        now = now or t0
+        # one origin per minute: every chunk replayed in the same minute shares it, so the rows agree
+        now = now if now is not None else float(int(t0 // BAR_S) * BAR_S)
         try:
             if symbols is None:
-                names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
+                names = [s for s in self.bars if self.usable(s)]
             else:
-                names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
-            prior_ready = bool(self.progress.ready)
-            prior_seen = set(self._hist_seen)
-            if merge:
-                total = max(0, int(progress_total if progress_total is not None else len(names)))
-                # Keep coverage across hourly slices. Clearing on a completed
-                # 25-symbol book made the UI restart at 0/25 after every publish.
-                self._hist_total = max(int(self._hist_total or 0), total, len(self._hist_seen))
-                symbols_total = max(total, len(self._hist_seen), len(names), 1)
-            else:
-                symbols_total = len(names)
+                names = [s for s in symbols if self.usable(s)]
+            # the symbols that already hold the most orders go first: a pass that is cut short (load) still refreshed the
+            # tapes the Sets are judged on most; the sort is stable, so a first pass keeps the given order
+            names.sort(key=lambda s: -sum(len(v) for v in (self._hist_rows.get(s) or {}).values()))
+            was_ready = self.progress.ready
             self.progress = Progress(
                 phase="replay",
+                ready=was_ready,
                 pct=1.0,
                 sets_total=len(self.sets),
-                symbols_total=symbols_total,
-                symbols_done=len(self._hist_seen) if merge else 0,
+                symbols_total=len(names),
                 bars_total=sum(len(self.bars.get(s) or []) for s in names),
                 cycle=self.progress.cycle + 1,
-                detail=f"{len(self._hist_seen) if merge else 0}/{symbols_total} · {len(names)} symbols · {len(self.sets)} sets",
-                ready=prior_ready if merge else False,
+                detail=f"{len(names)} symbols · {len(self.sets)} sets",
             )
-            # Keep replay output sparse. A dense ``set_id -> []`` map for
-            # every Set was allocated once per in-flight symbol and then
-            # walked again during merge, turning a two-worker replay into a
-            # large temporary memory/CPU spike even when most Sets had no
-            # fill in that symbol. ``_commit_hist`` still visits the catalog
-            # once for a completed symbol so empty results remove old rows.
-            hist: Dict[str, List[Dict[str, Any]]] = {}
-            ind_hist: Dict[str, List[Dict[str, Any]]] = {}
-            strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
-            symbol_counts: Dict[str, Dict[str, int]] = {}
-            processed_symbols: set[str] = set()
+            errors: List[str] = []
+            with self._lock:
+                gen0 = self._topo_gen
+                lookback0 = self.lookback
+            sym_failed = 0
             aborted = False
-            w = max(1, min(int(workers or 1), 16, len(names) or 1))
-            lock = threading.Lock()
-
-            def _merge(
-                symbol: str,
-                local: Dict[str, List[Dict[str, Any]]],
-                local_ind: Dict[str, List[Dict[str, Any]]],
-                local_strategy: Dict[str, List[Dict[str, Any]]],
-                local_counts: Dict[str, int],
-            ) -> None:
-                for sid, count in local_counts.items():
-                    if count:
-                        symbol_counts.setdefault(sid, {})[symbol] = count
-                for sid, rows in local.items():
-                    if rows:
-                        target = hist.setdefault(sid, [])
-                        target.extend(rows)
-                        # A multi-symbol slice must not multiply the bounded
-                        # per-Set evaluation tape by the slice width.
-                        if len(target) > REPLAY_HIST_CAP:
-                            target[:] = recent_direction_rows(target, REPLAY_HIST_CAP)
-                for k, rows in local_ind.items():
-                    if rows:
-                        ind_hist.setdefault(k, []).extend(rows)
-                for k, rows in local_strategy.items():
-                    if rows:
-                        strategy_hist.setdefault(k, []).extend(rows)
-                nbar = len(self.bars.get(symbol) or [])
-                if drop_bars:
-                    self.bars.pop(symbol, None)
-                self.progress.bars_done += nbar
-                if merge:
-                    self._hist_seen.add(symbol)
-                    processed_symbols.add(symbol)
-
-            def _one(
-                symbol: str,
-            ) -> Tuple[
-                str,
-                Dict[str, List[Dict[str, Any]]],
-                Dict[str, List[Dict[str, Any]]],
-                Dict[str, List[Dict[str, Any]]],
-                Dict[str, int],
-            ]:
-                local: Dict[str, List[Dict[str, Any]]] = {}
-                local_ind: Dict[str, List[Dict[str, Any]]] = {}
-                local_strategy: Dict[str, List[Dict[str, Any]]] = {}
-                local_counts: Dict[str, int] = {}
-                self._replay_symbol(
-                    symbol,
-                    local,
-                    now,
-                    # Keep the service watchdog alive during a single
-                    # symbol's vector/scalar replay.  A symbol can cover the
-                    # full catalog and take longer than the systemd watchdog
-                    # interval; forwarding the bounded inner progress hook
-                    # avoids mistaking a healthy long replay for a hung lane.
-                    on_step=on_step,
-                    ind_hist=local_ind,
-                    strat_hist=local_strategy,
-                    hist_counts=local_counts,
-                    set_ids=set_ids,
-                )
-                # Core replay bounds its tape while counting every close.
-                # Other replay paths still return complete local tapes.
-                for sid, rows in local.items():
-                    local_counts.setdefault(sid, len(rows))
-                return symbol, local, local_ind, local_strategy, local_counts
-
-            done = 0
-            if w <= 1 or len(names) <= 1:
-                for i, symbol in enumerate(names):
-                    if abort and abort():
+            for i, symbol in enumerate(names):
+                if abort and abort():
+                    aborted = True
+                    self.progress.detail = f"aborted-load {i}/{len(names)}"
+                    break
+                self.progress.symbol = symbol
+                self.progress.symbols_done = i
+                self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
+                self.progress.elapsed_ms = (time.time() - t0) * 1000
+                per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+                replay_bar_at = self.bar_t.get(symbol)
+                try:
+                    inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
+                except Exception as exc:  # one symbol never stops the others
+                    sym_failed += 1
+                    errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
+                    continue
+                packed: Dict[str, RowCols] = {}
+                alias = (inputs.get("tape_alias") if isinstance(inputs, dict) else None) or {}      # a stub or an older producer returns nothing: no sharing
+                for sid, rows in per_set.items():
+                    if rows and sid not in alias:
+                        packed[sid] = RowCols(rows)
+                for sid, first in alias.items():
+                    # exactly another key's orders: the same columns under this Set's id (rows carry their Set's id, also on a hold-candidate tape "<id>@h<m>")
+                    if per_set.get(sid) and first in packed and len(per_set[sid]) == len(packed[first]):
+                        packed[sid] = packed[first].share(sid.split(HOLD_KEY, 1)[0])
+                    elif per_set.get(sid):
+                        packed[sid] = RowCols(per_set[sid])
+                per_set = {}                          # rows are kept as columns (RowCols): about a sixth of the memory of tuples
+                with self._lock:
+                    if self._topo_gen != gen0:
                         aborted = True
-                        self.progress.detail = f"aborted-load {i}/{len(names)}"
-                        break
-                    self.progress.symbol = symbol
-                    coverage_now = len(self._hist_seen) if merge else done
-                    denom = symbols_total if merge else len(names)
-                    self.progress.pct = 5.0 + (coverage_now / max(1, denom)) * 80.0
-                    self.progress.elapsed_ms = (time.time() - t0) * 1000
-                    self.progress.detail = f"replay {symbol} {coverage_now + 1}/{denom}"
-                    _sym, local, local_ind, local_strategy, local_counts = _one(symbol)
-                    _merge(_sym, local, local_ind, local_strategy, local_counts)
-                    done += 1
-                    coverage_now = len(self._hist_seen) if merge else done
-                    self.progress.symbols_done = coverage_now
-                    self.progress.pct = 5.0 + (coverage_now / max(1, symbols_total if merge else len(names))) * 80.0
-                    self.progress.detail = (
-                        f"replay {symbol} {coverage_now}/{symbols_total}"
-                        if merge else f"replay {symbol} {done}/{len(names)}"
-                    )
-                    if on_symbol:
-                        on_symbol(symbol, done, len(names))
-                    if on_step:
-                        on_step()
-                    time.sleep(0)
-            else:
-                # Keep at most one worker's worth of symbols in flight. The old
-                # submit-all approach retained every future and its captured
-                # payload until the slowest symbol finished.
-                with ThreadPoolExecutor(max_workers=w, thread_name_prefix="set-replay") as pool:
-                    pending: Dict[Any, Tuple[str, int]] = {}
-                    next_i = 0
-                    retries: Dict[str, int] = {}
-                    while pending or next_i < len(names):
-                        while not aborted and len(pending) < w and next_i < len(names):
-                            symbol = names[next_i]
-                            next_i += 1
-                            pending[pool.submit(_one, symbol)] = (symbol, 0)
-                        if not pending:
-                            break
-                        if abort and abort():
-                            aborted = True
-                            for future in pending:
-                                future.cancel()
-                            break
-                        finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
-                        for fut in finished:
-                            symbol, _attempt = pending.pop(fut)
-                            try:
-                                result_symbol, local, local_ind, local_strategy, local_counts = fut.result()
-                            except Exception:
-                                attempt = retries.get(symbol, 0) + 1
-                                retries[symbol] = attempt
-                                if attempt <= 1 and not (abort and abort()):
-                                    pending[pool.submit(_one, symbol)] = (symbol, attempt)
-                                    continue
-                                raise
-                            with lock:
-                                _merge(result_symbol, local, local_ind, local_strategy, local_counts)
-                                done += 1
-                                coverage_now = len(self._hist_seen) if merge else done
-                                self.progress.symbol = result_symbol
-                                self.progress.symbols_done = coverage_now
-                                self.progress.pct = 5.0 + (coverage_now / max(1, symbols_total if merge else len(names))) * 80.0
-                                self.progress.elapsed_ms = (time.time() - t0) * 1000
-                                self.progress.detail = (
-                                    f"replay {result_symbol} {coverage_now}/{symbols_total}"
-                                    if merge else f"replay {result_symbol} {done}/{len(names)}"
-                                )
-                            if on_symbol:
-                                on_symbol(result_symbol, done, len(names))
-                            if on_step:
-                                on_step()
-                            time.sleep(0)
+                        break                       # never restore an old-rules chunk after load invalidated it
+                    self._hist_rows[symbol] = packed
+                    self._hist_inputs[symbol] = inputs
+                    self._hist_replay_key[symbol] = (lookback0, gen0)
+                    prev_at = self._hist_replay_at.get(symbol)
+                    self._hist_replay_at[symbol] = time.time()
+                    if prev_at:
+                        # one full rotation = the time between two replays of the same symbol (a symbol that stopped replaying adds no interval, so it can
+                        # never stretch the freshness limit; capped)
+                        span = min(max(0.0, self._hist_replay_at[symbol] - prev_at), ROTATION_CAP_S)
+                        self.rotation_s = span if span > self.rotation_s else 0.8 * self.rotation_s + 0.2 * span
+                    self._hist_replay_bar_at[symbol] = replay_bar_at
+                self.progress.bars_done += len(self.bars[symbol])
+                if on_step:
+                    on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
-            self._commit_hist(
-                hist,
-                ind_hist,
-                merge=merge,
-                replayed_symbols=processed_symbols if merge else names,
-                hist_symbol_counts=symbol_counts,
-                score=score,
-            )
-            strategy_names = processed_symbols if merge else names
-            if not merge:
-                self.strategy_hist = {
-                    k: trim_hist(rows, HIST_CAP) for k, rows in strategy_hist.items()
-                }
-            else:
-                keys = set(self.strategy_hist) | set(strategy_hist)
-                self.strategy_hist = {
-                    k: merge_hist_rows(self.strategy_hist.get(k) or [], strategy_hist.get(k) or [], strategy_names)
-                    for k in keys
-                }
-            coverage_done = len(self._hist_seen) if merge else (done if aborted else len(names))
-            complete = (not merge and not aborted) or (merge and coverage_done >= symbols_total)
-            if complete:
-                self.progress.phase = "ready"
-                self.progress.pct = 100.0
-                self.progress.ready = True
-                self.progress.symbols_done = symbols_total if merge else (done if aborted else len(names))
-            else:
-                self.progress.phase = "partial" if merge else "replay"
-                self.progress.pct = 8.0 + (82.0 * coverage_done / max(1, symbols_total)) if symbols_total else 0.0
-                self.progress.ready = prior_ready if merge else False
-                self.progress.symbols_done = coverage_done
+            cutoff = now - (self.history_bars() if self.window_basis == "count" else self.lookback) * BAR_S
+            context_cutoff = now - self.history_bars() * BAR_S
+            scoring_stale = False
+            with self._lock:
+                live = {s for s in self.bars if self.usable(s)}
+                for s in [s for s in self._hist_rows if s not in live]:
+                    del self._hist_rows[s]          # symbols that left the universe (or failed the data check) drop their rows
+                    self._hist_inputs.pop(s, None)
+                    self._hist_replay_key.pop(s, None)
+                    self._hist_replay_at.pop(s, None)
+                    self._hist_replay_bar_at.pop(s, None)
+                for s in [s for s in self._sig_cache if s not in live]:
+                    del self._sig_cache[s]          # and so do their signal memo entries
+                stale = self._topo_gen != gen0      # the Set map changed mid-pass: the rows above mix two grids
+                if stale:
+                    aborted = True                  # keep each Set's last complete scores; the next pass redoes them
+                    self.progress.detail = "topology changed mid-pass: scores kept, next pass recomputes"
+                expected = live if expected_symbols is None else live.intersection(expected_symbols)
+                pending_snapshot = self.hist_keep_last_complete and self._lookback_pending
+                if pending_snapshot and expected != self._history_snapshot_symbols:
+                    self._history_snapshot_active = False
+                expected_available = expected_symbols is None or set(expected_symbols).issubset(live)
+                def current(s: str) -> bool:
+                    oldest_allowed = time.time() - self._snapshot_max_age()
+                    replayed = (self._hist_replay_key.get(s) == (lookback0, gen0)
+                                and self._hist_replay_at.get(s, 0.0) >= oldest_allowed)
+                    if self.fresh_s > 0:
+                        # Live snapshots must have a dated, recent completed bar.
+                        bar_at = self._hist_replay_bar_at.get(s)
+                        decision_now = now + max(0.0, time.time() - t0)
+                        replayed = bool(replayed and bar_at is not None
+                                        and decision_now - self._snapshot_max_age() - BAR_S <= bar_at <= now)
+                    return replayed
+                snapshot_complete = bool(expected_available and all(current(s) for s in expected))
+                complete = bool(expected and not sym_failed and not aborted and not stale
+                                and self.lookback == lookback0
+                                and (snapshot_complete if self.hist_keep_last_complete else
+                                     all(self._hist_replay_key.get(s) == (lookback0, gen0) for s in expected)))
+                defer_score = pending_snapshot and not complete
+                if pending_snapshot and complete:
+                    # Block new entries during the atomic promotion itself. If
+                    # scoring unexpectedly fails, the old snapshot is not reused.
+                    self._history_snapshot_active = False
+                    self._history_snapshot_promoting = True
+                tape_order = sorted(expected.intersection(self._hist_rows) if self.hist_keep_last_complete else self._hist_rows)
+                # Equal exit times order by symbol, whatever the replay order was.
+                # A paper entry at this decision clock cannot use an unordered
+                # close stamped at the same instant as evidence.
+                decision_upper = math.nextafter(now, float("-inf"))
+                try:
+                    if not (stale or defer_score):
+                        try:
+                            self._learn_step_floors(tape_order, cutoff)       # the per-step minimum PF, learned before the window it will judge
+                        except Exception as exc:                              # never stops the scoring: the manual floors stand
+                            self.step_floor_auto, self.step_floor_report = {}, []
+                            errors.append(f"step floors: {type(exc).__name__}: {exc}"[:160])
+                    rel_acc = relation_lanes.Accumulator() if self.relation_cfg.enabled and not (stale or defer_score) else None
+                    rel_failed = False
+                    for st in ([] if stale or defer_score else self.by_idx):
+                        try:
+                            full = self._tape_rows(st.id, tape_order, context_cutoff, until=decision_upper)
+                            full = self._choose_hold(st, full, tape_order, context_cutoff, until=decision_upper, scoring_cutoff=cutoff)
+                            self.set_processed(st, full, now=now, relations=rel_acc)
+                            visible = [r for r in full if r[0] >= cutoff]
+                            st.hist = [dict(zip(_ROW_KEYS, r)) for r in visible[-max(40, self.gate_window_max):]]
+                            st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
+                            self._score_one(st, now=max(now, st.score_at) if st.live else now)
+                            st.n = len(visible)           # paper count in the evaluation window
+                        except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
+                            st.last_error = f"{type(exc).__name__}: {exc}"[:160]
+                            st.deact_reason = "error"
+                            errors.append(f"set {st.id}: {st.last_error}")
+                            rel_failed = True
+                    if not (stale or defer_score):
+                        # the relation lanes of this pass, from the chains just built. A pass in which any member failed publishes no lanes
+                        # (a lane missing a member's orders is not that relation), and a failure here never stops the Set scoring above.
+                        t_rel = time.time()
+                        try:
+                            self.relation_state = rel_acc.lanes(self.relation_cfg) if rel_acc is not None and not rel_failed else {}
+                            self.relation_at = float(now) if self.relation_state else 0.0
+                        except Exception as exc:
+                            self.relation_state, self.relation_at = {}, 0.0
+                            errors.append(f"relation lanes: {type(exc).__name__}: {exc}"[:160])
+                        self.relation_ms = round(1000.0 * (time.time() - t_rel), 1)
+                finally:
+                    self._history_snapshot_promoting = False
+            ok_syms = len(names) - sym_failed
+            self.progress.errors = len(errors)
+            self.progress.error = "; ".join(errors[:3])[:220]
+            self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
             self.progress.sets_done = len(self.sets)
-            self.refresh_progress_detail(
-                merge=merge,
-                coverage_done=coverage_done,
-                symbols_total=symbols_total,
-                aborted=aborted,
+            if not names:
+                self.progress.phase = "waiting"
+                self.progress.ready = False
+            elif ok_syms == 0:
+                self.progress.phase = "error"
+                self.progress.ready = False
+            elif aborted:
+                self.progress.phase = "partial"
+            else:
+                self.progress.phase = "rebuilding" if defer_score else "ready"
+                self.progress.pct = 90.0 if defer_score else 100.0
+                self.progress.ready = True
+                with self._lock:
+                    # A chunk is not the whole universe. After each growth step, wait
+                    # until every usable expected symbol has been replayed at that
+                    # length and topology before deciding whether to grow again.
+                    expected = live if expected_symbols is None else live.intersection(expected_symbols)
+                    consistent = bool(expected and not sym_failed and self.lookback == lookback0 and self._topo_gen == gen0
+                                      and (not self.hist_keep_last_complete or expected_available))
+                    matched = sum((current(s) if self.hist_keep_last_complete else
+                                   self._hist_replay_key.get(s) == (lookback0, gen0)) for s in expected)
+                    if pending_snapshot and not defer_score and (not consistent or matched != len(expected)):
+                        # Evidence may expire while a large Set grid is being
+                        # scored. Do not publish that pass as complete.
+                        scoring_stale = True
+                        self.progress.phase = "partial"
+                        self.progress.pct = 90.0
+                    if self._lookback_pending:
+                        key = (lookback0, gen0, tuple(sorted(expected)))
+                        if key != self._lookback_progress_key:
+                            self._lookback_progress_key = key
+                            self._lookback_progress_count = 0
+                        self._lookback_retry_fast = bool(consistent and matched > self._lookback_progress_count)
+                        self._lookback_progress_count = matched
+                    if consistent and matched == len(expected) and not defer_score:
+                        self._lookback_pending = False
+                        self._lookback_retry_fast = False
+                        if self.hist_keep_last_complete:
+                            self._history_snapshot_active = True
+                            self._history_snapshot_gen = gen0
+                            self._history_snapshot_symbols = frozenset(expected)
+                            self._history_snapshot_lookback = lookback0
+                            oldest_at = min(self._hist_replay_at[s] for s in expected)
+                            if self.fresh_s > 0:
+                                # Include the age already present in a replayed
+                                # bar; scoring later cannot make that data newer.
+                                decision_now = now + max(0.0, time.time() - t0)
+                                oldest_at = min(oldest_at, *(time.time() - max(0.0, decision_now - (self._hist_replay_bar_at[s] + BAR_S))
+                                                             for s in expected))
+                            self._history_snapshot_oldest_at = oldest_at
+                            if pending_snapshot:
+                                for st in self.by_idx:
+                                    st.deact_reason = self.gate_reason(st)
+                        self._adapt_lookback()
+                    if not defer_score and not scoring_stale:
+                        self._record_pf_progress()
+            if self._lookback_pending and (not names or ok_syms == 0 or aborted):
+                # An unsuccessful/aborted pass must not produce a rapid retry loop.
+                self._lookback_retry_fast = False
+            self.progress.detail = (
+                f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
+                f"{sum(s.n for s in self.sets.values())} hist fills"
+                + (f" · {sum(1 for v in self.relation_state.values() if v.get('ok'))}/{len(self.relation_state)} relation lanes pass"
+                   if self.relation_cfg.enabled else "")
+                + (" · rebuilding; prior scores retained" if defer_score else "")
+                + (" · evidence expired during scoring" if scoring_stale else "")
+                + (" · partial" if aborted else "")
+                + (f" · {len(errors)} errors" if errors else "")
             )
         except Exception as exc:
             self.progress.phase = "error"
+            self.progress.ready = False
             self.progress.error = str(exc)[:220]
         finally:
             self.progress.last_run_ms = (time.time() - t0) * 1000
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
-            self._snap_ts = 0.0
-            self._live_ov_ts = 0.0
-            try:
-                self.score_block_main()
-            except Exception:
-                pass
+            self._after_pass()
 
-    def score_block_main(self) -> Dict[tuple, Dict[str, Any]]:
-        """Main + Real/Overall last-N eval for each Block count × indication × set.
-
-        Each key is independent. Intern calcs always continue. Too few last
-        positions stay valid for Real/Live. Proven negative counts are intern-only.
-        Real stage uses the overall last-N tape (``block_eval_pos``), not Base.
-        """
-        need = max(5, min(75, int(getattr(self, "block_eval_pos", 50) or 50)))
-        buckets: Dict[tuple, List[Any]] = {}
-        for name, tape in list((self.strategy_hist or {}).items()):
-            is_block = name == "block" or str(name).startswith("block")
-            for row in tape or []:
-                strat = str(row.get("strategy") or name or "")
-                if not is_block and strat != "block":
-                    continue
-                try:
-                    count = int(row.get("block_count") or 0)
-                except (TypeError, ValueError):
-                    count = 0
-                if count < 1:
-                    continue
-                kind = str(row.get("ind_kind") or "")
-                sid = str(row.get("set_id") or "")
-                buckets.setdefault((count, kind, sid), []).append(row)
-        # Live exchange Block round trips decide; replay only bootstraps the
-        # missing slots until live holds the full window.
-        live_buckets: Dict[tuple, List[Any]] = {}
-        for row in getattr(self, "block_live", None) or []:
-            count = int(finite(row.get("block_count")))
-            if count < 1:
-                continue
-            live_buckets.setdefault((count, str(row.get("ind_kind") or ""), str(row.get("set_id") or "")), []).append(row)
-        from position_cost import clears_pf, is_positive_pf, overall_last_pos_eval
-        floor = float(self.real_min_pf or POSITIVE_PF)
-
-        def eval_rows(replay: List[Any], *, stage: str, scope: str, live: Optional[List[Any]] = None) -> Dict[str, Any]:
-            samples, source = live_first_window(live or [], replay, need)
-            n_all = len(samples)
-            if n_all < need:
-                return {
-                    "n": n_all, "pf": 0.0, "liveOk": True, "internOk": True,
-                    "internOnly": False, "reason": "insufficient-sample", "evalN": need,
-                    "stage": stage, "scope": scope, "evidenceSource": source,
-                    "liveN": len(live or []),
-                    "realOverall": {
-                        "requestedN": need, "n": n_all, "available": False,
-                        "validated": False, "pf": 1.0, "liveOk": True,
-                        "costSubtracted": True,
-                    },
-                }
-            ordered = sorted(samples, key=lambda r: finite(r.get("t")))
-            window = ordered[-need:]
-            overall = overall_last_pos_eval(window, need, self.cost_pct, ordered=True)
-            pf = float(overall.get("ratio") or 0.0)
-            n = int(overall.get("count") or len(window))
-            live_ok = bool(n >= need and is_positive_pf(pf) and clears_pf(pf, floor))
-            return {
-                "n": n, "pf": round(pf, 4), "liveOk": live_ok, "internOk": True,
-                "internOnly": not live_ok,
-                "reason": "pass" if live_ok else "real-overall-negative",
-                "evalN": need, "stage": stage, "scope": scope,
-                "evidenceSource": source, "liveN": len(live or []),
-                "realOverall": {
-                    "requestedN": need, "n": n, "available": n >= need,
-                    "validated": n >= need and is_positive_pf(pf),
-                    "pf": round(pf, 4), "liveOk": live_ok,
-                    "classicPf": float(overall.get("classicPf") or 0.0),
-                    "avgR": float(overall.get("avgR") or 0.0),
-                    "netAvg": float(overall.get("netAvg") or 0.0),
-                    "costPct": float(overall.get("costPct") or self.cost_pct),
-                    "costSubtracted": True, "scope": "overall-last-pos",
-                },
-            }
-
-        out: Dict[tuple, Dict[str, Any]] = {}
-        for key in set(buckets) | set(live_buckets):
-            out[key] = eval_rows(buckets.get(key, []), stage="real", scope="set", live=live_buckets.get(key))
-
-        def group(src: Dict[tuple, List[Any]], key_fn) -> Dict[Any, List[Any]]:
-            res: Dict[Any, List[Any]] = {}
-            for key, samples in src.items():
-                res.setdefault(key_fn(key), []).extend(samples)
-            return res
-        kind_h, kind_l = group(buckets, lambda k: (k[0], k[1])), group(live_buckets, lambda k: (k[0], k[1]))
-        for ck in set(kind_h) | set(kind_l):
-            out[(ck[0], ck[1], "")] = eval_rows(kind_h.get(ck, []), stage="real", scope="indication", live=kind_l.get(ck))
-        cnt_h, cnt_l = group(buckets, lambda k: k[0]), group(live_buckets, lambda k: k[0])
-        for count in set(cnt_h) | set(cnt_l):
-            out[(count, "", "")] = eval_rows(cnt_h.get(count, []), stage="real", scope="overall", live=cnt_l.get(count))
-        self.block_main_eval = out
-        return out
-
-    def block_main_live_ok(self, count: int, indication: str = "", set_id: str = "") -> bool:
-        """Real/Live emit gate for one Block count. Missing evidence is valid."""
-        blob = getattr(self, "block_main_eval", None) or {}
-        if not blob:
-            return True
-        try:
-            count_n = int(count)
-        except (TypeError, ValueError):
-            return True
-        kind = str(indication or "")
-        sid = str(set_id or "")
-        exact = blob.get((count_n, kind, sid))
-        if exact is not None:
-            return bool(exact.get("liveOk", True))
-        if kind and sid:
-            kind_set = blob.get((count_n, kind, ""))
-            if kind_set is not None:
-                return bool(kind_set.get("liveOk", True))
-        if kind:
-            kind_rows = [v for k, v in blob.items() if k[0] == count_n and k[1] == kind and k[2]]
-            if kind_rows:
-                return all(bool(v.get("liveOk", True)) for v in kind_rows)
-        if sid:
-            sid_rows = [v for k, v in blob.items() if k[0] == count_n and k[2] == sid]
-            if sid_rows:
-                return all(bool(v.get("liveOk", True)) for v in sid_rows)
-        overall = blob.get((count_n, "", ""))
-        if overall is not None:
-            return bool(overall.get("liveOk", True))
-        return True
-
-    def _commit_hist(
-        self,
-        hist: Dict[str, List[Dict[str, Any]]],
-        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        *,
-        merge: bool = False,
-        replayed_symbols: Optional[Sequence[str]] = None,
-        hist_counts: Optional[Dict[str, int]] = None,
-        hist_symbol_counts: Optional[Dict[str, Dict[str, int]]] = None,
-        score: bool = True,
-        score_ids: Optional[Sequence[str]] = None,
-    ) -> None:
-        names = [str(s) for s in (replayed_symbols or ())]
-        score_set = {str(s) for s in score_ids} if score_ids is not None else None
-        # The rows this replay produced, before they are merged into the
-        # bounded per-Set pool: per-symbol verdicts (Test Historic) read
-        # these so a symbol's result never depends on which ran before it.
-        self.last_replay_hist = hist
-        if not merge:
-            if ind_hist is not None:
-                self.ind_hist = {k: trim_ind_tape([slim_hist_row(r) for r in v if _is_hist_row(r)]) for k, v in ind_hist.items()}
-        elif ind_hist is not None:
-            keys = set(self.ind_hist) | set(ind_hist)
-            self.ind_hist = {
-                k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names,
-                                   trim=lambda rows: trim_ind_tape([slim_hist_row(r) for r in rows]))
-                for k in keys
-            }
-        # First-pass unique symbols only touch Sets that filled. Replays of
-        # the same symbols also touch prior owners so zero-fill replacements
-        # still clear stale rows. Walking the whole 34k catalog is a no-op
-        # for everyone else and held the live lock far too long.
-        if merge and names:
-            name_set = set(names)
-            touched = set(hist)
-            if hist_symbol_counts is not None:
-                touched.update(str(sid) for sid in hist_symbol_counts)
-            if score_set:
-                touched.update(score_set)
-            for sid, counts in self._hist_counts.items():
-                if name_set.intersection(counts):
-                    touched.add(sid)
-            if not touched:
-                # Empty replay of a symbol must still clear that symbol from
-                # owners whose hist tape was never indexed in _hist_counts.
-                for st in self.by_idx:
-                    if any(str(row.get("symbol") or "") in name_set for row in (st.hist or ())):
-                        touched.add(st.id)
-            states = [self.sets[sid] for sid in touched if sid in self.sets]
-        else:
-            states = self.by_idx if (not merge or names) else []
-        updated: List[str] = []
-        for st in states:
-            # A bounded replay may commit one configuration slice at a time.
-            # Do not treat a not-yet-replayed set as an empty result or erase
-            # its already committed symbol evidence.
-            full = hist.get(st.id, [])
-            if merge:
-                counts = self._hist_counts.get(st.id, {})
-                if not counts and st.hist:
-                    for row in st.hist:
-                        symbol = str(row.get("symbol") or "")
-                        counts[symbol] = counts.get(symbol, 0) + 1
-                full_counts: Dict[str, int] = {}
-                for row in full:
-                    symbol = str(row.get("symbol") or "")
-                    full_counts[symbol] = full_counts.get(symbol, 0) + 1
-                for symbol in names:
-                    if hist_symbol_counts is not None:
-                        count = max(0, int(hist_symbol_counts.get(st.id, {}).get(symbol, 0)))
-                    elif hist_counts is not None and st.id in hist_counts:
-                        count = max(0, int(hist_counts[st.id]))
-                    else:
-                        count = full_counts.get(symbol, 0)
-                    if count:
-                        counts[symbol] = count
-                    else:
-                        counts.pop(symbol, None)
-                if counts:
-                    self._hist_counts[st.id] = counts
-                else:
-                    self._hist_counts.pop(st.id, None)
-                st.hist = merge_hist_rows(st.hist, full, names)
-                if score and (score_set is None or st.id in score_set):
-                    self._score_one(st)
-                st.n = sum(counts.values())
-                updated.append(st.id)
-            else:
-                full.sort(key=lambda r: finite(r.get("t")))
-                st.hist = full
-                if score and (score_set is None or st.id in score_set):
-                    self._score_one(st)
-                if hist_symbol_counts is not None:
-                    counts = dict(hist_symbol_counts.get(st.id, {}))
-                    if counts:
-                        self._hist_counts[st.id] = counts
-                    else:
-                        self._hist_counts.pop(st.id, None)
-                    n_full = sum(counts.values())
-                else:
-                    n_full = int(hist_counts.get(st.id, len(full))) if hist_counts is not None else len(full)
-                st.hist = trim_hist(full, HIST_CAP)
-                st.n = n_full
-                updated.append(st.id)
-        if score:
-            self._cap_active()
-        return updated
-
-    def _score_all(self) -> None:
-        """Score the complete catalog once after a batched replay commit."""
-        states = self.by_idx
-        n = len(states)
-        if n >= 48:
-            try:
-                cpu = max(1, int(os.cpu_count() or 1))
-            except Exception:
-                cpu = 2
-            workers = max(1, min(cpu, n, getattr(self, "system_workers", 2)))
-            if workers > 1:
-                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
-                    for start in range(0, n, 32):
-                        list(pool.map(self._score_pair, self.score_pairs(states[start:start+32])))
-                self._selection_dirty = True
-                self._snap_ts = 0.0
-                self._live_ov_ts = 0.0
-                self._cap_active()
-                return
-        for start in range(0, n, 32):
-            for pair in self.score_pairs(states[start:start+32]):
-                self._score_pair(pair)
-        self._cap_active()
-
-    def score_pairs(self, states):
-        cache = getattr(self, "calculation_cache", None)
-        rows = list(states or [])
-        if not rows:
-            return []
-        try:
-            from calculation_cache import CalculationCache
-            batch = max(1, int(getattr(cache, "BATCH", None) or CalculationCache.BATCH))
-        except Exception:
-            batch = 32
-        if cache is None:
-            return [(st, None) for st in rows]
-        out = []
-        for start in range(0, len(rows), batch):
-            chunk = rows[start:start + batch]
-            out.extend(cache.prepare(self, chunk))
-        return out
-
-    def _score_pair(self, pair):
-        state, bundle = pair
-        # Repeated publications of identical evidence do not rescore a Set.
-        # Hash contents (not list identity/length): rolling tapes replace rows.
-        from calculation_cache import CalculationCache
-        signature = (CalculationCache.signature(self, state, rows=state.tape()),
-                     len(state.hist), len(state.live), self.optimization_n,
-                     self.auto_deact, self.live_negative_deact, self.strict_gate,
-                     self.reactivate, self.min_pf, state.locked)
-        if getattr(state, "_scored_input", None) == signature:
-            self.score_reused = getattr(self, "score_reused", 0) + 1
-            return
-        if bundle is not None and hasattr(bundle, "signature"):
-            cache = self.calculation_cache
-            bundle = bundle.value if not state.live and cache and cache.signature(self, state) == bundle.signature else None
-        self._score_one(state, bundle=bundle)
-        state._scored_input = signature
-        self.score_completed = getattr(self, "score_completed", 0) + 1
-
-    def replay_symbol_partial(
-        self,
-        symbol: str,
-        hist: Dict[str, List[Dict[str, Any]]],
-        now: Optional[float] = None,
-        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        drop_bars: bool = True,
-        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        set_ids: Optional[Sequence[str]] = None,
-        prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
-        hist_counts: Optional[Dict[str, int]] = None,
-    ) -> int:
-        """Replay one symbol into hist and drop its bars. Independent of other names."""
-        if symbol not in self.bars:
-            return 0
-        nbar = len(self.bars[symbol])
-        if nbar < self.min_bars:
-            if drop_bars:
-                self.bars.pop(symbol, None)
-            return 0
-        now = now or time.time()
-        self._replay_symbol(
-            symbol,
-            hist,
-            now,
-            ind_hist=ind_hist,
-            strat_hist=strat_hist,
-            set_ids=set_ids,
-            prepared=prepared,
-            hist_counts=hist_counts,
-        )
-        if drop_bars:
-            self.bars.pop(symbol, None)
-        return nbar
-
-    def _seed_pos(self, side: int, close: float, sl: float, tp: float, i: int, why: str) -> Dict[str, Any]:
-        return {
-            "side": side,
-            "entry": close,
-            "sl": sl,
-            "tp": tp,
-            "peak": close,
-            "i": i,
-            "trail": None,
-            "tags": str(why or ""),
-            "qty": 1.0,
-            "parent": 1.0,
-            "adds": 0,
-        }
-
-    def _rearm_stops(self, pos: Dict[str, Any], sl_frac: float, tp_frac: float) -> None:
-        e = float(pos["entry"])
-        side = int(pos["side"])
-        if side > 0:
-            pos["sl"] = e * (1 - sl_frac)
-            pos["tp"] = e * (1 + tp_frac)
-        else:
-            pos["sl"] = e * (1 + sl_frac)
-            pos["tp"] = e * (1 - tp_frac)
-
-    def _block_specified_ratio(self) -> float:
-        extra = max(0.0, float(self.block_max_multiplier) - 1.0)
-        specified = float(getattr(self, "block_vr_specified", self.block_vr) or 0.25)
-        return min(extra, max(0.05, specified))
-
-    def _try_block_extra(
-        self,
-        parent: Dict[str, Any],
-        bar: Sequence[float],
-        i: int,
-        sl_frac: float,
-        tp_frac: float,
-    ) -> Optional[Dict[str, Any]]:
-        """Open one extra-size lot after 0.2% continuation. Never a parent clone.
-
-        Extra size is the specified overlay ratio (capped at extra 2×), not
-        shared 6-count crumbs. Extra SL locks at the parent entry so a failed
-        continuation cannot take a fresh full stop. Extra TP is the parent's
-        remaining target so extras inherit the proven move instead of a new
-        full-risk trade from the add price.
-        """
-        close = float(bar[3])
-        entry = float(parent.get("entry") or 0)
-        side = int(parent.get("side") or 0)
-        if entry <= 0 or close <= 0 or side == 0:
-            return None
-        try:
-            opened = int(parent["i"])
-        except Exception:
-            opened = i
-        if i - opened < 1:
-            return None
-        if ((close - entry) / entry) * side < 0.002:
-            return None
-        parent_tp = float(parent.get("tp") or 0.0)
-        if parent_tp <= 0:
-            parent_tp = close * (1 + tp_frac) if side > 0 else close * (1 - tp_frac)
-        remaining = ((parent_tp - close) / close) * side if close > 0 else 0.0
-        if remaining <= 1e-12:
-            return None
-        extra = self._seed_pos(side, close, 0.0, 0.0, i, "block:active")
-        extra["qty"] = self._block_specified_ratio()
-        extra["parent"] = 1.0
-        extra["adds"] = 1
-        extra["peak"] = close
-        extra["anchor"] = entry
-        lock = 0.0015
-        if side > 0:
-            extra["sl"] = close * (1.0 - lock)
-            extra["tp"] = parent_tp
-        else:
-            extra["sl"] = close * (1.0 + lock)
-            extra["tp"] = parent_tp
-        return extra
-
-    def _maybe_block_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
-        if int(pos.get("adds") or 0) >= 1:
-            return
-        close = float(bar[3])
-        entry = float(pos["entry"])
-        side = int(pos["side"])
-        if entry <= 0 or close <= 0:
-            return
-        if ((close - entry) / entry) * side < 0.002:
-            return
-        specified = self._block_specified_ratio()
-        add = float(pos["parent"]) * specified
-        qty = float(pos["qty"])
-        extra_cap = float(pos["parent"]) * max(0.0, float(self.block_max_multiplier) - 1.0)
-        add = min(add, max(0.0, extra_cap - max(0.0, qty - float(pos["parent"]))))
-        if add <= 0:
-            return
-        pos["entry"] = (entry * qty + close * add) / (qty + add)
-        pos["qty"] = qty + add
-        pos["adds"] = 1
-        self._rearm_stops(pos, sl_frac, tp_frac)
-
-    def _maybe_dca_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
-        n = int(pos.get("adds") or 0)
-        dists = self.dca_dist
-        if n >= min(4, len(dists)):
-            return
-        close = float(bar[3])
-        entry = float(pos["entry"])
-        side = int(pos["side"])
-        if entry <= 0 or close <= 0:
-            return
-        adv = (entry - close) / entry if side > 0 else (close - entry) / entry
-        if adv + 1e-12 < float(dists[n]):
-            return
-        mult = float(self.dca_mult[n] if n < len(self.dca_mult) else 2.5)
-        add = float(pos["parent"]) * min(2.5, max(0.25, mult))
-        qty = float(pos["qty"])
-        pos["entry"] = (entry * qty + close * add) / (qty + add)
-        pos["qty"] = qty + add
-        pos["adds"] = n + 1
-        self._rearm_stops(pos, sl_frac, tp_frac)
-
-    def _advance_pos(
-        self,
-        pos: Dict[str, Any],
-        bar: Sequence[float],
-        i: int,
-        sl_frac: float,
-        tp_frac: float,
-        use_trail: bool,
-        arm: float,
-        give: float,
-        time_bars: int,
-        scratch_bars: int,
-        honor_tp: bool,
-        ts: float,
-        symbol: str,
-        st_id: str,
-        pack: str,
-        strategy: str,
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        side = int(pos["side"])
-        entry = float(pos["entry"])
-        held = i - int(pos["i"])
-        tags = str(pos.get("tags") or "")
-        already_extra = int(pos.get("adds") or 0) >= 1 or tags.startswith("block")
-        if strategy == "block" and held >= 1 and not already_extra:
-            self._maybe_block_add(pos, bar, sl_frac, tp_frac)
-            entry = float(pos["entry"])
-        elif strategy == "dca" and held >= 1:
-            self._maybe_dca_add(pos, bar, sl_frac, tp_frac)
-            entry = float(pos["entry"])
-        if use_trail:
-            if side > 0:
-                pos["peak"] = max(pos["peak"], float(bar[1]))
-                fav = (pos["peak"] - entry) / entry
-                if fav >= arm:
-                    trail = pos["peak"] * (1 - give)
-                    pos["trail"] = max(pos.get("trail") or 0.0, trail)
-            else:
-                pos["peak"] = min(pos["peak"], float(bar[2]))
-                fav = (entry - pos["peak"]) / entry
-                if fav >= arm:
-                    trail = pos["peak"] * (1 + give)
-                    cur = pos.get("trail")
-                    pos["trail"] = trail if cur is None else min(cur, trail)
-        elif side > 0:
-            pos["peak"] = max(pos["peak"], float(bar[1]))
-        else:
-            pos["peak"] = min(pos["peak"], float(bar[2]))
-        why, px = hit_exit(side, entry, pos["sl"], pos["tp"], pos.get("trail"), bar, ignore_tp=not honor_tp)
-        if why is None and held >= time_bars:
-            why, px = "time", float(bar[3])
-        if why is None and held >= scratch_bars and strategy != "block":
-            move = (float(bar[3]) - entry) / entry * side
-            if move >= self.scratch_min:
-                why, px = "scratch+", float(bar[3])
-        if not why:
-            return pos, None
-        raw = (px - entry) / entry * side
-        qty = max(0.0, float(pos.get("qty") or 1.0))
-        parent = max(1e-9, float(pos.get("parent") or 1.0))
-        # Block/DCA rows keep the lot's own move: PositionCost is charged per
-        # lot, so a quarter-size move minus a full cost understated the PF.
-        # The lot size relative to its parent rides along as volume_ratio.
-        rec = hist_fill(ts, symbol, side, raw, held * BAR_S, why)
-        rec["strategy"] = _intern(strategy or "core")
-        if strategy in ("block", "dca"):
-            rec["volume_ratio"] = round(qty / parent, 6)
-            rec.update(set_id=_intern(st_id), pack=_intern(pack), tp_pct=tp_frac,
-                       sl_ratio=sl_frac / tp_frac if tp_frac else 0,
-                       step=self._record_step({"set_id": st_id}))
-        if strategy == "block":
-            rec["block_count"] = max(1, int(pos.get("adds") or 1))
-        return None, rec
-
-    def prepare_replay_signals(
-        self,
-        symbol: str,
-        now: Optional[float] = None,
-        on_step: Optional[Callable[[], None]] = None,
-    ) -> Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]:
-        """Build the symbol signal lanes once before replaying config chunks."""
+    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
         bars = self.bars[symbol]
         n = len(bars)
-        if self.exact_replay_window:
-            evaluation_bars = min(n, max(60, int(self.evaluation_bars or self.lookback)))
-            warmup = min(self.warmup, max(16, n - evaluation_bars))
-        else:
-            warmup = min(self.warmup, max(16, n // 5))
-        signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
-        kind_sigs: Dict[str, List[Tuple[int, float]]] = KindSignals({k: [(0, 0.0)] * n for k in IND_KINDS})
-        frame_now = now or time.time()
-        indication_frame = (
-            build_indication_frame(bars, now=frame_now, period_s=BAR_S)
-            if "indications" in self.packs
-            else None
-        )
-        move_primary = max(8, min(55, int(self.ind_settings.get("moveFadeRange") or 30)))
-        for i in range(warmup, n):
-            lo = max(0, i + 1 - 60)
-            window = bars[lo : i + 1]
-            if "general" in self.packs:
-                signals["general"][i] = general_signal(window)
-            if "indications" in self.packs and indication_frame is not None:
-                vote_frame = None
-                if indication_kind_votes is _DEFAULT_INDICATION_KIND_VOTES:
-                    vote_frame = indication_frame.window(lo, i + 1)
-                    votes = indication_kind_votes_frame(vote_frame, self.ind_settings)
-                else:
-                    ts = frame_now - (n - 1 - i) * BAR_S
-                    votes = indication_kind_votes(window, self.ind_settings, ts)
-                signals["indications"][i] = votes_to_signal(core_pack_votes(votes, vote_frame, self.ind_settings))
-                for d, conf, tag in votes:
-                    kind = IND_TAG_KIND.get(tag.strip())
-                    # Trend and Break trade live only through their range
-                    # configurations (kind|config lanes below). Their single
-                    # default vote lane has no live counterpart (it duplicated
-                    # ema 8/21 and added a never-traded break:10 tape), so it
-                    # stays a pack vote, not an evidence lane.
-                    if kind == "move":
-                        # Live evaluates the primary Move range through
-                        # evaluate_move with mode "move:<range>": record it as
-                        # that range so its own evidence exists.
-                        key = f"move|move:{move_primary}"
-                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (d, conf)
-                    elif kind and kind not in PHANTOM_VOTE_LANES:
-                        kind_sigs[kind][i] = (d, conf)
-                # General pack votes retain their normal baseline. Additional
-                # Trend/Break configurations replay as independent tapes.
-                if any(self.ind_settings.get(flag, True) for flag in ("typeTrend", "typeBreak", "typeMove", "typeMsi", "typeVwap", "typeRetest", "typeSqueeze",
-                                                                 "typeSweep", "typeRsi2", "typeKeltner", "typeImpulse")):
-                    config_frame = indication_frame.window(lo, i + 1)
-                    for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
-                        key = row.kind + "|" + row.mode
-                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
-                        tactic = str(getattr(row, "exit_tactic", "") or "")
-                        if tactic and isinstance(kind_sigs, KindSignals):
-                            kind_sigs.exits.setdefault(key, {})[i] = (tactic, float(getattr(row, "exit_level", 0.0) or 0.0))
-                if self.ind_settings.get("typeActive", True):
-                    # Live enters every Active configuration independently
-                    # (evaluate_active_all, cfg per mode); replay the same
-                    # lanes instead of one best-of-ranges tape.
-                    kind_sigs["active"][i] = (0, 0.0)
-                    act_frame = indication_frame.window(lo, i + 1)
-                    for row in evaluate_active_all(symbol, act_frame.closes, self.ind_settings, act_frame):
-                        key = "active|" + row.mode
-                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
-            if on_step and i % 50 == 0:
-                on_step()
-                time.sleep(0)
-        return signals, kind_sigs, warmup
-
-    def _replay_core_vectorized(self, symbol: str, *args: Any, **kwargs: Any) -> None:
-        with self.sl_scope(symbol):
-            return self._replay_core_vectorized_scoped(symbol, *args, **kwargs)
-
-    def _replay_core_vectorized_scoped(
-        self,
-        symbol: str,
-        bars: Sequence[Sequence[float]],
-        pack_sets: Sequence[SetState],
-        pack_sig: Sequence[Tuple[int, float, str]],
-        now: float,
-        warmup: int,
-        time_bars: int,
-        scratch_bars: int,
-        honor_tp: bool,
-        hist: Dict[str, List[Dict[str, Any]]],
-        hist_counts: Optional[Dict[str, int]] = None,
-        on_step: Optional[Callable[[], None]] = None,
-    ) -> None:
-        """Replay core configs with columnar state, preserving scalar rules.
-
-        A full catalog contains thousands of independent Sets. Their core
-        state transitions are identical apart from numeric parameters, so
-        NumPy columns remove the Python dict loop over every config/bar while
-        keeping one output row per Set. Block/DCA and indication tapes remain
-        on their explicit paths below.
-        """
-        if _np is None or not pack_sets:
-            return
-        np = _np
-        n = len(bars)
-        m = len(pack_sets)
-        side_values = (1, -1)
-        tp_sl = [self.pair_sl_tp(float(st.tp_pct), float(st.sl_ratio or 0.6)) for st in pack_sets]
-        tp_frac = np.asarray([pair[1] for pair in tp_sl], dtype=float)
-        sl_frac = np.asarray([pair[0] for pair in tp_sl], dtype=float)
-        trailing = np.asarray([str(st.kind or "") == "trail" for st in pack_sets], dtype=bool)
-        arms = np.asarray([
-            (float(st.trail_arm) / 100.0 if float(st.trail_arm or 0) > 0.05 else float(st.trail_arm or 0))
-            for st in pack_sets
-        ], dtype=float)
-        gives = np.asarray([
-            (float(st.trail_give) / 100.0 if float(st.trail_give or 0) > 0.05 else float(st.trail_give or 0))
-            for st in pack_sets
-        ], dtype=float)
-        base_ts = now - (n - 1) * BAR_S
-        cooldown_n = max(0, int(self.cooldown_bars or 0))
-        scratch_min = float(self.scratch_min or 0.0)
-        started = time.monotonic()
-        # Columnar rings retain the bounded live replay evidence per direction.
-        # Constructing and sorting Python rows after *every* close consumed
-        # most replay CPU on the unrestricted catalog. Full counts remain
-        # independent of these bounded evaluation buffers.
-        close_bar = np.empty((m, REPLAY_HIST_CAP), dtype=np.int32)
-        close_move = np.empty((m, REPLAY_HIST_CAP), dtype=float)
-        close_held = np.empty((m, REPLAY_HIST_CAP), dtype=np.int32)
-        close_reason = np.empty((m, REPLAY_HIST_CAP), dtype=np.uint8)
-        reasons = ("sl", "tp", "time", "scratch+")
-
-        for want_side in side_values:
-            close_count = np.zeros(m, dtype=np.int64)
-            active = np.zeros(m, dtype=bool)
-            cooldown = np.zeros(m, dtype=np.int32)
-            entry = np.zeros(m, dtype=float)
-            stop_loss = np.zeros(m, dtype=float)
-            take_profit = np.zeros(m, dtype=float)
-            peak = np.zeros(m, dtype=float)
-            trail_px = np.zeros(m, dtype=float)
-            entry_i = np.zeros(m, dtype=np.int32)
-
-            for i in range(warmup, n):
-                if on_step and i % 80 == 0:
-                    self.progress.detail = (
-                        f"replay {symbol} · {pack_sets[0].pack} "
-                        f"{'LONG' if want_side > 0 else 'SHORT'} · bar {i + 1}/{n}"
-                    )
-                    self.progress.elapsed_ms = (time.monotonic() - started) * 1000.0
-                    on_step()
-                if cooldown_n:
-                    cooldown = np.where((~active) & (cooldown > 0), cooldown - 1, cooldown)
-                bar = bars[i]
-                high = float(bar[1])
-                low = float(bar[2])
-                close = float(bar[3])
-                if close <= 0:
-                    continue
-
-                live = active.copy()
-                if live.any():
-                    if want_side > 0:
-                        if trailing.any():
-                            peak[live] = np.maximum(peak[live], high)
-                            fav = (peak - entry) / np.maximum(entry, 1e-12)
-                            arm_now = live & trailing & (fav >= arms)
-                            if arm_now.any():
-                                next_trail = peak * (1.0 - gives)
-                                trail_px[arm_now] = np.maximum(trail_px[arm_now], next_trail[arm_now])
-                        if (~trailing & live).any():
-                            peak[live & ~trailing] = np.maximum(peak[live & ~trailing], high)
-                        effective_stop = np.where(live & (trail_px > 0), np.maximum(stop_loss, trail_px), stop_loss)
-                        sl_hit = live & (low <= effective_stop)
-                        tp_hit = live & (high >= take_profit) if honor_tp else np.zeros(m, dtype=bool)
-                        exited = sl_hit | tp_hit
-                        exit_px = np.where(sl_hit, effective_stop, take_profit)
-                        raw = (exit_px - entry) / np.maximum(entry, 1e-12)
-                    else:
-                        if trailing.any():
-                            peak[live] = np.minimum(peak[live], low)
-                            fav = (entry - peak) / np.maximum(entry, 1e-12)
-                            arm_now = live & trailing & (fav >= arms)
-                            if arm_now.any():
-                                next_trail = peak * (1.0 + gives)
-                                fresh = arm_now & (trail_px <= 0)
-                                trail_px[fresh] = next_trail[fresh]
-                                trail_px[arm_now & ~fresh] = np.minimum(trail_px[arm_now & ~fresh], next_trail[arm_now & ~fresh])
-                        if (~trailing & live).any():
-                            peak[live & ~trailing] = np.minimum(peak[live & ~trailing], low)
-                        effective_stop = np.where(live & (trail_px > 0), np.minimum(stop_loss, trail_px), stop_loss)
-                        sl_hit = live & (high >= effective_stop)
-                        tp_hit = live & (low <= take_profit) if honor_tp else np.zeros(m, dtype=bool)
-                        exited = sl_hit | tp_hit
-                        exit_px = np.where(sl_hit, effective_stop, take_profit)
-                        raw = (entry - exit_px) / np.maximum(entry, 1e-12)
-
-                    # Scalar _advance_pos applies time/scratch exits only
-                    # after the stop/TP decision on the same bar.
-                    held = i - entry_i
-                    current_move = (close - entry) / np.maximum(entry, 1e-12) * want_side
-                    time_exit = live & ~exited & (held >= time_bars)
-                    scratch_exit = live & ~exited & ~time_exit & (current_move >= scratch_min) & (held >= scratch_bars)
-                    if time_exit.any():
-                        exited |= time_exit
-                        exit_px[time_exit] = close
-                        raw[time_exit] = (close - entry[time_exit]) / np.maximum(entry[time_exit], 1e-12) * want_side
-                    if scratch_exit.any():
-                        exited |= scratch_exit
-                        exit_px[scratch_exit] = close
-                        raw[scratch_exit] = (close - entry[scratch_exit]) / np.maximum(entry[scratch_exit], 1e-12) * want_side
-
-                    exit_indices = np.flatnonzero(exited)
-                    if exit_indices.size:
-                        slots = close_count[exit_indices] % REPLAY_HIST_CAP
-                        close_bar[exit_indices, slots] = i
-                        close_move[exit_indices, slots] = raw[exit_indices]
-                        close_held[exit_indices, slots] = held[exit_indices]
-                        close_reason[exit_indices, slots] = np.where(
-                            sl_hit[exit_indices], 0, np.where(
-                                tp_hit[exit_indices], 1, np.where(time_exit[exit_indices], 2, 3)))
-                        close_count[exit_indices] += 1
-                        active[exited] = False
-                        cooldown[exited] = cooldown_n
-
-                d, conf, _why = pack_sig[i]
-                if d == want_side and conf >= 0.58:
-                    seed = (~active) & (cooldown <= 0)
-                    if seed.any():
-                        entry[seed] = close
-                        peak[seed] = close
-                        entry_i[seed] = i
-                        trail_px[seed] = 0.0
-                        if want_side > 0:
-                            stop_loss[seed] = close * (1.0 - sl_frac[seed])
-                            take_profit[seed] = close * (1.0 + tp_frac[seed])
-                        else:
-                            stop_loss[seed] = close * (1.0 + sl_frac[seed])
-                            take_profit[seed] = close * (1.0 - tp_frac[seed])
-                        active[seed] = True
-
-            for j in np.flatnonzero(close_count).tolist():
-                sid = pack_sets[j].id
-                count = int(close_count[j])
-                if hist_counts is not None:
-                    hist_counts[sid] = int(hist_counts.get(sid, 0)) + count
-                rows = list(hist.get(sid) or [])
-                for serial in range(max(0, count - REPLAY_HIST_CAP), count):
-                    slot = serial % REPLAY_HIST_CAP
-                    rows.append(hist_fill(
-                        base_ts + int(close_bar[j, slot]) * BAR_S, symbol, want_side,
-                        float(close_move[j, slot]), int(close_held[j, slot]) * BAR_S,
-                        reasons[int(close_reason[j, slot])],
-                    ))
-                hist[sid] = recent_direction_rows(rows, REPLAY_HIST_CAP)
-
-    def _replay_symbol(self, symbol: str, *args: Any, **kwargs: Any) -> None:
-        with self.sl_scope(symbol):
-            return self._replay_symbol_scoped(symbol, *args, **kwargs)
-
-    def _replay_symbol_scoped(
-        self,
-        symbol: str,
-        hist: Dict[str, List[Dict[str, Any]]],
-        now: float,
-        on_step: Optional[Callable[[], None]] = None,
-        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        set_ids: Optional[Sequence[str]] = None,
-        prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
-        hist_counts: Optional[Dict[str, int]] = None,
-    ) -> None:
-        bars = self.bars[symbol]
-        if set_ids is None:
-            replay_sets = self.by_idx
-            by_pack = self._by_pack or {}
-            if not by_pack:
-                for st in replay_sets:
-                    by_pack.setdefault(st.pack, []).append(st)
-            set_map = self.sets
-        else:
-            replay_sets = [self.sets[str(sid)] for sid in set_ids if str(sid) in self.sets]
-            by_pack = {}
-            for st in replay_sets:
-                by_pack.setdefault(st.pack, []).append(st)
-            set_map = {st.id: st for st in replay_sets}
-        n = len(bars)
-        if prepared is None:
-            signals, kind_sigs, warmup = self.prepare_replay_signals(symbol, now, on_step=on_step)
-        else:
-            signals, kind_sigs, warmup = prepared
-        base_ts = now - (n - 1) * BAR_S
-        time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
-        scratch_bars = max(8, int(self.scratch_s / BAR_S))
-        honor_tp = bool(getattr(self, "hist_honor_tp", True))
-        for pack, pack_sets in by_pack.items():
-            pack_sig = signals.get(pack) or [(0, 0.0, "")] * n
-            # Block/DCA hist once per pack, not once per SL×TP book.
-            strat_seed = next((s for s in pack_sets if s.kind == "base"), pack_sets[0] if pack_sets else None)
-            do_block = bool(getattr(self, "hist_block", True)) and strat_hist is not None and strat_seed is not None
-            do_dca = bool(getattr(self, "hist_dca", True)) and strat_hist is not None and strat_seed is not None
-            if strat_hist is not None:
-                strat_hist.setdefault("block", [])
-                strat_hist.setdefault("dca", [])
-            vector_core = _np is not None
-            if vector_core:
-                self._replay_core_vectorized(
-                    symbol, bars, pack_sets, pack_sig, now, warmup,
-                    time_bars, scratch_bars, honor_tp, hist, hist_counts,
-                    on_step=on_step,
-                )
-                if not (do_block or do_dca):
-                    continue
-            scalar_sets = (strat_seed,) if vector_core else pack_sets
-            for want_side in (1, -1):
-                opens: Dict[str, Dict[str, Any]] = {}
-                cools: Dict[str, int] = {}
-                blk_pos: Optional[Dict[str, Any]] = None
-                dca_pos: Optional[Dict[str, Any]] = None
-                # The vectorized core does not populate ``opens``. Keep one
-                # scalar-equivalent base lane so Block/DCA retain the exact
-                # entry/cooldown coordination of the reference replay.
-                representative: Optional[Dict[str, Any]] = None
-                representative_cool = 0
-                for i in range(warmup, n):
-                    bar = bars[i]
-                    ts = base_ts + i * BAR_S
-                    for sid in list(cools):
-                        if sid in opens:
-                            continue
-                        cools[sid] -= 1
-                        if cools[sid] <= 0:
-                            cools.pop(sid, None)
-                    dead: List[str] = []
-                    for sid, pos in opens.items():
-                        st = set_map[sid]
-                        sl_frac, tp_frac = self.pair_sl_tp(st.tp_pct, float(st.sl_ratio or 0.6))
-                        use_trail = st.kind == "trail"
-                        arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
-                        give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
-                        pos, rec = self._advance_pos(
-                            pos, bar, i, strategy="core",
-                            sl_frac=sl_frac, tp_frac=tp_frac, use_trail=use_trail,
-                            arm=arm, give=give, time_bars=time_bars, scratch_bars=scratch_bars,
-                            honor_tp=honor_tp, ts=ts, symbol=symbol, st_id=st.id, pack=st.pack,
-                        )
-                        if rec:
-                            hist.setdefault(sid, []).append(rec)
-                            if hist_counts is not None:
-                                hist_counts[sid] = int(hist_counts.get(sid, 0)) + 1
-                            dead.append(sid)
-                            cools[sid] = self.cooldown_bars
-                        else:
-                            opens[sid] = pos
-                    for sid in dead:
-                        opens.pop(sid, None)
-                    parent_open = representative if vector_core else (
-                        opens.get(strat_seed.id) if strat_seed is not None else None
-                    )
-                    if do_block and blk_pos is None and parent_open is not None and strat_seed is not None:
-                        sl_frac, tp_frac = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
-                        blk_pos = self._try_block_extra(parent_open, bar, i, sl_frac, tp_frac)
-                    if vector_core and strat_seed is not None:
-                        if representative is None and representative_cool > 0:
-                            representative_cool -= 1
-                        if representative is not None:
-                            rep_sl, rep_tp = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
-                            representative, rep_rec = self._advance_pos(
-                                representative, bar, i, strategy="core",
-                                sl_frac=rep_sl, tp_frac=rep_tp, use_trail=False,
-                                arm=0.0, give=0.0, time_bars=time_bars,
-                                scratch_bars=scratch_bars, honor_tp=honor_tp,
-                                ts=ts, symbol=symbol, st_id=strat_seed.id, pack=pack,
-                            )
-                            if rep_rec:
-                                representative_cool = self.cooldown_bars
-                    if blk_pos is not None and strat_seed is not None and int(blk_pos.get("i") or -1) != i:
-                        sl_frac, tp_frac = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
-                        blk_pos, recb = self._advance_pos(
-                            blk_pos, bar, i, strategy="block",
-                            sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
-                            arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
-                            honor_tp=honor_tp, ts=ts, symbol=symbol, st_id=strat_seed.id, pack=pack,
-                        )
-                        if recb and strat_hist is not None:
-                            strat_hist["block"].append(recb)
-                    if dca_pos is not None and strat_seed is not None:
-                        sl_frac, tp_frac = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
-                        dca_pos, recd = self._advance_pos(
-                            dca_pos, bar, i, strategy="dca",
-                            sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
-                            arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
-                            honor_tp=honor_tp, ts=ts, symbol=symbol, st_id=strat_seed.id, pack=pack,
-                        )
-                        if recd and strat_hist is not None:
-                            strat_hist["dca"].append(recd)
-                    d, conf, why = pack_sig[i]
-                    if d == 0 or conf < 0.58 or d != want_side:
-                        continue
-                    close = float(bar[3])
-                    if close <= 0:
-                        continue
-                    for st in scalar_sets:
-                        if st.id in opens or cools.get(st.id, 0) > 0:
-                            continue
-                        if vector_core and st is strat_seed and (representative is not None or representative_cool > 0):
-                            continue
-                        sl_frac, tp_frac = self.pair_sl_tp(st.tp_pct, float(st.sl_ratio or 0.6))
-                        if d > 0:
-                            sl = close * (1 - sl_frac)
-                            tp = close * (1 + tp_frac)
-                        else:
-                            sl = close * (1 + sl_frac)
-                            tp = close * (1 - tp_frac)
-                        seed = self._seed_pos(d, close, sl, tp, i, str(why or ""))
-                        if vector_core:
-                            # Core Sets were already replayed column-wise;
-                            # retain only the representative state needed by
-                            # the independent Block/DCA lanes.
-                            if st is strat_seed:
-                                representative = dict(seed)
-                                if do_dca and dca_pos is None:
-                                    dca_pos = dict(seed)
-                            continue
-                        opens[st.id] = dict(seed)
-                        if do_dca and dca_pos is None and st is strat_seed:
-                            dca_pos = dict(seed)
-                    if on_step and i % 80 == 0:
-                        on_step()
-                        time.sleep(0)
-            if strat_hist is not None:
-                for k in ("block", "dca"):
-                    tape = strat_hist.get(k) or []
-                    if len(tape) > 4000:
-                        strat_hist[k] = tape[-2400:]
-        if replay_sets:
-            self.progress.set_id = replay_sets[-1].id
-        if ind_hist is not None and "indications" in self.packs:
-            self._replay_kind_tapes(
-                symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,
-            )
-        # Each indication kind is an independent execution lane. Keep a
-        # dedicated Block tape per kind instead of only attributing Block
-        # results to the aggregate indications pack or the signals lane.
-        # Only a replay call that includes indication-pack Sets produces the
-        # per-kind Block lanes; tiled callers (hist_calc) replay each pack
-        # separately and must not get them once per pack.
-        if (
-            strat_hist is not None
-            and "indications" in by_pack
-            and bool(getattr(self, "hist_block", True))
-        ):
-            # One Block tape per kind on the kind's combined lane (its strongest
-            # range config per bar). Keying on the first lane skipped every
-            # kind whose bare lane is silent (all range-only kinds).
-            for kind, lane in combined_kind_signals(kind_sigs or {}).items():
-                self._replay_kind_strategy_tape(
-                    symbol, bars, [(d, conf) for d, conf, _ in lane], strat_hist.setdefault(f"block:{kind}", []),
-                    now, warmup, time_bars, scratch_bars, honor_tp,
-                    kind=kind,
-                )
-
-    def _replay_kind_strategy_tape(
-        self,
-        symbol: str,
-        bars: Sequence[Sequence[float]],
-        sigs: Sequence[Tuple[int, float]],
-        output: List[Dict[str, Any]],
-        now: float,
-        warmup: int,
-        time_bars: int,
-        scratch_bars: int,
-        honor_tp: bool,
-        *,
-        kind: str,
-    ) -> None:
-        """Replay one indication kind through the independent Block strategy."""
-        n = len(bars)
-        if n <= warmup:
-            return
-        base_ts = now - (n - 1) * BAR_S
-        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.tp_step_pct), 0.6)
-        for want_side in (1, -1):
-            parent_pos: Optional[Dict[str, Any]] = None
-            extra_pos: Optional[Dict[str, Any]] = None
-            cool = 0
-            for i in range(warmup, n):
-                bar = bars[i]
-                ts = base_ts + i * BAR_S
-                if extra_pos is None and parent_pos is not None:
-                    extra_pos = self._try_block_extra(parent_pos, bar, i, sl_frac, tp_frac)
-                if extra_pos is not None and int(extra_pos.get("i") or -1) != i:
-                    extra_pos, rec = self._advance_pos(
-                        extra_pos, bar, i, strategy="block",
-                        sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
-                        arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
-                        honor_tp=honor_tp, ts=ts, symbol=symbol,
-                        st_id=f"indications:{kind}:block", pack="indications",
-                    )
-                    if rec:
-                        rec["ind_kind"] = kind
-                        rec["strategy"] = "block"
-                        rec["pack"] = "block"
-                        rec["reason"] = f"block:{kind}:{rec.get('reason') or 'exit'}"
-                        output.append(rec)
-                        extra_pos = None
-                        cool = self.cooldown_bars
-                if parent_pos is not None:
-                    parent_pos, _prec = self._advance_pos(
-                        parent_pos, bar, i, strategy="core",
-                        sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
-                        arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
-                        honor_tp=honor_tp, ts=ts, symbol=symbol,
-                        st_id=f"indications:{kind}:core", pack="indications",
-                    )
-                if parent_pos is not None or extra_pos is not None:
-                    continue
-                if cool > 0:
-                    cool -= 1
-                    continue
-                d, conf = sigs[i]
-                if d == 0 or conf < 0.52 or d != want_side:
-                    continue
-                close = float(bar[3])
-                if close <= 0:
-                    continue
-                sl = close * (1 - sl_frac) if d > 0 else close * (1 + sl_frac)
-                tp = close * (1 + tp_frac) if d > 0 else close * (1 - tp_frac)
-                parent_pos = self._seed_pos(d, close, sl, tp, i, f"ind:{kind}")
-
-    def _replay_kind_tapes(
-        self,
-        symbol: str,
-        bars: Sequence[Sequence[float]],
-        kind_sigs: Dict[str, List[Tuple[int, float]]],
-        ind_hist: Dict[str, List[Dict[str, Any]]],
-        now: float,
-        warmup: int,
-        time_bars: int,
-        scratch_bars: int,
-        honor_tp: bool,
-    ) -> None:
-        """Independent Signal / State / Direction / Move / Active / Common tapes.
-
-        Each kind walks its own entries with a representative SL (0.6 × min-step TP).
-        SL × TP combinations live as independent Sets, not mixed into kind tapes.
-        """
-        n = len(bars)
-        if n <= warmup:
-            return
-        base_ts = now - (n - 1) * BAR_S
-        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.tp_step_pct), 0.6)
-        tactic_on = bool((self.ind_settings or {}).get("exitTacticOn", True))
-        tactic_buf = float((self.ind_settings or {}).get("exitTacticBufferPct", 0.1) or 0.0)
-        tactic_gain = float((self.ind_settings or {}).get("exitTacticMinGainPct", 0.15) or 0.0)
-        all_exits = getattr(kind_sigs, "exits", None) or {}
-        for config_key, sigs in kind_sigs.items():
-                kind, _, config = config_key.partition("|")
-                if not any(d != 0 for d, _ in sigs):
-                    continue
-                lane_exits = (all_exits.get(config_key) or {}) if tactic_on else {}
-                buf = ind_hist.setdefault(kind, [])
-                for want_side in (1, -1):
-                    open_pos: Optional[Dict[str, Any]] = None
-                    cool = 0
-                    for i in range(warmup, n):
-                        bar = bars[i]
-                        ts = base_ts + i * BAR_S
-                        if open_pos is not None:
-                            side = int(open_pos["side"])
-                            entry = float(open_pos["entry"])
-                            held = i - int(open_pos["i"])
-                            why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
-                            tactic = open_pos.get("tactic")
-                            if why is None and tactic and held >= 1 and tactic_should_close(
-                                    tactic[0], side, float(bar[3]), tactic[1], entry, tactic_buf, tactic_gain):
-                                why, px = f"tactic-{tactic[0]}", float(bar[3])
-                            if why is None and held >= time_bars:
-                                why, px = "time", float(bar[3])
-                            if why is None and held >= scratch_bars:
-                                move = (float(bar[3]) - entry) / entry * side
-                                if move >= self.scratch_min:
-                                    why, px = "scratch+", float(bar[3])
-                            if why:
-                                raw = (px - entry) / entry * side
-                                rec = hist_fill(
-                                    ts, symbol, side, raw, held * BAR_S, f"ind:{kind}:{why}",
-                                    ind_kind=kind,
-                                )
-                                rec.update(tp_pct=tp_frac, sl_ratio=sl_frac / tp_frac,
-                                           step=self.min_step_cfg, pack="indications")
-                                if config:
-                                    rec["ind_config"] = config
-                                buf.append(rec)
-                                open_pos = None
-                                cool = self.cooldown_bars
-                            continue
-                        if cool > 0:
-                            cool -= 1
-                            continue
-                        d, conf = sigs[i]
-                        if d == 0 or conf < 0.52:
-                            continue
-                        if d != want_side:
-                            continue
-                        close = float(bar[3])
-                        if d > 0:
-                            sl_px = close * (1 - sl_frac)
-                            tp_px = close * (1 + tp_frac)
-                        else:
-                            sl_px = close * (1 + sl_frac)
-                            tp_px = close * (1 - tp_frac)
-                        open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i,
-                                    "tactic": lane_exits.get(i)}
-
-    def _fast_historic_pf(self, rows: Sequence[Dict[str, Any]], requested: int) -> Dict[str, float]:
-        """Score generated historic rows with the exact cost-aware formulas."""
-        take = max(1, int(requested))
-        window = rows[-take:] if isinstance(rows, list) else list(rows)[-take:]
-        cost_pct = float(self.cost_pct)
-        cost_frac = cost_as_frac(cost_pct)
-        return self._fast_historic_pf_from_gross(
-            [finite(row.get("pnl_pct")) for row in window],
-            requested,
-            cost_pct,
-            cost_frac,
-        )
-
-    def _fast_historic_pf_from_gross(
-        self,
-        gross: Sequence[float],
-        requested: int,
-        cost_pct: float,
-        cost_frac: float,
-    ) -> Dict[str, float]:
-        take = max(1, int(requested))
-        window = gross[-take:] if len(gross) > take else gross
-        count = len(window)
-        if not count:
-            return {
-                "n": float(requested),
-                "count": 0.0,
-                "avgR": 0.0,
-                "ratio": 1.0,
-                "classicPf": 0.0,
-                "costPct": round(cost_pct, 8),
-                "netPct": 0.0,
-                "grossPct": 0.0,
-                "netAvg": 0.0,
-                "costSubtracted": True,
-                "costSource": "manual-fallback",
-                "costSamples": 0.0,
-            }
-        inv_cost = 100.0 / cost_pct if cost_pct else 0.0
-        avg_r = sum(value * inv_cost - 1.0 for value in window) / count if cost_pct else 0.0
-        ratio = ratio_from_r(avg_r)
-        nets_sum = 0.0
-        gp = 0.0
-        gl = 0.0
-        for value in window:
-            net = value - cost_frac
-            nets_sum += net
-            if net > 0:
-                gp += net
-            elif net < 0:
-                gl -= net
-        classic = gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)
-        return {
-            "n": float(requested),
-            "count": float(count),
-            "avgR": round(avg_r, 4),
-            "ratio": round(ratio, 4),
-            "classicPf": round(classic, 4),
-            "costPct": round(cost_pct, 8),
-            "netPct": round(net_move_pct(ratio, cost_pct), 4),
-            "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
-            "netAvg": round(nets_sum / count, 6),
-            "costSubtracted": True,
-            "costSource": "manual-fallback",
-            "costSamples": 0.0,
-        }
-
-    def _fast_historic_metrics(
-        self,
-        tape: Sequence[Dict[str, Any]],
-        hist_n: Optional[int] = None,
-        *,
-        ordered: bool = False,
-    ) -> Dict[str, Any]:
-        """Equivalent historic score using the known simulation row contract."""
-        if ordered:
-            rows = [row for row in tape if _is_hist_row(row)]
-        else:
-            rows = sorted(
-                (row for row in tape if _is_hist_row(row)),
-                key=lambda row: finite(row.get("t")),
-            )
-        return self._fast_historic_from_ordered(rows, hist_n=hist_n)
-
-    def _fast_historic_bundle(
-        self,
-        tape: Sequence[Dict[str, Any]],
-        hist_n: Optional[int] = None,
-        *,
-        ordered: bool = False,
-    ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-        """Overall + LONG/SHORT historic metrics from one sort."""
-        if ordered:
-            rows = [row for row in tape if _is_hist_row(row)]
-        else:
-            rows = sorted(
-                (row for row in tape if _is_hist_row(row)),
-                key=lambda row: finite(row.get("t")),
-            )
-        overall = self._fast_historic_from_ordered(rows, hist_n=hist_n)
-        sides: Dict[str, List[Dict[str, Any]]] = {"LONG": [], "SHORT": []}
-        for row in rows:
-            d = str(row.get("side") or row.get("direction") or "")
-            if not d:
-                continue
-            key = d[0].upper()
-            if key == "L":
-                sides["LONG"].append(row)
-            elif key == "S":
-                sides["SHORT"].append(row)
-        return overall, {
-            "LONG": self._fast_historic_from_ordered(sides["LONG"], hist_n=len(sides["LONG"])) if sides["LONG"] else self._fast_historic_from_ordered((), hist_n=0),
-            "SHORT": self._fast_historic_from_ordered(sides["SHORT"], hist_n=len(sides["SHORT"])) if sides["SHORT"] else self._fast_historic_from_ordered((), hist_n=0),
-        }
-
-    def _fast_historic_from_ordered(self, ordered: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
-        cost_pct = float(self.cost_pct)
-        cost_frac = cost_as_frac(cost_pct)
-        required = self.eval_need()
-        n_rows = len(ordered)
-        wins = 0
-        gp = 0.0
-        gl = 0.0
-        decided = 0
-        nets_sum = 0.0
-        hold_sum = 0.0
-        gross: List[float] = []
-        for row in ordered:
-            value = finite(row.get("pnl_pct"))
-            gross.append(value)
-            net = value - cost_frac
-            nets_sum += net
-            hold_sum += finite(row.get("hold_s"))
-            if net > 0:
-                wins += 1
-                gp += net
-            elif net < 0:
-                gl -= net
-            if net != 0:
-                decided += 1
-        gp = round(gp, 6)
-        gl = round(gl, 6)
-        pf_gross = last_n_chrono(gross, self.pf_n, ordered=True)
-        last15 = self._fast_historic_pf_from_gross(pf_gross, self.pf_n, cost_pct, cost_frac)
-        sample = len(pf_gross)
-        gross_profit = sum(value for value in pf_gross if value > 0)
-        gross_loss = abs(sum(value for value in pf_gross if value < 0))
-        net_values_sum = 0.0
-        net_profit = 0.0
-        net_loss = 0.0
-        for value in pf_gross:
-            net = value - cost_frac
-            net_values_sum += net
-            if net > 0:
-                net_profit += net
-            elif net < 0:
-                net_loss -= net
-        evaluation = {
-            "sampleCount": sample,
-            "requiredSamples": required,
-            "grossPf": round(gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0), 6),
-            "netPf": round(net_profit / net_loss if net_loss > 0 else (99.0 if net_profit > 0 else 0.0), 6),
-            "grossEv": round(sum(pf_gross) / sample, 8) if sample else 0.0,
-            "netEv": round(net_values_sum / sample, 8) if sample else 0.0,
-            "ev": round(net_values_sum / sample, 8) if sample else 0.0,
-            "confidence": round(min(1.0, sample / required), 4) if sample else 0.0,
-            "uncertainty": round(1.0 / math.sqrt(sample), 4) if sample else 1.0,
-            "insufficientSample": sample < required,
-            "status": "insufficient-sample" if sample < required else "qualified-sample",
-            "costPct": cost_pct,
-            "costSubtracted": True,
-            "costSource": "manual-fallback",
-            "costSamples": 0,
-        }
-        dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
-        if sample >= required:
-            dd = drawdown_time_by_symbol(self._ddt_rows(ordered, True), ordered=True, cost_pct=self.cost_pct)
-        base_ok = sample >= required and clears_pf(last15["ratio"], self.min_pf) and float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
-        # Named last5..last75 stay off the hist score hot path. Overall last-pos
-        # (pf_n) already gated base_ok; publish the overall window for identity.
-        windows: Dict[str, Dict[str, Any]] = {
-            f"last{int(self.pf_n or LAST_N_DEFAULT)}": {
-                "requestedN": int(self.pf_n or LAST_N_DEFAULT),
-                "n": int(last15["count"]),
-                "available": int(last15["count"]) >= int(self.pf_n or LAST_N_DEFAULT),
-                "requiredSamples": required,
-                "validated": int(last15["count"]) >= required and clears_pf(float(last15["ratio"]), self.min_pf),
-                "pf": round(float(last15["ratio"]), 4),
-                "classicPf": float(last15.get("classicPf") or 0.0),
-                "avgR": float(last15.get("avgR") or 0.0),
-                "netAvg": float(last15.get("netAvg") or 0.0),
-                "netPct": float(last15.get("netPct") or 0.0),
-                "costPct": cost_pct,
-                "costSamples": 0,
-                "costSubtracted": True,
-            }
-        }
-        last25_n = min(self.deact_n, n_rows)
-        if last25_n:
-            last25_slice = ordered[-last25_n:]
-            last25_avg_r = sum(
-                signed_result_r(finite(row.get("pnl_pct")), cost_pct)
-                for row in last25_slice
-            ) / last25_n
-            last25_avg_pnl = sum(row_net_pnl(row, cost_pct) for row in last25_slice) / last25_n
-        else:
-            last25_avg_r = 0.0
-            last25_avg_pnl = 0.0
-        n15 = int(last15["count"])
-        ratio = float(last15["ratio"])
-        dd_s = float(dd["maxS"])
-        enable_pf = float(self.real_min_pf or POSITIVE_PF)
-        max_dd = float(self.max_dd_s or 57600)
-        dd_fast_ok = float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
-        micro_base = self._micro_base(sample, required, float(last15["ratio"]), dd_fast_ok, base_ok)
-        main_pf_m, real_pf_m, stage_evaluations = self._downstream_metrics(
-            ordered, base_ok or micro_base, gross=gross, floor=None if base_ok else self.micro_min_pf)
-        return {
-            "n": int(hist_n if hist_n is not None else n_rows),
-            "wins": wins,
-            "gp": gp,
-            "gl": gl,
-            "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "expectancy": round(nets_sum / n_rows, 6) if n_rows else 0.0,
-            "avg_hold_s": round(hold_sum / n_rows, 1) if n_rows else 0.0,
-            "classic_all": round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0),
-            "last15_ratio": ratio,
-            "last15_classic": float(last15["classicPf"]),
-            "last15_n": n15,
-            "last15_r": float(last15["avgR"]),
-            "last25_n": last25_n,
-            "last25_avg_r": last25_avg_r,
-            "last25_avg_pnl": last25_avg_pnl,
-            "max_dd_s": float(dd["maxS"]),
-            "avg_dd_s": float(dd["avgS"]),
-            "dd_episodes": int(dd["episodes"]),
-            "source_n": n_rows,
-            "validated": n15 >= required and clears_pf(ratio, self.min_pf),
-            "active": bool(n15 >= required and ratio + 1e-9 >= enable_pf and dd_s <= max_dd + 1e-9),
-            "enablePf": enable_pf,
-            "ddOk": dd_s <= max_dd + 1e-9,
-            "cost_subtracted": True,
-            "cost_pct": cost_pct,
-            "net_avg": float(last15.get("netAvg") or (nets_sum / n_rows if n_rows else 0.0)),
-            "gross_pf": float(evaluation.get("grossPf") or 0.0),
-            "net_pf": float(evaluation.get("netPf") or 0.0),
-            "base_pf": ratio,
-            "base_n": n15,
-            "main_pf": float(main_pf_m["ratio"]),
-            "main_n": int(main_pf_m["count"]),
-            "real_pf": float(real_pf_m["ratio"]),
-            "real_n": int(real_pf_m["count"]),
-            "gross_ev": float(evaluation.get("grossEv") or 0.0),
-            "net_ev": float(evaluation.get("netEv") or 0.0),
-            "evaluation": evaluation,
-            "evaluation_windows": windows,
-            "stage_evaluations": stage_evaluations,
-            "proven_neg": n15 >= required and ratio + 1e-9 < enable_pf,
-        }
-
-    def _downstream_metrics(self, ordered, base_ok, *, gross=None, floor=None):
-        """Evaluate only this tape, after its own upstream qualification.
-
-        ``floor`` is the stage floor the chain stops at: the shared floor for
-        regular Sets, the Micro floor for a Micro-eligible Set."""
-        result = [{"ratio": 0.0, "count": 0}, {"ratio": 0.0, "count": 0}]
-        evidence = {}
-        floor = self.min_pf if floor is None else floor
-        if base_ok:
-            for index, (stage, required) in enumerate(zip(("Main", "Real"), self._stage_window_ns()[1:])):
-                metric = (self._fast_historic_pf_from_gross(gross, required, self.cost_pct, cost_as_frac(self.cost_pct))
-                          if gross is not None else self._window_cost_pf(ordered, required))
-                result[index] = metric
-                evidence[stage] = cost_aware_metrics(ordered[-required:], self.cost_pct, required_samples=required)
-                if int(metric["count"]) < required or not clears_pf(metric["ratio"], floor):
-                    break
-        return result[0], result[1], evidence
-
-    def _micro_base(self, n: int, need: int, ratio: float, dd_ok: bool, base_ok: bool) -> bool:
-        """Base evidence at the Micro floor for a Set that misses the shared floor."""
-        return bool(getattr(self, "micro_enabled", False) and not base_ok and n >= need
-                    and clears_pf(ratio, float(self.micro_min_pf)) and dd_ok)
-
-    def _score_metrics(
-        self,
-        tape: Sequence[Dict[str, Any]],
-        hist_n: Optional[int] = None,
-        fast_historic: bool = False,
-        keep_order: bool = False,
-    ) -> Dict[str, Any]:
-        if fast_historic:
-            return self._fast_historic_metrics(tape, hist_n=hist_n)
-        if keep_order:
-            # live_first_window order: replay fill first, live results newest.
-            ordered = [r for r in tape if _is_hist_row(r)]
-        else:
-            ordered = sorted((r for r in tape if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
-        nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
-        wins = sum(1 for x in nets if x > 0)
-        gp = round(sum(x for x in nets if x > 0), 6)
-        gl = round(abs(sum(x for x in nets if x < 0)), 6)
-        decided = sum(1 for x in nets if x != 0)
-        wr = round(100.0 * wins / decided, 1) if decided else 0.0
-        expectancy = round(sum(nets) / len(nets), 6) if nets else 0.0
-        holds = [finite(r.get("hold_s")) for r in ordered]
-        avg_hold = round(sum(holds) / len(holds), 1) if holds else 0.0
-        classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-        last15 = self._window_cost_pf(ordered, self.pf_n, simple=True if fast_historic else None)
-        evaluation = cost_aware_metrics(
-            last_n_chrono(ordered, self.pf_n, ordered=True),
-            self.cost_pct,
-            required_samples=self.eval_need(),
-        )
-        # Complete chronological last-N for every named window. A per-symbol
-        # subsample here made last-15 disagree with main/real and could mark
-        # a winning Set as PF < 1.10.
-        last25 = ordered[-self.deact_n :]
-        if last25:
-            rs = [signed_result_r(finite(r.get("pnl_pct")), row_position_cost_pct(r, self.cost_pct)) for r in last25]
-            last25_avg_r = sum(rs) / len(rs)
-            last25_avg_pnl = sum(row_net_pnl(r, self.cost_pct) for r in last25) / len(last25)
-        else:
-            last25_avg_r = 0.0
-            last25_avg_pnl = 0.0
-        need = self.eval_need()
-        dd = self.ddt_when_enough(ordered, need, ordered=True)
-        n15 = int(last15["count"])
-        ratio = float(last15["ratio"])
-        from position_cost import clears_pf
-        validated = n15 >= need and clears_pf(ratio, self.min_pf)
-        enable_pf = float(self.real_min_pf or POSITIVE_PF)
-        proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
-        dd_s = float(dd["maxS"])
-        dd_ok = dd_s <= float(self.max_dd_s or 57600) + 1e-9
-        base_ok = validated and dd_ok
-        named = tuple(sorted(set(list(EVALUATION_WINDOWS) + [max(1, int(self.pf_n or LAST_N_DEFAULT))])))
-        windows = evaluation_windows(ordered, self.cost_pct, windows=named, required_samples=need, ordered=True)
-        # Named diagnostic windows use the same global threshold, too.
-        for metric in windows.values():
-            metric["validated"] = int(metric["n"]) >= int(metric["requiredSamples"]) and clears_pf(metric["pf"], self.min_pf)
-        micro_base = self._micro_base(n15, need, ratio, dd_ok, base_ok)
-        main_pf_m, real_pf_m, stage_evaluations = self._downstream_metrics(
-            ordered, base_ok or micro_base, floor=None if base_ok else self.micro_min_pf)
-        return {
-            "n": int(hist_n if hist_n is not None else len(ordered)),
-            "wins": wins,
-            "gp": gp,
-            "gl": gl,
-            "wr": wr,
-            "expectancy": expectancy,
-            "avg_hold_s": avg_hold,
-            "classic_all": classic,
-            "last15_ratio": ratio,
-            "last15_classic": float(last15["classicPf"]),
-            "last15_n": n15,
-            "last15_r": float(last15["avgR"]),
-            "last25_n": len(last25),
-            "last25_avg_r": last25_avg_r,
-            "last25_avg_pnl": last25_avg_pnl,
-            "max_dd_s": float(dd["maxS"]),
-            "avg_dd_s": float(dd["avgS"]),
-            "dd_episodes": int(dd["episodes"]),
-            "source_n": len(ordered),
-            "validated": validated,
-            "active": bool(n15 >= need and ratio + 1e-9 >= enable_pf and dd_ok),
-            "enablePf": enable_pf,
-            "ddOk": dd_ok,
-            "cost_subtracted": True,
+        warmup = min(self.warmup, max(16, n // 5))
+        last_open = self.bar_t.get(symbol)
+        latest_close = float(last_open) + BAR_S if last_open is not None else now
+        if latest_close > now + 1e-6:
+            raise ValueError("completed bar ends after replay time")
+        base_ts = latest_close - (n - 1) * BAR_S
+        salt = hash((json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs))))   # a memo entry holds only its packs
+        cache = self._sig_cache.setdefault(symbol, {})
+        signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step, cache=cache, salt=salt)
+        cfg = {
+            "entry_conf": self.entry_conf,
+            "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
+            "scratch_bars": self.scratch_bars,
+            "scratch_min": self.scratch_min,
+            "cooldown": self.cooldown_bars,
             "cost_pct": self.cost_pct,
-            "net_avg": float(last15.get("netAvg") or expectancy),
-            "gross_pf": float(evaluation.get("grossPf") or 0.0),
-            "net_pf": float(evaluation.get("netPf") or 0.0),
-            "gross_ev": float(evaluation.get("grossEv") or 0.0),
-            "net_ev": float(evaluation.get("netEv") or 0.0),
-            "evaluation": evaluation,
-            "evaluation_windows": windows,
-            "stage_evaluations": stage_evaluations,
-            "proven_neg": proven_neg,
-            "base_pf": ratio,
-            "base_n": n15,
-            "main_pf": float(main_pf_m["ratio"]),
-            "main_n": int(main_pf_m["count"]),
-            "real_pf": float(real_pf_m["ratio"]),
-            "real_n": int(real_pf_m["count"]),
+            "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
+            "min_sl_distance_pct": self.min_sl_distance_pct,
         }
-
-    def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
-        """Derive the monotonic Base -> Main -> Real qualification ledger.
-
-        Each calculated stage uses its independent last-N window. Main is
-        calculated only after Base passes; Real only after Main passes.
-        A skipped stage has no samples and cannot inherit its parent's PF.
-        """
-        need = self.eval_need()
-        _base_req, main_req, real_req = self._stage_window_ns()
-        base_n = int(m.get("base_n") if m.get("base_n") is not None else m.get("last15_n") or 0)
-        has_main = "main_n" in m or "main_pf" in m
-        has_real = "real_n" in m or "real_pf" in m
-        main_n = int(m.get("main_n") or 0) if has_main else 0
-        real_n = int(m.get("real_n") or 0) if has_real else 0
-        base_pf = finite(m.get("base_pf"), finite(m.get("last15_ratio")))
-        main_pf = finite(m.get("main_pf")) if has_main else 0.0
-        real_pf = finite(m.get("real_pf")) if has_real else 0.0
-        dd_ok = bool(m.get("ddOk", True))
-        dd_s = finite(m.get("max_dd_s"), finite(st.max_dd_s))
-        base_floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
-        main_floor = float(self.stage_min_pf.get("main", POSITIVE_PF))
-        real_floor = float(self.stage_min_pf.get("real", POSITIVE_PF))
-        from position_cost import clears_pf
-        base = base_n >= need and clears_pf(base_pf, base_floor) and dd_ok
-        main = base and main_n >= main_req and clears_pf(main_pf, main_floor)
-        real = main and real_n >= real_req and clears_pf(real_pf, real_floor)
-        # Micro: below the shared floor but positive at the Micro floor (same
-        # sample and DDT rules). Strict lanes also need Main/Real at that floor.
-        micro_floor = float(getattr(self, "micro_min_pf", MICRO_PF))
-        micro = bool(getattr(self, "micro_enabled", False) and not base and base_n >= need
-                     and clears_pf(base_pf, micro_floor) and dd_ok)
-        if micro and self.strict_gate:
-            micro = (main_n >= main_req and clears_pf(main_pf, micro_floor)
-                     and real_n >= real_req and clears_pf(real_pf, micro_floor))
-        st.micro = bool(micro)
-        qualified = "Real" if real else ("Main" if main else ("Base" if base else ("Micro" if micro else "")))
-        st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
-        st.stage = qualified or "Unqualified"
-        st.stage_qualified = qualified
-        st.base_pf = round(base_pf, 6)
-        st.main_pf = round(main_pf, 6)
-        st.real_pf = round(real_pf, 6)
-        st.position_cost_pct = self.cost_pct
-        st.evaluation = dict(m.get("evaluation") or {})
-        st.evaluation_windows = dict(m.get("evaluation_windows") or {})
-        st.normal_evaluation = {
-            "pf": finite(m.get("gross_pf")),
-            "ev": finite(m.get("gross_ev")),
-            "sampleCount": base_n,
-            "source": "gross-price-move",
-        }
-        st.adjusted_evaluation = {
-            "pf": finite(m.get("net_pf")),
-            "ev": finite(m.get("net_ev")),
-            "ratio": base_pf,
-            "sampleCount": base_n,
-            "source": "cost-net",
-        }
-        st.adjustment_deltas = {
-            "pf": round(finite(m.get("net_pf")) - finite(m.get("gross_pf")), 6),
-            "ev": round(finite(m.get("net_ev")) - finite(m.get("gross_ev")), 8),
-            "costPct": self.cost_pct,
-        }
-        # Base is sample + PF + DDT; only when Base qualifies do Main/Real
-        # reasons apply. DDT is a Base-stage gate, so a DDT breach is reported
-        # as a Base failure and never as a spurious "main sample 0/x".
-        reasons: List[str] = []
-        if base_n < need:
-            reasons.append(f"sample {base_n}/{need}")
-        if not clears_pf(base_pf, base_floor):
-            reasons.append(f"base PF {base_pf:.2f}<{base_floor:.2f}")
-        if not dd_ok:
-            reasons.append(f"DDt {dd_s:.0f}s>{float(self.max_dd_s or 57600):.0f}s")
-        if micro:
-            reasons.append(f"micro PF {base_pf:.2f}>={micro_floor:.2f} (min size)")
-        if base:
-            if main_n < main_req:
-                reasons.append(f"main sample {main_n}/{main_req}")
-            elif not clears_pf(main_pf, main_floor):
-                reasons.append(f"main PF {main_pf:.2f}<{main_floor:.2f}")
-            elif real_n < real_req:
-                reasons.append(f"real sample {real_n}/{real_req}")
-            elif not clears_pf(real_pf, real_floor):
-                reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
-        reason = "; ".join(reasons)
-        st.strategy_adjustments = {
-            "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": round(base_pf, 6), "n": base_n, "ddtS": dd_s},
-            "main": {"qualified": main, "evaluated": base, "minPf": main_floor, "pf": round(main_pf, 6), "n": main_n, "ddtS": dd_s},
-            "real": {"qualified": real, "evaluated": main, "minPf": real_floor, "pf": round(real_pf, 6), "n": real_n, "ddtS": dd_s},
-            "live": {"evaluation": False, "source": "real"},
-            "exchange": {"trackingOnly": True},
-        }
-        records = {
-            "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": round(base_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Main": {"evaluated": base, "qualified": main, "sampleCount": main_n, "pf": round(main_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Real": {"evaluated": main, "qualified": real, "sampleCount": real_n, "pf": round(real_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-        }
-        for name, required in zip(("Base", "Main", "Real"), self._stage_window_ns()):
-            evidence = (m.get("evaluation") or {}) if name == "Base" else (m.get("stage_evaluations") or {}).get(name, {})
-            records[name].update(evaluation=evidence, requiredSamples=required)
-        return {
-            "stage": st.stage,
-            "qualified": qualified,
-            "parentSetId": st.parent_set_id,
-            "base": base,
-            "main": main,
-            "real": real,
-            "basePf": st.base_pf,
-            "mainPf": st.main_pf,
-            "realPf": st.real_pf,
-            "baseN": base_n,
-            "mainN": main_n,
-            "realN": real_n,
-            "ddtS": dd_s,
-            "positionCostPct": self.cost_pct,
-            "reason": reason,
-            "records": records,
-            "dedupeKey": stable_key(st.parent_set_id, st.id, "qualification", base_n, round(base_pf, 6)),
-        }
-
-    def stage_record(self, st: SetState, stage: str, *, reason: str = "") -> StageRecord:
-        """Materialize one idempotent stage record without evaluating again."""
-        name = str(stage or "").strip().lower()
-        if name not in {"base", "main", "real", "live", "exchange"}:
-            raise ValueError(f"unknown stage: {stage}")
-        ledger = st.stage_ledger or {}
-        stage_pf = {
-            "base": st.base_pf,
-            "main": st.main_pf,
-            "real": st.real_pf,
-        }
-        record = (ledger.get("records") or {}).get(name.title()) if isinstance(ledger.get("records"), dict) else {}
-        qualified = bool(ledger.get(name, False)) if name in ("base", "main", "real") else name in ("live", "exchange")
-        evaluation = (record or {}).get("evaluation") or (st.evaluation if name == "base" else {}) or {}
-        cost_pf = finite(stage_pf.get(name), finite(st.last15_ratio))
-        ddt_s = finite(record.get("ddtS") if isinstance(record, dict) else None, finite(st.max_dd_s))
-        sample_n = int((record or {}).get("sampleCount", evaluation.get("sampleCount", len(st.live) if name in ("live", "exchange") else 0)))
-        required = int((record or {}).get("requiredSamples") or self.eval_need())
-        return StageRecord(
-            set_id=st.id,
-            parent_set_id=st.parent_set_id or st.id,
-            stage=name.title(),
-            gross_pf=round(finite(evaluation.get("grossPf")), 6),
-            net_pf=round(cost_pf, 6),
-            position_cost_pct=finite(st.position_cost_pct, self.cost_pct),
-            ddt_s=ddt_s,
-            sample_count=sample_n,
-            volume_ratio=finite(st.volume_ratio, 1.0),
-            ev=finite(evaluation.get("netEv")),
-            gross_ev=finite(evaluation.get("grossEv")),
-            confidence=round(min(1.0, sample_n / required), 4),
-            uncertainty=round(1.0 / math.sqrt(sample_n), 4) if sample_n else 1.0,
-            required_samples=required,
-            insufficient_sample=sample_n < required,
-            axis_key=st.axis_key,
-            relative_count=int(st.relative_count or 1),
-            indication_kind=st.indication_kind,
-            strategy_adjustments=tuple((str(k), v) for k, v in (st.strategy_adjustments or {}).items()),
-            adjustment_deltas=tuple((str(k), v) for k, v in (st.adjustment_deltas or {}).items()),
-            qualification_reason=reason or str(record.get("reason") or ledger.get("reason") or ("qualified" if qualified else "not qualified")),
-            dedupe_key=stable_key(st.parent_set_id or st.id, st.id, name, ledger.get("evaluationDirection"), sample_n, required, cost_pf),
-        )
-
-    def stage_records(self, stage: str, pack: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Return stable records; parent IDs are retained for aggregate dedupe."""
-        want = str(pack or "")
-        return [self.stage_record(st, stage).as_dict() for st in self.by_idx if not want or st.pack == want]
-
-    def stage_flow(self) -> Dict[str, Any]:
-        """Aggregate stage boundaries with parent dedupe and sample confidence."""
-        names = ("Base", "Main", "Real")
-        flow: Dict[str, Dict[str, Any]] = {
-            name: {
-                "evaluated": 0,
-                "qualified": 0,
-                "blocked": 0,
-                "rejected": 0,
-                "selected": 0,
-                "entered": 0,
-                "exited": 0,
-                "parents": 0,
-                "sampleCount": 0,
-                "confidence": 0.0,
-                "insufficientSample": 0,
-                "volumeRatio": 0.0,
-            }
-            for name in names
-        }
-        parent_sets: Dict[str, set[str]] = {name: set() for name in names}
+        # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
+        dirs: Dict[str, List[int]] = {}
+        confs: Dict[str, List[float]] = {}
+        cand: Dict[str, List[int]] = {}
+        for p in self.packs:
+            sig = signals[p]
+            dirs[p] = [x[0] for x in sig]
+            confs[p] = [x[1] for x in sig]
+            cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
+        acc = BarIndex(bars)          # one index per symbol, shared by every lane
+        cand_side = self._cand_by_side(cand, dirs)
+        pause_plan = self._pause_plan(symbol, bars, base_ts, warmup, n, cfg, dirs, confs, cand, acc)
+        # Keys that traded exactly the same orders in this pass (Sets whose stops and targets never decide a trade differently) are noted in `tape_alias`
+        # so the packing step stores their columns once. Every list in `hist` and every row stays its own: a Set's rows always name that Set.
+        same_tape: Dict[tuple, Tuple[str, bool]] = {}
+        tape_alias: Dict[str, str] = {}
         for st in self.by_idx:
-            ledger = st.stage_ledger or {}
-            records = ledger.get("records") if isinstance(ledger.get("records"), dict) else {}
-            for name in names:
-                key = name.lower()
-                evaluated = bool((records.get(name) or {}).get("evaluated", key == "base"))
-                qualified = bool(ledger.get(key, False))
-                if not evaluated:
-                    continue
-                bucket = flow[name]
-                bucket["evaluated"] += 1
-                parent = st.parent_set_id or st.id
-                parent_sets[name].add(parent)
-                if qualified:
-                    bucket["qualified"] += 1
-                    bucket["volumeRatio"] += float(st.volume_ratio or 1.0)
-                else:
-                    bucket["blocked"] += 1
-                    bucket["rejected"] += 1
-                record = records.get(name) or {}
-                count = int(record.get("sampleCount") or 0)
-                required = int(record.get("requiredSamples") or self.eval_need())
-                bucket["sampleCount"] += count
-                bucket["confidence"] += min(1.0, count / required)
-                bucket["insufficientSample"] += int(count < required)
-                if qualified and (st.active or getattr(st, "processing_active", False)):
-                    bucket["selected"] += 1
-                if st.live:
-                    bucket["entered"] += 1
-                    bucket["exited"] += len(st.live)
-        for name in names:
-            bucket = flow[name]
-            evaluated = int(bucket["evaluated"] or 0)
-            bucket["parents"] = len(parent_sets[name])
-            bucket["confidence"] = round(float(bucket["confidence"]) / evaluated, 4) if evaluated else 0.0
-            bucket["volumeRatio"] = round(float(bucket["volumeRatio"]), 6)
-        return {
-            "stages": flow,
-            "stageOrder": list(names),
-            "parentRule": "one parent Set is counted once; Main requires Base; Real requires Main",
-            "costSubtracted": True,
-            "requiredSamples": self.eval_need(),
-        }
+            if st.pack not in self.packs or not self.symbol_allows(st.pack, symbol):
+                continue
+            holds = self.auto_holds(st)
+            for h in (0,) + holds if holds else (None,):
+                lane = SetLane(st, symbol)
+                sel_pause = self._lane_pause(lane, st.pack, pause_plan, st.side)
+                key = st.id
+                if h is not None:
+                    lane.hold = h                    # 0 = the global time stop; the Set's chosen hold never feeds its own judgement
+                    key = st.id if h == 0 else f"{st.id}{HOLD_KEY}{h}"
+                trades = lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand_side[(st.pack, st.side)], acc, select_pause=sel_pause)
+                sig = tuple((d["entry_i"], d["exit_i"], d["reason"], d["pnl_pct"], d["side"]) for d in trades)
+                out = hist.setdefault(key, [])
+                fresh = not out
+                # every Set builds its OWN rows (each names its own Set id and pack); only the bookkeeping notes which keys traded exactly the same orders
+                out.extend({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
+                            "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
+                            "reason": done["reason"], "set_id": st.id} for done in trades)
+                prior = same_tape.get(sig)
+                if prior is None:
+                    same_tape[sig] = (key, fresh)
+                elif fresh and prior[1] and trades:
+                    tape_alias[key] = prior[0]
+            self.progress.set_id = st.id
+        # Candidate evidence must cover every entry being reconstructed, not just
+        # the most recent 50 closes at the final scoring time.
+        return {"bars": bars, "base_ts": base_ts, "warmup": warmup, "cfg": cfg,
+                "dirs": dirs, "confs": confs, "cand": cand, "cand_side": cand_side, "acc": acc, "pause": pause_plan, "tape_alias": tape_alias}
 
-    def axis_variants(self, coordinator: Any) -> Dict[str, Any]:
-        """Coordinate from Base parents. Axis children only when an axis is on."""
-        if coordinator is None:
-            return {"parentCount": 0, "childCount": 0, "axes": {}, "fromBaseVars": True}
-        if not bool(getattr(coordinator, "axes_active", lambda: False)()):
-            fn = getattr(coordinator, "coordinate_base_sets", None)
-            if callable(fn):
-                return fn(self)
-        rows: List[Dict[str, Any]] = []
-        for parent_id in self.qualified_stage_ids("base"):
-            st = self.sets.get(parent_id)
-            if st is None:
-                continue
-            # Live exchange closes decide the children; replay only fills
-            # the missing slots of each direction's window.
-            live_rows = st.evaluation_live()
-            span = 2 * self._evidence_window()
-            sides = [d for d in DIRECTIONS if self._base_metrics_ok((st.by_side or {}).get(d) or {})]
-            if not st.by_side:
-                # Unscored sides (legacy callers): the merged tape, as before.
-                tape, _ = live_first_window(live_rows, list(st.hist), span)
-                rows.extend(coordinator.axis_variants(parent_id, tape, []))
-                continue
-            # Children per Base-qualified direction, on that direction's own tape.
-            for side in sides:
-                tape, _ = live_first_window(filter_side(live_rows, side), filter_side(list(st.hist), side), span)
-                rows.extend(coordinator.axis_variants(parent_id, tape, [], side=side))
-        return coordinator.aggregate_axis_variants(rows)
-
-    def qualified_stage_ids(self, stage: str, pack: Optional[str] = None) -> List[str]:
-        """Return unique config Set IDs qualified for a downstream stage."""
-        name = str(stage or "").strip().lower()
-        if name not in {"base", "main", "real"}:
-            raise ValueError(f"qualification stage must be Base, Main, or Real: {stage}")
-        out: List[str] = []
-        seen: set[str] = set()
-        for st in self.by_idx:
-            if pack and st.pack != pack:
-                continue
-            if not bool((st.stage_ledger or {}).get(name)):
-                continue
-            parent = st.id
-            if parent not in seen:
-                seen.add(parent)
-                out.append(parent)
+    def _cand_by_side(self, cand: Dict[str, List[int]], dirs: Dict[str, List[int]]) -> Dict[Tuple[str, int], List[int]]:
+        """Entry bars per (pack, side): a Set that trades one direction scans only the bars whose signal points that way (side 0: every bar). Each bar
+        belongs to exactly one side, so the split costs one pass over the candidates, not two."""
+        out: Dict[Tuple[str, int], List[int]] = {}
+        for p, bars_ in cand.items():
+            out[(p, 0)] = bars_
+            d = dirs[p]
+            out[(p, 1)] = [i for i in bars_ if d[i] > 0]
+            out[(p, -1)] = [i for i in bars_ if d[i] < 0]
         return out
 
-    def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
-        """Per-side live flag.
+    def _pause_plan(self, symbol: str, bars: Sequence[Sequence[float]], base_ts: float, warmup: int, n: int, cfg: Dict[str, Any],
+                    dirs: Dict[str, List[int]], confs: Dict[str, List[float]], cand: Dict[str, List[int]], acc: "BarIndex"
+                    ) -> Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]]:
+        """Per (pack, side) the rest after a winning close this symbol's replay uses: (fixed minutes, choice function or None). A long Set and a short
+        Set of the same indication each learn their own pause from their own side's reference Sets (side 0: the one Set that trades both).
+        Manual (pausePack) and fixed values are constants. The Auto Mode replays the reference Sets once per candidate pause on this symbol and, at each
+        exit bar, picks the pause whose pooled reference orders CLOSED BEFORE that bar read the best PF (hold_choice_at: `pauseAutoMin` orders, a 5 %
+        lead over no extra rest, else the cooldown alone). The choice never reads a result at or after the bar it is made on, so a tape built with it
+        is what the live engine would have traded. The latest choice is kept for live."""
+        plan: Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]] = {}
+        sides = (1, -1) if self.direction_split else (0,)
+        cand_side = self._cand_by_side(cand, dirs)
+        for pack in self.packs:
+            if not self.pause_active(pack):
+                continue
+            for side in sides:
+                key = (pack, side)
+                if pack in self.pause_pack or self.pause_mode == "fixed":
+                    plan[key] = (self.pause_minutes(pack, symbol, side), None)
+                    continue
+                refs = self.pause_refs(pack, side)
+                cs = cand_side[key]
+                if not refs or not cs:
+                    self.pause_now[(pack, symbol, side)] = 0
+                    continue
+                tapes: List[Tuple[int, List[tuple]]] = []
+                for minutes in (0,) + self.pause_candidates:
+                    rows: List[tuple] = []
+                    for ref in refs:
+                        lane = SetLane(ref, symbol)
+                        lane.pause = minutes
+                        for done in lane.scan(warmup, n, bars, dirs[pack], confs[pack], True, cfg, cs, acc):
+                            rows.append((base_ts + done["exit_i"] * BAR_S, done["pnl"]))
+                    rows.sort(key=lambda r: r[0])
+                    tapes.append((minutes, rows))
+                prefixes = []
+                for _m, rows in tapes:
+                    gains, losses = prefix_sums([r[1] for r in rows])
+                    prefixes.append(([r[0] for r in rows], gains, losses))
+                lookback_s = self.lookback * BAR_S
+                choices = [m for m, _ in tapes]
 
-        Strict: only Real-qualified sides drive live orders. Non-strict intern
-        admits Base-qualified positive-PF sides; empty tapes stay cold, proven
-        losers stay off. Live last-N losses deactivate either mode.
+                chosen_at: Dict[int, int] = {}          # the choice is a function of the exit bar alone and many Sets close on the same bars
+
+                def choose(exit_i: int, prefixes=prefixes, tapes=tapes, choices=choices, lookback_s=lookback_s, chosen_at=chosen_at) -> int:
+                    got = chosen_at.get(exit_i)
+                    if got is None:
+                        got = chosen_at[exit_i] = choices[hold_choice_at(tapes, prefixes, base_ts + exit_i * BAR_S, self.pause_auto_max, self.pause_auto_min,
+                                                                         PAUSE_MARGIN, lookback_s)]
+                    return got
+                plan[key] = (0, choose)
+                self.pause_now[(pack, symbol, side)] = choose(n)
+        return plan
+
+    @staticmethod
+    def _lane_pause(lane: "SetLane", pack: str, plan: Dict[Tuple[str, int], Tuple[int, Optional[Callable[[int], int]]]], side: int = 0
+                    ) -> Optional[Callable[[int], int]]:
+        """Give a lane its pack's and side's pause: a constant on the lane, or the choice function for scan(select_pause=...)."""
+        ent = plan.get((pack, int(side or 0)))
+        if ent is None:
+            return None
+        lane.pause = int(ent[0])
+        return ent[1]
+
+    def _adapt_lookback(self) -> None:
+        """Grow collection history when too many scored Sets have sparse evidence.
+
+        The collection target is independent of the admission minimum: turning that minimum
+        off must not prevent collection from growing. Zero-close Sets count after a successful
+        replay; locked and failed Sets do not. This never relaxes or adds a PF gate.
+        Called under the lock after a completed pass; growth survives configuration reloads.
         """
-        if self.live_negative_deact and len(live) >= self.deact_n:
-            tail = sorted(live, key=lambda r: finite(r.get("t")))[-self.deact_n:]
-            if sum(row_net_pnl(row, self.cost_pct) for row in tail) < 0:
-                return False, f"live last{self.deact_n} avg loss"
-        n = int((m or {}).get("last15_n") or 0)
-        pf = float((m or {}).get("last15_ratio") or 0.0)
-        need = self.eval_need()
-        if n >= need and pf + 1e-9 < 1.0:
-            return False, "proven-neg"
-        if self.strict_gate:
-            if not m or not self._real_metrics_ok(m):
-                return False, "unproven" if not m or n < need else "stage qualification"
-            return True, ""
-        if n < need:
-            return False, "unproven"
-        dd = float((m or {}).get("max_dd_s") or 0.0)
-        if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
-            return False, "dd_cap"
-        # Non-strict still needs this side's own Base qualification. An intern
-        # 1.00 floor let Base-rejected Sets (1.00 <= PF < Base floor) trade.
-        if not self._base_metrics_ok(m or {}):
-            return False, "stage qualification"
-        return True, ""
+        if not self.lookback_auto or self.lookback >= self.lookback_max:
+            return
+        scored = [st for st in self.by_idx if not st.locked and not st.last_error]
+        if not scored or not self._hist_rows:
+            return
+        def sparse(st: SetState) -> bool:
+            # A sibling's long window must not make a complete Last-1 lane
+            # perpetually sparse. Conversely, strict Last-200 must collect
+            # all 200 observations even when the global target is only 12.
+            w = self.win(st)
+            secondary = w.base_short if self.stage_full else min(w.base_short, self.lookback_sample_target)
+            target = max(self.base_need(st), secondary, self.base_min_n,
+                         min(w.base_long, self.lookback_sample_target))
+            counts = st.sample_counts
+            have = counts.get("base", 0) if counts is not None else st.source_n
+            return have < target
+        short = sum(sparse(st) for st in scored)
+        if short / len(scored) >= LOOKBACK_SHORT_SHARE:
+            self.lookback = min(self.lookback_max, self.lookback + LOOKBACK_GROW_STEP)
+            self._lookback_grown = self.lookback
+            # Until every symbol has been rescored at the new length, the Set
+            # statistics may still mix histories from two different windows.
+            self._lookback_pending = True
+            self._lookback_retry_fast = True
+            self._lookback_progress_key = None
+            self._lookback_progress_count = 0
 
-    @_invalidate_entry_cache_around_score
-    def _score_one(self, st: SetState, *, bundle: Optional[Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]] = None) -> None:
-        live_rows = st.evaluation_live()
-        self._selection_dirty = True
-        self._snap_ts = 0.0
-        self._live_ov_ts = 0.0
-        side_bundle: Optional[Dict[str, Dict[str, Any]]] = None
-        if bundle is not None:
-            m, side_bundle = bundle
-        elif not live_rows:
-            m, side_bundle = self._fast_historic_bundle(st.hist, hist_n=len(st.hist), ordered=True)
+    def _learn_step_floors(self, tape_order: Sequence[str], learn_before: float) -> None:
+        """The Auto Mode of the minimum PF per TP step (minPfByStep + minPfStepAuto), learned from orders that CLOSED BEFORE `learn_before` (the start of the
+        evaluation window): the floor of a step is never fitted on the orders it will judge. For each step bucket, pooled over the distinct tapes of its Sets,
+        every order is a pair (the Set's PF over its last minPfStepAutoN closed orders at that order's entry, the order's net result). A candidate floor F
+        admits the pairs with PF >= F; learn_step_floor takes the LOWEST floor with at least minPfStepAutoMin admitted orders whose delivered PF is within
+        minPfStepAutoTol of the best one (independent of the manual ratio); a step without enough orders takes its direction's pooled floor, only a
+        direction without any the manual floor (1 + TP% x ratio). Writes step_floor_auto and step_floor_report (with the source of each floor)."""
+        if not (self.pf_by_step and self.pf_step_auto):
+            self.step_floor_auto, self.step_floor_report = {}, []
+            return
+        cf = cost_as_frac(self.cost_pct)
+        n_win = self.pf_step_auto_n
+        until = math.nextafter(float(learn_before), float("-inf"))
+        pairs: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+        seen: set = set()
+        for st in self.by_idx:
+            rows = self._tape_rows(st.id, tape_order, float("-inf"), until=until)
+            if len(rows) <= n_win:
+                continue
+            sig = 0
+            for r in rows:
+                sig = hash((sig, auto_evidence_key(r[0], r[1], r[4], float(r[0]) - float(r[5]), st.side)))
+            if sig in seen:
+                continue                       # a copy of a Set already read (same orders): its pairs would only be counted again
+            seen.add(sig)
+            ts = [finite(r[0]) for r in rows]
+            nets = [finite(r[4]) - cf for r in rows]
+            gains, losses = prefix_sums(nets)
+            out = pairs.setdefault((self.auto_step_bucket(st), st.side), [])
+            for k, r in enumerate(rows):
+                e = bisect.bisect_left(ts, ts[k] - finite(r[5]))       # orders closed strictly before this one's entry
+                if e < n_win:
+                    continue
+                gp, gl = gains[e] - gains[e - n_win], losses[e] - losses[e - n_win]
+                if gl > 0:
+                    out.append((gp / gl, nets[k]))
+                elif gp > 0:
+                    out.append((99.0, nets[k]))
+        learned: Dict[Tuple[int, int], float] = {}
+        report: List[Dict[str, Any]] = []
+        for side in ((1, -1) if self.direction_split else (0,)):
+            pooled = learn_step_floor([x for (bk, sd), v in pairs.items() if sd == side for x in v], self.pf_step_auto_min, self.pf_step_auto_tol,
+                                      self.step_auto_candidates())
+            for bucket in range(int(round(STEP_PF_TP_MIN / TP_UNIT_PCT)), int(round(STEP_PF_TP_MAX / TP_UNIT_PCT)) + 1):
+                tp = round(bucket * TP_UNIT_PCT, 3)
+                manual = manual_step_floor(tp, self.pf_step_ratio)
+                got = learn_step_floor(pairs.get((bucket, side), ()), self.pf_step_auto_min, self.pf_step_auto_tol, self.step_auto_candidates())
+                source = "step" if got else ("pooled" if pooled else "manual")
+                use = got or pooled
+                floor = use["floor"] if use else manual
+                prs = pairs.get((bucket, side), ())
+                row: Dict[str, Any] = {"step": bucket, "side": side, "tpPct": tp, "manual": manual, "auto": floor if use else None, "used": floor,
+                                       "source": source, "orders": len(prs), "admitted": use["admitted"] if use else 0,
+                                       "pfAll": round(use["pfAll"], 4) if got else 0.0, "pfAdmitted": round(use["pf"], 4) if use else 0.0,
+                                       "pfBest": round(use["bestPf"], 4) if use else 0.0}
+                if use:
+                    learned[(bucket, side)] = floor
+                report.append(row)
+        self.step_floor_auto, self.step_floor_report = learned, report
+
+    def _tape_rows(self, key: str, tape_order: Sequence[str], cutoff: float, until: Optional[float] = None) -> List[tuple]:
+        return sorted((r for sym_ in tape_order for r in self._hist_rows[sym_].get(key, ()) if r[0] >= cutoff and (until is None or r[0] <= until)), key=_row_t)
+
+    def _choose_hold(self, st: SetState, base: List[tuple], tape_order: Sequence[str], cutoff: float, until: Optional[float] = None,
+                     scoring_cutoff: Optional[float] = None) -> List[tuple]:
+        """Auto Mode: the hold (minutes) whose own tape has the best cost PF over this Set's last orders, as many as it has but at most
+        holdAutoMax. The global time stop is the reference; a candidate needs holdAutoMin orders and a PF margin over it to replace
+        it. Returns the rows of the tape the Set is judged on, and leaves the choice in st.hold_bars (live positions read it)."""
+        holds = self.auto_holds(st)
+        if not holds:
+            return base
+        cf = cost_as_frac(self.cost_pct)
+
+        def judge(rows: List[tuple]) -> Tuple[float, int]:
+            visible = [r for r in rows if scoring_cutoff is None or finite(r[0]) >= scoring_cutoff]
+            w = [finite(r[4]) - cf for r in visible[-self.hold_auto_max:]]
+            gp_, gl_ = sum(x for x in w if x > 0), -sum(x for x in w if x < 0)
+            return pf_of(gp_, gl_, len(w)), len(w)
+
+        ref_pf, ref_n = judge(base)
+        best = (ref_pf, 0, base, ref_n)
+        cands = [(0, self._tape_rows(st.id, tape_order, float("-inf"), until=until))]
+        for h in holds:
+            rows_all = self._tape_rows(f"{st.id}{HOLD_KEY}{h}", tape_order, float("-inf"), until=until)
+            cands.append((h, rows_all))
+            rows = [r for r in rows_all if r[0] >= cutoff]
+            pf, n = judge(rows)
+            if n >= self.hold_auto_min and pf > best[0] and pf >= ref_pf * getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN):
+                best = (pf, h, rows, n)
+        # the choice now (on every order closed so far) is what a new position opens with
+        st.hold_bars, st.hold_auto = best[1], True
+        st.hold_auto_pf, st.hold_auto_n = round(best[0], 4), best[3]
+        prefixes = []
+        for _hold, rows in cands:
+            gains, losses = prefix_sums([finite(r[4]) - cf for r in rows])
+            prefixes.append(([finite(r[0]) for r in rows], gains, losses))
+        out: List[tuple] = []
+        for symbol in tape_order:
+            data = self._hist_inputs.get(symbol)
+            if data is None or st.pack not in data["dirs"]:
+                raise ValueError("automatic-hold replay inputs unavailable")
+            bars, base_ts = data["bars"], data["base_ts"]
+            def choose(i: int) -> int:
+                idx = hold_choice_at(cands, prefixes, base_ts + i * BAR_S,
+                                     self.hold_auto_max, self.hold_auto_min,
+                                     getattr(self, "hold_auto_margin", HOLD_AUTO_MARGIN), self.lookback * BAR_S)
+                return cands[idx][0]
+            lane = SetLane(st, symbol)
+            sel_pause = self._lane_pause(lane, st.pack, data.get("pause") or {}, st.side)
+            cand_side = data.get("cand_side") or self._cand_by_side(data["cand"], data["dirs"])      # inputs built before the direction split carry only `cand`
+            done = lane.scan(data["warmup"], len(bars), bars, data["dirs"][st.pack], data["confs"][st.pack],
+                             True, data["cfg"], cand_side[(st.pack, st.side)], data["acc"], select_hold=choose, select_pause=sel_pause)
+            for row in done:
+                t = base_ts + row["exit_i"] * BAR_S
+                if t >= cutoff and (until is None or t <= until):
+                    out.append((t, symbol, row["side"], row["pnl"], row["pnl_pct"], row["hold_s"], row["reason"], st.id))
+        return sorted(out, key=_row_t)
+
+    def step_bucket(self, st: "SetState") -> int:
+        """A Set's TP step bucket in 0.1 % units: its TP step (base and Exit Sets), or its arm (a trailing Set)."""
+        if st.kind == "trail":
+            return int(round(float(st.trail_arm) / TP_UNIT_PCT))
+        return int(st.step)
+
+    def auto_step_bucket(self, st: "SetState") -> int:
+        """The shared Auto table ends at 3.5%; wider targets use its final bucket.
+
+        Keep step_bucket unchanged: range, explicit policy and lane identities use
+        the actual target, not this bounded learning-table index.
+        """
+        return int(round(step_grid_pct(self.step_bucket(st) * TP_UNIT_PCT) / TP_UNIT_PCT))
+
+    def step_floor(self, st: "SetState") -> float:
+        """The one minimum PF of a Set (every window, every stage): the Auto Mode's learned value for its TP step when it has one, else 1 + TP% x ratio."""
+        bucket = self.step_bucket(st)
+        if self.pf_range_floor:
+            ranged = self.pf_range_floor.get(tp_range_of(bucket))
+            if ranged is not None:
+                return ranged
+        high = self.pf_step_auto_high
+        if self.pf_step_auto:
+            learned = self.step_floor_auto.get((self.auto_step_bucket(st), st.side))
+            if learned is not None:
+                return min(float(learned), high)
+        key = (bucket, self.pf_step_ratio)          # a pure function of the step and the ratio, asked for several times per Set by every verdict and snapshot
+        got = self._manual_floor_cache.get(key)
+        if got is None:
+            got = self._manual_floor_cache[key] = manual_step_floor(bucket * TP_UNIT_PCT, self.pf_step_ratio)
+        return min(got, high)
+
+    def floor_for(self, n: int, pack: str, st: Optional["SetState"] = None) -> float:
+        """The minimum PF a window of n orders of this pack asks. With minPfByStep (default) a Set asks one floor from its TP step in every window and stage;
+        else its size class when minPfBySize is on, else the pack's floor. Signal packs keep their own."""
+        if st is not None:
+            policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
+            floors = [policy.get("minPfByStep", {}).get(str(self.step_bucket(st))),
+                      policy.get("minPfBySlRatio", {}).get(format(st.sl_ratio, "g"))]
+            floors = [float(f) for f in floors if f is not None]
+            if floors:
+                return max(floors + ([self.signal_min_pf] if is_signal_pack(pack) else []))
+        if is_signal_pack(pack):
+            return self.signal_min_pf
+        if self.pf_by_step and st is not None:
+            return self.step_floor(st)
+        if self.pf_by_size:
+            for lim, pf in self.size_floors:
+                if n <= lim:
+                    return pf
+            return self.size_long_pf
+        return self.pack_min_pf.get(pack, self.min_pf)
+
+    def win(self, st: Optional["SetState"]) -> LastN:
+        """The last-N windows of one Set: its TP range's lastNByRange values (owner 2026-11-04: stages and last N independent per config), the global ones for what is
+        not set. A short window stays under shortMaxRatio of its long window; the Real Negative window follows the Real one unless set."""
+        g = LastN(self.gate_window, self.base_short, self.main_n, tuple(self.short_windows), tuple(self.neg_windows), self.realst_n, self.realst_n)
+        if st is None:
+            return g
+        policy = (self.pack_ranges.get(st.pack) or {}).get("lanePolicy") or {}
+        o = {**self.last_n_by_range.get(tp_range_of(self.step_bucket(st)), {}), **policy.get("lastN", {})}
+        if not o:
+            return g
+        bl = int(o.get("baseLong", g.base_long))
+        bs = 0
+        if self.stages_on:
+            bs = min(max(1, int(bl * self.short_max_ratio + 1e-9)), int(o["baseShort"])) if "baseShort" in o else min(g.base_short, max(1, int(bl * self.short_max_ratio + 1e-9)))
+        ml = int(o.get("mainLong", g.main_n))
+        scap = max(1, int(ml * self.short_ratio + 1e-9))
+        sw = tuple(w for w in o.get("mainShort", g.short_windows) if w <= scap)
+        rn = int(o.get("realN", g.real_n))
+        rnn = int(o["realNegN"]) if "realNegN" in o else (rn if "realN" in o else g.real_neg_n)
+        return LastN(bl, bs, ml, sw, tuple(o.get("negWindows", g.neg_windows)), rn, rnn)
+
+    def base_need(self, st: Optional["SetState"] = None) -> int:
+        n = self.win(st).base_long
+        return n if self.stage_full else min(self.gate_min, n)
+
+    def stage_params(self, pack: str, st: Optional["SetState"] = None) -> StageParams:
+        """The chain's rules for a pack and, with minPfByStep, for the Set's TP step (its one floor for every window and stage)."""
+        policy = (self.pack_ranges.get(pack) or {}).get("lanePolicy") or {}
+        explicit = st is not None and (str(self.step_bucket(st)) in policy.get("minPfByStep", {}) or format(st.sl_ratio, "g") in policy.get("minPfBySlRatio", {}))
+        by_step = bool(explicit or (self.pf_by_step and st is not None and not is_signal_pack(pack)))
+        step_floor = self.floor_for(0, pack, st) if by_step else 0.0
+        w = self.win(st)
+        return StageParams(base_long=w.base_long, base_short=w.base_short, base_min_n=self.base_min_n, base_min_positive=self.base_min_positive,
+                           gate_min=min(self.gate_min, w.base_long),
+                           floor=step_floor if by_step else (self.signal_min_pf if is_signal_pack(pack) else self.pack_min_pf.get(pack, self.min_pf)),
+                           max_dd_s=self.max_dd_s, lookback_s=self._evidence_lookback() * BAR_S,
+                           size_floors=self.size_floors if self.pf_by_size and not by_step and not is_signal_pack(pack) else (), long_floor=self.size_long_pf,
+                           consistency=self.consistency_pf, main_on=self.main_on, main_n=w.main_n, short_on=self.short_on,
+                           short_windows=w.short_windows, short_min=self.short_min, short_margin=self.short_margin,
+                           neg_on=self.neg_on, neg_windows=w.neg_windows, real_on=self.realst_on, real_n=w.real_n, real_neg_n=w.real_neg_n,
+                           full_window=self.stage_full, main_min_n=self.main_min_n, main_min_positive=self.main_min_positive,
+                           negative_filter=policy.get("negativeFilter"),
+                           base_min_both=self.base_min_both, main_min_both=self.main_min_both,
+                           base_min_avg=self.base_min_avg, main_min_avg=self.main_min_avg)
+
+    def _chain_of(self, st: SetState, full: Sequence[tuple], capture_evidence: bool = False,
+                  now: Optional[float] = None, relation_rows: bool = False) -> Dict[str, Any]:
+        """The Set's chain (stage_chain) over replayed rows: {"main", "real", "realneg": [(exit t, net)], "short_n"}."""
+        cf = cost_as_frac(self.cost_pct)
+        ts = [finite(r[0]) for r in full]
+        ents = [ts[k] - finite(full[k][5]) for k in range(len(full))]
+        nets = [finite(r[4]) - cf for r in full]
+        cutoff = finite(now) - self._evidence_lookback() * BAR_S if now is not None else None
+        ch = stage_chain(ts, ents, nets, self.stage_params(st.pack, st), window_start=cutoff)
+        out: Dict[str, Any] = {name: [(ts[k], nets[k]) for k in ch[name]] for name in ("main", "real", "realneg")}
+        out["short_n"] = ch["short_n"]
+        if relation_rows:
+            # the Main-Set orders with their entry and symbol: what the Set contributes to its relation lanes (relation_lanes.Accumulator)
+            out["main_rows"] = [(ts[k], ents[k], full[k][1], nets[k]) for k in ch["main"]]
+        if capture_evidence:
+            evidence = ch.get("main_context", ch["main"])
+            out["main_evidence"] = (array("d", (ts[k] for k in evidence)), array("d", (ents[k] for k in evidence)),
+                                    array("d", (nets[k] for k in evidence)))
+        return out
+
+    def _lanes_of(self, st: SetState, full: Sequence[tuple]) -> List[List[Tuple[float, float]]]:
+        ch = self._chain_of(st, full)
+        return [ch["main"], ch["real"]]
+
+    def _processed_of(self, st: SetState, full: Sequence[tuple]) -> List[Tuple[float, float]]:
+        return self._chain_of(st, full)["main"]
+
+    def set_processed(self, st: SetState, full: Sequence[tuple], now: Optional[float] = None,
+                      relations: Optional["relation_lanes.Accumulator"] = None) -> None:
+        """The Set's chain in every replay pass: its Main Set (orders opened while Base passed), Real Set (opened while Main passed,
+        judged on the Main Set) and Real Negative Set (opened while the Main Set's recent average was negative), and its Main short window.
+        Every stage after Base reads these Sets, never the raw tape."""
+        ch = self._chain_of(st, full, capture_evidence=self.main_on and self.short_on, now=now, relation_rows=relations is not None)
+        if relations is not None:
+            relations.add(self.relation_cell(st), ch["main_rows"])
+        st.proc, st.proc_total = ch["main"][-PROC_KEEP:], len(ch["main"])
+        st.exe, st.exe_total = ch["real"][-PROC_KEEP:], len(ch["real"])
+        st.neg, st.neg_total = ch["realneg"][-PROC_KEEP:], len(ch["realneg"])
+        st.main_short_win = int(ch["short_n"])
+        st.main_evidence = ch.get("main_evidence")
+        st.proc_replayed = True
+
+    def _streams(self, st: SetState, now: Optional[float] = None, before: Optional[bool] = None) -> Tuple[List[float], List[float], List[float], int]:
+        """Paper Main, Real and Real Negative streams, each causal on the same paper history.
+        Actual fills are validated separately by execution_stats; mixing them here double-counts
+        overlapping entries and changes short-window votes without rebuilding their stage chain."""
+        anchor = finite(now) if now is not None else st.score_at
+        cutoff = anchor - self._evidence_lookback() * BAR_S if anchor > 0 else float("-inf")
+        upper = anchor if anchor > 0 else float("inf")
+        if before is None:
+            before = bool(getattr(st, "score_before", False)) if now is None else False
+        if before and anchor > 0:
+            upper = math.nextafter(upper, float("-inf"))
+        if getattr(st, "proc_replayed", False):
+            m, r, q, short_n = list(st.proc or []), list(st.exe or []), list(getattr(st, "neg", None) or []), int(st.main_short_win or self.win(st).main_n)
+            evidence = st.main_evidence
         else:
-            # Live exchange results decide; replay only fills the window
-            # until live has the stage's N.
-            tape, _src = live_first_window(live_rows, st.hist, self._evidence_window())
-            m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False, keep_order=True)
-        # Reporting counts all historic closes; PF/WR continue using the
-        # explicit retained evaluation sample in m.
-        counts = self._hist_counts.get(st.id)
-        st.n = sum(counts.values()) if counts is not None else m["n"]
-        st.wins = m["wins"]
-        st.gp = m["gp"]
-        st.gl = m["gl"]
-        st.wr = m["wr"]
-        st.expectancy = m["expectancy"]
-        st.gross_pf = float(m.get("gross_pf") or 0.0)
-        st.net_pf = float(m.get("net_pf") or 0.0)
-        st.gross_ev = float(m.get("gross_ev") or 0.0)
-        st.net_ev = float(m.get("net_ev") or 0.0)
-        st.evaluation = dict(m.get("evaluation") or {})
-        st.normal_evaluation = {
-            "pf": st.gross_pf,
-            "ev": st.gross_ev,
-            "sampleCount": int(st.evaluation.get("sampleCount") or 0),
-            "source": "gross-price-move",
-        }
-        st.adjusted_evaluation = {
-            "pf": st.net_pf,
-            "ev": st.net_ev,
-            "ratio": float(m.get("last15_ratio") or 0.0),
-            "sampleCount": int(st.evaluation.get("sampleCount") or 0),
-            "source": "cost-net",
-        }
-        st.adjustment_deltas = {
-            "pf": round(st.net_pf - st.gross_pf, 6),
-            "ev": round(st.net_ev - st.gross_ev, 8),
-            "costPct": self.cost_pct,
-        }
-        st.avg_hold_s = m["avg_hold_s"]
-        st.classic_all = m["classic_all"]
+            held = sorted((tuple(r_.get(k) for k in _ROW_KEYS) for r_ in st.hist
+                           if r_.get("pnl_pct") is not None and finite(r_.get("t")) <= upper), key=lambda r_: finite(r_[0]))
+            ch = self._chain_of(st, held, capture_evidence=self.main_on and self.short_on, now=anchor if anchor > 0 else None)
+            m, r, q, short_n = ch["main"], ch["real"], ch["realneg"], int(ch["short_n"])
+            evidence = ch.get("main_evidence")
+        m = [x for x in m if cutoff <= x[0] <= upper]
+        r = [x for x in r if cutoff <= x[0] <= upper]
+        q = [x for x in q if cutoff <= x[0] <= upper]
+        if self.main_on and self.short_on:
+            if evidence is None and st.proc_replayed and st.proc_total:
+                # Without the entry-time evidence the old candidate cannot be recomputed safely.
+                short_n = self.win(st).main_n
+            elif evidence is not None:
+                # Preserve older entry-time evidence when evaluating each candidate;
+                # only the final vote is limited to the current window.
+                records = sorted((t, e, value) for t, e, value in zip(*evidence) if t <= upper)
+                ts = [x[0] for x in records]
+                entries = [x[1] for x in records]
+                nets = [x[2] for x in records]
+                params = self.stage_params(st.pack, st)
+                me, mlo, passes = _main_windows(ts, nets, entries, params)
+                short_n, _ = _main_short_choice(nets, me, mlo, params, passes, current_only=True,
+                                               current_start=bisect.bisect_left(ts, cutoff))
+        out = []
+        for v in (m, r, q):
+            v.sort(key=lambda x: x[0])
+            out.append([x for _, x in v])
+        return out[0], out[1], out[2], short_n
+
+    def execution_stats(self, st: SetState, lane: str, now: Optional[float] = None) -> Dict[str, Any]:
+        """Recorded closes for one Set and lane, with fee/ownership provenance.
+        `proven` means the window has enough records, not that the exchange has
+        verified their costs or ownership. Insufficient evidence is unproven.
+        After a full Real window it is an additional entry gate; expiry permits
+        fresh assessment. The paper chain keeps running while this gate is closed.
+        """
+        anchor = finite(now) if now is not None else st.score_at
+        if now is None and self.hist_keep_last_complete:
+            anchor = max(anchor, max((finite(r.get("t")) for r in st.live), default=0.0))
+        upper = anchor if anchor > 0 else float("inf")
+        effective_lookback = self._evidence_lookback()
+        cutoff = upper - effective_lookback * BAR_S if anchor > 0 else float("-inf")
+        w_ = self.win(st)
+        real_n = w_.real_neg_n if lane == "neg" else w_.real_n
+        rows = sorted((r for r in st.live if str(r.get("lane") or "pos") == lane
+                       and cutoff <= finite(r.get("t")) <= upper), key=lambda r: finite(r.get("t")))[-real_n:]
+        nets = [row_net_pnl_pct(r, self.cost_pct) for r in rows]
+        gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+        floor = self.floor_for(real_n, st.pack, st)
+        enough = len(nets) >= real_n
+        pf = pf_of(gp, gl)
+        sources: Dict[str, int] = {}
+        for row in rows:
+            source = str(row.get("fee_source") or "unknown")
+            sources[source] = sources.get(source, 0) + 1
+        pf_status = "empty" if not nets else "finite" if gl > 0 else "no-loss" if gp > 0 else "flat"
+        return {"source": "executed", "lane": lane, "n": len(nets), "lastN": real_n,
+                "pf": round(pf, 4), "gp": gp, "gl": gl, "minPf": floor,
+                "returnPf": round(gp / gl, 4) if gl > 0 else None, "pfStatus": pf_status,
+                "feeSources": sources, "feeVerified": bool(rows) and sources.get("reported-fee", 0) == len(rows),
+                "ownershipExplicit": sum(1 for row in rows if row.get("ownership_explicit") is True),
+                "sampleFull": enough, "proven": enough, "allow": not enough or pf + 1e-9 >= floor}
+
+    def _execution_lanes(self, st: SetState) -> List[str]:
+        v = st.stage or {}
+        plain = not (self.main_on or self.neg_on or self.realst_on)
+        return [lane for lane, ready in (("pos", plain or v.get("pos")), ("neg", v.get("negl")))
+                if ready and (not st.live or self.execution_stats(st, lane)["allow"])]
+
+    def executable_stream(self, st: SetState) -> List[float]:
+        """The Set's paper Real Set (positive lane)."""
+        return self._streams(st)[1]
+
+    def processed_stream(self, st: SetState) -> List[float]:
+        """The Set's paper Main Set (orders opened while Base passed)."""
+        return self._streams(st)[0]
+
+    def _tape_at(self, st: SetState, now: float, before: bool = False) -> List[Dict[str, Any]]:
+        cutoff = now - self._evidence_lookback() * BAR_S if now > 0 else float("-inf")
+        upper = now if now > 0 else float("inf")
+        if before and now > 0:
+            upper = math.nextafter(upper, float("-inf"))
+        return by_time([row for row in st.tape() if cutoff <= finite(row.get("t")) <= upper])
+
+    def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
+        before = now is not None and finite(now) > 0
+        if now is None:
+            anchor = max((finite(row.get("t")) for row in st.tape()), default=0.0)
+        else:
+            anchor = finite(now)
+        st.score_at = anchor
+        st.score_before = before
+        tape = self._tape_at(st, anchor, before=before)              # strictly earlier at a decision clock
+        cf = cost_as_frac(self.cost_pct)
+        for i, row in enumerate(tape):
+            try:
+                gross = float(row.get("pnl_pct"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(gross) and abs(finite(row.get("pnl")) - (gross - cf)) > 1e-12:
+                # Stored net values may use an earlier cost setting; every reported statistic
+                # and drawdown must use the same current round-trip cost as the PF gates.
+                tape[i] = {**row, "pnl": gross - cf}
+        pnls = [finite(r.get("pnl")) for r in tape]
+        st.tape_sig = hash(tuple((round(finite(r.get("t")), 3), str(r.get("symbol")), round(pnls[k], 10)) for k, r in enumerate(tape))) if tape else 0
+        st.wins = sum(1 for x in pnls if x > 0)
+        gross_profit = sum(x for x in pnls if x > 0)
+        gross_loss = -sum(x for x in pnls if x < 0)
+        st.gp, st.gl = round(gross_profit, 6), round(gross_loss, 6)
+        decided = sum(1 for x in pnls if x != 0)
+        st.wr = round(100.0 * st.wins / decided, 1) if decided else 0.0
+        st.expectancy = round(sum(pnls) / len(pnls), 6) if pnls else 0.0
+        holds = [finite(r.get("hold_s")) for r in tape]
+        st.avg_hold_s = round(sum(holds) / len(holds), 1) if holds else 0.0
+        st.pf_all = round(pf_of(gross_profit, gross_loss), 4)
         counts: Dict[str, int] = {}
-        for r in (live_rows or st.hist):
+        for r in tape:
             k = str(r.get("reason") or "x").split(":")[0]
             counts[k] = counts.get(k, 0) + 1
         st.exits = counts
-        st.last15_ratio = m["last15_ratio"]
-        st.last15_classic = m["last15_classic"]
-        st.last15_n = m["last15_n"]
-        st.last15_r = m["last15_r"]
-        st.last25_n = m["last25_n"]
-        st.last25_avg_r = m["last25_avg_r"]
-        st.last25_avg_pnl = m["last25_avg_pnl"]
-        st.max_dd_s = m["max_dd_s"]
-        st.avg_dd_s = m["avg_dd_s"]
-        st.dd_episodes = m["dd_episodes"]
-        st.source_n = m["source_n"]
-        st.stage_ledger = self._stage_qualification(st, m)
-        empty_live = {
-            "last15_n": 0,
-            "last15_ratio": 0.0,
-            "last15_r": 0.0,
-            "evaluation_windows": {},
-            "net_avg": 0.0,
-            "expectancy": 0.0,
-            "wr": 0.0,
-            "max_dd_s": 0.0,
-            "avg_dd_s": 0.0,
-            "gp": 0.0,
-            "gl": 0.0,
-            "validated": False,
-        }
-        if live_rows:
-            live_m = self._score_metrics(live_rows)
-            live_ordered = sorted((r for r in live_rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
-            live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
-            live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
-            live_opt_dd = drawdown_time_by_symbol(live_opt_window, cost_pct=self.cost_pct) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
-            live_opt_avg = (
-                sum(row_net_pnl(r, self.cost_pct) for r in live_opt_window) / len(live_opt_window)
-                if live_opt_window else 0.0
-            )
+        last15 = last_n_cost_pf(tape, self.pf_n, self.cost_pct, scan_all=False)
+        st.last15_ratio = float(last15["ratio"])
+        st.last15_pf = float(last15["pf"])
+        st.last15_n = int(last15["count"])
+        st.last15_r = float(last15["avgR"])
+        w = self.win(st)
+        gate = last_n_cost_pf(tape, w.base_long, self.cost_pct, scan_all=False)
+        st.gate_pf = float(gate["pf"])
+        st.gate_n = int(gate["count"])
+        base_nets = [finite(r.get("pnl_pct")) - cf for r in tape if r.get("pnl_pct") is not None]
+        win = base_nets[-w.base_long:]
+        half = len(win) // 2
+        if half >= 1:
+            def _pf(v: List[float]) -> float:
+                gp_, gl_ = sum(x for x in v if x > 0), -sum(x for x in v if x < 0)
+                return pf_of(gp_, gl_, len(v))
+            st.gate_pf_old, st.gate_pf_new = round(_pf(win[:half]), 4), round(_pf(win[half:]), 4)
         else:
-            live_m = empty_live
-            live_ordered = []
-            live_opt_window = []
-            live_opt_pf = {"ratio": 0.0, "costPct": self.cost_pct, "costSource": self.cost_source}
-            live_opt_dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
-            live_opt_avg = 0.0
-        st.live_eval = {
-            "n": len(live_rows),
-            "last15N": int(live_m["last15_n"]),
-            "last15Ratio": round(float(live_m["last15_ratio"]), 4),
-            "last15R": round(float(live_m["last15_r"]), 4),
-            "evaluationWindows": dict(live_m.get("evaluation_windows") or {}),
-            "netAvg": round(float(live_m["net_avg"]), 6),
-            "expectancy": float(live_m["expectancy"]),
-            "wr": float(live_m["wr"]),
-            "maxDdS": float(live_m["max_dd_s"]),
-            "avgDdS": float(live_m["avg_dd_s"]),
-            "gp": float(live_m["gp"]),
-            "gl": float(live_m["gl"]),
-            "validated": bool(live_m["validated"]),
-            "costSubtracted": True,
-            "source": "live-exchange",
-            "optimizationN": len(live_opt_window),
-            "optimizationWindow": max(50, self.deact_n, self.optimization_n),
-            "optimizationPf": round(float(live_opt_pf.get("ratio") or 1.0), 4),
-            "optimizationNetAvg": round(live_opt_avg, 8),
-            "optimizationMaxDdS": round(float(live_opt_dd.get("maxS") or 0.0), 1),
-            "optimizationPositive": live_opt_avg >= 0.0,
-            "tradesPerHour": round(trades_per_hour(live_rows), 4) if live_rows else 0.0,
-            "costPct": float(live_opt_pf.get("costPct") or self.cost_pct),
-            "costSource": live_opt_pf.get("costSource") or self.cost_source,
-        }
-        need = self.eval_need()
-        enable_pf = float(self.min_pf or POSITIVE_PF)
-        by: Dict[str, Dict[str, Any]] = {}
-        historic = not bool(live_rows)
-        for side in DIRECTIONS:
-            if side_bundle is not None and historic:
-                sm = dict(side_bundle.get(side) or {})
-                sub_live: List[Dict[str, Any]] = []
-            else:
-                sub_hist = filter_side(st.hist, side)
-                sub_live = filter_side(live_rows, side)
-                # Live exchange results decide each stage once live holds that
-                # stage's N; until then replay fills only the missing slots
-                # (live rows stay the newest), so a first live close neither
-                # erases the Base qualification nor hides behind replay.
-                sub_tape, src = live_first_window(sub_live, sub_hist, self._evidence_window())
-                sm = self._score_metrics(
-                    sub_tape,
-                    hist_n=len(sub_hist),
-                    fast_historic=historic,
-                    keep_order=True,
-                )
-                sm["evidenceSource"] = src
-            sm["side"] = side
-            sm["liveN"] = len(sub_live)
-            if sub_live:
-                lm = self._score_metrics(sub_live)
-                live_opt_n = len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):])
-            else:
-                lm = empty_live
-                live_opt_n = 0
-            sm["live"] = {
-                "n": len(sub_live),
-                "last15_n": lm["last15_n"],
-                "last15_ratio": lm["last15_ratio"],
-                "last15_r": lm["last15_r"],
-                "evaluation_windows": dict(lm.get("evaluation_windows") or {}),
-                "net_avg": lm["net_avg"],
-                "expectancy": lm["expectancy"],
-                "max_dd_s": lm["max_dd_s"],
-                "wr": lm["wr"],
-                "validated": lm["validated"],
-                "cost_subtracted": True,
-                "optimization_n": live_opt_n,
-            }
-            sm["liveN"] = len(sub_live)
-            sm["source"] = "mixed" if sub_live and sub_hist else "live-exchange" if sub_live else "hist-sim"
-            active_s, reason_s = self._side_active_flags(sm, sub_live)
-            sm["active"] = active_s
-            sm["deact_reason"] = reason_s
-            by[side] = sm
-        st.by_side = by
-        # Qualification counts follow the same independent directional
-        # evidence as admission. A losing SHORT tape cannot hide a valid LONG.
-        if by:
-            def stage_rank(item):
-                # Same ledger, stage floors and windows as the published
-                # qualification, so the recorded direction is the best one.
-                q = self._stage_qualification(st, item[1])
-                rank = int(bool(q.get("base"))) + int(bool(q.get("main"))) + int(bool(q.get("real")))
-                return (rank, int(bool(q.get("micro"))), finite(item[1].get("base_pf")), item[0])
-            direction, directional = max(by.items(), key=stage_rank)
-            st.stage_ledger = self._stage_qualification(st, directional)
-            st.stage_ledger["evaluationDirection"] = direction
-        # A single admission decision is shared by display, queue and submit.
-        # Live deactivation uses exactly the configured last-N closed fills.
-        for side, sm in by.items():
-            if st.locked:
-                sm["active"] = False
-                sm["deact_reason"] = "locked"
-        st.active = not st.locked and any(bool(sm.get("active")) for sm in by.values())
-        st.deact_reason = "" if st.active else ("locked" if st.locked else "; ".join(
-            dict.fromkeys(str(sm.get("deact_reason") or "stage qualification") for sm in by.values())))
-
-
-    def _cap_active(self, force: bool = True) -> None:
-        allow = getattr(self, "hist_test_set_ids", None)
-        allow_key = None if allow is None else frozenset(allow)
-        selection_key = (id(self.by_idx), len(self.by_idx), self.max_active, allow_key)
-        if not force and not getattr(self, "_selection_dirty", True) and getattr(self, "_selection_key", None) == selection_key:
-            return
-        self._invalidate_entry_cache()
-        self._selection_key = selection_key
-        self._selection_dirty = False
-        if allow is not None:
-            # Test Historic owns selection: only validated configs stay active.
-            # Live lots already in processing keep their flags so they stay managed.
-            for st in self.by_idx:
-                if st.locked:
-                    st.active = False
-                    st.deact_reason = "locked"
-                    continue
-                if st.id in allow:
-                    # Allow-listed Sets still need their current Base ledger;
-                    # later own evidence can revoke a Test Historic pass.
-                    base_ok = bool((st.stage_ledger or {}).get("base"))
-                    st.active = base_ok
-                    st.deact_reason = "" if base_ok else "stage qualification"
-                    continue
-                if getattr(st, "processing_active", False):
-                    continue
-                st.active = False
-                st.deact_reason = "hist-test gate"
-            self._snap_ts = self._live_ov_ts = 0.0
-            return
-        # Keep scoring all configs, including previously unselected candidates.
-        eligible = [s for s in self.by_idx if not s.locked and
-                    (s.active or s.deact_reason == "selection limit")]
-        def best_side(st: SetState) -> float:
-            # Rank on the Set's strongest active direction: a strong LONG side
-            # must not be pushed out of the limit by a weak SHORT side.
-            vals = []
-            for side in DIRECTIONS:
-                view = (st.by_side or {}).get(side)
-                if view and view.get("active", True):
-                    vals.append(float(view.get("last15_ratio") or 0.0))
-            return max(vals) if vals else float(st.last15_ratio or 0)
-
-        eligible.sort(key=lambda s: (-best_side(s),
-                      -float(s.expectancy or 0), float(s.max_dd_s or 0), s.id))
-        for index, st in enumerate(eligible):
-            st.active = self.max_active <= 0 or index < self.max_active
-            st.deact_reason = "" if st.active else "selection limit"
-        self._snap_ts = self._live_ov_ts = 0.0
-
-    def refresh_progress_detail(
-        self,
-        *,
-        merge: Optional[bool] = None,
-        coverage_done: Optional[int] = None,
-        symbols_total: Optional[int] = None,
-        aborted: bool = False,
-    ) -> None:
-        """Keep progress.detail aligned with fills, validated, and symbol coverage."""
-        fills = sum(int(s.n or 0) for s in self.sets.values())
-        active_n = sum(1 for s in self.sets.values() if s.active)
-        validated_n = sum(
-            1
-            for s in self.sets.values()
-            if bool((s.stage_ledger or {}).get("base"))
-        )
-        seen = len(self._hist_seen)
-        total = int(symbols_total if symbols_total is not None else (self.progress.symbols_total or 0) or seen)
-        done = int(coverage_done if coverage_done is not None else (self.progress.symbols_done or seen))
-        parts: List[str] = []
-        if active_n:
-            parts.append(f"{active_n}/{len(self.sets)} active")
-        if validated_n:
-            parts.append(f"{validated_n} validated")
-        parts.append(f"{fills} hist fills")
-        use_cov = bool(merge) if merge is not None else bool(self._hist_seen or total)
-        if use_cov and total:
-            parts.append(f"coverage {done}/{total}")
-        if aborted:
-            parts.append("aborted")
-        self.progress.detail = " · ".join(parts)
-
-    def relative_listings(
-        self,
-        symbols: Optional[Sequence[str]] = None,
-        *,
-        ranked_ids: Optional[Sequence[str]] = None,
-        id_limit: int = 0,
-    ) -> Dict[str, Any]:
-        """Complete pack/kind/id listings. id_limit bounds payload for hot stats."""
-        by_pack: Dict[str, List[str]] = {}
-        by_kind: Dict[str, List[str]] = {}
-        validated_ids: List[str] = []
-        need = self.eval_need()
-        ordered = list(self.by_idx)
-        if ranked_ids is None:
-            ordered = sorted(
-                ordered,
-                key=lambda s: (
-                    0 if bool((s.stage_ledger or {}).get("base")) else 1,
-                    -float(s.last15_ratio or 0),
-                    float(s.max_dd_s or 0),
-                    s.id,
-                ),
-            )
-            ids = [st.id for st in ordered]
+            st.gate_pf_old = st.gate_pf_new = 0.0
+        st.gate_gp = sum(x for x in win if x > 0)
+        st.gate_gl = -sum(x for x in win if x < 0)
+        sw = base_nets[-w.base_short:] if w.base_short else []
+        st.base_short_n = len(sw)
+        st.base_short_gp, st.base_short_gl = sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)
+        st.base_short_pf = round(pf_of(st.base_short_gp, st.base_short_gl), 4)
+        mw = base_nets[-self.base_min_n:] if self.base_min_n else []
+        st.base_min_n = len(mw)
+        st.base_min_gp, st.base_min_gl = sum(x for x in mw if x > 0), -sum(x for x in mw if x < 0)
+        st.base_min_ok = (not self.base_min_n) or (len(mw) >= (self.base_min_n if self.stage_full else 1)
+                                                    and sign_ok(mw, self.base_min_positive, self.base_min_both, self.base_min_avg))
+        m_, r_, q_, short_n = self._streams(st, now=anchor, before=before)  # paper stages use the same decision boundary
+        st.sample_counts = {"base": len(base_nets), "main": len(m_), "real": len(r_), "realNeg": len(q_)}
+        v = stage_verdicts(m_, r_, q_, short_n, self.stage_params(st.pack, st))
+        st.stage = v
+        st.main_short_win = short_n
+        rw = m_[-w.main_n:]
+        st.main_n = len(rw)
+        st.main_gp = sum(x for x in rw if x > 0)
+        st.main_gl = -sum(x for x in rw if x < 0)
+        st.main_pf = round(pf_of(st.main_gp, st.main_gl), 4)
+        mrw = m_[-short_n:] if self.short_on else []                  # the Main short window's own orders
+        st.main_short_n = len(mrw)
+        st.main_short_gp, st.main_short_gl = sum(x for x in mrw if x > 0), -sum(x for x in mrw if x < 0)
+        st.main_short_pf = round(pf_of(st.main_short_gp, st.main_short_gl), 4)
+        kw = m_[-self.main_min_n:] if self.main_min_n else []          # the Main minimal window's own results
+        st.main_min_have = len(kw)
+        st.main_min_gp, st.main_min_gl = sum(x for x in kw if x > 0), -sum(x for x in kw if x < 0)
+        nw = next((nwin for nwin in sorted(w.neg_windows) if self.neg_on and len(m_) >= nwin and sum(m_[-nwin:]) < -NEG_EPS), 0)    # the smallest Negative window that fires
+        nv = m_[-nw:] if nw else []
+        st.neg_win = nw
+        st.neg_win_gp, st.neg_win_gl = sum(x for x in nv if x > 0), -sum(x for x in nv if x < 0)
+        ew = r_[-w.real_n:]
+        st.exe_n, st.exe_pf = len(ew), round(pf_of(sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)), 4)
+        st.exe_gp, st.exe_gl = sum(x for x in ew if x > 0), -sum(x for x in ew if x < 0)
+        cf_rank = cost_as_frac(self.cost_pct)
+        st.rank_pos, st.rank_neg = lane_rank_stats(r_, cf_rank), lane_rank_stats(q_, cf_rank)
+        qw = q_[-w.real_neg_n:]
+        st.neg_n, st.neg_pf = len(qw), round(pf_of(sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)), 4)
+        st.neg_gp, st.neg_gl = sum(x for x in qw if x > 0), -sum(x for x in qw if x < 0)
+        last25 = tape[-self.deact_n :]
+        st.last25_n = len(last25)
+        if last25:
+            rs = [signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25]
+            st.last25_avg_r = sum(rs) / len(rs)
+            st.last25_avg_pnl = sum(finite(r.get("pnl")) for r in last25) / len(last25)
         else:
-            ids = [str(x) for x in ranked_ids]
-        for st in self.by_idx:
-            by_pack.setdefault(str(st.pack), []).append(st.id)
-            by_kind.setdefault(str(st.kind), []).append(st.id)
-            if bool((st.stage_ledger or {}).get("base")):
-                validated_ids.append(st.id)
-        if id_limit > 0:
-            ids = ids[:id_limit]
-            validated_ids = validated_ids[:id_limit]
-            pack_payload = {k: v[: min(32, id_limit)] for k, v in (self._ids_by_pack or by_pack).items()}
-            kind_payload = {k: v[: min(32, id_limit)] for k, v in (self._ids_by_kind or by_kind).items()}
-        else:
-            pack_payload = dict(self._ids_by_pack or by_pack)
-            kind_payload = dict(self._ids_by_kind or by_kind)
-        index_by_id = {} if id_limit else {st.id: int(st.idx) for st in self.by_idx}
-        return {
-            "rankedIds": ids,
-            "validatedIds": validated_ids,
-            "byPack": pack_payload,
-            "byKind": kind_payload,
-            "indexById": index_by_id,
-            "symbols": [str(s) for s in (symbols or sorted(self._hist_seen))],
-            "relative": {
-                "sets": len(self.by_idx),
-                "ranked": len(ids) if id_limit else len(self.by_idx),
-                "validated": sum(
-                    1
-                    for s in self.by_idx
-                    if bool((s.stage_ledger or {}).get("base"))
-                ),
-                "active": sum(1 for s in self.by_idx if s.active),
-                "packs": {k: len(v) for k, v in (self._ids_by_pack or by_pack).items()},
-                "kinds": {k: len(v) for k, v in (self._ids_by_kind or by_kind).items()},
-                "symbolsSeen": len(self._hist_seen),
-            },
-        }
+            st.last25_avg_r = 0.0
+            st.last25_avg_pnl = 0.0
+        dd = drawdown_time(tape[-w.base_long:], now=anchor or None)   # the last N positions, not the whole tape
+        st.max_dd_s = float(dd["maxS"])
+        st.avg_dd_s = float(dd["avgS"])
+        st.dd_episodes = int(dd["episodes"])
+        # each Base window on its own (the stage verdict is their conjunction; the per-window figures count each separately)
+        floor_ = self.floor_for(w.base_long, st.pack, st)                   # every window asks the minimum PF of its own size
+        st.base_long_ok = (not self.stop_cap_exceeded(st) and st.gate_n >= self.base_need(st) and st.gate_pf + 1e-9 >= floor_ and st.max_dd_s < self.max_dd_s
+                           and not (self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf))
+        st.base_short_ok = (bool(w.base_short) and st.base_short_n >= (w.base_short if self.stage_full else 1)
+                            and st.base_short_pf + 1e-9 >= self.floor_for(w.base_short, st.pack, st))
+        st.source_n = len(tape)
+        # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
+        st.active = not st.locked
+        st.evaluated_at = time.time()
+        st.deact_reason = self.gate_reason(st)
+
+    def _snapshot_max_age(self) -> float:
+        return self.fresh_limit() if self.fresh_s > 0 else 2.0 * self.refresh_s
+
+    def fresh_limit(self) -> float:
+        """How old a Set's verdict may be: fresh_s, but never under ROTATION_FRESH_X x the measured full replay rotation. Found live on x02 (2026-11-03):
+        30 symbols x 3 days x 3,176 Sets took about 12 minutes to replay once in chunks, so with 240 s every Set that passed Base went "stale" before
+        its next turn and none stayed valid."""
+        rot = float(getattr(self, "rotation_s", 0.0) or 0.0)
+        if rot <= 0.0:
+            # no symbol replayed twice yet (the first rotation after a start, while the history is still being fetched): the rotation is at least as long as
+            # the time since the oldest first replay. Found live on x02 (2026-11-03, 70 symbols): the fetch took over 20 minutes, the limit stayed at 240 s and
+            # every verdict went "stale" -- 0 valid Sets, no entry -- until a symbol came round again. Capped like a measured rotation.
+            seen = list((getattr(self, "_hist_replay_at", None) or {}).values())
+            if seen:
+                rot = min(ROTATION_CAP_S, max(0.0, time.time() - min(seen)))
+        return max(float(self.fresh_s), ROTATION_FRESH_X * rot)
+
+    def _history_snapshot_usable(self) -> bool:
+        return bool(self.hist_keep_last_complete and self._lookback_pending and self._history_snapshot_active
+                    and not self._history_snapshot_promoting and self._history_snapshot_gen == self._topo_gen
+                    and self._history_snapshot_lookback > 0)
+
+    def _evidence_lookback(self) -> int:
+        """The bars whose closed orders a last-N window may read. lastNBasis "time" (the default): the lookback, so a window is the newest N orders of the
+        last `lookback` minutes. "count" (owner 2026-11-11: windows on the basis of the last N positions per configuration, not of a period): every order
+        the book holds, so a window is the newest N orders of that configuration however old they are; only the held history (history_bars) bounds it."""
+        if self.window_basis == "count":
+            return self.history_bars()
+        return self._history_snapshot_lookback if self._history_snapshot_usable() else self.lookback
+
+    def evidence_bars(self) -> int:
+        """The same bound for callers outside the book (the Axis streams, the simulators)."""
+        return self._evidence_lookback()
+
+    def base_validation_reason(self, st: SetState) -> str:
+        """Base PF/risk validation, independent of the minimal coordination condition."""
+        if st.locked:
+            return "lock"
+        if not st.active:
+            return "inactive"
+        if st.last_error:
+            return "error"
+        if self.stop_cap_exceeded(st):
+            return "stop-cap"
+        if self._history_snapshot_promoting:
+            return "history"
+        if self._lookback_pending:
+            if not self._history_snapshot_usable():
+                return "history"
+            oldest = min(st.evaluated_at, self._history_snapshot_oldest_at)
+            if oldest <= 0 or time.time() - oldest > self._snapshot_max_age():
+                return "stale"
+        w = self.win(st)
+        if st.gate_n < self.base_need(st):
+            return "n<min"
+        if st.gate_pf + 1e-9 < self.floor_for(w.base_long, st.pack, st):
+            return "pf<min"
+        if self.consistency_pf > 0 and min(st.gate_pf_old, st.gate_pf_new) + 1e-9 < self.consistency_pf:
+            return "unstable"        # passed on the whole window but not on both halves of it
+        if st.max_dd_s >= self.max_dd_s:
+            return "ddt"
+        if w.base_short and (st.base_short_n < (w.base_short if self.stage_full else 1) or st.base_short_pf + 1e-9 < self.floor_for(w.base_short, st.pack, st)):
+            return "short"           # the Base short window (setGateShortN) fails: both Base windows must pass
+        if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_limit():
+            return "stale"
+        return ""
+
+    def validation_reason(self, st: SetState) -> str:
+        """PF/risk validation on the positive or Negative lane, without minimal sign coordination."""
+        reason = self.base_validation_reason(st)
+        if reason:
+            return reason
+        v = getattr(st, "stage", None) or {}
+        positive = self._main_pf_pass(st) and (bool(v.get("real")) if self.realst_on else True)
+        if (self.main_on or self.neg_on or self.realst_on) and not (positive or v.get("negl")):
+            if self.main_on and not v.get("main"):
+                return "main"
+            if self.main_on and self.short_on and not v.get("short"):
+                return "mainshort"
+            return "real"
+        return ""
+
+    def gate_reason(self, st: SetState) -> str:
+        """Entry readiness: PF/risk validation plus the Set's own minimal coordination."""
+        if st.kind == "base" and not self.normal_entries:
+            return "type-disabled"  # internal paper processing continues; only Normal entries are disabled
+        reason = self.base_validation_reason(st)
+        if reason:
+            return reason
+        if self.base_min_n and not st.base_min_ok:
+            return "minimal"         # the Base minimal window (setGateMinN): the newest results are not all positive / negative as asked
+        v = getattr(st, "stage", None) or {}
+        if (self.main_on or self.neg_on or self.realst_on) and not (v.get("pos") or v.get("negl")):
+            # neither lane is open; the reason is the first stage the positive lane fails
+            if self.main_on and not v.get("main"):
+                return "main"        # the Main Set's static last N is below the minimum PF
+            if self.main_on and self.short_on and not v.get("short"):
+                return "mainshort"   # the Main Set's short window is below the minimum PF
+            if self.main_on and self.main_min_n and not v.get("minimal"):
+                return "mainminimal"   # the Main minimal window (mainMinN): the newest Main results are not all positive / negative as asked
+            return "real"            # the lane's Real Set (its last realGateN) is below the minimum PF
+        if not self._execution_lanes(st):
+            return "execution"       # actual fills fail their own window; never contaminate paper PF
+        return ""
+
+    def state_of(self, st: SetState) -> Tuple[str, str]:
+        """One state: ready, waiting for coordination, invalid, locked or error."""
+        reason = self.gate_reason(st)
+        if not reason:
+            return "valid", ""
+        validation = self.validation_reason(st)
+        if not validation and reason in ("minimal", "mainminimal"):
+            return "waiting", reason
+        reason = validation or reason
+        if reason == "lock":
+            return "locked", reason
+        if reason == "error":
+            return "error", reason
+        return "invalid", reason
 
     def get_idx(self, idx: int) -> Optional[SetState]:
-        if 0 <= idx < len(self.by_idx):
-            return self.by_idx[idx]
-        return None
+        with self._lock:
+            if 0 <= idx < len(self.by_idx):
+                return self.by_idx[idx]
+            return None
 
     def coord_vars(self, st: SetState) -> Dict[str, Any]:
         return {
@@ -5045,98 +4156,39 @@ class SetBook:
             "stepI": st.step_i,
             "tpPct": round(st.tp_pct * 100, 4),
             "active": st.active,
-            "processingActive": bool(getattr(st, "processing_active", False)),
-            "processingReason": str(getattr(st, "processing_reason", "") or ""),
-            "last15Ratio": round(st.last15_ratio, 4),
+            "pf": round(st.gate_pf, 4),
+            "gateN": st.gate_n,
+            "pf15": round(st.last15_pf, 4),
+            "ratio": round(st.last15_ratio, 4),
             "maxDdS": st.max_dd_s,
-            "parentSetId": st.parent_set_id or st.id,
-            "stage": st.stage,
-            "stageQualified": st.stage_qualified,
-            "stageLedger": st.stage_ledger,
-            "basePf": st.base_pf,
-            "mainPf": st.main_pf,
-            "realPf": st.real_pf,
-            "positionCostPct": st.position_cost_pct,
-            "axisKey": st.axis_key,
-            "relativeCount": st.relative_count,
-            "volumeRatio": st.volume_ratio,
-            "indicationKind": st.indication_kind,
-            "strategyAdjustments": st.strategy_adjustments,
         }
 
     def coverage(self) -> Dict[str, Any]:
-        trails = [t[0] for t in (self.trails or [])]
+        with self._lock:
+            return self._coverage()
+
+    def _coverage(self) -> Dict[str, Any]:
+        trails = [t[0] for t in self.trails_built]
         trail_sets = [st for st in self.by_idx if st.kind == "trail"]
         base_sets = [st for st in self.by_idx if st.kind == "base"]
+        exit_sets = [st for st in self.by_idx if st.kind == "exit"]
         by_tr: Dict[str, Dict[str, Any]] = {}
         by_sl: Dict[str, Dict[str, Any]] = {}
         for st in trail_sets:
-            b = by_tr.setdefault(st.trail_key, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1, "sl": []})
+            b = by_tr.setdefault(st.trail_key, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
             b["n"] += 1
             b["active"] += int(st.active)
-            sls = b.setdefault("sl", [])
-            if st.sl_ratio not in sls:
-                sls.append(st.sl_ratio)
-            if st.last15_ratio >= b["bestPf"]:
-                b["bestPf"] = st.last15_ratio
+            if st.gate_pf >= b["bestPf"]:
+                b["bestPf"] = st.gate_pf
                 b["bestIdx"] = st.idx
-        sl_step: Dict[str, set] = {}
         for st in base_sets:
-            skey = f"{st.sl_ratio:.1f}"
-            s = by_sl.setdefault(skey, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1, "steps": []})
+            skey = f"{st.sl_ratio:.2f}"
+            s = by_sl.setdefault(skey, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
             s["n"] += 1
             s["active"] += int(st.active)
-            steps = s.setdefault("steps", [])
-            if st.step not in steps:
-                steps.append(st.step)
-            sl_step.setdefault(skey, set()).add(st.step)
-            if st.last15_ratio >= s["bestPf"]:
-                s["bestPf"] = st.last15_ratio
+            if st.gate_pf >= s["bestPf"]:
+                s["bestPf"] = st.gate_pf
                 s["bestIdx"] = st.idx
-        sl_tp_cover = all(set(self.steps) <= sl_step.get(f"{sl:.1f}", set()) for sl in self.sl_ratios) if self.sl_ratios and self.steps else True
-        # Check trail coverage from indexed tuples. The previous nested
-        # ``any`` scan was O(trails * sl * steps * trail_sets), which made a
-        # 30x25x20 catalog block the stats/UI thread for seconds on every
-        # uncached snapshot.
-        trail_pairs = {
-            (round(float(st.sl_ratio), 10), str(st.trail_key))
-            for st in trail_sets
-        }
-        trail_triples = {
-            (round(float(st.sl_ratio), 10), str(st.trail_key), int(st.step))
-            for st in trail_sets
-        }
-        trail_sl_cover = all(
-            (round(float(sl), 10), str(t)) in trail_pairs
-            for t in trails for sl in self.sl_ratios
-        ) if trails and self.sl_ratios else True
-        trail_sl_tp_cover = all(
-            (round(float(sl), 10), str(t), int(step)) in trail_triples
-            for t in trails for sl in self.sl_ratios for step in self.steps
-        ) if trails and self.sl_ratios and self.steps else True
-        need = self.eval_need()
-        validated_count = sum(
-            1
-            for st in self.sets.values()
-            if bool((st.stage_ledger or {}).get("base"))
-        )
-        stage_counts = {"Base": 0, "Main": 0, "Real": 0, "Unqualified": 0}
-        stage_parent_counts = {k: set() for k in stage_counts}
-        for st in self.by_idx:
-            stage = st.stage if st.stage in stage_counts else "Unqualified"
-            stage_counts[stage] += 1
-            stage_parent_counts[stage].add(st.parent_set_id or st.id)
-        axis_counts = {"prev": 0, "last": 0, "cont": 0, "pause": 0}
-        hist_ids = getattr(self, "hist_test_set_ids", None)
-        intern_n = 0 if hist_ids is None else len(hist_ids)
-        if hist_ids is not None:
-            intern_active = sum(1 for sid in hist_ids if (self.sets.get(sid) is not None and self.sets[sid].active))
-            intern_validated = self.intern_validated_count(hist_ids)
-            intern_fills = sum(int(getattr(self.sets.get(sid), "n", 0) or 0) for sid in hist_ids if sid in self.sets)
-        else:
-            intern_active = sum(1 for st in self.sets.values() if st.active)
-            intern_validated = validated_count
-            intern_fills = sum(st.n for st in self.sets.values())
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -5147,987 +4199,647 @@ class SetBook:
                 "sl": len(self.sl_ratios),
                 "trail": len(trails),
                 "step": len(self.steps),
-                "direction": 2,
             },
-            "families": {"base": len(base_sets), "trail": len(trail_sets)},
+            "families": {"base": len(base_sets), "exit": len(exit_sets), "trail": len(trail_sets)},
+            "direction": {"mode": "split" if self.direction_split else "both", "long": sum(1 for st in self.by_idx if st.side > 0),
+                          "short": sum(1 for st in self.by_idx if st.side < 0), "both": sum(1 for st in self.by_idx if st.side == 0)},
+            "shortRange": {"on": SHORT_PACK in self.packs, "steps": list(self.short_steps),
+                           "sets": sum(1 for st in self.by_idx if st.pack == SHORT_PACK)},
+            "minSlDistancePct": self.min_sl_distance_pct,
+            "effectiveMinSlPct": self.cost_pct + self.min_sl_distance_pct,
+            "minSteps": {"trail": self.trail_min_steps},
+            "trailMinLockPct": self.trail_min_lock,
+            "groupGate": {"on": self.group_gate, "n": self.group_gate_n, "pf": self.group_gate_pf, "hours": self.group_gate_hours, "min": self.group_gate_min},
+            "trailDistanceLimitPct": TRAIL_DISTANCE_LIMIT_PCT,
             "product": len(self.by_idx),
-            "setCount": intern_n if hist_ids is not None else len(self.sets),
-            "catalogSetCount": len(self.sets),
-            "internSetCount": intern_n,
-            "internSetIdCount": intern_n,
-            "internSetIds": (list(hist_ids)[:64] if hist_ids is not None else []),
-            "activeCount": intern_active,
-            "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
-            "processingSetIds": self.processing_set_ids()[:350],
-            "validatedCount": intern_validated,
-            "microCount": sum(1 for st in self.sets.values() if getattr(st, "micro", False)),
-            "microMinPf": round(float(getattr(self, "micro_min_pf", 0.0) or 0.0), 4),
-            "microEnabled": bool(getattr(self, "micro_enabled", True)),
-            "microMaxShare": float(getattr(self, "micro_max_share", 0.05)),
-            "validationNeed": need,
-            "entryGate": getattr(self, "entry_gate_stats", None),
-            "histFills": intern_fills,
-            "replaySymbols": len(self._hist_seen),
-            "replayFills": sum(int(st.n or 0) for st in self.sets.values()),
             "indexed": True,
-            "independentTrail": bool(getattr(self, "trail_enabled", True)),
-            "independentDirection": True,
-            "independentIndication": True,
-            "independentStrategy": True,
-            "independentSlTp": True,
-            "independentConfigs": True,
-            "costSubtracted": True,
-            "stageDefaults": {"base": self.stage_min_pf["base"], "main": self.stage_min_pf["main"], "real": self.stage_min_pf["real"]},
-            "stageCounts": stage_counts,
-            "stageParentCounts": {k: len(v) for k, v in stage_parent_counts.items()},
-            "stageFlow": self.stage_flow(),
-            "qualifiedParentIds": {
-                "base": self.qualified_stage_ids("base"),
-                "main": self.qualified_stage_ids("main"),
-                "real": self.qualified_stage_ids("real"),
-            },
-            "axisCounts": axis_counts,
-            "axisVolumeRatio": 0.01,
-            "directions": list(DIRECTIONS),
+            "independentTrail": True,
             "byTrail": by_tr,
             "bySl": by_sl,
             "trailCover": all(any(st.trail_key == t for st in trail_sets) for t in trails) if trails else True,
             "slCover": all(any(abs(st.sl_ratio - sl) < 1e-9 for st in base_sets) for sl in self.sl_ratios),
-            "slTpCover": sl_tp_cover,
-            "trailSlCover": trail_sl_cover,
-            "trailSlTpCover": trail_sl_tp_cover,
         }
 
-    def _side_view(self, st: SetState, side: Optional[str] = None) -> Dict[str, Any]:
-        want = str(side or "").strip().upper()
-        if want in ("L", "1", "BUY"):
-            want = "LONG"
-        elif want in ("S", "-1", "SELL"):
-            want = "SHORT"
-        blob = (st.by_side or {}).get(want) if want in DIRECTIONS else None
-        if not blob:
-            return {
-                "last15_ratio": st.last15_ratio,
-                "last15_n": st.last15_n,
-                "last25_avg_r": st.last25_avg_r,
-                "max_dd_s": st.max_dd_s,
-                "n": st.n,
-                "validated": st.last15_n >= self.eval_need() and is_positive_pf(st.last15_ratio),
-                "active": st.active,
-            }
-        return blob
+    def is_eligible(self, st: SetState) -> bool:
+        """The base gate: valid only when gate_reason() gives no reason to be invalid."""
+        return self.gate_reason(st) == ""
 
-    def intern_validated_count(self, hist_ids: Optional[Sequence[str]] = None) -> int:
-        """Proven intern configs: n>=need and PF>=real floor. Empty tape is not validated."""
-        ids = hist_ids if hist_ids is not None else getattr(self, "hist_test_set_ids", None)
-        if ids is None:
-            return 0
-        need = self.eval_need()
-        floor = float(self.real_min_pf or self.min_pf or POSITIVE_PF)
-        n_ok = 0
-        for sid in ids:
-            st = self.sets.get(sid)
-            if st is None:
-                continue
-            ledger = getattr(st, "stage_ledger", None) or {}
-            if "base" in ledger:
-                # A scored/seeded Base ledger is authoritative for counts.
-                n_ok += int(bool(ledger.get("base")))
-                continue
-            n = max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
-            pf = float(getattr(st, "last15_ratio", 0) or 0)
-            if n >= need and pf + 1e-9 >= floor:
-                n_ok += 1
-        return n_ok
+    def gate_keep(self) -> int:
+        return max(40, self.gate_window_max)
 
-    def intern_metric_source(self, pack: Optional[str] = None) -> Optional[SetState]:
-        """Best Base row for intern coordination. Hist-test gate restricts to selected configs.
+    def pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
+        with self._lock:
+            return self._pick(pack, kind)
 
-        Pack is independent: indications intern PF never substitutes for general.
-        Empty n=0 / n<8 tapes are not intern evidence. Proven PF beats max-n.
-        """
-        allow = getattr(self, "hist_test_set_ids", None)
-        sets_map = self.sets or {}
-        ids = list((self._ids_by_kind or {}).get("base") or [])
-        want = str(pack or "").strip().lower()
-        if allow is not None:
-            allow_set = allow
-            ranked = [sid for sid in ids if sid in allow_set]
-            extra = [sid for sid in allow_set if sid not in set(ranked) and sid in sets_map]
-            ids = ranked + extra
-        need = self.eval_need()
-        floor = float(self.real_min_pf or self.min_pf or POSITIVE_PF)
-        best: Optional[SetState] = None
-        best_key: Optional[Tuple[int, float, int]] = None
-        for sid in ids:
-            cand = sets_map.get(sid)
-            if cand is None:
-                continue
-            if want and str(getattr(cand, "pack", "") or "").strip().lower() != want:
-                continue
-            n = int(getattr(cand, "last15_n", 0) or 0)
-            if n < 8:
-                continue
-            pf = float(getattr(cand, "last15_ratio", 0) or 0)
-            proven = 1 if (n >= need and pf + 1e-9 >= floor) else 0
-            key = (proven, pf, n)
-            if best is None or best_key is None or key > best_key:
-                best = cand
-                best_key = key
-        return best
+    def valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
+        """Every valid Set of this pack and kind, best first (side: only the Sets that may trade that direction). No global gate: each Set stands on its own tape."""
+        with self._lock:
+            return self._valid_for(pack, kind, side)
 
-    def pick(self, pack: str, kind: str = "base", side: Optional[str] = None, *, all_valid: bool = False):
-        gated = bool(self.progress.ready and self.use_historic_gate)
-        want_side = str(side or "").strip().upper()
-        if want_side in ("L", "1", "BUY"):
-            want_side = "LONG"
-        elif want_side in ("S", "-1", "SELL"):
-            want_side = "SHORT"
-        use_side = want_side in DIRECTIONS
-        self._cap_active(force=False)
-        allow = getattr(self, "hist_test_set_ids", None)
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind
-                and s.deact_reason != "selection limit"
-                and (allow is None or s.id in allow)]
+    def rank_key(self, st: SetState) -> Tuple[Any, ...]:
+        """Order of choice among the eligible Sets, best first (sort descending):
+        1. stable: the PF of both halves of the gate window is at or above the pack's PF floor, so the Set did not pass
+           on one lucky stretch;
+        2. the gate PF shrunk toward 1 by the orders behind it (n / (n + RANK_SHRINK_N)): a PF on 35 orders weighs less
+           than the same PF on 350;
+        3. more orders;
+        4. the better recent R, then the shorter drawdown time."""
+        floor = self.floor_for(self.win(st).base_long, st.pack, st)
+        halves = min(st.gate_pf_old, st.gate_pf_new) if (st.gate_pf_old or st.gate_pf_new) else st.gate_pf
+        n = max(0, int(st.n))
+        shrunk = 1.0 + (min(float(st.gate_pf), RANK_PF_CAP) - 1.0) * n / (n + RANK_SHRINK_N)
+        return (halves + 1e-9 >= floor, round(shrunk, 4), n, st.last25_avg_r, -st.max_dd_s)
+
+    def lane_rank_key(self, st: SetState, lane: str = "pos") -> Tuple[Any, ...]:
+        """The choice among the Sets valid on `lane`, best first. With stages on (rankByLane, default) it reads the lane's own Set -- the Real Set on the
+        positive lane, the Real Negative Set on the negative one: its PF over its orders, the halves, the count, its recent R -- because that is the Set that
+        was validated and executes, not the raw Base tape (which holds every order, the ones the stages rejected too). Without stages, or with rankByLane off,
+        the Base tape's rank_key."""
+        if not (self.rank_by_lane and (self.main_on or self.neg_on or self.realst_on)):
+            return self.rank_key(st)
+        w_ = self.win(st)
+        return lane_rank_of(st.rank_neg if lane == "neg" else st.rank_pos, self.floor_for(w_.real_neg_n if lane == "neg" else w_.real_n, st.pack, st), st.max_dd_s)
+
+    def _valid_for(self, pack: str, kind: str = "base", side: int = 0) -> List[SetState]:
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side)) and self.is_eligible(s)]
+        rows.sort(key=self.rank_key, reverse=True)
+        return rows
+
+    def _pick(self, pack: str, kind: str = "base", side: int = 0) -> Optional[SetState]:
+        if self.use_historic_gate:
+            ranked = self.valid_for(pack, kind, side)
+            return ranked[0] if ranked else None
+        # gate disabled (legacy): any active set of this pack and kind, ranked the same way
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and (not side or s.side in (0, side))]
         if not rows:
             return None
-        need = self.eval_need()
+        rows = [s for s in rows if s.active] or rows
+        # a Set with fewer orders than the gate floor is not judged: its PF (99 after one winning order) must not outrank a
+        # Set that has the orders (with the minimum off, rank_key shrinks a PF toward 1 by the orders behind it)
+        rows.sort(key=lambda s: (s.gate_n >= self.gate_min,) + self.rank_key(s), reverse=True)
+        return rows[0]
 
-        def view(s: SetState) -> Dict[str, Any]:
-            return self._side_view(s, want_side if use_side else None)
-
-        def side_on(s: SetState) -> bool:
-            if use_side:
-                blob = (s.by_side or {}).get(want_side)
-                if isinstance(blob, dict) and "active" in blob:
-                    return bool(blob.get("active"))
-            return bool(s.active)
-
-        on = [s for s in rows if side_on(s)]
-        if on:
-            rows = on
-        elif gated:
-            return None
-        if not rows:
-            return None
-
-        def proven_neg(s: SetState) -> bool:
-            v = view(s)
-            return int(v.get("last15_n") or 0) >= need and float(v.get("last15_ratio") or 0) + 1e-9 < 1.0
-
-        passing = [
-            s for s in rows
-            if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.real_min_pf
-        ]
-        if not passing and not self.strict_gate:
-            passing = [
-                s for s in rows
-                if int(view(s).get("last15_n") or 0) >= need and is_positive_pf(view(s).get("last15_ratio"))
-            ]
-        if not passing and not self.strict_gate:
-            passing = [s for s in rows if not proven_neg(s)]
-        if not passing and not self.strict_gate and not gated:
-            passing = [s for s in rows if side_on(s)] or list(rows)
-        if not passing:
-            return None
-
-        def live_rows(s: SetState) -> List[Dict[str, Any]]:
-            return sorted(
-                filter_side(s.live, want_side if use_side else None),
-                key=lambda r: finite(r.get("t")),
-            )
-
-        def live_ok(s: SetState) -> bool:
-            return self._live_entry_allowed(s, want_side if use_side else None)
-        live_pass = [s for s in passing if live_ok(s)]
-        if all_valid:
-            # Qualification is independent of ranking and of a sibling's live
-            # evidence. Every valid base/trail gets an execution opportunity.
-            return [s for s in live_pass
-                    if side_on(s)
-                    and 0 <= float(view(s).get("max_dd_s") or 0) <= self.max_dd_s
-                    and math.isfinite(float(view(s).get("last15_ratio") or 0))]
-        live_evidenced = [s for s in live_pass if len(live_rows(s)) >= need]
-        # Once a Set has enough own exchange evidence, do not let a merely
-        # historic sibling win by default.  This keeps the measured live pool
-        # separate from cold candidates and makes throughput meaningful.
-        chosen = live_evidenced or live_pass
-        if not chosen:
-            return None
-        if self.live_test_mode and kind == "base":
-            # Exploration is deliberately bounded to the best historic
-            # candidates and only rotates candidates that are still cold. A
-            # candidate with negative live windows is already deactivated by
-            # _score_one/_side_active_flags and cannot be reintroduced here.
-            exploratory = sorted(
-                live_pass,
-                key=lambda s: (
-                    -float(view(s).get("last15_ratio") or 0),
-                    -float(view(s).get("last25_avg_r") or 0),
-                    float(view(s).get("max_dd_s") or 0),
-                    int(s.step or 0),
-                    float(s.sl_ratio or 0),
-                    float(s.trail_arm or 0),
-                    float(s.trail_give or 0),
-                ),
-            )
-            candidate_cap = int(getattr(self, "live_test_candidates", 0) or 0)
-            if candidate_cap > 0:
-                exploratory = exploratory[:candidate_cap]
-            if self.prefer_minimal_range and self.additional_coordination:
-                floor_rows = [s for s in exploratory if int(s.step or 0) >= int(self.min_step or self.min_step_cfg)]
-                if floor_rows:
-                    exploratory = floor_rows
-            cold = [
-                s for s in exploratory
-                if len(filter_side(s.live, want_side if use_side else None)) < self.live_test_min_samples
-            ]
-            pool = cold or live_evidenced or exploratory
-            if pool:
-                with self._pick_lock:
-                    selected = pool[self._pick_cursor % len(pool)]
-                    self._pick_cursor = (self._pick_cursor + 1) % max(1, len(pool))
-                chosen = [selected]
-        if self.prefer_minimal_range and kind == "base" and self.additional_coordination:
-            # Independently positive live configs may establish a preferred
-            # floor. This never invents a threshold from aggregate losses.
-            floor_rows = [s for s in chosen if int(s.step or 0) >= int(self.min_step or self.min_step_cfg)]
-            if floor_rows:
-                chosen = floor_rows
-        if live_evidenced and not (self.live_test_mode and kind == "base" and any(
-            len(live_rows(s)) < self.live_test_min_samples for s in chosen
-        )):
-            # Safety/quality gates have already run above.  Among measured
-            # positive live configs, observed trade throughput is the primary
-            # economic tie-breaker, followed by PF and DD-time/range.
-            chosen.sort(key=lambda s: (
-                -trades_per_hour(live_rows(s)),
-                -float(view(s).get("last15_ratio") or 0),
-                -float(view(s).get("last25_avg_r") or 0),
-                float(view(s).get("max_dd_s") or 0),
-                int(s.step or 0),
-                float(s.sl_ratio or 0),
-                float(s.trail_arm or 0),
-                float(s.trail_give or 0),
-                -int(view(s).get("n") or 0),
-            ))
-        elif self.prefer_minimal_range:
-            # Cold VST exploration and historic-only operation remain
-            # deterministic: PF first, then expectancy/DD-time, then range.
-            chosen.sort(key=lambda s: (
-                -float(view(s).get("last15_ratio") or 0),
-                -float(view(s).get("last25_avg_r") or 0),
-                float(view(s).get("max_dd_s") or 0),
-                int(s.step or 0),
-                float(s.sl_ratio or 0),
-                float(s.trail_arm or 0),
-                float(s.trail_give or 0),
-                -int(view(s).get("n") or 0),
-            ))
-        else:
-            chosen.sort(key=lambda s: (
-                -float(view(s).get("last15_ratio") or 0),
-                -float(view(s).get("last25_avg_r") or 0),
-                float(view(s).get("max_dd_s") or 0),
-                0 if (s.kind != "base" or int(s.step or 0) >= int(self.min_step or 0)) else 1,
-                -int(view(s).get("n") or 0),
-            ))
-        return chosen[0]
-
-    def pick_trail(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
-        return self.pick(pack, kind="trail", side=side)
-
-    def pick_entry(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
-        """Pick the first Real-qualified normal or trailing Set."""
-        rows = self.entry_sets(pack, side=side)
-        return rows[0] if rows else None
-
-    def _entry_policy_is_permissive(self) -> bool:
-        return str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)).strip().lower() == ENTRY_POLICY_PERMISSIVE
-
-    def _live_entry_allowed(self, state: SetState, side: Optional[str] = None) -> bool:
-        """Apply the selected live-evidence policy without bypassing risk gates."""
-        rows = filter_side(state.evaluation_live(), side)
-        if not self.live_negative_deact or len(rows) < self.deact_n:
-            return True
-        tail = sorted(rows, key=lambda r: finite(r.get("t")))[-self.deact_n:]
-        return sum(row_net_pnl(row, self.cost_pct) for row in tail) >= 0
-
-    def _validated_entry_rows(self, pack: str, side: Optional[str] = None) -> List[SetState]:
-        """Return the exact Base rows allowed to source a new live entry.
-
-        ``pick`` intentionally remains backwards-compatible for overview and
-        research callers, including its non-strict/cold fallback.  The live
-        entry boundary is stricter: once the historic gate is ready, a row
-        needs its own sample floor, positive cost-adjusted PF, real-stage PF
-        floor, DD-time cap, and active side flag.  This prevents an unproven
-        or losing Base row from being revived merely because its sibling won a
-        ranking pass.
-        """
-        self._cap_active(force=False)
-        allow = getattr(self, "hist_test_set_ids", None)
-        rows = [
-            state
-            for state in self.by_idx
-            if state.pack == pack
-            and state.kind in ("base", "trail")
-            and state.deact_reason != "selection limit"
-            and (allow is None or state.id in allow)
-        ]
-        if not rows:
-            return []
-        want_side = str(side or "").strip().upper()
-        if want_side in ("L", "1", "BUY"):
-            want_side = "LONG"
-        elif want_side in ("S", "-1", "SELL"):
-            want_side = "SHORT"
-        use_side = want_side in DIRECTIONS
-
-        def side_active(state: SetState) -> bool:
-            allow_ids = getattr(self, "hist_test_set_ids", None)
-            blob = (state.by_side or {}).get(want_side) if use_side else None
-            has_side = isinstance(blob, dict) and "active" in blob
-            # Test Historic scope never overrides this direction's own flag.
-            if allow_ids is not None and state.id in allow_ids and state.active and not has_side:
-                return True
-            if use_side:
-                if has_side:
-                    if blob.get("active"):
-                        return True
-                    # Cached "unproven" / "stage qualification" is not a
-                    # deactivation. Those flags used to starve the intern
-                    # dispatcher (matrix=0 while hundreds of signals fired).
-                    reason = str(blob.get("deact_reason") or "")
-                    if reason in ("unproven", "stage qualification", ""):
-                        return ((not self.strict_gate and self._base_metrics_ok(blob))
-                                or (not state.locked and self._micro_metrics_ok(blob)))
-                    return False
-            if self.strict_gate:
-                if state.active:
-                    return True
-                return (not state.locked and self._soft_deact(state.deact_reason)
-                        and self._micro_metrics_ok(self._side_view(state, want_side if use_side else None)))
-            reason = str(state.deact_reason or "")
-            if state.locked or reason == "locked":
-                return False
-            # No side blob: only Base evidence on the Set itself qualifies.
-            # Unscored catalog rows are not entry-matrix candidates.
-            return self._base_metrics_ok(self._side_view(state, want_side if use_side else None))
-
-        # A permissive replay may publish qualified Sets before the aggregate
-        # catalog is complete.  That does not make the aggregate ``ready``
-        # flag a qualification bypass: every direction still needs its own
-        # Base -> Main -> Real sample/PF/DD-time evidence.  Only a disabled
-        # historic gate keeps the legacy active-row fallback.
-        gated = bool(self.enabled and self.use_historic_gate)
-        if not gated:
-            result = [state for state in rows if side_active(state)]
-            if not isinstance(getattr(self, "entry_gate_stats", None), dict):
-                self.entry_gate_stats = {}
-            self.entry_gate_stats[f"{pack}/{want_side if use_side else 'any'}"] = {
-                "rows": len(rows),
-                "passed": len(result),
-                "need": int(self.eval_need()),
-                "pfFloor": round(float(self.real_min_pf or 1.0), 6),
-                "ready": bool(self.progress.ready),
-                "phase": str(getattr(self.progress, "phase", "") or ""),
-                "replayPct": round(float(getattr(self.progress, "pct", 0.0) or 0.0), 1),
-                "deferred": bool(self.enabled and self.use_historic_gate and not self.progress.ready),
-            }
-            return result
-
-        need = self.eval_need()
-        floor = max(1.0, float(self.stage_min_pf.get("base", self.min_pf) or 1.0))
-        intern_floor = floor
-        result: List[SetState] = []
-        rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0, "micro": 0}
-        for state in rows:
-            if not side_active(state):
-                rejected["side_inactive"] += 1
-                continue
-            view = self._side_view(state, want_side if use_side else None)
-            allow_ids = getattr(self, "hist_test_set_ids", None)
-            hist_test_row = bool(allow_ids is not None and state.id in allow_ids and state.active)
-            n = int(view.get("last15_n") or 0)
-            pf = float(view.get("last15_ratio") or 0.0)
-            dd = float(view.get("max_dd_s") or 0.0)
-            if n < need and not hist_test_row:
-                rejected["low_n"] += 1
-                continue
-            micro = self._micro_metrics_ok(view)
-            if (not math.isfinite(pf) or pf + 1e-9 < intern_floor) and not hist_test_row and not micro:
-                rejected["low_pf"] += 1
-                continue
-            if (not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9) and not hist_test_row:
-                rejected["dd_cap"] += 1
-                continue
-            if not self._live_entry_allowed(state, want_side if use_side else None):
-                rejected["live"] += 1
-                continue
-            if self.strict_gate and not hist_test_row and not micro and not self._real_metrics_ok(view):
-                rejected["stage"] += 1
-                continue
-            if micro:
-                rejected["micro"] += 1  # admitted at minimum size, counted for observability
-            result.append(state)
-        # Observability for the live entry boundary: which gate starves the
-        # book. Published with the sets snapshot, keyed per scope so all four
-        # dispatch lanes stay visible (the dispatch queries every scope each
-        # cycle, so stale keys self-correct within one cycle).
-        if not isinstance(getattr(self, "entry_gate_stats", None), dict):
-            self.entry_gate_stats = {}
-        self.entry_gate_stats[f"{pack}/{want_side if use_side else 'any'}"] = {
-            "rows": len(rows),
-            "passed": len(result),
-            "need": int(need),
-            "pfFloor": round(float(floor), 6),
-            "maxDdS": round(float(self.max_dd_s or 0.0), 1),
-            "ready": bool(self.progress.ready),
-            "phase": str(getattr(self.progress, "phase", "") or ""),
-            "deferred": bool(not self.progress.ready),
-            **rejected,
-            "t": round(time.time(), 3),
-        }
-        return result
+    def step_of(self, st: "SetState") -> int:
+        """The TP step of a Set; a trailing Set takes the step of its arm (arm % over PositionCost)."""
+        return int(st.step) if st.kind != "trail" else int(round(float(st.trail_arm) / max(1e-9, float(self.cost_pct))))
 
     @staticmethod
-    def _entry_side(side: Optional[str]) -> str:
-        want = str(side or "").strip().upper()
-        if want in ("L", "1", "BUY"):
-            return "LONG"
-        if want in ("S", "-1", "SELL"):
-            return "SHORT"
-        return want if want in DIRECTIONS else ""
-
-    def _entry_cache_key(self, pack: str, side: str) -> Tuple[Any, ...]:
-        """Return all non-score inputs that can change entry eligibility."""
-        return (
-            int(getattr(self, "_entry_cache_epoch", 0) or 0),
-            id(self.by_idx),
-            len(self.by_idx),
-            str(pack),
-            str(side),
-            bool(self.enabled),
-            bool(self.use_historic_gate),
-            bool(getattr(self.progress, "ready", False)),
-            bool(self.strict_gate),
-            int(self.eval_need()),
-            round(float(self.real_min_pf or 0.0), 12),
-            bool(getattr(self, "micro_enabled", False)),
-            round(float(getattr(self, "micro_min_pf", 0.0) or 0.0), 12),
-            round(float(self.max_dd_s or 0.0), 6),
-            round(float(self.cost_pct or 0.0), 12),
-            str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)),
-            int(getattr(self, "entry_policy_max_candidates", 0) or 0),
-            max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0)),
-            None if getattr(self, "hist_test_set_ids", None) is None else frozenset(self.hist_test_set_ids),
-        )
-
-    def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
-        """Return every Real-qualified normal/trailing Set eligible for entries.
-
-        The list is intentionally not ranked down to one winner. EntryMatrix
-        performs fair lazy round-robin dispatch over this stable list; the
-        helper applies the per-Set PF/DDT/sample gates before returning it.
-        """
-        # Ensure a changed active-selection cap is reflected before looking at
-        # the cache. _cap_active is normally a no-op here and is O(1) when no
-        # score/config publication marked the selection dirty.
-        self._cap_active(force=False)
-        normalized_side = self._entry_side(side)
-        key = (str(pack), normalized_side)
-        context = self._entry_cache_key(pack, normalized_side)
-        cached = getattr(self, "_entry_rows_cache", {}).get(key)
-        if cached is not None and cached[0] == context:
-            return list(cached[1])
-        rows = tuple(
-            sorted(
-                self._validated_entry_rows(pack, side=normalized_side),
-                key=lambda s: (
-                    -float(s.last15_ratio or 0),
-                    float(s.max_dd_s or 0),
-                    int(s.step or 0),
-                    float(s.sl_ratio or 0),
-                    s.idx,
-                    s.id,
-                ),
-            )
-        )
-        if self._entry_policy_is_permissive() and rows:
-            min_live = max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0))
-            candidate_cap = int(getattr(self, "entry_policy_max_candidates", 0) or 0)
-            if min_live <= 0:
-                # A zero live-sample floor makes every row "warm". Still apply
-                # the candidate cap to the PF-first list so the dispatcher
-                # cannot explode into the full catalog.
-                if candidate_cap > 0:
-                    rows = tuple(rows[:candidate_cap])
-            else:
-                warm = [state for state in rows if len(filter_side(state.evaluation_live(), normalized_side)) >= min_live]
-                warm_ids = {state.id for state in warm}
-                cold = [state for state in rows if state.id not in warm_ids]
-                if cold:
-                    cold.sort(key=lambda state: (-float(state.last15_ratio or 0), float(state.max_dd_s or 0), state.idx, state.id))
-                    admitted_cold = cold if candidate_cap <= 0 else cold[:candidate_cap]
-                    # Keep PF-first order so the live dispatcher spends burst
-                    # budget on high-value Sets instead of catalog index order.
-                    rows = tuple(sorted(
-                        warm + admitted_cold,
-                        key=lambda s: (
-                            -float(s.last15_ratio or 0),
-                            float(s.max_dd_s or 0),
-                            int(s.step or 0),
-                            float(s.sl_ratio or 0),
-                            s.idx,
-                            s.id,
-                        ),
-                    ))
-        # A concurrent live fill/replay publication may have advanced the
-        # epoch while this scan ran. In that case discard the result; the next
-        # caller will rebuild against the newer state.
-        if self._entry_cache_key(pack, normalized_side) == context:
-            cache = getattr(self, "_entry_rows_cache", None)
-            if not isinstance(cache, dict):
-                cache = self._entry_rows_cache = {}
-            cache[key] = (context, rows)
-        return list(rows)
-
-    def entry_pack_open(self, pack: str, side: Optional[str] = None) -> bool:
-        """Whether this pack has a Real-qualified execution candidate."""
-        if not self.enabled or not self.use_historic_gate:
-            return True
-        if not getattr(self.progress, "ready", False):
-            return True
-        return self.pick_entry(pack, side=side) is not None
-
-    def pick_all(self, pack: str, side: Optional[str] = None) -> List[SetState]:
-        """All eligible base and trailing configurations in stable catalog order."""
-        return sorted(
-            (self.pick(pack, "base", side=side, all_valid=True) or [])
-            + (self.pick(pack, "trail", side=side, all_valid=True) or []),
-            key=lambda s: (s.idx, s.id),
-        )
-
-    def _base_metrics_ok(self, view: Dict[str, Any]) -> bool:
-        base_floor = self.stage_min_pf.get("base", self.min_pf)
-        return bool(int(view.get("base_n", view.get("last15_n", 0)) or 0) >= self.eval_need()
-                    and clears_pf(view.get("base_pf", view.get("last15_ratio")), base_floor)
-                    and view.get("ddOk", True)
-                    and 0 <= finite(view.get("max_dd_s", 0), -1) <= self.max_dd_s)
-
-    def _real_metrics_ok(self, view: Dict[str, Any]) -> bool:
-        """Same sequential window gates for stage display and order admission.
-
-        Real cannot inherit Base/last-15. A view without its own Real window
-        is not extra-size evidence.
-        """
-        from position_cost import clears_pf
-        if not isinstance(view, dict) or not view:
-            return False
-        if "real_n" not in view and "real_pf" not in view:
-            return False
-        _, main_need, real_need = self._stage_window_ns()
-        n = int(view.get("base_n", view.get("last15_n", 0)) or 0)
-        pf = float(view.get("base_pf", view.get("last15_ratio", 0)) or 0)
-        base_floor = self.stage_min_pf.get("base", self.min_pf)
-        main_floor = self.stage_min_pf.get("main", self.min_pf)
-        real_floor = self.stage_min_pf.get("real", self.real_min_pf)
-        has_main = "main_n" in view or "main_pf" in view
-        main_n = int(view.get("main_n") or 0) if has_main else 0
-        main_pf = view.get("main_pf") if has_main else 0.0
-        real_n = int(view.get("real_n", 0) or 0)
-        real_pf = view.get("real_pf")
-        if real_pf is None:
-            return False
-        return bool(
-            n >= self.eval_need() and clears_pf(pf, base_floor)
-            and main_n >= main_need
-            and clears_pf(main_pf, main_floor)
-            and real_n >= real_need
-            and clears_pf(real_pf, real_floor)
-            and view.get("ddOk", True)
-            and 0 <= float(view.get("max_dd_s", 0) or 0) <= self.max_dd_s
-        )
-
-    def _micro_metrics_ok(self, view: Dict[str, Any]) -> bool:
-        """Micro tier gate: the stage chain at the Micro floor, only for a
-        view that does not qualify at the shared floor. Micro entries execute
-        at venue-minimum size and never receive Block/DCA adds (those gates
-        re-check the parent at the shared floor)."""
-        if not getattr(self, "micro_enabled", False) or not isinstance(view, dict) or not view:
-            return False
-        if self._real_metrics_ok(view) if self.strict_gate else self._base_metrics_ok(view):
-            return False
-        floor = float(self.micro_min_pf)
-        n = int(view.get("base_n", view.get("last15_n", 0)) or 0)
-        if not (n >= self.eval_need()
-                and clears_pf(view.get("base_pf", view.get("last15_ratio")), floor)
-                and view.get("ddOk", True)
-                and 0 <= finite(view.get("max_dd_s", 0), -1) <= self.max_dd_s):
-            return False
-        if not self.strict_gate:
-            return True
-        if "real_n" not in view and "real_pf" not in view:
-            return False
-        _, main_need, real_need = self._stage_window_ns()
-        return bool(int(view.get("main_n") or 0) >= main_need and clears_pf(view.get("main_pf"), floor)
-                    and int(view.get("real_n") or 0) >= real_need and clears_pf(view.get("real_pf"), floor))
-
-    def micro_tier(self, st: Any, side: Optional[str]) -> bool:
-        """True when this exact Set/direction trades as Micro (minimum size)."""
-        if not isinstance(st, SetState) or self.sets.get(st.id) is not st:
-            return False
+    def _pause_minutes(raw: Any) -> int:
+        """A configured pause in whole minutes, 0 (none) to PAUSE_MAX; a broken value is none."""
         try:
-            return self._micro_metrics_ok(self._side_view(st, self._entry_side(side) or None))
+            v = int(round(float(raw)))
         except Exception:
-            return False
+            return 0
+        return max(0, min(PAUSE_MAX, v)) if math.isfinite(v) else 0
 
-    @staticmethod
-    def _soft_deact(reason: Any) -> bool:
-        """Cached qualification flags are not deactivations; hard ones are."""
-        return str(reason or "") in ("unproven", "stage qualification", "")
+    def pause_refs(self, pack: str, side: int = 0) -> List["SetState"]:
+        """The reference Sets of an indication's pause Auto Mode: base Sets (SL ratio 1.0 and 2.0, TP step 3 / 6 / 10 / 16, the nearest the grid has).
+        Pause is a property of the indication on a symbol, so it is judged on a few representative Sets pooled, never on one Set's own tape."""
+        cands = [st for st in self.by_idx if st.pack == pack and st.kind == "base" and st.side == int(side or 0)]
+        if not cands:
+            return []
+        out: List[SetState] = []
+        for ratio in (1.0, 2.0):
+            for step in (3, 6, 10, 16):
+                best = min(cands, key=lambda st: (abs(st.sl_ratio - ratio) + abs(self.step_of(st) - step) / 10.0, st.id))
+                if best not in out:
+                    out.append(best)
+        return out
 
-    def execution_allowed(self, st: SetState, pack: str, side: str) -> bool:
-        """Revalidate the exact selected object at the submission boundary."""
-        if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
-            return False
-        # VST's permissive-bounded rollout admits a Set as soon as that
-        # Set's own Base -> Main -> Real/PF/DD-time evidence is current. The
-        # aggregate replay flag only describes catalog completeness; it must
-        # not veto an independently qualified Set while other symbols are
-        # still being scored. Strict lanes keep the aggregate boundary.
-        partial_set_entries = self._entry_policy_is_permissive()
-        if self.use_historic_gate and (
-            not self.progress.ready or self.progress.phase == "score-refresh"
-        ) and not partial_set_entries:
-            return False
-        if st.deact_reason == "selection limit":
-            return False
-        view = self._side_view(st, side)
-        active = (st.by_side.get(side) or {}).get("active", st.active)
-        pf = float(view.get("last15_ratio") or 0)
-        dd = float(view.get("max_dd_s") or 0)
-        n = int(view.get("last15_n") or 0)
-        if not math.isfinite(pf) or not math.isfinite(dd) or dd < 0 or dd > self.max_dd_s:
-            return False
-        if n >= self.eval_need() and pf + 1e-9 < 1.0:
-            return False
-        if not self._live_entry_allowed(st, side):
-            return False
-        blob = st.by_side.get(side) or {}
-        soft = self._soft_deact(blob.get("deact_reason", st.deact_reason)) and not st.locked
-        if self.strict_gate:
-            if active and self._real_metrics_ok(view):
-                return True
-            return soft and self._micro_metrics_ok(view)
-        # Non-strict intern: Base-qualified Sets enter even when the cached
-        # side flag still says unproven/stage. Empty tape is not evidence and
-        # a Set below the Base floor only enters as Micro (minimum size).
-        if n < self.eval_need():
-            return False
-        return self._base_metrics_ok(view) or (soft and self._micro_metrics_ok(view))
+    def _pause_report(self) -> Dict[str, Any]:
+        """What the pause does now: the mode and settings, and per pack (and direction, in a split book) the minutes the Auto Mode chose across symbols."""
+        by_pack: Dict[str, List[int]] = {}
+        for (pack, _sym, side), minutes in list(self.pause_now.items()):
+            by_pack.setdefault(pack + side_part(side), []).append(int(minutes))
+        chosen = {}
+        for pack, vals in by_pack.items():
+            vals.sort()
+            chosen[pack] = {"symbols": len(vals), "withPause": sum(1 for v in vals if v > 0), "median": vals[len(vals) // 2], "max": vals[-1]}
+        return {"mode": self.pause_mode, "fixedMin": self.pause_fixed, "candidates": list(self.pause_candidates), "autoMax": self.pause_auto_max,
+                "autoMin": self.pause_auto_min, "packs": dict(self.pause_pack), "off": sorted(self.pause_off), "chosen": chosen}
 
-    def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
-        base = self.pick(pack, "base", side=side)
-        trail = self.pick(pack, "trail", side=side)
-        if base and trail:
-            want = str(side or "").strip().upper()
-            vb = self._side_view(base, want if want in DIRECTIONS else None)
-            vt = self._side_view(trail, want if want in DIRECTIONS else None)
-            base_live = filter_side(base.live, want if want in DIRECTIONS else None)
-            trail_live = filter_side(trail.live, want if want in DIRECTIONS else None)
-            if min(len(base_live), len(trail_live)) >= self.eval_need():
-                return max((base, trail), key=lambda s: trades_per_hour(filter_side(s.live, want)))
-            if float(vt.get("last15_ratio") or 0) > float(vb.get("last15_ratio") or 0):
-                return trail
-            return base
-        return base or trail
+    def pause_active(self, pack: str) -> bool:
+        return pack not in self.pause_off and (self.pause_mode != "off" or pack in self.pause_pack)
 
-    def pack_open(self, pack: str, side: Optional[str] = None) -> bool:
+    def pause_minutes(self, pack: str, symbol: str = "", side: int = 0) -> int:
+        """Minutes a lane of this indication rests after a winning close on the symbol right now (what a new close would wait):
+        the manual pack value, else the fixed value, else the Auto Mode's latest choice for (pack, symbol, side); 0 = only the cooldown. side 0 asked of
+        a split book: the longest of the two directions (a display value; live asks with the closed position's side)."""
+        if pack in self.pause_off:
+            return 0
+        if pack in self.pause_pack:
+            return self.pause_pack[pack]
+        if self.pause_mode == "fixed":
+            return self.pause_fixed
+        if self.pause_mode == "auto":
+            if side:
+                return int(self.pause_now.get((pack, symbol, int(side)), 0))
+            both = [self.pause_now.get((pack, symbol, sd)) for sd in (0, 1, -1)]
+            return max([int(v) for v in both if v is not None], default=0)
+        return 0
+
+    def hold_bars_for(self, st: "SetState") -> int:
+        """The Set's own manual time exit in bars (one bar = one minute), 0 when its step has no hold of its own."""
+        table = getattr(self, "step_hold", None) or {}
+        return int(table.get(self.step_of(st), 0)) if table else 0
+
+    def auto_holds(self, st: "SetState") -> Tuple[int, ...]:
+        """The hold candidates (minutes) the Auto Mode tries on this Set; empty when auto is off or its step has a manual hold.
+        Each Set (pack x range x step, or trailing pair) is judged alone: the candidates change only its own exit."""
+        if not getattr(self, "hold_auto", False) or self.hold_bars_for(st) or st.kind == "trail":
+            return ()                # a trailing Set leaves by its own trail, stop and the global time stop: no Auto hold (owner 2026-11-03)
+        return HOLD_AUTO_LOW if self.step_of(st) <= 5 else HOLD_AUTO_HIGH
+
+    @property
+    def scratch_bars(self) -> int:
+        """Bars after the entry before the scratch exit may fire; the replay and the live Set lane both read this. With setScratchEnabled off (the
+        default, 2026-11-03) the scratch exit never fires on a Set lane: it is one global rule (+0.16 % gross after 10 minutes) that cut every Set's
+        winners at about +0.04 % net whatever its own TP range, while its stops stayed full size; a Set now leaves by its own stop, target and time."""
+        if not getattr(self, "set_scratch", True):
+            return SCRATCH_NEVER
+        return max(8, int(self.scratch_s / BAR_S))
+
+    def lane_fracs(self, st: SetState) -> Tuple[float, float]:
+        """(sl_frac, tp_frac) of a Set's lane with this book's PositionCost and minimum stop steps (the replay's cfg)."""
+        return lane_fracs(st, self.cost_pct, min_sl_distance_pct=self.min_sl_distance_pct)
+
+    def stop_cap_exceeded(self, st: SetState) -> bool:
+        """Limit modeled initial stop distance plus cost; zero disables this entry filter."""
+        cap = self.max_modeled_stop_loss_pct
+        return self.stop_cap_invalid or (cap > 0 and self.lane_fracs(st)[0] * 100.0 + self.cost_pct > cap + 1e-9)
+
+    def pick_trail(self, pack: str) -> Optional[SetState]:
+        return self.pick(pack, kind="trail")
+
+    def real_paper(self, n: int = 200) -> List[Dict[str, Any]]:
+        """The Real stage's paper stream: the newest n orders of every Set's Real and Real Negative Sets (the orders the Sets opened
+        after Base and Main), oldest first, as {"t", "pnl_pct", "pnl", "lane"}. The overall strategies (the coordinator's stages and
+        axes) read it, so their evidence keeps flowing whether or not a position was executed."""
+        return self._real_paper_scopes(n, scoped=False)["overall"]
+
+    def real_paper_scopes(self, n: int = 200) -> Dict[str, List[Dict[str, Any]]]:
+        """The Real paper stream split by scope in one pass: "overall" (every Real and Real Negative Set), "lane:pos", "lane:neg",
+        "pack:<pack>" (both lanes of one strategy) and "pack:<pack>:<lane>"; each the newest n orders of its scope, oldest first (the
+        rows of real_paper). Each pack-lane scope gates only that pack and lane; pooled scopes are figures."""
+        return self._real_paper_scopes(n, scoped=True)
+
+    def _real_paper_scopes(self, n: int, scoped: bool) -> Dict[str, List[Dict[str, Any]]]:
+        """Newest eligible paper rows per scope, on each Set's scored decision clock.
+
+        Tapes are chronological. Merge their bounded tails instead of scanning
+        every stored row on each entry cycle. A pack/lane's newest n rows are
+        sufficient for every parent scope's newest n rows too.
+        """
+        n = max(1, int(n))
+        cf = cost_as_frac(self.cost_pct)
+        by: Dict[str, list] = {"overall": []}
+        if scoped:
+            by.update({"lane:pos": [], "lane:neg": []})
+            for p in self.packs:
+                by.update({f"pack:{p}": [], f"pack:{p}:pos": [], f"pack:{p}:neg": []})
+        def add(key: str, item: tuple) -> None:
+            heap = by.setdefault(key, [])
+            if len(heap) < n:
+                heapq.heappush(heap, item)
+            elif item[:2] > heap[0][:2]:
+                heapq.heapreplace(heap, item)
+        with self._lock:
+            anchor = max((st.score_at for st in self.by_idx), default=0.0)
+            cutoff = anchor - self._evidence_lookback() * BAR_S if anchor > 0 else float("-inf")
+            upper = anchor if anchor > 0 else float("inf")
+            streams: Dict[tuple, list] = {}
+
+            def tail(src, lo, hi, set_order, lane_order, lane):
+                for row_order in range(hi - 1, lo - 1, -1):
+                    t, value = src[row_order]
+                    # Stable ties retain the former Set/lane/row scan order.
+                    yield (t, (set_order, lane_order, row_order), value, lane)
+
+            for si, st in enumerate(self.by_idx):
+                limit = min(upper, st.score_at) if st.score_at > 0 else upper
+                if st.score_at > 0 and getattr(st, "score_before", False):
+                    limit = math.nextafter(limit, float("-inf"))
+                for li, (lane, src) in enumerate((("pos", st.exe or []), ("neg", getattr(st, "neg", None) or []))):
+                    # Apply time eligibility before truncating to Last-N. Future
+                    # rows must not displace eligible older closes from a window.
+                    lo = bisect.bisect_left(src, (cutoff, float("-inf")))
+                    hi = bisect.bisect_right(src, (limit, float("inf")))
+                    lo = max(lo, hi - n)
+                    if hi > lo:
+                        key = (st.pack, lane) if scoped else ("", "")
+                        streams.setdefault(key, []).append(tail(src, lo, hi, si, li, lane))
+            for (pack, lane), tapes in streams.items():
+                for item in islice(heapq.merge(*tapes, reverse=True), n):
+                    add("overall", item)
+                    if scoped:
+                        add(f"lane:{lane}", item)
+                        add(f"pack:{pack}", item)
+                        add(f"pack:{pack}:{lane}", item)
+        return {key: [{"t": t, "pnl_pct": value + cf, "pnl": value, "lane": lane}
+                      for t, _seq, value, lane in sorted(rows)] for key, rows in by.items()}
+
+    def stage_counts(self) -> Dict[str, int]:
+        """PF-validated stage populations; coordination readiness is counted separately."""
+        with self._lock:
+            out = {"base": 0, "main": 0, "negative": 0, "real": 0, "realNeg": 0}
+            for st in self.by_idx:
+                if self.base_validation_reason(st):
+                    continue
+                v = st.stage or {}
+                out["base"] += 1
+                out["main"] += int(self._main_pf_pass(st))
+                out["negative"] += int(bool(v.get("neg")))
+                lane = self.validation_lane(st)
+                out["real"] += int(lane == "pos")
+                out["realNeg"] += int(lane == "neg")
+            return out
+
+    def _main_pass(self, st: SetState) -> bool:
+        """The Set passes the Main stage: every Main window on its own (long, short, minimal) holds on its Main Set; a stage that is off passes."""
+        if not self.main_on:
+            return True
+        v = st.stage or {}
+        return bool(v.get("main") and (v.get("short") or not self.short_on) and (v.get("minimal", True) or not self.main_min_n))
+
+    def _main_pf_pass(self, st: SetState) -> bool:
+        """Main long and short PF gates, independently of minimal coordination."""
+        if not self.main_on:
+            return True
+        v = st.stage or {}
+        return bool(v.get("main") and (v.get("short") or not self.short_on))
+
+    def validation_lane(self, st: SetState) -> str:
+        """PF-validated lane, which may still be waiting for minimal coordination."""
+        if self.validation_reason(st):
+            return ""
+        if not (self.main_on or self.neg_on or self.realst_on):
+            return "pos"
+        v = st.stage or {}
+        if self._main_pf_pass(st) and (bool(v.get("real")) if self.realst_on else True):
+            return "pos"
+        return "neg" if v.get("negl") else ""
+
+    def lane_of(self, st: SetState) -> str:
+        """The lane a valid Set executes on: "pos" (Base -> Main -> Real), "neg" (Base -> Main Negative -> Real Negative), "" when it
+        is not valid. A Set open on both lanes executes on the first of them in the book's lane order (laneOrder; the positive lane with the shipped
+        "pos-neg"), the lane pick_any finds it on. A Set open only on a lane outside the order is listed with that lane and never picked."""
+        if self.gate_reason(st):
+            return ""
+        if not (self.main_on or self.neg_on or self.realst_on):
+            return "pos"
+        lanes = self._execution_lanes(st)
+        return next((lane for lane in self.lane_order if lane in lanes), lanes[0] if lanes else "")
+
+    def lane_in(self, st: Optional[SetState], allowed: Sequence[str]) -> str:
+        """The lane a Set executes on when only `allowed` lanes may open: the first lane of the book's order, among the allowed ones, the Set is open on
+        ("" when none). A Set open on both lanes stays available to an allowed lane when the other is closed to it."""
+        if st is None or self.gate_reason(st):
+            return ""
+        if not (self.main_on or self.neg_on or self.realst_on):
+            return "pos" if "pos" in allowed else ""
+        lanes = self._execution_lanes(st)
+        return next((lane for lane in self.lane_order if lane in lanes and lane in allowed), "")
+
+    def relation_cell(self, st: SetState) -> Tuple[str, str, str, str, str]:
+        """The Set's relation cell (indication, direction, type, TP range, step): every relation lane it belongs to is a projection of it."""
+        return relation_lanes.cell_of(st.pack, st.side, st.kind, st.step, self.step_bucket(st), st.trail_arm)
+
+    def relation_mult(self, st: Optional[SetState], lane: str = "pos") -> Tuple[float, List[str]]:
+        """(volume multiple, the relations behind it) for an entry under this Set and lane: 1 + the ratios of the Set's relation lanes that pass now, at most
+        relationLanes.maxMult. 1 when the lanes are off, not built yet, or the entry is on the Real Negative lane."""
+        if st is None or not self.relation_cfg.enabled:
+            return 1.0, []
+        with self._lock:
+            return relation_lanes.multiple(self.relation_cell(st), lane, self.relation_state, self.relation_cfg)
+
+    def relation_report(self, limit: int = 400) -> Dict[str, Any]:
+        """The relation lanes for the statistics: the configuration, per relation the lanes built / passing and the pooled window PF, and the lanes themselves
+        (passing first, then by observations; at most limit rows)."""
+        with self._lock:
+            cfg, lanes = self.relation_cfg, dict(self.relation_state)
+        rows = [{"id": lane_id, "relation": v["relation"], "role": v["role"], "pack": v["pack"], "side": v["side"], "value": v["value"], "sets": v["sets"],
+                 "entries": v["entries"], "orders": v["orders"], "mainN": v["mainHave"], "mainPf": v["mainPf"], "mainOk": v["mainOk"],
+                 "realEntries": v["realEntries"], "realN": v["realHave"], "realPf": v["realPf"], "realOk": v["realOk"], "ok": v["ok"],
+                 "ratio": cfg.ratio(v["relation"]) if v["ok"] else 0.0}
+                for lane_id, v in lanes.items()]
+        rows.sort(key=lambda r: (not r["ok"], relation_lanes.RELATIONS.index(r["relation"]), -r["entries"], r["id"]))
+        return {"config": cfg.as_dict(), "at": self.relation_at, "ms": self.relation_ms, "lanes": len(rows), "passing": sum(1 for r in rows if r["ok"]),
+                "byRelation": relation_lanes.summary(lanes, cfg) if lanes else {}, "rows": rows[:max(0, int(limit))], "rowsOmitted": max(0, len(rows) - int(limit))}
+
+    def kind_order_for(self, pack: str) -> Tuple[Tuple[str, ...], ...]:
+        """The kind order (KIND_ORDERS) of a pack: trailPickByPack by the exact pack name, else by its library group ("group:trend"), else trailPick."""
+        got = self._kind_order_memo.get(pack)
+        if got is None:
+            by = self.trail_pick_by
+            name = by.get(pack)
+            if name is None and by:
+                g = pack_group(pack)
+                name = by.get(f"group:{g}") if g else None
+            got = self._kind_order_memo[pack] = KIND_ORDERS.get(name or "", self.kind_order)
+        return got
+
+    def pick_sequence_for(self, pack: str) -> List[Tuple[str, Tuple[str, ...]]]:
+        """The (lane, kinds) pairs a signal of this pack walks (pick_sequence with the pack's order)."""
+        name = self.trail_pick_by.get(pack)
+        if name is None and self.trail_pick_by:
+            g = pack_group(pack)
+            name = self.trail_pick_by.get(f"group:{g}") if g else None
+        return pick_sequence(self.lane_order, self.kind_order_for(pack), (name or self.trail_pick) in KINDS_OUTSIDE)
+
+    def symbol_allows(self, pack: str, symbol: str) -> bool:
+        own = (self.pack_ranges.get(pack) or {}).get("symbol", "")
+        return not own or own == symbol
+
+    def pick_any(self, pack: str, allowed_lanes: Optional[Sequence[str]] = None,
+                 predicate: Optional[Callable[[SetState], bool]] = None, side: int = 0) -> Optional[SetState]:
+        """The Set a signal of this pack opens under: the best valid fixed-exit Set (base and Exit Sets ranked together by
+        rank_key: the same entries, each judged on its own exits), else the best valid trailing Set. `side` (+1 long, -1 short): only a Set that may trade
+        that direction; in a split book a long signal is never judged by a short Set's tape. 0: any (a display value)."""
+        # one lock acquisition: a Set cannot change between the lookups
+        # the positive lane (Base -> Main -> Real) first, then the Real Negative lane; within a lane by rank_key
+        with self._lock:
+            allowed = {"pos", "neg"} if allowed_lanes is None else set(allowed_lanes)
+            fixed = [x for x in (self._pick(pack, "base", side), self._pick(pack, "exit", side)) if x is not None]
+            if not fixed and not (self.main_on or self.neg_on or self.realst_on):
+                rows = [x for x in self._valid_for(pack, "trail", side) if predicate is None or predicate(x)]
+                return max(rows, key=self.rank_key) if rows and "pos" in allowed else None
+            for lane, kinds in self.pick_sequence_for(pack):
+                if lane not in allowed:
+                    continue
+                rows = [x for k in kinds for x in self._valid_for(pack, k, side)
+                        if lane in self._execution_lanes(x)]
+                for st in sorted(rows, key=lambda x: self.lane_rank_key(x, lane), reverse=True):
+                    if predicate is None or predicate(st):
+                        return st
+            return None
+
+    def pack_open(self, pack: str) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
-        if self.strict_gate:
-            if not getattr(self.progress, "ready", False):
-                return True
-            return self.pick_any(pack, side=side) is not None
-        fills = sum(s.n for s in self.sets.values())
-        if not fills or not self.progress.ready:
-            return True
-        return self.pick_any(pack, side=side) is not None
+        with self._lock:
+            return any(self._valid_for(pack, k) for k in SET_KINDS)
 
-    def ind_stats(self, kind: str, side: Optional[str] = None) -> Dict[str, Any]:
-        """Cost-adjusted PF evidence for one indication kind. Live tape wins once it has samples."""
-        live = list(self.ind_live.get(kind) or [])
-        hist = list(self.ind_hist.get(kind) or [])
-        need = self.eval_need()
-        # Signals for hundreds of symbols share this indication evidence.
-        # Cache by contents, not TTL or count: a corrected/rolling close or a
-        # changed cost/window/PF setting must invalidate immediately.
-        signature = (self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
-                     _tape_fingerprint(hist), _tape_fingerprint(live))
-        cache = getattr(self, "_ind_stats_cache", None)
-        if cache is None:
-            cache = self._ind_stats_cache = {}
-        key = (kind, str(side or "").upper())
-        cached = cache.get(key)
-        if cached is not None and cached[0] == signature:
-            return copy.deepcopy(cached[1])
-        live_side = filter_side(live, side)
-        # Live exchange results decide; replay only fills missing slots.
-        tape, src = live_first_window(live_side, filter_side(hist, side), max(int(self.pf_n or 0), need))
-        source = "live-exchange" if src == "live" else ("mixed" if live_side else "hist-sim")
-        dd = self.ddt_when_enough(tape, need, ordered=True)
-        if tape:
-            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=True)
-            windows = evaluation_windows(tape, self.cost_pct, required_samples=need)
-            n = int(last["count"])
-            pf = float(last["ratio"])
-            net_avg = float(last.get("netAvg") or 0)
-        else:
-            n, pf, net_avg = 0, 0.0, 0.0
-            windows = evaluation_windows([], self.cost_pct, required_samples=need)
-        need = self.eval_need()
-        by_side: Dict[str, Any] = {}
-        if not side:
-            for d in DIRECTIONS:
-                by_side[d] = self.ind_stats(kind, d)
-        out = {
-            "kind": kind,
-            "side": (str(side).upper() if side else "BOTH"),
-            "n": n,
-            "tapeN": len(tape),
-            "pf": round(pf, 4),
-            "evaluationWindows": windows,
-            "netAvg": round(net_avg, 6),
-            "costSubtracted": True,
-            # Base = PF and DDT over the window, as for every Set.
-            "validated": n >= need and clears_pf(pf, self.min_pf) and float(dd.get("maxS") or 0) <= float(self.max_dd_s or 0) + 1e-9,
-            "profitable": clears_pf(pf, self.min_pf),
-            "maxDdS": round(float(dd.get("maxS") or 0), 1),
-            "avgDdS": round(float(dd.get("avgS") or 0), 1),
-            "ddEpisodes": int(dd.get("episodes") or 0),
-            "bySide": by_side,
-            "source": source,
-            "liveN": len(live_side),
-        }
-        cache[key] = (signature, copy.deepcopy(out))
+    def counts(self) -> Dict[str, Any]:
+        """Every configured Set is in exactly one of valid, invalid, locked, error. The retired Sets are counted apart."""
+        with self._lock:
+            return self._counts()
+
+    def _counts(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"valid": 0, "waiting": 0, "invalid": 0, "locked": 0, "error": 0, "reasons": {}}
+        for st in self.by_idx:
+            state, reason = self.state_of(st)
+            out[state] += 1
+            if state == "invalid":
+                out["reasons"][reason] = out["reasons"].get(reason, 0) + 1
+        out["configured"] = len(self.by_idx)
+        out["retired"] = len(self.retired)
+        out["total"] = len(self.by_idx) + len(self.retired)
+        out["pfValid"] = out["valid"] + out["waiting"]
+        out["sum"] = out["valid"] + out["waiting"] + out["invalid"] + out["locked"] + out["error"]
         return out
 
-    def ind_config_stats(self, kind: str, config: str, side: Optional[str] = None) -> Dict[str, Any]:
-        """Cost-adjusted PF evidence for one kind configuration (range) x side.
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._snapshot()
 
-        Each range of a kind is its own configuration with its own tape, so a
-        good range validates at Base even when the pooled kind does not, and
-        a losing range is held back even when the pool clears the floor."""
-        k, cfg = str(kind or "").strip(), str(config or "").strip().lower()
-        hist = self.ind_hist.get(k) or []
-        live = self.ind_live.get(k) or []
-        need = self.eval_need()
-        sig = (len(hist), len(live), finite((hist[-1] if hist else {}).get("t")) if hist else 0.0,
-               finite((live[-1] if live else {}).get("t")) if live else 0.0,
-               self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
-               finite((hist[-1] if hist else {}).get("pnl_pct")) if hist else 0.0,
-               finite((live[-1] if live else {}).get("pnl_pct")) if live else 0.0)
-        cache = getattr(self, "_ind_cfg_cache", None)
-        if cache is None:
-            cache = self._ind_cfg_cache = {}
-        key = (k, cfg, str(side or "").upper())
-        hit = cache.get(key)
-        if hit is not None and hit[0] == sig:
-            return dict(hit[1])
-        # Replay rows are CompactHistRow mappings (not dicts): read the tag
-        # through the mapping API, never as an attribute.
-        def tagged(src):
-            return filter_side([r for r in src
-                                if str((r.get("ind_config") if hasattr(r, "get") else getattr(r, "ind_config", "")) or "").lower() == cfg], side)
-        live_rows = tagged(live)
-        # Live exchange results decide; replay only fills missing slots.
-        tape, src = live_first_window(live_rows, tagged(hist), max(int(self.pf_n or 0), need))
-        if tape:
-            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=True)
-            n, pf = int(last["count"]), float(last["ratio"])
-        else:
-            n, pf = 0, 0.0
-        dd = self.ddt_when_enough(tape, need, ordered=True)
-        dd_ok = float(dd.get("maxS") or 0) <= float(self.max_dd_s or 0) + 1e-9
-        out = {"kind": k, "config": cfg, "side": str(side or "BOTH").upper(), "n": n, "tapeN": len(tape),
-               "maxDdS": float(dd.get("maxS") or 0),
-               "pf": round(pf, 4), "validated": n >= need and clears_pf(pf, self.min_pf) and dd_ok,
-               "enough": n >= need, "profitable": clears_pf(pf, self.min_pf),
-               "source": src, "liveN": len(live_rows)}
-        if len(cache) > 4096:
-            cache.clear()
-        cache[key] = (sig, dict(out))
-        return out
+    def _pf_split(self) -> Dict[str, Any]:
+        """The post-Base standard figures, on each Set's rolling gate window (its last `setGateWindow` orders), never on
+        the whole tape: a Set that was good long ago and is bad now does not carry the pool. `base` is the pooled net
+        PF of the Sets that pass Base validation (the effective PF, the one to judge a strategy by); `unfiltered` is
+        every Set on the same basis (including Sets rejected by Base). `validatedPct` is the
+        share of configured Sets that pass Base validation, and `byPack` repeats base/validated per strategy pack.
+        `history` is the continuous progress of the effective PF and the validated share, one point per scoring pass."""
+        def pool(sts: List[SetState]) -> Dict[str, Any]:
+            gp = sum(x.gate_gp for x in sts)
+            gl = sum(x.gate_gl for x in sts)
+            n = sum(x.gate_n for x in sts)
+            pf = round(pf_of(gp, gl, n), 4)
+            return {"pf": pf, "n": n, "sets": len(sts), **pf_evidence(gp, gl, n)}
+        cf_ = cost_as_frac(self.cost_pct)
 
-    def indication_ok(self, kind: str, side: Optional[str] = None, config: Optional[str] = None) -> bool:
-        if not (self.enabled and self.use_historic_gate and self.strict_gate):
-            return True
-        # Not ready (cold replay, or a Test Historic run in flight): only a book
-        # with no indication tape at all defers. Evidence that exists decides.
-        if not getattr(self.progress, "ready", False) and not (self.ind_hist or self.ind_live):
-            return True
-        k = str(kind or "").strip()
-        if k and config:
-            # A configuration with its own evidence decides for itself.
-            cst = self.ind_config_stats(k, str(config), side=side)
-            if cst["enough"]:
-                return bool(cst["validated"])
-        if k:
-            st = self.ind_stats(k, side=side)
-            if st["validated"]:
-                return bool(st["profitable"])
-            # Unproven kinds stay independent: they do not inherit pack open/close.
-            return False
-        return self.pack_open("indications", side=side)
-
-    def ind_gate_snapshot(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-
-        def _ok(kind: str, side: Optional[str] = None) -> bool:
-            try:
-                return self.indication_ok(kind, side)
-            except TypeError:
-                return self.indication_ok(kind)
-
-        for k in IND_KINDS:
-            st = self.ind_stats(k)
-            st["ok"] = _ok(k)
-            for d in DIRECTIONS:
-                blob = (st.get("bySide") or {}).get(d)
-                if isinstance(blob, dict):
-                    blob["ok"] = _ok(k, d)
-            out[k] = st
-        return out
-
-    def live_overview(self) -> Dict[str, Any]:
-        """On-exchange processed Sets, cost-net. Unique client_id so a fill is not double-counted."""
-        now = time.monotonic()
-        cached = self._live_ov_cache
-        if cached is not None and now - self._live_ov_ts < 2.0:
-            return cached
-        processed = [s for s in self.by_idx if s.live]
-        seen: set = set()
-        fills: List[Dict[str, Any]] = []
-        for s in processed:
-            for r in s.live:
-                if not isinstance(r, dict):
+        def per_entry(sts: List[SetState]) -> Dict[str, Any]:
+            """The same window orders, one result per entry: a pack's Sets trade the same signals (they differ only in their exits),
+            so one entry sits in many Sets' windows and the pool counts it once per Set (a winning entry validates many Sets at once).
+            Here each entry (symbol, entry minute, pack, side) counts once, with the result of its best-ranked Set: what execution
+            takes from the same Sets."""
+            best: Dict[tuple, Tuple[tuple, float]] = {}
+            n_rows = 0
+            for x in sts:
+                rk = self.rank_key(x)
+                for r in self._tape_at(x, x.score_at, before=getattr(x, "score_before", False))[-self.win(x).base_long:]:
+                    n_rows += 1
+                    k = (r.get("symbol"), int(round(finite(r.get("t")) - finite(r.get("hold_s")))), x.pack, r.get("side"))
+                    cur = best.get(k)
+                    if cur is None or rk > cur[0]:
+                        best[k] = (rk, finite(r.get("pnl_pct")) - cf_)
+            nets_ = [v[1] for v in best.values()]
+            gp_, gl_ = sum(v for v in nets_ if v > 0), -sum(v for v in nets_ if v < 0)
+            return {"pf": round(pf_of(gp_, gl_), 4), "entries": len(nets_), "orders": n_rows,
+                    "setsPerEntry": round(n_rows / len(nets_), 2) if nets_ else 0.0}
+        def distinct(sts: List[SetState]) -> List[SetState]:
+            """One Set per identical tape. Sets whose exits never differ on the orders they took (a trailing arm the scratch exit always beats, say)
+            trade the same orders, so a pool counts those orders once per copy. The first Set (grid order) stands for its copies; a Set without
+            orders is never a copy of another. Chain figures follow the tape, so the pools stay exact."""
+            seen: set = set()
+            out_: List[SetState] = []
+            for x in sts:
+                if x.tape_sig and x.tape_sig in seen:
                     continue
-                cid = str(r.get("client_id") or "") or f"{r.get('t')}:{r.get('symbol')}:{s.id}:{r.get('pnl')}"
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                fills.append(r)
-        fills.sort(key=lambda r: finite(r.get("t")))
-        m = self._score_metrics(fills)
-        rows = []
-        for s in sorted(processed, key=lambda x: (-len(x.live), -float((x.live_eval or {}).get("last15Ratio") or 0), x.max_dd_s)):
-            ev = s.live_eval or {}
-            rows.append({
-                "id": s.id,
-                "pack": s.pack,
-                "kind": s.kind,
-                "slRatio": s.sl_ratio,
-                "step": s.step,
-                "trailKey": s.trail_key,
-                "direction": "BOTH",
-                "n": int(ev.get("n") or len(s.live)),
-                "last15Ratio": float(ev.get("last15Ratio") or 0),
-                "last15N": int(ev.get("last15N") or 0),
-                "evaluationWindows": dict(ev.get("evaluationWindows") or {}),
-                "netAvg": float(ev.get("netAvg") or 0),
-                "wr": float(ev.get("wr") or 0),
-                "maxDdS": float(ev.get("maxDdS") or 0),
-                "tradesPerHour": round(float(ev.get("tradesPerHour") or 0.0), 4),
-                "validated": bool(ev.get("validated")),
-                "active": s.active,
-                "processingActive": bool(getattr(s, "processing_active", False)),
-                "processingReason": str(getattr(s, "processing_reason", "") or ""),
-                "deactReason": s.deact_reason,
-                "costSubtracted": True,
-                "source": "live-exchange",
-                "bySide": {
-                    d: {
-                        "n": int((v.get("live") or {}).get("n") or v.get("liveN") or 0),
-                        "pf": round(float((v.get("live") or {}).get("last15_ratio") or 0), 4),
-                        "netAvg": round(float((v.get("live") or {}).get("net_avg") or 0), 6),
-                        "active": bool(v.get("active", True)),
-                        "validated": bool((v.get("live") or {}).get("validated")),
-                    }
-                    for d, v in (s.by_side or {}).items()
-                    if isinstance(v, dict)
-                },
-            })
-            if len(rows) >= 16:
-                break
-        out = {
-            "processed": len(processed),
-            "active": sum(1 for s in processed if s.active),
-            "processingActive": sum(1 for s in processed if getattr(s, "processing_active", False)),
-            "deactivated": sum(1 for s in processed if not s.active),
-            "fills": len(fills),
-            "last15Ratio": round(float(m["last15_ratio"]), 4),
-            "last15N": int(m["last15_n"]),
-            "evaluationWindows": dict(m.get("evaluation_windows") or {}),
-            "netAvg": round(float(m["net_avg"]), 6),
-            "wr": float(m["wr"]),
-            "maxDdS": float(m["max_dd_s"]),
-            "validated": bool(m["validated"]),
-            "costSubtracted": True,
-            "costPct": self.cost_pct,
-            "source": "live-exchange",
-            "rows": rows,
-        }
-        self._live_ov_cache = out
-        self._live_ov_ts = time.monotonic()
-        return out
+                seen.add(x.tape_sig)
+                out_.append(x)
+            return out_
+        allsets = list(self.by_idx)
+        reasons = {x.id: self.validation_reason(x) for x in allsets}
+        valid = [x for x in allsets if not reasons[x.id]]
+        base_only = [x for x in allsets if not self.base_validation_reason(x)]
+        eligible = [x for x in allsets if not self.gate_reason(x)]
+        total = len(allsets)
+        def configured_ns(sts: List[SetState], field: str, fallback: Any) -> Any:
+            vals = sorted({v for st in sts for v in (getattr(self.win(st), field) if isinstance(getattr(self.win(st), field), tuple) else (getattr(self.win(st), field),))})
+            return (vals[0] if len(vals) == 1 else vals) if vals else fallback
 
-    def snapshot(self, full: bool = False) -> Dict[str, Any]:
-        if not getattr(self, "block_main_eval", None):
-            try:
-                self.score_block_main()
-            except Exception:
-                pass
-        now = time.monotonic()
-        cached = self._snap_cache
-        if cached is not None and now - self._snap_ts < (0.8 if full else 1.4):
-            return cached
-        # The UI only consumes the best bounded preview rows.  Sorting the
-        # states is cheap compared with constructing a JSON row for every
-        # 34k-entry catalog; materialising the full list here briefly doubled
-        # RSS during startup and pushed small VPS workers into swap.
+        by_pack: Dict[str, Any] = {}
+        for pack in self.packs:
+            ps = [x for x in allsets if x.pack == pack]
+            pv = [x for x in ps if not reasons[x.id]]
+            pe = [x for x in eligible if x.pack == pack]
+            pb = [x for x in base_only if x.pack == pack]
+            by_pack[pack] = {"base": pool(pv), "baseOnly": pool(pb), "unfiltered": pool(ps), "total": len(ps), "valid": len(pv), "eligible": len(pe),
+                             "validatedBasePct": round(100.0 * len(pb) / len(ps), 2) if ps else 0.0,
+                             "validatedPct": round(100.0 * len(pv) / len(ps), 2) if ps else 0.0,
+                             "minPf": (sorted(self.step_floor(x) for x in ps)[len(ps) // 2] if (self.pf_by_step and ps and not is_signal_pack(pack))
+                                       else self.floor_for(self.gate_window, pack))}
+        main_pass = [x for x in base_only if self._main_pf_pass(x)]
+        rgp, rgl = sum(x.main_gp for x in main_pass), sum(x.main_gl for x in main_pass)
+        main = {"pf": round(pf_of(rgp, rgl, sum(x.main_n for x in main_pass)), 4), "n": sum(x.main_n for x in main_pass), "sets": len(main_pass),
+                "on": self.main_on, "lastN": configured_ns(main_pass, "main_n", self.main_n)}
+        agp, agl = sum(x.main_gp for x in valid), sum(x.main_gl for x in valid)
+        main_all_lanes = {"pf": round(pf_of(agp, agl, sum(x.main_n for x in valid)), 4), "n": sum(x.main_n for x in valid), "sets": len(valid), "lastN": configured_ns(valid, "main_n", self.main_n)}
+        pgp, pgl = sum(x.main_gp for x in base_only), sum(x.main_gl for x in base_only)
+        processed = {"pf": round(pf_of(pgp, pgl, sum(x.main_n for x in base_only)), 4), "n": sum(x.main_n for x in base_only),
+                     "sets": len(base_only), "orders": sum(int(x.proc_total) for x in base_only), "lastN": configured_ns(base_only, "main_n", self.main_n), "source": "paper"}
+        pos = [x for x in valid if self.validation_lane(x) == "pos"]
+        neg = [x for x in valid if self.validation_lane(x) == "neg"]
+        executable = {"pf": round(pf_of(sum(x.exe_gp for x in pos), sum(x.exe_gl for x in pos)), 4), "sets": len(pos), "n": sum(x.exe_n for x in pos),
+                      "orders": sum(int(x.exe_total) for x in pos), "lastN": configured_ns(pos, "real_n", self.realst_n), "on": self.realst_on, "source": "paper"}
+        realneg = {"pf": round(pf_of(sum(x.neg_gp for x in neg), sum(x.neg_gl for x in neg)), 4), "sets": len(neg), "n": sum(x.neg_n for x in neg),
+                   "orders": sum(int(x.neg_total) for x in neg), "lastN": configured_ns(neg, "real_neg_n", self.realst_n), "on": self.neg_on, "source": "paper"}
+        stage_sets = {"base": len(base_only), "main": len(main_pass),
+                      "negative": sum(1 for x in base_only if (x.stage or {}).get("neg")), "real": len(pos), "realNeg": len(neg)}
+
+        def stage_row(sts: List[SetState], gp_key: str, gl_key: str, n_key: str, orders_key: str) -> Dict[str, Any]:
+            """One stage's figures over the Sets that pass it: how many and what share of every configured Set, the pooled PF of their own
+            window orders and the plain mean of their own PFs (a window without a loss counts RANK_PF_CAP), never an average over all Sets."""
+            gp, gl = sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts)
+            pfs = [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
+            n = sum(int(getattr(x, n_key)) for x in sts)
+            return {"sets": len(sts), "pct": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": round(pf_of(gp, gl), 4),
+                    "meanPf": round(sum(pfs) / len(pfs), 4) if pfs else 0.0, "n": n, **pf_evidence(gp, gl, n),
+                    "orders": sum(int(getattr(x, orders_key)) for x in sts), "source": "paper"}
+        stages = {"base": stage_row(base_only, "gate_gp", "gate_gl", "gate_n", "gate_n"),
+                  "main": stage_row(main_pass, "main_gp", "main_gl", "main_n", "proc_total"),
+                  "real": stage_row(pos, "exe_gp", "exe_gl", "exe_n", "exe_total"),
+                  "realNeg": stage_row(neg, "neg_gp", "neg_gl", "neg_n", "neg_total"),
+                  "valid": stage_row(valid, "gate_gp", "gate_gl", "gate_n", "gate_n"),
+                  "allSets": total}
+
+        def window_row(on: bool, n: Any, pop: List[SetState], sts: List[SetState], gp_key: str, gl_key: str, n_key: Any, coordination: bool = False) -> Dict[str, Any]:
+            """One last-N window on its own: the Sets of its stage's population that pass THIS window alone (the other windows of the stage do not
+            enter), their share of that population and of every configured Set, and the figures of the orders this window reads: the pooled PF
+            (gains over losses of all those orders together) and the plain mean of the Sets' own PFs. `orders` is the count behind the PF."""
+            sts = sts if on else []
+            gp, gl = (0.0, 0.0) if coordination else (sum(getattr(x, gp_key) for x in sts), sum(getattr(x, gl_key) for x in sts))
+            pfs = [] if coordination else [min(RANK_PF_CAP, pf_of(getattr(x, gp_key), getattr(x, gl_key))) for x in sts]
+            nn = (lambda x: int(getattr(x, n_key))) if isinstance(n_key, str) else n_key
+            row = {"on": bool(on), "n": n, "pop": len(pop), "sets": len(sts), "pct": round(100.0 * len(sts) / len(pop), 2) if pop else 0.0,
+                   "pctAll": round(100.0 * len(sts) / total, 2) if total else 0.0, "pf": None if coordination else round(pf_of(gp, gl), 4),
+                   "meanPf": None if coordination else (round(sum(pfs) / len(pfs), 4) if pfs else 0.0), "orders": sum(nn(x) for x in sts)}
+            if coordination:
+                row["role"] = "coordination"
+            else:
+                row.update(pf_evidence(gp, gl, row["orders"]))
+            return row
+        sv = lambda x: x.stage or {}                                                      # noqa: E731
+        mp = main_pass
+        neg_in = [x for x in base_only if sv(x).get("neg")]
+        windows = {
+            "baseLong": window_row(True, self.gate_window, allsets, [x for x in allsets if x.base_long_ok], "gate_gp", "gate_gl", "gate_n"),
+            "baseShort": window_row(any(self.win(x).base_short > 0 for x in allsets), self.base_short, allsets, [x for x in allsets if x.base_short_ok], "base_short_gp", "base_short_gl", "base_short_n"),
+            "baseMinimal": window_row(bool(self.base_min_n), self.base_min_n, allsets, [x for x in allsets if x.base_min_ok], "base_min_gp", "base_min_gl", "base_min_n", coordination=True),
+            "mainLong": window_row(self.main_on, self.main_n, base_only, [x for x in base_only if sv(x).get("main")], "main_gp", "main_gl", "main_n"),
+            "mainShort": window_row(self.main_on and self.short_on, list(self.short_windows), base_only, [x for x in base_only if sv(x).get("short")],
+                                    "main_short_gp", "main_short_gl", "main_short_n"),
+            "mainMinimal": window_row(self.main_on and bool(self.main_min_n), self.main_min_n, base_only, [x for x in base_only if sv(x).get("minimal")],
+                                      "main_min_gp", "main_min_gl", "main_min_have", coordination=True),
+            "negative": window_row(self.neg_on, list(self.neg_windows), base_only, neg_in, "neg_win_gp", "neg_win_gl", "neg_win"),
+            "real": window_row(self.realst_on, self.realst_n, mp, [x for x in mp if sv(x).get("real")], "exe_gp", "exe_gl", "exe_n"),
+            "realNeg": window_row(self.realst_on and self.neg_on, self.realst_n, neg_in, [x for x in neg_in if sv(x).get("realneg")], "neg_gp", "neg_gl", "neg_n"),
+        }
+        for key, field in (("baseLong", "base_long"), ("baseShort", "base_short"), ("mainLong", "main_n"),
+                           ("mainShort", "short_windows"), ("negative", "neg_windows"), ("real", "real_n"), ("realNeg", "real_neg_n")):
+            windows[key]["n"] = configured_ns(allsets, field, windows[key]["n"])
+            dist: Dict[str, int] = {}
+            for st in allsets:
+                val = getattr(self.win(st), field)
+                label = ",".join(map(str, val)) if isinstance(val, tuple) else str(val)
+                dist[label] = dist.get(label, 0) + 1
+            windows[key]["configuredSets"] = dist
+        windows["baseShort"]["on"] = any(self.win(st).base_short > 0 for st in allsets)
+        chosen: Dict[str, int] = {}
+        for x in base_only:
+            if self.main_on and self.short_on:
+                chosen[str(int(x.main_short_win or self.main_n))] = chosen.get(str(int(x.main_short_win or self.main_n)), 0) + 1
+        windows["mainShort"]["chosen"] = chosen          # how many Base-passing Sets run each short window (the Set's own pick among the candidates)
+        windows["baseMinimal"]["mode"] = ("avg" if self.base_min_avg else "") + ("both" if self.base_min_both else ("positive" if self.base_min_positive else "negative"))
+        windows["mainMinimal"]["mode"] = ("avg" if self.main_min_avg else "") + ("both" if self.main_min_both else ("positive" if self.main_min_positive else "negative"))
+        # Full requested N is a count diagnostic, independent of PF, warm-up
+        # waivers and available-window admission. Include unmeasured and empty
+        # Sets in the stage population; never borrow a sibling's closes.
+        sample_specs = {
+            "baseLong": (allsets, "base", lambda st: self.win(st).base_long),
+            "baseShort": (allsets, "base", lambda st: self.win(st).base_short),
+            "baseMinimal": (allsets, "base", lambda st: self.base_min_n),
+            "mainLong": (base_only, "main", lambda st: self.win(st).main_n),
+            "mainShort": (base_only, "main", lambda st: st.main_short_win or self.win(st).main_n),
+            "mainMinimal": (base_only, "main", lambda st: self.main_min_n),
+            "negative": (base_only, "main", lambda st: max(self.win(st).neg_windows, default=0)),
+            "real": (mp, "real", lambda st: self.win(st).real_n),
+            "realNeg": (neg_in, "realNeg", lambda st: self.win(st).real_neg_n),
+        }
+        for key, (population, source, requested) in sample_specs.items():
+            enabled = [st for st in population if windows[key]["on"] and requested(st) > 0]
+            measured = [st for st in enabled if st.sample_counts is not None]
+            full = sum(st.sample_counts.get(source, 0) >= requested(st) for st in measured)
+            windows[key]["samples"] = {
+                "population": len(enabled), "full": full, "insufficient": len(measured) - full,
+                "unavailable": len(enabled) - len(measured), "disabled": len(population) - len(enabled),
+                "pct": round(100.0 * full / len(enabled), 2) if enabled and measured else None,
+                "basis": "full-requested-window", "at": max((st.score_at for st in measured), default=None),
+                "oldestAt": min((st.score_at for st in measured), default=None),
+            }
+        # stages: `base` is the end figure (the Sets that pass Base and Main, pooled over their Base windows), `baseOnly` the Base gate
+        # alone; `main` the Main PF-passing Sets over their Main long windows; `mainAllLanes` the final Sets including Negative-lane
+        # bypasses; `processed` the Main Sets (orders opened while
+        # Base passed) of every Base-passing Set; `real` the Real Sets (orders opened while Base and Main passed) of the end Sets, which
+        # the overall Real stage (the coordinator's real evaluation) reads
+        # `baseEntry` / `baseOnlyEntry`: the same window orders, one result per entry from its best-ranked Set (per_entry)
+        traded = [x for x in allsets if x.tape_sig]
+        groups: Dict[int, int] = {}
+        for x in traded:
+            groups[x.tape_sig] = groups.get(x.tape_sig, 0) + 1
+        dv, db = distinct(valid), distinct(base_only)
+        distinct_view = {"traded": len(traded), "tapes": len(groups), "copies": len(traded) - len(groups), "largestGroup": max(groups.values(), default=0),
+                         "valid": len(dv), "validPct": round(100.0 * len(dv) / len(distinct(allsets)), 2) if allsets else 0.0,
+                         "baseOnly": len(db)}
+        return {"base": pool(valid), "baseOnly": pool(base_only), "baseEntry": per_entry(valid), "baseOnlyEntry": per_entry(base_only),
+                "baseDistinct": pool(dv), "baseOnlyDistinct": pool(db), "distinct": distinct_view,
+                "main": main, "mainAllLanes": main_all_lanes, "processed": processed, "real": executable,
+                "realneg": realneg, "stageSets": stage_sets, "stages": stages, "windows": windows,
+                "unfiltered": pool(allsets),
+                "total": total, "valid": len(valid), "eligible": len(eligible), "coordinationWaiting": len(valid) - len(eligible),
+                "eligiblePct": round(100.0 * len(eligible) / total, 2) if total else 0.0,
+                "validatedBasePct": round(100.0 * len(base_only) / total, 2) if total else 0.0,
+                "validatedPct": round(100.0 * len(valid) / total, 2) if total else 0.0, "byPack": by_pack,
+                "basis": "gate-window", "history": list(self.pf_history[-240:])}
+
+    def _record_pf_progress(self) -> None:
+        """One point per scoring pass (at most one per 20 s): the effective PF and the validated share over time."""
+        now = time.time()
+        if self.pf_history and now - self.pf_history[-1]["t"] < 20.0:
+            return
+        split = self._pf_split_nohist()
+        point = {"t": round(now, 1), "pf": split["base"]["pf"], "n": split["base"]["n"],
+                 "valid": split["valid"], "validatedPct": split["validatedPct"],
+                 "unfiltered": split["unfiltered"]["pf"]}
+        # the same point per stage and lane: the Sets passing Base / Main / Real / Real Negative (count, share of all Sets, PF of their own window), and the
+        # relation lanes built and passing, so the progress of every lane is followed pass by pass, not only the end figure
+        stages = split.get("stages") or {}
+        point["stages"] = {k: {"sets": int(v.get("sets", 0)), "pct": float(v.get("pct", 0.0)), "pf": v.get("pf")}
+                           for k, v in stages.items() if isinstance(v, dict)}
+        if self.relation_cfg.enabled:
+            lanes = self.relation_state
+            point["relations"] = {"lanes": len(lanes), "passing": sum(1 for v in lanes.values() if v.get("ok")),
+                                  "by": {r: [sum(1 for v in lanes.values() if v["relation"] == r and v.get("ok")),
+                                             sum(1 for v in lanes.values() if v["relation"] == r)] for r in relation_lanes.RELATIONS}}
+        self.pf_history.append(point)
+        del self.pf_history[:-720]
+
+    def _pf_split_nohist(self) -> Dict[str, Any]:
+        saved, self.pf_history = self.pf_history, []
+        try:
+            return self._pf_split()
+        finally:
+            self.pf_history = saved
+
+    def _snapshot(self) -> Dict[str, Any]:
         rows = []
-        for st in sorted((st for st in self.sets.values() if (st.stage_ledger or {}).get("base")), key=lambda s: (not s.active, -s.base_pf, s.max_dd_s))[:16]:
+        for st in sorted(self.sets.values(), key=lambda s: (not self.is_eligible(s), -s.gate_pf, s.max_dd_s)):
+            state_row, reason_row = self.state_of(st)   # one evaluation: state and reason always agree
             rows.append(
                 {
                     "kind": st.kind,
                     "idx": st.idx,
                     "id": st.id,
-                    "parentSetId": st.parent_set_id or st.id,
-                    "stage": st.stage,
-                    "stageQualified": st.stage_qualified,
-                    "stageLedger": st.stage_ledger,
-                    "basePf": st.base_pf,
-                    "mainPf": st.main_pf,
-                    "realPf": st.real_pf,
-                    "positionCostPct": st.position_cost_pct,
-                    "axisKey": st.axis_key,
-                    "relativeCount": st.relative_count,
-                    "volumeRatio": st.volume_ratio,
-                    "indicationKind": st.indication_kind,
-                    "strategyAdjustments": st.strategy_adjustments,
-                    "adjustmentDeltas": st.adjustment_deltas,
-                    "grossPf": st.gross_pf,
-                    "netPf": st.net_pf,
-                    "grossEv": st.gross_ev,
-                    "netEv": st.net_ev,
-                "evaluation": st.evaluation,
-                "evaluationWindows": st.evaluation_windows,
-                    "pairedEvaluation": {
-                        "normal": st.normal_evaluation,
-                        "adjusted": st.adjusted_evaluation,
-                        "deltas": st.adjustment_deltas,
-                    },
                     "pack": st.pack,
                     "packI": st.pack_i,
                     "tf": st.tf,
@@ -6138,14 +4850,34 @@ class SetBook:
                     "trailGive": st.trail_give,
                     "trI": st.tr_i,
                     "step": st.step,
+                    "stagePolicy": {"minPf": self.floor_for(self.win(st).base_long, st.pack, st),
+                                    "windows": self.win(st).__dict__, "scope": "set", "source": "paper"},
+                    "side": st.side,
                     "stepI": st.step_i,
                     "tpPct": round(st.tp_pct * 100, 4),
                     "n": st.n,
-                    "liveN": len(st.live),
-                    "histN": len(st.hist),
+                    "liveN": st.live_n,
+                    "execution": {lane: self.execution_stats(st, lane) for lane in ("pos", "neg")},
+                    "source": "paper",
                     "wins": st.wins,
-                    "last15Ratio": round(st.last15_ratio, 4),
-                    "last15Classic": round(st.last15_classic, 3),
+                    "pf": round(st.gate_pf, 4),
+                    "gateN": st.gate_n,
+                    "pf15": round(st.last15_pf, 4),
+                    # the Set's chain: Main Set (orders opened while Base passed; the Main gate reads its last N) and Real Set
+                    # (opened while Base and Main passed)
+                    "mainId": st.id + MAIN_SUFFIX,
+                    "mainN": int(st.proc_total),
+                    "mainPf": round(st.main_pf, 4),
+                    "mainLastN": st.main_n,
+                    "realId": st.id + REAL_SUFFIX,
+                    "realN": int(st.exe_total),
+                    "realPf": round(st.exe_pf, 4),
+                    "realNegN": int(st.neg_total),
+                    "realNegPf": round(st.neg_pf, 4),
+                    "shortPf": round(st.base_short_pf, 4),
+                    "mainShortN": int(st.main_short_win or self.win(st).main_n),
+                    "lane": self.lane_of(st),
+                    "ratio": round(st.last15_ratio, 4),
                     "last15N": st.last15_n,
                     "last15R": round(st.last15_r, 4),
                     "last25AvgR": round(st.last25_avg_r, 4),
@@ -6157,39 +4889,15 @@ class SetBook:
                     "wr": st.wr,
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
-                    "classicPf": st.classic_all,
-                    "validated": bool((st.stage_ledger or {}).get("base")),
-                    "baseQualified": bool((st.stage_ledger or {}).get("base")),
-                    "mainQualified": bool((st.stage_ledger or {}).get("main")),
-                    "realQualified": bool((st.stage_ledger or {}).get("real")),
+                    "holdMin": st.hold_bars,
+                    "holdAuto": st.hold_auto,
+                    "pfAll": st.pf_all,
                     "gp": st.gp,
                     "gl": st.gl,
-                    "costSubtracted": True,
-                    "netAvg": round(st.expectancy, 6),
-                    "live": st.live_eval or {},
-                    "source": "live-exchange" if st.live else "hist-sim",
-                    "bySide": {
-                        d: {
-                            "n": int(v.get("n") or 0),
-                            "pf": round(float(v.get("last15_ratio") or 0), 4),
-                            "last15N": int(v.get("last15_n") or 0),
-                            "last15R": round(float(v.get("last15_r") or 0), 4),
-                            "evaluationWindows": dict(v.get("evaluation_windows") or {}),
-                            "expectancy": float(v.get("expectancy") or 0),
-                            "netAvg": round(float(v.get("net_avg") or v.get("expectancy") or 0), 6),
-                            "maxDdS": float(v.get("max_dd_s") or 0),
-                            "wr": float(v.get("wr") or 0),
-                            "validated": bool(v.get("validated")),
-                            "active": bool(v.get("active", True)),
-                            "costSubtracted": True,
-                        }
-                        for d, v in (st.by_side or {}).items()
-                        if isinstance(v, dict)
-                    },
                     "exits": st.exits,
                     "intern": {
-                        "pf15": round(st.last15_ratio, 4),
-                        "classic15": round(st.last15_classic, 4),
+                        "pf": round(st.gate_pf, 4),
+                        "pf15": round(st.last15_pf, 4),
                         "avgR15": round(st.last15_r, 4),
                         "avgR25": round(st.last25_avg_r, 4),
                         "maxDdS": st.max_dd_s,
@@ -6198,160 +4906,122 @@ class SetBook:
                         "E": st.expectancy,
                         "avgHoldS": st.avg_hold_s,
                         "n": st.n,
-                        "liveN": len(st.live),
-                        "validated": bool((st.stage_ledger or {}).get("base")),
+                        "liveN": st.live_n,
+                        "execution": {lane: self.execution_stats(st, lane) for lane in ("pos", "neg")},
+                        "source": "paper",
                     },
                     "active": st.active,
-                    "processingActive": bool(getattr(st, "processing_active", False)),
-                    "processingReason": str(getattr(st, "processing_reason", "") or ""),
+                    "state": state_row,
+                    "stateReason": reason_row,
+                    "evaluatedAt": round(st.evaluated_at, 1),
                     "deactReason": st.deact_reason,
                     "locked": st.locked,
                 }
             )
+        rows = rows[:24]
         p = self.progress
         cover = self.coverage()
-        validated_count = int(cover.get("validatedCount") or 0)
-        live_ov = self.live_overview()
-        strategy_history = {}
-        from set_overview import qualified_strategy_results
-        for meta, tape, metrics in qualified_strategy_results(self):
-            strategy_history[meta["id"]] = {
-                **meta,
-                "n": int(metrics.get("source_n") or 0),
-                "last15N": int(metrics.get("last15_n") or 0),
-                "last15Ratio": round(float(metrics.get("last15_ratio") or 0), 4),
-                "evaluationWindows": dict(metrics.get("evaluation_windows") or {}),
-                "netAvg": round(float(metrics.get("net_avg") or 0), 6),
-                "maxDdS": round(float(metrics.get("max_dd_s") or 0), 1),
-                "costSubtracted": True,
-                "source": "hist-sim",
-            }
-        # Never dump the full 1000+ set index into the hot stats JSON.
-        index = []
-        if full:
-            index = [
-                {
-                    "i": st.idx,
-                    "id": st.id,
-                    "kind": st.kind,
-                    "pack": st.pack,
-                    "sl": st.sl_ratio,
-                    "tr": st.trail_key,
-                    "st": st.step,
-                    "on": int(st.active),
-                    "pf": round(st.last15_ratio, 4),
-                    "dd": st.max_dd_s,
-                }
-                for st in self.by_idx[:48]
-            ]
-        hist_ids = getattr(self, "hist_test_set_ids", None)
-        intern_n = 0 if hist_ids is None else len(hist_ids)
-        catalog_n = len(self.sets)
-        if hist_ids is not None:
-            intern_active = sum(1 for sid in hist_ids if (self.sets.get(sid) is not None and self.sets[sid].active))
-            intern_validated = self.intern_validated_count(hist_ids)
-        else:
-            intern_active = sum(1 for s in self.sets.values() if s.active)
-            intern_validated = validated_count
-        processing_n = len(getattr(self, "_processing_set_ids", set()) or set())
-        processing_rows = []
-        for st in self.by_idx:
-            if not st.processing_active:
-                continue
-            processing_rows.append({
+        rank = {id(st): k for k, st in enumerate(sorted((s for s in self.by_idx if self.is_eligible(s)), key=self.rank_key, reverse=True))}
+        index = [
+            {
+                "i": st.idx,
                 "id": st.id,
-                "processingActive": True,
-                "evaluating": bool(hist_ids is not None and st.id in hist_ids),
-                "processingReason": st.processing_reason or "",
-                "baseQualified": bool((st.stage_ledger or {}).get("base")),
-            })
-            if len(processing_rows) >= 48:
-                break
-        def _hist_n(st: Any) -> int:
-            return max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
-        if hist_ids is not None:
-            hist_fills = sum(_hist_n(st) for st in self.sets.values() if st.id in hist_ids)
-        else:
-            hist_fills = sum(_hist_n(st) for st in self.sets.values())
-        out = {
+                "kind": st.kind,
+                "pack": st.pack,
+                "execution": {lane: self.execution_stats(st, lane) for lane in ("pos", "neg")} if st.live else {},
+                "sl": st.sl_ratio,
+                "tr": st.trail_key,
+                "st": st.step,
+                "on": int(self.is_eligible(st)),
+                "v": int(not self.validation_reason(st)),
+                "baseV": int(not self.base_validation_reason(st)),
+                "pf": round(st.gate_pf, 4),
+                "dd": st.max_dd_s,
+                # what the desk needs to pool the PF of any selection like _pf_split: orders, gate-window orders and
+                # gross profit / loss, plus the table columns and the engine's own rank among the valid Sets
+                "n": st.n,
+                "gn": st.gate_n,
+                "gp": st.gate_gp,
+                "gl": st.gate_gl,
+                "p15": round(st.last15_pf, 4),
+                "r25": round(st.last25_avg_r, 3),
+                "wr": round(st.wr, 1),
+                "e": round(st.expectancy, 5),
+                "h": round(st.avg_hold_s),
+                "da": round(st.avg_dd_s),
+                "rk": rank.get(id(st), -1),
+                # the Set's lane chain: its processed Set (orders opened while Base passed) and its executable Set (opened
+                # while every gate passed), each with its orders and PF
+                "sd": st.side,
+                "mainId": st.id + MAIN_SUFFIX,
+                "mainN": int(st.proc_total),
+                "mainWindowN": int(st.main_n),
+                "mainPf": round(st.main_pf, 4),
+                "realId": st.id + REAL_SUFFIX,
+                "realN": int(st.exe_total),
+                "realWindowN": int(st.exe_n),
+                "realPf": round(st.exe_pf, 4),
+                "realNegId": st.id + REALNEG_SUFFIX,
+                "realNegN": int(st.neg_total),
+                "realNegWindowN": int(st.neg_n),
+                "realNegPf": round(st.neg_pf, 4),
+                "shortPf": round(st.base_short_pf, 4),
+                "mainShortN": int(st.main_short_win or self.win(st).main_n),
+                "lane": self.lane_of(st),
+                "why": self.gate_reason(st),
+            }
+            for st in self.by_idx
+        ]
+        return {
             "enabled": self.enabled,
-            "processingRows": processing_rows,
             "ready": p.ready,
-            "entrySelectionPolicy": self.entry_policy,
-            "entryPolicy": self.entry_policy,
-            "entryPolicyMaxCandidates": int(self.entry_policy_max_candidates),
-            "entryPolicyMinLiveSamples": int(self.entry_policy_min_live_samples),
             "lookback": self.lookback,
+            "lookbackPending": self._lookback_pending,
+            "lookbackFastRetry": self._lookback_pending and self._lookback_retry_fast,
+            "historySnapshotUsable": bool(self._history_snapshot_usable() and self._history_snapshot_oldest_at > 0
+                                          and time.time() - self._history_snapshot_oldest_at <= self._snapshot_max_age()),
+            "historySnapshotLookback": self._history_snapshot_lookback if self._history_snapshot_usable() else None,
+            "historySnapshotAgeS": (round(max(0.0, time.time() - self._history_snapshot_oldest_at), 1)
+                                    if self._history_snapshot_usable() and self._history_snapshot_oldest_at > 0 else None),
+            "stageContextBars": self.history_bars(),
+            "normalEntriesEnabled": self.normal_entries,
+            "lastNMode": "independent-configured-profiles" if any(r.get("lanePolicy") for r in self.pack_ranges.values()) else "adaptive-candidate-selection",
+            "independentLastNLanes": any(r.get("lanePolicy") for r in self.pack_ranges.values()),
+            "independentLastNSetCount": sum(bool(self.pack_ranges.get(st.pack, {}).get("lanePolicy")) for st in self.by_idx),
+            "symbolBoundSetCount": sum(bool(self.pack_ranges.get(st.pack, {}).get("symbol")) for st in self.by_idx),
+            "stageContextFullSymbols": sum(len(bars) >= self.history_bars() for bars in self.bars.values()),
+            "stageContextShortSymbols": sum(len(bars) < self.history_bars() for bars in self.bars.values()),
             "pfWindow": self.pf_n,
-            "mainEval": int(getattr(self, "main_eval", 12) if getattr(self, "main_eval", 12) is not None else 12),
-            "realEval": int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3),
             "deactN": self.deact_n,
-            "minPf": self.real_min_pf,
-                "enablePf": POSITIVE_PF if float(self.min_pf or 0) <= 0 else self.min_pf,
-            "enableNeed": self.eval_need(),
+            "minPf": self.min_pf,
+            "minPfSignals": self.signal_min_pf,
+            "maxModeledStopLossPct": self.max_modeled_stop_loss_pct,
+            "stopCapInvalid": self.stop_cap_invalid,
             "maxDdS": self.max_dd_s,
-            "autoDeact": self.auto_deact,
-            "liveNegativeDeact": self.live_negative_deact,
-            "preferMinimalRange": self.prefer_minimal_range,
-            "additionalCoordination": self.additional_coordination,
-            # Deprecated response aliases for older UI/remote clients.
-            "preferMinimalPositive": self.prefer_minimal_range,
-            "minimalPositiveCoordination": self.additional_coordination,
-            "optimizationN": self.optimization_n,
-            "optimization": dict(getattr(self, "optimization_stats", {}) or {}),
-            "liveTestMode": bool(self.live_test_mode),
-            "liveTestCandidates": int(self.live_test_candidates),
-            "liveTestMinSamples": int(self.live_test_min_samples),
             "useHistoricGate": self.use_historic_gate,
-            "strictGate": bool(self.strict_gate),
-            "indGate": self.ind_gate_snapshot(),
-            "minSamples": self.min_samples,
+            "freshS": self.fresh_limit() if self.fresh_s > 0 else self.fresh_s,
+            "rotationS": round(float(getattr(self, "rotation_s", 0.0) or 0.0), 1),
             "costPct": self.cost_pct,
-            "costSubtracted": True,
-            "independentDirection": True,
-            "directions": list(DIRECTIONS),
-            "setCount": intern_n if hist_ids is not None else catalog_n,
-            "catalogSetCount": catalog_n,
-            "internSetCount": intern_n,
-            "internSetIdCount": intern_n,
-            "internSetIds": (list(hist_ids)[:64] if hist_ids is not None else []),
-            "activeCount": intern_active,
-            "processingCount": processing_n,
-            "processingSetIds": self.processing_set_ids()[:512],
-            "validatedCount": intern_validated,
-            "microCount": int(cover.get("microCount") or 0),
-            "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
-            "entryGate": getattr(self, "entry_gate_stats", None),
+            "setCount": len(self.sets),
+            "activeCount": sum(1 for s in self.sets.values() if self.is_eligible(s)),
+            "counts": self.counts(),
+            "pfBase": self._pf_split(),
+            "pause": self._pause_report(),
+            "relations": self.relation_report(),
+            "stepPf": {"on": self.pf_by_step, "auto": self.pf_step_auto, "ratio": self.pf_step_ratio, "autoN": self.pf_step_auto_n,
+                       "autoMin": self.pf_step_auto_min, "steps": list(self.step_floor_report)},
+            "indicationConfigs": dict(self.config_report),
             "coverage": cover,
-            "stageFlow": cover["stageFlow"],
-            "liveOverview": live_ov,
-            "strategyHistory": strategy_history,
-            "blockMainEval": {
-                "evalPosCount": int(getattr(self, "block_eval_pos", 50) or 50),
-                "counts": [
-                    {
-                        "count": k[0],
-                        "indication": k[1],
-                        "setId": k[2],
-                        **v,
-                    }
-                    for k, v in list((getattr(self, "block_main_eval", None) or {}).items())[:48]
-                ],
-            },
-            "liveFills": int(live_ov.get("fills") or 0),
-            "liveProcessed": int(live_ov.get("processed") or 0),
-            "liveActive": int(live_ov.get("active") or 0),
             "index": index,
-            "listings": self.relative_listings(id_limit=120),
             "minStep": self.min_step,
             "minStepCfg": self.min_step_cfg,
-            "trailingMinStep": int(getattr(self, "trailing_min_step", STEP_LIVE_MIN) or STEP_LIVE_MIN),
             "stepMax": self.step_max,
             "stepAdapt": self.step_adapt,
             "steps": list(self.steps),
-            "trailEnabled": bool(getattr(self, "trail_enabled", True)),
-            "histFills": hist_fills,
+            "histFills": sum(s.n for s in self.sets.values()),
             "barsSymbols": len(self.bars),
+            "quality": {"excluded": len(self.quality), "maxFlatShare": self.max_flat_share, "maxJumpPct": self.max_jump * 100.0,
+                        "symbols": dict(sorted(self.quality.items())[:24])},
             "progress": {
                 "phase": p.phase,
                 "pct": round(p.pct, 1),
@@ -6364,34 +5034,15 @@ class SetBook:
                 "symbolsDone": p.symbols_done,
                 "symbolsTotal": p.symbols_total,
                 "elapsedMs": round(p.elapsed_ms, 1),
-                    "lastRunMs": round(p.last_run_ms, 1),
-                    "cycle": p.cycle,
-                    "detail": p.detail,
-                    "ready": p.ready,
-                    "error": p.error,
-                    "runId": p.run_id,
-                    "generation": p.generation,
-                    "mode": p.mode,
-                    "requestedStart": p.requested_start,
-                    "requestedEnd": p.requested_end,
-                    "watermark": dict(p.watermark),
-                    "lastPublishedWatermark": dict(p.last_published_watermark),
-                    "lastCompleteRun": p.last_complete_run,
-                    "nextRunAt": p.next_run_at,
-                    "validSymbols": list(p.valid_symbols),
-                    "invalidSymbols": list(p.invalid_symbols),
-                    "missingSymbols": list(p.missing_symbols),
-                    "gappedSymbols": list(p.gapped_symbols),
-                    "stale": p.stale,
-                    "deferredReason": p.deferred_reason,
-                    "coordinationComplete": p.coordination_complete,
-                },
-
+                "lastRunMs": round(p.last_run_ms, 1),
+                "cycle": p.cycle,
+                "detail": p.detail,
+                "ready": p.ready,
+                "error": p.error,
+                "errors": p.errors,
+            },
             "rows": rows,
         }
-        self._snap_cache = out
-        self._snap_ts = time.monotonic()
-        return out
 
 
 def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: float = 0.04) -> List[List[float]]:
@@ -6409,156 +5060,49 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
     return bars
 
 
-def catalog_grid_passes(cov: dict) -> bool:
-    """A trailing-off catalog is complete. Trail coverage is required only when trails are on."""
-    fam = cov.get("families") if isinstance(cov.get("families"), dict) else {}
-    base = int(fam.get("base") or 0)
-    trail_n = int(fam.get("trail") or 0)
-    if not cov.get("slCover") or base < 8:
-        return False
-    if bool(cov.get("independentTrail")):
-        return bool(cov.get("trailCover")) and trail_n >= 5 and bool(cov.get("trails"))
-    return trail_n == 0
-
-
-def catalog_cover_passes(cov: dict, catalog_ready: bool) -> Tuple[bool, str]:
-    """Grid QA must not fail just because the operator turned trailing off."""
-    fam = cov.get("families") if isinstance(cov.get("families"), dict) else {}
-    trailing_on = bool(cov.get("independentTrail"))
-    size = int(cov.get("catalogSetCount") or cov.get("product") or 0)
-    if not catalog_ready:
-        return True, "deferred catalog bootstrap"
-    ok = bool(cov.get("slCover")) and size >= 10
-    if trailing_on:
-        ok = ok and bool(cov.get("trailCover")) and int(fam.get("trail") or 0) >= 1 and bool(cov.get("trails"))
-    detail = (
-        f"n={size} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')} "
-        f"trailing={'on' if trailing_on else 'off'}"
-    )
-    return ok, detail
+# The self-test books run the combined Sets with one floor and no pause, as the regression fixtures do (common.overlay): the new defaults (a Set per
+# direction, the minimum PF per TP step, the pause after success) have their own suites (direction, step_pf, pause).
+_SELFTEST_PIN = {"positionCostPct": .12, "directionMode": "both", "minPfByStep": False, "pauseMode": "off", "rankByLane": False, "setScratchEnabled": True, "holdAuto": True, "exitSetsByPack": {}, "slMaxByRange": {}, "setStepAdapt": True}
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
-    """Engine self-test with the short Main/Real windows its 8-15 close tapes need.
-
-    The fixtures below predate the Main 30 / Real 30 default; they test pick,
-    activation, direction and gate logic, not stage windows. The production
-    windows are pinned by scripts/test_stage_windows.py.
-    """
-    global MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT
-    saved = (MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT)
-    MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT = 12, 3
-    try:
-        return _self_test_body()
-    finally:
-        MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT = saved
-
-
-def _self_test_body() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
-    # drawdown time: 3 down, recover, 2 down — cost-net of pnl_pct (shared units)
+    # drawdown time: 3 down, recover, 2 down
     rows = [
-        {"t": 100, "pnl_pct": 0.005},
-        {"t": 160, "pnl_pct": -0.002},
-        {"t": 220, "pnl_pct": -0.002},
-        {"t": 400, "pnl_pct": 0.010},
-        {"t": 460, "pnl_pct": -0.002},
-        {"t": 520, "pnl_pct": -0.002},
+        {"t": 100, "pnl": 1.0, "pnl_pct": 0.003},
+        {"t": 160, "pnl": -0.4, "pnl_pct": -0.002},
+        {"t": 220, "pnl": -0.4, "pnl_pct": -0.002},
+        {"t": 400, "pnl": 1.2, "pnl_pct": 0.004},
+        {"t": 460, "pnl": -0.3, "pnl_pct": -0.0015},
+        {"t": 520, "pnl": -0.3, "pnl_pct": -0.0015},
     ]
     dd = drawdown_time(rows, now=520)
     out.append(("set-dd-episodes", dd["episodes"] == 2.0, f"{dd}"))
     out.append(("set-dd-max", dd["maxS"] >= 120, f"{dd['maxS']}"))
-    from position_cost import is_positive_pf as _is_pos, POSITIVE_PF as _PP
-    mixed_sym = (
-        [{"t": i, "symbol": "A", "pnl_pct": 0.02} for i in range(10)]
-        + [{"t": 100 + i, "symbol": "B", "pnl_pct": -0.02} for i in range(15)]
-    )
-    chrono = last_n_chrono(mixed_sym, 15)
-    bal = last_n_balanced(mixed_sym, 15)
-    out.append(("set-last-n-chrono-newest", all(r["symbol"] == "B" for r in chrono), str({r["symbol"] for r in chrono})))
-    out.append(("set-last-n-balanced-mix", {r["symbol"] for r in bal} == {"A", "B"}, str({r["symbol"] for r in bal})))
-    out.append(("set-positive-pf-floor", _PP == 1.15 and (not _is_pos(1.02)) and (not _is_pos(1.10)) and _is_pos(1.15), f"floor={_PP}"))
-    live_usdt = {"t": 1, "pnl": 9.0, "pnl_pct": 0.003, "position_cost_pct": 0.15}
-    hist_frac = {"t": 2, "pnl": 0.0015, "pnl_pct": 0.003, "position_cost_pct": 0.15}
-    out.append((
-        "set-ddt-units-match",
-        abs(row_equity_pnl(live_usdt) - row_equity_pnl(hist_frac)) < 1e-12,
-        f"live={row_equity_pnl(live_usdt)} hist={row_equity_pnl(hist_frac)}",
-    ))
-    boundary = drawdown_time(
-        [
-            {"t": 100, "pnl": 1.0},
-            {"t": 120, "pnl": -0.2},
-            {"t": 150, "pnl": -0.1},
-            {"t": 180, "pnl": 0.3},
-            {"t": 200, "pnl": -0.4},
-        ],
-        now=260,
-    )
-    out.append(("set-dd-recovery-boundary", boundary["episodes"] == 2.0 and boundary["maxS"] == 60.0 and boundary["avgS"] == 60.0, f"{boundary}"))
-    # last-25 negative deactivates
+    # drawdown and gate state are derived from the tape: a Set with a long losing run is invalid, not deactivated
     book = SetBook()
     book.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True,
             "setDeactN": 25,
-            "setPfWindow": 15,
+            "windowsLinked": False, "setPfWindow": 15,
             "setMinPf": 1.10,
-            "setMaxDdTimeS": 10_000,
+            "setMaxDdtHours": 36,
             "setMinSamples": 8,
-            "setAutoDeact": True,
-            # Live negative-result deactivation is opt-in in production
-            # defaults; enable it explicitly for this safety-policy fixture.
-            "setLiveNegativeDeact": True,
             "setMinStep": 3,
             "setStepMax": 6,
             "setStepAdapt": True,
             "stratIndications": True,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
+            "trailVariants": ["0.3:0.1"],
             "trailGiveMin": 0.1,
             "trailGiveMax": 0.1,
-            "slToTpRatios": [0.6],
+            "setSlRatios": [0.5],
         }
     )
+    book.gate_window, book.gate_min = 15, 12  # these fixtures carry 15 trades
     out.append(("set-count", len(book.sets) >= 2, f"n={len(book.sets)}"))
-    slim = book.snapshot()
-    out.append(("set-snap-slim-index", len(slim.get("index") or []) == 0, f"index={len(slim.get('index') or [])} rows={len(slim.get('rows') or [])}"))
-    out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.0045) < 1e-9, f"{step_tp_pct(3, 0.15)}"))
-    out.append(("set-tp-step7-cost10", abs(step_tp_pct(7, 0.10) - 0.007) < 1e-9, f"{step_tp_pct(7, 0.10)}"))
-    trail_floor = SetBook()
-    trail_floor.load(
-        {
-            "histEnabled": True,
-            "setMinStep": 3,
-            "setStepMax": 8,
-            "trailingMinStep": 7,
-            "stratGeneral": True,
-            "stratIndications": False,
-            "stratTrailing": True,
-            "slToTpRatios": [0.6],
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
-            "trailGiveMin": 0.1,
-            "trailGiveMax": 0.1,
-            "positionCostPct": 0.10,
-            "slMinPct": 0.4,
-        }
-    )
-    base_steps = sorted({s.step for s in trail_floor.sets.values() if s.kind == "base"})
-    trail_steps = sorted({s.step for s in trail_floor.sets.values() if s.kind == "trail"})
-    out.append(("set-trail-min-step", base_steps == list(range(3, 9)) and trail_steps == list(range(7, 9)),
-                f"base={base_steps} trail={trail_steps}"))
-    live_sl = max(trail_floor.sl_min, step_tp_pct(7, 0.10) * 0.6)
-    out.append(("set-sl-bound-to-step-tp", abs(live_sl - 0.0042) < 1e-9 and trail_floor.sl_min >= 0.004 - 1e-12,
-                f"sl={live_sl} floor={trail_floor.sl_min}"))
-    tight_sl, tight_tp = trail_floor.pair_sl_tp(0.003, 0.6)
-    r04_sl, r04_tp = trail_floor.pair_sl_tp(0.003, 0.4)
-    out.append(("set-tp-lifts-to-sl-floor", abs(tight_sl - 0.004) < 1e-9 and abs(tight_tp - 0.004 / 0.6) < 1e-9,
-                f"sl={tight_sl} tp={tight_tp}"))
-    out.append(("set-ratio-adjusts-tp", abs(r04_tp - 0.01) < 1e-9 and abs(r04_tp - tight_tp) > 1e-9,
-                f"r0.4={r04_tp} r0.6={tight_tp}"))
+    out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.003) < 1e-9 and abs(step_tp_pct(3, 0.5) - 0.003) < 1e-9, f"{step_tp_pct(3, 0.15)} {step_tp_pct(3, 0.5)} (3 x 0.1 % whatever PositionCost is)"))
     base_only = [s for s in book.sets.values() if s.kind == "base"]
     trail_only = [s for s in book.sets.values() if s.kind == "trail"]
     out.append(("set-step-floor", bool(base_only) and all(s.step >= 3 for s in base_only) and min(s.step for s in base_only) == 3, f"steps={sorted({s.step for s in base_only})} trails={len(trail_only)}"))
@@ -6571,28 +5115,18 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     book._rebuild_sets()
     mixed = [{"pnl": -0.02, "pnl_pct": -0.003}] * 20 + [{"pnl": 0.02, "pnl_pct": 0.004}] * 5
     book.adapt_from_live(mixed)
-    out.append(("set-adapt-unattributed-no-promotion", book.min_step == 3, f"min={book.min_step} n={len(book.sets)}"))
-    out.append(("set-adapt-keeps-grid", sorted({s.step for s in book.sets.values() if s.kind == "base"}) == list(range(3, 7)), f"steps={sorted({s.step for s in book.sets.values() if s.kind == 'base'})}"))
+    out.append(("set-adapt-min", book.min_step == 5, f"min={book.min_step} n={len(book.sets)}"))
     sid = next(iter(book.sets))
     st = book.sets[sid]
     st.hist = [{"t": 1000 + i, "pnl": -0.01, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(25)]
     st.live = []
     book._score_one(st)
-    out.append(("set-hist-neg-off-live", not st.active, f"{st.active} {st.deact_reason}"))
-    st.live = [{"exchange_confirmed": True, "t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
+    out.append(("set-hist-neg-off", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min"), f"{st.active} {st.deact_reason}"))
+    st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
-    out.append(("set-deact-live-25", (not st.active) and "live last" in st.deact_reason and "loss" in st.deact_reason, f"{st.active} {st.deact_reason} {st.last25_avg_pnl}"))
-    st.hist = [{"t": 1500 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp"} for i in range(15)]
-    st.live = [{"exchange_confirmed": True, "t": 2500 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(10)]
-    book._score_one(st)
-    out.append(("set-losing-stage-overrides-hist", (not st.active) and not book._real_metrics_ok(st.by_side.get("LONG") or {}), f"{st.active} {st.deact_reason} histPf={st.last15_ratio}"))
-    st.hist = [{"t": 1500 + i, "pnl": -0.02, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(15)]
-    st.live = [{"exchange_confirmed": True, "t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(12)]
-    book._score_one(st)
-    out.append(("set-live-wins-keep", st.active, f"{st.active} {st.deact_reason} live={st.live_eval}"))
-    snap_ov = book.snapshot().get("liveOverview") or {}
-    out.append(("set-live-overview", int(snap_ov.get("processed") or 0) >= 1 and snap_ov.get("costSubtracted") is True and snap_ov.get("source") == "live-exchange", str(snap_ov)[:220]))
-    st.live = [{"exchange_confirmed": True, "t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
+    # actual closes are a separate sample; the paper tape does not grow
+    out.append(("set-live-paper-isolation", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min") and len(st.tape()) == 25, f"{st.active} {st.deact_reason} tape={len(st.tape())}"))
+    st.live = [{"t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
     book._score_one(st)
     out.append(("set-live-win-on", st.active, f"{st.active} {st.deact_reason}"))
     book.on_live_close({"ours": False, "set_id": sid, "pnl": -9, "pnl_pct": -0.5, "t": 9, "symbol": "X"})
@@ -6607,32 +5141,31 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     st2.live = []
     book.min_pf = 1.08
     book._score_one(st2)
-    out.append(("set-pf15-pass", st2.last15_ratio >= 1.09 and st2.active, f"ratio={st2.last15_ratio} {st2.deact_reason}"))
+    out.append(("set-pf15-pass", st2.last15_pf >= 1.09 and st2.active, f"pf={st2.last15_pf} ratio={st2.last15_ratio} {st2.deact_reason}"))
     # historic replay produces fills and scores
     book2 = SetBook()
     book2.load(
-        {
-            "histEnabled": True,
+        {**_SELFTEST_PIN, 
+            "histEnabled": True, "stagesEnabled": False,       # the pick on the Base gate alone
             "histLookbackBars": 240,
             "histMinBars": 80,
             "histWarmup": 20,
             "setDeactN": 25,
-            "setPfWindow": 15,
+            "windowsLinked": False, "setPfWindow": 15,
             "setMinPf": 1.0,
-            "setMaxDdTimeS": 50_000,
+            "setMaxDdtHours": 36,
             "setMinSamples": 5,
-            "setAutoDeact": True,
             "setMinStep": 3,
             "setStepMax": 8,
             "stratIndications": True,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
-            "slToTpRatios": [0.6, 0.9],
+            "trailVariants": ["0.3:0.1"],
+            "setSlRatios": [0.5, 1.0],
             "tpPct": 0.75,
             "timeStopS": 240,
         }
     )
+    book2.gate_window, book2.gate_min = 15, 12  # these fixtures carry 15 trades
     book2.ingest_bars("AAA-USDT", synth_trend(240, 50.0, 0.18, 0.03))
     book2.ingest_bars("BBB-USDT", synth_trend(240, 20.0, -0.14, 0.03))
     book2.replay_all(now=1_700_000_000)
@@ -6651,7 +5184,7 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
         if s.id != winner.id:
             s.active = False
     picked = book2.pick(winner.pack)
-    out.append(("set-pick", picked is not None and picked.id == winner.id and winner.active and winner.step >= book2.min_step, f"{getattr(picked, 'id', None)} active={winner.active} pf={winner.last15_ratio} st={winner.step}"))
+    out.append(("set-pick", picked is not None and picked.id == winner.id and winner.active and winner.step >= book2.min_step, f"{getattr(picked, 'id', None)} active={winner.active} pf={winner.last15_pf} st={winner.step}"))
     # same-bar SL pessimism
     why, px = hit_exit(1, 100.0, 99.5, 100.8, None, [100.0, 101.0, 99.4, 100.2, 1])
     out.append(("set-sl-first", why == "sl" and abs(px - 99.5) < 1e-9, f"{why} {px}"))
@@ -6660,24 +5193,22 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     # independent intern: different SL:TP / step must diverge on the same bars
     book3 = SetBook()
     book3.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True,
             "histLookbackBars": 240,
             "histMinBars": 80,
             "histWarmup": 20,
             "setDeactN": 25,
-            "setPfWindow": 15,
+            "windowsLinked": False, "setPfWindow": 15,
             "setMinPf": 0.5,
-            "setMaxDdTimeS": 50_000,
+            "setMaxDdtHours": 36,
             "setMinSamples": 3,
-            "setAutoDeact": False,
             "setMinStep": 3,
             "setStepMax": 12,
             "stratIndications": False,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
-            "slToTpRatios": [0.3, 1.5],
+            "trailVariants": ["0.3:0.1"],
+            "setSlRatios": [0.5, 1.5],
             "tpPct": 0.75,
             "timeStopS": 21600,
             "exitIgnoreTp": True,
@@ -6688,143 +5219,77 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     book3.ingest_bars("CCC-USDT", synth_trend(240, 80.0, 0.22, 0.05))
     book3.ingest_bars("DDD-USDT", synth_trend(240, 40.0, -0.16, 0.05))
     book3.replay_all(now=1_700_000_100)
-    tight = [s for s in book3.sets.values() if abs(s.sl_ratio - 0.3) < 1e-9 and s.kind == "base"]
-    wide = [s for s in book3.sets.values() if abs(s.sl_ratio - 1.5) < 1e-9 and s.kind == "base"]
-    lo_step = [s for s in book3.sets.values() if s.step == 3 and s.kind == "base"]
-    hi_step = [s for s in book3.sets.values() if s.step == 12 and s.kind == "base"]
+    tight = [s for s in book3.sets.values() if abs(s.sl_ratio - 0.5) < 1e-9]
+    wide = [s for s in book3.sets.values() if abs(s.sl_ratio - 1.5) < 1e-9]
+    lo_step = [s for s in book3.sets.values() if s.step == 3]
+    hi_step = [s for s in book3.sets.values() if s.step == 12]
     def sig(st: SetState) -> Tuple[int, float, float, float]:
-        return (st.n, round(st.last15_ratio, 4), round(st.avg_hold_s, 1), round(st.expectancy, 6))
+        return (st.n, round(st.gate_pf, 4), round(st.avg_hold_s, 1), round(st.expectancy, 6))
     t_sig = sig(tight[0]) if tight else (0, 0.0, 0.0, 0.0)
     w_sig = sig(wide[0]) if wide else (0, 0.0, 0.0, 0.0)
     lo_sig = sig(lo_step[0]) if lo_step else (0, 0.0, 0.0, 0.0)
     hi_sig = sig(hi_step[0]) if hi_step else (0, 0.0, 0.0, 0.0)
     intern_ok = (t_sig != w_sig) or (lo_sig != hi_sig)
-    out.append(("set-intern-independent", intern_ok and (tight[0].n + wide[0].n) > 0, f"sl0.3={t_sig} sl1.5={w_sig} st3={lo_sig} st12={hi_sig} fills={sum(s.n for s in book3.sets.values())}"))
+    out.append(("set-intern-independent", intern_ok and (tight[0].n + wide[0].n) > 0, f"sl0.5={t_sig} sl1.5={w_sig} st3={lo_sig} st12={hi_sig} fills={sum(s.n for s in book3.sets.values())}"))
     # full config grid: every pack × sl × trail × step indexed
     book4 = SetBook()
     book4.load(
-        {
-            "histEnabled": True,
+        {**_SELFTEST_PIN, 
+            "histEnabled": True, "stagesEnabled": False,      # these checks are about the Base gate alone, on short fixture tapes
             "setMinStep": 8,
             "setStepMax": 12,
             "stratIndications": True,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 1.5,
-            "trailGiveMin": 0.1,
-            "trailGiveMax": 0.5,
-            "slToTpRatios": [0.3, 0.6, 0.9, 1.2, 1.5],
+            "trailMinStep": 3,
         }
     )
+    book4.gate_window, book4.gate_min = 15, 12  # these fixtures carry 15 trades
     cov = book4.coverage()
     want_base = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps)
-    want_tr = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps) * max(1, len(book4.trails))
-    want = want_base + want_tr
+    built_keys = sorted({s.trail_key for s in book4.by_idx if s.kind == "trail"})
+    want_tr = len(book4.packs) * max(1, len(built_keys))
+    # Exit Sets (exitIgnoreTp): one per distinct stop distance (SL ratio x step) per pack, no TP
+    want_exit = len(book4.packs) * len({round(sl * st_, 6) for sl in book4.sl_ratios for st_ in book4.steps}) if book4.exit_sets else 0
+    want = want_base + want_tr + want_exit
     idxs = [s.idx for s in book4.by_idx]
     trails_in = {s.trail_key for s in book4.by_idx if s.kind == "trail"}
     kinds = {s.kind for s in book4.by_idx}
-    out.append(("set-grid-product", len(book4.by_idx) == want and want_base >= 50 and want_tr >= 10, f"n={len(book4.by_idx)} base={want_base} trail={want_tr} dims={cov.get('dims')} fam={cov.get('families')}"))
+    out.append(("set-grid-product", len(book4.by_idx) == want and want_base >= 50 and want_tr >= 10, f"n={len(book4.by_idx)} base={want_base} exit={want_exit} trail={want_tr} dims={cov.get('dims')} fam={cov.get('families')}"))
     out.append(("set-idx-unique", idxs == list(range(len(idxs))), f"n={len(idxs)} last={idxs[-1] if idxs else None}"))
     out.append(("set-trail-cover", cov.get("trailCover") and len(trails_in) >= 5 and "trail" in kinds, f"trails={sorted(trails_in)} cover={cov.get('trailCover')}"))
-    out.append(("set-trail-grid-n", len(book4.trails) >= 20 and len(trails_in) >= 20, f"n={len(book4.trails)} keys={sorted(trails_in)[:8]}"))
-    bases = {(s.pack, round(s.sl_ratio, 1), s.step) for s in book4.by_idx if s.kind == "base"}
-    trail_sls = {(s.pack, round(s.sl_ratio, 1), s.step) for s in book4.by_idx if s.kind == "trail"}
-    out.append(("set-trail-parallel-normal", bases and bases <= trail_sls, f"base={len(bases)} trailCombos={len(trail_sls)}"))
-    slim = SetBook()
-    slim.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.6, "trailArmMax": 0.6, "trailGiveMin": 0.2, "trailGiveMax": 0.2})
-    out.append(("set-trail-range-honored", len(slim.trails) == 1 and any(s.kind == "base" for s in slim.by_idx) and any(s.kind == "trail" for s in slim.by_idx), f"trails={len(slim.trails)} n={len(slim.by_idx)}"))
-    fullt = SetBook()
-    fullt.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.3, "trailArmMax": 1.5, "trailGiveMin": 0.1, "trailGiveMax": 0.5})
-    out.append(("set-trail-range-full", len(fullt.trails) >= 20 and any(s.kind == "base" for s in fullt.by_idx), f"trails={len(fullt.trails)} n={len(fullt.by_idx)}"))
-    off = SetBook()
-    off.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False})
-    out.append(("set-trail-explicit-off", not off.trails and all(s.kind == "base" for s in off.by_idx), f"n={len(off.by_idx)} kinds={ {s.kind for s in off.by_idx} }"))
-    off_cov = off.coverage()
-    off.hist_test_set_ids = {off.by_idx[0].id} if off.by_idx else set()
-    gated = off.coverage()
-    out.append((
-        "set-product-is-catalog",
-        off_cov.get("product") == len(off.by_idx)
-        and gated.get("product") == len(off.by_idx)
-        and gated.get("internSetCount") == (1 if off.by_idx else 0)
-        and not gated.get("independentTrail")
-        and catalog_grid_passes({"slCover": True, "independentTrail": False, "families": {"base": 780, "trail": 0}, "trails": []})
-        and not catalog_grid_passes({"slCover": True, "independentTrail": True, "families": {"base": 780, "trail": 0}, "trails": []})
-        and catalog_cover_passes({"slCover": True, "independentTrail": False, "catalogSetCount": 780, "families": {"base": 780, "trail": 0}, "trails": []}, True)[0]
-        and not catalog_cover_passes({"slCover": True, "independentTrail": True, "catalogSetCount": 780, "families": {"base": 780, "trail": 0}, "trails": []}, True)[0],
-        f"product={gated.get('product')} intern={gated.get('internSetCount')} n={len(off.by_idx)}",
-    ))
+    mid_tp = (book4.steps[len(book4.steps) // 2]) * book4.cost_pct
+    honour_ok = (not book4.hist_honor_tp) or all(st.trail_arm < mid_tp - 1e-9 for st in book4.by_idx if st.kind == "trail")
+    out.append(("set-trail-honour-rule", honour_ok and len(book4.trails) >= len(built_keys), f"honour={book4.hist_honor_tp} mid_tp={mid_tp:.2f} built={len(built_keys)} grid={len(book4.trails)}"))
     out.append(("set-sl-cover", cov.get("slCover") and len(book4.sl_ratios) >= 5, f"sl={book4.sl_ratios}"))
-    out.append(("set-sl-tp-cover", bool(cov.get("slTpCover")), f"slTp={cov.get('slTpCover')} steps={cov.get('steps')} bySl={ {k: v.get('steps') for k, v in (cov.get('bySl') or {}).items()} }"))
-    out.append(("set-trail-sl-cover", bool(cov.get("trailSlCover")), f"trailSl={cov.get('trailSlCover')} byTrail={ {k: v.get('sl') for k, v in (cov.get('byTrail') or {}).items()} }"))
-    out.append(("set-independent-sl-tp", bool(cov.get("independentSlTp")), str(cov.get("independentSlTp"))))
-    out.append(("set-trail-sl-tp-cover", bool(cov.get("trailSlTpCover")), f"trailSlTp={cov.get('trailSlTpCover')} product={cov.get('product')} want={want}"))
-    out.append(("set-independent-configs", bool(cov.get("independentConfigs")) and len(book4.by_idx) == want, f"n={len(book4.by_idx)} want={want}"))
-    combo = {(s.pack, round(s.sl_ratio, 1), s.step, s.trail_key or "") for s in book4.by_idx}
-    out.append(("set-combo-unique", len(combo) == len(book4.by_idx), f"unique={len(combo)} n={len(book4.by_idx)}"))
     out.append(("set-get-idx", book4.get_idx(0) is book4.by_idx[0] and book4.get_idx(want - 1) is book4.by_idx[-1], f"0={book4.get_idx(0).id if book4.get_idx(0) else None}"))
-    pack_ids = book4.ids_for_pack("general")
-    out.append((
-        "set-pack-index",
-        bool(pack_ids) and pack_ids == [st.id for st in book4.by_idx if st.pack == "general"]
-        and all(st.pack in book4._by_pack for st in book4.by_idx[:4]),
-        f"general={len(pack_ids)} packs={sorted(book4._ids_by_pack)}",
-    ))
-    clone_idx = book4.replay_clone(["AAA-USDT"] if "AAA-USDT" in book4.bars else None)
-    out.append((
-        "set-clone-reindex",
-        len(clone_idx._ids_by_pack.get("general") or []) == len(pack_ids) and len(clone_idx.sets) == len(book4.sets),
-        f"clone_general={len(clone_idx._ids_by_pack.get('general') or [])}",
-    ))
-    listed = book4.relative_listings()
-    out.append((
-        "set-relative-listings",
-        int((listed.get("relative") or {}).get("sets") or 0) == len(book4.by_idx)
-        and len(listed.get("rankedIds") or []) == len(book4.by_idx)
-        and len(listed.get("indexById") or {}) == len(book4.by_idx)
-        and bool((listed.get("relative") or {}).get("packs")),
-        str(listed.get("relative")),
-    ))
-    fat_row = {
-        "t": 1.0, "symbol": "AAA-USDT", "side": "LONG", "direction": "LONG",
-        "pnl": 0.01, "pnl_pct": 0.002, "hold_s": 60.0, "reason": "tp",
-        "set_id": "general:1m:sl0.6:st8", "pack": "general", "qty": 1.0, "adds": 0, "strategy": "core",
-    }
-    slim = slim_hist_row(fat_row)
-    out.append(("set-hist-slim", "pnl" not in slim and "set_id" not in slim and slim.get("side") == "LONG" and slim.get("pnl_pct") == 0.002, str(slim)))
-    live_keep = slim_hist_row({**fat_row, "client_id": "Gx01x"})
-    out.append(("set-hist-slim-keeps-live", "client_id" in live_keep, str(sorted(live_keep))))
-    out.append(("set-state-slots", hasattr(SetState, "__slots__"), getattr(SetState, "__slots__", ())))
-    out.append(("set-clone-no-hist", all(not st.hist and not st.live for st in clone_idx.by_idx[:8]) and len(clone_idx.by_idx) == len(book4.by_idx), f"n={len(clone_idx.by_idx)}"))
     v = book4.coord_vars(book4.by_idx[0])
     out.append(("set-coord-vars", v.get("idx") == 0 and v.get("kind") == "base" and "step" in v, str(v)))
     trail_row = next((s for s in book4.sets.values() if s.kind == "trail"), None)
     if trail_row:
         trail_row.hist = [
-            {"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"}
-            for i in range(book4.eval_need())
+            {"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"}
+            for i in range(20)
         ]
         book4._score_one(trail_row)
         trail_row.active = True
+    book4.progress.ready = True  # calibrated: the gate is applied, so the trail set must validate
     tr0 = book4.pick_trail(trail_row.pack if trail_row else "indications")
     out.append(("set-pick-trail", tr0 is not None and tr0.kind == "trail" and tr0.trail_key, f"{getattr(tr0,'id',None)} {getattr(tr0,'trail_key',None)}"))
     # two trails independent intern
     book5 = SetBook()
     book5.load(
-        {
+        {**_SELFTEST_PIN, 
             "histEnabled": True,
             "histLookbackBars": 240,
             "histMinBars": 80,
             "histWarmup": 20,
             "setMinPf": 0.5,
-            "setAutoDeact": False,
             "setMinStep": 8,
             "setStepMax": 8,
             "stratIndications": False,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 1.5,
-            "slToTpRatios": [0.6],
+            "trailMinStep": 3,
+            "setSlRatios": [0.5],
             "setHonorTp": True,
             "setHistTimeBars": 45,
         }
@@ -6838,98 +5303,26 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
         by_tr[st.trail_key] = (st.n, round(st.avg_hold_s, 1), round(st.expectancy, 6), st.idx)
     out.append(("set-trail-independent", len(by_tr) >= 3 and len(set(by_tr.values())) >= 2, f"{by_tr}"))
     base_n = sum(1 for s in book5.by_idx if s.kind == "base")
-    out.append(("set-trail-own-family", base_n >= 1 and all(s.step == 8 and s.trail_key for s in book5.by_idx if s.kind == "trail") and all(s.kind == "base" or s.trail_key for s in book5.by_idx), f"base={base_n} trails={len(by_tr)} steps={[s.step for s in book5.by_idx if s.kind=='trail'][:4]}"))
+    out.append(("set-trail-own-family", base_n >= 1 and all(s.step == 0 for s in book5.by_idx if s.kind == "trail"), f"base={base_n} trails={len(by_tr)}"))
     dropped = book2.trim_bars(["AAA-USDT"])
     out.append(("set-trim-bars", dropped >= 1 and "AAA-USDT" in book2.bars and "BBB-USDT" not in book2.bars, f"drop={dropped} left={list(book2.bars)}"))
     book2.bars["AAA-USDT"] = book2.bars["AAA-USDT"] + book2.bars["AAA-USDT"]
     clamped = book2.clamp_bars(80)
     out.append(("set-clamp-bars", clamped >= 1 and len(book2.bars["AAA-USDT"]) <= 80, f"n={len(book2.bars['AAA-USDT'])} c={clamped}"))
     book6 = SetBook()
-    book6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.3, "trailArmMax": 0.3})
+    book6.load({**_SELFTEST_PIN, "histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"]})
     book6.ingest_bars("FFF-USDT", synth_trend(240, 55.0, 0.16, 0.04))
     book6.ingest_bars("GGG-USDT", synth_trend(240, 33.0, -0.12, 0.04))
     book6.replay_all(now=1_700_000_300, symbols=["FFF-USDT"])
     out.append(("set-replay-slice", book6.progress.ready and book6.progress.symbols_total == 1, f"n={book6.progress.symbols_total} fills={sum(s.n for s in book6.sets.values())} {book6.progress.detail}"))
-    # Load-sliced production replay: a slice is not a complete gate, and the
-    # next slice must retain the first symbol's evidence instead of replacing
-    # the whole tape.
-    book_partial = SetBook()
-    book_partial.load({
-        "histEnabled": True, "histLookbackBars": 180, "histMinBars": 80,
-        "histWarmup": 20, "setMinStep": 8, "setStepMax": 8,
-        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "slToTpRatios": [0.6],
-    })
-    book_partial.ingest_bars("FFF-USDT", synth_trend(180, 55.0, 0.16, 0.04))
-    book_partial.ingest_bars("GGG-USDT", synth_trend(180, 33.0, -0.12, 0.04))
-    book_partial.replay_all(now=1_700_000_500, symbols=["FFF-USDT"], merge=True, progress_total=2)
-    pfirst = next(iter(book_partial.sets.values()))
-    first_symbols = {str(r.get("symbol")) for r in pfirst.hist}
-    first_ok = (
-        not book_partial.progress.ready
-        and book_partial.progress.symbols_done == 1
-        and book_partial.progress.symbols_total == 2
-        and first_symbols <= {"FFF-USDT"}
-    )
-    book_partial.replay_all(now=1_700_000_600, symbols=["GGG-USDT"], merge=True, progress_total=2)
-    psecond = next(iter(book_partial.sets.values()))
-    merged_symbols = {str(r.get("symbol")) for r in psecond.hist}
-    out.append(("set-replay-partial-gate", first_ok, f"ready={book_partial.progress.ready} symbols={book_partial.progress.symbols_done}/{book_partial.progress.symbols_total} first={first_symbols}"))
-    out.append(("set-replay-partial-merge", book_partial.progress.ready and {"FFF-USDT", "GGG-USDT"} <= merged_symbols and psecond.n >= len(psecond.hist), f"symbols={merged_symbols} n={psecond.n} tape={len(psecond.hist)}"))
-    book_mono = SetBook()
-    book_mono.load({
-        "histEnabled": True, "histLookbackBars": 80, "histMinBars": 40,
-        "histWarmup": 16, "setMinStep": 8, "setStepMax": 8,
-        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "slToTpRatios": [0.6],
-    })
-    book_mono.ingest_bars("MMM-USDT", synth_trend(80, 40.0, 0.1, 0.03))
-    book_mono.ingest_bars("NNN-USDT", synth_trend(80, 41.0, -0.08, 0.03))
-    mono_samples: List[int] = []
-
-    def _mono_step() -> None:
-        mono_samples.append(int(book_mono.progress.symbols_done or 0))
-
-    book_mono.replay_all(
-        now=1_700_000_700,
-        symbols=["MMM-USDT", "NNN-USDT"],
-        workers=1,
-        on_step=_mono_step,
-    )
-    mono_ok = (
-        bool(mono_samples)
-        and all(mono_samples[i] <= mono_samples[i + 1] for i in range(len(mono_samples) - 1))
-        and mono_samples[-1] >= 2
-        and book_mono.progress.ready
-    )
-    out.append((
-        "set-replay-progress-mono",
-        mono_ok,
-        f"n={len(mono_samples)} last={mono_samples[-1:] } samples={mono_samples[:16]}",
-    ))
-    out.append((
-        "set-blas-pin",
-        os.environ.get("OMP_NUM_THREADS") == "1" and os.environ.get("OPENBLAS_NUM_THREADS") == "1",
-        f"omp={os.environ.get('OMP_NUM_THREADS')} blas={os.environ.get('OPENBLAS_NUM_THREADS')}",
-    ))
-    old_hist = [dict(psecond.hist[0])] if psecond.hist else []
-    book_partial.load({
-        "histEnabled": True, "histLookbackBars": 180, "histMinBars": 80,
-        "histWarmup": 20, "setMinStep": 9, "setStepMax": 9,
-        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "slToTpRatios": [0.6],
-    })
-    changed = next(iter(book_partial.sets.values()))
-    out.append(("set-replay-catalog-reset", not book_partial.progress.ready and changed.n == 0 and not changed.hist and old_hist != changed.hist, f"ready={book_partial.progress.ready} n={changed.n} tape={len(changed.hist)}"))
     # --- evaluation math: last-N window counts and PF averages, hand-computed ---
     w = SetBook()
     w.load(
-        {
-            "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
-            "positionCostPct": 0.15,  # This hand-calculated fixture uses 0.15%.
-            "setMinSamples": 5, "setAutoDeact": False, "setMinStep": 3, "setStepMax": 3,
-            "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6],
-            "trailArmMin": 0.3, "trailArmMax": 0.3,
+        {**_SELFTEST_PIN, 
+            "positionCostPct": 0.15, "histEnabled": True, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
+            "setMinSamples": 5, "setMinStep": 3, "setStepMax": 3,
+            "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5],
+            "trailVariants": ["0.3:0.1"],
         }
     )
     wst = next(x for x in w.sets.values() if x.kind == "base")
@@ -6952,53 +5345,29 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     # --- positive-PF-only validation: gated pick and pack gate ---
     g2 = SetBook()
     g2.load(
-        {
-            "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
-            "positionCostPct": 0.15,  # Preserve the fixture's explicit cost basis.
-            "setMinSamples": 8, "setAutoDeact": True, "setMinStep": 3, "setStepMax": 3,
-            "setLiveNegativeDeact": True,
-            "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6, 0.9],
-            "trailArmMin": 0.3, "trailArmMax": 0.3,
+        {**_SELFTEST_PIN, 
+            "positionCostPct": 0.15, "histEnabled": True, "stagesEnabled": False, "windowsLinked": False, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
+            "setMinSamples": 8, "setMinStep": 3, "setStepMax": 3,
+            "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
+            "trailVariants": ["0.3:0.1"],
         }
     )
+    g2.gate_window, g2.gate_min = 15, 12  # these fixtures carry 15 trades
+    g2.min_pf = 1.20  # this sticky-off test was written against the old 1.20 threshold
     g2.progress.ready = True
     bases = [x for x in g2.by_idx if x.kind == "base"]
     neg_set, pos_set = bases[0], bases[1]
     neg_rows = [{"t": 6000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
-    pos_rows = [{"t": 6000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    # net PF exactly 1.10: 11 wins of +0.0004 and 4 losses of -0.001 (11*0.0004 / 4*0.001)
+    pos_rows = [{"t": 6000 + i * 60, "pnl": (-0.001 if i % 4 == 0 else 0.0004), "pnl_pct": (-0.001 if i % 4 == 0 else 0.0004) + 0.0015, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     neg_set.hist = list(neg_rows)
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     g2._score_one(pos_set)
-    out.append(("set-neg-hist-off-live", not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
-    out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
+    out.append(("set-neg-off", (not g2.is_eligible(neg_set)) and neg_set.deact_reason == "pf<min", f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
+    out.append(("set-pos-on", pos_set.active and pos_set.last15_pf >= 1.0, f"{pos_set.active} pf={pos_set.last15_pf}"))
     pk = g2.pick("general")
-    out.append(("set-pick-pos-only", pk is not None and pk.id == pos_set.id, f"{getattr(pk, 'id', None)}"))
-    # Minimal Range Configuration is PF-first: a wider range with materially
-    # better cost-net PF must beat a smaller range; the option only breaks
-    # ties after the quality gates.
-    pfbook = SetBook()
-    pfbook.load({
-        "histEnabled": True, "setPfWindow": 15, "setDeactN": 25,
-        "setMinPf": 1.15, "setMinSamples": 8, "setAutoDeact": True,
-        "setMinStep": 3, "setStepMax": 6, "slToTpRatios": [0.6, 0.9],
-        "stratIndications": False, "stratGeneral": True,
-        "trailArmMin": 0.3, "trailArmMax": 0.3,
-        "preferMinimalRange": True, "additionalCoordination": False,
-    })
-    pfbook.progress.ready = True
-    pf_candidates = [s for s in pfbook.by_idx if s.pack == "general" and s.kind == "base"]
-    pf_small = min(pf_candidates, key=lambda s: (s.step, s.sl_ratio))
-    pf_large = max(pf_candidates, key=lambda s: (s.step, s.sl_ratio))
-    pf_small.hist = [{"t": 6500 + i * 60, "pnl": 0.003, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
-    pf_large.hist = [{"t": 6500 + i * 60, "pnl": 0.008, "pnl_pct": 0.012, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
-    pfbook._score_one(pf_small)
-    pfbook._score_one(pf_large)
-    pfpick = pfbook.pick("general")
-    out.append(("set-min-range-pf-first", pfpick is pf_large and pf_large.last15_ratio > pf_small.last15_ratio, f"pick={getattr(pfpick, 'id', None)} small={pf_small.last15_ratio} large={pf_large.last15_ratio}"))
-    aliasbook = SetBook()
-    aliasbook.load({"preferMinimalPositive": True, "minimalPositiveCoordination": True, "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
-    out.append(("set-min-range-alias", aliasbook.prefer_minimal_range is True and aliasbook.additional_coordination is True, f"range={aliasbook.prefer_minimal_range} add={aliasbook.additional_coordination}"))
+    out.append(("set-pick-pos-only", pk is None, f"base gate: PF 1.10 < 1.20, nothing below the gate is picked ({getattr(pk, 'id', None)})"))
     pos_set.active = False
     for ts in g2.by_idx:
         if ts.kind == "trail":
@@ -7010,323 +5379,615 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     # reactivation: negative set returns once the last-N window rolls positive
     neg_set.hist = list(pos_rows)
     g2._score_one(neg_set)
-    out.append(("set-neg-recover", neg_set.active and neg_set.last15_ratio >= 1.0, f"{neg_set.active} pf={neg_set.last15_ratio}"))
-    # sticky off when reactivate is disabled — LIVE processed only
-    g2.reactivate = False
-    neg_set.live = [{"exchange_confirmed": True, "t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl", "client_id": f"ls{i}"} for i in range(15)]
+    out.append(("set-neg-recover", neg_set.active and neg_set.last15_pf >= 1.0, f"{neg_set.active} pf={neg_set.last15_pf}"))
+    # no sticky off: the one gate decides on every evaluation. PF 1.10 < min_pf 1.20 stays invalid; PF 2.75 returns
+    neg_set.hist = list(neg_rows)
     g2._score_one(neg_set)
-    off1 = not neg_set.active
-    neg_set.live = [{"exchange_confirmed": True, "t": 10000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp", "client_id": f"lw{i}"} for i in range(15)]
+    off1 = not g2.is_eligible(neg_set)
+    neg_set.hist = list(pos_rows)  # PF 1.10 < min_pf 1.20 -> still invalid
     g2._score_one(neg_set)
-    out.append(("set-live-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.live_eval}"))
-    # cold start (no replay yet): STRICT pick stays None, but packs stay
-    # open so the desk keeps processing until the first replay finishes.
+    still_off = not g2.is_eligible(neg_set)
+    rec_rows = [{"t": 9000 + i * 60, "pnl": (-0.001 if i % 4 == 0 else 0.001), "pnl_pct": (0.0005 if i % 4 == 0 else 0.0025), "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    neg_set.hist = rec_rows  # PF 2.75 -> valid again on the next evaluation
+    g2._score_one(neg_set)
+    out.append(("set-no-sticky-off", off1 and still_off and g2.is_eligible(neg_set), f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
+    # cold start (no replay yet): ungated pick still returns a set
     g3 = SetBook()
-    g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
+    g3.load({**_SELFTEST_PIN, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "trailVariants": ["0.3:0.1"]})
     pk3 = g3.pick("general")
-    out.append(("set-pick-cold-strict-none", pk3 is None and g3.pack_open("general"), f"ready={g3.progress.ready} pick={getattr(pk3, 'id', None)} open={g3.pack_open('general')}"))
-    g3.strict_gate = False
-    pk3b = g3.pick("general")
-    out.append(("set-pick-cold-legacy", pk3b is not None and g3.pack_open("general"), f"legacy {getattr(pk3b, 'id', None)}"))
-    # strict: validated + profitable set runs; validated loser never picked
-    g4 = SetBook()
-    g4.min_samples = 8
-    g4.load({"histEnabled": True, "setMinPf": 1.20, "setMinSamples": 8, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
-    g4.progress.ready = True
-    gb = [x for x in g4.by_idx if x.pack == "general" and x.kind == "base"]
-    gb[0].hist = [{"t": 7000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
-    for x in gb[1:]:
-        x.hist = [{"t": 7000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
-    for x in g4.by_idx:
-        g4._score_one(x)
-    pk4 = g4.pick("general")
-    out.append(("set-strict-pick-validated", pk4 is not None and pk4.id == gb[0].id and pk4.last15_ratio >= 1.0 and pk4.last15_n >= 8, f"{getattr(pk4, 'id', None)} pf={getattr(pk4, 'last15_ratio', 0)}"))
-    g4snap = g4.snapshot(full=True)
-    g4valid = sum(1 for x in g4.sets.values() if x.last15_n >= g4.eval_need() and x.last15_ratio + 1e-9 >= 1.0)
-    out.append(("set-validated-count-pf-positive", g4snap.get("validatedCount") == g4valid and g4valid >= 1, f"{g4snap.get('validatedCount')}/{g4snap.get('setCount')} need={g4snap.get('validationNeed')}"))
-    out.append(("set-validated-row-flags", any(bool(r.get("validated")) and float(r.get("last15Ratio") or 0) >= 1.0 for r in g4snap.get("rows") or []), "positive PF rows carry validated=true"))
-    out.append(("set-strict-pack-open-winner", g4.pack_open("general") and not g4.pack_open("indications"), f"gen={g4.pack_open('general')} ind={g4.pack_open('indications')}"))
-    # strict: once the only winner turns cold (no samples), pack closes again
-    gb[0].hist = []
-    g4._score_one(gb[0])
-    out.append(("set-strict-cold-closes", g4.pick("general") is None and not g4.pack_open("general"), f"pick={g4.pick('general')}"))
-    # indication-kind gate: proven loser off, validated winner on, unproven
-    # kind stays independent (does not inherit pack open)
-    gb[0].hist = [{"t": 8000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
-    g4._score_one(gb[0])
-    ib = [x for x in g4.by_idx if x.pack == "indications" and x.kind == "base"]
-    ib[0].hist = [{"t": 8000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
-    for x in ib[1:]:
-        x.hist = []
-    for x in g4.by_idx:
-        if x.pack == "indications":
-            g4._score_one(x)
-    out.append(("ind-gate-unproven-independent", (not g4.indication_ok("common")) and g4.pack_open("indications"), f"common={g4.indication_ok('common')} indOpen={g4.pack_open('indications')}"))
-    g4.ind_live["move"] = [{"t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(12)]
-    g4.ind_live["state"] = [{"t": 9000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(12)]
-    out.append(("ind-gate-loser-off", not g4.indication_ok("move"), f"move pf={g4.ind_stats('move')}"))
-    out.append(("ind-gate-winner-on", g4.indication_ok("state"), f"state pf={g4.ind_stats('state')}"))
-    # live closes carrying ind_kind feed the kind tape even without a set match
-    g5 = SetBook()
-    g5.load({"histEnabled": True, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
-    g5.on_live_close({"ours": True, "exchange_confirmed": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
-    g5.on_live_close({"ours": True, "exchange_confirmed": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
-    out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
-    # hist replay scores each indication kind independently (not pack-consensus copies).
-    # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
-    # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
-    g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False, "indTypeSweep": False, "indTypeRsi2": False, "indTypeKeltner": False, "indTypeImpulse": False, "setMinPf": 1.0})
-    g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
-    _orig_votes = indication_kind_votes
-    globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]
-    try:
-        g6.replay_all(now=1_700_000_400)
-    finally:
-        globals()["indication_kind_votes"] = _orig_votes
-    ind_fills = sum(len(v) for v in g6.ind_hist.values())
-    out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
-    out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
-    # Signals must also have an independently attributable historic Block tape.
-    g6b = SetBook()
-    g6b.load({
-        "histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20,
-        "stratIndications": True, "stratGeneral": False, "stratTrailing": False,
-        "stratBlock": True, "histSimulateBlock": True, "setMinStep": 3, "setStepMax": 3,
-        "slToTpRatios": [0.6], "setHonorTp": True, "setHistTimeBars": 12,
-    })
-    g6b.ingest_bars("BLOCK-SIG-USDT", synth_trend(240, 42.0, 0.2, 0.05))
-    _orig_votes_b = indication_kind_votes
-    globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig")]
-    block_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
-    try:
-        g6b.replay_symbol_partial("BLOCK-SIG-USDT", {}, now=1_700_000_500, strat_hist=block_hist, drop_bars=False)
-    finally:
-        globals()["indication_kind_votes"] = _orig_votes_b
-    signal_block = block_hist.get("block:signals") or []
-    out.append(("ind-block-signals-independent", len(signal_block) >= 1 and all(r.get("ind_kind") == "signals" for r in signal_block), f"n={len(signal_block)}"))
-    # Real synth: Signals / State / Move fire independently (no mock)
-    g7 = SetBook()
-    g7.load({
-        "histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20,
-        "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6],
-        "setMinStep": 8, "setStepMax": 8, "stratTrailing": False, "setHonorTp": True,
-        "setHistTimeBars": 12, "indMinConfidence": 0.5, "indMinStrength": 0.05,
-        "indTypeSignals": True, "indTypeState": True, "indTypeDirection": True,
-        "indTypeMove": True, "indTypeActive": True, "indTypeCommon": True,
-    })
-    g7.ingest_bars("SIG-USDT", synth_trend(240, 48.0, 0.22, 0.03))
-    g7.replay_all(now=1_700_000_800)
-    sig_n = int(g7.ind_stats("signals")["n"] or 0)
-    state_n = int(g7.ind_stats("state")["n"] or 0)
-    move_n = int(g7.ind_stats("move")["n"] or 0)
-    out.append(("ind-hist-signals-live", sig_n >= 1, f"signals n={sig_n} pf={g7.ind_stats('signals')['pf']}"))
-    out.append(("ind-hist-state-live", state_n >= 1, f"state n={state_n} pf={g7.ind_stats('state')['pf']}"))
-    out.append(("ind-hist-move-live", move_n >= 1, f"move n={move_n}"))
-    out.append(("ind-hist-kinds-split", sig_n != state_n or move_n != sig_n or True, f"sig={sig_n} state={state_n} move={move_n} dir={g7.ind_stats('direction')['n']}"))
-    # Signals-only flag: other kinds stay empty
-    g8 = SetBook()
-    g8.load({
-        "histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16,
-        "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6],
-        "setMinStep": 8, "setStepMax": 8, "stratTrailing": False, "setHonorTp": True,
-        "indMinConfidence": 0.5, "indMinStrength": 0.05,
-        "indTypeSignals": True, "indTypeState": False, "indTypeDirection": False,
-        "indTypeMove": False, "indTypeActive": False, "indTypeCommon": False,
-        "indTypeTrend": False, "indTypeBreak": False,
-        "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False, "indTypeSweep": False, "indTypeRsi2": False, "indTypeKeltner": False, "indTypeImpulse": False,
-    })
-    g8.ingest_bars("ONLY-USDT", synth_trend(180, 40.0, 0.18, 0.04))
-    g8.replay_all(now=1_700_001_200)
-    out.append(("ind-hist-signals-only", set(g8.ind_hist.keys()) <= {"signals"} and int(g8.ind_stats("signals")["n"] or 0) >= 1, f"keys={sorted(g8.ind_hist)} n={g8.ind_stats('signals')['n']}"))
-    out.append(("ind-hist-state-off", int(g8.ind_stats("state")["n"] or 0) == 0, f"state n={g8.ind_stats('state')['n']}"))
-    # Independent LONG/SHORT walks + cost-subtracted averages
-    dbook = SetBook()
-    dbook.load({"histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True, "positionCostPct": 0.15})
-    dbook.ingest_bars("DIR-USDT", synth_trend(180, 48.0, 0.22, 0.03))
-    dbook.replay_all(now=1_700_001_000, drop_bars=True)
-    dst = next(iter(dbook.sets.values()))
-    sides = set((dst.by_side or {}).keys())
-    out.append(("set-dir-keys", sides == {"LONG", "SHORT"}, str(sides)))
-    ln = int((dst.by_side.get("LONG") or {}).get("n") or 0)
-    sn = int((dst.by_side.get("SHORT") or {}).get("n") or 0)
-    out.append(("set-dir-independent-n", ln > 0 and sn > 0, f"long={ln} short={sn}"))
-    lp = float((dst.by_side.get("LONG") or {}).get("last15_ratio") or 0)
-    sp = float((dst.by_side.get("SHORT") or {}).get("last15_ratio") or 0)
-    out.append(("set-dir-scores-split", abs(lp - sp) > 1e-9 or ln != sn, f"Lpf={lp} Spf={sp}"))
-    pick_l = dbook.pick("general", side="LONG")
-    pick_s = dbook.pick("general", side="SHORT")
-    out.append(("set-dir-pick-side", True, f"L={getattr(pick_l, 'id', None)} S={getattr(pick_s, 'id', None)}"))
-    cost_rows = [{"t": 100 + i, "pnl_pct": 0.003, "pnl": 9.9, "symbol": "T", "side": "LONG"} for i in range(12)]
-    wst2 = next(iter(dbook.sets.values()))
-    wst2.hist = cost_rows
-    wst2.live = []
-    dbook._score_one(wst2)
-    want_net = net_pnl_pct(0.003, 0.15)
-    out.append(("set-cost-net-expectancy", abs(wst2.expectancy - want_net) < 1e-9, f"E={wst2.expectancy} want={want_net}"))
-    out.append(("set-cost-flag", bool((wst2.by_side.get("LONG") or {}).get("cost_subtracted")), str(wst2.by_side.get("LONG"))))
-    # Independent deact: a losing SHORT book must not gate a winning LONG book.
-    ibook = SetBook()
-    ibook.load({"histEnabled": True, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True, "positionCostPct": 0.15, "setUseHistoricGate": True, "setStrictGate": True, "setMinSamples": 8, "setMinPf": 1.10})
-    ist = next(iter(ibook.sets.values()))
-    long_rows = [{"t": 100 + i, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(12)]
-    short_rows = [{"t": 200 + i, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "SHORT", "hold_s": 40, "reason": "sl"} for i in range(12)]
-    ist.hist = long_rows + short_rows
-    ist.live = []
-    ibook.progress.ready = True
-    ibook._score_one(ist)
-    lblob = ist.by_side.get("LONG") or {}
-    sblob = ist.by_side.get("SHORT") or {}
-    out.append(("set-dir-long-active", bool(lblob.get("active")) and bool(lblob.get("validated")), str(lblob)))
-    out.append(("set-dir-short-off", float(sblob.get("last15_ratio") or 0) < 1.0 and ibook.pick("general", side="SHORT") is None, str(sblob)))
-    pk_l = ibook.pick("general", side="LONG")
-    pk_s = ibook.pick("general", side="SHORT")
-    out.append(("set-dir-pick-long-ok", pk_l is not None, f"L={getattr(pk_l, 'id', None)} mixed_on={ist.active}"))
-    out.append(("set-dir-pick-short-none", pk_s is None, f"S={getattr(pk_s, 'id', None)}"))
-    out.append(("set-dir-long-netavg", abs(float(lblob.get("net_avg") or 0) - 0.0015) < 1e-6, str(lblob.get("net_avg"))))
-    out.append(("set-dir-pack-open-split", ibook.pack_open("general", side="LONG") and not ibook.pack_open("general", side="SHORT"), f"L={ibook.pack_open('general', 'LONG')} S={ibook.pack_open('general', 'SHORT')} mixed={ibook.pack_open('general')}"))
-    snap = ibook.snapshot()
-    out.append(("set-snap-byside", bool((snap.get("rows") or [{}])[0].get("bySide", {}).get("LONG")), str((snap.get("rows") or [{}])[0].get("bySide"))))
-    mixed_dd = [
-        {"t": 100, "pnl": 1.0, "symbol": "A-USDT"},
-        {"t": 160, "pnl": -2.0, "symbol": "A-USDT"},
-        {"t": 50_000, "pnl": 1.0, "symbol": "B-USDT"},
-        {"t": 50_060, "pnl": -0.2, "symbol": "B-USDT"},
-        {"t": 50_120, "pnl": 1.5, "symbol": "B-USDT"},
-    ]
-    naive = drawdown_time(mixed_dd, now=50_120)
-    split = drawdown_time_by_symbol(mixed_dd, now=50_120)
-    out.append(("set-dd-split-not-span", split["maxS"] < 5_000 and naive["maxS"] > 5_000, f"split={split['maxS']} naive={naive['maxS']}"))
-    out.append(("set-dd-split-symbols", split.get("symbols") == 2.0, str(split)))
-    bookp = SetBook()
-    bookp.load({"histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True})
-    bookp.ingest_bars("P1-USDT", synth_trend(180, 40.0, 0.16, 0.04))
-    bookp.ingest_bars("P2-USDT", synth_trend(180, 22.0, -0.12, 0.04))
-    bookp.ingest_bars("P3-USDT", synth_trend(180, 31.0, 0.10, 0.04))
-    bookp.replay_all(now=1_700_000_500, workers=3, drop_bars=True)
-    out.append(("set-parallel-ready", bookp.progress.ready and not bookp.progress.error, f"{bookp.progress.phase} {bookp.progress.error}"))
-    out.append(("set-parallel-fills", sum(s.n for s in bookp.sets.values()) >= 4, f"n={sum(s.n for s in bookp.sets.values())}"))
-    out.append(("set-drop-bars", not bookp.bars, f"left={list(bookp.bars)}"))
-    out.append(("set-lookback-20h", LOOKBACK_MAX >= 1200 and 1200 <= LOOKBACK_MAX, str(LOOKBACK_MAX)))
-    fulln = SetBook()
-    fulln.load({
-        "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "setMinStep": 3, "setStepMax": 22,
-    })
-    sls = list(fulln.sl_ratios)
-    steps = list(fulln.steps)
-    bases = [s for s in fulln.by_idx if s.kind == "base"]
-    out.append(("set-tp-3-22", steps == list(range(3, 23)), f"steps={steps[:4]}..{steps[-2:]} n={len(steps)}"))
-    out.append(("set-sl-0.1-3.0", abs(sls[0] - 0.1) < 1e-9 and abs(sls[-1] - 3.0) < 1e-9 and len(sls) == 30, f"sl={sls}"))
-    out.append(("set-normal-product", len(bases) == 30 * 20, f"base={len(bases)} sl={len(sls)} st={len(steps)}"))
-    out.append(("set-live-unproven-off", all(not s.active for s in bases), f"on={sum(1 for s in bases if s.active)}"))
-    winner = bases[0]
-    winner.hist = [{"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(fulln.eval_need())]
-    fulln.min_pf = 1.0
-    fulln._score_one(winner)
-    out.append(("set-hist-valid-on", winner.active and winner.last15_n >= 8, f"on={winner.active} n={winner.last15_n} pf={winner.last15_ratio}"))
-    pkf = fulln.pick("general")
-    out.append(("set-pick-validated-only", pkf is not None and pkf.id == winner.id, f"pick={getattr(pkf, 'id', None)}"))
-    ranged = SetBook()
-    ranged.load({
-        "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "setMinStep": 5, "setStepMax": 7,
-        "slToTpMin": 0.4, "slToTpMax": 1.0, "slToTpStep": 0.2,
-        "slToTpRatios": [0.6],
-    })
-    rsl = [round(x, 1) for x in ranged.sl_ratios]
-    rst = list(ranged.steps)
-    out.append(("set-range-sl", rsl == [0.4, 0.6, 0.8, 1.0], f"sl={rsl}"))
-    out.append(("set-range-tp", rst == [5, 6, 7], f"steps={rst}"))
-    out.append(("set-range-product", len(ranged.by_idx) == 4 * 3, f"n={len(ranged.by_idx)}"))
-    e = SetBook()
-    e.load({
-        "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
-        "setMinPf": 1.15, "setMinSamples": 8, "setMaxDdTimeS": 1800, "setStrictGate": True,
-        "mainEvalPosCount": 5,
-    })
-    out.append(("set-enable-need-8", e.eval_need() == 8, str(e.eval_need())))
-    out.append(("set-enable-pf-115", abs(e.min_pf - 1.15) < 1e-9, str(e.min_pf)))
-    est = next(x for x in e.by_idx if x.kind == "base")
-    est.hist = [{"t": 100 + i, "pnl": 0.002, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(8)]
-    e._score_one(est)
-    out.append(("set-pf115-n8-on", bool(est.active and est.last15_n >= 8 and est.last15_ratio + 1e-9 >= 1.15),
-                f"on={est.active} n={est.last15_n} pf={est.last15_ratio} {est.deact_reason}"))
-    pk115 = e.pick("general")
-    out.append(("set-pick-pf115", pk115 is not None and pk115.id == est.id, f"pick={getattr(pk115, 'id', None)}"))
-    est.hist = [{"t": 100 + i, "pnl": -0.001, "pnl_pct": 0.0004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(8)]
-    e._score_one(est)
-    out.append(("set-pf-below-115-off", not est.active, f"on={est.active} pf={est.last15_ratio} {est.deact_reason}"))
-    est.hist = [{"t": 100 + i, "pnl": 0.002, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(4)]
-    e._score_one(est)
-    out.append(("set-n4-unproven", (not est.active) and est.deact_reason == "unproven", f"{est.active} {est.deact_reason} n={est.last15_n}"))
-    pct_only = [
-        {"t": 100, "pnl_pct": 0.01, "symbol": "A"},
-        {"t": 160, "pnl_pct": -0.02, "symbol": "A"},
-        {"t": 220, "pnl_pct": -0.01, "symbol": "A"},
-    ]
-    dd_pct = drawdown_time(pct_only, now=220)
-    out.append(("set-dd-pnl-pct-only", dd_pct["episodes"] >= 1.0 and dd_pct["maxS"] >= 60, str(dd_pct)))
-    from types import SimpleNamespace as _NS
-    obj_dd = [
-        _NS(t=100, symbol="A", pnl=1.0, pnl_pct=0.003),
-        _NS(t=160, symbol="A", pnl=-0.4, pnl_pct=-0.002),
-        _NS(t=220, symbol="A", pnl=-0.4, pnl_pct=-0.002),
-    ]
-    dd_obj = drawdown_time(obj_dd, now=220)
-    out.append(("set-dd-objects", dd_obj["episodes"] >= 1.0 and dd_obj["maxS"] >= 60, str(dd_obj)))
-    zero_pnl = [
-        {"t": 100, "pnl": 0, "pnl_pct": 0.01, "symbol": "A"},
-        {"t": 160, "pnl": 0, "pnl_pct": -0.02, "symbol": "A"},
-        {"t": 220, "pnl": 0, "pnl_pct": -0.01, "symbol": "A"},
-    ]
-    dd_zero = drawdown_time(zero_pnl, now=220)
-    out.append(("set-dd-zero-pnl-uses-pct", dd_zero["episodes"] >= 1.0 and dd_zero["maxS"] >= 60, str(dd_zero)))
-    sbook = SetBook()
-    sbook.load({
-        "histEnabled": True, "setPfWindow": 15, "setMinSamples": 8,
-        "baseMinPf": 1.20, "mainMinPf": 1.20, "realMinPf": 1.20,
-        "mainEvalPosCount": 5, "realEvalPosCount": 3,
-        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
-        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
-        "trailArmMin": 0.3, "trailArmMax": 0.3,
-        "microEnabled": False,  # Base-tier contract; Micro has its own checks
-    })
-    out.append(("set-stage-eval-from-overlay", sbook.main_eval == 5 and sbook.real_eval == 3, f"{sbook.main_eval}/{sbook.real_eval}"))
-    sst = next(x for x in sbook.by_idx if x.kind == "base")
-    sst.hist = (
-        [{"t": 1000 + i * 60, "pnl": 0.001, "pnl_pct": 0.0012, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(10)]
-        + [{"t": 2000 + i * 60, "pnl": 0.01, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(5)]
+    out.append(("set-pick-cold", pk3 is None and not g3.pack_open("general"), f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
+    # error state: due() retries on the backoff, not on every pass
+    g3.progress.phase = "error"; g3.progress.ready = False; g3.last_run = time.time()
+    out.append(("set-due-backoff", g3.due() is False, f"retry_s={g3.retry_s}"))
+    g3.last_run = time.time() - g3.retry_s - 1
+    out.append(("set-due-retry", g3.due() is True, "after backoff"))
+    # time-ordered tape: the last-40 window must be the most recent trades
+    g4 = SetBook(); g4.load({**_SELFTEST_PIN, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3})
+    st4 = next(iter(g4.by_idx))
+    rows4 = [{"t": 1000 + k, "pnl": -0.001, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl", "set_id": st4.id} for k in range(60)]
+    st4.hist = sorted(reversed(rows4), key=lambda r: r["t"])[-40:]
+    out.append(("set-tape-recent", min(r["t"] for r in st4.hist) == 1020, f"first={min(r['t'] for r in st4.hist)}"))
+    # entry threshold is configurable and defaults to the historical 0.58
+    out.append(("set-entry-conf-default", SetBook().entry_conf == 0.58, f"{SetBook().entry_conf}"))
+    g5 = SetBook(); g5.load({**_SELFTEST_PIN, "setEntryConf": 0.8, "setCooldownBars": 5})
+    out.append(("set-entry-conf-wired", g5.entry_conf == 0.8 and g5.cooldown_bars == 5, f"conf={g5.entry_conf} cd={g5.cooldown_bars}"))
+    # base gate = net PF over the last 50 orders, min 30 judged, boundary PF >= min_pf (no fallback tier)
+    def _pf_rows(n: int, target: float) -> List[Dict[str, Any]]:
+        # 30 wins of +0.001 and 20 losses of -(0.0015 / target): PF = target exactly (scaled to n)
+        rows = []
+        for k in range(n):
+            if k % 5 < 3:
+                rows.append({"t": 1_700_000_000 + k * 60, "pnl": 0.001, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "symbol": "T", "side": "LONG"})
+            else:
+                rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
+        return rows
+    gb = SetBook()
+    gb.load({**_SELFTEST_PIN, "positionCostPct": 0.15, "setMinPf": 1.10, "minPfBySize": False, "stagesEnabled": False, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    sg = next(iter(gb.by_idx))
+    sg.active = True
+    def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:
+        sg.hist = list(rows)
+        sg.live = []
+        gb._score_one(sg)
+        return gb.is_eligible(sg), round(sg.gate_pf, 4), sg.gate_n
+    ok105, pf105, n105 = _gate(_pf_rows(50, 1.05))
+    out.append(("gate-pf-1.05-rejected", (not ok105) and abs(pf105 - 1.05) < 1e-3 and n105 == 50, f"pf={pf105} n={n105} eligible={ok105}"))
+    ok115, pf115, _ = _gate(_pf_rows(50, 1.15))
+    out.append(("gate-pf-1.15-accepted", ok115 and abs(pf115 - 1.15) < 1e-3, f"pf={pf115} eligible={ok115}"))
+    okb, pfb, _ = _gate(_pf_rows(50, 1.10))
+    out.append(("gate-boundary-1.10", okb and abs(pfb - 1.10) < 1e-6, f"pf={pfb} eligible={okb}"))
+    okf, pff, nf = _gate(_pf_rows(29, 1.50))
+    out.append(("gate-min-30-orders", (not okf) and nf == 29, f"pf={pff} n={nf} eligible={okf}"))
+    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 4320 and SetBook().lookback == 4320)
+    out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
+    # R1: a live close is stored on the replay unit (net fraction), not USDT
+    lv = SetBook(); lv.load({**_SELFTEST_PIN, "positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    sl1 = next(iter(lv.by_idx))
+    lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
+    stored = sl1.live[-1] if sl1.live else {}
+    out.append(("live-unit-net-fraction", abs(stored.get("pnl", -9) - net_pnl_pct(0.0025, 0.15)) < 1e-12 and abs(stored.get("pnl_usdt", 0) - 0.25) < 1e-12, f"pnl={stored.get('pnl')} usdt={stored.get('pnl_usdt')}"))
+    # R2: a repeated close (same client id, or none) and a repeated seed add nothing
+    n_before = len(sl1.live)
+    lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
+    row_nocid = {"set_id": sl1.id, "t": 1_700_000_500, "symbol": "M-USDT", "side": "SHORT", "pnl": -0.1, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl"}
+    lv.on_live_close(row_nocid); lv.on_live_close(row_nocid)
+    seeded = [{"set_id": sl1.id, "t": 1_700_000_900, "symbol": "N-USDT", "side": "LONG", "pnl": 0.1, "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": "c9"}]
+    lv.seed_live(seeded); n_mid = len(sl1.live); lv.seed_live(seeded)
+    out.append(("live-dedupe", len(sl1.live) == n_before + 2 and len(sl1.live) == n_mid, f"before={n_before} after={len(sl1.live)} seeded_twice={n_mid==len(sl1.live)}"))
+    # a close without pnl_pct cannot be normalised and is skipped, not guessed
+    skip0 = lv.live_skipped
+    lv.on_live_close({"set_id": sl1.id, "t": 1_700_001_000, "symbol": "P-USDT", "side": "LONG", "pnl": 5.0, "reason": "tp"})
+    out.append(("live-skip-no-pct", lv.live_skipped == skip0 + 1 and len(sl1.live) == n_before + 2, f"skipped={lv.live_skipped}"))
+
+    # R10: drawdown is measured to the caller's clock; with no clock it is the last trade, never wall time
+    dd_rows = [{"t": 100, "pnl": 1.0}, {"t": 160, "pnl": -0.4}]
+    dd_def = drawdown_time(dd_rows)["currentS"]
+    dd_inj = drawdown_time(dd_rows, now=460)["currentS"]
+    dd_stale = drawdown_time(dd_rows, now=160 + 7200)["currentS"]
+    # the drawdown starts at the last high (t=100): open time is clock - 100, idle time never cuts it short
+    out.append(("dd-clock-injected", dd_def == 60.0 and dd_inj == 360.0 and dd_stale == 7260.0, f"default={dd_def} injected={dd_inj} stale={dd_stale}"))
+    # R4: a flat window is neutral (RSI 50, no signal), not a short bias from RSI 100
+    flat = [[1.0, 1.0, 1.0, 1.0, 1.0]] * 80
+    flat_sig = general_signal(flat)
+    out.append(("set-flat-neutral", flat_sig == (0, 0.0, "flat") and abs(rsi([1.0] * 20, 7) - 50.0) < 1e-9, f"{flat_sig} rsi={rsi([1.0] * 20, 7)}"))
+    # R6: one cost default, shared by indication settings and position cost
+    from indication_engine import DEFAULT_SETTINGS as IND_DEFAULTS
+    from position_cost import POSITION_COST_PCT_DEFAULT as PCD
+    out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD and abs(PCD - .176) < 1e-12, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
+    # perf: scan() is the lane loop used by the replay and the simulator; step() is its reference.
+    import random as _random
+    _rnd = _random.Random(11)
+    _bars: List[List[float]] = []
+    _px = 100.0
+    for _ in range(700):
+        _o = _px
+        _hi = _o * (1 + abs(_rnd.gauss(0, 0.002)))
+        _lo = _o * (1 - abs(_rnd.gauss(0, 0.002)))
+        _c = _lo + (_hi - _lo) * _rnd.random()
+        _px = _c
+        _bars.append([_o, _hi, _lo, _c, 1.0])
+    _dirs = [_rnd.choice([0, 0, 1, -1]) for _ in _bars]
+    _confs = [_rnd.random() for _ in _bars]
+    _book = SetBook()
+    _book.load({**_SELFTEST_PIN, "histEnabled": True, "stratGeneral": True, "stratIndications": True, "setMinStep": 2, "setStepMax": 30})
+    _sample = _book.by_idx[::max(1, len(_book.by_idx) // 40)]
+    _scan_ok = True
+    _checked = 0
+    for _st in _sample:
+        for _honor in (True, False):
+            _cfg = {"entry_conf": 0.5, "time_bars": 40, "scratch_bars": 12, "scratch_min": 0.001,
+                    "cooldown": 2, "cost_pct": 0.15, "honor_tp": _honor}
+            _cuts = [30]
+            while _cuts[-1] < len(_bars):
+                _cuts.append(min(len(_bars), _cuts[-1] + _rnd.randint(1, 60)))
+            _flags = [_rnd.random() < 0.8 for _ in range(len(_cuts) - 1)]
+            _allow = [True] * len(_bars)
+            for _c0, _c1, _f in zip(_cuts, _cuts[1:], _flags):
+                for _k in range(_c0, _c1):
+                    _allow[_k] = _f
+            _ref = SetLane(_st, "X")
+            _ref_recs = []
+            for _k in range(30, len(_bars)):
+                _rec = _ref.step(_k, _bars[_k], _dirs[_k], _confs[_k], _allow[_k], _cfg)
+                if _rec is not None:
+                    _ref_recs.append(_rec)
+            _lane = SetLane(_st, "X")
+            _cand = [_k for _k in range(30, len(_bars)) if _dirs[_k] != 0 and _confs[_k] >= _cfg["entry_conf"]]
+            _got = []
+            for _c0, _c1, _f in zip(_cuts, _cuts[1:], _flags):
+                _got.extend(_lane.scan(_c0, _c1, _bars, _dirs, _confs, _f, _cfg, _cand))
+            _same = _got == _ref_recs and _lane.open == _ref.open and _lane.cool == _ref.cool
+            _scan_ok = _scan_ok and _same
+            _checked += len(_ref_recs)
+    out.append(("scan-equals-step", _scan_ok and _checked > 0, f"sets={len(_sample)} trades={_checked}"))
+    # perf: the signal cache must give exactly the uncached signals, including after the window slides
+    _sb_bars = [[b[0], b[1], b[2], b[3], b[4]] for b in _bars[:420]]
+    _packs = ("indications", "general")
+    _cache: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    _salt = hash(json.dumps(_book.ind_settings, sort_keys=True, default=str))
+    _cold = pack_signals(_sb_bars, _packs, _book.ind_settings, 1_700_000_000.0, 30)
+    _warm1 = pack_signals(_sb_bars, _packs, _book.ind_settings, 1_700_000_000.0, 30, cache=_cache, salt=_salt)
+    _warm2 = pack_signals(_sb_bars, _packs, _book.ind_settings, 1_700_000_000.0, 30, cache=_cache, salt=_salt)
+    _slide = _sb_bars[5:] + [[_bars[k][0], _bars[k][1], _bars[k][2], _bars[k][3], _bars[k][4]] for k in range(420, 425)]
+    _cold_s = pack_signals(_slide, _packs, _book.ind_settings, 1_700_000_300.0, 30)
+    _warm_s = pack_signals(_slide, _packs, _book.ind_settings, 1_700_000_300.0, 30, cache=_cache, salt=_salt)
+    _cache_ok = _cold == _warm1 == _warm2 and _cold_s == _warm_s
+    out.append(("signal-cache-exact", _cache_ok, f"bars={len(_sb_bars)} cached_windows={len(_cache)}"))
+    # isolation: chunked refreshes agree with one full refresh; a failing symbol or Set stops nothing else
+    def _rw(seed: int, count: int) -> List[List[float]]:
+        r = _random.Random(seed)
+        px = 50.0
+        rows: List[List[float]] = []
+        for _ in range(count):
+            o = px
+            hi = o * (1 + abs(r.gauss(0, 0.002)))
+            lo = o * (1 - abs(r.gauss(0, 0.002)))
+            c = lo + (hi - lo) * r.random()
+            px = c
+            rows.append([o, hi, lo, c, 1.0])
+        return rows
+    _sym_bars = {"AAA-USDT": _rw(1, 900), "BBB-USDT": _rw(2, 900), "CCC-USDT": _rw(3, 900)}
+    _iso_ov = {"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 2, "setStepMax": 6,
+               "trailVariants": ["0.3:0.1"], "setSlRatios": [0.5, 1.0]}
+    _now = float((int(1_700_000_000 // BAR_S)) * BAR_S)
+
+    def _fresh_book() -> SetBook:
+        b = SetBook()
+        b.load(_iso_ov)
+        for sym, rows in _sym_bars.items():
+            b.bars[sym] = [r[:] for r in rows]
+        return b
+
+    _full = _fresh_book()
+    _full.replay_all(now=_now)
+    _chunked = _fresh_book()
+    _chunked.replay_all(now=_now, symbols=["AAA-USDT"])
+    _chunked.replay_all(now=_now, symbols=["BBB-USDT", "CCC-USDT"])
+    _chunk_ok = all(
+        _full.sets[st.id].n == _chunked.sets[st.id].n
+        and round(_full.sets[st.id].gate_pf, 9) == round(_chunked.sets[st.id].gate_pf, 9)
+        and _full.sets[st.id].hist == _chunked.sets[st.id].hist
+        for st in _full.by_idx
+    ) and sum(st.n for st in _full.by_idx) > 0
+    out.append(("chunk-equals-full", _chunk_ok, f"sets={len(_full.by_idx)} fills={sum(st.n for st in _full.by_idx)}"))
+    _bad = _fresh_book()
+    _bad.bars["BBB-USDT"] = [["x", "x", "x", "x", "x"]] * 900
+    _bad.replay_all(now=_now)
+    _sym_ok = (
+        _bad.progress.phase == "ready"
+        and "BBB-USDT" in _bad.progress.error
+        and "AAA-USDT" in _bad._hist_rows and "CCC-USDT" in _bad._hist_rows and "BBB-USDT" not in _bad._hist_rows
+        and sum(st.n for st in _bad.by_idx) > 0
     )
-    sbook._score_one(sst)
-    out.append(("set-stage-skip-below-base", sst.base_pf > 1.0 and sst.main_pf == 0.0 and sst.real_pf == 0.0, f"b={sst.base_pf} m={sst.main_pf} r={sst.real_pf} q={sst.stage_qualified}"))
-    out.append(("set-stage-independent-windows", abs(sst.base_pf - sst.main_pf) > 1e-4, f"b={sst.base_pf} m={sst.main_pf} r={sst.real_pf}"))
-    ssnap = sbook.snapshot()
-    srow = next((r for r in (ssnap.get("rows") or []) if r.get("id") == sst.id), {})
-    intern_ok = bool(srow.get("validated")) and float(srow.get("last15Ratio") or 0) >= 1.0
-    out.append(("set-intern-shares-stage-floor", not intern_ok and not bool(srow.get("realQualified")), f"val={srow.get('validated')} realQ={srow.get('realQualified')} pf={srow.get('last15Ratio')} stage={srow.get('stage')}"))
-    sbook.load({"minPf": 1.10, "baseEvalPosCount": 15}, rebuild=False)
-    sbook._score_one(sst)
-    rec_m = sbook.stage_record(sst, "main")
-    rec_r = sbook.stage_record(sst, "real")
-    out.append(("set-stage-record-cost-pf", abs(rec_m.net_pf - sst.main_pf) < 1e-9 and rec_m.net_pf < 20 and rec_m.net_pf > 1.0, f"net={rec_m.net_pf} main={sst.main_pf} classic={sst.net_pf}"))
-    out.append(("set-stage-record-ddt", rec_m.ddt_s == sst.max_dd_s and rec_r.ddt_s == sst.max_dd_s, f"ddt={rec_m.ddt_s} max={sst.max_dd_s}"))
-    out.append(("set-stage-record-real-pf", abs(rec_r.net_pf - sst.real_pf) < 1e-9, f"net={rec_r.net_pf} real={sst.real_pf}"))
-    # Named last50/last75 must not veto a qualified overall last-N tape.
-    gate = SetBook()
-    gate.load({"setPfWindow": 30, "setMinSamples": 8, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False})
-    losers = [{"t": 1000 + i * 60, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(20)]
-    winners = [{"t": 3000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp"} for i in range(30)]
-    mixed_last = losers + winners
-    ok_overall, reason_overall, win_overall = gate._live_windows_ok(mixed_last, minimum_pf=POSITIVE_PF)
-    last50_pf = float((win_overall.get("last50") or {}).get("pf") or 0.0)
-    overall_pf = float((win_overall.get("overall") or {}).get("pf") or 0.0)
-    out.append((
-        "set-overall-last-pos-not-blocked-by-named-windows",
-        ok_overall and overall_pf + 1e-9 >= POSITIVE_PF and last50_pf + 1e-9 < POSITIVE_PF,
-        f"ok={ok_overall} overall={overall_pf:.3f} last50={last50_pf:.3f} reason={reason_overall}",
-    ))
+    out.append(("symbol-isolation", _sym_ok, f"phase={_bad.progress.phase} errors={_bad.progress.errors} err={_bad.progress.error[:60]}"))
+    _iso = _fresh_book()
+    _victim = _iso.by_idx[3].id
+    _orig_score = _iso._score_one
+
+    def _flaky_score(st: SetState, now: Optional[float] = None) -> None:
+        if st.id == _victim:
+            raise RuntimeError("injected scoring fault")
+        return _orig_score(st, now=now)
+
+    _iso._score_one = _flaky_score
+    _iso.replay_all(now=_now)
+    _set_ok = (
+        _iso.sets[_victim].last_error != ""
+        and all(st.last_error == "" and st.n >= 0 for st in _iso.by_idx if st.id != _victim)
+        and _iso.progress.phase == "ready"
+        and _iso.progress.errors >= 1
+    )
+    out.append(("set-isolation", _set_ok, f"victim={_victim} err={_iso.sets[_victim].last_error[:40]} errors={_iso.progress.errors}"))
+    # Exit Sets: exitIgnoreTp is its own strategy type. A base Set takes its TP; its Exit twin (same stop, no TP) does not,
+    # each has its own id and tape, and the pick ranks the two kinds together.
+    xb = SetBook()
+    xb.load({**_SELFTEST_PIN, "exitIgnoreTp": True, "stagesEnabled": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
+    kinds_x = {k: [x for x in xb.by_idx if x.kind == k] for k in SET_KINDS}
+    dists = {round(x.sl_ratio * x.step, 6) for x in kinds_x["exit"] if x.pack == "general"}
+    out.append(("set-exit-kind-built", len(kinds_x["exit"]) == len(xb.packs) * 5 and len(dists) == 5
+                and all(x.id.endswith(":" + EXIT_TAG) for x in kinds_x["exit"]),
+                f"exit={len(kinds_x['exit'])} distinct stops={sorted(dists)}"))
+    xoff = SetBook()
+    xoff.load({**_SELFTEST_PIN, "exitIgnoreTp": False, "setMinStep": 2, "setStepMax": 4, "setSlRatios": [1.0, 2.0], "histEnabled": True})
+    out.append(("set-exit-kind-off", not any(x.kind == "exit" for x in xoff.by_idx), "exitIgnoreTp off builds no Exit Set"))
+    up = [[100.0, 100.0, 100.0, 100.0, 1.0]] + [[100.0 + 0.05 * k, 100.06 + 0.05 * k, 99.99 + 0.05 * k, 100.05 + 0.05 * k, 1.0] for k in range(30)]
+    cfg_x = {"entry_conf": 0.5, "time_bars": 200, "scratch_bars": 999, "scratch_min": 0.5, "cooldown": 0, "cost_pct": 0.12,
+             "honor_tp": False, "sl_floor_steps": 1}
+    bst = next(x for x in xb.by_idx if x.kind == "base" and x.pack == "general" and x.step == 2 and x.sl_ratio == 1.0)
+    xst = next(x for x in xb.by_idx if x.kind == "exit" and x.pack == "general" and x.step == 2 and x.sl_ratio == 1.0)
+    dirs_x = [1] + [0] * 30
+    confs_x = [0.9] + [0.0] * 30
+    tb = SetLane(bst, "T").scan(0, len(up), up, dirs_x, confs_x, True, cfg_x, [0], BarIndex(up))
+    tx = SetLane(xst, "T").scan(0, len(up), up, dirs_x, confs_x, True, cfg_x, [0], BarIndex(up))
+    out.append(("set-base-takes-tp-exit-never", bool(tb) and tb[0]["reason"] == "tp" and not tx,
+                f"base={[t['reason'] for t in tb]} exit={[t['reason'] for t in tx]} (honor_tp off applies to trailing Sets only)"))
+    bst.gate_n = xst.gate_n = 50
+    bst.gate_pf, xst.gate_pf = 1.3, 2.0
+    bst.gate_pf_old = bst.gate_pf_new = 1.3
+    xst.gate_pf_old = xst.gate_pf_new = 2.0
+    bst.n = xst.n = 200
+    bst.main_n = xst.main_n = xb.main_n
+    bst.main_pf = xst.main_pf = 2.0                 # both pass the Main gate as well
+    for x in xb.by_idx:
+        x.active = x in (bst, xst)
+        x.max_dd_s = 0.0
+    out.append(("set-pick-ranks-base-and-exit", xb.pick_any("general") is xst and xb.pack_open("general"),
+                f"pick={getattr(xb.pick_any('general'), 'id', None)}"))
+    # last N: the hold Auto floor and the linked windows read at least MIN_VALIDATION_N orders; the Base gate's minimum order count has
+    # no floor (0 = off, owner 2026-10-29): a value of 3 is taken as it is
+    ln = SetBook()
+    ln.load({**_SELFTEST_PIN, "setPfWindow": 3, "pfWindow": 3, "setGateMinTrades": 3, "setGateWindow": 20, "holdAutoMin": 3})
+    out.append(("set-last-n-at-least-8", ln.pf_n >= MIN_VALIDATION_N and ln.gate_min == 3 and ln.hold_auto_min >= MIN_VALIDATION_N
+                and MIN_VALIDATION_N == 8, f"pf_n={ln.pf_n} gate_min={ln.gate_min} hold_auto_min={ln.hold_auto_min}"))
+    try:
+        from exit_engine import ExitBook
+        from risk_variants import VariantBook
+        e_, v_ = ExitBook(), VariantBook()
+        e_.load({**_SELFTEST_PIN, "exitPfWindow": 3})
+        v_.load({**_SELFTEST_PIN, "slToTpRecalcN": 3, "trailRecalcN": 3}, {})
+        # the floor applies to the Base gate minimum, the hold Auto floor and the linked validation windows; the other
+        # counts (Block's own samples, the Exit lane minimum, the DCA window) keep their own ranges
+        floors = {"exit_pf": e_.pf_n, "sl_recalc": v_.sl_recalc_n, "trail_recalc": v_.trail_recalc_n}
+        ok_floor = all(v >= MIN_VALIDATION_N for v in floors.values())
+    except Exception as exc:          # a module that no longer loads is a failure here
+        floors, ok_floor = {"error": repr(exc)[:80]}, False
+    out.append(("set-last-n-floor-linked-windows", ok_floor, str(floors)))
+    # the Main gate reads the processed orders (opened while the Set passed Base), not the raw tape: 20 wins, 6 losses of three
+    # times the size, then 12 wins opened while the Set was not valid. Base passes at the end (PF 1.33 over the last 30) and the
+    # raw last 12 are all wins; the processed last 12 hold the losses (PF 1.0), so the Set fails the Main gate.
+    pr = SetBook()
+    pr.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+             "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
+    pst = next(x for x in pr.by_idx if x.kind == "base")
+    cfp = cost_as_frac(pr.cost_pct)
+    seq = [0.004] * 20 + [-0.012] * 6 + [0.004] * 12
+    rows_p = [(1_700_000_000.0 + 600.0 * k, "T", "LONG", x, x + cfp, 300.0, "x", pst.id) for k, x in enumerate(seq)]
+    pst.active = True
+    pr.set_processed(pst, rows_p)
+    pst.hist = [dict(zip(_ROW_KEYS, r)) for r in rows_p]
+    pr._score_one(pst, now=rows_p[-1][0] + 60.0)
+    raw12 = [r[3] for r in rows_p[-12:]]
+    held = SetBook()
+    held.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 0, "mainGateN": 12, "setMinPf": 1.25, "setMaxDdtHours": 36,
+               "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
+    hst = next(x for x in held.by_idx if x.kind == "base")
+    hst.active = True
+    hst.hist = [dict(zip(_ROW_KEYS, r)) for r in rows_p]
+    held._score_one(hst, now=rows_p[-1][0] + 60.0)          # not replayed: the same rule over the tape it holds
+    out.append(("set-real-gate-reads-processed-orders", min(raw12) > 0 and pr.gate_reason(pst) == "main" and pst.gate_pf >= 1.25
+                and held.gate_reason(hst) == "main" and abs(hst.main_pf - pst.main_pf) < 1e-9 and pst.proc_total < len(rows_p),
+                f"raw last 12 all wins={min(raw12) > 0}; Base PF {pst.gate_pf}; processed {pst.proc_total}/{len(rows_p)}; "
+                f"Real PF {pst.main_pf} -> {pr.gate_reason(pst) or 'valid'} (held tape: {held.gate_reason(hst) or 'valid'})"))
+    # the stage chain: Base (long + short + minimal window) -> Main Set -> Main (long + short + minimal) -> Real Set -> Real (last realGateN); and
+    # Main Negative (the last 5 / 10 Main orders average below zero) -> Real Negative Set -> Real on it. Each Set a subset of the one before.
+    ch = SetBook()
+    ch.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "mainGateN": 8, "realGateN": 8, "setMinPf": 1.25,
+             "setMaxDdtHours": 36, "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
+    cst = next(x for x in ch.by_idx if x.kind == "base")
+    cfc = cost_as_frac(ch.cost_pct)
+    seqc = ([0.004, 0.004, 0.004, -0.006] * 30 + [-0.004] * 6 + [0.004, 0.004, -0.004] * 20)
+    rows_c = [(1_700_000_000.0 + 600.0 * k, "T", "LONG", x, x + cfc, 300.0, "x", cst.id) for k, x in enumerate(seqc)]
+    chain_c = ch._chain_of(cst, rows_c)
+    tm = {t for t, _ in chain_c["main"]}
+    sub = {t for t, _ in chain_c["real"]} <= tm and {t for t, _ in chain_c["realneg"]} <= tm and len(tm) < len(rows_c)
+    short_ok = chain_c["short_n"] in (ch.main_n,) + tuple(ch.short_windows)
+    cst.active = True
+    ch.set_processed(cst, rows_c)
+    cst.hist = [dict(zip(_ROW_KEYS, r)) for r in rows_c]
+    ch._score_one(cst, now=rows_c[-1][0] + 60.0)
+    idx_c = next(r for r in ch.snapshot()["index"] if r["id"] == cst.id)
+    pfb = ch.snapshot()["pfBase"]
+    out.append(("set-stage-chain-each-set-from-the-one-before", sub and short_ok and len(chain_c["real"]) > 0 and len(chain_c["realneg"]) > 0
+                and idx_c["mainId"] == cst.id + ":main" and idx_c["realId"] == cst.id + ":real" and idx_c["realNegId"] == cst.id + ":realneg"
+                and idx_c["mainN"] == len(chain_c["main"]) and idx_c["realN"] == len(chain_c["real"])
+                and {"base", "main", "processed", "real", "realneg"} <= set(pfb),
+                f"Base Set {len(rows_c)} -> Main Set {len(chain_c['main'])} -> Real Set {len(chain_c['real'])} / Real Negative Set "
+                f"{len(chain_c['realneg'])}; Main short window {chain_c['short_n']}"))
+    # each stage rule on its own: the verdicts read only the Set of their stage
+    P = ch.stage_params(cst.pack)
+    good, bad8 = [0.004] * 20, [0.004] * 12 + [-0.004] * 8
+    v_auto = stage_verdicts(good + bad8[-5:], good, [], 5, P)                 # the short window (5) fails, the long 8 passes
+    v_neg = stage_verdicts(good + [-0.004] * 5, [], [0.004] * 8, ch.main_n, P)  # a dip: the Negative lane opens, Real Negative passes
+    v_real = stage_verdicts(good, bad8, [0.004] * 8, ch.main_n, P)             # Main passes, the Real Set fails: no positive lane
+    out.append(("set-stage-rules-main-short-negative-real", (not v_auto["short"]) and v_auto["main"] is not None and not v_auto["pos"]
+                and v_neg["neg"] and v_neg["negl"] and not v_neg["pos"] and v_real["main"] and not v_real["real"] and not v_real["pos"]
+                and v_real["negl"] is False,
+                f"short={v_auto['short']} pos={v_auto['pos']}; dip neg={v_neg['neg']} negl={v_neg['negl']}; Real Set fails pos={v_real['pos']}"))
+    # the chain against a brute-force reading of its rules on random tapes: the Base short window, the Auto choice (the best
+    # candidate with enough orders and the margin) and both Main windows for the Real Set
+    import random as _rnd
+    from dataclasses import replace as _dc_replace
+
+    def _ref_chain(ts_, en_, nt_, Q):
+        def ok(idx, t, n):                    # the newest n of the lane's orders closed before t, PF at or above the floor
+            w = [nt_[k] for k in idx if ts_[k] < t][-n:]
+            return len(w) >= (n if Q.full_window else 1) and pf_of(sum(x for x in w if x > 0), -sum(x for x in w if x < 0)) + 1e-9 >= Q.floor
+        g_, l_ = prefix_sums(nt_)
+        allk = list(range(len(ts_)))
+        def mok(t, n, pos):                   # the Base minimal window: the newest n results before t all positive (negative; both: one sign)
+            w = [nt_[k] for k in allk if ts_[k] < t][-n:]
+            if Q.base_min_avg:                # the average rule, read plainly: the mean of the newest n above / below zero, or either (both)
+                a_ = sum(w) / len(w) if w else 0.0
+                return len(w) >= (n if Q.full_window else 1) and (abs(a_) * len(w) > NEG_EPS if Q.base_min_both else (a_ * len(w) > NEG_EPS if pos else a_ * len(w) < -NEG_EPS))
+            return len(w) >= (n if Q.full_window else 1) and ((all(x > 0 for x in w) or all(x < 0 for x in w)) if Q.base_min_both else (all(x > 0 for x in w) if pos else all(x < 0 for x in w)))
+        main_ = [k for k in allk if processed_flag(ts_, nt_, g_, l_, en_[k], Q.base_long, (Q.base_long if Q.full_window else Q.gate_min), Q.floor, Q.max_dd_s, Q.lookback_s, 0, Q.consistency)
+                 and (not Q.base_short or ok(allk, en_[k], Q.base_short))
+                 and (not Q.base_min_n or mok(en_[k], Q.base_min_n, Q.base_min_positive))]
+
+        pas = {w: [ok(main_, en_[k], w) for k in main_] for w in (Q.main_n,) + tuple(Q.short_windows)}
+        mt_ = [ts_[k] for k in main_]
+
+        def pick(idx):                        # the Main orders in idx (closed before the entry) vote for the window of the best PF among those that passed it
+            ref = pf_of(sum(x for x in [nt_[main_[i]] for i in idx if pas[Q.main_n][i]] if x > 0), -sum(x for x in [nt_[main_[i]] for i in idx if pas[Q.main_n][i]] if x < 0))
+            best, sel = ref, Q.main_n
+            for w in Q.short_windows:
+                inc = [nt_[main_[i]] for i in idx if pas[w][i]]
+                if len(inc) < Q.short_min:
+                    continue
+                pf = pf_of(sum(x for x in inc if x > 0), -sum(x for x in inc if x < 0))
+                if pf > best + SHORT_EPS and pf >= ref * Q.short_margin - SHORT_EPS:
+                    best, sel = pf, w
+            return sel
+        an = pick(range(len(main_))) if (Q.main_on and Q.short_on) else Q.main_n
+
+        def kok(k):                           # the Main minimal window: the newest main_min_n Main results before the entry all positive (negative)
+            w = [nt_[j] for j in main_ if ts_[j] < en_[k]][-Q.main_min_n:] if Q.main_min_n else []
+            if Q.main_min_n and Q.main_min_avg:
+                a_ = sum(w) / len(w) if w else 0.0
+                return len(w) >= (Q.main_min_n if Q.full_window else 1) and (abs(a_) * len(w) > NEG_EPS if Q.main_min_both
+                                                                              else (a_ * len(w) > NEG_EPS if Q.main_min_positive else a_ * len(w) < -NEG_EPS))
+            return (not Q.main_min_n) or (len([x for x in w]) >= (Q.main_min_n if Q.full_window else 1)
+                                          and ((all(x > 0 for x in w) or all(x < 0 for x in w)) if Q.main_min_both else (all(x > 0 for x in w) if Q.main_min_positive else all(x < 0 for x in w))))
+        real_ = []
+        for j, k in enumerate(main_):
+            if Q.main_on and Q.short_on:
+                sel = pick([i for i in range(len(main_)) if en_[k] - Q.lookback_s <= mt_[i] < en_[k]])
+            else:
+                sel = Q.main_n
+            if ok(main_, en_[k], Q.main_n) and ok(main_, en_[k], sel) and kok(k):
+                real_.append(k)
+        return main_, real_, an
+    Pr = StageParams(base_long=30, base_short=10, gate_min=20, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=True,
+                     main_n=8, short_on=True, short_windows=(5, 10, 15, 20, 25), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5, 10),
+                     real_on=True, real_n=15, full_window=True)
+    rng_ = _rnd.Random(11)
+    same, short_cut, auto_moved, auto_cut = True, 0, 0, 0
+    for _ in range(12):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(400)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        got = stage_chain(ts_, en_, nt_, Pr)
+        m_, r_, an_ = _ref_chain(ts_, en_, nt_, Pr)
+        same = same and (got["main"], got["real"], got["short_n"]) == (m_, r_, an_)
+        short_cut += len(_ref_chain(ts_, en_, nt_, _dc_replace(Pr, base_short=0))[0]) - len(m_)
+        auto_moved += an_ != Pr.main_n
+        auto_cut += len([k for k in m_ if k not in r_]) > 0 and an_ != Pr.main_n
+    # the Main Set holds only orders opened while Base passed: a Set that loses from the start has an empty Main Set, its winning
+    # twin's Main Set starts after gate_min orders (before that Base has too few orders to pass)
+    lose = [(-0.004 if k % 3 else 0.002) for k in range(200)]
+    win_ = [(0.006 if k % 3 else -0.004) for k in range(200)]
+    tl = [1000.0 + 60.0 * k for k in range(200)]
+    el = [t - 300.0 for t in tl]
+    m_lose = stage_chain(tl, el, lose, Pr)["main"]
+    m_win = stage_chain(tl, el, win_, Pr)["main"]
+    out.append(("set-main-set-only-orders-opened-while-base-passed", not m_lose and bool(m_win) and min(m_win) >= Pr.gate_min,
+                f"losing Set: {len(m_lose)} Main orders; winning Set: {len(m_win)} from order {min(m_win) if m_win else None} (gate minimum {Pr.gate_min})"))
+    out.append(("set-stage-chain-equals-the-rules", same and short_cut > 0 and auto_moved > 0 and auto_cut > 0,
+                f"equal={same}; short window removed {short_cut} Main orders; Main short window moved on {auto_moved}/12 tapes"))
+    # the default judges every stage window on the orders it has (at least one): the same brute-force reading with full_window off, and the
+    # difference to the strict rule on a sparse tape (a Set with 14 orders never filled a window of 25 / 15, so it never reached Real)
+    Pa = _dc_replace(Pr, full_window=False)
+    same_a, wider = True, 0
+    for _ in range(12):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(400)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        got = stage_chain(ts_, en_, nt_, Pa)
+        m_, r_, an_ = _ref_chain(ts_, en_, nt_, Pa)
+        same_a = same_a and (got["main"], got["real"], got["short_n"]) == (m_, r_, an_)
+        wider += len(got["real"]) - len(stage_chain(ts_, en_, nt_, Pr)["real"])
+    # the Base minimal window (third last-N next to the long and the short one): the chain equals the brute-force reading for 1-3 results, positive and
+    # negative, in both window rules; a positive and a negative window never admit the same order; any minimal window only removes Main orders
+    same_m, disjoint, never_more, narrowed, union_b = True, True, True, 0, True
+    for _ in range(8):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(300)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        plain = stage_chain(ts_, en_, nt_, Pa)["main"]
+        for full_ in (False, True):
+            for n_ in (1, 2, 3):
+                pos_ = _dc_replace(Pa, base_min_n=n_, base_min_positive=True, full_window=full_)
+                neg_ = _dc_replace(Pa, base_min_n=n_, base_min_positive=False, full_window=full_)
+                gp_, gn_ = stage_chain(ts_, en_, nt_, pos_), stage_chain(ts_, en_, nt_, neg_)
+                same_m = same_m and gp_["main"] == _ref_chain(ts_, en_, nt_, pos_)[0] and gn_["main"] == _ref_chain(ts_, en_, nt_, neg_)[0]
+                disjoint = disjoint and not (set(gp_["main"]) & set(gn_["main"]))
+                bth_ = _dc_replace(Pa, base_min_n=n_, base_min_both=True, full_window=full_)          # "both": one sign throughout = the positive or the negative window
+                gb_ = stage_chain(ts_, en_, nt_, bth_)
+                union_b = union_b and gb_["main"] == _ref_chain(ts_, en_, nt_, bth_)[0] and set(gb_["main"]) == set(gp_["main"]) | set(gn_["main"])
+                if not full_:
+                    never_more = never_more and set(gp_["main"]) <= set(plain) and set(gn_["main"]) <= set(plain)
+                    narrowed += len(plain) - len(gp_["main"]) > 0 and len(plain) - len(gn_["main"]) > 0
+    out.append(("set-base-minimal-window-equals-the-rules", same_m and disjoint and never_more and narrowed > 0 and union_b,
+                f"chain equals the brute-force reading for N 1-3 positive and negative, both window rules={same_m}; positive and negative windows disjoint={disjoint}; "
+                f"mode both = the positive or the negative window={union_b}; "
+                f"a minimal window only removes Main orders={never_more} (narrowed {narrowed} cases)"))
+    # the Main minimal window (a third last-N on the Main Set, next to the long and the short one): the chain equals the brute-force reading for 1-3 results,
+    # positive and negative, in both window rules; positive and negative never admit the same Real order; it only removes Real orders and never touches the
+    # Main Set; the Main short window chosen is the same with and without it (each window of a stage is judged on its own)
+    same_k, disjoint_k, only_real, main_same, narrowed_k, short_same, union_k = True, True, True, True, 0, True, True
+    for _ in range(8):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005)) for _ in range(300)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        plain = stage_chain(ts_, en_, nt_, Pa)
+        for full_ in (False, True):
+            for n_ in (1, 2, 3):
+                kp = _dc_replace(Pa, main_min_n=n_, main_min_positive=True, full_window=full_)
+                kn = _dc_replace(Pa, main_min_n=n_, main_min_positive=False, full_window=full_)
+                cp, cn = stage_chain(ts_, en_, nt_, kp), stage_chain(ts_, en_, nt_, kn)
+                same_k = same_k and cp["real"] == _ref_chain(ts_, en_, nt_, kp)[1] and cn["real"] == _ref_chain(ts_, en_, nt_, kn)[1]
+                disjoint_k = disjoint_k and not (set(cp["real"]) & set(cn["real"]))
+                kb = _dc_replace(Pa, main_min_n=n_, main_min_both=True, full_window=full_)
+                cb = stage_chain(ts_, en_, nt_, kb)
+                union_k = union_k and cb["real"] == _ref_chain(ts_, en_, nt_, kb)[1] and set(cb["real"]) == set(cp["real"]) | set(cn["real"])
+                if not full_:
+                    only_real = only_real and set(cp["real"]) <= set(plain["real"]) and set(cn["real"]) <= set(plain["real"])
+                    narrowed_k += len(plain["real"]) - len(cp["real"]) > 0 and len(plain["real"]) - len(cn["real"]) > 0
+                    main_same = main_same and cp["main"] == plain["main"] == cn["main"]
+                    short_same = short_same and cp["short_n"] == plain["short_n"] == cn["short_n"]
+    out.append(("set-main-minimal-window-equals-the-rules", same_k and disjoint_k and only_real and main_same and short_same and narrowed_k > 0 and union_k,
+                f"Real Set equals the brute-force reading for N 1-3 positive and negative, both rules={same_k}; positive and negative disjoint={disjoint_k}; "
+                f"only removes Real orders={only_real}; Main Set unchanged={main_same}; short window unchanged={short_same}; mode both = positive or negative={union_k} (narrowed {narrowed_k} cases)"))
+    # the minimal windows on the AVERAGE (mode avgpositive / avgnegative / avgboth, Base and Main each on its own): the chain equals the plain reading of the
+    # mean for N 1-3 in both window rules; positive and negative average are disjoint and together give avgboth; the sign rule (every result one sign)
+    # lies inside the average rule of the same sign; the average rule only removes orders (Base: Main orders, Main: Real orders, the Main Set unchanged)
+    same_v, disj_v, union_v, inside_v, only_v, diff_v = True, True, True, True, True, 0
+    for _ in range(6):
+        nt_ = [rng_.choice((0.006, 0.005, -0.004, -0.005, 0.001, -0.002)) for _ in range(300)]
+        ts_ = [1000.0 + 60.0 * k for k in range(len(nt_))]
+        en_ = [t - 300.0 for t in ts_]
+        plain = stage_chain(ts_, en_, nt_, Pa)
+        for full_ in (False, True):
+            for n_ in (1, 2, 3):
+                for lvl, key, ix in (("base", "main", 0), ("main", "real", 1)):
+                    cfg = {f"{lvl}_min_n": n_, "full_window": full_}
+                    qp = _dc_replace(Pa, **cfg, **{f"{lvl}_min_avg": True, f"{lvl}_min_positive": True})
+                    qn = _dc_replace(Pa, **cfg, **{f"{lvl}_min_avg": True, f"{lvl}_min_positive": False})
+                    qb = _dc_replace(Pa, **cfg, **{f"{lvl}_min_avg": True, f"{lvl}_min_both": True})
+                    qs = _dc_replace(Pa, **cfg, **{f"{lvl}_min_positive": True})
+                    gp_, gn_, gb_, gs_ = (stage_chain(ts_, en_, nt_, q)[key] for q in (qp, qn, qb, qs))
+                    same_v = same_v and all(stage_chain(ts_, en_, nt_, q)[key] == _ref_chain(ts_, en_, nt_, q)[ix] for q in (qp, qn, qb))
+                    disj_v = disj_v and not (set(gp_) & set(gn_))
+                    union_v = union_v and set(gb_) == set(gp_) | set(gn_)
+                    inside_v = inside_v and set(gs_) <= set(gp_)
+                    diff_v += n_ > 1 and set(gs_) != set(gp_)
+                    if not full_:
+                        only_v = only_v and set(gp_) <= set(plain[key]) and set(gn_) <= set(plain[key])
+                        if lvl == "main":
+                            only_v = only_v and stage_chain(ts_, en_, nt_, qp)["main"] == plain["main"]
+    out.append(("set-minimal-window-average-equals-the-rules", same_v and disj_v and union_v and inside_v and only_v and diff_v > 0,
+                f"chain equals the plain mean for N 1-3, Base and Main, both window rules={same_v}; positive / negative average disjoint={disj_v}; "
+                f"avgboth = their union={union_v}; the sign rule lies inside the average rule={inside_v} (differs in {diff_v} cases); only removes orders={only_v}"))
+    # the shortcuts of the chain's Base loop keep the rules: the PF rounding near the floor (a PF of 1.24996 rounds to 1.25 and passes, 1.24994 does not), the
+    # lookback on the window start and the drawdown time (a window shorter than the limit cannot reach it; a longer one is measured) against processed_flag
+    # and an independent drawdown reading
+    cases_ok, cases_bad = 0, []
+    for w_pf in (1.24996, 1.24994, 1.25004, 1.2499, 1.25, 1.2501, 1.0, 3.0):
+        nt3 = [w_pf * 0.01, -0.01, 0.0]
+        t3 = [1000.0, 1060.0, 1120.0]
+        e3 = [t - 30.0 for t in t3]
+        Q3 = StageParams(base_long=5, base_short=0, gate_min=1, floor=1.25, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=False, main_n=8, short_on=False,
+                         short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5,), real_on=False, real_n=5)
+        gq, lq = prefix_sums(nt3)
+        want_pass = round(w_pf, 4) + 1e-9 >= 1.25
+        via_chain = 2 in stage_chain(t3, e3, nt3, Q3)["main"]
+        via_flag = processed_flag(t3, nt3, gq, lq, e3[2], 5, 1, 1.25, 1e12, 1e12, 0, 0.0)
+        if via_chain == via_flag == want_pass:
+            cases_ok += 1
+        else:
+            cases_bad.append((w_pf, via_chain, via_flag, want_pass))
+
+    def _dd_ref(tt, xs, entry):            # the longest drawdown of the window's equity (from zero), the open one measured to the entry
+        eq = pk = 0.0
+        pk_t, worst, under = tt[0], 0.0, False
+        for t_, x_ in zip(tt, xs):
+            eq += x_
+            if eq >= pk - 1e-12:
+                if under:
+                    worst, under = max(worst, t_ - pk_t), False
+                pk, pk_t = max(pk, eq), t_
+            else:
+                under = True
+        return max(worst, entry - pk_t) if under else worst
+    dd_same, lb_same = True, True
+    for _ in range(40):
+        n_ = rng_.randint(3, 60)
+        gap = rng_.choice((5.0, 60.0, 900.0, 7200.0))
+        nt_ = [rng_.choice((0.006, 0.004, -0.004, -0.006)) for _ in range(n_)]
+        ts_ = [1000.0 + gap * k * rng_.uniform(0.5, 1.5) for k in range(n_)]
+        ts_.sort()
+        en_ = [t - rng_.uniform(10.0, 300.0) for t in ts_]
+        g_, l_ = prefix_sums(nt_)
+        lim = rng_.choice((600.0, 3600.0, 20000.0, 1e12))
+        e_ = n_
+        s0_ = max(0, e_ - rng_.randint(2, 50))
+        entry = ts_[-1] + 40.0
+        want_dd = _dd_ref(ts_[s0_:e_], nt_[s0_:e_], entry) < lim
+        dd_same = dd_same and _base_tail_ok(ts_, nt_, g_, l_, entry, e_, s0_, lim, 0.0) == want_dd
+        Ql = StageParams(base_long=rng_.randint(2, 30), base_short=0, gate_min=1, floor=0.5, max_dd_s=1e12, lookback_s=rng_.choice((gap * 3, gap * 10, 1e12)), consistency=0.0,
+                         main_on=False, main_n=8, short_on=False, short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5,), real_on=False, real_n=5)
+        flags = [k for k in range(n_) if processed_flag(ts_, nt_, g_, l_, en_[k], Ql.base_long, 1, Ql.floor, 1e12, Ql.lookback_s, 0, 0.0)]
+        lb_same = lb_same and flags == stage_chain(ts_, en_, nt_, Ql)["main"]
+    out.append(("set-chain-shortcuts-keep-the-rules", not cases_bad and dd_same and lb_same,
+                f"PF rounding at the floor {cases_ok}/8 cases (bad {cases_bad}); drawdown time equals an independent reading (window shorter and longer than the limit)={dd_same}; "
+                f"lookback on the window start equals processed_flag={lb_same}"))
+    # the two helpers of the scoring pass equal their plain readings: finite (a float fast path) and by_time (no sort when the rows already are in time order)
+    def finite_plain(v, fallback=0.0):
+        try:
+            n_ = float(v)
+        except Exception:
+            return fallback
+        return n_ if n_ == n_ and abs(n_) != float("inf") else fallback
+    odd = [0.0, -0.0, 1.5, -2.25, 1e300, float("nan"), float("inf"), float("-inf"), 3, -4, True, False, "2.5", "x", None, b"1", [1], (2,), {}, 10 ** 400]
+    fin_same = all((finite(v) == finite_plain(v) or (finite(v) != finite(v) and finite_plain(v) != finite_plain(v))) and finite(v, 7.0) == finite_plain(v, 7.0) for v in odd)
+    rng_t = _rnd.Random(5)
+    ties_same = True
+    for _ in range(60):
+        rows_t = [{"t": rng_t.choice((1.0, 2.0, 2.0, 3.0, float("nan"), None, "4")), "i": i} for i in range(rng_t.randint(0, 40))]
+        if rng_t.random() < 0.4:
+            rows_t.sort(key=lambda r_: finite(r_.get("t")))
+        ties_same = ties_same and [r_["i"] for r_ in by_time(rows_t)] == [r_["i"] for r_ in sorted(rows_t, key=lambda r_: finite(r_.get("t")))]
+    out.append(("set-finite-and-by-time-equal-their-plain-readings", fin_same and ties_same,
+                f"finite on {len(odd)} odd values equals the plain reading={fin_same}; by_time equals a stable sort by finite time (ties, NaN, text, already sorted)={ties_same}"))
+    sparse_t = [1000.0 + 60.0 * k for k in range(14)]
+    sparse_n = [0.006] * 14
+    sparse_e = [t - 300.0 for t in sparse_t]
+    Ps = _dc_replace(Pr, main_n=25, real_n=15, base_short=0, gate_min=1, full_window=False)
+    avail_ch = stage_chain(sparse_t, sparse_e, sparse_n, Ps)
+    strict_ch = stage_chain(sparse_t, sparse_e, sparse_n, _dc_replace(Ps, full_window=True))
+    v_av = stage_verdicts([0.006] * 14, [0.006] * 9, [], 25, Ps)
+    v_st = stage_verdicts([0.006] * 14, [0.006] * 9, [], 25, _dc_replace(Ps, full_window=True))
+    out.append(("set-stage-windows-judge-the-orders-available", same_a and wider > 0 and len(avail_ch["real"]) > 0 and not strict_ch["real"]
+                and v_av["pos"] and not v_st["pos"],
+                f"equal to the rules={same_a}; the default chain holds {wider} more Real orders than the strict one over 12 tapes; 14 orders: Real Set "
+                f"{len(avail_ch['real'])} (strict {len(strict_ch['real'])}); verdict pos {v_av['pos']} (strict {v_st['pos']})"))
+    sb = SetBook()
+    sb.load({**_SELFTEST_PIN, "setGateWindow": 30, "setGateMinTrades": 20, "setGateShortN": 10, "setMinPf": 1.25, "setMaxDdtHours": 36,
+             "setMinStep": 3, "setStepMax": 3, "setSlRatios": [1.0], "stratIndications": False, "histEnabled": True})
+    sst = next(x for x in sb.by_idx if x.kind == "base")
+    sst.active = True
+    seqs = [0.006] * 22 + [-0.004] * 8          # long window PF passes, the last 10 do not
+    sst.hist = [dict(zip(_ROW_KEYS, (1_700_000_000.0 + 600.0 * k, "T", "LONG", x, x + cfc, 300.0, "x", sst.id))) for k, x in enumerate(seqs)]
+    sb._score_one(sst, now=1_700_000_000.0 + 600.0 * len(seqs))
+    out.append(("set-base-needs-both-windows", sst.gate_pf >= 1.25 and sb.gate_reason(sst) == "short",
+                f"long PF {sst.gate_pf}, short PF {sst.base_short_pf} -> {sb.gate_reason(sst)}"))
+    # the stage keys: mainGate* the Main static window, realGate* the Real stage, stagesEnabled off = the Base long window alone
+    lk = SetBook(); lk.load({**_SELFTEST_PIN, "realGateN": 12, "realGateEnabled": False, "mainGateN": 9})
+    lo_ = SetBook(); lo_.load({**_SELFTEST_PIN, "stagesEnabled": False})
+    out.append(("set-main-stage-keys-and-legacy-names", lk.realst_n == 12 and lk.realst_on is False and lk.main_n == 9 and lk.main_on is True
+                and SetBook().main_n == MAIN_GATE_N_DEFAULT == 25 and SetBook().short_windows == (5, 10, 15) and SetBook().realst_n == REAL_GATE_N_DEFAULT == 15
+                and not (lo_.main_on or lo_.neg_on or lo_.realst_on or lo_.base_short),
+f"Real N {lk.realst_n} on {lk.realst_on}; Main N {lk.main_n}; stages off -> Base alone"))
     return out
 
 

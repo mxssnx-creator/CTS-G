@@ -6,7 +6,7 @@
  * sandboxes, LTS 20) crash the whole `npm test` with "bad option" before a
  * single assertion runs. On those runtimes the .ts suites are skipped with a
  * clear note instead of failing; the scripts/*.test.mjs suites still run
- * unconditionally. Node 22+ runs everything, exactly as before.
+ * unconditionally. Node 22+ runs everything. On an older Node the run fails unless CTSG_SKIP_TS=1 is set.
  */
 import { spawnSync } from "node:child_process";
 
@@ -14,25 +14,32 @@ const [major, minor] = process.versions.node.split(".").map((n) => parseInt(n, 1
 const supportsStripTypes = major > 22 || (major === 22 && minor >= 6);
 
 if (!supportsStripTypes) {
-  console.log(
-    `[ts-tests] node ${process.versions.node} lacks --experimental-strip-types (needs >= 22.6); skipping .ts suites`,
-  );
-  process.exit(0);
+  // A silent skip made `npm test` green with zero desk TS tests. Fail unless the skip is explicit.
+  const msg = `[ts-tests] node ${process.versions.node} lacks --experimental-strip-types (needs >= 22.6)`;
+  if (process.env.CTSG_SKIP_TS === "1") {
+    console.log(`${msg}; CTSG_SKIP_TS=1 set, skipping .ts suites`);
+    process.exit(0);
+  }
+  console.error(`${msg}. Use Node >= 22.6, or set CTSG_SKIP_TS=1 to skip the .ts suites on purpose.`);
+  process.exit(1);
 }
 
 const files = [
-  "src/lib/analytics.test.ts",
-  "src/lib/config-model.test.ts",
-  "src/lib/config-proxy.test.ts",
-  "src/lib/set-overview.test.ts",
-  "src/lib/dimension-stats.test.ts",
-  "src/lib/live-stats.test.ts",
-  "src/lib/polling.test.ts",
-  "src/lib/hist-test.test.ts",
-  "src/lib/hist-calc.test.ts",
-  "src/lib/indication-kinds.test.ts",
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
+  "src/lib/analytics.test.ts",
+  "src/lib/relation-lanes.test.ts",
+  "src/lib/block-rounds.test.ts",
+  "src/lib/base-progress.test.ts",
+  "src/lib/execution-scope.test.ts",
+  "src/lib/evidence-view.test.ts",
+  "src/lib/poll.test.ts",
+  "src/lib/sets-view.test.ts",
+  "src/lib/config-model.test.ts",
+  "src/lib/live-stats.test.ts",
+  "src/lib/poll-http.test.ts",
+  "src/lib/hourly-pf.test.ts",
+  "src/lib/control-coverage.test.ts",
 ];
 const run = spawnSync(
   process.execPath,

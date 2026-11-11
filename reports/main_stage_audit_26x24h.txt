@@ -1,0 +1,71 @@
+Main-stage audit · 20 symbols · 26 test window(s) of 24 h, 02 Oct 17:00 - 28 Oct 17:00 UTC · pre-history 24 h · 1538 Sets · PositionCost 0.12 %
+config: Base long 50 / short 25 / minimal 0, Main long 25 / short [5, 10] / minimal 0, Real 15, min PF 1.25, full windows False. Every PF below is gains over losses of the POOLED orders (never a mean of PFs).
+
+A. ACCOUNTING AND INDEPENDENCE (first window)
+  chains recomputed by a plain reading of the rules: 120 Sets, 274441 orders - differing: 0 []
+  Real and Real Negative inside Main (every Set): violations 0; Sets with a Main Set 1507, with a Real Set 1473
+  costs and ranges: 1113221 stop exits equal -SL distance (max deviation 2.2e-16), 876960 target exits equal +TP distance (max deviation 2.2e-16); net = gross - 0.0012 once per order
+
+B. ZERO-EDGE BENCHMARK (base Sets, unfiltered tape: observed PF against the PF of a random entry with the same stop and target and one cost per order)
+  step range   observed PF  zero-edge PF    orders
+  2-6                0.522         0.572   6372938
+  7-12               0.754         0.817   4411130
+  13-20              0.832         0.892   4217389
+  21-30              0.879         0.929   4167749
+  mean gross result per order (cost 0.12 %): base +0.0033 %, exit +0.0784 %, trail +0.0625 %
+
+C / D. THE STAGE LADDER: selection PF (the window that picked each order) against the PF its results delivered; placebo = the same chain on results shuffled inside each Set
+  lane                                                orders  selection PF  realised PF  placebo realised  real - placebo
+  Base tape (every order of every Set)              40665141         0.816        0.834  0.825 (sel 0.82)          +0.009
+  Main Set (opened while Base passed)                4334820         1.747        0.914  0.881 (sel 1.73)          +0.033
+  Real Set (opened while Base and Main passed)       1119615         2.111        0.934  0.891 (sel 2.08)          +0.043
+  Real Negative Set (opened in a Main dip)           2606609         1.610        0.908  0.881 (sel 1.62)          +0.027
+  Real Set orders were also selected by the Main long window: its pooled PF at their entry 2.231
+
+E. PERSISTENCE: every (Set, hour) by its Base window PF at the hour start (deciles) against the PF of the Set's next orders (pooled over all windows)
+  decile  window PF mean  next hour PF   orders   next 25 PF   orders
+       1           0.355         0.710  5258792        0.797  2386793
+       2           0.493         0.809  4244794        0.856  2386125
+       3           0.583         0.823  4104438        0.856  2385447
+       4           0.664         0.829  4044838        0.852  2386042
+       5           0.747         0.830  3987030        0.849  2385749
+       6           0.839         0.840  3945659        0.857  2387319
+       7           0.950         0.844  3910827        0.857  2387881
+       8           1.096         0.860  3891567        0.867  2387187
+       9           1.325         0.881  3817563        0.873  2384961
+      10           2.141         0.912  3459633        0.888  2371476
+  rank correlation (window PF vs PF of the next 25 orders), per window: mean +0.0793, min -0.0232, max +0.2158, negative in 2 of 26 windows
+  base   lowest decile: window PF 0.33 -> next 25 PF 0.715 (1170364 orders); highest decile: window PF 2.07 -> next 25 PF 0.827 (1160295 orders)
+  exit   lowest decile: window PF 0.37 -> next 25 PF 0.943 (561312 orders); highest decile: window PF 2.54 -> next 25 PF 0.922 (557827 orders)
+  trail  lowest decile: window PF 0.40 -> next 25 PF 0.829 (655200 orders); highest decile: window PF 1.82 -> next 25 PF 0.929 (655200 orders)
+
+F. LAG: realised PF by the number of the Set's own positions still open when the order was opened
+  base  [0: PF 0.441 on 3527]  [1-2: PF 0.817 on 68130]  [3-5: PF 0.806 on 629316]  [6-10: PF 0.823 on 5872354]  [11+: PF 0.836 on 34091814]
+  main  [0: PF 0.593 on 187]  [1-2: PF 1.100 on 4699]  [3-5: PF 1.207 on 43171]  [6-10: PF 1.016 on 513110]  [11+: PF 0.899 on 3773653]
+
+G. EXIT REASONS by lane (share of the lane's orders, PF, average hold in minutes)
+  base    [scratch+ 50.9% PF – 22.8m]  [sl 35.6% PF 0.152 16.8m]  [tp 12.9% PF – 5.8m]  [time 0.6% PF 0.000 360.0m]
+  main    [scratch+ 58.1% PF – 23.1m]  [sl 35.1% PF 0.214 17.3m]  [tp 5.9% PF – 7.1m]  [time 0.9% PF 0.000 360.0m]
+  real    [scratch+ 59.4% PF – 23.7m]  [sl 34.3% PF 0.240 17.3m]  [tp 5.3% PF – 7.1m]  [time 1.0% PF 0.000 360.0m]
+  realneg [scratch+ 57.3% PF – 22.7m]  [sl 36.0% PF 0.204 17.0m]  [tp 6.0% PF – 7.0m]  [time 0.8% PF 0.000 360.0m]
+
+H. BY CATEGORY AND TYPE: pooled PF / orders on the Base tape, Main Set, Real Set, Real Negative Set; and in how many of the windows the lane held above 1
+  general     base      0.770/8306811     0.838/675167      0.849/177529      0.843/384770     windows >= 1: main 5/26, real 5/26, realneg 2/26
+  general     exit      0.920/3361612     0.935/555857      0.917/155506      0.937/325541     windows >= 1: main 8/26, real 7/26, realneg 8/26
+  general     trail     0.871/6068697     0.928/677880      0.912/138211      0.933/439896     windows >= 1: main 6/26, real 6/26, realneg 8/26
+  indications base      0.760/10862395    0.832/768271      0.795/189206      0.852/450496     windows >= 1: main 2/26, real 3/26, realneg 4/26
+  indications exit      0.932/4023996     0.932/628554      0.952/172179      0.932/387519     windows >= 1: main 6/26, real 8/26, realneg 10/26
+  indications trail     0.878/8041630     1.022/1029091     1.140/286984      0.956/618387     windows >= 1: main 10/26, real 14/26, realneg 8/26
+
+STABILITY ACROSS THE WINDOWS (PF of the lane in each 24 h window): mean, median, min, max, windows at or above 1
+  base     mean 0.826  median 0.824  min 0.746  max 0.975  >= 1 in 0 of 26
+  main     mean 0.897  median 0.896  min 0.659  max 1.074  >= 1 in 4 of 26
+  real     mean 0.897  median 0.888  min 0.605  max 1.193  >= 1 in 5 of 26
+  realneg  mean 0.894  median 0.906  min 0.696  max 1.055  >= 1 in 2 of 26
+  placebo Main mean 0.865
+  placebo Real mean 0.868
+  Main realised minus Main placebo, per window: mean +0.032 (standard error 0.017), negative in 11 of 26 windows
+
+I. THE LIVE ENGINE (stats-bingx-x02.json): validated 0.24 %, unfiltered {'pf': 1.0284, 'n': 56700, 'sets': 1272}, end figure {'pf': 2.5047, 'n': 150, 'sets': 3}, Base alone {'pf': 1.6442, 'n': 12800, 'sets': 256}
+   Main {'pf': 2.5325, 'n': 75, 'sets': 3, 'on': True, 'lastN': 25}; Main Sets of the Base-passing Sets {'pf': 1.101, 'n': 4643, 'sets': 256, 'orders': 7130, 'lastN': 25}; Real {'pf': 2.7566, 'sets': 3, 'orders': 125, 'lastN': 15, 'on': True}; Real Negative {'pf': 0.0, 'sets': 0, 'orders': 0, 'lastN': 15, 'on': True}; Sets per stage {'base': 256, 'main': 72, 'negative': 68, 'real': 3, 'realNeg': 0}
+   closed orders: {'orders': 511, 'setLane': 511, 'exitLane': 0, 'wins': 338, 'losses': 173, 'skippedNotScored': 5, 'droppedNoRecord': 7, 'setsThatTraded': 48}

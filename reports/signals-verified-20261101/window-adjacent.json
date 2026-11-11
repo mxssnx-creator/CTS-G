@@ -1,0 +1,1009 @@
+{
+  "scope": "Separate source capital books; stage aggregates count hypothetical branches, not a funded portfolio",
+  "sources": 2,
+  "activeSources": 2,
+  "positiveSources": 0,
+  "settled": 20,
+  "stages": {
+    "base": {
+      "population": 129024,
+      "passed": 124,
+      "chainPassed": 124,
+      "allocatedStreams": 3072,
+      "closed": 70642,
+      "gain": 126.75261420705164,
+      "loss": 188.51130671378985,
+      "windowGain": 10.265237129920907,
+      "windowLoss": 3.2443031499633603,
+      "pf": 0.6723873300581154,
+      "passingWindowPf": 3.164080745671636
+    },
+    "main": {
+      "population": 6193152,
+      "passed": 49,
+      "chainPassed": 13,
+      "allocatedStreams": 7841,
+      "closed": 21138,
+      "gain": 41.96060427697473,
+      "loss": 75.69987623904657,
+      "windowGain": 3.5304839649565594,
+      "windowLoss": 0.8607371119306673,
+      "pf": 0.5543021516240092,
+      "passingWindowPf": 4.101698318825297
+    },
+    "real": {
+      "population": 6193152,
+      "passed": 27,
+      "chainPassed": 13,
+      "allocatedStreams": 53,
+      "closed": 55,
+      "gain": 0.08365390070557369,
+      "loss": 0.08344387824471106,
+      "windowGain": 2.044408365437901,
+      "windowLoss": 0.4615246293857186,
+      "pf": 1.002516930723746,
+      "passingWindowPf": 4.429684214597548
+    }
+  },
+  "plan": {
+    "config": {
+      "mode": "offline-only",
+      "progress": {
+        "base": {
+          "long": [
+            5,
+            10,
+            15,
+            20
+          ],
+          "minimal": [
+            1,
+            2,
+            3
+          ],
+          "polarity": [
+            "positive",
+            "negative"
+          ],
+          "short": [
+            4,
+            6,
+            8,
+            10
+          ],
+          "shortRatio": 0.5
+        },
+        "fees": {
+          "entryLiquidity": "taker",
+          "exitLiquidity": "taker",
+          "maker": 0.0002,
+          "slippagePerLeg": 0.0001,
+          "source": "configured-scenario",
+          "taker": 0.0005
+        },
+        "historyMinutes": 6000,
+        "main": {
+          "long": [
+            5,
+            8,
+            10,
+            15,
+            20
+          ],
+          "minimal": [
+            1,
+            2,
+            3
+          ],
+          "polarity": [
+            "positive",
+            "negative"
+          ],
+          "short": [
+            4,
+            6,
+            8,
+            10
+          ],
+          "shortRatio": 0.5
+        },
+        "maxContextDrawdown": 0.04,
+        "minPf": 2.2,
+        "realLastN": "coordinated"
+      },
+      "protections": [
+        {
+          "holdMinutes": 60,
+          "id": "normal-low-signals",
+          "kind": "normal",
+          "sl": 0.005,
+          "strategyRange": "signals",
+          "tp": 0.006,
+          "trailArm": 0,
+          "trailGap": 0
+        },
+        {
+          "holdMinutes": 60,
+          "id": "normal-low-exit",
+          "kind": "normal",
+          "sl": 0.005,
+          "strategyRange": "exit",
+          "tp": 0.006,
+          "trailArm": 0,
+          "trailGap": 0
+        },
+        {
+          "holdMinutes": 60,
+          "id": "normal-middle-signals",
+          "kind": "normal",
+          "sl": 0.01,
+          "strategyRange": "signals",
+          "tp": 0.015,
+          "trailArm": 0,
+          "trailGap": 0
+        },
+        {
+          "holdMinutes": 60,
+          "id": "normal-middle-exit",
+          "kind": "normal",
+          "sl": 0.01,
+          "strategyRange": "exit",
+          "tp": 0.015,
+          "trailArm": 0,
+          "trailGap": 0
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-low-signals",
+          "kind": "trailing",
+          "sl": 0.005,
+          "strategyRange": "signals",
+          "tp": 0.012,
+          "trailArm": 0.006,
+          "trailGap": 0.003
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-low-exit",
+          "kind": "trailing",
+          "sl": 0.005,
+          "strategyRange": "exit",
+          "tp": 0.012,
+          "trailArm": 0.006,
+          "trailGap": 0.003
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-middle-signals",
+          "kind": "trailing",
+          "sl": 0.01,
+          "strategyRange": "signals",
+          "tp": 0.025,
+          "trailArm": 0.012,
+          "trailGap": 0.006
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-middle-exit",
+          "kind": "trailing",
+          "sl": 0.01,
+          "strategyRange": "exit",
+          "tp": 0.025,
+          "trailArm": 0.012,
+          "trailGap": 0.006
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-only-low-signals",
+          "kind": "trailing-only",
+          "sl": 0.005,
+          "strategyRange": "signals",
+          "tp": 0,
+          "trailArm": 0.006,
+          "trailGap": 0.003
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-only-low-exit",
+          "kind": "trailing-only",
+          "sl": 0.005,
+          "strategyRange": "exit",
+          "tp": 0,
+          "trailArm": 0.006,
+          "trailGap": 0.003
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-only-middle-signals",
+          "kind": "trailing-only",
+          "sl": 0.01,
+          "strategyRange": "signals",
+          "tp": 0,
+          "trailArm": 0.012,
+          "trailGap": 0.006
+        },
+        {
+          "holdMinutes": 60,
+          "id": "trailing-only-middle-exit",
+          "kind": "trailing-only",
+          "sl": 0.01,
+          "strategyRange": "exit",
+          "tp": 0,
+          "trailArm": 0.012,
+          "trailGap": 0.006
+        }
+      ],
+      "risk": {
+        "initialEquity": 1000,
+        "maxDrawdown": 0.02,
+        "maxGrossExposure": 80,
+        "maxHourlyLoss": 0.005,
+        "maxOpen": 8,
+        "notionalPerOrder": 10
+      },
+      "schema": "cts-g-signals-windows-v2"
+    },
+    "provenance": {
+      "configSha256": "59b3ff6e751c612de4e62ddf6782dab700a1755256d3a1e56d06e9fb52d2118a",
+      "eventsSha256": "f5684525b2d8aac7a91b1f956a1b9455f1a4f321f9edb594a0085ba91449b6df",
+      "feedSha256": "e21d39b0b7583685e2fe355f6261e0860deff3057ca5c81b43a6c3cf374e2f03",
+      "sourceSha256": {
+        "scripts/run_signal_windows.py": "2bac4f91f3caf359d52d47d854cc8e2558ebe362fc57e7d9414d873659df3055",
+        "server/pulse/signal_progress.py": "93c8d84b7e9a2ee4c580d4e8d96fef36335d22337020b4ccd84ed47b2a4e637a",
+        "server/pulse/signal_replay.py": "5f913285ac3963300f8c203b9f54687d93aaa7d550bb57e331883dbdda6d0992",
+        "server/pulse/signal_windows.py": "36e237a21fb0f30796ca3b2620634968dcfc40bd961d382404d079343fa5fc03"
+      },
+      "unseenHoldout": false
+    },
+    "sources": [
+      "r-clv-thrust",
+      "s2-block-scale"
+    ]
+  },
+  "sourceResults": [
+    {
+      "counts": {
+        "open": 7,
+        "opened": 18,
+        "settled": 11
+      },
+      "drawdown": 0.0004983942159539756,
+      "execution": {
+        "gain": 0.0,
+        "loss": 0.02795309717574839,
+        "maxReturnDrawdown": 0.027953097175748384,
+        "n": 11,
+        "net": -0.02795309717574839,
+        "pf": 0.0,
+        "pfState": "finite"
+      },
+      "file": "273eaf159d47b395.json.gz",
+      "final": {
+        "activeShadowPositions": 153,
+        "at": 1791590400000,
+        "baseRuleCount": 42,
+        "eventVisits": 26784,
+        "historyMinutes": 6000,
+        "mainRuleCount": 48,
+        "minPf": 2.2,
+        "possibleExecutionLanes": 3096576,
+        "realLastN": "coordinated",
+        "realValidationStage": "main",
+        "roots": 1536,
+        "stages": {
+          "base": {
+            "allocatedStreams": 1536,
+            "chainPassed": 120,
+            "closed": 20199,
+            "gain": 37.413928879728545,
+            "loss": 52.08872128808903,
+            "passed": 120,
+            "passingWindowPf": 3.1778577611744048,
+            "passingWindowState": "finite",
+            "pf": 0.7182731300467511,
+            "population": 64512,
+            "validatedPct": 0.18601190476190477,
+            "windowGain": 10.06333918581105,
+            "windowLoss": 3.1667053537638687
+          },
+          "main": {
+            "allocatedStreams": 1610,
+            "chainPassed": 13,
+            "closed": 3795,
+            "gain": 8.22113272310952,
+            "loss": 14.11762233361817,
+            "passed": 41,
+            "passingWindowPf": 4.284511132432786,
+            "passingWindowState": "finite",
+            "pf": 0.5823312544303305,
+            "population": 3096576,
+            "validatedPct": 0.001324043072089947,
+            "windowGain": 3.0829336649659016,
+            "windowLoss": 0.7195531928085767
+          },
+          "real": {
+            "allocatedStreams": 39,
+            "chainPassed": 13,
+            "closed": 39,
+            "gain": 0.0579116862996192,
+            "loss": 0.05505139769516111,
+            "passed": 25,
+            "passingWindowPf": 4.5901078376998745,
+            "passingWindowState": "finite",
+            "pf": 1.0519566936392153,
+            "population": 3096576,
+            "validatedPct": 0.0008073433366402117,
+            "windowGain": 1.9568292317242992,
+            "windowLoss": 0.4263144355024295
+          }
+        },
+        "strategyRanges": [
+          "signals",
+          "exit"
+        ]
+      },
+      "hourly": {
+        "counts": {
+          "flat": 5,
+          "negative": 5,
+          "positive": 2
+        },
+        "everyHourNetPositive": false,
+        "hours": [
+          {
+            "from": 1791547200000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791550800000
+          },
+          {
+            "from": 1791550800000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791554400000
+          },
+          {
+            "from": 1791554400000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791558000000
+          },
+          {
+            "from": 1791558000000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791561600000
+          },
+          {
+            "from": 1791561600000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791565200000
+          },
+          {
+            "from": 1791565200000,
+            "netEquity": -0.042874632583561834,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "negative",
+            "to": 1791568800000
+          },
+          {
+            "from": 1791568800000,
+            "netEquity": 0.007077087128891435,
+            "settledNetCash": -0.03579754545468643,
+            "settledOrders": 2,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": 0.0035797545454686426,
+              "maxReturnDrawdown": 0.0035797545454686426,
+              "n": 2,
+              "net": -0.0035797545454686426,
+              "pf": 0.0,
+              "pfState": "finite"
+            },
+            "state": "positive",
+            "to": 1791572400000
+          },
+          {
+            "from": 1791572400000,
+            "netEquity": -0.014512593506879057,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "negative",
+            "to": 1791576000000
+          },
+          {
+            "from": 1791576000000,
+            "netEquity": -0.07117355049877006,
+            "settledNetCash": -0.08568614400558065,
+            "settledOrders": 2,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": 0.008568614400558065,
+              "maxReturnDrawdown": 0.008568614400558065,
+              "n": 2,
+              "net": -0.008568614400558065,
+              "pf": 0.0,
+              "pfState": "finite"
+            },
+            "state": "negative",
+            "to": 1791579600000
+          },
+          {
+            "from": 1791579600000,
+            "netEquity": -0.1662738246814115,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "negative",
+            "to": 1791583200000
+          },
+          {
+            "from": 1791583200000,
+            "netEquity": 0.008226542384591085,
+            "settledNetCash": -0.15804728229721685,
+            "settledOrders": 7,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": 0.015804728229721683,
+              "maxReturnDrawdown": 0.01580472822972168,
+              "n": 7,
+              "net": -0.015804728229721683,
+              "pf": 0.0,
+              "pfState": "finite"
+            },
+            "state": "positive",
+            "to": 1791586800000
+          },
+          {
+            "from": 1791586800000,
+            "netEquity": -0.06759194703147386,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "negative",
+            "to": 1791590400000
+          }
+        ]
+      },
+      "netEquity": -0.3471229187886138,
+      "performance": {
+        "peakRssKiB": 345240,
+        "seconds": 3.8232628730038414
+      },
+      "prehistory": {
+        "activeShadowPositions": 93,
+        "at": 1791547200000,
+        "baseRuleCount": 42,
+        "eventVisits": 24072,
+        "historyMinutes": 6000,
+        "mainRuleCount": 48,
+        "minPf": 2.2,
+        "possibleExecutionLanes": 3096576,
+        "realLastN": "coordinated",
+        "realValidationStage": "main",
+        "roots": 1536,
+        "stages": {
+          "base": {
+            "allocatedStreams": 1536,
+            "chainPassed": 246,
+            "closed": 18174,
+            "gain": 35.06238347603094,
+            "loss": 46.33673593381421,
+            "passed": 246,
+            "passingWindowPf": 3.3676499943763627,
+            "passingWindowState": "finite",
+            "pf": 0.7566865203045987,
+            "population": 64512,
+            "validatedPct": 0.38132440476190477,
+            "windowGain": 20.7769463462624,
+            "windowLoss": 6.169568209569823
+          },
+          "main": {
+            "allocatedStreams": 1427,
+            "chainPassed": 0,
+            "closed": 3256,
+            "gain": 7.791869952781884,
+            "loss": 11.825104028913403,
+            "passed": 34,
+            "passingWindowPf": 4.26311223064082,
+            "passingWindowState": "finite",
+            "pf": 0.6589261230793477,
+            "population": 3096576,
+            "validatedPct": 0.001097986937830688,
+            "windowGain": 2.5430100415107155,
+            "windowLoss": 0.596514917724429
+          },
+          "real": {
+            "allocatedStreams": 16,
+            "chainPassed": 0,
+            "closed": 19,
+            "gain": 0.0579116862996192,
+            "loss": 0.0067779356526277085,
+            "passed": 9,
+            "passingWindowPf": 4.181391681591661,
+            "passingWindowState": "finite",
+            "pf": 8.544148140026628,
+            "population": 3096576,
+            "validatedPct": 0.0002906436011904762,
+            "windowGain": 0.6696555809604293,
+            "windowLoss": 0.1601513639366888
+          }
+        },
+        "strategyRanges": [
+          "signals",
+          "exit"
+        ]
+      },
+      "sha256": "7fb354f2cbb58261b3cb74b22de421c9f73e521e69480be62855f9d8d189a39a",
+      "source": "r-clv-thrust",
+      "stepPerformance": {
+        "maxMs": 18.104438000591472,
+        "meanMs": 0.24986499109521293,
+        "p95Ms": 0.6403489969670773
+      }
+    },
+    {
+      "counts": {
+        "open": 0,
+        "opened": 9,
+        "settled": 9
+      },
+      "drawdown": 0.00043547217244843987,
+      "execution": {
+        "gain": 0.0063018154418797686,
+        "loss": 0.026864739545183917,
+        "maxReturnDrawdown": 0.026864739545183917,
+        "n": 9,
+        "net": -0.02056292410330415,
+        "pf": 0.23457571331673321,
+        "pfState": "finite"
+      },
+      "file": "ed6adccd2f0f76b5.json.gz",
+      "final": {
+        "activeShadowPositions": 343,
+        "at": 1791590400000,
+        "baseRuleCount": 42,
+        "eventVisits": 228468,
+        "historyMinutes": 6000,
+        "mainRuleCount": 48,
+        "minPf": 2.2,
+        "possibleExecutionLanes": 3096576,
+        "realLastN": "coordinated",
+        "realValidationStage": "main",
+        "roots": 1536,
+        "stages": {
+          "base": {
+            "allocatedStreams": 1536,
+            "chainPassed": 4,
+            "closed": 50443,
+            "gain": 89.33868532732309,
+            "loss": 136.42258542570082,
+            "passed": 4,
+            "passingWindowPf": 2.601851521540774,
+            "passingWindowState": "finite",
+            "pf": 0.6548672644529171,
+            "population": 64512,
+            "validatedPct": 0.006200396825396825,
+            "windowGain": 0.20189794410985762,
+            "windowLoss": 0.0775977961994914
+          },
+          "main": {
+            "allocatedStreams": 6231,
+            "chainPassed": 0,
+            "closed": 17343,
+            "gain": 33.73947155386521,
+            "loss": 61.58225390542841,
+            "passed": 8,
+            "passingWindowPf": 3.1699807086643688,
+            "passingWindowState": "finite",
+            "pf": 0.5478765295872211,
+            "population": 3096576,
+            "validatedPct": 0.0002583498677248677,
+            "windowGain": 0.44755029999065754,
+            "windowLoss": 0.14118391912209055
+          },
+          "real": {
+            "allocatedStreams": 14,
+            "chainPassed": 0,
+            "closed": 16,
+            "gain": 0.025742214405954485,
+            "loss": 0.028392480549549945,
+            "passed": 2,
+            "passingWindowPf": 2.487323245191415,
+            "passingWindowState": "finite",
+            "pf": 0.9066560549730668,
+            "population": 3096576,
+            "validatedPct": 6.458746693121693e-05,
+            "windowGain": 0.08757913371360165,
+            "windowLoss": 0.03521019388328914
+          }
+        },
+        "strategyRanges": [
+          "signals",
+          "exit"
+        ]
+      },
+      "hourly": {
+        "counts": {
+          "flat": 9,
+          "negative": 1,
+          "positive": 2
+        },
+        "everyHourNetPositive": false,
+        "hours": [
+          {
+            "from": 1791547200000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791550800000
+          },
+          {
+            "from": 1791550800000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791554400000
+          },
+          {
+            "from": 1791554400000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791558000000
+          },
+          {
+            "from": 1791558000000,
+            "netEquity": 0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791561600000
+          },
+          {
+            "from": 1791561600000,
+            "netEquity": 0.05141541379771297,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "positive",
+            "to": 1791565200000
+          },
+          {
+            "from": 1791565200000,
+            "netEquity": -0.2770649838553254,
+            "settledNetCash": 0.06301815441879768,
+            "settledOrders": 2,
+            "settledReturns": {
+              "gain": 0.0063018154418797686,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 2,
+              "net": 0.0063018154418797686,
+              "pf": null,
+              "pfState": "no-loss"
+            },
+            "state": "negative",
+            "to": 1791568800000
+          },
+          {
+            "from": 1791568800000,
+            "netEquity": 0.020020329024646344,
+            "settledNetCash": -0.2686473954518392,
+            "settledOrders": 7,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": 0.026864739545183917,
+              "maxReturnDrawdown": 0.02686473954518392,
+              "n": 7,
+              "net": -0.026864739545183917,
+              "pf": 0.0,
+              "pfState": "finite"
+            },
+            "state": "positive",
+            "to": 1791572400000
+          },
+          {
+            "from": 1791572400000,
+            "netEquity": 0.0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791576000000
+          },
+          {
+            "from": 1791576000000,
+            "netEquity": 0.0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791579600000
+          },
+          {
+            "from": 1791579600000,
+            "netEquity": 0.0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791583200000
+          },
+          {
+            "from": 1791583200000,
+            "netEquity": 0.0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791586800000
+          },
+          {
+            "from": 1791586800000,
+            "netEquity": 0.0,
+            "settledNetCash": 0.0,
+            "settledOrders": 0,
+            "settledReturns": {
+              "gain": 0.0,
+              "loss": -0.0,
+              "maxReturnDrawdown": 0.0,
+              "n": 0,
+              "net": 0.0,
+              "pf": null,
+              "pfState": "empty"
+            },
+            "state": "flat",
+            "to": 1791590400000
+          }
+        ]
+      },
+      "netEquity": -0.2056292410329661,
+      "performance": {
+        "peakRssKiB": 361624,
+        "seconds": 11.567308336001588
+      },
+      "prehistory": {
+        "activeShadowPositions": 426,
+        "at": 1791547200000,
+        "baseRuleCount": 42,
+        "eventVisits": 201780,
+        "historyMinutes": 6000,
+        "mainRuleCount": 48,
+        "minPf": 2.2,
+        "possibleExecutionLanes": 3096576,
+        "realLastN": "coordinated",
+        "realValidationStage": "main",
+        "roots": 1536,
+        "stages": {
+          "base": {
+            "allocatedStreams": 1536,
+            "chainPassed": 181,
+            "closed": 43804,
+            "gain": 81.21300102751226,
+            "loss": 117.76137081538144,
+            "passed": 181,
+            "passingWindowPf": 2.9048183868787967,
+            "passingWindowState": "finite",
+            "pf": 0.689640418289905,
+            "population": 64512,
+            "validatedPct": 0.28056795634920634,
+            "windowGain": 18.106219605354728,
+            "windowLoss": 6.233167514754584
+          },
+          "main": {
+            "allocatedStreams": 6110,
+            "chainPassed": 0,
+            "closed": 16636,
+            "gain": 32.901342747689576,
+            "loss": 58.51166152108987,
+            "passed": 8,
+            "passingWindowPf": 2.9106115900180805,
+            "passingWindowState": "finite",
+            "pf": 0.5623040244008565,
+            "population": 3096576,
+            "validatedPct": 0.0002583498677248677,
+            "windowGain": 0.41631560659215994,
+            "windowLoss": 0.14303372116702587
+          },
+          "real": {
+            "allocatedStreams": 6,
+            "chainPassed": 0,
+            "closed": 6,
+            "gain": 0.01944039896407472,
+            "loss": 0.0,
+            "passed": 2,
+            "passingWindowPf": 2.487323245191415,
+            "passingWindowState": "finite",
+            "pf": null,
+            "population": 3096576,
+            "validatedPct": 6.458746693121693e-05,
+            "windowGain": 0.08757913371360165,
+            "windowLoss": 0.03521019388328914
+          }
+        },
+        "strategyRanges": [
+          "signals",
+          "exit"
+        ]
+      },
+      "sha256": "a5bffa84dcff5723e2a7540d492d08eac6bea2c98d0c432d739867b23bc88978",
+      "source": "s2-block-scale",
+      "stepPerformance": {
+        "maxMs": 24.708343000384048,
+        "meanMs": 1.140994814852006,
+        "p95Ms": 3.3204869978362694
+      }
+    }
+  ]
+}

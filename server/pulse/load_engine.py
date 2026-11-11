@@ -15,7 +15,6 @@ backpressure, RSS caps, malloc_trim):
 from __future__ import annotations
 
 import gc
-import os
 import threading
 import time
 from collections import OrderedDict
@@ -24,20 +23,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 LEVELS = ("idle", "normal", "busy", "overload", "critical")
 LEVEL_RANK = {n: i for i, n in enumerate(LEVELS)}
-# Pulse holds a ~2GiB set catalog. If cgroup max cannot be read, do not
-# treat that RSS as "critical" using the tiny 90+0.35*n formula.
-CATALOG_SOFT_FLOOR_MB = 1600.0
-CATALOG_HARD_FLOOR_MB = 2200.0
-# Candidates examined per cycle on a ranked 9-64 symbol desk. The time slice
-# (entry_budget_ms below) is what keeps SL/TP running; the count only bounds the
-# cheap rejections (lane already open, cooldown, margin) that fit into it. A
-# count of 8 needed hundreds of cycles to sweep the entry matrix once.
-SMALL_BOOK_ENTRY_BATCH = {"normal": 64, "busy": 24, "overload": 24, "critical": 4}
-# Host-wide pressure: two pulse lanes plus Redis share one box. Shed hist
-# and extra TFs before the kernel starts reclaiming into D-state stalls.
-HOST_PRESSURE_MB = 1600.0
-HOST_CRITICAL_MB = 800.0
-HOST_SWAP_PRESSURE_MB = 1536.0
 
 
 def rss_mb() -> float:
@@ -49,124 +34,39 @@ def rss_mb() -> float:
         return 0.0
 
 
-def unescape_cgroup_rel(rel: str) -> str:
-    """Decode systemd /proc/self/cgroup escapes (``\\x2d`` → ``-``)."""
-    text = str(rel or "")
-    if "\\x" not in text:
-        return text
-    out: List[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        if text[i] == "\\" and i + 3 < n and text[i + 1] in "xX":
-            try:
-                out.append(chr(int(text[i + 2 : i + 4], 16)))
-                i += 4
-                continue
-            except ValueError:
-                pass
-        out.append(text[i])
-        i += 1
-    return "".join(out)
+# The memory limits scale with the machine (2026-11-03): the fixed 140 + 0.55 MB per symbol hard limit (156 MB at 30 symbols) sat below the Set book's own
+# working set (3,176 Sets, 3 days of 1m history: about 250 MB before the first replay), so the governor shed the Set replay for good and no Set was ever
+# validated -- the engine ran and never traded. A share of the machine's memory (the cgroup limit, else MemTotal) now sets the floor of each limit.
+MACHINE_SOFT_SHARE = 0.25
+MACHINE_HARD_SHARE = 0.40
+MACHINE_CRIT_SHARE = 0.10        # the critical level sits this share of the machine above the hard limit (at least 80 MB)
+_MACHINE: Dict[str, float] = {}
 
 
-def cgroup_memory_limit_mb() -> float:
-    """Return this process' effective memory cap when cgroups expose one."""
-    paths = []
-    try:
-        with open("/proc/self/cgroup") as f:
-            for line in f:
-                parts = line.strip().split(":", 2)
-                if len(parts) == 3:
-                    rel = parts[2].lstrip("/")
-                    for candidate in (unescape_cgroup_rel(rel), rel):
-                        if not candidate:
-                            continue
-                        paths.append(os.path.join("/sys/fs/cgroup", candidate, "memory.max"))
-                        paths.append(os.path.join("/sys/fs/cgroup", candidate, "memory", "memory.limit_in_bytes"))
-    except Exception:
-        pass
-    paths.extend(("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"))
-    seen = set()
-    for path in paths:
-        if path in seen:
-            continue
-        seen.add(path)
+def machine_mb() -> float:
+    """The memory this process may use, in MB: the cgroup limit (v2 memory.max, v1 memory.limit_in_bytes) when one is set, else MemTotal; 0 when
+    nothing can be read (the limits then keep their per-symbol formula). Read once."""
+    if "mb" in _MACHINE:
+        return _MACHINE["mb"]
+    vals: List[float] = []
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
         try:
             with open(path) as f:
                 raw = f.read().strip()
-            if not raw or raw.lower() in ("max", "infinity"):
-                continue
-            value = float(raw)
-            if value > 0:
-                return value / 1048576.0
+            if raw.isdigit() and int(raw) < (1 << 60):
+                vals.append(int(raw) / 1048576.0)
         except Exception:
-            continue
-    return 0.0
-
-
-def _cgroup_paths(v2_name: str, v1_name: str) -> List[str]:
-    """Return compatible cgroup v2/v1 paths without assuming one layout."""
-    paths: List[str] = []
+            pass
     try:
-        with open("/proc/self/cgroup") as f:
+        with open("/proc/meminfo") as f:
             for line in f:
-                parts = line.strip().split(":", 2)
-                if len(parts) != 3:
-                    continue
-                rel = parts[2].lstrip("/")
-                for candidate in (unescape_cgroup_rel(rel), rel):
-                    if not candidate:
-                        continue
-                    paths.append(os.path.join("/sys/fs/cgroup", candidate, v2_name))
-                    paths.append(os.path.join("/sys/fs/cgroup", candidate, "memory", v1_name))
+                if line.startswith("MemTotal:"):
+                    vals.append(int(line.split()[1]) / 1024.0)
+                    break
     except Exception:
         pass
-    paths.extend((os.path.join("/sys/fs/cgroup", v2_name),
-                  os.path.join("/sys/fs/cgroup", "memory", v1_name)))
-    seen = set()
-    result = []
-    for path in paths:
-        if path not in seen:
-            seen.add(path)
-            result.append(path)
-    return result
-
-
-def cgroup_memory_current_mb() -> float:
-    """Return current cgroup usage, including reclaimable cache."""
-    for path in _cgroup_paths("memory.current", "memory.usage_in_bytes"):
-        try:
-            with open(path) as handle:
-                raw = handle.read().strip()
-            if raw and raw.lower() not in ("max", "infinity"):
-                value = float(raw)
-                if value >= 0:
-                    return value / 1048576.0
-        except Exception:
-            continue
-    return 0.0
-
-
-def cgroup_memory_events() -> Dict[str, int]:
-    """Read cumulative cgroup pressure/OOM counters when available."""
-    for path in _cgroup_paths("memory.events", "memory.oom_control"):
-        try:
-            result: Dict[str, int] = {}
-            with open(path) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) != 2:
-                        continue
-                    try:
-                        result[parts[0]] = max(0, int(parts[1]))
-                    except (TypeError, ValueError):
-                        continue
-            if result:
-                return result
-        except Exception:
-            continue
-    return {}
+    _MACHINE["mb"] = min(vals) if vals else 0.0
+    return _MACHINE["mb"]
 
 
 def malloc_trim() -> bool:
@@ -178,42 +78,6 @@ def malloc_trim() -> bool:
         return bool(libc.malloc_trim(0))
     except Exception:
         return False
-
-
-def host_mem_mb() -> Tuple[float, float]:
-    """Return (MemAvailable, MemTotal) in MiB from /proc/meminfo."""
-    avail = 0.0
-    total = 0.0
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    avail = float(line.split()[1]) / 1024.0
-                elif line.startswith("MemTotal:"):
-                    total = float(line.split()[1]) / 1024.0
-                if avail and total:
-                    break
-    except Exception:
-        return 0.0, 0.0
-    return avail, total
-
-
-def host_swap_used_mb() -> float:
-    """Return used swap in MiB. Stale swap from a prior spike still counts."""
-    total = 0.0
-    free = 0.0
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("SwapTotal:"):
-                    total = float(line.split()[1]) / 1024.0
-                elif line.startswith("SwapFree:"):
-                    free = float(line.split()[1]) / 1024.0
-    except Exception:
-        return 0.0
-    if total <= 0:
-        return 0.0
-    return max(0.0, total - free)
 
 
 def trim_map(store: Dict[Any, Any], keep: Iterable[Any]) -> int:
@@ -314,10 +178,6 @@ class Budget:
     do_gc: bool = False
     stats_full: bool = True
     warm_s: float = 0.32
-    entry_batch: int = 256
-    entry_budget_ms: float = 500.0
-    cycle_yield_s: float = 0.02
-    memory_headroom_mb: float = 0.0
     shed: List[str] = field(default_factory=list)
 
 
@@ -327,13 +187,7 @@ class LoadGovernor:
         self.partial = True
         self.soft_mb = 0.0  # 0 = scale with universe
         self.hard_mb = 0.0
-        self.cgroup_mb = cgroup_memory_limit_mb()
-        self.cgroup_current_mb = 0.0
-        self.cgroup_headroom_mb = 0.0
-        self.cgroup_events: Dict[str, int] = {}
-        self.cgroup_event_delta: Dict[str, int] = {}
         self.level = "normal"
-        self.raw_level = "normal"
         self.rss = 0.0
         self.rss_peak = 0.0
         self.hot_ms = 0.0
@@ -351,50 +205,31 @@ class LoadGovernor:
         self.n_sym = 0
         self.n_open = 0
         self.shed: List[str] = []
-        self._host_avail_override: Optional[float] = None
-        self._swap_used_override: Optional[float] = None
-        self.host_avail_mb = 0.0
-        self.host_total_mb = 0.0
-        self._cgroup_current_override: Optional[float] = None
-        self._level_down_streak = 0
-        self._last_level_change = 0.0
-        self.safety_partial = False
 
     def configure(self, ov: Optional[Dict[str, Any]] = None) -> None:
         ov = ov or {}
         self.partial = bool(ov.get("loadPartial", True))
         try:
             if ov.get("rssSoftMb") is not None:
-                self.soft_mb = max(0.0, float(ov.get("rssSoftMb") or 0))
+                self.soft_mb = max(40.0, float(ov.get("rssSoftMb") or 0))
             if ov.get("rssHardMb") is not None:
-                self.hard_mb = max(0.0, float(ov.get("rssHardMb") or 0))
+                self.hard_mb = max(60.0, float(ov.get("rssHardMb") or 0))
         except Exception:
             pass
 
     def soft_limit(self, n_sym: int) -> float:
         if self.soft_mb > 0:
-            if self.cgroup_mb > 0:
-                return min(self.soft_mb, max(256.0, self.cgroup_mb - 256.0))
             return self.soft_mb
-        base = 90.0 + max(0, n_sym) * 0.35
-        if self.cgroup_mb > 0:
-            # Leave room for a bounded replay clone and the Python runtime,
-            # while allowing a large-symbol lane to use its explicit service
-            # budget instead of being classified critical forever.
-            return max(base, min(self.cgroup_mb * 0.58, self.cgroup_mb - 160.0))
-        return max(base, CATALOG_SOFT_FLOOR_MB)
+        return max(90.0 + max(0, n_sym) * 0.35, MACHINE_SOFT_SHARE * machine_mb())
 
     def hard_limit(self, n_sym: int) -> float:
         if self.hard_mb > 0:
-            if self.cgroup_mb > 0:
-                return min(self.hard_mb, max(512.0, self.cgroup_mb - 64.0))
             return self.hard_mb
-        base = 140.0 + max(0, n_sym) * 0.55
-        if self.cgroup_mb > 0:
-            # Catalog + hist fills sit near MemoryHigh (~90% of MemoryMax).
-            # 0.78*cgroup classified a healthy 3.2GiB book as critical forever.
-            return max(base, CATALOG_HARD_FLOOR_MB, min(self.cgroup_mb * 0.90, self.cgroup_mb - 120.0))
-        return max(base, CATALOG_HARD_FLOOR_MB)
+        return max(140.0 + max(0, n_sym) * 0.55, MACHINE_HARD_SHARE * machine_mb())
+
+    def crit_limit(self, n_sym: int) -> float:
+        """The RSS at which the governor turns critical (and sheds the Set replay): above the hard limit by 80 MB or MACHINE_CRIT_SHARE of the machine."""
+        return self.hard_limit(n_sym) + max(80.0, MACHINE_CRIT_SHARE * machine_mb())
 
     def observe(
         self,
@@ -410,41 +245,6 @@ class LoadGovernor:
     ) -> Budget:
         rss = float(rss_mb if rss_mb is not None else globals()["rss_mb"]())
         with self.lock:
-            # The limit is effectively static for a service lifetime. Do not
-            # overwrite an operator/test-provided limit on every observation;
-            # current usage and headroom are sampled below and are the dynamic
-            # signals that drive the governor.
-            if self.cgroup_mb <= 0:
-                try:
-                    measured = cgroup_memory_limit_mb()
-                    if measured > 0:
-                        self.cgroup_mb = measured
-                except Exception:
-                    pass
-            try:
-                current = (
-                    self._cgroup_current_override
-                    if self._cgroup_current_override is not None
-                    else cgroup_memory_current_mb()
-                )
-                self.cgroup_current_mb = max(0.0, float(current or 0.0))
-            except Exception:
-                self.cgroup_current_mb = 0.0
-            try:
-                events = cgroup_memory_events()
-                if not self.cgroup_events:
-                    # Historical OOM counters from a prior process in this
-                    # cgroup are a baseline, not a fresh kill this cycle.
-                    self.cgroup_events = dict(events)
-                    self.cgroup_event_delta = {key: 0 for key in events}
-                else:
-                    self.cgroup_event_delta = {
-                        key: max(0, int(value) - int(self.cgroup_events.get(key, 0)))
-                        for key, value in events.items()
-                    }
-                    self.cgroup_events = dict(events)
-            except Exception:
-                self.cgroup_event_delta = {}
             self.n_sym = int(n_sym)
             self.n_open = int(n_open)
             self.hot_ms = float(hot_ms)
@@ -452,27 +252,17 @@ class LoadGovernor:
             self.hist_busy = bool(hist_busy)
             self.kline_ban = bool(kline_ban)
             self.rss = rss
-            usage = max(rss, self.cgroup_current_mb) if self.cgroup_current_mb > 0 else rss
-            self.cgroup_headroom_mb = max(0.0, self.cgroup_mb - usage) if self.cgroup_mb > 0 else 0.0
             if rss > self.rss_peak:
                 self.rss_peak = rss
             if cycle_overrun:
-                self.overrun_n = min(16, self.overrun_n + 1)
+                self.overrun_n += 1
             else:
-                self.overrun_n = max(0, self.overrun_n - 2)
+                self.overrun_n = max(0, self.overrun_n - 1)
             b = self._compute(cycle_overrun=cycle_overrun)
             self.last_budget = b
             self.level = b.level
             self.shed = list(b.shed)
             return b
-
-    def _host_avail(self) -> float:
-        if self._host_avail_override is not None:
-            return float(self._host_avail_override)
-        avail, total = host_mem_mb()
-        self.host_avail_mb = avail
-        self.host_total_mb = total
-        return avail
 
     def _compute(self, cycle_overrun: bool = False) -> Budget:
         n = max(0, self.n_sym)
@@ -480,49 +270,10 @@ class LoadGovernor:
         rss = self.rss
         soft = self.soft_limit(n)
         hard = self.hard_limit(n)
-        crit = hard + 80.0
+        crit = self.crit_limit(n)
         shed: List[str] = []
-        host_avail = self._host_avail()
-        host_critical = host_avail > 0 and host_avail < HOST_CRITICAL_MB
-        swap_used = 0.0
-        if self._swap_used_override is not None:
-            swap_used = float(self._swap_used_override)
-        elif self._host_avail_override is None:
-            try:
-                swap_used = host_swap_used_mb()
-            except Exception:
-                swap_used = 0.0
-        # Residual swap from a prior peak is not pressure when RAM is free.
-        # Only treat swap as host pressure when available RAM is also tight.
-        ram_host_pressure = host_avail > 0 and host_avail < HOST_PRESSURE_MB
-        swap_host_pressure = (
-            swap_used >= HOST_SWAP_PRESSURE_MB
-            and (host_avail <= 0 or host_avail < max(HOST_PRESSURE_MB * 2.5, 4096.0))
-        )
-        host_pressure = ram_host_pressure or swap_host_pressure
-        pressure_rss = max(rss, self.cgroup_current_mb) if self.cgroup_current_mb > 0 else rss
-        cgroup_near_max = bool(
-            self.cgroup_mb > 0
-            and self.cgroup_headroom_mb <= max(96.0, self.cgroup_mb * 0.025)
-        )
-        cgroup_pressure = bool(
-            self.cgroup_mb > 0
-            and self.cgroup_headroom_mb <= max(192.0, self.cgroup_mb * 0.08)
-        )
-        cgroup_event_pressure = any(
-            self.cgroup_event_delta.get(key, 0) > 0
-            for key in ("high", "max", "oom", "oom_kill", "oom_group_kill")
-        )
-        safety_override = bool(
-            cycle_overrun
-            or host_critical
-            or host_pressure
-            or cgroup_pressure
-            or cgroup_event_pressure
-        )
-        self.safety_partial = bool(self.partial or safety_override)
 
-        if not self.partial and not safety_override:
+        if not self.partial:
             return Budget(
                 level="normal",
                 rss_mb=round(rss, 1),
@@ -541,74 +292,23 @@ class LoadGovernor:
                 do_gc=False,
                 stats_full=n <= 48,
                 warm_s=0.32,
-                entry_batch=256,
-                entry_budget_ms=500.0,
-                cycle_yield_s=0.02,
-                memory_headroom_mb=round(self.cgroup_headroom_mb, 1),
             )
 
         level = "idle"
-        # Ranked 50-symbol desk: keep a usable 1m window so hist scoring
-        # can actually produce fills. A 34k-set catalog regularly exceeds
-        # SCAN_S without being short of RAM.
-        small_book = n <= 64
-        if (pressure_rss >= crit or (cycle_overrun and pressure_rss >= hard)
-                or host_critical or cgroup_near_max
-                or self.cgroup_event_delta.get("oom_kill", 0) > 0
-                or self.cgroup_event_delta.get("oom_group_kill", 0) > 0):
+        if rss >= crit or (cycle_overrun and rss >= hard) or self.overrun_n >= 8:
             level = "critical"
-        elif (pressure_rss >= hard or (cycle_overrun and pressure_rss >= soft)
-              or (self.hist_busy and self.warm_ms > 420) or host_pressure
-              or cgroup_pressure or cgroup_event_pressure):
+        elif rss >= hard or cycle_overrun or (self.hist_busy and self.warm_ms > 420):
             level = "overload"
-        elif (pressure_rss >= soft or self.warm_ms > 280 or self.hot_ms > 180
-              or n > 80):
+        elif rss >= soft or self.warm_ms > 280 or self.hot_ms > 180 or n > 80:
             level = "busy"
         elif n > 0:
             level = "normal"
 
-        # Repeated compute overruns are a scheduling signal even when RSS is
-        # healthy. They reduce optional work on the next cycle. Do not jump
-        # to overload (which sheds hist scoring) unless RAM is actually tight.
-        if self.overrun_n >= 2 and LEVEL_RANK[level] < LEVEL_RANK["busy"]:
-            level = "busy"
-        ram_tight = pressure_rss >= soft or (
-            self.cgroup_mb > 0 and self.cgroup_headroom_mb < max(384.0, self.cgroup_mb * 0.12)
-        )
-        if self.overrun_n >= 8 and ram_tight and LEVEL_RANK[level] < LEVEL_RANK["overload"]:
-            level = "overload"
-        self.raw_level = level
-
-        # Move up immediately for safety. Move down only after three calm
-        # observations so a reclaim burst cannot make the budget flap.
-        current_rank = LEVEL_RANK.get(self.level, LEVEL_RANK["normal"])
-        target_rank = LEVEL_RANK[level]
-        if target_rank > current_rank:
-            self.level = level
-            self._level_down_streak = 0
-            self._last_level_change = time.monotonic()
-        elif target_rank < current_rank:
-            self._level_down_streak += 1
-            if self._level_down_streak >= 3:
-                self.level = level
-                self._level_down_streak = 0
-                self._last_level_change = time.monotonic()
-        else:
-            self._level_down_streak = 0
-        level = self.level
-
-        b = Budget(
-            level=level,
-            rss_mb=round(rss, 1),
-            memory_headroom_mb=round(self.cgroup_headroom_mb, 1),
-        )
+        b = Budget(level=level, rss_mb=round(rss, 1))
         if level == "critical":
             b.scan_chunk = max(4, min(8, n_open + 4))
             b.kline_batch = 2
-            # A replay clone retains one bounded tape per Set. Keep the
-            # historic window to one symbol under critical pressure so the
-            # safety cap is not reached before the next commit.
-            b.hist_chunk = 1
+            b.hist_chunk = 2
             b.extra_n = 0
             b.lookback = 80
             b.universe_rows = 40
@@ -617,27 +317,15 @@ class LoadGovernor:
             b.tf_15m = False
             b.extra_sources = False
             b.hist_run = False
-            # One-symbol slices still run unless RSS is actually at the cgroup
-            # max. An unread cgroup plus a 2GiB catalog used to freeze hist
-            # forever at "load critical".
-            if self.cgroup_mb > 0:
-                b.hist_run = self.cgroup_headroom_mb >= max(192.0, self.cgroup_mb * 0.06)
-            else:
-                b.hist_run = rss < CATALOG_HARD_FLOOR_MB + 200.0
             b.kline_rest = not self.hist_busy
             b.do_gc = True
             b.stats_full = False
             b.warm_s = 0.55
-            b.entry_batch = 32
-            b.entry_budget_ms = 100.0
-            b.cycle_yield_s = 0.12
-            shed = ["extra", "tf15m", "tf5m", "fat-stats"]
-            if not b.hist_run:
-                shed.append("hist")
+            shed = ["extra", "tf15m", "tf5m", "hist", "fat-stats"]
         elif level == "overload":
             b.scan_chunk = max(6, min(12, 8 + n_open))
             b.kline_batch = 3
-            b.hist_chunk = 2
+            b.hist_chunk = 3
             b.extra_n = 2
             b.lookback = 120
             b.universe_rows = 60
@@ -645,39 +333,30 @@ class LoadGovernor:
             b.tf_5m = True
             b.tf_15m = False
             b.extra_sources = False
-            b.hist_run = pressure_rss < hard and not cgroup_near_max
+            b.hist_run = rss < hard
             b.kline_rest = not self.hist_busy
             b.do_gc = True
             b.stats_full = False
             b.warm_s = 0.48
-            b.entry_batch = 64
-            b.entry_budget_ms = 180.0
-            b.cycle_yield_s = 0.08
             shed = ["extra", "tf15m", "fat-stats"]
             if not b.hist_run:
                 shed.append("hist")
         elif level == "busy":
-            b.scan_chunk = max(8, min(16, 10 + min(n_open, 8)))
-            b.kline_batch = 3
-            # The full catalog is complete even when replay is sliced. A
-            # smaller history slice bounds clone+tape memory and avoids
-            # cgroup reclaim stalls on the 2 GiB lane.
-            b.hist_chunk = 2 if n > 200 else 6
-            b.extra_n = 2 if n > 80 else 4
-            b.lookback = 120 if n > 200 else 180
-            b.universe_rows = 60 if n > 200 else 80
-            b.vol1h_batch = 4
+            b.scan_chunk = max(8, min(20, 12 + n_open))
+            b.kline_batch = 4
+            b.hist_chunk = 6
+            b.extra_n = 4
+            b.lookback = 180
+            b.universe_rows = 80
+            b.vol1h_batch = 6
             b.tf_5m = True
             b.tf_15m = n <= 80
             b.extra_sources = n <= 40
             b.hist_run = True
             b.kline_rest = not (self.hist_busy and n > 48)
-            b.do_gc = rss >= soft or n > 200
+            b.do_gc = rss >= soft
             b.stats_full = n <= 40
-            b.warm_s = 0.45
-            b.entry_batch = 128
-            b.entry_budget_ms = 300.0
-            b.cycle_yield_s = 0.04
+            b.warm_s = 0.40
             if not b.tf_15m:
                 shed.append("tf15m")
             if not b.extra_sources:
@@ -700,9 +379,6 @@ class LoadGovernor:
             b.do_gc = False
             b.stats_full = n <= 48
             b.warm_s = 0.32
-            b.entry_batch = 256
-            b.entry_budget_ms = 500.0
-            b.cycle_yield_s = 0.02
             if not b.stats_full:
                 shed.append("fat-stats")
 
@@ -714,64 +390,6 @@ class LoadGovernor:
             b.kline_rest = False
             b.extra_sources = False
             shed.append("kline-ban")
-        if host_pressure:
-            b.do_gc = True
-            b.hist_chunk = min(int(b.hist_chunk or 1), 3 if small_book else 1)
-            b.stats_full = False
-            if "host" not in shed:
-                shed.append("host")
-            if "fat-stats" not in shed:
-                shed.append("fat-stats")
-        if host_critical:
-            b.do_gc = True
-            b.hist_chunk = 2 if small_book else 1
-            b.extra_sources = False
-            b.tf_15m = False
-            if "host-critical" not in shed:
-                shed.append("host-critical")
-        if small_book:
-            # Ranked 50-symbol desk: keep a usable 1m window so hist scoring
-            # can actually produce fills. Overlay lookback (480) still wins
-            # at replay; this floor only stops the governor from clamping
-            # in-memory bars to 80 and wiping the tape.
-            floor_look = 180 if level == "critical" else 240
-            b.lookback = max(int(b.lookback or 0), floor_look)
-            if n <= 8:
-                floor_chunk = max(1, n)
-            elif level in ("critical", "overload"):
-                floor_chunk = 2
-            else:
-                floor_chunk = 4
-            b.hist_chunk = max(int(b.hist_chunk or 1), floor_chunk)
-            if not (self.cgroup_mb > 0 and self.cgroup_headroom_mb < max(192.0, self.cgroup_mb * 0.06)):
-                b.hist_run = True
-                if "hist" in shed:
-                    shed.remove("hist")
-            # A 50-symbol intern book must keep 5m/15m/extra indications unless
-            # RAM is actually critical. False host/swap pressure used to shed
-            # tf15m and stall Set scoring.
-            if level != "critical" and not host_critical:
-                b.tf_5m = True
-                b.tf_15m = True
-                b.extra_sources = True
-                for token in ("tf15m", "tf5m", "extra"):
-                    if token in shed:
-                        shed.remove(token)
-            # 50-symbol intern: 128 sequential entry POSTs blow the scan
-            # budget and starve SL/TP. Cap the cooperative window.
-            if level == "critical":
-                b.entry_batch = min(int(b.entry_batch or 1), SMALL_BOOK_ENTRY_BATCH["critical"])
-                b.entry_budget_ms = min(float(b.entry_budget_ms or 80.0), 80.0)
-            elif level in ("overload", "busy"):
-                b.entry_batch = min(int(b.entry_batch or 1), SMALL_BOOK_ENTRY_BATCH[level])
-                b.entry_budget_ms = min(float(b.entry_budget_ms or 150.0), 150.0)
-            else:
-                b.entry_batch = min(int(b.entry_batch or 1), SMALL_BOOK_ENTRY_BATCH["normal"])
-                b.entry_budget_ms = min(float(b.entry_budget_ms or 180.0), 180.0)
-        if n:
-            b.scan_chunk = min(int(b.scan_chunk or 1), n)
-            b.hist_chunk = min(int(b.hist_chunk or 1), n)
-            b.kline_batch = min(int(b.kline_batch or 1), n)
         b.shed = shed
         return b
 
@@ -787,29 +405,15 @@ class LoadGovernor:
         if not names:
             return [], 0
         take = max(1, int(chunk or 1))
-        if take >= len(names) or not self.safety_partial:
+        if take >= len(names) or not self.partial:
             return list(names), 0
         out: List[str] = []
         seen = set()
         name_set = set(names)
-        open_unique: List[str] = []
-        open_seen = set()
         for s in open_syms:
-            if s and s in name_set and s not in open_seen:
-                open_unique.append(s)
-                open_seen.add(s)
-        # Open lots stay scannable, but they cannot consume the whole chunk.
-        # Ranked intern majors (BTC/ETH/...) must keep rotating even when
-        # BCH/SOL/XRP already have many independent lots.
-        min_rotate = 1 if take <= 2 else max(take // 2, 2)
-        if open_unique:
-            min_rotate = min(min_rotate, take - 1)
-        else:
-            min_rotate = take
-        open_budget = min(len(open_unique), max(0, take - min_rotate))
-        for s in open_unique[:open_budget]:
-            out.append(s)
-            seen.add(s)
+            if s and s in name_set and s not in seen:
+                out.append(s)
+                seen.add(s)
         remaining = max(0, take - len(out))
         ranked_n = min(4, remaining // 2) if remaining >= 2 else remaining
         head_src = list(ranked or names)
@@ -817,13 +421,11 @@ class LoadGovernor:
         for s in head_src:
             if added >= ranked_n:
                 break
-            if s and s in name_set and s not in seen and s not in open_seen:
+            if s and s not in seen:
                 out.append(s)
                 seen.add(s)
                 added += 1
-        rot_rest = [s for s in names if s not in seen and s not in open_seen]
-        rot_opens = [s for s in names if s not in seen and s in open_seen]
-        rot = rot_rest + rot_opens
+        rot = [s for s in names if s not in seen]
         if not rot:
             return out[:take], 0
         n = len(rot)
@@ -834,6 +436,21 @@ class LoadGovernor:
         nxt = (start + need) % n
         return out[:take], nxt
 
+    def history_window(self, symbols: Sequence[str], chunk: int, cursor: int) -> Tuple[List[str], int]:
+        """Rotate through every history symbol, even when open positions outnumber the chunk.
+
+        History is separate from the hot scan, so prioritizing the same open positions on
+        every pass must not starve the remaining symbols or leave an expansion pending.
+        """
+        names = list(dict.fromkeys(s for s in symbols if s))
+        if not names:
+            return [], 0
+        take = max(1, int(chunk or 1))
+        if take >= len(names) or not self.partial:
+            return names, 0
+        start = int(cursor) % len(names)
+        return [names[(start + i) % len(names)] for i in range(take)], (start + take) % len(names)
+
     def free(self, force: bool = False) -> Dict[str, Any]:
         now = time.time()
         if not force and now - self.last_gc < 6.0:
@@ -842,14 +459,10 @@ class LoadGovernor:
         try:
             n0 = gc.collect(0)
             n1 = gc.collect(1)
-            n2 = 0
-            if force:
-                n2 = gc.collect(2)
+            n2 = gc.collect(2)
         except Exception:
             n0 = n1 = n2 = 0
-        trimmed = False
-        if force or n0 + n1 + n2 > 0:
-            trimmed = malloc_trim()
+        trimmed = malloc_trim()
         after = rss_mb()
         self.last_gc = now
         self.gc_n += 1
@@ -870,12 +483,6 @@ class LoadGovernor:
             "peakMb": round(self.rss_peak, 1),
             "softMb": round(self.soft_limit(self.n_sym), 1),
             "hardMb": round(self.hard_limit(self.n_sym), 1),
-            "cgroupMb": round(self.cgroup_mb, 1),
-            "cgroupCurrentMb": round(self.cgroup_current_mb, 1),
-            "memoryHeadroomMb": round(self.cgroup_headroom_mb, 1),
-            "cgroupEvents": dict(self.cgroup_events),
-            "cgroupEventDelta": dict(self.cgroup_event_delta),
-            "rawLevel": self.raw_level,
             "scanChunk": int(b.scan_chunk),
             "histChunk": int(b.hist_chunk),
             "klineBatch": int(b.kline_batch),
@@ -888,40 +495,22 @@ class LoadGovernor:
             "doGc": bool(b.do_gc),
             "statsFull": bool(b.stats_full),
             "partial": bool(self.partial),
-            "safetyPartial": bool(self.safety_partial),
             "trimmed": int(self.trimmed),
             "gcN": int(self.gc_n),
             "overrunN": int(self.overrun_n),
-            "entryBatch": int(b.entry_batch),
-            "entryBudgetMs": round(float(b.entry_budget_ms), 1),
-            "cycleYieldS": round(float(b.cycle_yield_s), 3),
             "shed": list(self.shed)[:8],
             "hotMs": round(self.hot_ms, 1),
             "warmMs": round(self.warm_ms, 1),
             "histBusy": bool(self.hist_busy),
-            "hostAvailMb": round(self.host_avail_mb if self._host_avail_override is None else self._host_avail_override, 1),
-            "hostTotalMb": round(self.host_total_mb, 1),
         }
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     g = LoadGovernor()
-    g._host_avail_override = 8192.0
-    g.cgroup_mb = 4096.0
-    g._cgroup_current_override = 42.0
     b = g.observe(n_sym=12, n_open=1, hot_ms=40, warm_ms=70, rss_mb=42.0)
     out.append(("load-level-calm", b.level in ("idle", "normal"), f"level={b.level} chunk={b.scan_chunk}"))
     out.append(("load-chunk-fits", b.scan_chunk >= 8 and b.scan_chunk <= 12, f"chunk={b.scan_chunk}"))
-    escaped = r"system.slice/system-cts\x2dga\x2dpulse.slice/cts-ga-pulse@bingx-x02.service"
-    out.append((
-        "cgroup-unescape-hyphen",
-        unescape_cgroup_rel(escaped) == "system.slice/system-cts-ga-pulse.slice/cts-ga-pulse@bingx-x02.service",
-        unescape_cgroup_rel(escaped),
-    ))
-    out.append(("cgroup-unescape-plain", unescape_cgroup_rel("system.slice/foo") == "system.slice/foo", "ok"))
-    swap_used = host_swap_used_mb()
-    out.append(("load-swap-used-finite", swap_used >= 0.0 and swap_used < 1_000_000.0, f"swap={swap_used}"))
     out.append(("load-tf-calm", b.tf_5m and b.tf_15m and b.hist_run, f"5m={b.tf_5m} 15m={b.tf_15m}"))
     b2 = g.observe(
         n_sym=400,
@@ -935,30 +524,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("load-level-hot", b2.level in ("overload", "critical"), f"level={b2.level} rss={b2.rss_mb}"))
     out.append(("load-shed-hot", (not b2.tf_15m) and (not b2.extra_sources) and b2.scan_chunk <= 12, f"chunk={b2.scan_chunk} shed={b2.shed}"))
     out.append(("load-backpressure", b2.kline_rest is False or "hist" in b2.shed or not b2.hist_run, f"klineRest={b2.kline_rest} hist={b2.hist_run}"))
-    g3 = LoadGovernor()
-    g3._host_avail_override = 8192.0
-    g3.cgroup_mb = 4096.0
-    g3._cgroup_current_override = 700.0
-    g3.overrun_n = 16
-    b3 = g3.observe(n_sym=50, n_open=3, hot_ms=800, warm_ms=200, rss_mb=700.0, cycle_overrun=True, hist_busy=False)
-    out.append(("load-overrun-healthy-ram", b3.level == "busy" and b3.hist_run, f"level={b3.level} hist={b3.hist_run} rss={b3.rss_mb}"))
     keep, cur = g.scan_window(["A", "B", "C", "D", "E", "F"], ["C"], chunk=3, cursor=0)
     out.append(("load-window-open-first", keep[:1] == ["C"] and len(keep) == 3, f"keep={keep} cur={cur}"))
     keep2, cur2 = g.scan_window(["A", "B", "C", "D", "E", "F"], ["C"], chunk=3, cursor=cur)
     out.append(("load-window-rotate", keep2[0] == "C" and keep2 != keep and cur2 != cur, f"keep2={keep2} cur2={cur2}"))
-    junk, _ = g.scan_window(
-        ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"],
-        ["SOL-USDT", "XRP-USDT"],
-        chunk=3,
-        cursor=0,
-        ranked=["AIN-USDT", "FLYBRAIN-USDT", "BTC-USDT"],
-    )
-    out.append(("load-window-ranked-in-book", "AIN-USDT" not in junk and "FLYBRAIN-USDT" not in junk and "BTC-USDT" in junk, f"keep={junk}"))
-    majors = [f"S{i}" for i in range(20)]
-    hog = majors[:12]
-    mixed, _ = g.scan_window(majors, hog, chunk=12, cursor=0, ranked=["JUNK"] + majors)
-    rotated = [s for s in mixed if s not in hog]
-    out.append(("load-window-opens-do-not-starve", "JUNK" not in mixed and len(mixed) == 12 and len(rotated) >= 3, f"keep={mixed} rot={rotated}"))
     d = {"A": 1, "B": 2, "C": 3, "D": 4}
     n = trim_map(d, {"A", "C"})
     out.append(("load-trim-map", n == 2 and set(d) == {"A", "C"}, f"n={n} keys={sorted(d)}"))
@@ -987,98 +556,6 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ranks = [LEVEL_RANK[x] for x in LEVELS]
     out.append(("load-levels", ranks == list(range(5)), str(LEVELS))
     )
-    g._host_avail_override = 8192.0
-    g._swap_used_override = 2048.0
-    g.cgroup_mb = 4608.0
-    g._cgroup_current_override = 240.0
-    b_swap = g.observe(n_sym=48, n_open=16, hot_ms=22, warm_ms=80, rss_mb=230.0)
-    out.append((
-        "load-swap-ignored-when-ram-free",
-        b_swap.level not in ("overload", "critical") and b_swap.tf_15m and b_swap.extra_sources and "host" not in b_swap.shed and int(b_swap.entry_batch or 0) <= SMALL_BOOK_ENTRY_BATCH["normal"] and float(b_swap.entry_budget_ms or 0) <= 180.0,
-        f"level={b_swap.level} tf15m={b_swap.tf_15m} shed={b_swap.shed}",
-    ))
-    g._swap_used_override = None
-    g._host_avail_override = 400.0
-    b_host = g.observe(n_sym=25, n_open=0, hot_ms=40, warm_ms=40, rss_mb=220.0)
-    out.append((
-        "load-host-pressure",
-        b_host.level in ("overload", "critical") and b_host.do_gc and "host" in b_host.shed,
-        f"level={b_host.level} shed={b_host.shed}",
-    ))
-    g._host_avail_override = 8192.0
-    g_floor = LoadGovernor()
-    g_floor.cgroup_mb = 0.0
-    g_floor._host_avail_override = 8192.0
-    out.append((
-        "load-catalog-soft-floor",
-        g_floor.soft_limit(25) >= CATALOG_SOFT_FLOOR_MB - 0.1,
-        str(g_floor.soft_limit(25)),
-    ))
-    out.append((
-        "load-catalog-hard-floor",
-        g_floor.hard_limit(25) >= CATALOG_HARD_FLOOR_MB - 0.1,
-        str(g_floor.hard_limit(25)),
-    ))
-    avail, total = host_mem_mb()
-    out.append(("load-host-mem-readable", avail >= 0 and total >= 0, f"avail={avail:.0f} total={total:.0f}"))
-    g_book = LoadGovernor()
-    g_book.cgroup_mb = 3840.0
-    g_book._cgroup_current_override = 900.0
-    g_book._host_avail_override = 4096.0
-    g_book.overrun_n = 20
-    b_book = g_book.observe(n_sym=25, n_open=0, hot_ms=12000, warm_ms=80, rss_mb=1864.0, cycle_overrun=True)
-    out.append((
-        "load-overrun-not-critical-healthy-rss",
-        b_book.level != "critical",
-        f"level={b_book.level} overrun={g_book.overrun_n} look={b_book.lookback}",
-    ))
-    out.append((
-        "load-small-book-keeps-hist",
-        b_book.lookback >= 180 and b_book.hist_chunk >= 2 and b_book.hist_run,
-        f"look={b_book.lookback} chunk={b_book.hist_chunk} run={b_book.hist_run} level={b_book.level}",
-    ))
-    g8 = LoadGovernor()
-    g8.cgroup_mb = 3840.0
-    g8._cgroup_current_override = 400.0
-    g8._host_avail_override = 4096.0
-    b8 = g8.observe(n_sym=8, n_open=0, hot_ms=40, warm_ms=40, rss_mb=400.0)
-    out.append((
-        "load-eight-book-one-slice",
-        int(b8.hist_chunk) == 8 and b8.hist_run and int(b8.lookback) >= 240,
-        f"chunk={b8.hist_chunk} look={b8.lookback} level={b8.level}",
-    ))
-    gd = LoadGovernor()
-    gd.cgroup_mb = 4096.0
-    gd._host_avail_override = 8192.0
-    gd._cgroup_current_override = 1000.0
-    calm = gd.observe(n_sym=8, n_open=0, hot_ms=20, warm_ms=20, rss_mb=500.0)
-    gd._cgroup_current_override = 3975.0
-    tight = gd.observe(n_sym=8, n_open=0, hot_ms=20, warm_ms=20, rss_mb=500.0)
-    out.append((
-        "load-headroom-adapts",
-        calm.memory_headroom_mb > 2500 and tight.level == "critical" and tight.memory_headroom_mb < 200,
-        f"calmHeadroom={calm.memory_headroom_mb} tightHeadroom={tight.memory_headroom_mb} level={tight.level}",
-    ))
-    gd._cgroup_current_override = 1000.0
-    for _ in range(3):
-        recovered = gd.observe(n_sym=8, n_open=0, hot_ms=20, warm_ms=20, rss_mb=500.0)
-    out.append((
-        "load-level-hysteresis",
-        recovered.level == "normal" and gd._level_down_streak == 0,
-        f"level={recovered.level} down={gd._level_down_streak}",
-    ))
-    gs = LoadGovernor()
-    gs.cgroup_mb = 4096.0
-    gs._host_avail_override = 8192.0
-    gs._cgroup_current_override = 4085.0
-    gs.configure({"loadPartial": False})
-    bs = gs.observe(n_sym=200, n_open=0, rss_mb=500.0)
-    kept, _ = gs.scan_window([str(i) for i in range(200)], [], bs.scan_chunk, 0)
-    out.append((
-        "load-safety-overrides-full-mode",
-        bs.level == "critical" and gs.safety_partial and len(kept) <= bs.scan_chunk,
-        f"level={bs.level} safetyPartial={gs.safety_partial} chunk={bs.scan_chunk} kept={len(kept)}",
-    ))
     return out
 
 

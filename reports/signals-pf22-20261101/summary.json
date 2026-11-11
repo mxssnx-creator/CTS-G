@@ -1,0 +1,337 @@
+{
+  "purpose": "retrospective cost/risk diagnostics; no untouched holdout, no preset promoted",
+  "results": [
+    {
+      "file": "reports/signals-pf22-20261101/baseline.json.gz",
+      "contexts": 2304,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 2304,
+            "passed": 55,
+            "pct": 2.3871527777777777,
+            "chainPassed": 55,
+            "windowSamples": 276,
+            "pooledWindowPf": 4.010896562007129,
+            "pooledWindowState": "finite",
+            "insufficient": 1909
+          },
+          "main": {
+            "evaluated": 2304,
+            "passed": 4,
+            "pct": 0.1736111111111111,
+            "chainPassed": 4,
+            "windowSamples": 24,
+            "pooledWindowPf": 2.9222860293537285,
+            "pooledWindowState": "finite",
+            "insufficient": 2238
+          },
+          "real": {
+            "evaluated": 2304,
+            "passed": 2,
+            "pct": 0.08680555555555555,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.3087336629164708,
+            "pooledWindowState": "finite",
+            "insufficient": 2282
+          }
+        }
+      },
+      "execution": {
+        "n": 31,
+        "gain": 0.06652105676932357,
+        "loss": 0.09077764614069886,
+        "pf": 0.7327911616723427,
+        "pfState": "finite",
+        "net": -0.024256589371375287,
+        "maxReturnDrawdown": 0.06560378000862094
+      },
+      "orders": {
+        "ordersOpened": 32,
+        "ordersSettled": 31,
+        "ordersOpen": 1,
+        "positionsOpened": 32,
+        "positionsSettled": 31,
+        "positionsOpen": 1
+      },
+      "hourly": {
+        "flat": 2,
+        "positive": 5,
+        "negative": 5
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0018617028753868945,
+      "performance": {
+        "wallSeconds": 1.3323435069905827,
+        "peakRssKiB": 42980
+      }
+    },
+    {
+      "file": "reports/signals-pf22-20261101/expanded.json.gz",
+      "contexts": 9216,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 9216,
+            "passed": 137,
+            "pct": 1.4865451388888888,
+            "chainPassed": 137,
+            "windowSamples": 676,
+            "pooledWindowPf": 4.349447189499352,
+            "pooledWindowState": "finite",
+            "insufficient": 7533
+          },
+          "main": {
+            "evaluated": 9216,
+            "passed": 12,
+            "pct": 0.13020833333333334,
+            "chainPassed": 11,
+            "windowSamples": 60,
+            "pooledWindowPf": 3.365671444419331,
+            "pooledWindowState": "finite",
+            "insufficient": 8993
+          },
+          "real": {
+            "evaluated": 9216,
+            "passed": 2,
+            "pct": 0.021701388888888888,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.3087336629164708,
+            "pooledWindowState": "finite",
+            "insufficient": 9173
+          }
+        }
+      },
+      "execution": {
+        "n": 61,
+        "gain": 0.13782210772326894,
+        "loss": 0.19516594153934486,
+        "pf": 0.7061790937302677,
+        "pfState": "finite",
+        "net": -0.05734383381607591,
+        "maxReturnDrawdown": 0.09218761514897159
+      },
+      "orders": {
+        "ordersOpened": 62,
+        "ordersSettled": 61,
+        "ordersOpen": 1,
+        "positionsOpened": 62,
+        "positionsSettled": 61,
+        "positionsOpen": 1
+      },
+      "hourly": {
+        "positive": 5,
+        "negative": 7
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0026606185057118535,
+      "performance": {
+        "wallSeconds": 4.680136405993835,
+        "peakRssKiB": 110800
+      }
+    },
+    {
+      "file": "reports/signals-pf22-20261101/cost-stress.json.gz",
+      "contexts": 9216,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 9216,
+            "passed": 71,
+            "pct": 0.7703993055555556,
+            "chainPassed": 71,
+            "windowSamples": 332,
+            "pooledWindowPf": 4.990937829416509,
+            "pooledWindowState": "finite",
+            "insufficient": 7533
+          },
+          "main": {
+            "evaluated": 9216,
+            "passed": 4,
+            "pct": 0.043402777777777776,
+            "chainPassed": 4,
+            "windowSamples": 20,
+            "pooledWindowPf": 3.046137100795758,
+            "pooledWindowState": "finite",
+            "insufficient": 9075
+          },
+          "real": {
+            "evaluated": 9216,
+            "passed": 0,
+            "pct": 0.0,
+            "chainPassed": 0,
+            "windowSamples": 0,
+            "pooledWindowPf": null,
+            "pooledWindowState": "empty",
+            "insufficient": 9199
+          }
+        }
+      },
+      "execution": {
+        "n": 17,
+        "gain": 0.023461173277548774,
+        "loss": 0.0964739377479988,
+        "pf": 0.24318664527649012,
+        "pfState": "finite",
+        "net": -0.07301276447045002,
+        "maxReturnDrawdown": 0.07301276447045003
+      },
+      "orders": {
+        "ordersOpened": 17,
+        "ordersSettled": 17,
+        "ordersOpen": 0,
+        "positionsOpened": 17,
+        "positionsSettled": 17,
+        "positionsOpen": 0
+      },
+      "hourly": {
+        "flat": 5,
+        "negative": 5,
+        "positive": 2
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0018792058041283833,
+      "performance": {
+        "wallSeconds": 4.553072788999998,
+        "peakRssKiB": 110024
+      }
+    },
+    {
+      "file": "reports/signals-pf22-20261101/maker-hypothesis.json.gz",
+      "contexts": 9216,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 9216,
+            "passed": 170,
+            "pct": 1.8446180555555556,
+            "chainPassed": 170,
+            "windowSamples": 832,
+            "pooledWindowPf": 4.493957204864029,
+            "pooledWindowState": "finite",
+            "insufficient": 7533
+          },
+          "main": {
+            "evaluated": 9216,
+            "passed": 14,
+            "pct": 0.1519097222222222,
+            "chainPassed": 13,
+            "windowSamples": 76,
+            "pooledWindowPf": 3.3945482544363506,
+            "pooledWindowState": "finite",
+            "insufficient": 8968
+          },
+          "real": {
+            "evaluated": 9216,
+            "passed": 2,
+            "pct": 0.021701388888888888,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.4247285527283835,
+            "pooledWindowState": "finite",
+            "insufficient": 9165
+          }
+        }
+      },
+      "execution": {
+        "n": 65,
+        "gain": 0.15327650987459565,
+        "loss": 0.19048303225456972,
+        "pf": 0.8046727735295096,
+        "pfState": "finite",
+        "net": -0.03720652237997407,
+        "maxReturnDrawdown": 0.08455908124109324
+      },
+      "orders": {
+        "ordersOpened": 66,
+        "ordersSettled": 65,
+        "ordersOpen": 1,
+        "positionsOpened": 66,
+        "positionsSettled": 65,
+        "positionsOpen": 1
+      },
+      "hourly": {
+        "positive": 6,
+        "negative": 6
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.0024780561821082852,
+      "performance": {
+        "wallSeconds": 4.438144629995804,
+        "peakRssKiB": 111144
+      }
+    },
+    {
+      "file": "reports/signals-pf22-20261101/smaller-book.json.gz",
+      "contexts": 9216,
+      "stages": {
+        "t": 1791547200000,
+        "stages": {
+          "base": {
+            "evaluated": 9216,
+            "passed": 137,
+            "pct": 1.4865451388888888,
+            "chainPassed": 137,
+            "windowSamples": 676,
+            "pooledWindowPf": 4.349447189499352,
+            "pooledWindowState": "finite",
+            "insufficient": 7533
+          },
+          "main": {
+            "evaluated": 9216,
+            "passed": 12,
+            "pct": 0.13020833333333334,
+            "chainPassed": 11,
+            "windowSamples": 60,
+            "pooledWindowPf": 3.365671444419331,
+            "pooledWindowState": "finite",
+            "insufficient": 8993
+          },
+          "real": {
+            "evaluated": 9216,
+            "passed": 2,
+            "pct": 0.021701388888888888,
+            "chainPassed": 1,
+            "windowSamples": 8,
+            "pooledWindowPf": 3.3087336629164708,
+            "pooledWindowState": "finite",
+            "insufficient": 9173
+          }
+        }
+      },
+      "execution": {
+        "n": 41,
+        "gain": 0.08793097652154583,
+        "loss": 0.1347154303782229,
+        "pf": 0.6527164429098695,
+        "pfState": "finite",
+        "net": -0.046784453856677066,
+        "maxReturnDrawdown": 0.0704601806760255
+      },
+      "orders": {
+        "ordersOpened": 42,
+        "ordersSettled": 41,
+        "ordersOpen": 1,
+        "positionsOpened": 42,
+        "positionsSettled": 41,
+        "positionsOpen": 1
+      },
+      "hourly": {
+        "positive": 5,
+        "negative": 7
+      },
+      "everyHourNetPositive": false,
+      "drawdown": 0.001051803873583569,
+      "performance": {
+        "wallSeconds": 4.650479235002422,
+        "peakRssKiB": 110680
+      }
+    }
+  ]
+}

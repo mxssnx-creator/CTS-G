@@ -1,0 +1,44 @@
+{
+  "repository": "mxssnx-creator/CTS-A-O",
+  "commit": "2599b652b9429c34d290a07e8df1d70a62d80462",
+  "purpose": "Pinned pure source registry with explicit local numeric corrections; no account or exchange adapter imports",
+  "files": {
+    "domain/types.ts": "e461c62f5ccf5494a25c4ad62bfaf54f1a37faaa86968a99d2e4997bff905bb9",
+    "indications/break-config.ts": "8dc1d063438c7f14eca7787b2e0c4bb98ec932bb8f04dc576384f697990874da",
+    "indications/break.ts": "a472be61c22a7304e515c6897d8672ff3e1741f201da2f9dad3fcee16fb42a73",
+    "indications/cache.ts": "f75792e9e7b2f74c50e59ef4f1cfbaa1a4cc7f02b0dae84f179be7ba501f48fa",
+    "indications/intraday-timeframes.ts": "c26006992c0f622a24c8c320d46d8d14564f1bcb163ed72b8e8e55332dbaaea7",
+    "indications/inverse-config.ts": "12730be5eba8543cccb87f169cf1aef37bf3a58b4766a19f31dbff397941ed25",
+    "indications/inverse.ts": "eb4199bdd78c210f895f27ada4a2cd25f8a09ddce3849ca25be8f972a35c8f6c",
+    "indications/low-range-research.ts": "9b6bafecb148c1ff5085830766e62a4a03aa4f90b42161e61cc519330cc456af",
+    "indications/low-range.ts": "1cf2f14d741c60c13a04d5e94a08efda197ba56c3cc83f304461756079e938e9",
+    "indications/market.ts": "62ff4c0ad4f6f9d2778d76a2be00cce51f011d304f1abde2c2e3631d4f55a3dd",
+    "indications/micro-family.ts": "8ff70a86a5a85b2a8f1e71965d0daa0152166c3f27d0ed39b9461879f3792881",
+    "indications/micro.ts": "a39aa60e5eb8a3b5dd674d9ca91217f895aeaeacc0973a7396b9b310f94da82f",
+    "indications/range-families.ts": "7727bf1f3b92786dcdb92d87c9308df08e7aa9323b6db559b5e32166917bcc2d",
+    "indications/registry.ts": "e3f05440da70223d7a42d01da69691e6493e833dedf9271089cd7dd57afb7042",
+    "indications/relate.ts": "1629e05e1b48477a20392bee9e5b8ba3e1e0e8a493ef46229641951822e1e3e1",
+    "indications/research.ts": "fabfbbc2f03ca04204cacb5b668f921fe1e30aa59ed5d0ce8470e9dbbf916ead",
+    "indications/research2.ts": "8b9cba9d970bf5b1bd0661fc38f24e77f481befb5a06952e672b6662cc6289c5",
+    "indications/research3.ts": "3eba19e75ef751dc3d98c1ff6019d49819b3359c3f625b0228c4b5c8f752eedd",
+    "indications/research4.ts": "37ea0b5e205c3a3d2a0dac975700236b8f411eb0633d1eac4a5c05386058488d",
+    "indications/research5.ts": "c438fa3e3ceeb5ac13e9a01d43e17c1a65fdf009e91ce47d87f4a214e83c27a5",
+    "indications/stable02.ts": "78a1215c16495af37325a2d0be7226b216e582e57f0af17cfa73ff273b11ce87",
+    "indications/stream-math.ts": "8566ef3aa323ed9abeeb1a5e0479a8faf5e343d4573d880f13a3068551b68fa4",
+    "indications/tactic.ts": "560f0755b0514cdb532a6b0a016ae1a4d4c909c1d17ca0ae91b13399f3cd026e",
+    "math/indicators.ts": "020258414a511dd3f1e8085ebf27d65f39f8d0a60b36b1d418266f4ac4a9f508",
+    "metrics/profit-factor.mjs": "463630fe0a4ac399fd3a6225278e0ea090c5841284488c9c709fbbf6bb60f21d",
+    "minimal-coord.ts": "433c1713ec60d952a3e351301c71688887213421b89513a4bdbdabbea610a2a1",
+    "model-cost.ts": "19b825a0efb446e7800e11a3a5a4aa6866522098025ef0e72171e4cd655dac61",
+    "signal-config.ts": "c506bcead1ba0802948dbdf2c41f9302135621d3a3f17b2a8d2b2f2a76a9827c",
+    "signal-coordination.ts": "2531a8c77832c0cde9fd9cb63e7863a85da2e4eff9d981db40590453ad12eb9f",
+    "signal-policy.ts": "1fe9786b951baf26b05ed1e4955fcf284f587eb15e0c7ca003491775ac8dc3b9",
+    "volume-ratio.ts": "6ad04baa7605855edb8aace91b685dfedd826cfb0216a714abc4ad743acfcd51"
+  },
+  "localCorrections": {
+    "math/indicators.ts": {
+      "upstreamSha256": "948c163cd7d9e18acc57a4757c698115c034ef1d657e033b1d2e1536e60ccd93",
+      "reason": "Centered variance, Bollinger mean and CCI deviation prevent cancellation and phantom signals on flat or near-flat prices. Offline array producer only; incremental stream math remains upstream."
+    }
+  }
+}

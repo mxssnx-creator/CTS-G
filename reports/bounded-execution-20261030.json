@@ -1,0 +1,922 @@
+{
+  "symbols": [
+    "BTC-USDT",
+    "DOGE-USDT",
+    "ETH-USDT",
+    "SOL-USDT"
+  ],
+  "input_bars": {
+    "BTC-USDT": 660,
+    "DOGE-USDT": 660,
+    "ETH-USDT": 660,
+    "SOL-USDT": 660
+  },
+  "cost_pct": 0.12,
+  "runs": [
+    {
+      "axis": false,
+      "block": false,
+      "source": "historical execution model",
+      "hold_auto": false,
+      "start": 1792001280,
+      "end": 1792019280,
+      "sets": 438,
+      "closed": {
+        "n": 13,
+        "pf": 99.0,
+        "net": 0.01776958498493664
+      },
+      "with_block": {
+        "n": 13,
+        "pf": 99.0,
+        "net": 0.01776958498493664
+      },
+      "add_fills": 0,
+      "open_at_end": 4,
+      "validated_pct_mean": 21.175421089237652,
+      "groups": {
+        "indications|base|15|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0017950051491345334
+        },
+        "flow|base|25|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.002207028121769254
+        },
+        "trend|base|14|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0022885866981217588
+        },
+        "multi|base|25|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0013176882871347424
+        },
+        "trend|base|15|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.0015217953952170258
+        },
+        "multi|base|19|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.004946548040700234
+        },
+        "multi|base|16|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.002408032008871042
+        },
+        "general|base|17|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.0012849012839880505
+        }
+      },
+      "trades": [
+        {
+          "set": "indications:1m:sl1.00:st15",
+          "pack": "indications",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792001880,
+          "reason": "scratch+",
+          "net": 0.0005829583688805979,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "flow:1m:sl1.00:st25",
+          "pack": "flow",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792002300,
+          "reason": "scratch+",
+          "net": 0.000471607378129282,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st14",
+          "pack": "trend",
+          "type": "base",
+          "step": 14,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792003320,
+          "reason": "scratch+",
+          "net": 0.0013628508664876966,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st25",
+          "pack": "multi",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792002480,
+          "exit_t": 1792003500,
+          "reason": "scratch+",
+          "net": 0.00045265413781743263,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st14",
+          "pack": "trend",
+          "type": "base",
+          "step": 14,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792002060,
+          "exit_t": 1792004700,
+          "reason": "scratch+",
+          "net": 0.0009257358316340622,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st25",
+          "pack": "multi",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792003680,
+          "exit_t": 1792004700,
+          "reason": "scratch+",
+          "net": 0.0008650341493173098,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st15",
+          "pack": "trend",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792004880,
+          "exit_t": 1792009920,
+          "reason": "scratch+",
+          "net": 0.0015217953952170258,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "indications:1m:sl1.00:st15",
+          "pack": "indications",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792004880,
+          "exit_t": 1792010460,
+          "reason": "scratch+",
+          "net": 0.0012120467802539355,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st19",
+          "pack": "multi",
+          "type": "base",
+          "step": 19,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792010100,
+          "exit_t": 1792010700,
+          "reason": "scratch+",
+          "net": 0.00223121707287935,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "flow:1m:sl1.00:st25",
+          "pack": "flow",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792003500,
+          "exit_t": 1792011060,
+          "reason": "scratch+",
+          "net": 0.001735420743639972,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st16",
+          "pack": "multi",
+          "type": "base",
+          "step": 16,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792010880,
+          "exit_t": 1792011840,
+          "reason": "scratch+",
+          "net": 0.002408032008871042,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st19",
+          "pack": "multi",
+          "type": "base",
+          "step": 19,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792011240,
+          "exit_t": 1792011840,
+          "reason": "scratch+",
+          "net": 0.0027153309678208844,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "general:1m:sl1.00:st17",
+          "pack": "general",
+          "type": "base",
+          "step": 17,
+          "lane": "pos",
+          "symbol": "BTC-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792017780,
+          "reason": "scratch+",
+          "net": 0.0012849012839880505,
+          "block_net": 0.0,
+          "add_fills": 0
+        }
+      ],
+      "block_evidence": {
+        "lanes": [],
+        "minSamples": 8,
+        "window": 25,
+        "error": ""
+      }
+    },
+    {
+      "axis": true,
+      "block": false,
+      "source": "historical execution model",
+      "hold_auto": false,
+      "start": 1792001280,
+      "end": 1792019280,
+      "sets": 438,
+      "closed": {
+        "n": 13,
+        "pf": 99.0,
+        "net": 0.01776958498493664
+      },
+      "with_block": {
+        "n": 13,
+        "pf": 99.0,
+        "net": 0.01776958498493664
+      },
+      "add_fills": 0,
+      "open_at_end": 4,
+      "validated_pct_mean": 21.175421089237652,
+      "groups": {
+        "indications|base|15|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0017950051491345334
+        },
+        "flow|base|25|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.002207028121769254
+        },
+        "trend|base|14|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0022885866981217588
+        },
+        "multi|base|25|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0013176882871347424
+        },
+        "trend|base|15|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.0015217953952170258
+        },
+        "multi|base|19|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.004946548040700234
+        },
+        "multi|base|16|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.002408032008871042
+        },
+        "general|base|17|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.0012849012839880505
+        }
+      },
+      "trades": [
+        {
+          "set": "indications:1m:sl1.00:st15",
+          "pack": "indications",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792001880,
+          "reason": "scratch+",
+          "net": 0.0005829583688805979,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "flow:1m:sl1.00:st25",
+          "pack": "flow",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792002300,
+          "reason": "scratch+",
+          "net": 0.000471607378129282,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st14",
+          "pack": "trend",
+          "type": "base",
+          "step": 14,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792003320,
+          "reason": "scratch+",
+          "net": 0.0013628508664876966,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st25",
+          "pack": "multi",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792002480,
+          "exit_t": 1792003500,
+          "reason": "scratch+",
+          "net": 0.00045265413781743263,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st14",
+          "pack": "trend",
+          "type": "base",
+          "step": 14,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792002060,
+          "exit_t": 1792004700,
+          "reason": "scratch+",
+          "net": 0.0009257358316340622,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st25",
+          "pack": "multi",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792003680,
+          "exit_t": 1792004700,
+          "reason": "scratch+",
+          "net": 0.0008650341493173098,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st15",
+          "pack": "trend",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792004880,
+          "exit_t": 1792009920,
+          "reason": "scratch+",
+          "net": 0.0015217953952170258,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "indications:1m:sl1.00:st15",
+          "pack": "indications",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792004880,
+          "exit_t": 1792010460,
+          "reason": "scratch+",
+          "net": 0.0012120467802539355,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st19",
+          "pack": "multi",
+          "type": "base",
+          "step": 19,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792010100,
+          "exit_t": 1792010700,
+          "reason": "scratch+",
+          "net": 0.00223121707287935,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "flow:1m:sl1.00:st25",
+          "pack": "flow",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792003500,
+          "exit_t": 1792011060,
+          "reason": "scratch+",
+          "net": 0.001735420743639972,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st16",
+          "pack": "multi",
+          "type": "base",
+          "step": 16,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792010880,
+          "exit_t": 1792011840,
+          "reason": "scratch+",
+          "net": 0.002408032008871042,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st19",
+          "pack": "multi",
+          "type": "base",
+          "step": 19,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792011240,
+          "exit_t": 1792011840,
+          "reason": "scratch+",
+          "net": 0.0027153309678208844,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "general:1m:sl1.00:st17",
+          "pack": "general",
+          "type": "base",
+          "step": 17,
+          "lane": "pos",
+          "symbol": "BTC-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792017780,
+          "reason": "scratch+",
+          "net": 0.0012849012839880505,
+          "block_net": 0.0,
+          "add_fills": 0
+        }
+      ],
+      "block_evidence": {
+        "lanes": [],
+        "minSamples": 8,
+        "window": 25,
+        "error": ""
+      }
+    },
+    {
+      "axis": true,
+      "block": true,
+      "source": "historical execution model",
+      "hold_auto": false,
+      "start": 1792001280,
+      "end": 1792019280,
+      "sets": 438,
+      "closed": {
+        "n": 13,
+        "pf": 99.0,
+        "net": 0.01776958498493664
+      },
+      "with_block": {
+        "n": 13,
+        "pf": 99.0,
+        "net": 0.01776958498493664
+      },
+      "add_fills": 0,
+      "open_at_end": 4,
+      "validated_pct_mean": 21.175421089237652,
+      "groups": {
+        "indications|base|15|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0017950051491345334
+        },
+        "flow|base|25|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.002207028121769254
+        },
+        "trend|base|14|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0022885866981217588
+        },
+        "multi|base|25|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.0013176882871347424
+        },
+        "trend|base|15|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.0015217953952170258
+        },
+        "multi|base|19|pos": {
+          "n": 2,
+          "pf": 99.0,
+          "net": 0.004946548040700234
+        },
+        "multi|base|16|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.002408032008871042
+        },
+        "general|base|17|pos": {
+          "n": 1,
+          "pf": 99.0,
+          "net": 0.0012849012839880505
+        }
+      },
+      "trades": [
+        {
+          "set": "indications:1m:sl1.00:st15",
+          "pack": "indications",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792001880,
+          "reason": "scratch+",
+          "net": 0.0005829583688805979,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "flow:1m:sl1.00:st25",
+          "pack": "flow",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792002300,
+          "reason": "scratch+",
+          "net": 0.000471607378129282,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st14",
+          "pack": "trend",
+          "type": "base",
+          "step": 14,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792003320,
+          "reason": "scratch+",
+          "net": 0.0013628508664876966,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st25",
+          "pack": "multi",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792002480,
+          "exit_t": 1792003500,
+          "reason": "scratch+",
+          "net": 0.00045265413781743263,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st14",
+          "pack": "trend",
+          "type": "base",
+          "step": 14,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792002060,
+          "exit_t": 1792004700,
+          "reason": "scratch+",
+          "net": 0.0009257358316340622,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st25",
+          "pack": "multi",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792003680,
+          "exit_t": 1792004700,
+          "reason": "scratch+",
+          "net": 0.0008650341493173098,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "trend:1m:sl1.00:st15",
+          "pack": "trend",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792004880,
+          "exit_t": 1792009920,
+          "reason": "scratch+",
+          "net": 0.0015217953952170258,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "indications:1m:sl1.00:st15",
+          "pack": "indications",
+          "type": "base",
+          "step": 15,
+          "lane": "pos",
+          "symbol": "SOL-USDT",
+          "entry_t": 1792004880,
+          "exit_t": 1792010460,
+          "reason": "scratch+",
+          "net": 0.0012120467802539355,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st19",
+          "pack": "multi",
+          "type": "base",
+          "step": 19,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792010100,
+          "exit_t": 1792010700,
+          "reason": "scratch+",
+          "net": 0.00223121707287935,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "flow:1m:sl1.00:st25",
+          "pack": "flow",
+          "type": "base",
+          "step": 25,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792003500,
+          "exit_t": 1792011060,
+          "reason": "scratch+",
+          "net": 0.001735420743639972,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st16",
+          "pack": "multi",
+          "type": "base",
+          "step": 16,
+          "lane": "pos",
+          "symbol": "ETH-USDT",
+          "entry_t": 1792010880,
+          "exit_t": 1792011840,
+          "reason": "scratch+",
+          "net": 0.002408032008871042,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "multi:1m:sl1.00:st19",
+          "pack": "multi",
+          "type": "base",
+          "step": 19,
+          "lane": "pos",
+          "symbol": "DOGE-USDT",
+          "entry_t": 1792011240,
+          "exit_t": 1792011840,
+          "reason": "scratch+",
+          "net": 0.0027153309678208844,
+          "block_net": 0.0,
+          "add_fills": 0
+        },
+        {
+          "set": "general:1m:sl1.00:st17",
+          "pack": "general",
+          "type": "base",
+          "step": 17,
+          "lane": "pos",
+          "symbol": "BTC-USDT",
+          "entry_t": 1792001280,
+          "exit_t": 1792017780,
+          "reason": "scratch+",
+          "net": 0.0012849012839880505,
+          "block_net": 0.0,
+          "add_fills": 0
+        }
+      ],
+      "block_evidence": {
+        "lanes": [
+          {
+            "lane": "general:1m:sl1.00:st17|pos|BTC-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 0.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "trend:1m:sl1.00:st14|pos|DOGE-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 0.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "flow:1m:sl1.00:st25|pos|ETH-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 0.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "indications:1m:sl1.00:st15|pos|SOL-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 0.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "multi:1m:sl1.00:st25|pos|ETH-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 0.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "flow:1m:sl1.00:st25|pos|DOGE-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 99.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "multi:1m:sl1.00:st19|pos|ETH-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 99.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "multi:1m:sl1.00:st19|pos|ETH-USDT|SHORT",
+            "group": 2,
+            "paper": {
+              "pf": 0.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "multi:1m:sl1.00:st16|pos|ETH-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 99.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          },
+          {
+            "lane": "multi:1m:sl1.00:st19|pos|DOGE-USDT|SHORT",
+            "group": 1,
+            "paper": {
+              "pf": 99.0,
+              "n": 1,
+              "source": "paper"
+            },
+            "executed": {
+              "pf": 0.0,
+              "n": 0,
+              "source": "executed"
+            }
+          }
+        ],
+        "minSamples": 8,
+        "window": 25,
+        "error": ""
+      }
+    }
+  ],
+  "seconds": 60.80203190699831,
+  "peak_rss_kb": 31756
+}

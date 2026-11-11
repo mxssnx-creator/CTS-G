@@ -1,39 +1,1022 @@
-# CTS-G Project Guide
+# CTS-G: standards for every session
 
-Independent BingX pulse desks with a full indication / Set / coordination stack and a desk UI.
+## Standing owner rules (newest first)
 
-## Project Structure
-- `src/`: Desk UI (React/Vite)
-- `server/pulse/`: Engine (Python)
-  - `pulse_trader.py`: Main entry point for the engine
-  - `pulse_http.py`: Sidecar for stats/control (port :3015)
-  - `indication_engine.py`, `set_engine.py`, `coord_engine.py`, `block_engine.py`, `dca_engine.py`, `exit_engine.py`: Core logic modules
-  - `overlay-bingx-x01.json` (Live), `overlay-bingx-x02.json` (VST): Connection overlays
-- `deploy/`: Linux installation and update scripts
-- `scripts/`: Test, smoke, and helper scripts
+- **2026-11-11, owner: "Frage 1 JA ... prozessiere alle block counts unabhängig, keine restrictions" / "Liste welche block besser als ohne und stelle default settings so das diese in wirkung" /
+  "Teste selbst welche [Axis] funktionieren" / "Axis ergebnisse müssen auf jeden fall hohen PF haben".** Record: `docs/verification/block-coordinations-20261111.md` sections 6 and 7. No connection started.
+  (a) **Block rounds are in the engine** (`server/pulse/block_rounds.py`, overlay `blockRounds`, desk Settings "Block rounds", state `block-state-<conn>.json.rounds.json`, stats `execution.blockRounds`):
+  a procedure = (relation, group key, block count N); the group's positions form blocks of N; a losing block raises the group's next entries by ratio x level of the ORIGINAL volume until the
+  volume-weighted net since that block is back at zero; step = one more level per further losing block; pause after a positive block or a recovery. All six counts of every selected relation always
+  form their own blocks and keep their own record; only a switched-on count raises; multiple = 1 + the sum over the raising procedures, at most `maxMult`. `Pulse.place` applies it like the relation
+  raise (best effort, rounded down, never cancels an entry); the close hands over the base position's own net; an unscored close teaches nothing. The study (`scripts/block_rounds_study.py`) drives the same book.
+  (b) **Better than without** (nine windows, 1,859 positions, without = PF 0.6475 / net -495.1; rule: weighted PF at or above the unit PF on all nine windows AND net not below): of 3,456 single
+  procedures **18 pass, all relation step x block count 5 with step on** (ratio 0.1 .. 1.0: PF 0.661 .. 0.750, net -494.6 .. -480.2). Every other count's best is 9 / 9 on the PF with a lower net
+  (N1-N3 0.650 / -538.8, N4 0.658 / -503.2, N6 0.659 / -496.7); all six counts raising at once lowers the net in all 90 arms.
+  (c) **Shipped by the owner's instruction** (overlays, the three Block presets, desk; engine absent-key default off): relation step, **count 5, ratio 1.0, step to level 2, no pause, ceiling x 3**;
+  counts 1-4 and 6 observe. Weighted PF 0.750 against 0.648, net -480.2 against -495.1: still under 1, chosen on the windows it is reported on, and the earlier forward check held for no setting.
+  A raised entry is up to 3 x its base size on the live account. Revert: `blockRounds.enabled` false.
+  (d) **Axis in the other projects** (read: CTS-C, CTS-A-O, CTS-X, CTS-A): none records an Axis result above 1 (CTS-A-O: Axis PF 0.22 on 564 closes; CTS-C: selected-candidate holdout 0.72 - 0.75, no positive
+  Axis figure; CTS-A's "axis" is a price level, another thing). The one structural difference is CTS-C's rule: disjoint windows (the previous window is the closes BEFORE the last window and must reach
+  the floor; the last window is judged by the sign of its net). Built here as an option: `axisDisjoint`, `axisLastOutcome` any / positive / negative (`coord_engine.judge`, default off, golden unchanged).
+  **Measured (executed PF; W1 dev / W1 sealed / W2 dev / W2 sealed): no Axis 0.916 / 0.775 / 0.504 / 0.865; shipped Axis 0.708 / 0.977 / 0.523 / 0.944; disjoint any 0.872 / 0.782 / 0.507 / 0.914;
+  disjoint + last positive 0.732 / 1.008 / 0.485 / 1.002; disjoint + last negative 0.920 / 0.663 / 0.444 / 0.624** (62 - 405 positions per cell). Disjoint + positive reaches 1.0 on both sealed parts and is
+  under no Axis on both development parts, and against the shipped Axis it is better on three and worse on one: the ship rule is not met, **no Axis default changed**. A high Axis PF cannot be ordered:
+  the parents it admits are under PF 1 on these windows whatever rule admits them; `axisDisjoint: true` + `axisLastOutcome: "positive"` is two keys for the owner.
+  (e) **Intensive test and one defect fixed (later the same day):** hand-calculated cases (ratio from the original volume, step to the top level, hold, recovery at exactly zero, pause of exactly P blocks,
+  blocks of 3, stacking under the ceiling) and 300 random books of 30,318 overlapping positions with all six counts raising, each multiple recomputed from nothing: 0 mismatches. Found: a position leaving
+  the book with no close record kept its block waiting and would have stopped its group's procedure for good (`Pulse.rounds_release` at every drop site; a restart forgets members the book no longer holds).
+  Checks `trader.block-rounds-*`, `block_structure.block-rounds-*` (3), `selftest.block_rounds`, `lane_rank.the-disjoint-axis-*`; mutants `block rounds:` (21), `axis disjoint:` (3), all caught. Regression 706 pass.
 
-## Common Commands
+- **2026-11-11, owner: "windows no longer on the basis of a period, instead on the basis of the last N positions and configs" / "keep using both".** `lastNBasis`
+  (overlay, desk Settings "Last-N windows by count"): "time" (the default, unchanged, golden identical) = a last-N window is the newest N orders inside the
+  lookback; "count" = the newest N orders of the configuration whatever their age, bounded only by the held history (`SetBook.evidence_bars` = `history_bars`;
+  the stage chain, `_score_one`, the Axis streams and the simulators read the one bound; part of the evaluation signature). Engine and simulator agree on 1,008
+  sampled pairs incl. two count configurations; check `processing.last-n-windows-by-count-read-the-newest-orders-whatever-their-age`. **Measured (executed PF /
+  positions, with the overlay's Axis; time -> count): W1 dev 0.708 / 405 -> 0.763 / 405, W2 dev 0.523 / 222 -> 0.538 / 232, W1 sealed 0.977 / 204 -> 0.788 / 181,
+  W2 sealed 0.944 / 74 -> 0.766 / 74** (without the Axis 0.916 -> 0.937, 0.504 -> 0.517, 0.775 -> 0.626, 0.865 -> 0.963). Better on both development windows, worse on
+  both sealed ones: the ship rule is not met, so "time" stays the shipped basis and "count" is one key. Reports: `lane_axis_study.py` prints every arm also on the
+  newest 25 / 50 / 100 / 200 positions it closed and on the newest 25 of each configuration group (pack / type / lane), next to the period figure.
 
-### UI (Desk)
-- `npm install`: Install dependencies
-- `npm run dev`: Start development server (port :8080)
-- `npm run build`: Build for production
-- `npm run typecheck`: Run TypeScript type checking
-- `npm test`: Run JS/TS tests
+- **2026-11-11, owner: "Make Block fully effectively working with high PF as without ... try different coordinations completely until its working" / "check the
+  Block structure ... independent for each block count with ratios and correct stacking, for each Set and Overall".** Record: `docs/verification/block-coordinations-20261111.md`.
+  Nine windows (W5 10-29 .. W4 11-11, the same 20 symbols, x01 overlay, 24 h pre-history, parents admitted by the overlay's Axis); no connection started.
+  (a) **An add's result follows its parent's.** Unconditional adds by the parent's Set type paid exactly in the windows where that type of parent was itself
+  profitable (trailing on W1 dev / W2 sealed, base on W1 sealed / W3 sealed) and lost elsewhere; the executed parents were under PF 1 on all nine windows. Adds on
+  Exit-Set parents and adds past the middle of the way to a fixed target lost on seven of seven windows; no other state of an add (speed, room, side, lane, level,
+  the parent still valid with its Axis allowing) had a stable sign.
+  (b) **Sweeps** (`scripts/block_coordination_study.py`: stored executed parents, then thousands of coordinations in seconds; the shipped one reproduces
+  `stack_eval.py` to the digit): 11,704 coordinations with parent filters -> 25 at or above "without" on the four development windows -> on three windows no rule
+  was chosen on 24 fail (the best family +49 .. +56 net points in development, -44 .. -49 in confirmation) and the one that holds made 3 adds. 22,680 structural
+  coordinations (relations x mode x count tables x ratios x Additive / Shared x skip x observations x PF ratio) -> none passes the development windows. Nothing was
+  shipped from a sweep; a development winner among thousands of settings is selection.
+  (c) **Changed: three rules that only remove adds** (`block_rules.py`, called by `set_block.SetBlockBook`, `stack_eval.block_sim2` and the study; shipped in the
+  overlays, presets and desk): `blockGuard` true (the book's own executed adds must not be in deficit; the add that would have gone is followed on paper, and adding
+  resumes when the paper adds have earned the deficit back; no window, no count; kept in the Block state file), `blockTargetShare` 0.5 (a count of a fixed-target parent
+  adds only up to the middle of the way to the target), `blockKinds` ["base", "trail"] (no add on Exit-Set parents). The engine's absent-key defaults stay off / 0 / every
+  type. **13 days, the book carried chronologically, 1,859 parents: before -22.1 net points on 17 adds (PF 0.6392 against 0.6475 without), now -0.7 on 1 add (0.6472
+  against 0.6475)**; the guard is holding because the adds it follows on paper lost another 19 points. Block is at "without", not above it, and it is there because it
+  almost stopped adding. Revert: `blockGuard` false, `blockTargetShare` 0, `blockKinds` all three.
+  (d) **Structure checked, no defect** (`block_structure.*`): every count its own step, ratio and evidence record; six counts one PositionCost apart with ratios
+  0.1 .. 1.0 run six independent procedures (counts whose own record wins add their own ratio x the ORIGINAL volume, the others do not); Shared splits one budget;
+  "set" is taught only by that Set's parents, "step" (Overall) by every Set of the pack, TP step, lane and direction; observations are one per count and parent, from
+  the price an add would have had. Mutants `block guard:`, `block share:`, `block kinds:`.
 
-### Engine (Pulse)
-- `python3 scripts/engine-test.py`: Run engine-level tests (sets, indications, rank, etc.)
-- `sudo systemctl restart cts-g-pulse@bingx-x01`: Restart Live engine
-- `sudo systemctl restart cts-g-pulse@bingx-x02`: Restart VST engine
-- `sudo systemctl restart cts-g-desk`: Restart Desk UI service
-- `sudo systemctl restart cts-g-pulse-http`: Restart Pulse HTTP sidecar
+- **2026-11-10 / 11, owner: "make indications work also by type and additionally by step ... use ratios for higher volume factors ... for the overall and major
+  lanes types ... Set it optimally" / "Test, Fix Axis, Block .. make fully work with correct high PF related to without".** Full record and tables:
+  `docs/verification/relation-lanes-axis-block-20261110.md`. Two three-day datasets of 20 symbols (W1 11-07 18:00 .. 11-10 18:00, W2 11-04 18:00 .. 11-07 18:00
+  UTC), x01 overlay, 24 h pre-history, development 32 h + sealed 16 h each; no connection started.
+  (a) **Relation lanes** (`relationLanes`, `server/pulse/relation_lanes.py`, **shipped OFF**): next to every configuration's own lane, last-N lanes of the post-Base
+  orders by relation: overall (every Set of a direction), indication and type (major), TP range and step / distance (minor). A lane is a chain of new Sets built
+  only from orders valid after Base: the Relation Set (the members' Main-Set orders, ONE observation per entry = the mean net of its closed member orders) with a
+  Main window, and the Relation Real Set (the entries opened while that window passed, read from the closes before each entry) with a Real window. A passing lane
+  adds its ratio to the volume of a member Set's positive-lane entry (1 + the passing ratios, at most `maxMult`; rounded down to the lot step; never cancels an
+  entry; never opens, blocks, closes or scores anything; the Real Negative lane is not raised). Defaults when enabled: Main 25, Real 15, floor 1.1, ratios overall
+  / indication / type 0.25, range / step 0, ceiling x 2. **Measured (unit PF / volume-weighted PF, executed positions): W1 0.708 / 0.661 on 405 (the 77 raised
+  positions 0.265 against 0.847), W2 0.522 / 0.526 on 219 (13 raised).** Seven window / floor arms: all worse on W1, all within 0.025 on W2. The sign is not stable,
+  so no ratio above 0 is supported and the ship rule is not met. Checks `relations.*`, `trader.relation-lanes-raise-a-set-entry-and-never-cancel-it`,
+  `selftest.relation_lanes`; mutants `relation lanes:`. Study: `scripts/relation_lane_study.py`.
+  (b) **Axis against no Axis** (PF, positions; W1 dev / W1 sealed / W2 dev / W2 sealed): none 0.916 / 0.775 / 0.504 / 0.865; x01 all four **0.708 / 0.977 / 0.523 /
+  0.944** (pooled 0.728 against 0.759 on about 910); `last` 4 alone 0.759 / 0.920 / 0.519 / 0.944; `prev` 12, `cont` 8 inside the noise; `pause` 8 never binds. Better
+  on three windows, worse on one, and the sign of `last` flips between the development and sealed part of the same three days. **No Axis setting changed.**
+  (c) **Block against the same parents without it** (shipped: symbol + step, 3 counts x 3 costs, ratio 1.0): 0.693 / 0.969 / 0.516 / 0.909 against 0.708 / 0.977 /
+  0.523 / 0.944: lower on four of four windows, 23 adds, -17.4 net points, the adds' PF 0.48 / 0.81 / 0 / 0; no candidate's adds are net positive (step only -4.3).
+  **Block is left as the owner switched it on (2026-11-05) and is not profitable on this evidence**; `blockEnabled: false` is one key and the owner's decision.
+  (d) **Lane order**: pos-neg / neg-pos / neg / pos read 0.916 / 0.884 / 0.936 / 0.804 (W1 dev) and 0.504 / 0.532 / 0.533 / 0.495 (W2 dev) without the Axis: no change.
+  (e) **Defects fixed.** A Set open on BOTH lanes was always named positive (`lane_of` ignored `laneOrder`): with neg-pos / neg and no Axis its position was opened
+  and scored on the wrong lane, and a closed positive scope dropped it instead of taking it on the negative lane (`lane_of` follows the order, `lane_in`; check
+  `lane_rank.a-set-open-on-both-lanes-executes-on-the-lane-it-was-picked-for`). Simulator: a Set is a candidate of every lane it passes under the Axis; the Block
+  floor reads the parent's own lane window; `stack_eval.py` starts at the same hour as `trade_sim.py`. A check that located `presets/` from the engine copy failed
+  on every fault-injection copy and was the false catcher of new mutants (reads `common.ROOT` now).
+  (f) **Statistics.** `execution.lift` (desk "Executed - with against without"): the settled Set parents without and with Block adds, and at volume 1 against their
+  relation multiple, on the original base notional, rebuilt from the trades file (`pulse_trader.lift_note` / `lift_report`, check
+  `trader.lift-figures-compare-the-same-parents-with-and-without`). Relation lanes table; "Stage and lane progress" chart (the share passing Base / Main / Real /
+  Real Negative per pass, each on its own line, and the relation lanes passing: `pfBase.history[].stages` / `.relations`).
+  (g) Rule kept: a stack type or gate is enabled or removed only when the counterfactual replay agrees on every window; a weighted PF is never quoted as a unit PF.
+  Caches of `stack_eval.py` and of `trade_sim.py` / `relation_lane_study.py` / `lane_axis_study.py` are not interchangeable (different cost resolution): one file each.
 
-### General
-- `npm run lint`: Lint UI code
-- `npm run format`: Format UI code
+- **2026-11-09, post-Base / Block follow-up:** preserve actual later losses even
+  when qualification PF was high. Block now honors explicit range floors,
+  counts partial targets once, weights add cash by entry notional, includes
+  actual base fees when complete, and ignores unverified closes in its lifecycle.
+  Fixed-target adds require positive remaining net room. Replay preserves both
+  valid parent lanes. The 52-case offline sensitivity found no profitable preset;
+  see `docs/verification/block-postbase-20261109.md`. No connection was started.
 
-## Development Guidelines
-- **UI**: Follow React 19 / TanStack patterns. Use Tailwind CSS 4 for styling.
-- **Engine**: Maintain Python 3.13 compatibility. Ensure Redis key consistency for connection info.
-- **Deployment**: Always verify deployments with `scripts/engine-test.py` and browser checks.
-- **Secrets**: Never commit API keys or private identities to Git. Use Redis for runtime keys.
+- **2026-11-09, later request:** Lower Micro qualification while remaining positive. The explicit TP-range floor is 1.01 (`minPfByRange.micro`) across its stages; the window-size `minPfMicro` control is a different policy. This requested threshold is not evidence of profitable future executions or an account start.
+
+- **2026-11-09, latest request:** Micro qualification first, then 80 symbols and the lowest volume factor (0.05) for a 3 USD test account. This supersedes the 120-symbol/factor-1 preference below; it is not evidence of an account start. Preserve the distinction between strategy qualification, strict funded-size feasibility and verified venue execution. Public fee/lot quotes are not authenticated account evidence. The new Micro study is offline and never starts a connection or changes a production preset.
+
+- **2026-11-08, latest requested x01 values:** the owner requested `symbolCap` 120 and `volumeFactor` 1, superseding the earlier request for 100 symbols and the minimum volume factor. This records the requested preference for later sessions; it is not evidence that an active instance has those settings.
+
+- **2026-11-06, owner: "Make only profitable ones run, but also Signals" / "Ensure correctness and correct PF eval".** Measured on C / B / A (3-day windows, executed positions, `trade_sim.py`, 20 symbols; PF / orders / net %).
+  (a) **PF evaluation corrected.** A close the venue made while the engine was down (its Set's own stop, trailing and time exit did not run) was scored as a Set-lane result: x01's three outages booked 49 such closes
+  (43 targets), which lifted the executed PF to 0.87 per close / 1.12 in USDT and the negative lane to 1.53; engine-managed closes read **0.71 / 0.91 overall, positive lane 0.54, negative lane 1.22 (174 closes)**. Such closes are now recorded
+  with the reason suffix `-downtime`, counted apart (`downtimeCloses`), scored nowhere and do not ban the symbol (`pulse_trader.not_scored_close`, outage intervals in `downtime-<conn>.json` written by `credit_restart_downtime`; history
+  backfilled from the log). `scripts/live_pf_audit.py` (read-only) recomputes the executed PF per scope from the trades file with plain loops and diffs it with `stats.execution`: equal on every scope before the fix (577 closes) and after.
+  Checks `trader.closes-made-while-the-engine-was-down-are-recorded-but-not-scored`, `trader.live-executed-pf-equals-the-plain-reading-of-the-trades-file`. PF is stated two ways (equal weight per close and in USDT); do not mix them.
+  (b) **Yesterday's static switch-offs were WRONG and are reverted** (Micro range, Short Range, SL ratios 0.75 / 1.5 / 1.75 / 2.75 / 3.5, trailing pairs locking under 0.2 %): a group that reads badly in isolation also takes signals that
+  would otherwise go to worse Sets. Counterfactual replay (same data, same rules, trend + breakout on): all four switched off pooled **0.701 / 464 / -61.7**, PF C 1.07 / B 0.54 / A 0.38; Micro back on 0.815 / 503 / -37.2; Short Range back
+  on 0.682 / 473 / -68.5; all 13 SL ratios 0.720 / 494 / -59.4; trailing lock 0 0.707 / 467 / -61.3; **all four back 0.895 / 538 / -20.1, PF C 1.14 / B 0.77 / A 0.59** (it reproduces the earlier run to the digit: the simulator is consistent).
+  Rule for later: never remove a group on its isolated PF; measure the counterfactual (removal replaces its trades with the next-ranked Sets'). x01 runs the full grid again (Normal range off only, owner 2026-11-04) **with the trend pack OFF**: the same grid with trend on reads 0.895 / 538 / -20.1 (PF C 1.14, B 0.77, A 0.59), with it off **1.032 / 516 / +5.6 (C 1.10, B 0.97, A 0.98)**, and live trend read 0.54 on 108 closes - the owner's "also Signals" is kept for breakout (3 orders in all) and for the packs still to be measured (reversion, flow, multi: `q45`); `trailMinLockPct` stays as an
+  opt-in setting, default 0. The `general:exit` x 1.5 volume multiple rests on 14 orders and is kept as the owner asked, not as a finding.
+  (c) **Profit group gate** (`groupGate`, default OFF; `set_group` = pack x type x TP range x lane, `group_verdict` = PF of the group's newest `groupGateN` executed net results of the last `groupGateHours` hours against `groupGatePf`, judged on the
+  results it has, `groupGateMin` 1; open positions untouched; same code in the engine and in `stage_eval.execute`). Measured: on the pruned grid it helped (n20h24: 0.780 / 395 / -38.7 against 0.701 / 464 / -61.7), **on the full grid it does not**:
+  no gate 0.895 / 538 / -20.1 (C 1.14, B 0.77, A 0.59), n20h24 0.858 / 467 / -25.7 (C 1.23, B 0.70, A 0.55), n10h24 identical, n5h24 0.854, n20h12 0.860. The ship rule (PF at or above the baseline on all three windows) is not met, so it ships OFF; the
+  desk toggle and `groupGate*` overlay keys switch it on. Checks `trader.group-gate-blocks-a-losing-group-and-only-that-group`, `processing.simulator-applies-the-group-gate-as-the-engine-does`.
+  (e) **Signals and "disable non-working configs", measured (full grid, executed positions, C / B / A pooled; baseline = full grid, trend off: PF 1.032 / 516 orders / net +5.6, PF C 1.10 / B 0.97 / A 0.98):** + trend 0.895 / 538 / -20.1,
+  + flow 0.842 / 453 / -28.5, + reversion 1.006 / 492 / +1.1 (C 1.20, B 0.85, A 0.92), + multi 0.991 / 513 / -1.6 (C 1.32, B 0.81, A 0.67); breakout executes 3 orders in all. No signal pack clears the rule (at or above the baseline on all windows), so only
+  breakout stays on. Last-24h check (window D = 11-03 12:17 .. 11-06 12:26, 13 symbols still listed, `--last-hours 24`, baseline PF 0.70 / 141 orders / -27.6): removing the Short range reads 1.07, Micro 0.94, Minimal 0.93, Wide 0.88, indications 0.71;
+  the same removals on C / B / A read pooled **0.711 / 0.704 / 0.887 / 0.874** against 1.032 - they only look better on one 24 h window, so **nothing is switched off**. Removing general 0.60, trailing 0.69, Exit Sets 0.68, the negative lane 0.59 on D (no better).
+  Live, the last 24 h are not representative: 104 engine-managed closes (PF 1.40 per close / 1.94 in USDT, +5.05 USDT, 34 of them one group, indications trailing Normal range negative lane, closed by the engine when it came back) plus 31 venue-side
+  closes of the outage (not scored). Rule: a config is switched off only if its removal improves the counterfactual replay on every window.
+  (d) **Engine continuity.** Watchdog + hourly wake-up + SessionStart hook keep x01 running; the 11-05 07:38 .. 11-06 10:14 outage (26 h) also saw about 25 USDT leave the wallet as a transfer (29.34 -> 17.36 USDT; trading made +13.07), which
+  `check_transfer` cannot see while the engine is down.
+- **2026-11-06, owner: "Always keep engine continuously running."** Three layers (x01 only, none touches a setting, the halt, start equity, EQ_MIN or the STOP / PAUSE / reset files): (1) `scripts/x01_watchdog.sh`, one instance (pidfile
+  `x01-watchdog.pid`), runs `scripts/ensure_x01.sh` every 20 s and starts the engine when its process is missing (three starts inside ten minutes = a crash loop: it backs off 600 s); started by `ensure_x01.sh` itself; (2) the
+  SessionStart hook runs `ensure_x01.sh` (also starts the watchdog) whenever a session starts; (3) a scheduled wake-up of the session (`trig_014XqU7tj9psfDCRbbMjZ1Ut`, hourly at :17, the platform's minimum interval) runs the same
+  script, so a container restart with no open session is repaired within the hour. The watchdog dies with the container; layers 2 and 3 revive it. Check `logistics.x01-watchdog-keeps-the-engine-running-once-and-backs-off`.
+  **Outage found 2026-11-06 (x01 dead 11-05 07:40 -> 11-06 10:14, 26 h, nothing running between sessions):** its 62 open positions stayed on their venue-side stop / target (55 targets and 5 stops filled meanwhile, +13.07 USDT in the trades file,
+  income feed +13.29 USDT), and the wallet fell from 29.34 to 17.36 USDT: about 25 USDT left the account as a transfer, not a trading loss (the transfer detector `check_transfer` only runs while the engine runs, so a transfer during downtime is
+  not adjusted; the session basis re-baselines at the restart, `startEquity` 28.2555 was left alone by rule).
+- **2026-11-05, owner: "Enable block and also subtype Overall" / "Increase also overall vol factor by 5 times" / "Check, disable non performing by adjusting minimal steps and ratios" / "Increase vol ratios for performing coordinations".**
+  (1) Block runs with the relations **symbol + step (Overall)** on every shipped overlay, the desk default and the presets (`blockRelations` ["symbol", "step"]; the engine's absent-key default stays "symbol").
+  Block v2 needs every selected relation to agree, so an add now needs both the per-symbol proof and the per-TP-step proof: measured (executed parents, ratio 1.0, skip first) symbol alone C PF 1.938 / net 57.21 / 32 adds,
+  B 0.818 / -11.29; symbol + step C 1.645 / 39.3 / 16 adds, B 0.813 / -11.55 (half the adds; an "any relation agrees" mode would need a new `blockRelationMode`, not built). Check
+  `logistics.block-is-on-with-the-symbol-and-overall-relations`. (2) x01 `volumeFactor` 1.0 -> **5.0** (hot reload 01:20 UTC): one position is balance x 5 % x 5 = 8.15 USDT notional at 32.6 USDT equity
+  (was 1.63); a Block parent grows to 3 x that. Live stops cost 0.068 USDT on average at the old size (220 stops = -14.9 USDT of the -5.18 net over 407 closes), so one stop now costs about 0.34 USDT (1 % of equity);
+  the 80 % drawdown halt (session start equity) and `EQ_MIN` are untouched and are the only backstop besides the stops. Revert = `volumeFactor` 1.0 in the x01 overlay (hot reload). (3) New opt-in setting
+  `trailMinLockPct` (default 0 = every pair, golden unchanged; desk Settings next to the trailing minimum): trailing pairs with arm - give under it build no Set; live x01 closed 53 positions with a lock of 0.1 % or less, 4 won (PF 0.14, -2.35 USDT), against locks of 0.2 % (33 closes, PF 2.09) and 0.3 %+ (45 closes, PF 1.15). Check `grid.trail-min-lock-removes-only-pairs-that-lock-nothing`. Any change of the Set grid (ranges, SL ceilings, trailing pairs, Exit Sets) makes the engine re-evaluate before it validates
+  again (the evaluation signature holds the Set list), so grid changes are batched into one reload.
+  (4) **SUPERSEDED 2026-11-06 (reverted, see the 2026-11-06 bullet (b): removing groups by their isolated PF lowered the replay result on all three windows).** Non-performers switched off on x01 (restart 02:14 UTC, 4,022 -> 1,930 Sets) and one group raised. Evidence = x01's 407+ live Set closes (11-03 22:00 .. 11-05 01:10) next to the replay of the shipped x01 config on C / B / A (executed
+  PF / orders / net %: C 1.139 / 256 / +11.62, B 0.772 / 183 / -15.04, A 0.595 / 99 / -16.71; `scripts` scratch `grouptab.py` / `decide.py`, `trade_sim.py` trade rows). Rule: a group goes off when live PF < 1 AND at least 2 of the 3 replay
+  windows < 1 AND the pooled PF (live + replay orders) < 0.8 on at least 35 orders; it goes up (x 1.5) when every source with orders is above 1. **Off:** Micro range (steps 2-3: replay 0.65 / 0.25 / 0.39 on 23 / 25 / 16 orders, pooled 0.39,
+  no live order), trend pack (live 0.55 on 99 closes: base 0.66 / 55, Exit 0.44 / 11, trailing 0.46 / 33; replay base 1.05 / 118, 0.50 / 40, 0.27 / 20, Exit 0.28 on 20 in B and A), Short Range pack (live 0.26 / 5, replay 0.76 / 18, 1.22 / 12, 0.31 / 4),
+  SL ratios 0.75 (pooled 0.59 / 94), 1.5 (0.59 / 37), 1.75 (0.63 / 38), 2.75 (0.44 / 89), 3.5 (0.77 / 87) via `setSlRatios` [0.5, 1.0, 1.25, 2.0, 2.25, 2.5, 3.0, 3.25], trailing pairs that lock (arm - give) under 0.2 %
+  (`trailMinLockPct` 0.2). **Up:** `volumeByPackKind` {"general:exit": 1.5} (live 2.49 / 11, B 3.52 / 2, A all wins on 1: 14 orders, the only pack x type with every source above 1). **Kept although weak:** Minimal range (live 1.10 / 20,
+  replay 0.95 / 0.68 / 0.51 on 143 / 107 / 56, pooled 0.75 / 326: watch it), Short range (pooled 1.12 / 159), breakout (3 orders in all). x02 (stopped) keeps the wide grid as the control. Read this as selection on small noisy samples: the replay
+  PF over the three windows is about 0.8 and nothing here creates an edge; every switch is one overlay key (`tpRanges.micro`, `stratTrend`, `stratShortRange`, `setSlRatios`, `trailMinLockPct`, `volumeByPackKind`). Open finding: the replay executes
+  almost no trailing Sets (3 of 538 orders) while live ran 135 trailing closes (PF 0.72), so the live mix differs from the replay's pick order. Check `grid.x01-builds-none-of-the-switched-off-non-performers`.
+- **2026-11-04, owner: "Do not use a minimum-orders gate. Just ensure that many validations happen and many orders open. It is meant this way."** No setting may
+  require N orders (or observations) before a Set, a block count, a pause choice, a hold choice or a PF floor may act: a Set / count is judged on the orders it has
+  (a Set without any closed order is never judged). Report **how many Sets validate and how many orders open** next to every PF. Order-count gates to keep at their
+  smallest value: `setGateMinTrades` 0, `minPfStepAutoMin`, `pauseAutoMin`, `mainShortMin`, `exitMinSamples`, `prevPosMinCount`, `blockMinSamples`, Block v2
+  `blockMinObservations` (all 1). `MIN_VALIDATION_N` only bounds the LENGTH of a last-N window and stays. A default above 1 is allowed only when a measurement on three
+  windows shows it keeps the validations and orders high AND the PF better.
+- **2026-11-03, owner:** x01 (real money) runs 120 symbols at volume factor 0.4 with no cap on open positions; always the exchange maximum leverage (`leverageStopCap` off,
+  the maximum re-read every 30 minutes); Micro range on; Block v2 (per-count steps and ratios, no windows, Additive / Shared, relations). Never clear the drawdown halt,
+  change `EQ_MIN` or reset the start equity without an explicit instruction.
+
+- **Axis Sets study (2026-11-04, `stack_eval.py --part axissets`, window C only, executed parents, baseline no Axis Sets PF 1.631 / 188 orders / net 37.01 / drawdown 24.2):** choosing the Axis setting per Set
+  from the 14 candidates gave PF 1.589 / net 34.51 / drawdown 24.2 (flat volume; "the Axis Set must reach its floor" identical); volume scaled by the Axis Set's PF gave PF 1.593 / net 68.40 / drawdown 48.49 - net and drawdown
+  both doubled with no PF gain (it is a volume multiplier, not an edge). Window B was not run (the run was stopped to free the CPU for the engine). Nothing built in the engine.
+- **2026-11-04, owner: "Make stages and last N work for each config possibility / lane independent."** `lastNByRange` (overlay, desk Settings table "Last N per TP range"): each TP range (micro, minimal,
+  short, normal, long, wide) may carry its own Base long / short (`baseLong` 10-200, `baseShort` 0-200), Main long / short candidates (`mainLong`, `mainShort`), Negative windows (`negWindows`), Real
+  window (`realN`) and Real Negative window (`realNegN`, new: the two lanes no longer have to share one N); a missing range or key uses the global window (`setGateWindow` ... `realGateN`), a short
+  window is capped at its long window x the ratio, so an unset overlay is byte-identical (golden unchanged). One accessor, `SetBook.win(st)` (`set_engine.LastN`), feeds `stage_params`, `_score_one`,
+  `gate_reason`, `rank_key`, the executed-lane window and the lane rank; the simulator reads the same accessor (`stage_eval`: Base eval, window figures, Axis/Block floors, processed tail, gate_until). The
+  statistics rows (`pfBase.windows`, `stages`) still print the global windows; the older audit scripts (`main_stage_audit`, `independent_progress_audit`, `window_grid` ...) assume the global ones and
+  must be run with `lastNByRange` empty. Checks `stages.last-n-windows-are-independent-per-tp-range`, `processing.sim-gate-equals-the-engine-for-every-window-configuration` (now with two per-range
+  configurations: engine and simulator agree on 936 sampled pairs). Not enabled anywhere: no per-range value was measured better yet.
+- **2026-11-04, owner (newest): "Refresh drawdown halt. And on each session money got transferred."** The drawdown halt was refreshed explicitly (x01, 11:35 UTC, the engine's own `reset-eq-bingx-x01` marker, the same
+  path the desk Start uses): start equity 27.6997 -> 28.2555, session start equity 128.3826 -> 28.2555 (the 100 USDT that left the account had read as 78.5 % drawdown against the 80 % halt); ddHaltPct 80 and EQ_MIN unchanged.
+  From now on a deposit or withdrawal moves the basis instead of reading as a gain or loss: `Pulse.check_transfer` (every balance read) takes the wallet-balance change, subtracts the venue income feed
+  (`/openApi/swap/v2/user/income`: REALIZED_PNL, TRADING_FEE, FUNDING_FEE; it lists NO transfers - checked over 72 h), and a residual of at least max(0.5 USDT, 2 % of the balance) seen on two consecutive reads
+  (the feed can lag a fill) is a transfer: session and start equity move by it (stats `transfers`, log `TRANSFER`, overlay `transferAdjust` default on). A failed income read is unknown, never a transfer; a real
+  trading loss stays a drawdown. Check `trader.transfers-move-the-drawdown-basis-not-the-drawdown` (fails with the function disabled). Takes effect at the next engine restart.
+- **2026-11-04, owner (latest): Auto PF off on x01 (manual floors), lower min PF, 200 symbols, x02 off, Block ratios doubled, manual closes rest only that symbol and direction.**
+  x01: `minPfStepAuto` false, manual floor 1 + TP % x `minPfStepRatio` 0.1 capped by `minPfStepAutoHigh` 1.15 (new setting; 2.0 = no cap, caps the manual and the learned floor in every stage; x01 ran 1.27 for a few
+  minutes before), `symbolCap` 200; x02 is stopped (its process, not its positions - their venue-side stops stay). Block counts: ratio 1.0 each (was 0.5; Block v2 maximum), measured on executed parents of
+  C / B (symbol relation, 3 counts 3 PositionCosts apart, skip first): ratio 0.5 C PF 1.788 net 47.11 dd 25.4, B 0.811 / -11.69; **ratio 1.0 C 1.938 / 57.21 / 26.6, B 0.818 / -11.29** (no Block: 1.631 / 37.01 / 24.2 and 0.805 / -12.08); skip-first 0
+  with ratio 1.0 is worse on B (0.742 / -18.46). Auto against manual was measured worse earlier (manual 0.2: C 0.584 against 0.879 on the 3-day data; ratio 0.5 C 1.092 against Auto 1.631): the owner chose manual anyway.
+  "Axis volume ratios": the Axis has no volume setting (windows are already at their maxima 12 / 4 / 8 / 8; `posCountsVolumeRatio` is read but `size_mult` is unused), so the doubling was applied to the Block ratios.
+  `manualCloseRestMin` (240): a position the venue no longer holds with no stop / target fill of ours (a manual close, `drop_ghost`, a restored position gone) rests that SYMBOL AND DIRECTION for that long
+  (`manual-rest-<conn>.json`); every other symbol and the other direction keep opening (check `trader.a-manual-close-rests-only-that-symbol-and-direction`).
+- **2026-11-04, owner (later): Block adds are "after their ratio, without limit, based on the position's original base volume"; same for the other add types; revert indications trailing x 3; Normal range off on x01.**
+  `blockRiskPctOfBalance` 0 (no risk-budget cap, engine default and desk default too): each Block count adds exactly its ratio x the parent's ORIGINAL base volume V0 (`pos.base_qty`, never a share of
+  the grown position; `pulse_trader.block_risk_qty` is infinite at 0). What still bounds an add is the table itself (shipped: counts 2 and 3 at 0.5 V0 each, so a parent grows to at most 2 x V0) and the
+  venue / margin sanity guards (`max_book_notional`, margin at most 38 % of available, venue minimum lot). `dcaMaxExposureX` 0 = no exposure ceiling (a DCA add is its multiple x the original base);
+  DCA itself stays off. `volumeByPackKind` {} everywhere (the x 3 for indications trailing is reverted; live PF 0.24 - 0.74). x01 `tpRanges.normal` false (live PF 0.36 - 0.52 on both engines); x02 keeps Normal
+  on as the control group. Checks `correctness.block-adds-are-ratio-times-original-base-volume-without-a-risk-cap`, `dca_engine` self-test row, `trader.indications-trailing-volume-is-not-multiplied`.
+- **2026-11-04, owner: signals on x01, DCA off by default, Block for all relations.** Extra packs trend + breakout are enabled on x01 and x02 (`stratTrend`, `stratBreakout`; live entries read
+  them through `SetBook.entry_signals`; measured on window C PF 1.758 / 199 orders against 1.631 / 188 without; B and A pending). `dcaEnabled` / `stratDca` are off in the overlays, the desk
+  default and the check `logistics.dca-off-by-default-with-set-and-axis-options-off`.
+
+## Live-close audit, Block relations, 12-step DCA, micro tactics (2026-11-04)
+
+- **Live closes (x01 197, x02 120 rows).** `pnl` equals gross minus the recorded fees on every row (max difference 0.00000), `net_pnl_pct` equals gross minus fee / notional on every row
+  (0 mismatches): the cost is deducted once. Stop fills sit at 1.09 x the planned stop (median) and 1.28 x (mean) on base Sets, 1.44 x on trailing Sets (p90 2.2 x; thin small caps gap
+  through the level, e.g. 4.9 x), target fills at 1.01 x; the replay assumes exactly 1.00 x on stops, so replay PF overstates what stops deliver live. Not modelled yet (an option
+  would be a stop-fill factor in the replay; it would lower every displayed PF and change which Sets validate).
+- **Block relations** (`stack_eval.py --part block2`, executed parents of C / B, shipped counts 3 x 3 PositionCosts apart, skip first, ratio 0.5, minimum observations 1). Baseline C PF 1.631 net
+  37.01 dd 24.2, B 0.805 net -12.08 dd 30.9. symbol: C 1.788 / 47.11 / 25.4 (32 adds, add PF 9.5), B 0.811 / -11.69 (3 adds); step (Overall): C 1.599 / 37.65 / 28.3, B 0.813 / -11.55;
+  set: C 1.587 / 36.88, B 0.811 / -11.69; indication: C 1.544 / 34.20, B 0.813 / -11.55; symbol + step: C 1.638 / 38.16 / 25.4 (16 adds), B 0.809 / -11.82; all four agreeing: C 1.620 / 37.05
+  (5 adds). Skipping no count (`skip_first` 0) is worse on B in every relation (net -12.4 .. -15.3). Shared stacking is within 3 net points of Additive. Every relation is at or above no
+  Block on net in both windows; none is a large gain; symbol stays the shipped default.
+- **12-step DCA** (`stack_eval.py --part dca12`, 98 arms on executed parents of C / B; rung k at (f0 + k x fs) x the parent's stop distance, volume m0 x g^k V0, total add volume under
+  `max_expo` - 1, parent keeps its stop and target, optional gate by reversal indications). Best by net with drawdown at most 1.15 x no DCA on both windows: 3 rungs f 0.1 + 0.05, m 0.1:
+  C +0.56 net points, B +0.21 (inside the noise). Larger volumes lift net (n6 f 0.05 + 0.075, m 0.5: C +3.9, B +6.2) at 1.5 - 1.9 x the drawdown (47 against 24 on C). Rungs 7-12 never fill
+  at stop distances up to 0.9 x the stop (n6 = n12). The reversal-indication gate (`IND-*` arms) cut the drawdown a little and the net more. DCA stays off; the engine still has the 1-rung auto plan
+  and static lists; a 12-rung engine mode was not built because the measured gain does not justify it.
+- **Min PF** (C, today's code): Auto tolerance 2 % 1.751 / 194 against 1.631 / 188 (5 %) and 1.554 (0 %); manual step ratio 0.5 gives 1.092 / 276 and 0.8 1.025 / 275 (worse than Auto); a global
+  `setMinPf` 1.4 is identical to 1.25 (the per-step floors govern). Raising the floor does not raise the executed PF.
+- **Micro tactics** (`indication_lib` groups `microrev` / `microgo`, outside the voted groups so no existing vote changes): sweep (liquidity sweep), wickrev, burstfade, burstgo, exhaust, volclimax,
+  momchg, vwapx, mpull; sources in the module comment (arXiv 2308.14235 momentum change, arXiv 2607.09426 / 2602.00776 find 1 - 5 minute order imbalance weak). Check
+  `indication.micro-tactics-fire-on-their-pattern-and-leave-group-votes-alone`. Post-Base measurement queued (`q32`).
+
+## Current execution contract (2026-10-30)
+
+This section supersedes older operational descriptions and historical measurements below. See
+`reports/execution-cost-and-lane-audit-20261030.md` for the current audit and its limits.
+
+- Base, Main and Real stage statistics use paper evidence only. Executed results have separate per-Set,
+  per-positive/negative-lane windows; no paper/live overlap is counted twice. A fully populated executed
+  window can block only its own lane. Sparse executed windows are explicitly unproven.
+- Minimal last N = 1–3 sign coordination, independently positive, negative or both. Only long/short
+  windows apply positive PF thresholds; negative minimal is not a positive-PF failure. Long starts at 10.
+- x01 enables Short Range and all four Axis controls. Axis evaluates the candidate's own Set/lane paper
+  stream and capacity. DCA's optional Axis gate uses that same parent's scope, not the last pooled verdict.
+- Set Block uses independent forward evidence for each (Set, lane, symbol, side, group). It keeps the
+  original parent entry, quantity, stop/target and hold. Adds are additive fractions of the original base,
+  never inherited from a different parent. The default total planned stop loss cap is 0.25% of equity;
+  minimum lots cannot exceed it. This is a risk limit, not a proof of optimal sizing or bounded gap loss.
+- Paper PositionCost is max(configured 0.12% floor, exchange taker round trip + 0.02% slippage allowance).
+  Executions use actual fill prices and each leg's commission/rate on its own notional. Fill slippage is
+  already in the prices. Explicit recorded net is immutable when a paper-cost setting changes. Missing
+  fee data remains labelled as an estimate. Funding is not yet attributed per position.
+- Verified emergency-close losses and historically large positions remain in actual statistics after a
+  size-setting change. Unverified exits never invent a scored return. Partial close quantity, value and
+  fees survive failed retries and restart. Execution lane/Set counters also restore from history.
+- `scripts/monitor_readonly.py` reads health only. The older `monitor_engines.py` automatically restarts engines; do not use it for read-only checks. A failed or stale status request is unknown health, never proof of a stable run.
+- Every new simulation/test must use no more than three days of market history. Older longer-window
+  reports below are historical records, not evidence for the current implementation.
+- Never clamp Main PF to Base PF, copy selected PF into execution PF, or remove a verified loss to make
+  PF higher. Same data and rules must agree; different populations can have different PF.
+
+## Block v2 (2026-11-04): per-count steps and ratios, no windows, measured
+
+- **Rules** (`server/pulse/block_rules.py`, shared by `set_block.SetBlockBook` and `scripts/stack_eval.py --part block2`): each count has its own step (PositionCosts after the
+  count before), ratio (0.1 .. 1.0 x the parent's original volume) and switch; evidence is the cumulative {observations, gains, losses} of ALL observations (no window, no
+  lookback cut); Additive (own ratio) or Shared (one budget split over the counts that are on); relations symbol / indication / set / step, all selected must agree; opt-in
+  carry (a losing parent's level is kept until the relation's net is back positive, then a pause). Desk: Settings "Block v2". State file version 2 (version 1 migrates).
+- **Measured** (3 days each, executed parents of windows C and B, `stack_eval.py`): 12,960 settings per window; minimum observations >= 5 never beat no Block in either window
+  (0 of 4,860), observations 1 is the only value that did (owner rule 2026-11-04: no minimum-orders gate); carry lifts window C through bigger parents (adds' PF 0.3-0.6,
+  drawdown +10 %) and stays off. Best development setting: per-symbol evidence, steps of 3, the first count skipped, counts 2 / 3 at ratio 1.0 (+20 net points on C at add PF 9.5
+  on 32 adds, 3 adds on B). **Sealed third read once for four finalists: C 16 h lost (adds PF 0.09 on 9 adds, net -4.4 .. -7.7 against -1.1 without Block), B won (3 adds all
+  winners, +5.0 .. +6.6 against +3.3).** Across both sealed windows no setting beats no Block (ratio 0.5 / 0.5: +0.56 against +2.24). The development gain was partly selection.
+- **Shipped default** (least harmful measured, not proven): symbol relation, three counts 3 PositionCosts apart, count 1 only observes, counts 2 / 3 add 0.5 x V0, Additive,
+  minimum observations 1, no carry. The risk budget (`blockRiskPctOfBalance` 0.25 % of equity) still caps every add; on a ~25 USDT account it refuses most of them.
+- A defect found by the plain-reading check: the pause engaged with carry off (now only with carry).
+
+## Live fixes, lane order, Axis / Block / DCA and grid options measured (2026-11-03)
+
+- **Live defects found on local x02 and fixed (each with a check):** the load governor's fixed 156 MB hard limit was under the Set book's footprint and
+  shed the Set replay for good (no Set ever validated): limits now scale with the machine (`load_engine.machine_mb`). 9 of 11 VST entries filled 0.7-24 %
+  away on thin books and closed as `bad-fill`: `Pulse.book_allows` checks the venue's own best price and top quantity before sending (`skippedThinBook`).
+  At 150x the venue liquidated before the Set's own stop (positions vanished book-only): `stop_leverage_cap` keeps 1 / leverage >= 2 x stop + 0.5 %.
+  "Position SL order already exists" (110406) retried every ~10 s into a BingX ban: an existing control is adopted, else 300 s back-off. A close whose
+  POST got no answer and that the venue calls non-existent is sent again after 3 reads / 60 s; a locally cooled close is retried, not awaited. Verdict
+  freshness follows the measured replay rotation (`fresh_limit`, 1.5 x the time between two replays of one symbol, capped 30 min): a 12-minute
+  rotation had left every Base-passing Set "stale". Crash detection (`run-state-<conn>.json`), `system_info` (CPU, memory, request rates, restore
+  events, errors) for the desk footer. x02 runs 70 symbols (owner).
+- **Lane order (`laneOrder`, shipped `pos-neg`)**, executed PF (orders) on the development part of three windows, C = 10-31 12:06 .. 11-03 12:15
+  (the newest day), B = 3-day data, A = its first 16 h: shipped **1.36 (167) / 0.879 (165) / 0.953 (81)**; Negative lane first 1.223 / 0.785 / 0.850;
+  Base only (stages off) 0.944 / 0.479 / 0.440; Main long 15 1.795 / 0.648 / 0.709. The stages raise the executed PF over Base alone on all three
+  windows and the shipped order is the best of these: nothing changed. The independent audit's pooled ladder (C: Base long 1.13, Real window 0.32,
+  Real Negative 1.14-1.24) counts one entry once per Set (~50 x) without one-position-per-symbol, so it is a map of the gates, not what executes.
+- **Axis / Block / DCA** (`scripts/stack_eval.py`: the engine's per-Set Axis via `stage_eval.execute(axis_coord=)`, SetBlockBook and DcaBook rules on
+  executed parents; B / A, baseline 0.879 / 0.953): Axis x01 all four 0.949 / 0.786; prev 4 0.935 / 1.048; cont 8 0.919 / 1.029; prev 4 + cont 8
+  0.914 / 1.022; cont 4 0.958 / 0.953 (all inside the noise of 70-165 orders; A is part of B). Block as built never adds (its evidence per Set and
+  symbol from executed parents never reaches 8 samples); evidence from the Set's own paper tape per symbol 0.772 / 1.027 (worse on B). DCA auto
+  0.891 / 0.970 (+0.01-0.02, noise). No default changed.
+- **Grid options** (off by default, shipped grid byte-identical; desk settings): named TP ranges Micro / Minimal / Short / Normal / Long / Wide
+  (`tpRanges`), SL ratios 0.2 / 0.3 / 0.4 (`setSlLow`, only where the floored stop is new), trailing arms to 3.0 % (`trailStepMax`), trailing stop
+  families (`trailSlRatios`, stop r x arm); own volume multiples per pack / type / range (`volumeByPack` / `volumeByKind` / `volumeByRange`). Executed
+  B / A against 0.879 / 0.953: low SL 0.763 / 0.965, Wide 0.879 / 0.953 (no Wide Set executed), arms to 3.0 % 0.847 / 0.953, families 0.744 / 0.636.
+
+## Minimum PF per TP step, long/short independence (2026-11-02)
+
+- **Minimum PF per TP step** (`minPfByStep`, default on; replaces the window-size classes, which stay selectable with it off): a Set asks ONE floor, from its own
+  TP step, in every window of every stage (Base long / short / minimal, Main, Real, Negative). The drawdown time, the minimum order count and the consistency floor are Base-stage rules only (Main / Real windows have none; see "Execution reads the processed Sets"). **Manual**: floor =
+  1 + TP% x ratio, the TP on its 0.1 % grid rounded DOWN (0.25 % uses the 0.2 % value), ratio 0.1 .. 1.5 in steps of 0.05 (back to 1.5, owner 2026-11-03), default 0.2 (`minPfStepRatio`):
+  1.04 at 0.2 %, 1.06 at 0.3 %, 1.64 at 3.2 %, 1.70 at 3.5 % (`set_engine.manual_step_floor`, `config-model.manualStepPf`, one table held equal in both).
+  **Auto** (`minPfStepAuto`, default on; ratio-free since 2026-11-03, see "Auto minimum PF without the manual ratio"): for each step 0.2 .. 3.5 % the engine
+  takes the LOWEST floor (1.00 .. 2.00 in 0.02) whose admitted orders -- the orders whose Set had that PF over its last `minPfStepAutoN` (10) closed orders at
+  entry -- delivered a PF within `minPfStepAutoTol` (5 %) of the best floor's, pooled over the step's distinct Set tapes, from orders that CLOSED BEFORE the
+  evaluation window only; it needs `minPfStepAutoMin` (300) admitted orders, else the direction's pooled floor, else the manual floor (`SetBook._learn_step_floors`; checks `step-pf.*`: a plain-loop reading, 1,448 results after the boundary flipped without
+  moving the floor, a copy counted once). A step floor needs history BEFORE the window: with a 3-day lookback the live engine has it (it keeps 3 x the lookback),
+  a replay of exactly the lookback has none and runs on the manual floors. The simulators learn the same Auto floors every test hour (`stage_eval.AutoFloors`).
+  The global `MIN_PF_FLOOR` (1.05) still governs Exit / DCA / Block / coordinator; the per-step table may go lower (1.04 at 0.2 % by owner decision).
+- **Long and short are independent** (`directionMode` split, default; fixtures run `both`): every Set exists once per direction (`SetState.side` +1 / -1, id
+  `<pack>:L:1m:...` / `<pack>:S:1m:...`), scans only its own side's entry bars (`_cand_by_side`, each bar belongs to exactly one side, so scan work is not
+  doubled), and so has its own lane, tape, windows, stage chain, pause (`pause_now[(pack, symbol, side)]`) and learned floor (`step_floor_auto[(step, side)]`).
+  A live signal is judged only by a Set that may trade its direction (`pick_any(side)`, `_scope_choice(pack, side)`), a close rests the symbol with the pause of ITS
+  direction. Independence is shown by removal (`direction.removing-one-direction-leaves-the-other-untouched`): without any short signal the long Sets' 1,668
+  orders are byte-identical, and the combined Set's long orders change (its one position couples the sides). Occupancy across Sets is as before: live opens one
+  position per symbol.
+- **Simulator rest after a close** (2026-11-02): `stage_eval`'s executed positions now rest the symbol as the lane and live do (the cooldown, and after a win the
+  pause chosen at that exit bar) and pick only Sets of the signal's direction. Executed figures measured before this change modelled the pause through the Set tapes
+  only, not the wait after an executed win; the pause numbers below were taken that way.
+
+## Measured on the new defaults (2026-11-02, 3 days of 1m history, 20 liquid USDT perpetuals, 2026-10-31 .. 11-02)
+
+- **Six arms, development window 32 h, `trade_sim.py` (validated per order, one position per symbol; the simulator now rests an executed symbol as live does; hold Auto
+  off because the simulator cannot model it; the per-step floors are the manual ones, Auto is engine-only).** Executed PF / orders / net: shipped defaults (split Sets,
+  step ratio 0.2, pause auto, stages on) **0.351 / 313 / -56.7 %**; combined Sets 0.416 / 232 / -37.2 %; window-size classes instead of step floors 0.427 / 297 / -42.1 %;
+  step ratio 0.5 **0.520** / 308 / -29.3 %; Base only (stages off) 0.408 / 363 / -55.4 %; **pause off 0.568 / 464 / -41.9 %**. In-sample effective PF 2.0-7.0 in every arm
+  against a next-50-orders PF of 0.24-0.46. **No arm is above 1 and every net is negative.** At 230-460 orders an arm's PF carries roughly +-0.1, so only the
+  larger gaps mean anything: (1) **pause auto was worse than off here (0.351 against 0.568, 313 against 464 orders)** -- the opposite of the earlier reading
+  (0.796 against 0.572), which used the old grid and a simulator that did not rest an executed symbol; the earlier figure is not evidence for the shipped default.
+  (2) A stricter floor executed better (ratio 0.5 above 0.2, 0.52 against 0.35), as did the lower validated share with it; the owner's default ratio 0.2 validates more Sets
+  and delivers less per order. (3) The stages did not lift the executed PF over Base alone (0.351 against 0.408) while cutting the validated share from 18.6 % to 4.6 %.
+  (4) The split gives independent verdicts at twice the Sets; it did not move the executed PF beyond the noise. The sealed 16 h window was read once earlier for the
+  pause and is not available for these choices. Defaults here (pause auto, ratio 0.2, split) are the OWNER's decisions of 2026-11-02, kept; this table is the evidence
+  to weigh them against, and `pauseMode off` / `minPfStepRatio 0.5` are one-line changes.
+- **Cycle timings, same machine and data, 3 symbols x 4,318 bars, separate processes.** Before this session (`f3b0824`, 1,654 Sets): 10.9 s per symbol, snapshot 71 ms, peak
+  114 MB. Now, shipped defaults (3,400 Sets): **7.6 s per symbol (-30 %)**, snapshot about 0.3-0.4 s (profiled 0.8 s with the profiler on; four verdict lookups per Set
+  across twice the Sets), peak 169 MB (+48 %); combined Sets with no pause (1,700 Sets): 6.3 s per symbol, 132 MB. What it cost and saved: the pause about +3 %, the direction
+  split about +15 % time and +47 % memory; the Low-Range state once per bar instead of four times (and only the bandwidths the rank reads) roughly halved a symbol's pass
+  (profile: 72 % of the time was `pack_signals`, 83 % of that `low_range_state`), bit-identical on 1,155 window/parameter pairs. About 70 % of the default grid's Sets are copies of
+  another Set's tape on real data (2,421 of 3,400): their columns are stored once; each Set keeps its own rows.
+
+## Execution reads the processed Sets (2026-11-02, owner: "min PF over all stages, post-Base Sets, not pooled or unfiltered")
+
+- **One floor over the whole chain (verified, unchanged).** `StageParams.floor_for` / `SetBook.floor_for` hand a Set the same floor (`minPfByStep`: its TP step) in the Base long / short
+  windows, the Main long / short windows, Real and Real Negative; `stage_chain` and `stage_verdicts` read nothing else. The Main Set holds the orders opened while Base passed, the Real Set
+  the Main orders opened while Main passed; each stage is judged on the Set the stage before built, never on the raw tape or a pool.
+- **Found and fixed, 1: the choice among valid Sets read the raw Base tape.** `rank_key` (PF of the Base window, its halves, its order count, the tape's recent R) picked which valid Set a
+  signal opens under. The Base tape holds every order the Set made, the ones the stages rejected too; the Set that executes is its Real Set. `rankByLane` (default on, desk Settings,
+  overlays) ranks the Sets valid on a lane by `lane_rank_stats` of that lane's own Set (Real Set on the positive lane, Real Negative Set on the negative lane: orders, PF, PF of both halves,
+  recent R over the newest `PROC_KEEP` results in the lookback) through `lane_rank_of` (stable halves at or above the Set's floor, PF shrunk toward 1 by its orders, order count, recent R, then
+  the Base tape's drawdown time). `SetBook.lane_rank_key` / `pick_any`; the walk-forward simulator uses the same two functions (`stage_eval.gate_metrics`), compared with the engine on 94 valid
+  (Set, hour) pairs (`lane_rank.simulator-and-engine-rank-valid-sets-the-same-way`). Off = the earlier Base-tape rank. Fixtures pin it off (`common.overlay`, `_SELFTEST_PIN`).
+- **Found and fixed, 2: Axis, Block and DCA-on-Axis judged one Set's stream at the pooled floor.** `Pulse.set_axis_floor(st)` hands `coord.judge(..., min_pf=)`, `coord.slot_cap(..., min_pf=)`
+  and `SetBlockBook.candidate(..., floor=)` the Set's own floor (1.04 at a 0.2 % target, 1.20 at 1.0 %, ratio 0.2) instead of the coordinator's 1.25; `minPfLinked` off keeps the coordinator's.
+  The scope record carries the floor it used (`minPf`). Check `lane_rank.the-axis-block-and-dca-gates-judge-a-sets-stream-at-that-sets-floor`; mutants `lane rank:` and `axis floor:`.
+- **Owner decision 2026-11-02: the drawdown time, the minimum order count and the consistency floor stay Base-stage rules.** Main and Real windows are PF-only (at the Set's floor). An earlier note and the
+  Settings text said "the same drawdown time everywhere"; both are corrected. Main and Real are judged by their last-N PF windows at the same per-Set floor; nothing more is planned there.
+- **Measured, `rankByLane` on against off** (`scripts/trade_sim.py`, walk-forward, per-order validation, 20 symbols, 3 days of 1m history, development window 32 h, split + manual step floors + pause auto,
+  hold Auto off): on **0.406 PF / 284 orders / net -43.7 %**, off (the earlier rank) **0.351 / 313 / -56.7 %**; the simulator's gate and rank match the engine on 60/60 sampled pairs in both arms. The
+  gap (+0.055) is inside the noise of 280-310 orders (+-0.1) and both arms are under 1 with a negative net: the lane rank is a correctness change (execution reads the Set that was validated), not a
+  measured edge. The sealed window was not read. Indications base carried the change (0.381 on 230 orders -> 0.464 on 211).
+- **Costs, audited again for a second deduction (none).** A tape row stores gross `pnl_pct` and net `pnl = pnl_pct - cost` once (`set_engine` scan); `_chain_of` computes `nets = gross - cf` once and
+  Main / Real / Real Negative are index lists into that one array; `_score_one` re-normalises a stored net to the current cost from the gross, never from a net; `row_net_pnl_pct` uses a recorded
+  `net_pnl_pct` unchanged and otherwise gross minus one PositionCost; executed closes carry the fee-based net and no PositionCost on top; Block's paper rows are gross (`price / entry - 1`) and
+  net once in `stats`, its executed rows carry their fee net; the Axis streams are rebuilt as `net + cf` so `last_n_cost_pf` returns the stored net; `src/lib/analytics.ts` has the same rule.
+  `scripts/regression/cost_accounting.py` and `stages.costs-are-applied-once-...` pin it.
+- **Defect in the evaluation tooling, fixed:** `scripts/window_grid.py` swapped `stage_eval.gate_base` for a memo wrapper without the `coordinate` argument `validation_lane` passes, so every grid
+  died on its first hour; the memo now keys on it (`report.window-grid-memo-wrappers-take-what-stage-eval-takes`). A surviving mutant (pause references of a direction taken from both directions) got
+  `direction.pause-references-are-of-their-own-direction`.
+- **Window grid on the current engine (2026-11-02, `scripts/window_grid.py`, 20 symbols, split + manual step floors, hold Auto off, Negative lane off, 24 h pre-history, two consecutive 24 h windows:
+  A 10-31 15:00 - 11-01 15:00, B 11-01 15:00 - 11-02 15:00; every figure is gains over losses of the pooled executed orders, a few hundred to 2,700 orders per row, so +-0.1 is noise).**
+  Base alone, long 30 / 50: A 0.399 / 0.383 (274 / 248 orders), B 0.369 / 0.434 (345 / 292). Stages on, by Base long 30 / 50: A 0.313 (578) / 0.350 (1,089), B 0.431 (1,233) / 0.444 (2,665); by Base
+  short 10 / 25: A 0.352 / 0.305, B 0.424 / 0.472; Main long 15 / 25: A 0.301 / 0.345, B 0.456 / 0.436; Real N 1 / 5 / 15 / 25: A 0.325 / 0.330 / 0.325 / 0.391, B 0.413 / 0.432 / 0.458 / 0.441.
+  Base minimal window (shipped cell long 50 / short 25 / Main 25 / Real 15): off A 0.345 (95) B 0.463 (276); newest result positive A 0.345 / B 0.415, positive 2 0.325 / 0.421, positive 3 0.301 / 0.376;
+  newest result negative A **0.576 on 66 orders** / B **0.328 on 179**, negative 2 B 0.104 on 29 (A 11 orders). Main minimal positive: identical to off in both windows; negative: 0 / 85 orders.
+  **No setting reaches 1 in either window; the best cell of window A (negative 1) is among the worst of window B; the stages do not lift the executed PF above Base alone (A 0.35 against 0.38-0.40, B 0.44
+  against 0.37-0.43).** Nothing here supports changing a default; it is consistent with the regime-dependent persistence found in the audit above.
+
+## Hold Auto off by default, measured (2026-11-03); volume factor bounded; x02 at 30 symbols
+
+- **trade_sim models hold Auto** (`stage_eval.build_hold_auto`): each Set's tape is the engine's own single lane whose time exit at an entry is the hold chosen from the
+  candidates' orders closed before it (`SetBook._choose_hold`, pooled over all symbols as live). Where no hold is chosen the tapes equal the plain replay's (2,316 of 2,316
+  Set/symbol pairs). Trailing Sets never get an Auto hold (owner); every other Set (pack x TP step x SL ratio, base and Exit) chooses on its own orders.
+- **Measured against no hold** (development windows, Auto floor, scratch off; executed PF / orders): no hold **0.879 / 165** (3-day) and **0.953 / 81** (A); hold Auto as shipped
+  before 0.412 / 168 and 0.323 / 84; only with 30 own orders and a 10 % lead over the global stop (`holdAutoMin` 30, `holdAutoMarginPct` 10) 0.649 / 166 and 0.568 / 82; with 50 and 20 %
+  0.665 / 171 and 0.513 / 89. Every variant cuts targets (time exits 28-56 of the orders) and is worse than no hold on both windows, so `holdAuto` is **off** in the overlays,
+  presets, desk and engine default (fixtures keep it on for their pinned counts; `lane_rank.hold-auto-is-off-by-default-and-never-on-trailing-sets`).
+- **Volume factor** (owner default and minimum 0.05): a missing, zero, negative or unreadable `volumeFactor` sized at 1.0 in the engine (20 x the default); now
+  `pulse_trader.volume_factor_of` (0.05 .. 10, else 0.05) for the overlay, `sized_notional` and the strict cap; desk slider from 0.05, displays and preview fall back to 0.05,
+  the settings load clamps. Check `trader.volume-factor-is-bounded-and-defaults-to-the-minimum`. `presets.ts` keeps its explicit 1 (a preset's own choice).
+- **Rejected with the new Auto floor** (both windows, executed PF): pause off 0.70 / 0.535 (pause auto 0.879 / 0.953 stays), Base long 30 / short 15 0.735 / 0.607 (50 / 25 stays).
+- x02 overlay `symbolCap` 30 (owner).
+
+## Auto minimum PF without the manual ratio (2026-11-03, `learn_step_floor`, `minPfStepAutoTol` 5 %)
+
+- **Objective (owner: high PF with as many valid Sets as possible, not tied to the ratio).** Per (TP step, direction), from the causal pairs (the Set's PF over its last
+  `minPfStepAutoN` closes at an order's entry, that order's net; orders closed before the evaluation window; one Set per distinct tape): of the floors 1.00 .. 2.00 with at least
+  `minPfStepAutoMin` admitted orders, the **lowest whose delivered PF is within `minPfStepAutoTol` of the best**. A step without the orders takes its direction's pooled floor;
+  only without any the manual floor. No margin over the manual value any more. One pure function `set_engine.learn_step_floor` for the engine and the simulators;
+  `stage_eval.AutoFloors` re-learns it every test hour from the orders closed before it, so `trade_sim` / `window_grid` now measure Auto (they ran the manual floors before).
+  Checks `step-pf.*` (plain reading, plateau -> lowest floor, step -> pooled -> manual, ratio does not move it, simulator = engine at the same hour).
+- **Measured** (`trade_sim.py`, per-order validation, one position per symbol, scratch off, pause auto, hold Auto off; development windows): 3-day data (32 h) Auto **0.879 PF /
+  165 orders / net -6.9 %**, validated 2.53 % (manual floors 0.584 / 199 / -35.6 %, 1.01 %); window A data (16 h) Auto **0.953 / 81 / -1.3 %**, validated 1.95 % (manual 0.426 / 96 /
+  -26.2 %, 0.25 %). Better PF AND more validated Sets on both windows; still just under 1. The largest gain measured after the scratch fix.
+- **Last-N grid, scratch off, manual floors** (`window_grid.py`, both 24 h windows, 54 cells each): pooled over both windows the best cells are Base 30 / short 15 / Main 25 / Real 15
+  0.767 (A 0.556 on 149 orders, B 1.026 on 125), Base 30 / 15 / Main 15 0.704, Base 50 / 15 / Main 10 0.695, Base 50 alone 0.676; Base 10 alone the worst 0.380 (a long window of 10
+  selects on noise). Main long 10 / 15 / 25 and Real 1 / 5 / 15 move the result by less than the noise of 110-180 orders per cell.
+
+## Set lanes no longer scratch (2026-11-03, `setScratchEnabled`, default off)
+
+- **Defect found.** The scratch exit is one global rule (`scratchS` 600 s, `scratchMinPct` 0.16 %): any position whose 1m close is +0.16 % gross after 10 minutes is closed. On Set
+  lanes it fired before almost every target (TP 0.2-3.2 %) and so cut every range's and coordination's winners at about +0.04 % net (0.16 % - 0.12 % PositionCost), while the stops
+  stayed full size: 217 of 284 executed orders left by it. That is a cross-lane exit acting on every Set whatever its own TP range.
+- **Fix.** `SetBook.set_scratch` (overlay `setScratchEnabled`, default false in the four overlays and both secure presets, desk toggle): off, a Set lane leaves only by its own stop, target
+  and time exit, in the replay (`scratch_bars` = `SCRATCH_NEVER`) and in the live lane (`Pulse.manage_set_lane` reads the same `scratch_bars`). The Exit lane (positions without a Set)
+  keeps its own scratch (`SCRATCH_S` / `SCRATCH_MIN`). Fixtures pin it on (`common.overlay`, `_SELFTEST_PIN`) so pinned counts and the golden stay meaningful. Checks
+  `lane_rank.set-lanes-do-not-scratch-unless-asked`, `trader.set-lane-scratch-and-time-follow-replay` (on scratches, off stays open).
+- **Measured** (`trade_sim.py`, 3 days, 20 symbols, development window 32 h, per-order validation, one position per symbol): scratch on 0.406 PF / 284 orders / net -43.7 %, next 50 orders 0.27;
+  **scratch off 0.584 / 199 / -35.6 %, next 50 orders 0.56**; scratch at +0.5 % 0.515 / 216 / -42.2 %. Exits with it off: target 102, time 38, stop 59. The biggest single lift measured in this
+  work, and still under 1 with a negative net.
+
+## Independent progress audit, gate by gate (2026-11-02; `scripts/independent_progress_audit.py`, `grid_compare.py`, `coverage_census.py`)
+
+- **What is independent.** The engine supplies each Set's orders (entry bar, exit bar, gross, reason) and its per-Set floor; everything else is re-derived in plain code from the raw 1m bars and the written
+  rules. *Market truth*: every order of a sample of base and Exit Sets (both directions) is replayed from the bars (entry = close of the entry bar, stop and target at TP = step x 0.1 %, SL = ratio x TP never
+  under (1 + slMinSteps) x PositionCost, stop first when one bar touches both, then target, time exit, scratch exit): **156,613 orders in two windows (63,114 + 93,499), 0 differ** in exit bar, reason or gross
+  result, 0 start before the Set's previous order closed. *Gate ladder*: `main_stage_audit.naive_chain` (sums in loops) one gate at a time. *Last-N grid*: `--grid`, every Base x Main x Real combination as
+  its own lane (a Base option builds its Main Set, a Main option builds its Real Set from it, a Real N judges it at the entry). Trailing Sets are not replayed independently (their arm / give walk is the engine's).
+  The signals (which bar enters) are an input in all of this.
+- **The ladder, 20 symbols, 252 of 3,400 Sets sampled by (pack, kind, direction, step range), 24 h test windows after 24 h of pre-history, PF = gains / losses of the net results of the window's orders:**
+  window A (10-31 14:00 + 24 h) / window B (11-01 14:00 + 24 h): Base tape (every order) **0.447 / 0.451**; + Base long window 0.260 / 0.360 (selected at 2.06 / 2.85); + Base short window 0.255 / 0.351; + Main long
+  window 0.196 / 0.209 (selected at 6.0 / 7.0); the Real Set (Main short / minimal) 0.194 / 0.206; **executable (Real window at the entry) 0.224 on 101 orders / 0.185 on 2,890** (selected at 25.6 in B); the Real
+  Negative Set 0.316 / 0.563, at its Real window 0.408 / 0.447. Long Sets 0.357 -> 0.108, short Sets 0.594 -> 0.242 (B). **Every gate lowers the PF the orders then deliver while the PF of the window that admitted them
+  rises**: the stages select on a stretch that does not persist (the persistence sign of the audit below). The contrarian lane (Real Negative) delivers more than the positive lane in both windows. These pool every
+  Set's orders: one entry is counted once per Set that took it (about 50), and no one-position-per-symbol rule applies, so they are a map of the gates, not an executed PF.
+- **Single last-N changes, the executable gate (A / B):** shipped 0.224 / 0.185; Base long 30 / short 10 0.161 / 0.235; 20 / 10 0.125 / 0.304; Base short off 0.383 / 0.183; Base minimal +1 0.150 / 0.169, +2 0.134 /
+  0.168, +3 0.141 / 0.178; **Base minimal -1 0.470 (84 orders) / 0.882 (245)**; Main long 15 / 25 / 35 0.166 / 0.224 / 0.131 and 0.201 / 0.185 / 0.175; Main short off 0.248 / 0.192; Real N 1 / 5 / 15 / 25
+  0.208 / 0.244 / 0.224 / 0.224 and 0.197 / 0.200 / 0.185 / 0.177; stages off (Base long + short only) 0.187 / 0.238.
+- **The Base x Main x Real grid, walk-forward (200 combinations, window A ranks, window B reads; `grid_compare.py`).** Positive lane: rank correlation of the combinations' PFs between the two days **+0.64** (97
+  combinations with 30+ orders in both); none reaches 1 in A, 9 do in B. By Base setting (pooled over every combination that uses it, A / B): **Base minimal -1 with long 30 / short 10 0.39 / 1.07, with long 50 / short 25
+  0.47 / 0.88**, every other Base setting 0.15-0.29; by Main setting 0.19-0.21 / 0.22-0.27 and by Real N 0.18-0.21 / 0.23-0.26 (Main and Real windows do not move the result). The top eight combinations of A (all Base
+  30 / 10 with minimal -1) read 0.328 on 1,270 orders in A and 0.975 on 2,276 in B. Negative lane: rank correlation -0.33, top eight 0.418 -> 0.520.
+- **That lead did not survive execution.** The same setting through the walk-forward executed simulator (`trade_sim.py`, 32 h development window, per-order validation, one position per symbol; the default arm was
+  re-run and reproduced 0.406 / 284 / -43.7 % exactly): `setGateMinN 1`, `setGateMinMode negative` **0.431 PF on 216 orders, net -25.7 %** against **0.406 on 284, -43.7 %** (-0.12 % against -0.15 % per order). The
+  difference is inside the noise, both are under 1 and negative. The pooled ladder figure (up to 1.07) counts a winning entry once per Set; the executed figure is the one that counts. No default is changed.
+- **Against the earlier engine on the same data.** `f3b0824` (before this session's grid, floors and split) on the same three days and window: **0.496 PF on 377 orders, net -44.0 %**; the shipped defaults now
+  0.351-0.406 on 284-313 orders, net -43.7 % to -56.7 %. Not better and not distinguishable at this order count. The earlier positive figures (small caps 1.07 sealed, window-grid cell 1.07 on 1,629 orders, live x02
+  1.04 net) are of other days and a different universe; the three-day limit on every run means they cannot be reproduced on today's data, only compared in kind: they were single windows of one regime each, and the
+  audit above shows the sign of persistence flipping between consecutive days.
+- **Coverage census (`scripts/coverage_census.py`, everything switched on: general, indications, Short Range, the five extra packs and five `indicationConfigs` entries over families x ranges x timeframes
+  x relations, split directions; 19,608 Sets in 39 packs and 452 groups of pack x type x direction x TP-step range; 8 symbols, one 24 h window after 24 h; the engine's chain, which the plain reading above equals).**
+  **Every one of the 19,608 Sets processed**: each produced orders (1,884,564 tape orders), so no strategy, type, range, direction or configured indication entry is dead. Past each gate: Base 116,823 orders on 7,389 Sets
+  (37.7 %), Main 65,976 on 5,228, executable 45,777 on 4,337 Sets (22.1 %); 166 of the 452 groups reach execution, 286 stop at a gate on this data (mostly at Base: a signal in one direction that did not persist that
+  day; the census prints the gate per group). Pooled PF of those orders (one entry counted once per Set, so a map, not an executed PF): tape 0.489, Base 0.369, Main 0.346, executable 0.309; by direction tape /
+  executable long 0.352 / 0.113 (1,598 orders), short 0.702 / 0.320 (44,179); by type executable base 0.308, Exit 0.313, trailing 0.302; by TP-step range 2-6 0.375, 7-12 0.296, 13-20 0.305, 21-32 0.282. The day's
+  market moved down (short tape 0.70 against long 0.35): the direction split shows the regime, and the gates do not turn either direction above 1.
+- **Harness fixes found on the way.** Mutants in the pinned trader were "caught" by the deploy-pin check any edit of that file trips (four earlier mutants and the Axis-floor ones): `mutate.py` now skips that one check
+  for them (`CTSG_SKIP_CHECKS`), the recorded catchers for them were cleared, and they were re-run. A Low-Range memo mutant that survived (key without the newest row's values) got an in-place-edit case; a stale
+  anchor of the pause mutant was repaired.
+
+## Audit of the new defaults (2026-11-02, `scripts/main_stage_audit.py`, 2 x 24 h, 20 symbols, 3,400 Sets, split + step floors + pause auto, hold Auto off)
+
+- **Arithmetic is right.** The chain recomputed by a plain reading of the rules differs on 0 of 40 Sets (24,613 orders); Real and Real Negative lie inside Main for all 3,400 Sets;
+  223,998 stop exits sit at -SL and 89,194 target exits at +TP of the lane distances (deviation 2.2e-16); every order's net is its gross move minus one PositionCost, once.
+  Nothing in Sets, stages, costs, ratios or the last-N windows is mis-calculated.
+- **The stages are anti-selective on these three days.** Selection PF 3.49 at Main entry and 5.30 at Real entry; delivered 0.324 (Main Set) and 0.229 (Real Set) against 0.532 for
+  the unfiltered Base tape and 0.555 for the shuffled placebo (real minus placebo -0.23 and -0.33, negative in both windows). Real Negative 0.555 (-0.01 against its placebo).
+  No category (general / indications / short range x base / exit / trail) holds above 1 in either lane.
+- **Persistence has the opposite sign to the 26-window audit.** By decile of a Set's Base window PF at the hour start, the next 25 orders read 1.19 (window PF 0.16) falling to
+  0.35 (window PF 4.1); rank correlation -0.26 in both windows (the 2-28 Oct audit: +0.08). Past losers bounce (base Sets 1.39, Exit Sets 1.81 in the lowest decile), past winners
+  fade. **The sign of persistence depends on the market regime**, so a gate that selects "high recent PF" works in one regime and works against you in the next; no fixed gate
+  can hold a high PF through both. This is a LEAD, not a result: two windows of one regime, and the three-day limit on every run means a single run cannot span regimes.
+  Test it on later days, one regime at a time, before building anything on it (the existing Negative lane and the Auto floor, which can only raise a floor, would not
+  exploit it as they stand).
+
+## Pause after success, indications by range, distinct tapes (2026-11-02)
+
+- **Pause after success** (`pauseMode` off / **auto (default, owner 2026-11-02)** / fixed, `pauseFixedMin`, `pauseCandidates` 2-60 min, `pauseAutoMax` 100,
+  `pauseAutoMin` 30, `pausePack` minutes per pack): a Set lane rests at least `pause` bars after a WINNING close (net of PositionCost above zero) on top of
+  the cooldown (`set_engine.rest_after`). Auto chooses per indication (pack) and symbol: the pack's reference Sets (SL ratio 1.0 / 2.0 x TP step 3 / 6 / 10 /
+  16) are replayed once per candidate pause on that symbol, and at each exit bar the pause whose pooled reference orders CLOSED BEFORE that bar read the best PF
+  wins (`hold_choice_at`: `pauseAutoMin` orders, a 5 % lead over no extra rest, else the cooldown alone). Causal by construction (check
+  `pause.auto-choice-never-reads-the-future`, mutant "the choice reads results closed after the bar"); the latest choice per (pack, symbol) is what live waits
+  (`Pulse.symbol_backoff(pack=...)`, `SetBook.pause_minutes`). Fixtures pin `pauseMode` off (`common.overlay`) so pinned counts stay meaningful; the golden
+  has a second fingerprint for the auto default (`pauseAuto`). Cost: about 80 extra reference scans per pack and symbol (about 5 % of a replay).
+- **Measured, pause off against auto** (3 days of 1m history, 20 liquid USDT perpetuals, 2026-10-31 .. 11-02, hold Auto off for both arms because the simulator
+  cannot model it): main-stage audit, 2 x 24 h, pooled over all Sets' orders: Base tape 0.510 -> 0.511 (the pause adds no signal edge), Main Set 0.375 -> 1.118,
+  Real Set 0.266 -> 0.654, Real Negative 0.431 -> 1.498; the gain sits in `general` base / exit (Main 0.58 -> 1.29 / 0.54 -> 1.27), `indications` and
+  `shortrange` stay below 1. Walk-forward `trade_sim.py` (validated per order, one position per symbol), development window 32 h: executed PF 0.572 on 294
+  orders -> **0.796 on 151**, net -26.2 % -> -4.1 %; **sealed 16 h, read once**: 0.540 on 227 orders -> **0.848 on 102**, net -18.9 % -> -2.7 %. Auto is better in
+  both windows and **both arms are still under 1 with a negative net**: it removes losing orders, it does not create an edge. 100-300 orders per arm is inside
+  the noise; read the demo connection before the live one.
+- **Indications by range** (`indicationConfigs`, `server/pulse/indication_config.py`): entries of families x ranges x timeframes (1 / 5 / 15 / 30, `c` vote over
+  1/5/15, `x` over 1/5/15/30) x relations, each with its own TP-step range, SL ratios, Set types and pause (auto / none / minutes). Every name is its own pack
+  (`extra.<name>`) with its own Base validation; unknown or over-bound combinations (128 names per entry, 384 total, 64 entries; raised 2026-11-03 from 48 / 96 / 24) are dropped and listed
+  (`stats.sets.indicationConfigs`). A configured range also caps trailing arms at its largest step. A narrow entry (steps 3-6) builds 99 Sets, not 1,654.
+- **Distinct tapes**: Sets whose exits never differ trade the same orders (a trailing arm the scratch exit always beats): on the 3-day data 210 `general`
+  trailing Sets made 42 distinct tapes (one group of 147) and their Main orders were 67 distinct entries counted about 76 times each, the source of the
+  "PF 261" trailing lane in earlier pooled audits. `pfBase.distinct`, `baseDistinct`, `baseOnlyDistinct` count one Set per tape (`SetState.tape_sig`); the
+  plain pooled figures keep their meaning but must be read next to these.
+- **Audit of the same data** (`scripts/main_stage_audit.py`, 2 x 24 h, pause off): the plain re-derivation of the chain differs on 0 Sets, Real/Real Negative
+  lie inside Main, stops and targets sit exactly at the lane distances; selection PF 2.0-2.4 against a realised 0.27-0.43 (placebo 0.62): the window PF
+  predicts nothing here (rank correlation -0.13). No accounting defect; the stages do not create an edge on these signals.
+- **Deploy pin**: `python3 scripts/update_restore_pin.py` after every edit of `pulse_trader.py` (regenerates `restore/pulse_trader.py.patch` and the hash in
+  `logistics.py` and `deploy/linux-common.sh`).
+- **Minimum PF by window size** is defined once, `position_cost.PF_BY_SIZE_DEFAULTS` (Minimal 1.10, Short 1.15; the 2026-10-29 note said 1.08 / 1.12, the higher
+  value stands).
+
+## Post-Base evaluation is the standard
+
+A Set (one grid configuration: pack x SL ratio x TP step, or pack x trailing pair) is judged on its own tape by the Base
+validation: PF over its last `setGateWindow` orders at or above `setMinPf`, a drawdown time under `setMaxDdtHours` (default 24 h), and,
+when `setGateMinTrades` is above 0, at least that many closed orders (0 = off, the default: a Set is judged on the orders it has; a
+Set without any closed order is never judged). Only Sets that pass are tradeable.
+
+- The number that counts for any strategy, indicator or setting is the **PF after Base validation** ("effective PF",
+  `sets.pfBase.base`), together with **how many percent of the Sets are validated** (`validatedPct`, also per pack in
+  `byPack`). Quote both, always, with the order count behind them.
+- The **unfiltered PF** covers every Set before Base. It may be above or below 1; label its population separately from selected and executed PF.
+- A change is good when the effective PF is high and stable across windows (every hour if possible), the validated share
+  is not collapsing, and the order count stays large enough to mean something. A high effective PF on a handful of
+  Sets or orders is noise.
+- Choose on the development windows only; read the sealed window once, for the finalists. Report the numbers as they
+  come out, positive or not. Do not tune on the sealed window.
+- **Read the effective PF next to the executed PF.** The effective PF is measured on the tapes the Sets were selected on, so
+  it is in-sample: tightening the gate (higher minimum PF, shorter windows, a consistency floor) pushes it from 1.5 to over 10
+  while the walk-forward executed PF of the validated Sets stays at 0.6 to 0.7 (30 days, 20 symbols, `scripts/gate_eval.py`).
+  `scripts/stage_eval.py`, `axis_eval.py`, `gate_eval.py` and `indicator_postbase.py` report both; do not raise a gate to
+  chase the effective PF.
+
+## Defaults decided by the owner (2026-10-28)
+
+- **2026-10-29: the minimum order count is off and the maximum drawdown time is 24 h.** `setGateMinTrades` 0 (engine `GATE_MIN_DEFAULT`, the
+  four shipped overlays, the desk): no "n<min" rejection beyond a Set with no closed order, the Base gate judges a Set on the orders it
+  has. `setMaxDdtHours` 24 (`GATE_MAX_DDT_HOURS_DEFAULT`, the overlays, the desk; settable 2-36 h in steps of 2). Read the cost of this
+  next to the executed PF: a Set with a handful of orders can pass on a lucky stretch, so the effective PF is more in-sample than before
+  and the validated share is higher (checks `gates.minimum-order-count-off-...`, `gates.default-max-drawdown-time-is-24-hours`,
+  `processing.few-order-sets-judged-when-the-minimum-is-off`). Measured (2 days, 20 symbols, development window, Base 30, Main off / 8,
+  `scripts/window_eval.py --patch`, minimum 25 / off x drawdown time 12 / 24 h): the dense 2-day tapes give every Set hundreds of orders
+  and drawdowns of minutes, so neither setting binds there: recent small caps identical in all four cells (valid 28.3 % / 14.0 %, effective
+  PF 1.98 / 2.31, executed PF 0.94 on 1,829 orders / 0.95 on 1,802), majors the same except the minimum off with Main 8 (valid 9.28 -> 9.33 %,
+  executed PF 0.61 on 743 orders in both). The effect belongs to the live book (sparse orders per Set: on x02 220 of 988 Sets were
+  "n<min", 152 on drawdown time at 12 h); read it there, next to the executed PF.
+
+- **Minimum PF by window size (owner, 2026-10-29)**: every last-N window asks the PF of its size class (`minPfBySize`, default on;
+  `SetBook.floor_for`, `StageParams.floor_for`, the simulator the same): (single definition: `position_cost.PF_BY_SIZE_DEFAULTS`; where an older note and the table differ the higher value stands, 2026-10-30 `19e0361`) **Micro** up to 5 orders **1.05**, **Minimal** up to 10 **1.10**,
+  **Short** up to 20 **1.15**, **Medium** (general / normal) up to 35 **1.25**, **Long** above **1.5** (`minPfMicro` / `minPfMinimal` / `minPfShort` /
+  `minPfMedium` / `minPfLong`, bounds `minPf*N`; overlays and desk Settings). With the defaults: Base long 50 asks 1.5, Base short 25 and Main
+  static 25 1.25, Real 15 1.15, the Main short windows 5 / 10 1.05 / 1.10. Off: `setMinPf` (and the Short Range floor) for every window. No
+  class is under `MIN_PF_FLOOR` (**1.05**, lowered from 1.1 for the Micro class). The other gates (Exit, DCA, Block, coordinator) keep
+  `setMinPf`. Check `gates.every-window-asks-the-minimum-pf-of-its-size`, `min PF by size:` mutants; test fixtures run one floor
+  (`common.overlay` sets `minPfBySize` off unless a check asks for the classes).
+- The Base gate is always on (the engine ignores `setUseHistoricGate: false`); the default minimum PF is **1.25**
+  (`GATE_MIN_PF_DEFAULT`, `setMinPf`, `minPf`); the Short Range strategy keeps its own earlier floor **1.1** (`shortRangeMinPf`,
+  owner 2026-10-29). No positive PF gate asks less than **1.05** whatever is configured (`position_cost.MIN_PF_FLOOR`, `pf_floor`; desk the same).
+  The volume factor default is the minimum, **0.05**.
+- Block is enabled for Set parents through its separate evidence book. DCA is enabled, but its Set/Axis
+  opt-ins stay off. All four Axis controls and Short Range are enabled on x01.
+- Axis reads continuing paper evidence so a rejected lane can recover; actual executions are a separate check.
+
+## Units and defaults
+
+- PositionCost is in percent, default 0.12 (`position_cost.POSITION_COST_PCT_DEFAULT`, both overlays, desk default).
+- **Ceilings raised (owner 2026-11-03)**: a TP step can be set up to 50 (5.0 %, `TP_STEP_MAX`; the shipped grid still ends at 32 = 3.2 %, `TP_STEP_DEFAULT_MAX`); the per-step floor table stays 0.2-3.5 % (owner 2026-11-03, a TP above 3.5 % asks the 3.5 % floor); `indicationConfigs` 128 names per entry, 384 in all, 64 entries.
+- **One TP step = 0.1 % of price (owner 2026-11-02)**: TP = step x 0.1 %, steps 2..32 = 0.2 % .. 3.2 % (`position_cost.TP_UNIT_PCT`, `TP_STEP_MIN/MAX`), whatever
+  PositionCost is; it was step x PositionCost. SL = SL ratio x TP with ratios 0.5..3.5 step 0.25. PositionCost still pays for every order and floors the lane's
+  TP at 1 x PositionCost (`TP_MIN_COSTS`, was 2). Trailing arms and gives use the same 0.1 % unit (arms 0.3 .. 2.2 %, `trail_grid`). Default grid: 1,700 Sets
+  (871 base, 443 Exit, 386 trailing; `grid.default-grid-follows-its-rules` derives them), 3,400 with the direction split.
+- Overall minimum stop = PositionCost + `slMinSteps` steps (default 1, so 2 x cost); minimum trailing distance =
+  PositionCost + `trailMinSteps` steps (default 2, so 3 x cost). These two stay in PositionCost units (they are cost safety rules); a trailing pair under the
+  minimum distance is never built, so a high PositionCost can leave no trailing Set (found 2026-11-02: the floor had been clamped to the grid).
+- **Pre-history default 3 days** (`histLookbackBars` 4320 = `LOOKBACK_DEFAULT` = `LOOKBACK_MAX`, owner 2026-11-02; was 1920). The engine keeps up to
+  `history_bars()` = depth x lookback + warm-up + holds per symbol (about 13,000 bars at the default); read the latency note below before raising anything.
+- Short Range strategy (pack `shortrange`, overlay `stratShortRange`): the Low-Range signals, TP steps 2-6.
+
+## Live entries = replay entries (standard)
+
+- Under the Base gate every live entry is the replay's: `SetBook.entry_signal` reads the signal of the minute that just
+  completed on the Set history (`bar_signal`, the per-bar rule `pack_signals` uses; the pack with the highest confidence at or
+  above `setEntryConf`), once per symbol and minute, within `ENTRY_FRESH_S` (30 s) of that minute's close
+  (`Pulse.set_entry_candidates`). Only completed minutes reach the Set history (`Pulse._closed_klines`; the venue's last row
+  is the minute still forming). The live 60-bar indication and general scores (outbreak, regime, forming bar) never open a
+  Set position: they traded entries no Set was validated on. Checks `trader.live-entry-is-the-replays-signal`,
+  `trader.only-completed-minutes-reach-set-history`, with mutants.
+
+## Exit Sets (exitIgnoreTp as its own strategy type)
+
+- With `exitIgnoreTp` on (the default) every base stop (SL ratio x TP step, one Set per distinct stop distance: 182 per
+  pack) also runs as an Exit Set (`kind` exit, id `<pack>:1m:sl<r>:st<n>:xt`): no TP exit, leaves by its stop, the time
+  exit or the scratch exit, with its own lanes, tape and Base validation. Base Sets always take their TP. `pick_any` ranks
+  the valid base and Exit Sets of a pack together (`rank_key`), then the trailing Sets. Default x01 grid including Short Range: 819 base + 405 Exit +
+  430 trailing = 1654 Sets. Client ids mark an Exit Set in the trail field (`CID_EXIT_TR`), so it never decodes to its twin.
+  Desk: Sets overview type "Exit".
+
+## Measured edge (30 days, 20 symbols, development window, `scripts/trade_sim.py`)
+
+- Every Set group's average gross result per order is at most +0.034 % (indications trail +0.025 %, Exit +0.014 %, base
+  +0.008 %, general about 0) against a PositionCost of 0.12 %. Effective PF after Base 2.33 (in-sample, 15 % validated);
+  the validated Sets' next 8 orders PF 0.46, next 50 orders 0.50 (below the ungated average of about 0.58: a Set passes
+  at the end of a lucky stretch); executed (validated per order) 0.61 on 9,993 orders, 61 of 199 blocks of 50 orders at PF
+  1 or more; the last 12 h on 12 symbols 0.43 on 130 orders (`reports/trade_sim_12h_12sym.txt`); no type,
+  step or SL ratio above 1 on its next orders. No gate or ranking can carry a PF above 1 out of sample while the signals'
+  gross move per order is under the cost: an edge has to come from the signals or the exits. `trade_sim.py` reports per
+  type and range, in orders (never hours); `reports/trade_sim_dev.txt` holds the full listing.
+
+## Independent lanes (standard)
+
+Every strategy type runs its own lane; none may close, tighten or score another's positions.
+
+- **Set lane.** A position opened under a Set (`pos.set_id`) is closed only by its Set's own rules, the ones the replay
+  validated: stop (kept on the exchange), TP by the Set's kind (a base Set always takes its TP, an Exit Set never does, a
+  trailing Set follows `setHonorTp` / `exitIgnoreTp`; `set_engine.lane_honors_tp`, replay and live alike), trailing only from an independent trailing Set (`trail_set_id`; a base Set does not trail), the time
+  exit after `hist_time_bars`, the scratch exit only when `setScratchEnabled` is on (off by default since 2026-11-03). Live code: `Pulse.manage_set_lane`. The Exit strategies, the
+  coordinator and the default variants never read or move these positions (`security_prices` skips the exit-lane stop
+  tightening for them).
+- **Exit lane.** The Exit strategies (lock, peak, rev, time, hard) manage only positions that have no Set. They score only
+  their own closes (`exits.on_close` and `variants.on_close` get closes without a set_id).
+- **Why.** A Set is validated on its own lane; an Exit strategy closing the same position early makes the live result
+  something the Base validation never measured (the PF after Base then does not carry over to live).
+- **No cross-lane exits on a Set position.** Set Block may add through its separate group proof without moving parent rules, and DCA only through its opt-in switches; the coordinator's rearrange never swaps it out (`Pulse.rearrange_opens`), and the global 6 h hold
+  cap leaves it to its own time exit. Each rule has a `trader.lanes-*` check and a mutant.
+- **Live = replay for a Set position.** Its SL and TP come from `set_engine.lane_fracs` (the replay's formula, no overlay
+  clamp); a base Set never trails, a trailing Set trails with its own arm and give (the independent trailing pick is for
+  positions without a Set); the lane stops at its own level even when the venue stop sits farther out; scratch is judged
+  on a completed 1m close after `SetBook.scratch_bars`. The same holds for a position recovered after a restart.
+  `scripts/regression/lanes.py` drives the live trader through the replay's bars and requires the same exit (reason, bar,
+  price), and the same outcome with every other strategy switched on (differential check).
+- **Block stacks on independent evidence.** Set parents use `SetBlockBook`: own Set/lane/symbol/side/group,
+  eight forward observations by default, a separate actual-add window, and additive sizing under the existing
+  parent stop and risk budget. The legacy non-Set parent book stays separate. Default: six groups, volume ratio 1.
+- **DCA is an opt-in lane** (the lane is enabled by default, `dcaEnabled`, but its Set and Axis options `dcaOnSets` / `dcaOnAxis` are off, so under the Base gate it is idle; `dca_engine.DCA_HARD_OFF` is only a build-time kill switch).
+  Independent of Block. `dcaAuto` (on by default) calculates the plan from each position's own stop distance (rungs as
+  fractions of it, one small rung, exposure ceiling `dcaMaxExposureX`, stop kept at the original level; the measured
+  least-harmful shape, `scripts/dca_eval.py`); off = the static lists (`dcaMaxSteps`, distances, multipliers).
+  Set positions are added to only with `dcaOnSets`, or `dcaOnAxis` (an Axis is on and that parent's own Set/lane allows); the Set
+  then keeps its own stop and TP at the entry it opened at (`pos.dca_ref`), is scored on its base result, and the DCA
+  lane is scored on its own adds (`dca_pct`) and switches itself off when they lose. Measured walk-forward on Base-executed
+  positions (8 and 30 days, 20 symbols): every DCA shape lowered or left the PF unchanged and scaled the losses, so it
+  stays off until a window shows otherwise.
+- **Block volume (`block_engine`).** Additive from the group's original base volume V0: each VALID group (its PF decision
+  passes, not paused) adds one partial ratio (`blockVolumeRatio` x V0), so the stack is V0 x (1 + ratio x valid groups),
+  at most `blockMaxStack` (6) groups, never a cumulative jump in one order and never computed on the grown volume. The
+  k-th valid group must pass the PF threshold of the stack it creates. For legacy non-Set parents only, a stack that was increased stays increased: a
+  parent that closes at a net loss keeps the level (`carried`, `top`) and V0, the next parent opens at V0 x (1 + carried
+  x ratio) (`Pulse.place`, `BlockBook.parent_scale`), and the group's net accumulates over its parents; once that net is
+  back to equal (>= 0) the next parent opens at the base volume. The lane's observed PF, pauses and parent ring persist
+  across parents. Checks: `block.*` and `trader.block-*`.
+
+## Hold time (per step, per Set, Auto Mode)
+
+- **2026-11-03: `holdAuto` is OFF by default** (overlays, presets, desk, engine): every Auto-hold variant executed worse than no hold on both windows (see "Hold Auto
+  off by default"); trailing Sets never get an Auto hold; `holdAutoMarginPct` (default 2) sets the lead a candidate needs over the global stop.
+- Overlay keys: `holdEnabled` (master, default on), `holdAuto` (Auto Mode, default off since 2026-11-03), `holdAutoMax` (orders judged, at most 50, default
+  50), `holdAutoMin` (orders needed, default 10), `stepHoldOn[i]` / `stepHoldMin[i]` (manual hold of step i + 1; desk sliders 1-50 min for
+  steps 1-5, 30-350 min for steps 6-12; the engine accepts 1..720). Master off = only the global time stop (`hist_time_bars`).
+- Manual: an "on" step leaves every Set of that step on its own time exit after that many minutes. Auto: every Set without a manual step
+  hold (pack x range x SL ratio x TP step, or trailing pair, so each indication, coordination, range and step on its own) replays the
+  candidates (`HOLD_AUTO_LOW` for steps 1-5, `HOLD_AUTO_HIGH` for steps 6-12) next to the global stop on the same bars and keeps the one
+  with the best cost PF over its last orders (as many as it has, at most `holdAutoMax`; a candidate needs `holdAutoMin` orders and
+  `HOLD_AUTO_MARGIN` x the global stop's PF). `SetBook._choose_hold`; the Set is validated on the tape of its chosen hold; live reads
+  `st.hold_bars` (`Pulse.manage_set_lane`), the same bar as the replay (`trader.auto-hold-same-in-replay-and-live`).
+- **The judged tape is causal** (2026-10-29, `set_engine.causal_hold_tape` / `hold_choice_at`): each order comes from the hold that was
+  chosen at its entry, on the candidates' orders closed before it, as live positions open with the hold in effect then. Before, the hold
+  chosen now was applied to every earlier order of the tape that Base, Main and Real are built from (hindsight): on 8 symbols x 40 h the
+  unfiltered PF read 0.64 with it against 0.46 causal, on the same orders. `st.hold_bars` (what a new position opens with) is unchanged. A
+  candidate keeps its newest 50 orders per symbol (memory), so older entries without candidate history fall back to the global stop
+  (conservative, never hindsight). Check `processing.hold-auto-tape-is-causal`, `hold auto:` mutants.
+- The choice is made on the orders the Set is then judged on, so the effective PF after Base is in-sample (higher than the executed PF).
+  Measured results: `scripts/hold_eval.py` (fixed hold per step), `scripts/hold_auto_eval.py` (Auto Mode against the global stop, both
+  PFs, development window; `--sealed` once). Do not read a better effective PF as an edge without the executed PF.
+- Validation windows (`position_cost.window_n`, `MIN_VALIDATION_N` = 8): with `windowsLinked` (default on) `pfWindow`, `setPfWindow`,
+  `exitPfWindow`, `slToTpRecalcN` and `trailRecalcN` follow the overall validation's last N (`setGateWindow`, 50); unlinked each is its
+  own value, at least 8 (shipped 8). The floor of 8 applies to these windows and the hold Auto sample floor only (the Base gate's minimum order
+  count has no floor since 2026-10-29: 0 = off). Other counts keep their own ranges; the defaults of `mainEvalPosCount` (20) and `realEvalPosCount` (15, owner, 2026-10-28), and of `prevPosMinCount`,
+  `exitMinSamples` and Block's `blockMinSamples` (8) (Block's `blockWindow` 25). Block counts its own samples (overlay `blockMinSamples`,
+  `blockWindow`), independent of the coordinator's `prevPos*` counts and of the validation windows (`trader.block-samples-own-...`).
+- Measured (2 days, 20 symbols, development window = first 2/3; `scripts/window_eval.py`, extra last-N PF check on top of the Base gate; "none" =
+  the Base gate alone, all windows at the overall N): majors executed PF none 0.40, N = 6/8/12/15/20/25: 0.42/0.43/0.41/0.42/0.41/0.43;
+  recent small caps none 1.20, N = 6/8/12/15/20/25: 1.19/1.15/1.07/1.12/1.08/1.10 (sealed third, read once: none vs 8, majors 1.54 vs 1.62,
+  small caps 0.98 vs 1.01). `scripts/sim12h.py --counts N` (12 h, 20 symbols, windows + Axis last-N + Block evidence at N): executed PF
+  as before / 8 / 12 / 15 / 20 / 25: majors 1.08/1.14/1.04/1.04/1.44/1.13, small caps 0.99/1.03/1.03/1.09/1.01/0.92. No N wins in both
+  universes and the differences are inside the noise of one 12-hour window, so the shipped default is the minimum, 8 (windows linked to
+  the overall N). Do not tune these on a 12-hour window.
+- Base gate last N (`setGateWindow`, 2 days, 20 symbols, `window_eval.py --gate-window`, Base gate alone; N = 50 / 25 / 30 / 35): development
+  executed PF majors 0.40/0.53/0.47/0.56, small caps 1.20/1.08/1.19/1.14; validated share 9.5/16.2/14.5/12.7 % and 27.1/33.5/31.4/29.1 %.
+  Sealed third (read once for 50, 30, 35): majors 1.54/1.08/1.18, small caps 0.98/1.10/0.98. 12 h sim (`sim12h.py --overlay`): majors
+  1.08/0.99/1.01/0.94, small caps 0.99/1.19/1.06/1.02. The development ranking flips on the sealed window and between universes, so the
+  default stays 50 (shorter windows validate more Sets and read higher in-sample, not a better executed result).
+
+## Stages: Base -> Main -> Real, each stage's orders a new Set (core logic, owner 2026-10-28)
+
+- **Base stage** (coordinations, ranges, types: pack x SL ratio x TP step, Exit Set, trailing pair), judged on the Set's own tape with
+  **two windows, both must pass** at the minimum PF: the long window `setGateWindow` (50) and the short window `setGateShortN` (default
+  25, 0 = off), plus minimum orders and drawdown time. Reason `short` for the short one. A third Base window, the
+  **minimal** window (`setGateMinN` 0 = off, 1-3; `setGateMinMode` positive / negative / **both**; reason `minimal`): the newest N results of the Set's own tape (net after
+  PositionCost) must all be positive, all negative, or (both, owner 2026-10-29) share one sign throughout (`set_engine.sign_ok`; at N 1 that is any result but an exact zero);
+  judged on the results it has unless `stageFullWindow`; **no ratio rule** (owner 2026-10-29: 1-3 whatever the short window, the 0.5 share applies to the short windows only); part of the chain
+  (`set_engine.stage_chain`, the Base loop), the simulator (`stage_eval.gate_base`) and the desk Settings (`gates.base-minimal-window-...`, `set-base-minimal-window-equals-the-rules`,
+  `processing.sim-gate-equals-the-engine-for-every-window-configuration`, `base minimal:` mutants). The short window
+  is at most `setGateShortMaxRatio` (0.5, owner 2026-10-29, desk Settings) of the long window: long 40 allows at most 20, long 20 at most 10 (`gates.short-window-is-at-most-half-of-the-long-window`, `short window:` mutants).
+- **The standard window test** (owner, 2026-10-29): `scripts/base_window_grid.py` runs every Base long x short cell (long 20-50 step 10, short
+  off / 5-25 step 5) through `trade_sim.py` on 20 symbols, the last 24 h simulated after 24 h of pre-history (`histLookbackBars` 1440),
+  and writes an HTML report (heatmaps of executed PF, next 15 / next 25 orders PF, effective PF, validated share and orders; cumulative
+  net per hour per cell; the best cell hour by hour and by type). Ranking: the geometric mean of the executed PF and the next 15 / 25
+  orders PF (at least 100 executed orders). Run 2026-10-28 04:00 - 10-29 04:00 UTC (`reports/base_window_grid_24h.html`): best long 50 /
+  short 25 (executed PF 0.75 on 617 orders, next 15 orders 0.85, next 25 orders 1.09, validated 2.4 %, effective PF 2.86 in-sample);
+  every cell executed 0.58-0.82, next 25 orders 0.30-1.09 (the 20 majors of the 30-day set). The parallel grid on the live small-cap
+  universe (`scripts/window_grid.py`, `reports/window_grid_24h.html`, 10-28 01:00 - 10-29 01:00, x Main / Real 15 / 25): best long 30 /
+  short 15 / Main 15 / Real 15 executed 1.07 on 1,629 orders (halves 1.15 / 0.95); long 50 short 15 0.96, short 25 0.94. The two
+  universes rank the cells differently; one 24 h window is inside the noise.
+- **Main stage** (additional strategies, coordinations, processings; **the last-N validation sits here**): the Base Set's **Main Set**
+  (`<id>:main`) holds the orders it opened while Base passed (all Base windows, each judged on the Set's own closes before that entry). **Three
+  windows on the Main Set, like Base (long, short, minimal), every one judged on its own and all of them must pass** (owner 2026-10-29: the earlier
+  "Auto" window is the **short** window; the earlier `mainAuto*` overlay keys still load when their `mainShort*` twin is absent, the new key wins):
+  - **long** `mainGateN` (25, reason `main`);
+  - **short** (`mainShortEnabled`, reason `mainshort`): each Set picks its own window from `mainShortWindows` 5/10/15 - the window whose passed
+    validations were followed by the best PF on its own Main Set; a candidate needs `mainShortMin` (8) orders and `mainShortMargin` (1.02) x the long
+    window's PF, like `_choose_hold`; `st.main_short_win`, snapshot `mainShortN`. The windows are at most `mainShortMaxRatio` (0.5, owner 2026-10-29,
+    desk Settings) of the long window, the same rule as the Base short window: long 25 keeps 5 and 10, drops 15
+    (`gates.main-short-windows-are-at-most-half-of-the-long-window`, `main short:` mutants). **The pick is causal (2026-10-29)**: each Main order is judged
+    with the window its own entry could pick, from the Main orders that had CLOSED before it and whether each had passed the candidates at its entry
+    (`stage_chain` returns `short_by_order`); the pick for the verdict now reads every Main order. Before, one pick over the whole tape was applied to every
+    earlier order, so the Real Set's history held hindsight (the order's own result was in the pick that admitted it): 13 % of the Real orders differed and
+    the realised PF of the Real Set read 0.925 against 0.878 without it (20 symbols, 24 h, 61k orders) - the gain was the leak, not an edge;
+  - **minimal** (`mainMinN` 0 = off, 1-3; `mainMinMode` positive / negative / both; reason `mainminimal`): the newest N results of the Main Set (net after
+    PositionCost) must all be positive, all negative or (both) share one sign, judged on the results it has unless `stageFullWindow`; no ratio rule (not capped by the short candidates); it
+    only removes Real Set orders and never changes the Main Set or the short pick (`gates.main-minimal-window-positive-and-negative`,
+    `set-main-minimal-window-equals-the-rules`, `main minimal:` mutants).
+- **Main Negative lane** (separate, `mainNegEnabled`): the average net of the last 5 or the last 10 Main-Set orders (`mainNegWindows`) is
+  negative. Its orders form the **Real Negative Set** (`<id>:realneg`), with its own Real validation, stats and rank.
+- **Real stage** (evals and overall strategies): the **Real Set** (`<id>:real`) holds the Main-Set orders opened while both Main windows
+  passed. One window, the last `realGateN` (15, `realGateEnabled`, reason `real`) of the lane's Real Set at the minimum PF; the Real
+  Negative Set is judged the same way on its own orders. The overall strategies (coordinator real stage) read the Real Sets' pooled
+  paper stream (`SetBook.real_paper`, `realStagePaper`).
+- **Real stage Axis scope:** candidate admission reads `set:<id>:<lane>` paper evidence and counts only
+  positions in that exact scope for continuation capacity. Both positive and negative alternatives are tried,
+  including both lanes of the same Set. Pooled overall/pack views remain diagnostics. Execution figures are
+  stored separately for overall, pack, lane and exact Set/lane and are restored on restart.
+- **Active execution**: `pick_any` takes only Sets valid through Real on a lane (`SetBook.lane_of`), the positive lane first, then the
+  Real Negative lane; the position carries its lane (`pos.lane`, client id nonce marker `CID_NEG_MARK`), a live close joins only its own
+  lane's separate execution window, and orders mirror to the exchange through the usual order path. `stagesEnabled` off = the Base long window alone.
+- **Stage windows judge the orders their lane has** (2026-10-29, `stageFullWindow` false, the default; true = the strict rule): the Base short
+  window, the Main long / short / minimal windows, Real and Real Negative each judge the newest N orders of their lane, at least one, at the minimum PF.
+  The strict rule (a window must hold its full N) was a hidden minimum order count: a Set needed 25 Main orders before its first Real order and
+  15 Real orders after, so on a sparse live book nothing reached Real. Measured on x02 (28 Oct, 1,234 configured Sets): 725 passed Base, 558 stopped at
+  Main, 449 of those for lack of orders (median 18 Main orders in the 32 h lookback, 172 of them at PF 1.25 or more on the orders they had); of the 109 with
+  25 or more, none reached 1.25 (median Main PF 0.94). On dense tapes (20 symbols, 24 h) the two rules differ by under 0.02 executed PF. Real last N and
+  the Negative windows go down to 1 (`realGateN` 1..200, `mainNegWindows` such as 1,2; the Main long window keeps its floor of 10). A Negative window is
+  below zero when its sum is under -`NEG_EPS` (1e-12): results that cancel exactly are not negative whatever the float rounding of a prefix-sum difference
+  says (found by the plain-reading check; the chain and the verdict read it the same way).
+  Checks `set-stage-windows-judge-the-orders-available`, `gates.stage-short-window-...`, `gates.stage-windows-accept-one-and-two`, `stage windows:` mutants.
+- **Stage figures** (`pfBase.stages`, desk "Stages" card, coverage strip): per stage (Base, Main, Real, Real Negative, valid on any lane) the Sets that
+  pass it, their share of all configured Sets, the pooled PF of those Sets' window orders and the mean of their own PFs. Never an average over all Sets
+  (`processing.stage-figures-average-the-valid-sets-...`, `stats stages:` mutants).
+- **Last-N windows** (`pfBase.windows`, desk "Last-N windows" table, grid `windows`): nine rows, each window on its own - Base long / short / minimal, Main long /
+  short / minimal, Negative (dip), Real, Real Negative: the Sets of the stage's population (all Sets for Base, the Base-passing Sets for Main and Negative, the
+  Main-passing Sets for Real) that pass THIS window alone, their share of that population and of all Sets, and the PF of the orders this window reads (gains
+  over losses of all those orders together, `orders` behind it) next to the mean of the Sets' own PFs; `chosen` = how many Sets run each Main short candidate.
+  The stage passes when all of its windows do, so a stage never has more Sets than any one of its windows (`stages.the-statistics-relations-hold`,
+  `stages.window-figures-pool-exactly-the-orders-each-window-reads`, `stages.every-window-is-judged-on-its-own`, `windows:` mutants). The simulator keeps the same
+  figures (`stage_eval.window_figures`, compared with the engine's SetState fields in `self_check` for every sampled pair).
+- **Complete figures in the window grid** (`scripts/window_grid.py`, `window_grid_report.py`, 2026-10-29): every average is over ALL the orders it covers. The cell's
+  effective PF is the gains over the losses of all the valid Sets' long-window orders over all 24 test hours (`eff_gp`, `eff_gl`, `eff_orders`; the median of the
+  hourly PFs stays beside it as `eff_pf_median`, it was the headline before), the executed PF carries its exact sums (`exec_gp_pct`, `exec_gl_pct`, also per half and lane), and
+  the per-setting tables add the cells' gains and losses ("Exec PF (all orders)", "Eff PF (all orders)", orders next to them) instead of averaging cell PFs
+  (the plain mean stays as a second column). Every cell walks the same hours, so these are comparisons between settings, not independent samples. `--main-minimal`
+  adds the Main minimal window as a grid dimension; several grid files of one test window merge into one report.
+- **Performance** (2026-10-29): `stage_chain` computes each order's window position once and shares it between the windows, answers the long window's PF before anything
+  else, skips the drawdown time for a window shorter than the limit (no episode can be longer) and builds the prefix sums in C: 4.4 -> 1.7 ms per Set and hour on 6,152
+  real Set-hours with identical lists (2.6x); the scoring pass reads a long tape from its end and sorts only when it is out of order (`_score_one` of a replayed Set
+  2.2 -> 1.4 ms, `snapshot` of 1,538 Sets about 70 ms, the golden replay fingerprint unchanged). Each shortcut has a check against the plain rule
+  (`set-chain-shortcuts-keep-the-rules`, `set-finite-and-by-time-equal-their-plain-readings`, `calc.last-n-window-without-a-full-scan-equals-the-full-scan`) and mutants.
+- **Main-stage audit** (owner question 2026-10-29: the PF after Main reads far below the effective PF - a defect?). `scripts/main_stage_audit.py`, 26 consecutive 24 h
+  test windows (2-28 Oct, 20 live-universe symbols, 24 h pre-history each, 40.7 M orders, Base 50/25, Main 25 + short 5/10, Real 15, minimum PF 1.25;
+  `reports/main_stage_audit_26x24h.txt`, `.json`; every PF is the gains over the losses of the pooled orders). Answer: **no accounting defect; the drop is the
+  selection effect on signals without an edge**, and the audit found and fixed two real defects on the way (below).
+  - *Accounting.* The chain of 120 Sets (274k orders) recomputed by a plain reading of the rules (sums in loops, no prefix sums) equals the engine's, Real and Real
+    Negative lie inside Main for every Set, 1.11 M stop exits sit exactly at -SL and 0.88 M target exits at +TP of the lane distances (deviation 2e-16), and the net of
+    every order is the gross move minus one PositionCost, once. Live x02 (80 closes of the stats export): net = gross - 0.12 % once; stops fill 2.5 % beyond the level
+    (8 stops: -4.58 % against -4.47 %), targets at the level, a scratch exit fills at the price of the next order, not of the completed minute (one closed at 0.000 %).
+  - *Zero edge.* A random entry with the Set's stop and target and one cost per order has an exact expected PF (win rate = stop / (stop + target)): 0.57 / 0.82 / 0.89 /
+    0.93 for step ranges 2-6 / 7-12 / 13-20 / 21-30. The unfiltered tapes read 0.52 / 0.75 / 0.83 / 0.88, i.e. at the benchmark and a little under it: mean gross result per
+    order +0.003 % (base Sets), +0.078 % (Exit), +0.063 % (trailing) against 0.12 % cost. No selection can make a PF above 1 out of nothing.
+  - *The ladder.* The window that selected each order reads 1.75 at Main entry and 2.11 at Real entry (2.23 for the Main long window of the Real orders); what those
+    orders then delivered: Base tape 0.834, Main Set 0.914, Real Set 0.934, Real Negative Set 0.908. Placebo (the same chain on results shuffled inside each Set, no
+    persistence in time left): 0.881 / 0.891 / 0.881. The Main Set beats the Base tape by +0.071 per window (standard error 0.015, 20 of 26 windows; pooled +0.080), the Real Set by
+    +0.071 per window (0.025, 19 of 26); of the pooled +0.080, +0.056 is choosing better Sets (the placebo keeps it: shuffling inside a Set keeps each Set's mean) and
+    +0.033 is persistence in time inside a Set (real minus placebo for Main, standard error 0.017 per window, negative in 11 of 26 windows), less 0.009 that the Base tape
+    itself differs from its placebo. Per window the lanes sit at 0.83 (Base) / 0.90 (Main) / 0.90 (Real) / 0.89 (Real Negative) and reach 1.0 in 0 / 4 / 5 / 2 of 26.
+  - *Persistence.* The Base window PF at an hour start in deciles against the PF of the Set's next 25 orders rises 0.797 -> 0.888 (rank correlation +0.079, negative
+    in 2 of 26 windows): the window PF carries about +0.09 PF of information across its whole range, trailing and base Sets +0.10 / +0.11, Exit Sets none. Nothing near
+    the 1.7-2.1 it reads at selection.
+  - *Groups.* Mean of the 26 per-window Real-lane PFs: indications trailing 1.008 (standard error 0.059), indications Exit 0.91, general Exit 0.93, general base 0.84, general
+    trailing 0.77, indications base 0.77; a pooled PF of 1.14 for indications trailing is carried by a few windows with many orders. No group holds above 1 (one window
+    ranked general trailing first, the 26 windows do not).
+  - *Hold times and exits.* The same 24 h window with every step on a fixed hold of 30 or 120 minutes instead of the 6 h stop: Base tape 0.850 / 0.854 (0.855 without),
+    Main Set 0.906 / 0.902 (0.902), Real Set 0.880 / 0.880 (0.878), Real Negative Set 0.915 / 0.912 (0.912), the selection PFs identical: the hold does not move the drop. Exits
+    by reason (26 windows): scratch exits are 51 % of the Base orders and 58 % of the Main orders (all wins), stops 36 % / 35 % (PF 0.15 / 0.21), targets 13 % / 6 %, the
+    6 h time exit under 1 % and always a loss. The Exit strategies manage only positions without a Set (live x02: 511 closes, all on the Set lane, none by an Exit strategy).
+  - *Lag and crowding (a lead, not a result).* Main Set orders opened while 1-5 of the Set's own positions were still open read PF 1.10-1.21 (48k orders), those opened with
+    11 or more open (87 % of the Main orders) 0.899; the Base tape shows no such pattern. The Base verdict reads closed orders only, so a market-wide burst of signals
+    (many symbols at once) is judged on results that come after it.
+  - *Defects found.* (1) The Main short window (then "Auto") was picked once over the whole tape and applied to every earlier order, so the Real Set's history held hindsight
+    (the order's own result sat in the pick that admitted it): now per order from the Main orders closed before it; 13 % of the Real orders changed and the realised PF of the
+    Real Set fell 0.925 -> 0.878 on the 24 h window it was found on (`stages.the-chain-is-causal`, `main short: ... hindsight` mutants). (2) A Negative window whose results
+    cancel exactly could count as negative through the rounding of a prefix-sum difference (`NEG_EPS`). (3) The grid reported the effective PF as a median of hourly values
+    and the setting tables as unweighted means of cell PFs: now the pooled figures above.
+  - *Process debug.* `scripts/stage_debug.py --data DIR --set ID`: every order of a Set with the windows that stopped it (Base: orders / long / short / minimal /
+    drawdown; Main: long / short / minimal), the Main short window each order was judged with, the three Sets the chain builds and the verdict now; the trace must rebuild the
+    engine's lists (`stages.the-debug-trace-equals-the-engine`).
+- Measured, stage audit (`scripts/stage_audit.py`, 20 live-universe symbols, fresh 24 h test after 24 h pre-history, Base 50/15, Main 25 + short window, Real 15;
+  `reports/stage_audit_24h.txt`): PF of the lanes in the test window, Base Sets (whole tape) 0.855 on 2.39 M orders, Main Sets 0.892 on 221,560, Real Sets
+  1.000 on 56,627, Real Negative Sets 0.887 on 131,966. By type (Base / Main / Real): trailing 0.894 / 1.032 / 1.254, exit 0.927 / 0.921 / 0.969, base (TP)
+  0.797 / 0.769 / 0.770; by category general 0.911 / 0.996 / 1.090, indications 0.816 / 0.787 / 0.853; by step range 2-6 0.615 / 0.889 / 0.997, 7-12 0.843 /
+  0.915 / 1.043, 13-20 0.885 / 0.925 / 1.085, 21-30 0.906 / 0.857 / 0.919. The Sets valid at an hour start read 1.64 in-sample (after Base alone, 270 Sets an
+  hour) and 0.88 on their next hour's orders (373,090 orders); after every gate 1.84 against 0.89 (56 Sets an hour, 69,825 orders): the drop after
+  selection is the in-sample gap, not a stage fault, and the stages do not close it. Only trailing Sets hold above 1 on their next orders (1.02 after Base,
+  1.19 after every gate); base (TP) 0.76 / 0.73 and exit 0.86 / 0.73 fall further after the stages; indications base and exit Sets in 13-30 and general exit 21-30
+  are the groups that lose most (0.64-0.78 next hour). Live x02, 485 closes (27-29 Oct): all on the Set lane, none closed by an Exit strategy or the
+  coordinator, PF net of cost 1.04.
+- Measured, window grid (`scripts/window_grid.py`, report `reports/window_grid_24h.html` + `.json`, relations `scripts/grid_relations.py`; rerun 2026-10-29 on the engine after
+  the causal Main short pick, the pooled figures and the Main minimal window; 20 live-universe symbols, fresh 24 h test after 24 h pre-history, hold Auto off, Main long 25 + short
+  5/10; 824 cells (820 staged + Base alone at long 20/30/40/50), each its own independent group of SetBooks; every cell's orders, net and PF agree however they are cut; two
+  runs merged into one report, a reference cell both runs carry kept once when its figures agree): Base long 20/30/40/50 x short 5-25 (at most half the long window) x Base minimal
+  window off / +1 / +2 / +3 / -1 / -2 / -3 x Real last N 1/5/15/25 x Negative windows 5,10 / 1,2, plus the Main minimal window off / +1..+3 / -1..-3 at long 30 / 50 x short 10 / 25 x
+  Real 15. **Every figure below is pooled over all the orders it covers** (gains over losses of the cells' orders added, the cell's orders beside it), the plain mean of cell PFs only
+  as a second column in the report. Executed PF by setting: Base minimal off 0.931 (237,229 orders), +1 0.900, +2 0.909, +3 0.917, -1 0.969 (181,050), -2 0.936, -3 0.908 (47,230);
+  against the same cells without a Base minimal window (twins, 0.937 on 178,430 orders): -1 +0.032, every other value at or below it. Main minimal: off 0.926 (949,729 orders), +1 0.923,
+  +2 0.884, +3 0.888, -1 0.949, -2 0.925, -3 0.920 (6 cells each); against their own twins (0.976 on 10,437 orders) every one is lower (-1 -0.027, -2 -0.051, -3 -0.056, +1 -0.053, +2
+  -0.092, +3 -0.088): a Main minimal window takes Real orders away and none of the six values lifts the executed PF, so it ships off. Negative windows 1,2 0.925 against 5,10 0.926;
+  Real N 1/5/15/25 0.922 / 0.930 / 0.925 / 0.924 (validated 3.12 / 2.02 / 1.76 / 1.48 %); Base long 20/30/40/50 0.895 / 0.933 / 0.932 / 0.927 (effective PF, all orders, 2.51 / 2.10 /
+  1.91 / 1.81, validated 2.77 / 2.26 / 1.96 / 1.81 %); Base short 5/10/15/20/25 0.940 / 0.925 / 0.927 / 0.914 / 0.896 (effective PF 2.01 / 2.00 / 1.92 / 1.89 / 1.82). Base alone (no
+  Main, no Real) executed 0.808 / 0.853 / 0.896 / 0.916 for long 20 / 30 / 40 / 50 on 1,232-1,417 orders (effective PF 2.09 / 1.84 / 1.73 / 1.64, validated 25.6 / 22.2 / 18.7 / 17.5 %):
+  the same long window with the stages on (Real 15, Negative 5,10, minimals off, pooled over the short windows) reads 0.866 / 0.980 / 0.952 / 0.968 on 3,470 / 4,674 / 6,420 / 8,308 orders, so
+  the stages lift the executed PF by +0.06 / +0.13 / +0.06 / +0.05 and cut the validated share from 17.5 % to 3.6 % at the shipped setting; still under 1. The shipped setting
+  (long 50, short 25, Main 25, Real 15, Negative 5,10, minimals off) executed 0.949 on 1,688 orders (halves 0.957 / 0.934), effective PF 1.85 on 65,600 orders, validated 3.55 %; the
+  Stages table of that cell reads Base long 17.5 % of the Sets (PF 1.64 on 323,700 orders), Base short 23.9 %, Main long 34.7 % of the Base-passing Sets (2.15), Main short 45.1 % (2.78),
+  Real 41.7 % of the Main-passing Sets (2.76 on 7,904 orders), Negative 54.8 % (0.39 on 14,805: the dip lane's own window reads below 1 by construction). Best cells (chosen on the same 24 h,
+  so in-sample for the choice): long 50 short 5 Real 5 Base minimal -2 1.157 on 654 orders (halves 1.165 / 1.103, validated 0.27 %), long 50 short 5 Real 25 minimal -2 1.149 on 653, long 30
+  short 5 Real 25 minimal -1 1.120 on 1,746 (1.141 / 1.076, effective PF 2.01 on 9,570 orders), long 50 short 25 Real 5 Negative 1,2 1.104 on 1,688 (1.149 / 1.025); 107 of 791 cells with
+  150 or more orders reach 1.00, 27 with 500 or more orders hold 1.0 in both halves (24 of them with a Base minimal window, 18 of those -1; 15 at Base short 5; validated 0.27-5.1 % of the Sets).
+  One window, a few hundred to a few thousand orders per cell, every cell walking the same hours (comparisons between settings, not independent samples): a gap of 0.03-0.05 between pooled
+  marginals is noise; the shape that repeats across both grid runs is -1 above +1 (requiring the newest result to be negative, mean reversion on these tapes) and a longer Base long window
+  raising the executed PF while lowering the effective one (in-sample gap). Read a second window before shipping any minimal window or a Real N other than 15.
+  **Process without the Negative lane and minimal mode both** (2026-10-29, 1,178 cells in all, engine before the minimum-PF-by-window-size change, so comparable with the cells above; the grid takes
+  Negative windows `off` = `mainNegEnabled` false, and minimal `±N` = mode both): Negative windows off 0.929 on 402,158 orders (effective PF 2.34, validated 1.35 %, no Negative-lane orders) against
+  5,10 0.926 and 1,2 0.925; on the same long / short / Real cells off reads 0.938 on 72,654 orders against 0.937 on 89,880 with the lane, so dropping the lane changes nothing measurable and loses its
+  orders. Base minimal both against the same cells without it (0.938, 72,654 orders): ±1 0.938 (identical: one result of one sign is every non-zero result, a sanity check of the rule), ±2 0.945,
+  ±3 0.890; Main minimal both against its twins (0.986 on 9,612 orders): ±1 0.986 (identical), ±2 0.936, ±3 0.918. No minimal value, either sign rule, lifts the executed PF beyond the noise except
+  Base -1 (0.979 against 0.938 on the Negative-off cells). The minimal windows run at every N beside every short window (no ratio rule).
+- **Minimal window on the average** (owner 2026-10-29: "both positive and negative average"): `setGateMinMode` / `mainMinMode` also take `avgpositive`,
+  `avgnegative`, `avgboth`, each of Base and Main on its own: the AVERAGE of the newest N results (net after PositionCost) is above zero, below zero, or
+  either (an average within `NEG_EPS` of zero is neither); the sign rule (every result one sign) lies inside the average rule of the same sign.
+  `sign_ok(w, positive, both, avg)`, the chain (Base loop, `main_minimal`), the verdict, the simulator, `stage_debug`, the audit's plain chain, the desk
+  selects and the grid (`--minimal 'a+2;a-2;a±2'`). Checks `set-minimal-window-average-equals-the-rules`, `gates.main-minimal-window-positive-and-negative`
+  (avg cases), `minimal average:` mutants. Off by default; not yet measured on the grid.
+- **Why the PF drops after Base (audit 2026-10-29, both chats; no accounting defect left)**. The effective PF is not the number a Set's
+  next orders deliver, for three measured reasons, two of them fixed in the engine:
+  1. **Selection (in-sample)**: a Set passes at the end of a good stretch; its next orders are near the ungated average (selection PF
+     1.75 / 2.11 at Main / Real entry against 0.91 / 0.93 delivered; a placebo chain on shuffled results 0.88 / 0.89:
+     `reports/main_stage_audit_26x24h.txt`). The stages add +0.03-0.04 over the placebo, they cannot remove the gap.
+  2. **Hindsight in the hold choice (fixed)**: hold Auto applied the hold chosen now to every earlier order of the tape all stages are
+     built from (8 symbols x 2 days: unfiltered PF 1.19 -> 0.70, Base-alone effective 4.65 -> 2.17 with the causal tape); and the Main short
+     window was picked over the whole tape (13 % of the Real Set; fixed by the other chat).
+  3. **Entries counted once per Set (statistic added)**: a pack's Sets trade the same signals and differ only in their exits, so one entry
+     sits in about 50 valid Sets' windows and the pooled effective PF counts it 50 times (a winning entry validates many Sets at once).
+     `pfBase.baseEntry` / `baseOnlyEntry` count each entry once, with its best-ranked Set's result (what execution takes): 8 symbols x 2
+     days, Base-passing pooled 2.17 against 1.29 per entry (361 entries, 50 Sets each); valid through every gate 2.17 against 1.62 (303
+     entries). Desk: "per entry PF" next to the effective PF. Check `processing.effective-pf-per-entry-counts-each-entry-once`.
+  4. **The long window reacts slowly** (`scripts/main_overlap_check.py`, 8 symbols x 2 days): for the 361 Sets passing Base now, their
+     window orders read 2.17 (18,050), the Main orders inside those windows 1.82 (1,609), but their Main Sets' last 25 orders 0.60
+     (3,950): most Main orders were opened in an earlier stretch while the 50-order window still passed and lost, before the window
+     failed. Same orders, same costs, same chain: a validation property (survivorship of the Sets valid now), not a bookkeeping fault.
+  Read the per-entry PF next to the Main / Real figures: that is the like-for-like comparison.
+- One chain function, `set_engine.stage_chain` (each stage reads only the lane the stage before it built; each lane a subset of the one
+  before) and `stage_verdicts`; `SetBook.set_processed` builds it in every replay pass. Snapshot index per Set: `mainId/N/Pf`,
+  `realId/N/Pf`, `realNegId/N/Pf`, `shortPf`, `autoN`, `lane`; `pfBase`: `base`, `baseOnly`, `main`, `processed`, `real`, `realneg`,
+  `stageSets`; execution stats `sets.stages` (Sets per stage) and `lanes` (open, closed, wins, losses per lane). Desk: Settings "Stages ·
+  Base -> Main -> Real", Sets overview columns Main / Real / Real Neg / Short PF · Main short / Lane, stats "Stages" and "Last-N windows". The simulator mirrors the
+  chain (`stage_eval.stage_lane`, self-check against the engine). Checks: `set-stage-chain-*`, `set-stage-rules-*`, `set-base-needs-both-windows`,
+  `trader.lanes-every-stage-on-its-own-lane`, and the `stage:` mutants.
+- Measured earlier (single windows; 30 days, 20 symbols, development window, Base 30/25, Main 8; pooled over every Set): Base Sets PF 0.59
+  on 15.3 M orders, Main Sets 0.63 on 3.3 M, Real Sets 0.65 on 1.9 M. Each stage lifts the PF a little; none makes it high or stable while
+  the signals' gross move per order is under the PositionCost.
+
+## Validation gates: Base last N, Main gate, shared minimum PF, pre-history, execution tracking
+
+- Every last-N evaluation is per Set (`SetBook._score_one` reads that Set's own tape: pack x SL ratio x TP step, or trailing pair, or Exit Set);
+  another Set's orders never move it. The coordinator's `pfWindow` evidence is a strategy-level pool by design.
+- **Base last N** (`setGateWindow`) **50** plus the short window `setGateShortN`, its minimum order count `setGateMinTrades` is off (0) since 2026-10-29 (was 30). **Main gate**
+  (`mainGateN` 25 plus the short window 5/10/15 and the minimal window, at least 8 where a floor applies) and **Real gate** (`realGateN` 15) as in the Stages section; execution picks only
+  Sets that pass every stage on a lane (`valid_for`, `pick_any`). `pfBase.base` is the end figure (all gates), `baseOnly` the Base gate alone, `real` the end Sets
+  over the Real window, `validatedBasePct` / `validatedPct` the shares. **One minimum PF**: Real, Exit, DCA, Block and the coordinator use `setMinPf`
+  (Short Range its own floor) while `minPfLinked` (default on); unlinked, Exit/DCA/coordinator take their own `exitMinPf` / `dcaMinPf` / `minPf`.
+- **Pre-history grows** (`histLookbackAuto`, `histLookbackMax` 2880): when a quarter of the Sets that traded have fewer orders than the gate
+  minimum (with the minimum off: no closed order at all), the lookback grows by 240 bars after a complete pass (the next fetch pages older minutes); it only grows and survives a reload.
+- **Execution tracking** (`Pulse.execution_snapshot`, stats `execution`, desk "Executed · after all gates"): Sets valid after all gates, open
+  positions and the Sets they run under (a Set that stopped passing keeps its open positions handled by its own lane until they close; counted
+  as `underInvalidSet`), orders closed by lane (Set / Exit, wins, losses, Sets that traded) from the whole trades file plus live closes, closes not
+  scored (`skippedNotScored`) and positions that left the book without a record (`droppedNoRecord`). Checks `trader.invalid-set-keeps-open-position-...`,
+  `processing.real-gate-per-set-...`, `processing.every-validation-gate-asks-the-base-minimum-pf`, `processing.pre-history-grows-...`.
+- Measured (2 days, 20 symbols, `scripts/window_eval.py --base-list ... --arms ...`, development window; 7 Base N x 7 Real N): validated Sets
+  fall with a longer Base window (small caps 36.7 % at 10 to 29.1 % at 35, majors 31.9 % to 12.7 %) and again with the Main gate (Base 30: 31.4 %
+  alone, 20.2-26.8 % after Real 8-25; majors 14.5 % alone, 10.1-12.8 %). The in-sample effective PF rises as the windows shorten and with the Real
+  gate (small caps Base 30: 1.79 alone, 1.90-2.01 with Real); the executed PF does not follow: small caps 1.07-1.22 (best Base 30 / Real 8-10 1.22, Base 25
+  / Real 10 1.06), majors 0.35-0.57, no cell above 1 on majors and no consistent winner across universes. Merged engine (Exit Sets), Base 30 Real
+  off / 12: small caps dev 0.94 / 0.91, sealed 1.07 / 0.97; majors dev 0.55 / 0.42, sealed 0.80 / 0.82. The Main gate removes a third of the validated
+  Sets and carries no measurable out-of-sample gain; it is on by default at N = 8 (owner, 2026-10-28).
+
+## Indication library and extra packs
+
+- `server/pulse/indication_lib.py`: 37 causal indicator families (trend, breakout, reversion, volume and flow; relations and
+  ratios such as higher-high counts, close location, up/down volume, ATR expansion, last-part acceleration), each at ranges
+  5, 8 (minimal) and 14, 21 (medial) on the 1m, 5m and 15m series (`<family>_n<range>_t<minutes>`), the three timeframes
+  combined (`<family>_c<range>`, at least two agree, none disagrees) and group votes (`g_<group>_<min|med>`). They are in
+  `indication_extra.INDICATORS` next to the older ones, so any name works in `extraIndicators` (a vote of the
+  indications pack) or in a pack's variant list. A name on a higher timeframe reads `indication_lib.TF_BARS` (96) bars of it
+  (`rows_for`: 480 one-minute rows for 5m, 1440 for 15m; combined and group votes the 15m history; `indication_extra.window_of`),
+  replay and live alike, and `pack_signals` keys its memo on `set_engine.signal_window` (every bar a pack reads). Audit on 30 days
+  (2026-10-29): 124 of 880 names could never fire on the old 300-row window, and `bbb` / `bbrev` / `vwapz` asked a 2 sd band a close
+  cannot reach in its own 5-bar window (`_band_k`); after the fix 4 rarely firing names remain (`ao_ultimate` at n21 on 5m / 15m).
+  The library's 5m / 15m memo is keyed by the rows object, its length and newest row (a list changed in place got its earlier bars).
+  Checks `indication.every-name-gets-its-timeframe-history`, `indication.signal-memo-key-covers-the-window`,
+  `indication.library-memo-never-stale`, with mutants. The live defaults (indications without `extraIndicators`, general) are unchanged.
+- **30m timeframe** (2026-10-29): every library, AO and Trend / Break family also on the 30m series (`<family>_n<range>_t30`) and a
+  combined vote over 1 / 5 / 15 / 30 (`<family>_x<range>`, at least two agree, none disagrees); the existing `_c<range>` votes stay over
+  1 / 5 / 15. A 30m name reads 64 bars (`indication_lib.rows_for` is capped at `ROWS_CAP` 1920 rows, the Set history's default
+  lookback). 1,296 names in all.
+- **Relations** (`server/pulse/indication_rel.py`, 2026-10-29): any name composes with conditions on the market around its signal as
+  one name, `<indicator>@<relation>[@...]`, applied left to right on the signal's direction (upper case with it, lower case against it):
+  `T<tf>[n<k>]` / `t<tf>` / `N<tf>` the Trend family on that series agrees / opposes / is absent; `B<tf>[n<k>]` / `b<tf>` the close is beyond
+  / inside the prior k-bar range of the series; `M<n>` / `m<n>` the earlier move (n 1m bars before the last part of 5) went with / against
+  by one random-walk unit; `A` / `a` last-part activity (true range 1.5x / 0.7x the 30 bars before); `V` / `v` last-part volume; `D` / `d` /
+  `X` a 0.5-2.5 ATR pullback from the 30-bar extreme / at the extreme / a deep drawdown; `C` / `c` volatility contraction / expansion;
+  tactics `I` invert, `K` confirmed on the bar before, `F` fresh, `G` a go candle. Any composite works wherever a name does
+  (`extraIndicators`, every pack's variant list; `indication_extra.resolve` / `known`); an unknown base or relation is an unknown name
+  (dropped from a list, never a silent vote); `window_of` covers every part. Checks `indication.relations-compose-by-their-rules`,
+  `indication.thirty-minute-names-fire`, `relations:` mutants. Sources for the relations: trend / regime filters for reversion, volatility
+  contraction before a break, earlier-move momentum and intraday reversal (see `reports/indicator_audit.html`).
+- **Indicator memo** (2026-10-29): the library's aggregated bars, every single name's result (library and AO) and the relation features
+  are memoised per thread in one bounded dict (`indication_lib._memo`, cleared past `MEMO_CAP` 4,096 entries) keyed by the rows the
+  series reads (first and newest row objects, count, newest values): a group vote and its singles share one result per bar, every window
+  of one evaluation hits the same entry, a list changed in place is never served its earlier state. 1,296 names cost about 1.0 ms each
+  per bar (5.8 ms before), peak heap 2.1 MB; every existing name gives the same signals as before (checked on 40 bars x 896 names).
+- Extra packs (`set_engine.EXTRA_PACKS`: trend, breakout, reversion, flow, multi): each its own Sets and its own Base
+  validation, switched by `stratTrend` etc. (off by default), indicator names by `trendVariants` etc. They exist in the Set
+  engine and the evaluation scripts (`scripts/indicator_postbase.py`: effective PF, validated share and orders per pack and
+  per variant, development window only, `--sealed` once for finalists). The live trader does not open positions from them.
+- Measured so far (8 and 30 day walk-forward, 20 symbols): every single indicator has an unfiltered PF of 0.4 to 0.65; the
+  effective PF after Base reads 1.3 to 1.7 in-sample and the executed PF of the walk-forward stays under 1 (best 0.87 on 459
+  orders). Choose on development windows; do not read these as an edge until an executed PF above 1 holds on the sealed window.
+- Audit of all 880 names (2026-10-29, 6 symbols, development window, average signed gross move after 5 / 15 / 30 bars): 5 reach about
+  the PositionCost after 30 bars (kelt_n8_t5 0.120 %, donch_n21_t5 0.129 %, atrx_n8_t1, brk_n10_t5, brk_n6_t5). As the Breakout pack
+  alone through Base -> Main -> Real (30 days, 20 symbols, development, `trade_sim.py`): the five together executed PF 0.57 on 4,102
+  orders (`reports/edge_near_cost5_dev.txt`); donch_n21_t5 alone 0.80 on 2,547 orders, next 25 orders after a validation 0.79, 20 of 50
+  blocks of 50 orders at PF 1 or more (`reports/edge_donch_n21_t5_dev.txt`), the best single pack measured so far and still under 1.
+
+## Venues
+
+- BingX is the default venue (`bingx-x01` live, `bingx-x02` VST demo). **Bybit V5 linear USDT perpetuals** run through the same
+  trader: `PULSE_CONN=bybit-x01` (mainnet, `https://api.bybit.com`) or `bybit-x02` (demo trading, `https://api-demo.bybit.com`,
+  public data from mainnet). `server/pulse/bybit_fast.py` (`FastBybit`, selected by `pulse_trader.make_api`) takes the trader's
+  BingX calls and returns BingX-shaped answers; nothing in the order logic differs by venue. Order tags are `Gb01` / `Gb02`.
+  Hedge mode (positionIdx 1 / 2), conditional reduce-only SL/TP (`triggerDirection` from side and kind), stops move by amend,
+  every create is idempotent through `orderLinkId` (a lost reply or a timeout is looked up before it is ever resent).
+- Bybit limits (`bybit_limits.py`): 80 requests/s IP pace (venue 600 per 5 s; HTTP 403 holds an IP for ten minutes, so nothing is
+  sent for 600 s after one), per-endpoint gates driven by `X-Bapi-Limit*` headers, a batch counts once per item, batches of 10,
+  failed items are resent alone, retCode 10002 resyncs the clock from `/v5/market/time`, a breaker holds new entries (never closes
+  or cancels) after repeated transient failures. Error classes: `bybit_limits.classify`; the words the trader reads are kept
+  in `msg`. Checks: `bybit.*` (stub venue, `scripts/regression/bybit.py`) and the `bybit:` mutants.
+- **Not verified against the live venue**: Bybit is geo-blocked from the build host, so the adapter is proven on a stub of the V5
+  documentation, not on Bybit. Run `bybit-x02` (demo) first. Credentials: `deploy/bybit-up.sh x01|x02` writes
+  `/opt/grok-x01-pulse/cred-bybit-xNN.json` (mode 600: `api_key`, `api_secret`, `is_testnet` "0" live / "1" demo); keys need Unified
+  Trading, Orders + Positions (trade) and Wallet (read), no withdrawal, bound to the host IP. The Bybit lanes are separate from
+  Overall in the desk and are not started by Overall Start or the watchdog. The drawdown halt ships on (18) in the Bybit overlays.
+
+## Live safety
+
+- x01 runs real money. The drawdown halt is a protection: never clear it or reset the start equity without an explicit
+  instruction. **Owner decision (2026-10-28, later): the drawdown halt is 80 % (`ddHaltPct` 80, x01 and x02; the Bybit overlays keep 18) of the equity the
+  active session started with (`ddHaltBasis` "session": the first balance this engine process reads, or the one after an explicit Start;
+  "start" = the stored start equity), replacing the 18 % / off settings below.** Checks `trader.drawdown-halt-*`. It is the overlay setting `ddHaltPct` (percent of the start equity, default 18, 0 = off). On 2026-10-28
+  the owner reset x01's start equity and switched its halt off (`ddHaltPct` 0) and set x01 to the minimum order size
+  (`sizePctOfBalance` 0, `targetNotional` 0.2); the volume factor is the minimum, 0.05 (owner, later the same day)); the minimum-equity guard (`EQ_MIN`) stays on. The same day x01 took
+  x02's settings (its overlay is x02's plus those three keys and `symbolCap` 50). The Base gate
+  (`setUseHistoricGate` true) is the default on every connection: entries open only under a Base-validated Set. (x02 ran
+  with it off from 01e842b, 2026-10-21, until 2026-10-28; switched back on by the owner.) Credentials are never printed or stored in the repo; rotate any that appeared in a session.
+- **Positions survive an outage (2026-11-04, owner: "All positions got closed ... keep pos running and continue on crash, reloads").** After the 8 h outage the engine's 6 h time exit (hold from `opened_at`) closed 27 open positions
+  the moment it was back, because their hold had "run out" while nothing watched them (20 more left on their venue-side target, 20 on their stop). Now a restart credits the downtime to every open position
+  (`Position.hold_credit_s`, from the previous run's last sign of life, at most 24 h per restart and 72 h in all; `credit_restart_downtime` runs before the restored book is reconciled), the time and scratch exits
+  read `position_age`, and positions keep their venue-side stop and target throughout. The overlay hot reload and a Set rebuild never close anything (a Set that stops passing keeps its open positions on its own
+  lane); `flatten_untracked` and `flatten_all` have no caller. Check `trader.restart-credits-the-downtime-so-positions-keep-running`. A position that is simply held longer than its replay's hold keeps the venue stop,
+  so the risk is the stop's, not a larger one; the replay-vs-live gap of a late exit is not modelled.
+- **Engine restart after a container restart (2026-11-04).** The container restarted five times in one day and the x01 engine stayed dead for 25 minutes to 4 hours each time (its positions kept their venue-side
+  stop / target orders, but nothing managed trailing, time exits, Block adds or new entries). `scripts/ensure_x01.sh` (idempotent, x01 only, never touches the halt / start equity / EQ_MIN / STOP / PAUSE / reset files)
+  is run by the committed SessionStart hook in `.claude/settings.json`, so every session that starts in the container brings the engine back at once. It is not a supervisor: with no session and no
+  process manager a dead container stays dead. After any restart the 200-symbol rebuild takes 15-25 minutes before entries resume. Check `logistics.ensure-x01-script-is-idempotent-and-starts-only-x01`.
+- State files of the live engine live in the pulse directory; tests must use private temp paths.
+
+## Memory and speed (2026-10-29)
+
+- Replay rows are stored per Set and symbol as columns (`set_engine.RowCols`: exit time, pnl, pnl_pct and hold as doubles, side and reason
+  as one-byte codes; about 34 bytes a row instead of about 200 as tuples), read as the same row tuples (`len`, iteration, index). 2 symbols x
+  1,920 bars (1.04 M rows with the hold candidates): Python heap 253 -> 94 MB. The replay still builds one symbol's rows as dicts before
+  packing them (the golden and memo harnesses read that form): that peak is per symbol and does not grow with the universe.
+- Indicators: one bounded per-thread memo (`indication_lib._memo`, `MEMO_CAP` 4,096) for aggregated bars, single results and relation
+  features; 1,296 names cost about 1 ms each per bar. `scripts/stress_test.py` (every pack, repeated passes: time, peak RSS, heap, cache
+  sizes, the same result every pass). Simulations and tests run on at most 3 days of data (owner, 2026-10-29).
+
+## Checks
+
+`python3 -B scripts/regression/run.py` (record the current result and duration), `python3 -B scripts/regression/mutate.py` (historical mutation results are not a current run; each
+mutant first runs the check that caught it last time, `scripts/regression/mutant_catchers.json`, and the whole suite only
+when that one passes, so a run takes minutes, not hours; `--only PREFIX`, `--full`),
+`npm run typecheck`, `npm test`. A new check must fail on the previous code.
+
+The stage chain has its own suite, `scripts/regression/stages.py` (`stages.*`): each last-N window judged on its own (a setting of one window never moves another's
+verdict), the per-window figures against the Sets' own streams, the chain against two independent plain readings (the selftest's `_ref_chain` and
+`scripts/main_stage_audit.naive_chain`, sums in loops, no prefix sums), the process debug (`scripts/stage_debug.py`: order by order which window stopped an order
+and why; the trace must rebuild the engine's lists), causality (a result that closes after an order's entry never moves its place in the Main / Real Sets),
+neutrality (no PF created or destroyed on results without persistence, a lift on results with it), a Set's verdict ignoring every other Set's tape, the stats'
+own relations, id collisions between Sets and the Sets their orders form, and the costs (net = gross - one PositionCost, stops and targets at the lane's
+distances, a live close and a replay row of the same move on the same net). Tools: `scripts/main_stage_audit.py` (the audit below), `scripts/stage_debug.py`.

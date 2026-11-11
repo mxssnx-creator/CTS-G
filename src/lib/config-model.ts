@@ -1,8 +1,8 @@
-import { requestJson } from "./request-json.ts";
-
-/** 1h lane kinds (server/pulse/htf_engine.py HTF_KINDS), validated in reports/htf-validation-20261007. */
-export const HTF_KINDS = ["rsi-mom-10-25", "rsi-mom-14-15", "rsi-mom-14-20", "rsi-mom-14-25", "rsi-mom-21-15", "rsi-mom-21-20", "rsi-mom-21-25", "bb-walk@x4", "break-vol@x4", "break-vol-2@x4", "break-atr-2@x4", "act-burst-2.5@x4", "act-chop@x4", "cci-14-200@x4", "cci-40-200@x4", "z-50-2.5@x4"] as const;
-
+import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "./lane-policy.ts";
+import { relateConfigs, type RelateConfig } from "./relate-config.ts";
+import { relationLanesOf, type RelationLanesConfig } from "./relation-lanes.ts";
+import { blockRoundsOf, type BlockRoundsConfig } from "./block-rounds.ts";
+import protectionPolicy from "../../server/pulse/protection-policy.json" with { type: "json" };
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
   "XRP-USDT",
@@ -18,8 +18,15 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
-export const DEFAULT_SYMBOL_COUNT = 50;
-export const MAX_SYMBOLS = 0; // 0 = unlimited hard ceiling; ranked cap is DEFAULT_SYMBOL_COUNT
+/** A list of last-N windows (2..200), sorted and unique; the fallback when empty (set_engine.parse_windows). */
+export function windows(raw: unknown, fallback: number[]): number[] {
+  const src = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(/[,;]/) : [];
+  const out = [...new Set(src.map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x)).map((x) => Math.max(1, Math.min(200, x))))];
+  return out.length ? out.sort((a, b) => a - b) : [...fallback];
+}
+
+export const DEFAULT_SYMBOL_COUNT = 12;
+export const MAX_SYMBOLS = 0; // 0 = unlimited
 
 export const SYMBOL_SORTS = [
   { id: "vol1h", label: "Volatility 1H", hint: "Most volatile last 1 hour" },
@@ -31,14 +38,6 @@ export const SYMBOL_SORTS = [
 ] as const;
 
 export type SymbolSortId = (typeof SYMBOL_SORTS)[number]["id"];
-
-export type EntryPolicy = "strict" | "permissive-bounded";
-
-export function coerceEntryPolicy(value: unknown): EntryPolicy {
-  return String(value || "").trim().toLowerCase() === "permissive-bounded"
-    ? "permissive-bounded"
-    : "strict";
-}
 
 export const SYMBOL_SORT_IDS: SymbolSortId[] = SYMBOL_SORTS.map((s) => s.id);
 
@@ -93,151 +92,32 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
-
-/** Cap 0 + All/* is unlimited. A positive ranked cap is not "all". */
-export function isUnlimitedSymbolBook(overlay: {
-  symbolCap?: number;
-  symbolsAll?: boolean;
-  symbols?: string[];
-}): boolean {
-  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
-  return cap === 0 && Boolean(
-    overlay.symbolsAll || overlay.symbols?.includes("*") || overlay.symbols?.includes("ALL"),
-  );
-}
-
-export function rankedSymbolCap(overlay: { symbolCap?: number }): number {
-  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
-  return cap > 0 ? cap : DEFAULT_SYMBOL_COUNT;
-}
-// Full independent risk catalog. PF remains the coordinator's primary
-// objective; this axis controls the evaluated SL:TP range only.
-export const SL_TP_MIN = 0.1;
-export const SL_TP_MAX = 3.0;
-export const SL_TP_STEP = 0.1;
-
-import { normalizeSystemSettings } from "./system-settings.ts";
-
-export const PF_MIN = 1.02;
-export const PF_MAX = 1.35;
-export const PF_STEP = 0.01;
-export const POSITIVE_PF = 1.15;
-// Shared "Overall minimum PF" default (minPf and its six sibling stage floors).
-// Mirrors EVAL_MIN_PF in server/pulse/connection_profile.py; POSITIVE_PF stays the
-// separate "positive Set" predicate and the Test Historic floor.
-export const EVAL_MIN_PF = 1.1;
-export const INTERN_PF = 1.0;
-/**
- * Mirrors coord_engine.AXIS_SPECS: every relative count from min up to the
- * configured max window (step 1, the finest grid) is one axis child per Base
- * parent and direction.
- */
-export const AXIS_SPECS = {
-  prev: { min: 4, max: 12, step: 1, default: 12 },
-  last: { min: 1, max: 4, step: 1, default: 4 },
-  cont: { min: 1, max: 8, step: 1, default: 8 },
-  pause: { min: 1, max: 8, step: 1, default: 8 },
+// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.25).
+export const GATE_MIN_PF_DEFAULT = 1.25;
+// Floor for the general/window-size settings; explicit per-step/range rules have their own bounds.
+export const MIN_PF_FLOOR = 1.02;
+const pfFloor = (v: number) => Math.max(MIN_PF_FLOOR, v);
+/** Defaults for the last-N window classes and the separate Signal source. */
+export const PF_TYPE_DEFAULTS = {
+  minPfMicro: 1.02,
+  minPfMinimal: 1.1,
+  minPfShort: 1.15,
+  minPfMedium: 1.25,
+  minPfLong: 1.5,
+  minPfSignals: 2.2,
 } as const;
-export type AxisName = keyof typeof AXIS_SPECS;
-/** Engine clamp_window: clamp to the axis range, then snap down onto its step grid. */
-export function clampAxisWindow(axis: AxisName, value: unknown): number {
-  const spec = AXIS_SPECS[axis];
-  const parsed = Math.trunc(Number(value));
-  const n = Number.isFinite(parsed) ? parsed : spec.default;
-  const clamped = Math.max(spec.min, Math.min(spec.max, n));
-  return spec.min + Math.floor((clamped - spec.min) / spec.step) * spec.step;
+export const SL_TP_RATIOS: readonly number[] = protectionPolicy.slTpRatios;
+/** Set grid: SL = TP x ratio, 0.25..2.5 step 0.25 (10 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
+export const SL_SET_RATIOS = SL_TP_RATIOS;
+export function setSlRatiosOf(value: unknown): number[] {
+  const rows = Array.isArray(value) ? value.filter((r): r is number => typeof r === "number" && Number.isFinite(r)).map(r => snapSlToTp(r)) : [];
+  return rows.length ? [...new Set(rows)].sort((a, b) => a - b) : [...SL_SET_RATIOS];
 }
-export { BASE_EVAL_DEFAULT, MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT } from "./stage-windows.ts";
-export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
-export const DEFAULT_MIN_STEP = 7;
-export const SL_MIN_PCT = 0.4;
-/** Default SL floor; SL_MIN_PCT stays the hard minimum. */
-export const SL_MIN_DEFAULT_PCT = 0.6;
-/** Trailing grid: arm 0.3–1.5 % on a 0.3 grid, give 0.1–0.5 % on a 0.1 grid (risk_variants.trail_grid). */
-export const TRAIL_ARM_MIN_DEFAULT = 0.6;
-export const TRAIL_GIVE_MIN_DEFAULT = 0.2;
-export function clampTrailGrid(v: { trailArmMin?: number; trailArmMax?: number; trailGiveMin?: number; trailGiveMax?: number }) {
-  const snap = (x: number, lo: number, hi: number, step: number) =>
-    Math.round(Math.max(lo, Math.min(hi, Math.round(x / step) * step)) * 10) / 10;
-  const n = (x: unknown, d: number) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : d);
-  const armMin = snap(n(v.trailArmMin, TRAIL_ARM_MIN_DEFAULT), 0.3, 1.5, 0.3);
-  const armMax = Math.max(armMin, snap(n(v.trailArmMax, 1.5), 0.3, 1.5, 0.3));
-  const giveMin = snap(n(v.trailGiveMin, TRAIL_GIVE_MIN_DEFAULT), 0.1, 0.5, 0.1);
-  const giveMax = Math.max(giveMin, snap(n(v.trailGiveMax, 0.5), 0.1, 0.5, 0.1));
-  return { trailArmMin: armMin, trailArmMax: armMax, trailGiveMin: giveMin, trailGiveMax: giveMax };
-}
-export const HIST_TEST_HOURS_MIN = 4;
-export const HIST_TEST_HOURS_MAX = 64;
-export const HIST_TEST_HOURS_DEFAULT = 20;
-export const HIST_TEST_HOURS_STEP = 1;
-export const HIST_TEST_REFRESH_MIN = 1;
-export const HIST_TEST_REFRESH_MAX = 8;
-export const HIST_TEST_REFRESH_DEFAULT = 2;
-/** Scratch window ceiling on the desk; must cover the 600 s engine default. */
-export const SCRATCH_S_MAX = 7200;
-
-export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
-  const n = Math.round(Number(value));
-  const base = Number.isFinite(n) ? n : fallback;
-  return Math.max(HIST_TEST_HOURS_MIN, Math.min(HIST_TEST_HOURS_MAX, base));
-}
-
-export function clampHistTestRefreshHours(value: unknown, fallback = HIST_TEST_REFRESH_DEFAULT): number {
-  const n = Math.round(Number(value));
-  const base = Number.isFinite(n) ? n : fallback;
-  return Math.max(HIST_TEST_REFRESH_MIN, Math.min(HIST_TEST_REFRESH_MAX, base));
-}
-
-export function histTestLookbackBars(hours: unknown): number {
-  return clampHistTestHours(hours) * 60;
-}
-
-export function normalizePf(value: number, fallback: number): number {
-  const parsed = Number.isFinite(value) ? value : fallback;
-  return Math.round(Math.min(PF_MAX, Math.max(PF_MIN, parsed)) * 100) / 100;
-}
-
-export function slTpGrid(lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): number[] {
-  const a = Number.isFinite(lo) ? lo : SL_TP_MIN;
-  const b = Number.isFinite(hi) ? hi : SL_TP_MAX;
-  const s = Number.isFinite(step) && step > 0 ? step : SL_TP_STEP;
-  const min = Math.max(SL_TP_MIN, Math.min(a, b));
-  const max = Math.min(SL_TP_MAX, Math.max(a, b));
-  const out: number[] = [];
-  for (let x = min; x <= max + 1e-9 && out.length < 64; x = Math.round((x + s) * 10) / 10) {
-    out.push(Math.round(x * 10) / 10);
-  }
-  return out.length ? out : [0.6];
-}
-
-export const SL_TP_RATIOS = slTpGrid() as readonly number[];
 export const TRAIL_VARIANTS = ["0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5"] as const;
-export const TRAIL_ARMS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
-export const TRAIL_GIVES = [0.1, 0.2, 0.3, 0.4, 0.5] as const;
 
-export function trailGrid(): { key: string; arm: number; give: number }[] {
-  const out: { key: string; arm: number; give: number }[] = [];
-  for (const arm of TRAIL_ARMS) {
-    for (const give of TRAIL_GIVES) {
-      out.push({ key: `${arm.toFixed(1)}:${give.toFixed(1)}`, arm, give });
-    }
-  }
-  return out;
-}
-
-export function snapSlToTp(v: number, lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): number {
-  const grid = slTpGrid(lo, hi, step);
-  const x = Number.isFinite(v) ? v : 0.6;
-  let best = grid[0] ?? 0.6;
-  let dist = Math.abs(x - best);
-  for (const g of grid) {
-    const d = Math.abs(x - g);
-    if (d < dist) {
-      best = g;
-      dist = d;
-    }
-  }
-  return best;
+export function snapSlToTp(v: number, lo = SL_TP_RATIOS[0], hi = SL_TP_RATIOS.at(-1)!, step = 0.25): number {
+  const x = Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : 0.5));
+  return Math.round((lo + Math.round((x - lo) / step) * step) * 100) / 100;
 }
 
 export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax = 0.5): number {
@@ -245,29 +125,139 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
   return Math.round(Math.min(gmax, Math.max(gmin, g)) * 100) / 100;
 }
 
-export type SizingMode = "balance" | "fixed";
+/** TP grid, owner 2026-11-02: one TP step is an absolute 0.1 % of price (steps 2..32 = 0.2 % .. 3.2 %), not a multiple of PositionCost. Mirrors position_cost.py. */
+export const TP_UNIT_PCT = 0.1;
+export const TP_STEP_MIN = 2;
+export const TP_STEP_MAX = 50;
+export const TP_STEP_DEFAULT_MAX = 32;
+/** Named TP ranges (server: position_cost.TP_RANGES): each a band of TP steps switched on or off on its own (overlay tpRanges). Wide (3.3-5.0 %) is off by default. */
+export const TP_RANGES = [
+  { id: "micro", label: "Micro", lo: 2, hi: 3 },
+  { id: "minimal", label: "Minimal", lo: 4, hi: 6 },
+  { id: "short", label: "Short", lo: 7, hi: 12 },
+  { id: "normal", label: "Normal", lo: 13, hi: 20 },
+  { id: "long", label: "Long", lo: 21, hi: 32 },
+  { id: "wide", label: "Wide", lo: 33, hi: 50 },
+] as const;
+export type TpRangeId = (typeof TP_RANGES)[number]["id"];
+export const MICRO_RANGE_PF_DEFAULT = 1.01;
+export function pfRangeFloorsOf(raw: unknown): Partial<Record<TpRangeId, number>> {
+  const out: Partial<Record<TpRangeId, number>> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const name = key.toLowerCase() as TpRangeId;
+    if (!TP_RANGES.some(r => r.id === name) || (typeof value !== "number" && typeof value !== "string")) continue;
+    const floor = Number(value);
+    if (Number.isFinite(floor) && floor > 0) out[name] = Math.round(Math.max(1, Math.min(2, floor)) * 10000) / 10000;
+  }
+  return out;
+}
+export const TP_RANGES_DEFAULT: Record<TpRangeId, boolean> = { micro: true, minimal: true, short: true, normal: true, long: true, wide: false };
+/** Trailing grid ceiling: arms up to trailStepMax steps (default 22 = 2.2 %, at most 30 = 3.0 %). */
+export const TRAIL_STEP_MAX_DEFAULT = 22;
+export const TRAIL_STEP_CEIL = 30;
+/** Trailing stop families (server: position_cost.TRAIL_SL_RATIOS): each ratio r builds the arm / give pairs again with the initial stop at r x the arm. */
+export const TRAIL_SL_RATIOS = [0.5, 1.0, 1.5, 2.0, 3.0] as const;
+export const tpPctOfStep = (step: number) => Math.round(step * TP_UNIT_PCT * 1000) / 1000;
+/** Minimum PF per TP step (owner 2026-11-02), mirrors set_engine.py: 1 + TP% x ratio on the 0.1 % grid rounded DOWN, 0.2 % at ratio 0.2 = 1.04.
+ * The ratio runs 0.1 .. 1.5 in steps of 0.05 (default 0.2). Auto learns the floor per step from earlier orders and falls back to this value. */
+export const STEP_PF_RATIO_MIN = 0.1;
+export const STEP_PF_RATIO_MAX = 1.5;
+export const STEP_PF_RATIO_STEP = 0.05;
+export const STEP_PF_RATIO_DEFAULT = 0.2;
+export const STEP_PF_TP_MIN = 0.2;
+export const STEP_PF_TP_MAX = 3.5;
+export const stepPfRatio = (raw: unknown): number => {
+  const v = Number(raw);
+  if (raw === null || raw === undefined || raw === "" || !Number.isFinite(v)) return STEP_PF_RATIO_DEFAULT;
+  const bounded = Math.max(STEP_PF_RATIO_MIN, Math.min(STEP_PF_RATIO_MAX, v));
+  const snapped = Math.floor(bounded / STEP_PF_RATIO_STEP + 0.5 + 1e-9) * STEP_PF_RATIO_STEP;
+  return Math.round(Math.max(STEP_PF_RATIO_MIN, Math.min(STEP_PF_RATIO_MAX, snapped)) * 100) / 100;
+};
+export const stepPfGridPct = (tpPct: number): number =>
+  Math.round(Math.max(STEP_PF_TP_MIN, Math.min(STEP_PF_TP_MAX, Math.floor(tpPct * 10 + 1e-9) / 10)) * 10) / 10;
+export const manualStepPf = (tpPct: number, ratio: number): number => Math.round((1 + stepPfGridPct(tpPct) * ratio) * 1e6) / 1e6;
+export type DirectionMode = "split" | "both";
+export type PauseMode = "off" | "auto" | "fixed";
+export const PAUSE_MODES: PauseMode[] = ["off", "auto", "fixed"];
+export const PAUSE_CANDIDATES_DEFAULT = [2, 3, 5, 8, 12, 20, 30, 45, 60];
+export const PAUSE_MAX = 240;
+export const SET_TYPES = ["base", "exit", "trail"] as const;
+export const INDICATION_TIMEFRAMES = [1, 5, 15, 30] as const;
+/** One range configuration of the additional indications; mirrors server/pulse/indication_config.py (the engine expands and validates it). */
+export type IndicationConfig = {
+  lastNLanes?: LastNLane[];
+  symbols?: string[];
+  major?: string; minor?: string; coordination?: string;
+  label: string;
+  enabled: boolean;
+  families: string[]; // library families, e.g. "donch", "kelt"
+  names: string[]; // exact names (group votes, composites)
+  ranges: number[]; // _n<range>
+  timeframes: (number | "c" | "x")[]; // _t<tf>; "c" vote over 1/5/15, "x" over 1/5/15/30
+  relations: string[]; // "" = none, else name@relation
+  stepMin: number;
+  stepMax: number;
+  slRatios: number[];
+  types: string[];
+  pause: "auto" | number;
+  /** The entry's own (thin) trailing arm range in steps of 0.1 %; 0 = every arm up to stepMax (server: indication_config trailStepMin / trailStepMax). */
+  trailStepMin: number;
+  trailStepMax: number;
+};
+export const DEFAULT_INDICATION_CONFIG: IndicationConfig = {
+  lastNLanes: structuredClone(DEFAULT_LAST_N_LANES),
+  label: "",
+  enabled: true,
+  families: [],
+  names: [],
+  ranges: [8, 14],
+  timeframes: [1, 5],
+  relations: [""],
+  stepMin: 3,
+  stepMax: 12,
+  slRatios: [1, 1.5, 2],
+  types: ["base", "exit", "trail"],
+  pause: "auto",
+  trailStepMin: 0,
+  trailStepMax: 0,
+};
 
-export type PulseOverlay = import("./system-settings").SystemSettings & {
+export type PulseOverlay = {
   targetNotional: number;
   volumeFactor: number;
-  /** "balance": one order = targetNotionalPct % of the system's equity × volumeFactor; "fixed": targetNotional × volumeFactor */
-  sizingMode: SizingMode;
-  targetNotionalPct: number;
-  orderSizing: "minQty" | "factor";
-  htfEnabled: boolean;
-  htfKinds: string[];
-  htfMinPf: number;
-  htfWindow: number;
-  htfMinN: number;
-  htfLastN: number;
-  htfSideHours: number;
-  htfSideMinTrades: number;
-  htfSideMinPf: number;
-  htfMaxOpen: number;
-  htfHistoryBars: number;
-  slAutoLeverage: boolean;
+  /** Percent of the balance per position before the volume factor; 0 = the fixed targetNotional. */
+  sizePctOfBalance: number;
+  /** Skip orders when the exchange minimum exceeds the balance-relative entry budget. */
+  strictSizeCap: boolean;
+  /** Hard ceiling for one position's notional in USDT, whatever the balance. */
+  sizeMaxNotional: number;
+  /** Model-only initial stop plus cost limit; 0 = off. */
+  maxModeledStopLossPct: number;
+  /** A fill farther than this (percent) from the price the entry was decided at is closed at once and the symbol rests. */
+  maxEntrySlipPct: number;
+  /** Drawdown from the start equity (percent) that halts entries; 0 = off. */
+  ddHaltPct: number;
+  ddHaltBasis: "session" | "start";
   leverage: number;
   useMaxLeverage: boolean;
+  /** Lower the leverage to 1 / (2 x stop + 0.5 %) so the venue never liquidates before a Set's stop; off (default, owner 2026-11-03): always the maximum. */
+  leverageStopCap: boolean;
+  /** Block v2 (server: block_rules): one entry per block count, each with its own step (PositionCosts after the count before), volume ratio (0.1 .. 1.0 of the parent's original volume) and switch. */
+  blockCounts: BlockCount[];
+  blockStackType: "additive" | "shared";
+  blockSharedTotal: number;
+  blockMinObservations: number;
+  blockRelations: BlockRelation[];
+  blockCarry: boolean;
+  blockPauseSteps: number;
+  blockSkipFirst: number;
+  /** Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back. */
+  blockGuard: boolean;
+  /** A count of a fixed-target parent adds only up to this share of the way to the target (0 = no rule). */
+  blockTargetShare: number;
+  /** Parent Set types that may receive adds. */
+  blockKinds: string[];
   maxOpen: number;
   maxPerGroup: number;
   symbolsAll: boolean;
@@ -279,37 +269,36 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   trailArmPct: number;
   trailGivePct: number;
   timeStopS: number;
-  maxDdTimeS: number;
   scratchS: number;
   scratchMinPct: number;
   scanS: number;
   cooldownS: number;
   staggerS: number;
-  drawdownHaltPct: number;
-  minimumEquity: number;
   controlOrders: boolean;
-  controlOrdersPerConfig: boolean;
-  controlOrdersOverall: boolean;
-  // Up to entryBatchSize entries per batchOrders call (own venue quota). Off until enabled per lane.
-  entryBatchOrders: boolean;
-  entryBatchSize: number;
-  normalExecutionEnabled: boolean;
-  entryPolicy: EntryPolicy;
-  entryPolicyMaxCandidates: number;
-  entryPolicyMinLiveSamples: number;
-  blockActive: boolean;
-  blockActiveMinLevel: number;
   blockEnabled: boolean;
   blockMaxStack: number;
+  blockMinSamples: number;
+  blockWindow: number;
+  mainEvalPosCount: number;
+  realEvalPosCount: number;
+  prevPosMinCount: number;
+  prevPosWindow: number;
+  exitMinSamples: number;
+  relateConfigs: RelateConfig[];
+  /** Relation lanes: last-N lanes of the post-Base orders by relation (overall / type / range / step); passing lanes raise an entry's volume by their ratio. */
+  relationLanes: RelationLanesConfig;
+  /** Block rounds: blocks of N positions per group; a losing block raises the next entries until the weighted net is back at zero. */
+  blockRounds: BlockRoundsConfig;
   blockVolumeRatio: number;
-  blockMaxVolumeMultiplier: number;
-  blockCounts: number[];
+  blockRiskPctOfBalance: number;
+  /** Minutes a symbol and direction rest after a position of it was closed outside the engine (manual close); 0 = off. */
+  manualCloseRestMin: number;
+  /** A deposit or withdrawal moves the drawdown basis (session and start equity) instead of reading as a gain or loss. */
+  transferAdjust: boolean;
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
-  blockEvalPosCount: number;
   blockActiveLive: boolean;
   blockActiveReal: boolean;
-  blockOverall: boolean;
   dcaEnabled: boolean;
   dcaMaxSteps: number;
   dcaCooldownSeconds: number;
@@ -318,6 +307,10 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   dcaStepDistancesPct: number[];
   dcaStepVolumeMultipliers: number[];
   dcaAutoDeact: boolean;
+  dcaAuto: boolean;
+  dcaOnSets: boolean;
+  dcaOnAxis: boolean;
+  dcaMaxExposureX: number;
   dcaMinPf: number;
   dcaPfWindow: number;
   dcaDeactN: number;
@@ -330,71 +323,15 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   axisContMaxWindow: number;
   axisPauseEnabled: boolean;
   axisPauseMaxWindow: number;
-  prevPosWindow: number;
-  prevPosMinCount: number;
   minPf: number;
-  baseMinPf: number;
-  mainMinPf: number;
-  realMinPf: number;
   positionCostPct: number;
-  positionCostFallbackPct: number;
-  useLivePositionCosts: boolean;
-  /** Prefer the smallest stable ranges after PF/DD/sample gates. */
-  preferMinimalRange: boolean;
-  /** Evaluate the independent 50+ close coordination window. */
-  additionalCoordination: boolean;
-  /** @deprecated Read-only compatibility aliases for older overlays. */
-  preferMinimalPositive?: boolean;
-  minimalPositiveCoordination?: boolean;
-  coordOptimizationN: number;
+  slippageAllowancePct: number;
+  makerFeeRate: number;
+  takerFeeRate: number;
+  slippageFeeRatio: number;
+  windowsLinked: boolean;
   pfWindow: number;
   slMinPct: number;
-  /** TP grid unit (%): TP = step × tpStepPct, independent of the position cost. */
-  tpStepPct: number;
-  venueSlTicks: number;
-  mainEvalPosCount: number;
-  realEvalPosCount: number;
-  setDdtWindow: number;
-  setHistTimeBars: number;
-  /** Max hold of a 1m-lane lot (s); the Set replay hold is capped to it. */
-  shortMaxHoldS: number;
-  setHonorTp: boolean;
-  setCooldownBars: number;
-  setScratchMin: number;
-  histSimulateBlock: boolean;
-  histSimulateDca: boolean;
-  histExactWindow: boolean;
-  marginCapPct: number;
-  maxLotsPerSymbolSide: number;
-  manualCloseLaneHoldS: number;
-  exitMinSamples: number;
-  exitTacticMinGainPct: number;
-  blockActiveLiveEnabled: boolean;
-  blockActiveRealEnabled: boolean;
-  variantBlockEnabled: boolean;
-  indDirRange: number;
-  indMoveRange: number;
-  indMoveRanges: number[];
-  indDirMinChange: number;
-  indMoveMinChange: number;
-  indActiveThreshold: number;
-  indActiveMovePct: number;
-  indMsiMinGap: number;
-  indVwapDevZ: number;
-  indVwapVolMult: number;
-  indRetestTol: number;
-  indRetestMinBreak: number;
-  indSqueezePctl: number;
-  indSweepWickAtr: number;
-  indRsi2Low: number;
-  indRsi2High: number;
-  indKeltnerMult: number;
-  indImpulseSigma: number;
-  indImpulseVolMult: number;
-  actSweepMin: number;
-  actRsi2Min: number;
-  actKeltnerMin: number;
-  actImpulseMin: number;
   slMaxPct: number;
   tpMinPct: number;
   tpMaxPct: number;
@@ -403,9 +340,6 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   slToTpAuto: boolean;
   slToTpRecalcN: number;
   slToTpRecalcEvery: number;
-  slToTpMin: number;
-  slToTpMax: number;
-  slToTpStep: number;
   trailAuto: boolean;
   trailRecalcN: number;
   trailRecalcEvery: number;
@@ -423,7 +357,31 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   stratIndications: boolean;
   stratBlock: boolean;
   stratTrailing: boolean;
+  stratNormal: boolean;
   stratGeneral: boolean;
+  /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
+  stratShortRange: boolean;
+  stratTrend: boolean;
+  stratBreakout: boolean;
+  stratReversion: boolean;
+  stratFlow: boolean;
+  stratMulti: boolean;
+  shortRangeStepMin: number;
+  shortRangeStepMax: number;
+  /** Short Range has its own Base PF floor, whatever the global setMinPf is (default 1.1). */
+  shortRangeMinPf: number;
+  /** Minimum initial SL = modeled round-trip cost + this net price percent. */
+  minSlDistancePct: number;
+  /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
+  trailMinSteps: number;
+  /** Smallest arm - give (percent) a trailing pair may have; pairs under it build no Set. 0 = every pair. */
+  trailMinLockPct: number;
+  /** Profit group gate: a group (pack x type x TP range x lane) opens positions only while its newest `groupGateN` executed results of the last `groupGateHours` hours have PF >= `groupGatePf`; judged on the results it has (`groupGateMin` 1). */
+  groupGate: boolean;
+  groupGateN: number;
+  groupGatePf: number;
+  groupGateHours: number;
+  groupGateMin: number;
   stratDca: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -431,28 +389,6 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   indTypeActive: boolean;
   indTypeCommon: boolean;
   indTypeSignals: boolean;
-  indTypeTrend: boolean;
-  indTypeBreak: boolean;
-  indTypeMsi: boolean;
-  indTypeVwap: boolean;
-  indTypeRetest: boolean;
-  indTypeSqueeze: boolean;
-  indTypeSweep: boolean;
-  indTypeRsi2: boolean;
-  indTypeKeltner: boolean;
-  indTypeImpulse: boolean;
-  indSweepRanges?: number[];
-  indRsi2Ranges?: number[];
-  indKeltnerRanges?: number[];
-  indImpulseRanges?: number[];
-  indTrendRanges?: number[];
-  indBreakRanges?: number[];
-  indMsiRanges?: number[];
-  indVwapRanges?: number[];
-  indRetestRanges?: number[];
-  indSqueezeRanges?: number[];
-  exitTacticOn: boolean;
-  exitTacticBufferPct: number;
   noise: number;
   volWeight: number;
   minStep: number;
@@ -476,40 +412,123 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   histMinBars: number;
   histWarmup: number;
   histRefreshS: number;
-  /** Historic test window in hours (Settings Overall · Test Historic). */
-  histTestHours: number;
-  /** PF floor used to admit a symbol as a positive historic-test result. */
-  histTestMinPf: number;
-  /** Test Historic option on Settings Overview. Default ON. */
-  histTestEnabled: boolean;
-  /** A new validated Test Historic result assigns its symbols to the selection. Default ON. */
-  histTestAutoAssign: boolean;
-  /** Independent historic-test rerun interval in hours. */
-  histTestRefreshHours: number;
   setPfWindow: number;
-  baseEvalPosCount?: number;
   setDeactN: number;
-  controlMinTrades: number;
   setMinPf: number;
-  setMaxDdTimeS: number;
-  setAutoDeact: boolean;
-  microEnabled: boolean;
-  microMinPf: number;
-  microMaxShare: number;
-  liveEdgeGuard: boolean;
-  liveEdgeN: number;
-  liveEdgeProbeShare: number;
-  /** 1m lanes: "on" full size, "probe" minimum lots only, "off" no new entries (1h lane separate). */
-  oneMinuteLanes: "on" | "probe" | "off";
-  setLiveNegativeDeact: boolean;
+  setMaxDdtHours: number;
+  setGateWindow: number;
+  setGateMinTrades: number;
+  /** Stages Base -> Main -> Real (off: the Base long window alone). */
+  stagesEnabled: boolean;
+  /** true: a stage window judges only once it holds its full N orders; false (default): the orders it has, at least one. */
+  stageFullWindow: boolean;
+  /** Basis of every last-N window: "time" = the newest N orders inside the lookback, "count" = the newest N orders of the configuration whatever their age. */
+  lastNBasis: "time" | "count";
+  /** Base: the second last N; both Base windows must pass (0 = off). */
+  setGateShortN: number;
+  /** Minimum PF by window size: every last-N window asks the PF of its class (Micro / Minimal / Short / Medium up to their bounds, Long above). */
+  minPfBySize: boolean;
+  minPfMicro: number;
+  minPfMinimal: number;
+  minPfShort: number;
+  minPfMedium: number;
+  minPfLong: number;
+  /** Separate Signal-source floor; source integration is not yet active in CTS-G. */
+  minPfSignals: number;
+  minPfMicroN: number;
+  minPfMinimalN: number;
+  minPfShortN: number;
+  minPfMediumN: number;
+  /** The short window is at most this share of the long window (default 0.5: long 40, short at most 20). */
+  setGateShortMaxRatio: number;
+  /** Base minimal window: the newest N (1-3) results of a Set must all be positive / negative (0 = off). */
+  setGateMinN: number;
+  setGateMinMode: MinMode;
+  mainGateEnabled: boolean;
+  mainGateN: number;
+  /** Main short window (earlier "Auto"): each Set picks its own window from these on its Main Set; the long window and the short one must both pass. */
+  mainShortEnabled: boolean;
+  mainShortWindows: number[];
+  /** The short windows are at most this share of the Main long window (default 0.5: long 25, short at most 12). */
+  mainShortMaxRatio: number;
+  mainShortMin: number;
+  mainShortMargin: number;
+  /** Main minimal window: the newest N (1-3) results of a Set's Main Set must all be positive / negative (0 = off). */
+  mainMinN: number;
+  mainMinMode: MinMode;
+  /** Main Negative lane: the average of the last N Main orders below zero (for some N) opens the Real Negative lane. */
+  mainNegEnabled: boolean;
+  mainNegWindows: number[];
+  /** Real: the last N of the lane's Real Set. */
+  realGateEnabled: boolean;
+  realGateN: number;
+  /** The overall strategies (coordinator stages, axes) read the Real Sets' paper stream. */
+  realStagePaper: boolean;
+  minPfLinked: boolean;
+  histLookbackAuto: boolean;
+  histLookbackMax: number;
+  histLookbackTargetN: number;
   setUseHistoricGate: boolean;
-  setStrictGate: boolean;
+  holdEnabled: boolean;
+  holdAuto: boolean;
+  holdAutoMax: number;
+  holdAutoMin: number;
+  // Pause after success: rest after a WINNING close of a Set lane, per indication (pack) and symbol. off / auto (chosen from reference Sets, only from
+  // earlier results) / fixed. pausePack fixes minutes for one pack and wins over the mode.
+  // Minimum PF by TP step: one floor per Set for every window and stage. Auto learns it per step from orders that closed before the evaluation window.
+  // split (default): every Set exists once per trade direction, each with its own lane, tape, windows, stages, pause and floor; both: one Set trades both.
+  directionMode: DirectionMode;
+  minPfByStep: boolean;
+  /** Explicit TP-range floors override manual and learned per-step floors in every stage. */
+  minPfByRange: Partial<Record<TpRangeId, number>>;
+  rankByLane: boolean;
+  setScratchEnabled: boolean;
+  // Set grid extensions (2026-11-03): named TP ranges on / off, SL ratios 0.2 / 0.3 / 0.4 x TP, trailing arms up to 3.0 %, trailing stop families.
+  tpRanges: Record<TpRangeId, boolean>;
+  setSlRatios: number[];
+  trailStepMax: number;
+  trailSlRatios: number[];
+  // own volume multiples (0.1 .. 5, missing = 1) per indication pack, Set type (base / exit / trail) and TP range (micro .. wide, trail)
+  volumeByPack: Record<string, number>;
+  volumeByKind: Record<string, number>;
+  volumeByRange: Record<string, number>;
+  /** Volume multiple per pack and type, "<pack>:<type>" (server: pulse_trader.VOLUME_BY_PACK_KIND_DEFAULT, empty since 2026-11-04). */
+  volumeByPackKind: Record<string, number>;
+  /** Largest SL ratio per TP range (server: set_engine.SL_MAX_BY_RANGE_DEFAULT: Long and Wide 1.0). */
+  slMaxByRange: Record<string, number>;
+  /** Last-N windows per TP range (server: set_engine.last_n_by_range_of): a range that is absent, or a key that is absent, uses the global window. */
+  lastNByRange: Record<string, LastNOverride>;
+  /** Exit Sets (no-TP Sets) per indication pack: missing = on. */
+  exitSetsByPack: Record<string, boolean>;
+  /** Named trailing ranges by the arm's step (Micro .. Wide): missing = on. */
+  trailRanges: Record<TpRangeId, boolean>;
+  trailPick: TrailPick;
+  /** Per pack or library group ("group:trend", "group:break", ...): the kind order for that pack's signals (server: SetBook.kind_order_for). */
+  trailPickByPack: Record<string, TrailPick>;
+  minPfStepAuto: boolean;
+  minPfStepRatio: number;
+  minPfStepAutoN: number;
+  minPfStepAutoMin: number;
+  minPfStepAutoTol: number;
+  /** The lowest floor Auto may choose (1.00 .. 2.00). */
+  minPfStepAutoLow: number;
+  /** Highest floor a TP step may ask (server: set_engine.STEP_PF_AUTO_HIGH_DEFAULT); 2 = no cap. */
+  minPfStepAutoHigh: number;
+  pauseMode: PauseMode;
+  pauseFixedMin: number;
+  pauseCandidates: number[];
+  pauseAutoMax: number;
+  pauseAutoMin: number;
+  pausePack: Record<string, number>;
+  // Indications by range: families x ranges x timeframes x relations, each entry with its own TP-step range, SL ratios, types and pause.
+  indicationConfigs: IndicationConfig[];
+  stepHoldOn: boolean[];
+  stepHoldMin: number[];
   setMinSamples: number;
-  setReactivate: boolean;
-  setMaxActive: number;
   setMinStep: number;
   setStepMax: number;
   setStepAdapt: boolean;
+  trailMinStep: number;
   exitEnabled: boolean;
   exitIgnoreTp: boolean;
   exitBestOf: boolean;
@@ -528,195 +547,133 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   exitMinPf: number;
   exitAutoDeact: boolean;
   modules?: Record<string, boolean>;
-  forcedSymbols?: string[];
-  forcedVariant?: string;
-  forcedEligible?: number;
-  forcedBest?: Record<string, {
-    id?: string;
-    indication?: string;
-    direction?: string;
-    tpPct?: number;
-    slPct?: number;
-    slRatio?: number;
-    trainPf?: number;
-    pf?: number;
-    tradesPerHour?: number;
-    variant?: string;
-    settingsKey?: string;
-  }>;
 };
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
-  ...normalizeSystemSettings(),
   targetNotional: 2.15,
-  volumeFactor: 1,
-  sizingMode: "balance",
-  targetNotionalPct: 1,
-  volumeFactor: 0.1,
-  orderSizing: "minQty",
-  htfEnabled: false,
-  htfKinds: [...HTF_KINDS],
-  htfMinPf: 1.05,
-  htfWindow: 50,
-  htfMinN: 20,
-  htfLastN: 0,
-  htfSideHours: 24,
-  htfSideMinTrades: 30,
-  htfSideMinPf: 1.05,
-  htfMaxOpen: 12,
-  htfHistoryBars: 1000,
-  slAutoLeverage: false,
+  volumeFactor: 0.05,
+  sizePctOfBalance: 1,
+  strictSizeCap: false,
+  sizeMaxNotional: 25,
+  maxModeledStopLossPct: 0,
+  maxEntrySlipPct: 0.75,
+  ddHaltPct: 80,
+  ddHaltBasis: "session",
   leverage: 150,
   useMaxLeverage: true,
-  maxOpen: 100,
+  leverageStopCap: false,
+  // measured 2026-11-04 (stack_eval block2, 4,400 + 12,960 settings per window, sealed third read once): per-symbol evidence, steps of 3 PositionCosts, the first count only
+  // collects evidence, counts 2 and 3 add 0.5 x the original volume, no minimum observations, no carry. Not proven: the sealed read was mixed (see CLAUDE.md).
+  blockCounts: [{ step: 3, ratio: 1, on: true }, { step: 3, ratio: 1, on: true }, { step: 3, ratio: 1, on: true }],
+  blockStackType: "additive",
+  blockSharedTotal: 1,
+  blockMinObservations: 1,
+  blockRelations: ["symbol", "step"],
+  blockCarry: false,
+  blockPauseSteps: 1,
+  blockSkipFirst: 1,
+  blockGuard: true,
+  blockTargetShare: 0.5,
+  blockKinds: ["base", "trail"],
+  maxOpen: 0,
   maxPerGroup: 0,
-  symbolsAll: true,
+  symbolsAll: false,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: DEFAULT_SYMBOL_COUNT,
-  slPct: 0.42,
-  tpPct: 0.70,
+  symbolCap: 50,
+  slPct: 0.48,
+  tpPct: 0.75,
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
-  maxDdTimeS: 64800,
-  scratchS: 7200,
+  scratchS: 600,
   scratchMinPct: 0.16,
   scanS: 0.2,
-  cooldownS: 9,
-  staggerS: 0.6,
-  drawdownHaltPct: 0,
-  minimumEquity: 0.2,
+  cooldownS: 3,
+  staggerS: 0.12,
   controlOrders: true,
-  controlOrdersPerConfig: true,
-  controlOrdersOverall: true,
-  entryBatchOrders: false,
-  entryBatchSize: 5,
-  normalExecutionEnabled: true,
-  entryPolicy: "permissive-bounded",
-  entryPolicyMaxCandidates: 0,
-  entryPolicyMinLiveSamples: 0,
-  blockActiveMinLevel: 0,
-  blockActive: true,
   blockEnabled: true,
   blockMaxStack: 6,
-  blockVolumeRatio: 0.25,
-  blockMaxVolumeMultiplier: 2,
-  blockCounts: [1, 2, 3, 4, 5, 6],
-  blockProfitFactorRatio: 1.1,
+  blockMinSamples: 8,
+  blockWindow: 25,
+  mainEvalPosCount: 20,
+  realEvalPosCount: 15,
+  prevPosMinCount: 8,
+  prevPosWindow: 25,
+  exitMinSamples: 8,
+  relateConfigs: relateConfigs(undefined),
+  relationLanes: relationLanesOf(undefined),
+  blockRounds: blockRoundsOf(undefined),
+  blockVolumeRatio: 1,
+  blockRiskPctOfBalance: 0,
+  manualCloseRestMin: 240,
+  transferAdjust: true,
+  blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
-  blockEvalPosCount: 50,
   blockActiveLive: true,
   blockActiveReal: true,
-  blockOverall: true,
   dcaEnabled: false,
-  dcaMaxSteps: 4,
+  dcaMaxSteps: 0,
   dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
   dcaTakeProfitMode: "average",
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
-  dcaMinPf: EVAL_MIN_PF,
+  dcaAuto: true,
+  dcaOnSets: false,
+  dcaOnAxis: false,
+  dcaMaxExposureX: 0,
+  dcaMinPf: 1.25,
   dcaPfWindow: 15,
   dcaDeactN: 25,
-  symbols: ["*"],
+  symbols: [
+    "SOL-USDT",
+  "XRP-USDT",
+  "HYPE-USDT",
+  "JUP-USDT",
+  "ETC-USDT",
+  "TRX-USDT",
+  "DOGE-USDT",
+  "APT-USDT",
+  "ENA-USDT",
+  "LDO-USDT",
+  "1000PEPE-USDT",
+  "KAS-USDT",
+  ],
   axisPrevEnabled: true,
-  axisPrevMaxWindow: AXIS_SPECS.prev.default,
+  axisPrevMaxWindow: 12,
   axisLastEnabled: true,
-  axisLastMaxWindow: AXIS_SPECS.last.default,
+  axisLastMaxWindow: 4,
   axisContEnabled: true,
-  axisContMaxWindow: AXIS_SPECS.cont.default,
+  axisContMaxWindow: 8,
   axisPauseEnabled: true,
-  axisPauseMaxWindow: AXIS_SPECS.pause.default,
-  prevPosWindow: 25,
-  prevPosMinCount: 5,
-  minPf: EVAL_MIN_PF,
-  baseMinPf: EVAL_MIN_PF,
-  mainMinPf: EVAL_MIN_PF,
-  realMinPf: EVAL_MIN_PF,
-  positionCostPct: 0.18,
-  positionCostFallbackPct: 0.18,
-  // Prefer measured exchange fees. The manual PositionCost remains the
-  // deterministic fallback until a complete live sample is available.
-  useLivePositionCosts: true,
-  // Evaluate the full catalog, then (optionally) prefer the smallest stable
-  // ranges after PF/DD/sample gates. PF remains the primary objective.
-  // Additional 50+ close coordination is independently switchable and does
-  // not shrink historic coverage.
-  // Optional optimization layers are deliberately opt-in.  The complete
-  // catalog is still evaluated when historic calculation runs; these flags
-  // only alter live selection/coordination after that evidence exists.
-  preferMinimalRange: false,
-  additionalCoordination: false,
-  // 150 measured fastest among coordination-on window sizes in the 3h
-  // XRP/BCH/SOL real-data sweep (see reports/14d-run/coord_sweep_result.json).
-  coordOptimizationN: 150,
-  pfWindow: 15,
-  slMinPct: SL_MIN_DEFAULT_PCT,
-  tpStepPct: 0.1,
-  venueSlTicks: 3,
-  mainEvalPosCount: 30,
-  realEvalPosCount: 30,
-  setDdtWindow: 0,
-  setHistTimeBars: 30,
-  shortMaxHoldS: 1800,
-  setHonorTp: true,
-  setCooldownBars: 2,
-  setScratchMin: 0.0016,
-  histSimulateBlock: true,
-  histSimulateDca: true,
-  histExactWindow: false,
-  marginCapPct: 0.1,
-  maxLotsPerSymbolSide: 0,
-  manualCloseLaneHoldS: 21600,
-  exitMinSamples: 0,
-  exitTacticMinGainPct: 0.15,
-  blockActiveLiveEnabled: true,
-  blockActiveRealEnabled: true,
-  variantBlockEnabled: true,
-  indDirRange: 10,
-  indMoveRange: 10,
-  indMoveRanges: [20, 30, 40],
-  indDirMinChange: 0.001,
-  indMoveMinChange: 0.001,
-  indActiveThreshold: 1,
-  indActiveMovePct: 0.5,
-  indMsiMinGap: 5,
-  indVwapDevZ: 2,
-  indVwapVolMult: 1.8,
-  indRetestTol: 0.12,
-  indRetestMinBreak: 0.08,
-  indSqueezePctl: 0.2,
-  indSweepWickAtr: 0.25,
-  indRsi2Low: 10,
-  indRsi2High: 90,
-  indKeltnerMult: 2,
-  indImpulseSigma: 3,
-  indImpulseVolMult: 2,
-  actSweepMin: 0.04,
-  actRsi2Min: 0.03,
-  actKeltnerMin: 0.04,
-  actImpulseMin: 0.03,
-  slMaxPct: 3.0,
-  tpMinPct: 0.3,
-  tpMaxPct: 0,
+  axisPauseMaxWindow: 8,
+  minPf: GATE_MIN_PF_DEFAULT,
+  positionCostPct: 0.176,
+  slippageAllowancePct: 0.016,
+  makerFeeRate: 0.0005,
+  takerFeeRate: 0.0008,
+  slippageFeeRatio: 0.1,
+  windowsLinked: true,
+  pfWindow: 8,
+  slMinPct: 0.2,
+  slMaxPct: 15.75,
+  tpMinPct: 0.35,
+  tpMaxPct: 4.5,
   tpCostRatio: 5,
-  slToTpRatio: 0.6,
+  slToTpRatio: 0.5,
   slToTpAuto: true,
-  slToTpRecalcN: 6,
+  slToTpRecalcN: 8,
   slToTpRecalcEvery: 8,
-  slToTpMin: SL_TP_MIN,
-  slToTpMax: SL_TP_MAX,
-  slToTpStep: SL_TP_STEP,
   trailAuto: true,
-  trailRecalcN: 6,
+  trailRecalcN: 8,
   trailRecalcEvery: 8,
-  trailArmMin: 0.6,
+  trailArmMin: 0.3,
   trailArmMax: 1.5,
-  trailGiveMin: 0.2,
+  trailGiveMin: 0.1,
   trailGiveMax: 0.5,
-  trailGiveFactor: 0.333,
+  trailGiveFactor: 0.3333333333333333,
   trailRecalcGive: true,
   tf1m: true,
   tf5m: true,
@@ -726,41 +683,37 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratIndications: true,
   stratBlock: true,
   stratTrailing: true,
+  stratNormal: true,
   stratGeneral: true,
-  stratDca: true,
+  stratShortRange: true,
+  stratTrend: false,
+  stratBreakout: false,
+  stratReversion: false,
+  stratFlow: false,
+  stratMulti: false,
+  shortRangeStepMin: 2,
+  shortRangeStepMax: 6,
+  shortRangeMinPf: 1.1,
+  minSlDistancePct: protectionPolicy.minSlDistancePct.default,
+  trailMinSteps: 2,
+  trailMinLockPct: 0,
+  groupGate: false,
+  groupGateN: 10,
+  groupGatePf: 1,
+  groupGateHours: 12,
+  groupGateMin: 1,
+  stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
   indTypeMove: true,
   indTypeActive: true,
   indTypeCommon: true,
   indTypeSignals: true,
-  indTypeTrend: true,
-  indTrendRanges: [13, 21, 34],
-  indBreakRanges: [8, 16, 32],
-  indTypeBreak: true,
-  indTypeMsi: true,
-  indTypeVwap: true,
-  indTypeRetest: true,
-  indTypeSqueeze: true,
-  indTypeSweep: true,
-  indTypeRsi2: true,
-  indTypeKeltner: true,
-  indTypeImpulse: true,
-  indSweepRanges: [12, 20, 34],
-  indRsi2Ranges: [21, 34, 55],
-  indKeltnerRanges: [14, 20, 30],
-  indImpulseRanges: [20, 30, 45],
-  indMsiRanges: [14, 21, 34],
-  indVwapRanges: [20, 30, 40],
-  indRetestRanges: [12, 20, 32],
-  indSqueezeRanges: [16, 20, 26],
-  exitTacticOn: true,
-  exitTacticBufferPct: 0.1,
   noise: 0.05,
   volWeight: 0.3,
-  minStep: 7,
+  minStep: 10,
   maxStopLossRatio: 2.5,
-  trailingMinStep: 7,
+  trailingMinStep: 6,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
   rearrangeGap: 0.22,
@@ -769,46 +722,98 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indMinAgreement: 0.6,
   indMinConfidence: 0.6,
   indMinStrength: 0.2,
-  indStopMinPct: 0.4,
+  indStopMinPct: 0.2,
   indStopMaxPct: 1.5,
   indAtrMult: 0.85,
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 720,
+  histLookbackBars: 4320,
   histMinBars: 120,
   histWarmup: 30,
-  histRefreshS: 3600,
-  histTestHours: HIST_TEST_HOURS_DEFAULT,
-  histTestMinPf: POSITIVE_PF,
-  histTestEnabled: true,
-  histTestAutoAssign: true,
-  histTestRefreshHours: HIST_TEST_REFRESH_DEFAULT,
-  setPfWindow: 50,
-  baseEvalPosCount: 50,
+  histRefreshS: 120,
+  setPfWindow: 8,
   setDeactN: 25,
-  controlMinTrades: 0,
-  setMinPf: EVAL_MIN_PF,
-  setMaxDdTimeS: 64800,
-  setAutoDeact: true,
-  microEnabled: true,
-  microMinPf: 1.05,
-  microMaxShare: 0.05,
-  liveEdgeGuard: true,
-  liveEdgeN: 50,
-  liveEdgeProbeShare: 0.25,
-  oneMinuteLanes: "on",
-  // Live negative-result deactivation is an explicit safety policy, not an
-  // implicit default for a newly created settings profile.
-  setLiveNegativeDeact: false,
+  setMinPf: GATE_MIN_PF_DEFAULT,
+  setMaxDdtHours: 24,
+  setGateWindow: 50,
+  setGateMinTrades: 0,
+  stagesEnabled: true,
+  stageFullWindow: false,
+  lastNBasis: "time",
+  setGateShortN: 25,
+  minPfBySize: true,
+  ...PF_TYPE_DEFAULTS,
+  minPfMicroN: 5,
+  minPfMinimalN: 10,
+  minPfShortN: 20,
+  minPfMediumN: 35,
+  setGateShortMaxRatio: 0.5,
+  setGateMinN: 0,
+  setGateMinMode: "positive",
+  mainGateEnabled: true,
+  mainGateN: 25,
+  mainShortEnabled: true,
+  mainShortWindows: [5, 10, 15],
+  mainShortMaxRatio: 0.5,
+  mainShortMin: 1,
+  mainShortMargin: 1.02,
+  mainMinN: 0,
+  mainMinMode: "positive",
+  mainNegEnabled: true,
+  mainNegWindows: [5, 10],
+  realGateEnabled: true,
+  realGateN: 15,
+  realStagePaper: true,
+  minPfLinked: true,
+  histLookbackAuto: true,
+  histLookbackMax: 4320,
+  histLookbackTargetN: 12,
   setUseHistoricGate: true,
-  setStrictGate: true,
-  setMinSamples: 30,
-  setReactivate: true,
-  setMaxActive: 0,
-  setMinStep: 7,
-  setStepMax: 30,
-  setStepAdapt: true,
+  holdEnabled: true,
+  holdAuto: false,
+  holdAutoMax: 50,
+  holdAutoMin: 10,
+  directionMode: "split",
+  minPfByStep: true,
+  minPfByRange: { micro: MICRO_RANGE_PF_DEFAULT },
+  rankByLane: true,
+  setScratchEnabled: false,
+  tpRanges: { ...TP_RANGES_DEFAULT, wide: true }, // shipped overlays: every range on, Wide included (owner 2026-11-03)
+  setSlRatios: [...SL_SET_RATIOS],
+  trailStepMax: TRAIL_STEP_MAX_DEFAULT,
+  trailSlRatios: [],
+  volumeByPack: {},
+  volumeByKind: {},
+  volumeByRange: {},
+  volumeByPackKind: {},
+  slMaxByRange: { long: 1, wide: 1 },
+  lastNByRange: {},
+  exitSetsByPack: { indications: false }, // shipped: the indications pack's Exit Sets off (measured 2026-11-03)
+  trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true },
+  trailPick: "after",
+  trailPickByPack: {},
+  minPfStepAuto: true,
+  minPfStepRatio: STEP_PF_RATIO_DEFAULT,
+  minPfStepAutoN: 10,
+  minPfStepAutoMin: 1,
+  minPfStepAutoTol: 5,
+  minPfStepAutoLow: 1,
+  minPfStepAutoHigh: 2,
+  pauseMode: "auto",
+  pauseFixedMin: 10,
+  pauseCandidates: [...PAUSE_CANDIDATES_DEFAULT],
+  pauseAutoMax: 100,
+  pauseAutoMin: 30,
+  pausePack: {},
+  indicationConfigs: [],
+  stepHoldOn: [false, false, false, false, false, false, false, false, false, false, false, false],
+  stepHoldMin: [15, 15, 15, 15, 15, 120, 120, 120, 120, 120, 120, 120],
+  setMinSamples: 12,
+  setMinStep: 2,
+  setStepMax: TP_STEP_DEFAULT_MAX,
+  setStepAdapt: false,
+  trailMinStep: 3,
   exitEnabled: true,
   exitIgnoreTp: true,
   exitBestOf: true,
@@ -822,9 +827,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitOptSlMin: 0.1,
   exitOptSlMax: 0.9,
   exitMinHoldS: 45,
-  exitPfWindow: 15,
+  exitPfWindow: 8,
   exitDeactN: 25,
-  exitMinPf: EVAL_MIN_PF,
+  exitMinPf: 1.25,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -832,7 +837,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
     "strategy.sets": true,
     "core.historic": true,
     "strategy.block": true,
-    "strategy.dca": true,
+    "strategy.dca": false,
     "strategy.coord": true,
     "strategy.indications": true,
     "strategy.rearrange": true,
@@ -846,35 +851,44 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   },
 };
 
+/** Restore all desk defaults as an editable, unsaved copy. */
+export function defaultOverlay(): PulseOverlay {
+  return structuredClone(DEFAULT_OVERLAY);
+}
+
 export type CtsSettings = {
   coordination_settings?: Record<string, unknown>;
   coordinationSettings?: Record<string, unknown>;
   strategyBaseTrailingVariants?: string[];
   control_orders?: boolean | number | string;
-  controlOrdersPerConfig?: boolean | number | string;
-  controlOrdersOverall?: boolean | number | string;
-  entryBatchOrders?: boolean | number | string;
-  entryBatchSize?: number;
-  control_orders_per_config?: boolean | number | string;
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
   blockMaxStack?: number;
+  blockMinSamples?: number;
+  blockCounts?: Partial<BlockCount>[];
+  blockStackType?: string;
+  blockSharedTotal?: number;
+  blockMinObservations?: number;
+  blockRelations?: string[];
+  blockCarry?: boolean;
+  blockPauseSteps?: number;
+  blockSkipFirst?: number;
+  blockGuard?: boolean;
+  blockTargetShare?: number;
+  blockKinds?: string[];
+  blockWindow?: number;
+  exitMinSamples?: number;
+  relateConfigs?: RelateConfig[];
+  relationLanes?: RelationLanesConfig;
+  blockRounds?: BlockRoundsConfig;
   blockVolumeRatio?: number;
-  blockMaxVolumeMultiplier?: number;
-  blockCounts?: number[];
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
-  blockEvalPosCount?: number;
-  normalExecutionEnabled?: boolean;
-  entryPolicy?: EntryPolicy | string;
-  entryPolicyMaxCandidates?: number;
-  entryPolicyMinLiveSamples?: number;
-  blockActiveMinLevel?: number;
-  blockActive?: boolean;
   blockActiveLiveEnabled?: boolean;
   blockActiveRealEnabled?: boolean;
-  blockOverall?: boolean;
   dcaEnabled?: boolean;
+  strictSizeCap?: boolean;
+  maxModeledStopLossPct?: number;
   variantDcaEnabled?: boolean;
   variant_dca?: boolean;
   dcaMaxSteps?: number;
@@ -884,25 +898,14 @@ export type CtsSettings = {
   dcaStepDistancesPct?: number[];
   dcaStepVolumeMultipliers?: number[];
   dcaAutoDeact?: boolean;
+  dcaAuto?: boolean;
+  dcaOnSets?: boolean;
+  dcaOnAxis?: boolean;
+  dcaMaxExposureX?: number;
   dcaMinPf?: number;
   dcaPfWindow?: number;
   dcaDeactN?: number;
   volumeFactor?: number;
-  sizingMode?: string;
-  targetNotionalPct?: number;
-  orderSizing?: string;
-  htfEnabled?: boolean;
-  htfKinds?: string[];
-  htfMinPf?: number;
-  htfWindow?: number;
-  htfMinN?: number;
-  htfLastN?: number;
-  htfSideHours?: number;
-  htfSideMinTrades?: number;
-  htfSideMinPf?: number;
-  htfMaxOpen?: number;
-  htfHistoryBars?: number;
-  slAutoLeverage?: boolean;
   axisPrevEnabled?: boolean;
   axisPrevMaxWindow?: number;
   axisLastEnabled?: boolean;
@@ -915,10 +918,9 @@ export type CtsSettings = {
   realProfitFactor?: number;
   exchangePositionCost?: number;
   positionCost?: number;
+  windowsLinked?: boolean;
   pfWindow?: number;
   slMinPct?: number;
-  tpStepPct?: number;
-  venueSlTicks?: number;
   slMaxPct?: number;
   tpMinPct?: number;
   tpMaxPct?: number;
@@ -927,9 +929,6 @@ export type CtsSettings = {
   slToTpAuto?: boolean;
   slToTpRecalcN?: number;
   slToTpRecalcEvery?: number;
-  slToTpMin?: number;
-  slToTpMax?: number;
-  slToTpStep?: number;
   trailAuto?: boolean;
   trailRecalcN?: number;
   trailRecalcEvery?: number;
@@ -947,7 +946,25 @@ export type CtsSettings = {
   stratIndications?: boolean;
   stratBlock?: boolean;
   stratTrailing?: boolean;
+  stratNormal?: boolean;
   stratGeneral?: boolean;
+  stratShortRange?: boolean;
+  stratTrend?: boolean;
+  stratBreakout?: boolean;
+  stratReversion?: boolean;
+  stratFlow?: boolean;
+  stratMulti?: boolean;
+  shortRangeStepMin?: number;
+  shortRangeStepMax?: number;
+  shortRangeMinPf?: number;
+  minSlDistancePct?: number;
+  trailMinSteps?: number;
+  trailMinLockPct?: number;
+  groupGate?: boolean;
+  groupGateN?: number;
+  groupGatePf?: number;
+  groupGateHours?: number;
+  groupGateMin?: number;
   stratDca?: boolean;
   indTypeState?: boolean;
   indTypeDirection?: boolean;
@@ -955,28 +972,6 @@ export type CtsSettings = {
   indTypeActive?: boolean;
   indTypeCommon?: boolean;
   indTypeSignals?: boolean;
-  indTypeTrend?: boolean;
-  indTypeBreak?: boolean;
-  indTypeMsi?: boolean;
-  indTypeVwap?: boolean;
-  indTypeRetest?: boolean;
-  indTypeSqueeze?: boolean;
-  indTypeSweep?: boolean;
-  indTypeRsi2?: boolean;
-  indTypeKeltner?: boolean;
-  indTypeImpulse?: boolean;
-  indSweepRanges?: number[];
-  indRsi2Ranges?: number[];
-  indKeltnerRanges?: number[];
-  indImpulseRanges?: number[];
-  indTrendRanges?: number[];
-  indBreakRanges?: number[];
-  indMsiRanges?: number[];
-  indVwapRanges?: number[];
-  indRetestRanges?: number[];
-  indSqueezeRanges?: number[];
-  exitTacticOn?: boolean;
-  exitTacticBufferPct?: number;
   activeNoiseFilter?: number;
   activeVolatilityWeight?: number;
   posCountsVolumeRatio?: number;
@@ -987,30 +982,95 @@ export type CtsSettings = {
   histMinBars?: number;
   histWarmup?: number;
   histRefreshS?: number;
-  histTestHours?: number;
-  histTestMinPf?: number;
-  histTestEnabled?: boolean;
-  histTestAutoAssign?: boolean;
-  histTestRefreshHours?: number;
   setPfWindow?: number;
   setDeactN?: number;
-  controlMinTrades?: number;
   setMinPf?: number;
-  setMaxDdTimeS?: number;
-  setAutoDeact?: boolean;
-  microEnabled?: boolean;
-  microMinPf?: number;
-  microMaxShare?: number;
-  liveEdgeGuard?: boolean;
-  liveEdgeN?: number;
-  liveEdgeProbeShare?: number;
-  oneMinuteLanes?: string;
+  setMaxDdtHours?: number;
+  setGateWindow?: number;
+  setGateMinTrades?: number;
+  mainGateEnabled?: boolean;
+  mainGateN?: number;
+  stagesEnabled?: boolean;
+  stageFullWindow?: boolean;
+  lastNBasis?: "time" | "count";
+  setGateShortN?: number;
+  minPfBySize?: boolean;
+  minPfMicro?: number;
+  minPfMinimal?: number;
+  minPfShort?: number;
+  minPfMedium?: number;
+  minPfLong?: number;
+  minPfSignals?: number;
+  minPfMicroN?: number;
+  minPfMinimalN?: number;
+  minPfShortN?: number;
+  minPfMediumN?: number;
+  setGateShortMaxRatio?: number;
+  setGateMinN?: number;
+  setGateMinMode?: string;
+  mainShortEnabled?: boolean;
+  mainShortWindows?: number[];
+  mainShortMaxRatio?: number;
+  mainShortMin?: number;
+  mainShortMargin?: number;
+  mainMinN?: number;
+  mainMinMode?: string;
+  /** Earlier names of the Main short window keys (overlays written before the rename still load). */
+  mainAutoEnabled?: boolean;
+  mainAutoWindows?: number[];
+  mainAutoMaxRatio?: number;
+  mainAutoMin?: number;
+  mainAutoMargin?: number;
+  mainNegEnabled?: boolean;
+  mainNegWindows?: number[];
+  realGateEnabled?: boolean;
+  realGateN?: number;
+  realStagePaper?: boolean;
+  minPfLinked?: boolean;
+  histLookbackAuto?: boolean;
+  histLookbackMax?: number;
+  histLookbackTargetN?: number;
   setUseHistoricGate?: boolean;
-  setStrictGate?: boolean;
-  baseEvalPosCount?: number;
+  holdEnabled?: boolean;
+  holdAuto?: boolean;
+  holdAutoMax?: number;
+  holdAutoMin?: number;
+  directionMode?: string;
+  minPfByStep?: boolean;
+  minPfByRange?: Partial<Record<TpRangeId, number>>;
+  rankByLane?: boolean;
+  setScratchEnabled?: boolean;
+  tpRanges?: Partial<Record<string, boolean>>;
+  setSlRatios?: number[];
+  trailStepMax?: number;
+  trailSlRatios?: number[];
+  volumeByPack?: Record<string, number>;
+  volumeByKind?: Record<string, number>;
+  volumeByRange?: Record<string, number>;
+  volumeByPackKind?: Record<string, number>;
+  slMaxByRange?: Record<string, number>;
+  lastNByRange?: Record<string, LastNOverride>;
+  exitSetsByPack?: Record<string, boolean>;
+  trailRanges?: Partial<Record<string, boolean>>;
+  trailPick?: string;
+  trailPickByPack?: Record<string, string>;
+  minPfStepAuto?: boolean;
+  minPfStepRatio?: number;
+  minPfStepAutoN?: number;
+  minPfStepAutoMin?: number;
+  minPfStepAutoTol?: number;
+  minPfStepAutoLow?: number;
+  minPfStepAutoHigh?: number;
+  pauseMode?: string;
+  pauseFixedMin?: number;
+  pauseCandidates?: number[];
+  pauseAutoMax?: number;
+  pauseAutoMin?: number;
+  pausePack?: Record<string, number>;
+  indicationConfigs?: Partial<IndicationConfig>[];
+  stepHoldOn?: boolean[];
+  stepHoldMin?: number[];
   setMinSamples?: number;
-  setReactivate?: boolean;
-  setMaxActive?: number;
   setMinStep?: number;
   minStepRange?: number;
   setStepMax?: number;
@@ -1038,11 +1098,6 @@ export type CtsSettings = {
   margin_mode?: string;
   leveragePercentage?: number;
   useMaximalLeverage?: boolean;
-  maxDdTimeS?: number;
-  cooldownS?: number;
-  staggerS?: number;
-  drawdownHaltPct?: number;
-  minimumEquity?: number;
   live_trade_requested?: boolean;
   live_trading_enabled?: boolean;
   useSystemCloseOnly?: boolean;
@@ -1089,6 +1144,213 @@ function arr<T>(v: unknown, d: T[] = []): T[] {
   return Array.isArray(v) ? (v as T[]) : d;
 }
 
+/** Minimal window rule: every one of the newest N results of one sign (positive / negative / both), or their average (avg*). */
+export type MinMode = "positive" | "negative" | "both" | "avgpositive" | "avgnegative" | "avgboth";
+const MIN_MODES: MinMode[] = ["positive", "negative", "both", "avgpositive", "avgnegative", "avgboth"];
+
+export function minMode(v: unknown): MinMode {
+  const m = String(v ?? "positive").toLowerCase() as MinMode;
+  return MIN_MODES.includes(m) ? m : "positive";
+}
+
+const pauseMinutes = (v: unknown, d: number) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.max(0, Math.min(PAUSE_MAX, n)) : d;
+};
+const pauseList = (v: unknown): number[] => {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : [];
+  const out = [...new Set(raw.map((x) => pauseMinutes(x, 0)).filter((x) => x > 0))].sort((a, b) => a - b);
+  return out.length ? out : [...PAUSE_CANDIDATES_DEFAULT];
+};
+const pausePackMap = (v: unknown): Record<string, number> => {
+  const out: Record<string, number> = {};
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, m] of Object.entries(v as Record<string, unknown>)) {
+      const n = pauseMinutes(m, 0);
+      if (k && n > 0) out[k] = n;
+    }
+  }
+  return out;
+};
+const strList = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;]/) : []).map((x) => String(x).trim()).filter((x) => x.length > 0);
+const numList = (v: unknown, lo: number, hi: number): number[] =>
+  [...new Set((Array.isArray(v) ? v : typeof v === "string" ? v.split(/[,;\s]+/) : []).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= lo && x <= hi))];
+/** Normalise the saved range configurations; the engine expands and validates the names, so an unknown family is reported there, not silently kept here. */
+export function indicationConfigList(v: unknown): IndicationConfig[] {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, 64).map((raw, i) => {
+    const e = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const tfRaw: unknown[] = Array.isArray(e.timeframes) ? e.timeframes : typeof e.timeframes === "string" ? e.timeframes.split(/[,;\s]+/) : [];
+    const tfs = tfRaw
+      .map((x) => (x === "c" || x === "x" ? x : Math.round(Number(x))))
+      .filter((x) => x === "c" || x === "x" || (INDICATION_TIMEFRAMES as readonly number[]).includes(x as number)) as (number | "c" | "x")[];
+    const lo = Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMin) || DEFAULT_INDICATION_CONFIG.stepMin)));
+    const hi = Math.max(lo, Math.min(TP_STEP_MAX, Math.round(Number(e.stepMax) || DEFAULT_INDICATION_CONFIG.stepMax)));
+    const types = strList(e.types).filter((t) => (SET_TYPES as readonly string[]).includes(t));
+    const relRaw: unknown[] = Array.isArray(e.relations) ? e.relations : typeof e.relations === "string" ? e.relations.split(/[,;]/) : [""];
+    const rel = relRaw.map((x) => String(x ?? "").trim());
+    const ratios = (Array.isArray(e.slRatios) ? e.slRatios : []).map(Number).filter((x) => Number.isFinite(x) && x >= 0.25 && x <= 3.5);
+    return {
+      label: String(e.label ?? `entry ${i + 1}`).slice(0, 60),
+      lastNLanes: lastNLanes(e.lastNLanes),
+      symbols: strList(e.symbols),
+      major: typeof e.major === "string" ? e.major : undefined,
+      minor: typeof e.minor === "string" ? e.minor : undefined,
+      coordination: typeof e.coordination === "string" ? e.coordination : undefined,
+      enabled: e.enabled !== false,
+      families: strList(e.families),
+      names: strList(e.names),
+      ranges: numList(e.ranges, 2, 60),
+      timeframes: [...new Set(tfs)],
+      relations: rel.length ? [...new Set(rel)] : [""],
+      stepMin: lo,
+      stepMax: hi,
+      slRatios: ratios.length ? [...new Set(ratios)] : [...DEFAULT_INDICATION_CONFIG.slRatios],
+      types: types.length ? types : [...DEFAULT_INDICATION_CONFIG.types],
+      pause: e.pause === "auto" || e.pause === undefined ? "auto" : pauseMinutes(e.pause, 0),
+      ...trailSpan(e.trailStepMin, e.trailStepMax),
+    };
+  });
+}
+
+/** An entry's trailing arm range: 0 = not set (every arm up to the entry's stepMax); else 2..50 steps, max >= min. */
+function trailSpan(lo: unknown, hi: unknown): { trailStepMin: number; trailStepMax: number } {
+  const l = Math.round(Number(lo) || 0);
+  const h = Math.round(Number(hi) || 0);
+  const tl = l >= 2 ? Math.min(TP_STEP_MAX, l) : 0;
+  const th = h >= 2 ? Math.max(tl, Math.min(TP_STEP_MAX, h)) : 0;
+  return { trailStepMin: tl, trailStepMax: th };
+}
+
+/** Trailing range switches: only explicit booleans of known names (missing = on). */
+function trailRangesOf(raw: unknown): Partial<Record<TpRangeId, boolean>> {
+  if (!raw || typeof raw !== "object") return {};
+  const ids = TP_RANGES.map((r) => r.id) as string[];
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([k, v]) => ids.includes(k) && typeof v === "boolean")) as Partial<Record<TpRangeId, boolean>>;
+}
+
+/** Largest SL ratio per TP range: missing = the shipped limits (Long, Wide 1.0); {} = none; each 0.2 .. 3.5 (server: set_engine.sl_max_by_range_of). */
+function slMaxByRangeOf(raw: unknown): Record<string, number> {
+  if (raw === undefined || raw === null) return { long: 1, wide: 1 };
+  if (typeof raw !== "object") return {};
+  const ids = TP_RANGES.map((r) => r.id) as string[];
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(([k, v]) => ids.includes(k) && Number.isFinite(Number(v)) && Number(v) > 0)
+      .map(([k, v]) => [k, Math.max(0.2, Math.min(3.5, Number(v)))]),
+  );
+}
+
+export type LastNOverride = { baseLong?: number; baseShort?: number; mainLong?: number; mainShort?: number[]; negWindows?: number[]; realN?: number; realNegN?: number };
+export const LAST_N_FIELDS: { key: keyof LastNOverride; label: string; lo: number; hi: number; list?: boolean }[] = [
+  { key: "baseLong", label: "Base long", lo: 1, hi: 200 },
+  { key: "baseShort", label: "Base short", lo: 0, hi: 200 },
+  { key: "mainLong", label: "Main long", lo: 1, hi: 200 },
+  { key: "mainShort", label: "Main short", lo: 1, hi: 200, list: true },
+  { key: "negWindows", label: "Negative", lo: 1, hi: 200, list: true },
+  { key: "realN", label: "Real", lo: 1, hi: 200 },
+  { key: "realNegN", label: "Real Neg", lo: 1, hi: 200 },
+];
+
+export const BLOCK_KINDS = ["base", "exit", "trail"] as const;
+/** blockKinds from a settings file: the known Set types in their fixed order; missing or unreadable = the shipped base + trailing (Exit-Set parents get no add). */
+export function blockKindsOf(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return ["base", "trail"];
+  const names = new Set(raw.map((x) => String(x).toLowerCase()));
+  return BLOCK_KINDS.filter((k) => names.has(k));
+}
+
+/** lastNByRange from a settings file: only known ranges and keys, each bounded (server: set_engine.last_n_by_range_of). */
+export function lastNByRangeOf(raw: unknown): Record<string, LastNOverride> {
+  if (!raw || typeof raw !== "object") return {};
+  const ids = TP_RANGES.map((r) => r.id) as string[];
+  const out: Record<string, LastNOverride> = {};
+  for (const [rng, o] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ids.includes(rng) || !o || typeof o !== "object") continue;
+    const got: Record<string, number | number[]> = {};
+    for (const f of LAST_N_FIELDS) {
+      const v = (o as Record<string, unknown>)[f.key];
+      if (v === undefined || v === null || v === "") continue;
+      if (f.list) {
+        const arr = (Array.isArray(v) ? v : String(v).split(/[,;]/)).map((x) => Math.round(Number(x))).filter((x) => Number.isFinite(x) && x >= 1 && x <= 200);
+        if (arr.length) got[f.key] = Array.from(new Set(arr)).sort((a, b) => a - b);
+      } else if (Number.isFinite(Number(v))) {
+        got[f.key] = Math.max(f.lo, Math.min(f.hi, Math.round(Number(v))));
+      }
+    }
+    if (Object.keys(got).length) out[rng] = got as LastNOverride;
+  }
+  return out;
+}
+
+/** How a lane's trailing Sets compete with its base and Exit Sets (server: set_engine.KIND_ORDERS). */
+export const TRAIL_PICKS = ["after", "together", "first", "first-any"] as const;
+export type TrailPick = (typeof TRAIL_PICKS)[number];
+
+export type BlockCount = { step: number; ratio: number; on: boolean };
+export const BLOCK_RELATIONS = ["symbol", "indication", "set", "step"] as const;
+export type BlockRelation = (typeof BLOCK_RELATIONS)[number];
+export const BLOCK_RATIO_MIN = 0.1;
+export const BLOCK_RATIO_MAX = 1;
+export const BLOCK_COUNTS_MAX = 12;
+
+/** The block count table from an overlay value (server: block_rules.clean_cfg): each ratio 0.1 .. 1.0, each step 0.5 .. 20 PositionCosts, at most 12 counts; an unreadable entry is dropped. */
+export function blockCountsOf(raw: unknown): BlockCount[] {
+  const out: BlockCount[] = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    const e = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    const step = Number(e.step ?? 2);
+    const ratio = Number(e.ratio ?? 0.5);
+    if (!Number.isFinite(step) || !Number.isFinite(ratio)) continue;
+    out.push({ step: Math.max(0.5, Math.min(20, step)), ratio: Math.round(Math.max(BLOCK_RATIO_MIN, Math.min(BLOCK_RATIO_MAX, ratio)) * 100) / 100, on: e.on !== false });
+  }
+  return out.length ? out.slice(0, BLOCK_COUNTS_MAX) : DEFAULT_OVERLAY.blockCounts.map((c) => ({ ...c }));
+}
+
+/** The enabled Block relations (symbol, indication, set, step): unknown names dropped, none left means the Set relation. */
+export function blockRelationsOf(raw: unknown): BlockRelation[] {
+  const names = (Array.isArray(raw) ? raw : []).map((x) => String(x).toLowerCase());
+  const out = BLOCK_RELATIONS.filter((r) => names.includes(r));
+  return out.length ? [...out] : ["symbol"];
+}
+
+/** The range switches from an overlay value: unknown names ignored, missing names at their default (server: position_cost.tp_ranges_on). */
+export function tpRangesOf(raw: unknown): Record<TpRangeId, boolean> {
+  const out: Record<TpRangeId, boolean> = { ...TP_RANGES_DEFAULT };
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const r of TP_RANGES) {
+      const v = (raw as Record<string, unknown>)[r.id];
+      if (typeof v === "boolean") out[r.id] = v;
+    }
+  }
+  return out;
+}
+
+/** {name: multiple}, each bounded 0.1 .. 5, unreadable entries dropped (server: pulse_trader.volume_mults_of). */
+export function volumeMultsOf(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) out[k] = Math.max(0.1, Math.min(5, n));
+    }
+  }
+  return out;
+}
+
+/** Only the listed trailing stop families: an unknown ratio is dropped, never snapped (server: SetBook.load). */
+export function trailSlRatiosOf(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  const ok = new Set<number>();
+  for (const x of raw) {
+    const n = Number(x);
+    const hit = TRAIL_SL_RATIOS.find((r) => Math.abs(r - n) < 1e-9);
+    if (hit !== undefined) ok.add(hit);
+  }
+  return [...ok].sort((a, b) => a - b);
+}
+
 export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): PulseOverlay {
   const coord = (cts.coordination_settings ?? cts.coordinationSettings ?? {}) as Record<string, unknown>;
   const trails = arr<string>(cts.strategyBaseTrailingVariants ?? coord.trailingVariants, [
@@ -1099,163 +1361,89 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   const give = Number(first[1]) || 0.1;
   const out: PulseOverlay = {
     ...DEFAULT_OVERLAY,
+    strictSizeCap: bool(cts.strictSizeCap, false),
+    maxModeledStopLossPct: Math.max(0, Math.min(100, num(cts.maxModeledStopLossPct, 0))),
     trailArmPct: arm,
     trailGivePct: give,
-    controlOrders: true, // SL/TP protection is always on
-    controlOrdersOverall: bool(cts.controlOrdersOverall, true),
-    entryBatchOrders: bool(live?.entryBatchOrders ?? cts.entryBatchOrders, false),
-    entryBatchSize: num(live?.entryBatchSize ?? cts.entryBatchSize, 5),
-    controlOrdersPerConfig: bool(
-      cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
-      true,
-    ),
+    controlOrders: bool(cts.control_orders, true),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
-    blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 0.25),
-    blockMaxVolumeMultiplier: num(cts.blockMaxVolumeMultiplier ?? coord.blockMaxVolumeMultiplier, 2),
-    blockCounts: cts.blockCounts ?? DEFAULT_OVERLAY.blockCounts,
-    blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
+    blockMinSamples: Math.max(1, Math.round(num(cts.blockMinSamples, 8))),
+    blockCounts: blockCountsOf(cts.blockCounts),
+    blockStackType: cts.blockStackType === "shared" ? "shared" : "additive",
+    blockSharedTotal: Math.max(0.1, Math.min(3, num(cts.blockSharedTotal, 1))),
+    blockMinObservations: Math.max(1, Math.min(200, Math.round(num(cts.blockMinObservations, 1)))),
+    blockRelations: blockRelationsOf(cts.blockRelations),
+    blockCarry: bool(cts.blockCarry, false),
+    blockPauseSteps: Math.max(0, Math.min(20, Math.round(num(cts.blockPauseSteps, 1)))),
+    blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 1)))),
+    blockGuard: bool(cts.blockGuard, true),
+    blockTargetShare: Math.max(0, Math.min(1, num(cts.blockTargetShare, 0.5))),
+    blockKinds: blockKindsOf(cts.blockKinds),
+    blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
+    mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 20))),
+    realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 15))),
+    prevPosMinCount: Math.max(1, Math.round(num(cts.prevPosMinCount ?? cts.prev_pos_min_count, 8))),
+    prevPosWindow: Math.max(1, Math.round(num(cts.prevPosWindow ?? cts.prev_pos_window, 25))),
+    exitMinSamples: Math.max(5, Math.round(num(cts.exitMinSamples, 8))),
+    relateConfigs: relateConfigs(live?.relateConfigs ?? cts.relateConfigs),
+    relationLanes: relationLanesOf(live?.relationLanes ?? cts.relationLanes),
+    blockRounds: blockRoundsOf(live?.blockRounds ?? cts.blockRounds),
+    blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
+    blockRiskPctOfBalance: num(cts.blockRiskPctOfBalance, 0),
+    manualCloseRestMin: Math.max(0, Math.min(10080, Math.round(num(cts.manualCloseRestMin, 240)))),
+    transferAdjust: bool(cts.transferAdjust, true),
+    blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
-    blockEvalPosCount: Math.max(5, Math.min(75, Math.round(num(cts.blockEvalPosCount ?? live?.blockEvalPosCount, 50)))),
-  normalExecutionEnabled: bool(live?.normalExecutionEnabled ?? cts.normalExecutionEnabled, true),
-  entryPolicy: coerceEntryPolicy(live?.entryPolicy ?? cts.entryPolicy ?? DEFAULT_OVERLAY.entryPolicy),
-  entryPolicyMaxCandidates: (() => {
-    const candidateCap = Math.round(num(live?.entryPolicyMaxCandidates ?? cts.entryPolicyMaxCandidates, 0));
-    return candidateCap <= 0 ? 0 : Math.max(2, Math.min(32, candidateCap));
-  })(),
-  entryPolicyMinLiveSamples: Math.max(0, Math.min(25, Math.round(num(live?.entryPolicyMinLiveSamples ?? cts.entryPolicyMinLiveSamples, 0)))),
-  blockActiveMinLevel: num(cts.blockActiveMinLevel, 0),
-    blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
-    blockOverall: bool(live?.blockOverall ?? cts.blockOverall, true),
     dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, false),
-    dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 4),
+    dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 0),
     dcaCooldownSeconds: num(cts.dcaCooldownSeconds ?? coord.dcaCooldownSeconds, 30),
     dcaBreakevenProfitPct: num(cts.dcaBreakevenProfitPct ?? coord.dcaBreakevenProfitPct, 0.2),
     dcaTakeProfitMode: String(cts.dcaTakeProfitMode ?? coord.dcaTakeProfitMode ?? "average"),
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
-    dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
+    dcaAuto: bool(cts.dcaAuto, true),
+    dcaOnSets: bool(cts.dcaOnSets, false),
+    dcaOnAxis: bool(cts.dcaOnAxis, false),
+    dcaMaxExposureX: num(cts.dcaMaxExposureX, 0),
+    dcaMinPf: pfFloor(num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT)),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
-    sizingMode: (live?.sizingMode ?? cts.sizingMode) === "fixed" ? "fixed" : "balance",
-    targetNotionalPct: Math.max(0.05, Math.min(20, num(live?.targetNotionalPct ?? cts.targetNotionalPct, 1))),
+    volumeFactor: Math.max(0.05, Math.min(10, num(cts.volumeFactor, 0.05) || 0.05)),     // 0.05 = the minimum and the default; never 1 for a missing or zero value
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
-    volumeFactor: num(cts.volumeFactor, 0.1),
-    orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
-    htfEnabled: bool(cts.htfEnabled, false),
-    htfKinds: Array.isArray(cts.htfKinds) ? cts.htfKinds.filter((k) => (HTF_KINDS as readonly string[]).includes(k)) : [...HTF_KINDS],
-    htfMinPf: Math.max(0.5, Math.min(3, num(cts.htfMinPf, 1.05))),
-    htfWindow: Math.max(5, Math.min(500, Math.round(num(cts.htfWindow, 50)))),
-    htfMinN: Math.max(1, Math.min(500, Math.round(num(cts.htfMinN, 20)))),
-    htfLastN: Math.max(0, Math.min(100, Math.round(num(cts.htfLastN, 0)))),
-    htfSideHours: Math.max(1, Math.min(168, num(cts.htfSideHours, 24))),
-    htfSideMinTrades: Math.max(1, Math.min(500, Math.round(num(cts.htfSideMinTrades, 30)))),
-    htfSideMinPf: Math.max(0.5, Math.min(3, num(cts.htfSideMinPf, 1.05))),
-    htfMaxOpen: Math.max(0, Math.min(200, Math.round(num(cts.htfMaxOpen, 12)))),
-    htfHistoryBars: Math.max(400, Math.min(1440, Math.round(num(cts.htfHistoryBars, 1000)))),
-    slAutoLeverage: bool(cts.slAutoLeverage, false),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
-    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),
+    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
     axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
-    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), true),
+    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
-    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
+    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
-    prevPosWindow: num(live?.prevPosWindow ?? cts.prevPosWindow ?? cts.prev_pos_window, 25),
-    prevPosMinCount: num(live?.prevPosMinCount ?? cts.prevPosMinCount ?? cts.prev_pos_min_count, 5),
-  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, EVAL_MIN_PF), EVAL_MIN_PF),
-  baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, EVAL_MIN_PF), EVAL_MIN_PF),
-  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, EVAL_MIN_PF), EVAL_MIN_PF),
-  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, EVAL_MIN_PF), EVAL_MIN_PF),
-
-    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.18),
-    positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.18),
-    useLivePositionCosts: bool(
-      live?.useLivePositionCosts ?? cts.useLivePositionCosts ?? cts.useExchangePositionCost ?? cts.livePositionCostEnabled,
-      true,
-    ),
-    preferMinimalRange: bool(
-      live?.preferMinimalRange ?? live?.preferMinimalPositive ?? cts.preferMinimalRange ?? cts.preferMinimalPositive,
-      false,
-    ),
-    additionalCoordination: bool(
-      live?.additionalCoordination ?? live?.minimalPositiveCoordination ?? cts.additionalCoordination ?? cts.minimalPositiveCoordination,
-      false,
-    ),
-    coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
-    maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 64800),
-    cooldownS: num(live?.cooldownS ?? cts.cooldownS, 9),
-    staggerS: num(live?.staggerS ?? cts.staggerS, 0.6),
-    drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 0),
-    minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
-    pfWindow: num(cts.pfWindow, 15),
-    slMinPct: num(cts.slMinPct, SL_MIN_DEFAULT_PCT),
-    tpStepPct: Math.max(0.02, Math.min(1, num(cts.tpStepPct, 0.1))),
-    venueSlTicks: Math.max(1, Math.min(50, num(live?.venueSlTicks ?? cts.venueSlTicks, 3))),
-    mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 30)))),
-    realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 30)))),
-    setDdtWindow: Math.max(0, Math.min(200, Math.round(num(live?.setDdtWindow, 0)))),
-    setHistTimeBars: Math.max(8, Math.min(120, Math.round(num(live?.setHistTimeBars, 30)))),
-    shortMaxHoldS: Math.max(300, Math.min(21600, Math.round(num(live?.shortMaxHoldS, 1800)))),
-    setHonorTp: bool(live?.setHonorTp, true),
-    setCooldownBars: Math.max(1, Math.min(12, Math.round(num(live?.setCooldownBars, 2)))),
-    setScratchMin: Math.max(0, Math.min(0.05, num(live?.setScratchMin, 0.0016))),
-    histSimulateBlock: bool(live?.histSimulateBlock, true),
-    histSimulateDca: bool(live?.histSimulateDca, true),
-    histExactWindow: bool(live?.histExactWindow, false),
-    marginCapPct: Math.max(0, Math.min(1, num(live?.marginCapPct, 0.1))),
-    maxLotsPerSymbolSide: Math.max(0, Math.min(100, Math.round(num(live?.maxLotsPerSymbolSide, 0)))),
-    manualCloseLaneHoldS: Math.max(0, Math.min(86400, Math.round(num(live?.manualCloseLaneHoldS, 21600)))),
-    exitMinSamples: Math.max(0, Math.min(200, Math.round(num(live?.exitMinSamples, 0)))),
-    exitTacticMinGainPct: Math.max(0, Math.min(2, num(live?.exitTacticMinGainPct, 0.15))),
-    blockActiveLiveEnabled: bool(live?.blockActiveLiveEnabled, true),
-    blockActiveRealEnabled: bool(live?.blockActiveRealEnabled, true),
-    variantBlockEnabled: bool(live?.variantBlockEnabled, true),
-    indDirRange: Math.max(4, Math.min(55, Math.round(num(live?.indDirRange, 10)))),
-    indMoveRange: Math.max(4, Math.min(55, Math.round(num(live?.indMoveRange, 10)))),
-    indMoveRanges: Array.isArray(live?.indMoveRanges) ? (live?.indMoveRanges as number[]) : [20, 30, 40],
-    indDirMinChange: Math.max(0, Math.min(0.05, num(live?.indDirMinChange, 0.001))),
-    indMoveMinChange: Math.max(0, Math.min(0.05, num(live?.indMoveMinChange, 0.001))),
-    indActiveThreshold: Math.max(0.1, Math.min(10, num(live?.indActiveThreshold, 1))),
-    indActiveMovePct: Math.max(0, Math.min(5, num(live?.indActiveMovePct, 0.5))),
-    indMsiMinGap: Math.max(0.5, Math.min(30, num(live?.indMsiMinGap, 5))),
-    indVwapDevZ: Math.max(0.5, Math.min(6, num(live?.indVwapDevZ, 2))),
-    indVwapVolMult: Math.max(1, Math.min(10, num(live?.indVwapVolMult, 1.8))),
-    indRetestTol: Math.max(0.01, Math.min(2, num(live?.indRetestTol, 0.12))),
-    indRetestMinBreak: Math.max(0.01, Math.min(2, num(live?.indRetestMinBreak, 0.08))),
-    indSqueezePctl: Math.max(0.05, Math.min(0.5, num(live?.indSqueezePctl, 0.2))),
-    indSweepWickAtr: Math.max(0, Math.min(3, num(live?.indSweepWickAtr, 0.25))),
-    indRsi2Low: Math.max(1, Math.min(49, num(live?.indRsi2Low, 10))),
-    indRsi2High: Math.max(51, Math.min(99, num(live?.indRsi2High, 90))),
-    indKeltnerMult: Math.max(0.5, Math.min(5, num(live?.indKeltnerMult, 2))),
-    indImpulseSigma: Math.max(1, Math.min(10, num(live?.indImpulseSigma, 3))),
-    indImpulseVolMult: Math.max(1, Math.min(10, num(live?.indImpulseVolMult, 2))),
-    actSweepMin: Math.max(0, Math.min(2, num(live?.actSweepMin, 0.04))),
-    actRsi2Min: Math.max(0, Math.min(2, num(live?.actRsi2Min, 0.03))),
-    actKeltnerMin: Math.max(0, Math.min(2, num(live?.actKeltnerMin, 0.04))),
-    actImpulseMin: Math.max(0, Math.min(2, num(live?.actImpulseMin, 0.03))),
-    slMaxPct: num(cts.slMaxPct, 3.0),
-    tpMinPct: num(cts.tpMinPct, 0.3),
-    tpMaxPct: num(cts.tpMaxPct, 0),
+    minPf: pfFloor(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
+    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.176),
+    slippageAllowancePct: num(cts.slippageAllowancePct, 0.016),
+    makerFeeRate: num(cts.makerFeeRate, 0.0005),
+    takerFeeRate: num(cts.takerFeeRate, 0.0008),
+    slippageFeeRatio: num(cts.slippageFeeRatio, 0.1),
+    windowsLinked: bool(cts.windowsLinked, true),
+    pfWindow: Math.max(8, num(cts.pfWindow, 15)),
+    slMinPct: num(cts.slMinPct, 0.2),
+    slMaxPct: num(cts.slMaxPct, 15.75),
+    tpMinPct: num(cts.tpMinPct, 0.35),
+    tpMaxPct: num(cts.tpMaxPct, 4.5),
     tpCostRatio: num(cts.tpCostRatio, 5),
-    slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
+    slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.5)),
     slToTpAuto: bool(cts.slToTpAuto, true),
-    slToTpRecalcN: num(cts.slToTpRecalcN, 6),
+    slToTpRecalcN: Math.max(8, num(cts.slToTpRecalcN, 8)),
     slToTpRecalcEvery: num(cts.slToTpRecalcEvery, 8),
-    slToTpMin: num(cts.slToTpMin, SL_TP_MIN),
-    slToTpMax: num(cts.slToTpMax, SL_TP_MAX),
-    slToTpStep: num(cts.slToTpStep, SL_TP_STEP),
     trailAuto: bool(cts.trailAuto, true),
-    trailRecalcN: num(cts.trailRecalcN, 6),
+    trailRecalcN: Math.max(8, num(cts.trailRecalcN, 8)),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
-    trailArmMin: num(cts.trailArmMin, 0.6),
+    trailArmMin: num(cts.trailArmMin, 0.3),
     trailArmMax: num(cts.trailArmMax, 1.5),
-    trailGiveMin: num(cts.trailGiveMin, 0.2),
+    trailGiveMin: num(cts.trailGiveMin, 0.1),
     trailGiveMax: num(cts.trailGiveMax, 0.5),
     trailGiveFactor: num(cts.trailGiveFactor, 0.333),
     trailRecalcGive: bool(cts.trailRecalcGive, true),
@@ -1267,77 +1455,137 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratIndications: bool(cts.stratIndications, true),
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
+    stratNormal: bool(cts.stratNormal, true),
     stratGeneral: bool(cts.stratGeneral, true),
-    stratDca: bool(cts.stratDca, true),
+    stratShortRange: bool(cts.stratShortRange, false),
+    stratTrend: bool(cts.stratTrend, false),
+    stratBreakout: bool(cts.stratBreakout, false),
+    stratReversion: bool(cts.stratReversion, false),
+    stratFlow: bool(cts.stratFlow, false),
+    stratMulti: bool(cts.stratMulti, false),
+    shortRangeStepMin: num(cts.shortRangeStepMin, 2),
+    shortRangeStepMax: num(cts.shortRangeStepMax, 6),
+    shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.1)),
+    minSlDistancePct: Math.max(protectionPolicy.minSlDistancePct.min, Math.min(protectionPolicy.minSlDistancePct.max, num(cts.minSlDistancePct, protectionPolicy.minSlDistancePct.default))),
+    trailMinSteps: num(cts.trailMinSteps, 2),
+    trailMinLockPct: Math.max(0, Math.min(3, num(cts.trailMinLockPct, 0))),
+    groupGate: bool(cts.groupGate, false),
+    groupGateN: Math.max(1, Math.min(200, Math.round(num(cts.groupGateN, 10)))),
+    groupGatePf: Math.max(0.5, Math.min(3, num(cts.groupGatePf, 1))),
+    groupGateHours: Math.max(1, Math.min(72, num(cts.groupGateHours, 12))),
+    groupGateMin: Math.max(1, Math.min(50, Math.round(num(cts.groupGateMin, 1)))),
+    stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),
     indTypeMove: bool(cts.indTypeMove, true),
     indTypeActive: bool(cts.indTypeActive, true),
     indTypeCommon: bool(cts.indTypeCommon, true),
     indTypeSignals: bool(cts.indTypeSignals, true),
-    indTypeTrend: bool(cts.indTypeTrend, true),
-    indTrendRanges: Array.isArray(cts.indTrendRanges) ? cts.indTrendRanges : [13, 21, 34],
-    indBreakRanges: Array.isArray(cts.indBreakRanges) ? cts.indBreakRanges : [8, 16, 32],
-    indTypeBreak: bool(cts.indTypeBreak, true),
-    indTypeMsi: bool(cts.indTypeMsi, true),
-    indTypeVwap: bool(cts.indTypeVwap, true),
-    indTypeRetest: bool(cts.indTypeRetest, true),
-    indTypeSqueeze: bool(cts.indTypeSqueeze, true),
-    indTypeSweep: bool(cts.indTypeSweep, true),
-    indTypeRsi2: bool(cts.indTypeRsi2, true),
-    indTypeKeltner: bool(cts.indTypeKeltner, true),
-    indTypeImpulse: bool(cts.indTypeImpulse, true),
-    indSweepRanges: Array.isArray(cts.indSweepRanges) ? cts.indSweepRanges : [12, 20, 34],
-    indRsi2Ranges: Array.isArray(cts.indRsi2Ranges) ? cts.indRsi2Ranges : [21, 34, 55],
-    indKeltnerRanges: Array.isArray(cts.indKeltnerRanges) ? cts.indKeltnerRanges : [14, 20, 30],
-    indImpulseRanges: Array.isArray(cts.indImpulseRanges) ? cts.indImpulseRanges : [20, 30, 45],
-    indMsiRanges: Array.isArray(cts.indMsiRanges) ? cts.indMsiRanges : [14, 21, 34],
-    indVwapRanges: Array.isArray(cts.indVwapRanges) ? cts.indVwapRanges : [20, 30, 40],
-    indRetestRanges: Array.isArray(cts.indRetestRanges) ? cts.indRetestRanges : [12, 20, 32],
-    indSqueezeRanges: Array.isArray(cts.indSqueezeRanges) ? cts.indSqueezeRanges : [16, 20, 26],
-    exitTacticOn: bool(cts.exitTacticOn, true),
-    exitTacticBufferPct: Math.max(0, Math.min(1, num(cts.exitTacticBufferPct, 0.1))),
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),
-    minStep: num((coord as { minStep?: number }).minStep, DEFAULT_MIN_STEP),
+    minStep: num((coord as { minStep?: number }).minStep, 6),
     maxStopLossRatio: num((coord as { maxStopLossRatio?: number }).maxStopLossRatio, 2.5),
-    trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, DEFAULT_MIN_STEP),
+    trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, 6),
     posCountsVolumeRatio: num(cts.posCountsVolumeRatio ?? (coord as { posCountsVolumeRatio?: number }).posCountsVolumeRatio, 0.05),
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),
     histEnabled: bool(cts.histEnabled, true),
-    histLookbackBars: num(cts.histLookbackBars, DEFAULT_HIST_LOOKBACK_BARS),
+    histLookbackBars: Math.max(120, Math.min(4320, Math.round(num(cts.histLookbackBars, 4320)))),
     histMinBars: num(cts.histMinBars, 120),
     histWarmup: num(cts.histWarmup, 30),
-    histRefreshS: num(cts.histRefreshS, 3600),
-    histTestHours: clampHistTestHours(cts.histTestHours ?? live?.histTestHours, HIST_TEST_HOURS_DEFAULT),
-    histTestMinPf: normalizePf(num(cts.histTestMinPf ?? live?.histTestMinPf, POSITIVE_PF), POSITIVE_PF),
-    histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
-    histTestAutoAssign: bool(cts.histTestAutoAssign ?? live?.histTestAutoAssign, true),
-    histTestRefreshHours: clampHistTestRefreshHours(cts.histTestRefreshHours ?? live?.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT),
-    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 50),
-    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 50),
+    histRefreshS: num(cts.histRefreshS, 90),
+    setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
-    controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
-    setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),
-    setMaxDdTimeS: num(cts.setMaxDdTimeS, 64800),
-    setAutoDeact: bool(cts.setAutoDeact, true),
-    microEnabled: bool(cts.microEnabled, true),
-    microMinPf: normalizePf(num(cts.microMinPf, 1.05), 1.05),
-    microMaxShare: Math.max(0, Math.min(1, num(cts.microMaxShare, 0.05))),
-    liveEdgeGuard: bool(cts.liveEdgeGuard, true),
-    liveEdgeN: Math.max(10, Math.min(500, Math.round(num(cts.liveEdgeN, 50)))),
-    liveEdgeProbeShare: Math.max(0, Math.min(1, num(cts.liveEdgeProbeShare, 0.25))),
-    oneMinuteLanes: ((v) => (v === "probe" || v === "off" ? v : "on"))(String(live?.oneMinuteLanes ?? cts.oneMinuteLanes ?? "on")),
-    setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
+    setMinPf: pfFloor(num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT)),
+    setMaxDdtHours: num(cts.setMaxDdtHours, 24),
+    setGateWindow: Math.max(1, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
+    setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
+    stagesEnabled: bool(cts.stagesEnabled, true),
+    stageFullWindow: bool(cts.stageFullWindow, false),
+    lastNBasis: cts.lastNBasis === "count" ? "count" : "time",
+    setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
+    minPfBySize: bool(cts.minPfBySize, true),
+    minPfMicro: pfFloor(num(cts.minPfMicro, PF_TYPE_DEFAULTS.minPfMicro)),
+    minPfMinimal: pfFloor(num(cts.minPfMinimal, PF_TYPE_DEFAULTS.minPfMinimal)),
+    minPfShort: pfFloor(num(cts.minPfShort, PF_TYPE_DEFAULTS.minPfShort)),
+    minPfMedium: pfFloor(num(cts.minPfMedium, PF_TYPE_DEFAULTS.minPfMedium)),
+    minPfLong: pfFloor(num(cts.minPfLong, PF_TYPE_DEFAULTS.minPfLong)),
+    minPfSignals: Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(cts.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals))),
+    minPfMicroN: Math.max(1, Math.round(num(cts.minPfMicroN, 5))),
+    minPfMinimalN: Math.max(1, Math.round(num(cts.minPfMinimalN, 10))),
+    minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
+    minPfMediumN: Math.max(1, Math.round(num(cts.minPfMediumN, 35))),
+    setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
+    setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
+    setGateMinMode: minMode(cts.setGateMinMode),
+    mainGateEnabled: bool(cts.mainGateEnabled, true),
+    mainGateN: Math.max(1, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
+    mainShortEnabled: bool(cts.mainShortEnabled ?? cts.mainAutoEnabled, true),
+    mainShortWindows: windows(cts.mainShortWindows ?? cts.mainAutoWindows, [5, 10, 15]),
+    mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),
+    mainShortMin: Math.max(1, Math.min(200, Math.round(num(cts.mainShortMin ?? cts.mainAutoMin, 1)))),
+    mainShortMargin: Math.max(1, Math.min(2, num(cts.mainShortMargin ?? cts.mainAutoMargin, 1.02))),
+    mainMinN: Math.max(0, Math.min(3, Math.round(num(cts.mainMinN, 0)))),
+    mainMinMode: minMode(cts.mainMinMode),
+    mainNegEnabled: bool(cts.mainNegEnabled, true),
+    mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
+    realGateEnabled: bool(cts.realGateEnabled, true),
+    realGateN: Math.max(1, Math.min(200, Math.round(num(cts.realGateN, 15)))),
+    realStagePaper: bool(cts.realStagePaper, true),
+    minPfLinked: bool(cts.minPfLinked, true),
+    histLookbackAuto: bool(cts.histLookbackAuto, true),
+    histLookbackMax: Math.max(120, Math.min(4320, Math.round(num(cts.histLookbackMax, 4320)))),
+    histLookbackTargetN: Math.max(1, Math.min(200, Math.round(num(cts.histLookbackTargetN, 12)))),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
-    setStrictGate: bool(cts.setStrictGate, true),
-    setMinSamples: num(cts.setMinSamples, 30),
-    setReactivate: bool(cts.setReactivate, true),
-    setMaxActive: num(cts.setMaxActive, 0),
-    setMinStep: num(cts.setMinStep ?? cts.minStepRange, DEFAULT_MIN_STEP),
-    setStepMax: num(cts.setStepMax, 30),
-    setStepAdapt: bool(cts.setStepAdapt, true),
+    holdEnabled: bool(cts.holdEnabled, true),
+    holdAuto: bool(cts.holdAuto, false),
+    holdAutoMax: Math.max(10, Math.min(50, Math.round(num(cts.holdAutoMax, 50)))),
+    holdAutoMin: Math.max(3, Math.min(50, Math.round(num(cts.holdAutoMin, 10)))),
+    directionMode: cts.directionMode === "both" ? "both" : "split",
+    minPfByStep: bool(cts.minPfByStep, true),
+    minPfByRange: pfRangeFloorsOf(cts.minPfByRange ?? DEFAULT_OVERLAY.minPfByRange),
+    rankByLane: bool(cts.rankByLane, true),
+    setScratchEnabled: bool(cts.setScratchEnabled, false),
+    tpRanges: tpRangesOf(cts.tpRanges),
+    setSlRatios: setSlRatiosOf(cts.setSlRatios),
+    trailStepMax: Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(num(cts.trailStepMax, TRAIL_STEP_MAX_DEFAULT)))),
+    trailSlRatios: trailSlRatiosOf(cts.trailSlRatios),
+    volumeByPack: volumeMultsOf(cts.volumeByPack),
+    volumeByKind: volumeMultsOf(cts.volumeByKind),
+    volumeByRange: volumeMultsOf(cts.volumeByRange),
+    volumeByPackKind: cts.volumeByPackKind && typeof cts.volumeByPackKind === "object" ? volumeMultsOf(cts.volumeByPackKind) : {},
+    slMaxByRange: slMaxByRangeOf(cts.slMaxByRange),
+    lastNByRange: lastNByRangeOf(cts.lastNByRange),
+    exitSetsByPack: Object.fromEntries(
+      Object.entries(cts.exitSetsByPack && typeof cts.exitSetsByPack === "object" ? cts.exitSetsByPack : {}).filter(([, v]) => typeof v === "boolean"),
+    ) as Record<string, boolean>,
+    trailRanges: { micro: true, minimal: true, short: true, normal: true, long: true, wide: true, ...trailRangesOf(cts.trailRanges) },
+    trailPick: (TRAIL_PICKS as readonly string[]).includes(String(cts.trailPick)) ? (cts.trailPick as TrailPick) : "after",
+    trailPickByPack: Object.fromEntries(
+      Object.entries(cts.trailPickByPack && typeof cts.trailPickByPack === "object" ? cts.trailPickByPack : {}).filter(([, v]) =>
+        (TRAIL_PICKS as readonly string[]).includes(String(v)),
+      ),
+    ) as Record<string, TrailPick>,
+    minPfStepAuto: bool(cts.minPfStepAuto, true),
+    minPfStepRatio: stepPfRatio(cts.minPfStepRatio),
+    minPfStepAutoN: Math.max(3, Math.min(50, Math.round(num(cts.minPfStepAutoN, 10)))),
+    minPfStepAutoMin: Math.max(1, Math.min(100000, Math.round(num(cts.minPfStepAutoMin, 1)))),
+    minPfStepAutoTol: Math.max(0, Math.min(50, Math.round(num(cts.minPfStepAutoTol, 5)))),
+    minPfStepAutoLow: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoLow, 1) * 100) / 100)),
+    minPfStepAutoHigh: Math.max(1, Math.min(2, Math.round(num(cts.minPfStepAutoHigh, 2) * 100) / 100)),
+    pauseMode: PAUSE_MODES.includes(cts.pauseMode as PauseMode) ? (cts.pauseMode as PauseMode) : DEFAULT_OVERLAY.pauseMode,
+    pauseFixedMin: pauseMinutes(cts.pauseFixedMin, DEFAULT_OVERLAY.pauseFixedMin),
+    pauseCandidates: pauseList(cts.pauseCandidates),
+    pauseAutoMax: Math.max(10, Math.min(500, Math.round(num(cts.pauseAutoMax, 100)))),
+    pauseAutoMin: Math.max(8, Math.min(500, Math.round(num(cts.pauseAutoMin, 30)))),
+    pausePack: pausePackMap(cts.pausePack),
+    indicationConfigs: indicationConfigList(cts.indicationConfigs),
+    stepHoldOn: Array.isArray(cts.stepHoldOn) ? cts.stepHoldOn.slice(0, 12).map(Boolean) : DEFAULT_OVERLAY.stepHoldOn,
+    stepHoldMin: Array.isArray(cts.stepHoldMin) ? cts.stepHoldMin.slice(0, 12).map((x) => Math.round(Number(x) || 0)) : DEFAULT_OVERLAY.stepHoldMin,
+    setMinSamples: num(cts.setMinSamples, 12),
+    setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
+    setStepMax: num(cts.setStepMax, TP_STEP_DEFAULT_MAX),
+    setStepAdapt: bool(cts.setStepAdapt, false),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
     exitBestOf: bool(cts.exitBestOf, true),
@@ -1353,65 +1601,36 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, EVAL_MIN_PF),
+    exitMinPf: pfFloor(num(cts.exitMinPf, GATE_MIN_PF_DEFAULT)),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
-  Object.assign(out, normalizeSystemSettings({ ...cts, ...live }));
-  out.stratGeneral = true; // Permanent calculation basis; not an execution toggle.
-  out.histEnabled = true;
-  out.blockActiveMinLevel = Math.max(0, Math.min(out.blockMaxStack || 6, Math.trunc(num(out.blockActiveMinLevel, 0))));
-  const pct = (value: number, fallback: number): number =>
-    Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 100) / 100;
-  out.slMinPct = Math.max(SL_MIN_PCT, pct(out.slMinPct, SL_MIN_PCT));
-  out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, 3.0));
-  out.indStopMinPct = Math.max(SL_MIN_PCT, num(out.indStopMinPct, SL_MIN_PCT));
-  out.indStopMaxPct = Math.max(out.indStopMinPct, num(out.indStopMaxPct, 1.5));
-  out.tpMinPct = Math.max(0.3, pct(out.tpMinPct, 0.3));
-  out.tpMaxPct = num(out.tpMaxPct, 0) <= 0 ? 0 : Math.max(out.tpMinPct, num(out.tpMaxPct, 0));
-  out.slToTpMin = SL_TP_MIN;
-  out.slToTpMax = SL_TP_MAX;
-  out.slToTpStep = SL_TP_STEP;
-  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), SL_TP_MIN, SL_TP_MAX, SL_TP_STEP);
-  Object.assign(out, clampTrailGrid(out));
-  out.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.setMinStep, DEFAULT_MIN_STEP))));
-  out.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.minStep, DEFAULT_MIN_STEP))));
-  out.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.trailingMinStep, DEFAULT_MIN_STEP))));
-  out.setStepMax = Math.max(out.setMinStep, Math.min(30, Math.round(num(out.setStepMax, 30))));
-  out.slPct = Math.max(out.slMinPct, num(out.slPct, out.slMinPct));
-  for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
-    out[key] = normalizePf(out.minPf, EVAL_MIN_PF);
+  out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
+  out.minPfByRange = pfRangeFloorsOf(out.minPfByRange);
+  for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
+    out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
   }
-  out.axisPrevMaxWindow = clampAxisWindow("prev", out.axisPrevMaxWindow);
-  out.axisLastMaxWindow = clampAxisWindow("last", out.axisLastMaxWindow);
-  out.axisContMaxWindow = clampAxisWindow("cont", out.axisContMaxWindow);
-  out.axisPauseMaxWindow = clampAxisWindow("pause", out.axisPauseMaxWindow);
-  out.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.maxDdTimeS, 64800) / 600) * 600));
-  out.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.setMaxDdTimeS, 64800) / 600) * 600));
+  out.minPfMicroN = Math.max(1, Math.round(num(out.minPfMicroN, 5)));
+  out.minPfMinimalN = Math.max(out.minPfMicroN, Math.round(num(out.minPfMinimalN, 10)));
+  out.minPfShortN = Math.max(out.minPfMinimalN, Math.round(num(out.minPfShortN, 20)));
+  out.minPfMediumN = Math.max(out.minPfShortN, Math.round(num(out.minPfMediumN, 35)));
+  out.histLookbackMax = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackMax, 4320))));
+  out.histLookbackTargetN = Math.max(1, Math.min(200, Math.round(num(out.histLookbackTargetN, 12))));
+  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.5));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),
   };
+  // A raw module disable must not be displayed or re-saved as an enabled strategy.
+  out.minPfSignals = Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(out.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals)));
+  out.stratTrailing = out.stratTrailing && out.modules["strategy.trailing"] !== false;
   if (Array.isArray(live?.symbols)) out.symbols = live.symbols as string[];
   if (live?.symbolsAll != null) out.symbolsAll = bool(live.symbolsAll, out.symbolsAll);
   out.symbolSort = coerceSymbolSort(out.symbolSort ?? live?.symbolSort);
   out.symbolsDynamic = bool(out.symbolsDynamic, true);
-  out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, DEFAULT_SYMBOL_COUNT)));
-  out.histTestHours = clampHistTestHours(out.histTestHours, HIST_TEST_HOURS_DEFAULT);
-  out.histTestMinPf = normalizePf(num(out.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
-  out.histTestEnabled = bool(out.histTestEnabled, true);
-  out.histTestAutoAssign = bool(out.histTestAutoAssign, true);
-  out.histTestRefreshHours = clampHistTestRefreshHours(out.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
-  if (Array.isArray(live?.forcedSymbols) && live.forcedSymbols.length) {
-    out.forcedSymbols = live.forcedSymbols.filter((s): s is string => typeof s === "string" && s.length > 0);
-  }
-  if (typeof live?.forcedVariant === "string" && live.forcedVariant) out.forcedVariant = live.forcedVariant;
-  if (live?.forcedEligible != null) out.forcedEligible = Math.max(0, Math.round(num(live.forcedEligible, 0)));
-  if (live?.forcedBest && typeof live.forcedBest === "object" && !Array.isArray(live.forcedBest)) {
-    out.forcedBest = live.forcedBest;
-  }
+  out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, 0)));
   if (out.trailRecalcGive && live?.trailGivePct == null) {
     out.trailGivePct = trailGiveFromArm(out.trailArmPct, out.trailGiveFactor, out.trailGiveMin, out.trailGiveMax);
   }
@@ -1423,49 +1642,34 @@ function nestedAxis(coord: Record<string, unknown>, axis: string, field: string)
   return axes?.[axis]?.[field];
 }
 
-export function sharedBlockVolumeRatio(ratio: number, liveCount: number, extraCap = 1) {
-  const vr = Math.max(0.05, Math.min(2, num(ratio, 0.25)));
-  const extra = Math.max(0, num(extraCap, 1));
-  const n = Math.max(1, Math.trunc(liveCount) || 1);
-  if (n > 1 && extra > 0 && vr + 1e-12 >= extra) return extra / n;
-  return vr;
-}
-
-export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number, baseQty = 1, stack = 0, maxMultiplier = 2, counts?: number[]) {
+export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number, baseQty = 1, stack = 0) {
   const rows = [];
-  const nMax = stack > 0 ? Math.min(stack, 6) : 6;
-  const cap = Math.max(1, Math.min(2, num(maxMultiplier, 2)));
-  const live = Array.isArray(counts) && counts.length
-    ? [...new Set(counts.filter((n) => Number.isInteger(n) && n >= 1 && n <= nMax))].sort((a, b) => a - b)
-    : Array.from({ length: nMax }, (_, i) => i + 1);
-  const volumeRatio = sharedBlockVolumeRatio(ratio, live.length, cap - 1);
+  const nMax = stack > 0 ? Math.min(stack, 24) : 12;
   for (let n = 1; n <= nMax; n += 1) {
-    const inc = Math.min(cap - 1, n * volumeRatio);
+    const inc = n * ratio;
     rows.push({
       n,
       inc,
       add: baseQty * inc,
       tot: baseQty + baseQty * inc,
       minPf: 1 + Math.max(0, defaultMinPf - 1) * pfRatio * inc,
-      step: n === 1 ? baseQty * inc : baseQty * (inc - Math.min(cap - 1, (n - 1) * volumeRatio)),
     });
   }
   return rows;
 }
 
 export type CtsBundle = {
-  ok: boolean;
   cts: CtsSettings | null;
   overlay: Partial<PulseOverlay> | null;
   conn?: string;
 };
 
-export async function fetchCtsBundle(conn = "overall", signal?: AbortSignal): Promise<CtsBundle> {
-  if (conn === "overall") return { ok: true, cts: null, overlay: null, conn: "overall" };
+export async function fetchCtsBundle(conn = "overall"): Promise<CtsBundle> {
+  if (conn === "overall") return { cts: null, overlay: null, conn: "overall" };
   try {
-    const value = await requestJson(`/config.json?conn=${encodeURIComponent(conn)}`, signal);
-    if (!value) return { ok: false, cts: null, overlay: loadLocalOverlay(conn), conn };
-    const j = value as {
+    const r = await fetch(`/config.json?conn=${encodeURIComponent(conn)}`, { cache: "no-store" });
+    if (!r.ok) return { cts: null, overlay: loadLocalOverlay(conn), conn };
+    const j = (await r.json()) as {
       cts?: CtsSettings;
       overlay?: Partial<PulseOverlay>;
       conn?: string;
@@ -1480,9 +1684,9 @@ export async function fetchCtsBundle(conn = "overall", signal?: AbortSignal): Pr
         : j && typeof j === "object" && ("blockMaxStack" in j || "strategies" in j) && !overlay
           ? (j as CtsSettings)
           : ((j.cts as CtsSettings) ?? null);
-    return { ok: Boolean(cts || overlay), cts, overlay, conn: j?.conn || conn };
+    return { cts, overlay, conn: j?.conn || conn };
   } catch {
-    return { ok: false, cts: null, overlay: loadLocalOverlay(conn), conn };
+    return { cts: null, overlay: loadLocalOverlay(conn), conn };
   }
 }
 
@@ -1494,50 +1698,12 @@ export async function fetchCtsSettings(conn = "overall"): Promise<CtsSettings | 
 export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
-    ...normalizeSystemSettings(overlay),
-    stratGeneral: true,
-    histEnabled: true,
-    blockActiveMinLevel: Math.max(0, Math.min(overlay.blockMaxStack || 6, Math.trunc(num(overlay.blockActiveMinLevel, 0)))),
+    relateConfigs: relateConfigs(overlay.relateConfigs),
+    relationLanes: relationLanesOf(overlay.relationLanes),
+    blockRounds: blockRoundsOf(overlay.blockRounds),
+    minPfSignals: Math.max(PF_TYPE_DEFAULTS.minPfSignals, pfFloor(num(overlay.minPfSignals, PF_TYPE_DEFAULTS.minPfSignals))),
     symbols: capSymbols(overlay.symbols || []),
-    blockMaxStack: Math.max(1, Math.min(6, Math.trunc(num(overlay.blockMaxStack, 6)) || 6)),
-    blockVolumeRatio: Math.max(0.05, Math.min(2, num(overlay.blockVolumeRatio, 0.25))),
-    blockMaxVolumeMultiplier: Math.max(1, Math.min(2, num(overlay.blockMaxVolumeMultiplier, 2))),
-    blockCounts: Array.isArray(overlay.blockCounts)
-      ? [...new Set(overlay.blockCounts.filter((n) => Number.isInteger(n) && n >= 1 && n <= 6))].sort((a, b) => a - b)
-      : [1, 2, 3, 4, 5, 6],
-    blockEvalPosCount: Math.max(5, Math.min(75, Math.round(num(overlay.blockEvalPosCount, 50)))),
   };
-  for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
-    next[key] = normalizePf(next.minPf, EVAL_MIN_PF);
-  }
-  next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 40))));
-  next.setPfWindow = next.baseEvalPosCount;
-  next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
-  next.slMinPct = Math.max(SL_MIN_PCT, Math.min(3, num(next.slMinPct, SL_MIN_PCT)));
-  next.slMaxPct = Math.max(next.slMinPct, Math.min(3, num(next.slMaxPct, 3)));
-  next.indStopMinPct = Math.max(SL_MIN_PCT, num(next.indStopMinPct, SL_MIN_PCT));
-  next.indStopMaxPct = Math.max(next.indStopMinPct, num(next.indStopMaxPct, 1.5));
-  next.tpMinPct = Math.max(.3, num(next.tpMinPct, .3));
-  next.tpMaxPct = num(next.tpMaxPct, 0) <= 0 ? 0 : Math.max(next.tpMinPct, next.tpMaxPct);
-  next.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.setMinStep, DEFAULT_MIN_STEP))));
-  next.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.minStep, DEFAULT_MIN_STEP))));
-  next.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.trailingMinStep, DEFAULT_MIN_STEP))));
-  next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
-  // Save the same trail grid that overlayFromCts loads (same clamps), so the
-  // engine catalog matches what the desk shows.
-  Object.assign(next, clampTrailGrid(next));
-  next.slPct = Math.max(next.slMinPct, num(next.slPct, next.slMinPct));
-  next.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.maxDdTimeS, 64800) / 600) * 600));
-  next.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.setMaxDdTimeS, 64800) / 600) * 600));
-  next.cooldownS = Math.max(0, Math.min(120, num(next.cooldownS, 9)));
-  next.staggerS = Math.max(0, Math.min(30, num(next.staggerS, 0.6)));
-  next.drawdownHaltPct = Math.max(0, Math.min(80, num(next.drawdownHaltPct, 0)));
-  next.minimumEquity = Math.max(0, num(next.minimumEquity, 0.2));
-  next.histTestHours = clampHistTestHours(next.histTestHours, HIST_TEST_HOURS_DEFAULT);
-  next.histTestMinPf = normalizePf(num(next.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
-  next.histTestEnabled = bool(next.histTestEnabled, true);
-  next.histTestAutoAssign = bool(next.histTestAutoAssign, true);
-  next.histTestRefreshHours = clampHistTestRefreshHours(next.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];
     next.symbolsAll = true;
@@ -1545,44 +1711,9 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     next.symbolsAll = false;
     if (!next.symbols.length) next.symbols = [...PULSE_SYMBOLS];
   }
-  // Migrate the old names at the boundary so the rest of the UI and API
-  // always expose the actual policy: minimal ranges, PF-first ranking.
-  next.preferMinimalRange = bool(
-    next.preferMinimalRange ?? next.preferMinimalPositive,
-    false,
-  );
-  next.additionalCoordination = bool(
-    next.additionalCoordination ?? next.minimalPositiveCoordination,
-    false,
-  );
-  delete next.preferMinimalPositive;
-  delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
-  next.controlOrders = true;
-  next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
-  next.controlOrdersOverall = bool(next.controlOrdersOverall, true);
-  next.entryBatchOrders = bool(next.entryBatchOrders, false);
-  next.entryBatchSize = Math.max(2, Math.min(5, Math.round(num(next.entryBatchSize, 5))));
-  next.blockOverall = bool(next.blockOverall, true);
-  next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
-  next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
-  const candidateCap = Math.round(num(next.entryPolicyMaxCandidates, 0));
-  next.entryPolicyMaxCandidates = candidateCap <= 0 ? 0 : Math.max(2, Math.min(32, candidateCap));
-  next.entryPolicyMinLiveSamples = Math.max(0, Math.min(25, Math.round(num(next.entryPolicyMinLiveSamples, 0))));
   next.symbolsDynamic = next.symbolsDynamic !== false;
-
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
-  if (next.symbolCap === 0 && overlay.symbolCap == null) {
-    next.symbolCap = DEFAULT_SYMBOL_COUNT;
-  }
-  if (Array.isArray(overlay.forcedSymbols) && overlay.forcedSymbols.length) {
-    next.forcedSymbols = overlay.forcedSymbols.filter((s) => typeof s === "string" && s.length > 0);
-  }
-  if (typeof overlay.forcedVariant === "string" && overlay.forcedVariant) next.forcedVariant = overlay.forcedVariant;
-  if (overlay.forcedEligible != null) next.forcedEligible = Math.max(0, Math.round(num(overlay.forcedEligible, 0)));
-  if (overlay.forcedBest && typeof overlay.forcedBest === "object" && !Array.isArray(overlay.forcedBest)) {
-    next.forcedBest = overlay.forcedBest;
-  }
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
   next.dcaMaxSteps = steps;
   const dist = [...(next.dcaStepDistancesPct || [0.5, 1, 1.5, 2])];
@@ -1594,8 +1725,8 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.dcaStepVolumeMultipliers = steps > 0 ? mult.slice(0, steps) : mult;
   const m: Record<string, boolean> = { ...(next.modules ?? {}) };
   m["strategy.block"] = Boolean(next.blockEnabled && next.stratBlock);
-  m["strategy.dca"] = next.stratDca !== false;
-  m["exec.controls"] = true;
+  m["strategy.dca"] = next.dcaEnabled === true && next.stratDca === true;
+  m["exec.controls"] = Boolean(next.controlOrders);
   m["strategy.rearrange"] = Boolean(next.rearrange);
   m["strategy.indications"] = Boolean(next.indEnabled && next.stratIndications);
   m["feed.tf1m"] = Boolean(next.tf1m);
@@ -1614,38 +1745,6 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   m["feed.universeRank"] = Boolean(next.symbolsDynamic);
   next.modules = m;
   return next;
-}
-
-/** Universe and forced-winner keys belong to one connection. */
-export const LANE_OVERLAY_KEYS = [
-  "symbols",
-  "symbolsAll",
-  "symbolsDynamic",
-  "forcedSymbols",
-  "forcedVariant",
-  "forcedEligible",
-  "forcedBest",
-] as const;
-
-/** A shared preset never carries one connection's universe to another. */
-export function withoutLaneKeys(overlay: Partial<PulseOverlay>): Partial<PulseOverlay> {
-  const out: Partial<PulseOverlay> = { ...overlay };
-  for (const key of LANE_OVERLAY_KEYS) delete out[key];
-  return out;
-}
-
-/**
- * Keys the form changed relative to the overlay it was loaded from, plus keys
- * explicitly set since then (a set value can equal the loaded default).
- */
-export function overlayEdits(baseline: PulseOverlay, current: PulseOverlay, touched: Iterable<string> = []): Partial<PulseOverlay> {
-  const out: Record<string, unknown> = {};
-  const base = baseline as Record<string, unknown>;
-  const set = new Set(touched);
-  for (const [key, value] of Object.entries(current)) {
-    if (set.has(key) || JSON.stringify(value) !== JSON.stringify(base[key])) out[key] = value;
-  }
-  return out as Partial<PulseOverlay>;
 }
 
 export async function saveOverlay(
@@ -1671,8 +1770,6 @@ export async function saveOverlay(
       detail?: string;
       overlay?: Partial<PulseOverlay>;
       conn?: string;
-      appliedAt?: number;
-      reload?: string;
     };
     if (r.ok && j.ok !== false) {
       const applied = syncOverlayFlags({ ...next, ...(j.overlay || {}) } as PulseOverlay);
@@ -1681,14 +1778,9 @@ export async function saveOverlay(
       } catch {
         /* ignore */
       }
-      try {
-        window.dispatchEvent(new Event("pulse:control"));
-      } catch {
-        /* ignore */
-      }
       return {
         ok: true,
-        detail: `Saved ${j.conn || desk} · applied`,
+        detail: `Saved ${j.conn || desk} · engine reload`,
         overlay: applied,
         conn: j.conn || desk,
       };
@@ -1708,20 +1800,4 @@ export function loadLocalOverlay(conn = ""): Partial<PulseOverlay> | null {
   } catch {
     return null;
   }
-}
-
-/**
- * One order's target notional before the per-symbol volatility and Set ratio adjustments, exactly as the engine
- * sizes it (pulse_trader.base_notional): balance mode uses the system's own equity reported by the engine.
- */
-export function effectiveNotional(
-  overlay: Pick<PulseOverlay, "sizingMode" | "targetNotionalPct" | "targetNotional" | "volumeFactor">,
-  sizingEquity?: number | null,
-): { value: number; source: "equity" | "fixed" } {
-  const vf = overlay.volumeFactor || 1;
-  const eq = Number(sizingEquity);
-  if (overlay.sizingMode !== "fixed" && Number.isFinite(eq) && eq > 0) {
-    return { value: Math.max(0.2, ((eq * overlay.targetNotionalPct) / 100) * vf), source: "equity" };
-  }
-  return { value: Math.max(0.2, overlay.targetNotional * vf), source: "fixed" };
 }

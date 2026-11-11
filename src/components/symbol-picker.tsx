@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   DEFAULT_SYMBOL_COUNT,
+  MAX_SYMBOLS,
   PULSE_SYMBOLS,
   SYMBOL_SORTS,
   capSymbols,
@@ -29,7 +30,6 @@ export function SymbolPicker({
   dynamic = true,
   onDynamicChange,
   onCap,
-  cap = DEFAULT_SYMBOL_COUNT,
 }: {
   selected: string[];
   onChange: (next: string[]) => void;
@@ -38,7 +38,6 @@ export function SymbolPicker({
   dynamic?: boolean;
   onDynamicChange?: (next: boolean) => void;
   onCap?: (n: number) => void;
-  cap?: number;
 }) {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<UniverseRow[]>([]);
@@ -94,23 +93,19 @@ export function SymbolPicker({
     return ranked.filter((r) => r.symbol.toUpperCase().includes(s));
   }, [q, ranked]);
 
-  const bookCap = Math.max(0, Math.round(Number(cap) || 0));
-  const wild = selected.includes("*") || selected.includes("ALL");
-  const unlimited = bookCap === 0 && wild;
-  const rankedBook = bookCap > 0 && wild;
-  const named = selected.filter((s) => s !== "*" && s !== "ALL");
-  const sel = new Set(named);
-  const atMax = bookCap > 0 && !wild && named.length >= bookCap;
+  const unlimited = !MAX_SYMBOLS || MAX_SYMBOLS <= 0;
+  const allOn = selected.includes("*") || selected.includes("ALL");
+  const sel = new Set(selected);
+  const atMax = !unlimited && !allOn && selected.length >= MAX_SYMBOLS;
   const sortMeta = SYMBOL_SORTS.find((s) => s.id === sortId);
 
   const toggle = (symbol: string) => {
-    if (unlimited || rankedBook) {
+    if (allOn) {
       onChange([symbol]);
-      onCap?.(bookCap > 0 ? bookCap : DEFAULT_SYMBOL_COUNT);
       return;
     }
-    if (sel.has(symbol)) onChange(named.filter((x) => x !== symbol));
-    else if (!atMax) onChange(capSymbols([...named, symbol]));
+    if (sel.has(symbol)) onChange(selected.filter((x) => x !== symbol));
+    else if (!atMax) onChange(capSymbols([...selected, symbol]));
   };
 
   const applyTop = (n: number) => {
@@ -122,27 +117,22 @@ export function SymbolPicker({
     onCap?.(n);
   };
 
-  const applyDefaultRanked = () => {
-    onChange(["*"]);
-    onCap?.(DEFAULT_SYMBOL_COUNT);
-  };
-
   const top = ranked[0];
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="font-mono text-sm tabular-nums">
-          <span className="text-fg">{unlimited ? "all" : rankedBook ? bookCap : named.length}</span>
-          <span className="text-muted"> / {unlimited ? "unlimited" : bookCap > 0 ? bookCap : "unlimited"}</span>
+          <span className="text-fg">{allOn ? "all" : selected.length}</span>
+          <span className="text-muted"> / {unlimited ? "unlimited" : MAX_SYMBOLS}</span>
           <span className="ml-2 text-muted">default {DEFAULT_SYMBOL_COUNT}</span>
         </p>
         <div className="flex flex-wrap gap-2">
-          <Mini onClick={applyDefaultRanked}>Default {DEFAULT_SYMBOL_COUNT}</Mini>
+          <Mini onClick={() => applyTop(DEFAULT_SYMBOL_COUNT)}>Default 12</Mini>
           <Mini onClick={() => applyTop(12)}>Top 12</Mini>
-          <Mini onClick={() => applyTop(25)}>Top 25</Mini>
+          <Mini onClick={() => applyTop(24)}>Top 24</Mini>
           <Mini onClick={() => applyTop(50)}>Top 50</Mini>
-          <Mini onClick={() => { onChange(["*"]); onCap?.(0); }}>All unlimited</Mini>
+          <Mini onClick={() => onChange(["*"])}>All unlimited</Mini>
           <Mini onClick={() => onChange([])}>Clear</Mini>
         </div>
       </div>
@@ -191,13 +181,9 @@ export function SymbolPicker({
         </button>
       ) : null}
 
-      {rankedBook ? (
-        <p className="text-sm text-muted">
-          Ranked book of {bookCap} names from the full USDT-M universe (max leverage, then the criterion above). Not the full book.
-        </p>
-      ) : named.length > 0 ? (
+      {selected.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
-          {named.map((s) => (
+          {selected.map((s) => (
             <button
               key={s}
               type="button"
@@ -210,9 +196,9 @@ export function SymbolPicker({
         </div>
       ) : (
         <p className="text-sm text-muted">
-          {unlimited
+          {allOn
             ? "Every listed USDT-M swap is processed, ordered by max leverage then the criterion above."
-            : `Select any set of USDT-M swaps. Cap ${bookCap > 0 ? bookCap : "unlimited"}. Empty reverts to default ${DEFAULT_SYMBOL_COUNT} on save unless All unlimited is on.`}
+            : `Select any set of USDT-M swaps. Cap ${unlimited ? "unlimited" : MAX_SYMBOLS}. Empty reverts to default 12 on save unless All is on.`}
         </p>
       )}
 
@@ -249,7 +235,7 @@ export function SymbolPicker({
                   <td className="px-3 py-2 font-mono text-xs tabular-nums text-primary">{fmtPct(r.vol1h)}</td>
                   <td
                     className={`px-3 py-2 font-mono text-xs tabular-nums ${
-                      r.changePct >= 0 ? "text-primary" : "text-muted"
+                      r.changePct >= 0 ? "text-primary" : "text-danger"
                     }`}
                   >
                     {r.changePct >= 0 ? "+" : ""}

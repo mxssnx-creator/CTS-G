@@ -1,0 +1,23 @@
+{
+  "input_symbols_loaded": 8,
+  "replayed_symbols": 8,
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "sets": 1654,
+  "bars_per_symbol": 4320,
+  "holds_enabled": false,
+  "elapsed_s": 77.994,
+  "peak_rss_kib_linux": 165660,
+  "phase": "ready",
+  "errors": 0,
+  "history_rows": 935150,
+  "note": "shared host; automatic holds off, not a production live-cycle benchmark"
+}

@@ -1,27 +1,42 @@
 #!/usr/bin/env python3
 """Independent SL:TP ratio sets and trailing recals.
 
-SL is bound to TP on the discrete CTS grid 0.1–3.0 step 0.1.
+SL is bound to TP on the discrete CTS grid 0.3–1.5 step 0.3.
 Trailing arm/give is a separate book with its own optimal range and recals.
 Neither book writes the other.
 """
 from __future__ import annotations
 
 import time
+from modules import trailing_enabled
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, snap_ratio, SL_TP_RATIOS, SL_TP_STEP, SL_TP_MIN, SL_TP_MAX, sl_tp_grid
+from position_cost import (
+    MIN_VALIDATION_N,
+    POSITION_COST_PCT_DEFAULT,
+    window_n,
+    TRAIL_STEP_MAX,
+    TP_UNIT_PCT,
+    TRAIL_STEP_SETTING_MAX,
+    TRAIL_STEP_SETTING_MIN,
+    last_n_cost_pf,
+    net_pnl_pct,
+    row_net_pnl_pct,
+    snap_ratio,
+    SL_TP_RATIOS,
+    SL_TP_STEP,
+    SL_TP_MIN,
+    SL_TP_MAX,
+)
 
 TRAIL_VARIANTS = ("0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5")
 TRAIL_ARM_MIN = 0.3
 TRAIL_ARM_MAX = 1.5
+TRAIL_ARM_STEP = 0.3  # price percent; independent of the SL/TP ratio grid
 TRAIL_GIVE_MIN = 0.1
 TRAIL_GIVE_MAX = 0.5
 TRAIL_GIVE_FACTOR = 1.0 / 3.0
-# Default trailing minimums (the constants above stay the hard floors).
-TRAIL_ARM_MIN_DEFAULT = 0.6
-TRAIL_GIVE_MIN_DEFAULT = 0.2
 
 
 def parse_trail(raw: Any) -> Tuple[float, float]:
@@ -31,7 +46,7 @@ def parse_trail(raw: Any) -> Tuple[float, float]:
             arm = float(text)
         except Exception:
             arm = 0.3
-        return snap_ratio(arm), round(max(TRAIL_GIVE_MIN, min(TRAIL_GIVE_MAX, snap_ratio(arm) * TRAIL_GIVE_FACTOR)), 1)
+        return snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP), round(max(TRAIL_GIVE_MIN, min(TRAIL_GIVE_MAX, snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP) * TRAIL_GIVE_FACTOR)), 1)
     a, g = text.split(":", 1)
     try:
         arm = float(a)
@@ -41,7 +56,7 @@ def parse_trail(raw: Any) -> Tuple[float, float]:
         give = float(g)
     except Exception:
         give = arm * TRAIL_GIVE_FACTOR
-    arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
+    arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
     give = round(max(TRAIL_GIVE_MIN, min(TRAIL_GIVE_MAX, give)), 2)
     return arm, give
 
@@ -55,47 +70,6 @@ def give_from_arm(arm: float, factor: float, gmin: float, gmax: float) -> float:
     return round(max(gmin, min(gmax, raw)), 2)
 
 
-def trail_grid(
-    arm_min: float = TRAIL_ARM_MIN,
-    arm_max: float = TRAIL_ARM_MAX,
-    give_min: float = TRAIL_GIVE_MIN,
-    give_max: float = TRAIL_GIVE_MAX,
-) -> List[Tuple[str, float, float]]:
-    """Independent arm × give product inside the Settings min/max ranges.
-    A singleton range is one trail Set; it does not expand past the knobs."""
-    def _axis(lo: float, hi: float, amin: float, amax: float, step: float) -> List[float]:
-        a = snap_ratio(lo, amin, amax, step)
-        b = snap_ratio(hi, amin, amax, step)
-        if a > b:
-            a, b = b, a
-        out: List[float] = []
-        x = a
-        for _ in range(16):
-            if x > b + 1e-9:
-                break
-            r = round(float(x), 1)
-            if not out or abs(out[-1] - r) > 1e-9:
-                out.append(r)
-            nxt = snap_ratio(x + step, amin, amax, step)
-            if nxt <= x + 1e-12:
-                break
-            x = nxt
-        return out or [round(float(a), 1)]
-
-    arms = _axis(arm_min, arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-    gives = _axis(give_min, give_max, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
-    out: List[Tuple[str, float, float]] = []
-    seen = set()
-    for arm in arms:
-        for give in gives:
-            key = trail_key(arm, give)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append((key, float(arm), float(give)))
-    return out
-
-
 def trail_candidates(
     arm_min: float,
     arm_max: float,
@@ -105,11 +79,31 @@ def trail_candidates(
     recalc_give: bool,
     variants: Sequence[str],
 ) -> List[Tuple[str, float, float]]:
-    # Settings ranges define the evaluation catalog. The legacy diagonal
-    # variants are a live default/compatibility input and must not remove
-    # independent arm×give combinations from scoring.
-    del factor, recalc_give, variants
-    return trail_grid(arm_min, arm_max, give_min, give_max)
+    out: List[Tuple[str, float, float]] = []
+    seen = set()
+    lo = snap_ratio(arm_min, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
+    hi = snap_ratio(arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
+    if lo > hi:
+        lo, hi = hi, lo
+    source = list(variants) or list(TRAIL_VARIANTS)
+    for raw in source:
+        arm, give = parse_trail(raw)
+        if arm + 1e-9 < lo or arm - 1e-9 > hi:
+            continue
+        if recalc_give:
+            give = give_from_arm(arm, factor, give_min, give_max)
+        if give + 1e-9 < give_min or give - 1e-9 > give_max:
+            continue
+        key = trail_key(arm, give)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((key, arm, give))
+    if not out:
+        arm = snap_ratio((lo + hi) / 2, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
+        give = give_from_arm(arm, factor, give_min, give_max)
+        out.append((trail_key(arm, give), arm, give))
+    return out
 
 
 @dataclass
@@ -125,20 +119,39 @@ class LaneScore:
     in_range: bool = True
 
 
+def trail_grid(min_step: int, cost_pct: float = 0.0, max_step: int = TRAIL_STEP_MAX) -> List[Tuple[str, float, float]]:
+    """Every trailing config for the Set grid, in absolute steps of TP_UNIT_PCT (0.1 % of price).
+
+    arm = k x 0.1 % and give = j x 0.1 % with min_step <= j <= k <= max_step. The give never exceeds the
+    arm, so an activated stop never sits below entry. min_step (trailMinStep) is clamped to 2..8.
+    Returns (key, arm %, give %), the same units as trail_candidates. cost_pct is kept for callers; the grid no longer moves with it.
+    """
+    m = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(min_step)))
+    out: List[Tuple[str, float, float]] = []
+    for k in range(m, int(max_step) + 1):
+        for j in range(m, k + 1):
+            arm = round(k * TP_UNIT_PCT, 4)
+            give = round(j * TP_UNIT_PCT, 4)
+            out.append((f"{arm:.2f}:{give:.2f}", arm, give))
+    return out
+
+
 @dataclass
 class VariantBook:
     """Two independent recals: SL:TP ratios and trailing arm/give."""
 
-    sl_ratio: float = 0.6
+    cost_pct: float = POSITION_COST_PCT_DEFAULT
+    skipped: int = 0            # closes without pnl_pct: cannot be normalised, not counted in any tape
+    sl_ratio: float = 0.5
     sl_auto: bool = True
-    sl_recalc_n: int = 6
+    sl_recalc_n: int = 8
     sl_recalc_every: int = 8
     sl_ratios: List[float] = field(default_factory=lambda: list(SL_TP_RATIOS))
     trail_key: str = "0.3:0.1"
     trail_arm: float = 0.3
     trail_give: float = 0.1
     trail_auto: bool = True
-    trail_recalc_n: int = 6
+    trail_recalc_n: int = 8
     trail_recalc_every: int = 8
     trail_arm_min: float = TRAIL_ARM_MIN
     trail_arm_max: float = TRAIL_ARM_MAX
@@ -160,49 +173,47 @@ class VariantBook:
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
+        try:
+            c = float(ov.get("positionCostPct") or 0)
+        except (TypeError, ValueError):
+            c = 0.0
+        if c > 0:
+            self.cost_pct = c   # the engine's PositionCost, so lane scores and net rows use the same cost
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
-        has_range = any(k in ov for k in ("slToTpMin", "slToTpMax", "slToTpStep"))
-        raw_ratios = ov.get("slToTpRatios")
-        if has_range or not (isinstance(raw_ratios, (list, tuple)) and raw_ratios):
-            self.sl_ratios = sl_tp_grid(
-                ov.get("slToTpMin") if "slToTpMin" in ov else SL_TP_MIN,
-                ov.get("slToTpMax") if "slToTpMax" in ov else SL_TP_MAX,
-                ov.get("slToTpStep") if "slToTpStep" in ov else SL_TP_STEP,
-            )
-        else:
-            ratios: List[float] = []
-            for x in raw_ratios:
-                try:
-                    ratios.append(snap_ratio(float(x)))
-                except Exception:
-                    continue
-            self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
+        raw_ratios = ov.get("slToTpRatios") or list(SL_TP_RATIOS)
+        ratios: List[float] = []
+        for x in raw_ratios:
+            try:
+                ratios.append(snap_ratio(float(x)))
+            except Exception:
+                continue
+        self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
         self.sl_ratio = snap_ratio(ov.get("slToTpRatio", self.sl_ratio))
         if self.sl_ratio not in self.sl_ratios:
             self.sl_ratio = min(self.sl_ratios, key=lambda r: abs(r - self.sl_ratio))
         self.sl_auto = bool(ov.get("slToTpAuto", True))
-        self.sl_recalc_n = max(3, int(ov.get("slToTpRecalcN") or 6))
+        self.sl_recalc_n = max(MIN_VALIDATION_N, window_n(ov, "slToTpRecalcN", fallback=MIN_VALIDATION_N))
         self.sl_recalc_every = max(3, int(ov.get("slToTpRecalcEvery") or 8))
 
         raw_trails = ov.get("trailVariants") or coord.get("trailingVariants") or cts.get("strategyBaseTrailingVariants") or list(TRAIL_VARIANTS)
         if isinstance(raw_trails, str):
             raw_trails = [p.strip() for p in raw_trails.split(",") if p.strip()]
         self.trail_variants = [str(x) for x in raw_trails] or list(TRAIL_VARIANTS)
-        self.trail_arm_min = snap_ratio(ov.get("trailArmMin", TRAIL_ARM_MIN_DEFAULT), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-        self.trail_arm_max = snap_ratio(ov.get("trailArmMax", TRAIL_ARM_MAX), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-        self.trail_give_min = float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN_DEFAULT)
+        self.trail_arm_min = snap_ratio(ov.get("trailArmMin", TRAIL_ARM_MIN), TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
+        self.trail_arm_max = snap_ratio(ov.get("trailArmMax", TRAIL_ARM_MAX), TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
+        self.trail_give_min = float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN)
         self.trail_give_max = float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX)
         self.trail_give_factor = float(ov.get("trailGiveFactor") or TRAIL_GIVE_FACTOR)
         self.trail_recalc_give = bool(ov.get("trailRecalcGive", True))
-        self.trail_auto = bool(ov.get("trailAuto", True))
-        self.trail_recalc_n = max(3, int(ov.get("trailRecalcN") or 6))
+        self.trail_auto = trailing_enabled(ov) and bool(ov.get("trailAuto", True))
+        self.trail_recalc_n = max(MIN_VALIDATION_N, window_n(ov, "trailRecalcN", fallback=MIN_VALIDATION_N))
         self.trail_recalc_every = max(3, int(ov.get("trailRecalcEvery") or 8))
         arm = ov.get("trailArmPct")
         give = ov.get("trailGivePct")
         if arm is None:
             arm, give2 = parse_trail(self.trail_variants[0])
             give = give if give is not None else give2
-        self.trail_arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
+        self.trail_arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_STEP)
         if give is None:
             self.trail_give = give_from_arm(self.trail_arm, self.trail_give_factor, self.trail_give_min, self.trail_give_max)
         else:
@@ -222,20 +233,29 @@ class VariantBook:
         return self.trail_arm / 100.0, self.trail_give / 100.0
 
     def on_close(self, rec: Any) -> None:
+        if (rec.get("set_id") or rec.get("setId")) if isinstance(rec, dict) else getattr(rec, "set_id", ""):
+            return   # the default SL/trailing variants never learn from a Set's exit
         if isinstance(rec, dict):
             pnl = float(rec.get("pnl") or 0)
             pnl_pct = float(rec.get("pnl_pct") or 0)
+            has_pct = rec.get("pnl_pct") is not None
             hold = float(rec.get("hold_s") or 0)
             sl_r = float(rec.get("sl_ratio") or rec.get("slRatio") or self.sl_ratio)
             t_key = str(rec.get("trail_key") or rec.get("trailKey") or self.trail_key)
         else:
             pnl = float(getattr(rec, "pnl", 0) or 0)
             pnl_pct = float(getattr(rec, "pnl_pct", 0) or 0)
+            has_pct = getattr(rec, "pnl_pct", None) is not None
             hold = float(getattr(rec, "hold_s", 0) or 0)
             sl_r = float(getattr(rec, "sl_ratio", 0) or self.sl_ratio)
             t_key = str(getattr(rec, "trail_key", "") or self.trail_key)
-        sl_key = f"{snap_ratio(sl_r):.1f}"
-        row = {"pnl": pnl, "pnl_pct": pnl_pct, "hold_s": hold}
+        if not has_pct:
+            self.skipped += 1
+            return
+        sl_key = f"{snap_ratio(sl_r):.2f}"
+        # tape pnl is the NET FRACTION, the same unit as set_engine replay rows; pnl_usdt is display-only
+        row = {"pnl": row_net_pnl_pct(rec, self.cost_pct), "pnl_usdt": pnl, "pnl_pct": pnl_pct, "hold_s": hold,
+               "net_pnl_pct": rec.get("net_pnl_pct") if isinstance(rec, dict) else getattr(rec, "net_pnl_pct", None)}
         self.sl_rows.setdefault(sl_key, []).append(row)
         self.sl_rows[sl_key] = self.sl_rows[sl_key][-40:]
         self.trail_rows.setdefault(t_key, []).append(row)
@@ -265,20 +285,20 @@ class VariantBook:
         self.trail_closes = 0
         self.maybe_recalc(force=True)
 
-    def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: float = 0.15) -> LaneScore:
-        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
-        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] < 0))
-        pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+    def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: Optional[float] = None) -> LaneScore:
+        cost_pct = self.cost_pct if cost_pct is None else cost_pct
         wins = sum(1 for r in rows if r["pnl"] > 0)
         exp = (sum(r["pnl"] for r in rows) / len(rows)) if rows else 0.0
         hold = (sum(r.get("hold_s", 0) for r in rows) / len(rows)) if rows else 0.0
-        cost = last_n_cost_pf(list(rows), max(len(rows), 1), cost_pct) if rows else {"ratio": 1.0}
+        # one PF for the lane: net, from pnl_pct, by last_n_cost_pf (no second PF formula here)
+        cost = last_n_cost_pf(list(rows), max(len(rows), 1), cost_pct) if rows else {"ratio": 1.0, "pf": 0.0}
+        pf = float(cost["pf"])
         return LaneScore(
             key="",
             n=len(rows),
             wins=wins,
-            pf=round(pf, 3),
-            ratio=float(cost.get("ratio") or 1.0),
+            pf=round(pf, 4),                 # the decision PF: the engine's 4 dp, not a second rounding
+            ratio=float(cost["ratio"]) if rows else 1.0,   # display only; selection below sorts by pf
             expectancy=round(exp, 5),
             avg_hold=round(hold, 1),
         )
@@ -287,7 +307,7 @@ class VariantBook:
         ready = [s for s in scores if s.in_range and s.n >= min_n]
         if not ready:
             return current, "cold"
-        ready.sort(key=lambda s: (s.ratio, s.expectancy, s.n), reverse=True)
+        ready.sort(key=lambda s: (s.pf, s.expectancy, s.n), reverse=True)   # the decision metric is the PF
         best = ready[0]
         if best.key == current:
             return current, "hold"
@@ -296,12 +316,12 @@ class VariantBook:
     def _recalc_sl(self) -> None:
         scores = []
         for r in self.sl_ratios:
-            key = f"{r:.1f}"
+            key = f"{r:.2f}"
             sc = self._score_rows(self.sl_rows.get(key) or [])
             sc.key = key
             sc.in_range = True
             scores.append(sc)
-        pick, why = self._pick(scores, self.sl_recalc_n, f"{self.sl_ratio:.1f}")
+        pick, why = self._pick(scores, self.sl_recalc_n, f"{self.sl_ratio:.2f}")
         self.sl_ratio = snap_ratio(float(pick))
         self.last_sl_pick = why
         self.sl_scores = scores
@@ -335,7 +355,7 @@ class VariantBook:
     def _refresh_scores(self) -> None:
         sl = []
         for r in self.sl_ratios:
-            key = f"{r:.1f}"
+            key = f"{r:.2f}"
             sc = self._score_rows(self.sl_rows.get(key) or [])
             sc.key = key
             sc.selected = abs(r - self.sl_ratio) < 1e-9
@@ -416,35 +436,41 @@ class VariantBook:
 
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
-    ratios = [snap_ratio(x) for x in (0.2, 0.3, 0.45, 0.64, 1.0, 1.4, 2.55, 2.8)]
-    expect = [0.2, 0.3, 0.5, 0.6, 1.0, 1.4, 2.6, 2.8]
+    ratios = [snap_ratio(x) for x in (0.3, 0.45, 0.64, 0.9, 1.05, 1.4, 1.5, 1.8)]
+    expect = [0.25, 0.5, 0.75, 1.0, 1.0, 1.5, 1.5, 1.75]
     out.append(("var-snap-ratio", ratios == expect, f"{ratios}"))
-    step = [round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(len(SL_TP_RATIOS))]
+    step = [round(SL_TP_MIN + i * SL_TP_STEP, 2) for i in range(len(SL_TP_RATIOS))]
     out.append(("var-sl-grid", step == list(SL_TP_RATIOS), f"{step}"))
     b = VariantBook()
-    b.load({"slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333,
-            "trailArmMin": 0.3, "trailGiveMin": 0.1})
-    out.append(("var-sl-default", abs(b.sl_ratio - 0.6) < 1e-9, f"sl={b.sl_ratio}"))
+    b.load({"windowsLinked": False, "slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333})
+    out.append(("var-sl-default", abs(b.sl_ratio - 0.75) < 1e-9, f"sl={b.sl_ratio}"))
     out.append(("var-trail-give", abs(b.trail_give - 0.1) < 0.02, f"arm={b.trail_arm} give={b.trail_give}"))
     # independent recals: SL book does not move trail
-    wins = [{"pnl": 1.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.8, "trail_key": "0.3:0.1"}] * 8
-    loss = [{"pnl": -0.4, "pnl_pct": -0.003, "hold_s": 18, "sl_ratio": 0.2, "trail_key": "1.5:0.5"}] * 8
+    wins = [{"pnl": 1.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.9, "trail_key": "0.3:0.1"}] * 8
+    loss = [{"pnl": -0.4, "pnl_pct": -0.003, "hold_s": 18, "sl_ratio": 0.3, "trail_key": "1.5:0.5"}] * 8
     for r in wins + loss:
         b.on_close(r)
     b.maybe_recalc(force=True)
-    out.append(("var-sl-recalc", abs(b.sl_ratio - 0.8) < 1e-9, f"sl={b.sl_ratio} why={b.last_sl_pick}"))
+    out.append(("var-sl-recalc", abs(b.sl_ratio - 1.0) < 1e-9, f"sl={b.sl_ratio} why={b.last_sl_pick}"))
     out.append(("var-trail-indep", b.trail_arm <= 0.6, f"trail={b.trail_key} why={b.last_trail_pick}"))
     cands = trail_candidates(0.3, 0.9, 0.1, 0.3, 0.333, True, TRAIL_VARIANTS)
-    pairs = {(a, g) for _, a, g in cands}
-    out.append(("var-trail-range", len(cands) == 9 and len(pairs) == 9, f"n={len(cands)} {cands}"))
+    arms = [a for _, a, _ in cands]
+    out.append(("var-trail-range", arms == [0.3, 0.6, 0.9], f"{cands}"))
     # ratio 1.5 allowed (SL > TP)
-    out.append(("var-ratio-wide", len(SL_TP_RATIOS) == 30 and 0.1 in SL_TP_RATIOS and 3.0 in SL_TP_RATIOS, str(SL_TP_RATIOS[:3] + SL_TP_RATIOS[-3:])))
-    grid = trail_grid()
-    keys = [k for k, _, _ in grid]
-    out.append(("var-trail-grid-n", len(grid) == 25 and len(set(keys)) == 25, f"n={len(grid)} {keys[:6]}"))
-    out.append(("var-trail-grid-corners", "0.3:0.1" in keys and "1.5:0.5" in keys and "0.3:0.5" in keys and "1.5:0.1" in keys, str(keys)))
-    slim = trail_grid(0.6, 0.6, 0.2, 0.2)
-    out.append(("var-trail-grid-range", len(slim) == 1 and slim[0][0] == "0.6:0.2", f"n={len(slim)} {slim}"))
+    out.append(("var-ratio-wide", 1.5 in SL_TP_RATIOS, "1.5"))
+
+    # R14: a lane that loses every close reads PF 0.0, not the neutral 1.0; the lane PF is one function
+    zb = VariantBook()
+    zb.cost_pct = 0.15   # the fixtures below are written for 0.15%
+    losers = [{"pnl": -0.002, "pnl_pct": -0.0005, "hold_s": 20}] * 4
+    zs = zb._score_rows(losers, 0.15)
+    want = last_n_cost_pf(losers, 4, 0.15)
+    out.append(("var-zero-pf", zs.pf == 0.0 and zs.pf == want["pf"] and zs.ratio == want["ratio"], f"pf={zs.pf} ratio={zs.ratio} want_ratio={want['ratio']}"))
+    # R13: a close is stored as a net fraction, never the USDT field; a close without pnl_pct is skipped
+    zb.on_close({"pnl": 5.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.6, "trail_key": "0.3:0.1"})
+    stored = [r for rows in zb.sl_rows.values() for r in rows]
+    zb.on_close({"pnl": 5.0, "hold_s": 20})
+    out.append(("var-net-unit", len(stored) == 1 and abs(stored[0]["pnl"] - 0.0025) < 1e-12 and zb.skipped == 1, f"stored={stored} skipped={zb.skipped}"))
     return out
 
 

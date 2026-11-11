@@ -4,30 +4,28 @@ Documentation=https://github.com/mxssnx-creator/CTS-G
 After=network-online.target grok-pulse-http.service
 Wants=network-online.target
 PartOf=grok-pulse.target
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
 EnvironmentFile=-/etc/cts-g/cts-g.env
-EnvironmentFile=-/etc/cts-g/credentials.env
 WorkingDirectory=/opt/cts-g
 ExecStart=/opt/cts-g/deploy/cts-g-desk.sh
 Restart=always
-RestartSec=3
+RestartSec=15
 TimeoutStartSec=120
 TimeoutStopSec=20
-KillMode=control-group
+KillMode=mixed
 Environment=NODE_ENV=development
 Environment=HOST=0.0.0.0
 Environment=PORT=3102
 Environment=PULSE_URL=http://127.0.0.1:3015
-Environment=CTS_URL=
+Environment=CTS_URL=http://127.0.0.1
 Environment=PATH=/opt/cts-g/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LimitNOFILE=8192
-MemoryHigh=768M
-MemoryMax=1536M
-TasksMax=128
-StandardOutput=append:/var/log/cts-g/desk.log
-StandardError=append:/var/log/cts-g/desk.err.log
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=grok-desk
 
 [Install]

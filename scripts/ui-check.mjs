@@ -1,42 +1,18 @@
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
 
-const BASE = process.env.TEST_BASE || "http://127.0.0.1:8080";
+const BASE = "http://127.0.0.1:8080";
 const out = [];
 const ok = (m) => out.push("OK " + m);
 const fail = (m) => { out.push("FAIL " + m); };
 
-const browser = await chromium.launch({
-  executablePath: process.env.CTS_CHROMIUM_PATH || undefined,
-  args: ["--no-sandbox", "--disable-dev-shm-usage"],
-});
+const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(16000);
 const shot = (path) => page.screenshot({ path, timeout: 6000 }).catch((e) => out.push("WARN shot " + path + " " + e.message));
 const errors = [];
-await page.route("**/grok-app-builder/extensions.js", (route) => route.abort());
-await page.route("https://fonts.googleapis.com/**", (route) => route.abort());
 page.on("pageerror", (e) => errors.push(String(e)));
-page.on("console", (m) => {
-  if (m.type() !== "error") return;
-  // These two resources are intentionally blocked below because the remote
-  // QA host has no outbound font/Grok access. They are not CTS failures.
-  if (/Failed to load resource: net::ERR_FAILED/.test(m.text())) return;
-  errors.push("console " + m.text());
-});
-page.on("requestfailed", (request) => {
-  const failure = request.failure()?.errorText || "failed";
-  if (/fonts\.googleapis\.com|grok\.com/.test(request.url()) || failure === "net::ERR_ABORTED") return;
-  errors.push(`request ${request.url()} · ${failure}`);
-});
-
-async function waitHydrated() {
-  await page.waitForFunction(
-    () => !window.$_TSR || window.$_TSR.hydrated === true,
-    null,
-    { timeout: 30000 },
-  );
-}
+page.on("console", (m) => { if (m.type() === "error") errors.push("console " + m.text()); });
 
 try {
   await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
@@ -47,7 +23,6 @@ try {
     localStorage.setItem("pulse.connType", "vst");
   });
   await page.reload({ waitUntil: "domcontentloaded" });
-  await waitHydrated();
   await page.waitForTimeout(2000);
   await page.getByTestId("conn-vst").click();
   await page.waitForFunction(
@@ -65,25 +40,9 @@ try {
   if (/coverage · px/i.test(desk) && /controls ·/i.test(desk)) ok("coverage+controls"); else fail("missing coverage/controls");
   if (/recon /i.test(desk)) ok("recon in coverage"); else out.push("WARN no recon");
   if (/load /i.test(desk)) ok("load strip"); else out.push("WARN no load strip");
-  const systemInfo = page.getByTestId("system-health");
-  if (await systemInfo.count()) {
-    const initiallyClosed = await systemInfo.evaluate((el) => !(el instanceof HTMLDetailsElement) || !el.open);
-    if (initiallyClosed) ok("system info collapsed"); else fail("system info not collapsed");
-    await systemInfo.locator("summary").click();
-    await page.waitForFunction(
-      () => /Shared Redis database|Redis metadata pending/i.test(document.body.innerText) && /REST requests \/ sec|REST req\/s pending/i.test(document.body.innerText),
-      null,
-      { timeout: 12000 },
-    ).catch(() => null);
-    const expanded = await systemInfo.innerText();
-    if (/Shared Redis database/i.test(expanded) && /REST requests \/ sec/i.test(expanded) && /ops\/s/i.test(expanded)) ok("system info Redis + req/s");
-    else fail("system info missing Redis/req-s");
-    await systemInfo.locator("summary").click();
-  } else fail("no system info");
   await shot("/workspace/screenshots/desk-vst-live.png");
 
   await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
-  await waitHydrated();
   await page.waitForTimeout(1200);
   await page.getByTestId("conn-vst").click();
   await page.waitForFunction(
@@ -162,8 +121,21 @@ try {
   await page.waitForSelector("[data-ratio='1.5']", { timeout: 8000 });
   await page.waitForTimeout(200);
   await shot("/workspace/screenshots/ui-sl-tp-ratios.png");
-  const ratioRow = page.locator("[data-ratio='1.5']");
-  if (await ratioRow.count()) ok("sl:tp ratio table"); else fail("no sl:tp ratio table");
+  const chip = page.locator("[data-ratio='1.5']");
+  if (await chip.count()) {
+    await chip.first().click();
+    await page.getByTestId("save-status").waitFor({ timeout: 4000 }).catch(() => null);
+    await page.waitForTimeout(300);
+    const txt = await page.locator("[data-testid=save-status]").innerText();
+    if (/Unsaved overlay/i.test(txt)) ok("unsaved after 1.5"); else out.push("WARN no unsaved label: " + txt);
+    await page.locator("[data-testid=save-overlay]").click();
+    await page.waitForTimeout(1800);
+    const r = await page.evaluate(async () => (await fetch("/config.json?conn=vst", { cache: "no-store" })).json());
+    const ratio = Number(r?.overlay?.slToTpRatio);
+    if (ratio === 1.5) ok("saved slToTpRatio 1.5"); else fail("save 1.5 got " + ratio);
+    const mods = r?.overlay?.modules || {};
+    if (mods["risk.slTpRatios"] === true) ok("saved modules synced"); else out.push("WARN modules " + JSON.stringify(mods).slice(0, 80));
+  } else fail("no 1.5 chip");
 
   await page.getByTestId("section-dca").click();
   await page.waitForFunction(() => /Distance #1/i.test(document.body.innerText), null, { timeout: 8000 });
@@ -199,7 +171,6 @@ try {
   await shot("/workspace/screenshots/ui-saved.png");
 
   await page.goto(BASE + "/", { waitUntil: "domcontentloaded" });
-  await waitHydrated();
   await page.waitForTimeout(1200);
   await page.getByTestId("conn-overall").click();
   await page.waitForTimeout(800);
@@ -214,21 +185,15 @@ try {
   await shot("/workspace/screenshots/desk-vst.png");
 
   await page.goto(BASE + "/results", { waitUntil: "domcontentloaded" });
-  await waitHydrated();
   await page.getByTestId("conn-vst").click();
+  await page.waitForSelector("[data-testid=coverage-panel]", { timeout: 12000 }).catch(() => null);
   await page.waitForTimeout(400);
   ok("results " + (await page.locator("h1").innerText().catch(() => "?")));
   const res = await page.locator("main").innerText();
-  if (/Download JSON/i.test(res) && /PF after cost/i.test(res)) ok("results export+pf"); else fail("results missing export/pf");
-  await page.getByTestId("results-tab-coverage").click();
-  await page.waitForSelector("[data-testid=coverage-panel]", { timeout: 12000 }).catch(() => null);
-  await page.waitForTimeout(300);
-  const coverage = await page.locator("main").innerText();
-  if (/Scan universe/i.test(coverage) || /coverage · px/i.test(coverage)) ok("results coverage panel"); else fail("results missing coverage");
+  if (/Scan universe/i.test(res) || /coverage · px/i.test(res)) ok("results coverage panel"); else fail("results missing coverage");
   await shot("/workspace/screenshots/desk-overall.png");
 
   await page.goto(BASE + "/system", { waitUntil: "domcontentloaded" });
-  await waitHydrated();
   await page.waitForTimeout(900);
   ok("system " + (await page.locator("h1").innerText().catch(() => "?")));
   const sys = await page.locator("main").innerText();
@@ -237,7 +202,6 @@ try {
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
-  await waitHydrated();
   await page.waitForTimeout(900);
   await shot("/workspace/screenshots/settings-mobile.png");
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 2);

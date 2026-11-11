@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   ArrowDownRight,
@@ -8,16 +8,11 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, moneyUnitOf, fmtMoney, balanceStaleReason, type LiveStats } from "@/lib/live-stats";
-import { kindShort } from "@/lib/indication-kinds";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, type LiveStats } from "@/lib/live-stats";
-import { startPolling } from "@/lib/polling";
-import { SystemHealthFooter } from "@/components/system-health";
+import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
 import { DeskShell } from "@/components/desk-shell";
-import { PosOrdersBlock, PosOrdersLine } from "@/components/pos-orders";
 import { useConnection } from "@/components/connection-provider";
 import {
   BlockHeat,
@@ -28,38 +23,33 @@ import {
   WinRing,
 } from "@/components/visual-stats";
 import { CoverageBar } from "@/components/coverage-overview";
-import { KindStrategyStrip } from "@/components/kind-strategy-stats";
-import { ComboEvalPanel } from "@/components/combo-eval-panel";
-import { ActivityPanel } from "@/components/activity-overview";
-import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setMetric, setRowKey } from "@/lib/set-overview";
-import { SetIdentity } from "@/components/set-identity";
+import { OverviewSections } from "@/components/overview-sections";
+import { SystemFooter } from "@/components/system-footer";
 import type { ConnType } from "@/lib/connections";
-import { pnlClass, sideChipClass, haltClass, isBenignError } from "@/lib/status-tone";
-import { histTestIsEnabled, histTestOverviewLine } from "@/lib/hist-test";
+import { createPoller } from "@/lib/poll";
+import { DEFAULT_OVERLAY } from "@/lib/config-model";
+import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
 
 function DeskPage() {
   const { conn } = useConnection();
   const [raw, setRaw] = useState<LiveStats | null>(null);
-  const cacheRef = useRef<Partial<Record<string, LiveStats>>>({});
   useEffect(() => {
-    const cached = cacheRef.current[conn];
-    setRaw(cached ?? null);
-    const poll = startPolling(async (signal) => {
-      const s = await fetchLiveStats(conn, signal);
-      if (signal.aborted) return;
-      if (s) {
-        const prev = cacheRef.current[conn];
-        cacheRef.current[conn] = s;
-        if (!statsUnchanged(prev, s)) setRaw(s);
-      }
-    }, () => deskPollMs(cacheRef.current[conn], document.hidden));
-    window.addEventListener("pulse:control", poll.refresh);
+    // One poll chain per connection (see lib/poll.ts). Control actions kick an immediate pull through the
+    // pulse:control event, and a failed pull keeps the last good snapshot on screen.
+    setRaw(null);
+    const poller = createPoller<LiveStats>({
+      fetch: () => fetchLiveStats(conn),
+      onData: (s) => setRaw(s),
+      intervalMs: 2000,
+    });
+    const kick = () => poller.kick();
+    window.addEventListener("pulse:control", kick);
+    poller.start();
     return () => {
-      window.removeEventListener("pulse:control", poll.refresh);
-      poll.stop();
+      window.removeEventListener("pulse:control", kick);
+      poller.stop();
     };
   }, [conn]);
   const stats = pickView(raw, conn);
@@ -67,28 +57,21 @@ function DeskPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
+        stats?.closed ?? [],
         Date.now(),
-        stats?.pfCost?.costPct ?? stats?.positionCost?.effectivePct ?? 0.10,
+        stats?.pfCost?.costPct ?? stats?.costModel?.paperCostPct,
+        stats?.pfCost?.minPf,
       ),
     [stats],
   );
-  const session = stats?.systemPnl ?? stats?.sessionPnl ?? 0;
-  const grow = stats?.systemGrow ?? 0;
-  const loss = stats?.systemLoss ?? 0;
-  const systemEquity = stats?.systemEquity ?? stats?.equity ?? 0;
-  const unit = moneyUnitOf(stats);
-  const staleBalance = balanceStaleReason(stats);
-  const foreignCount = (stats?.foreignPositionCount ?? 0) + (stats?.foreignOpenOrderCount ?? 0);
+  const session = stats?.sessionPnl ?? 0;
 
   return (
-
     <DeskShell
-      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
-      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
-      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
-      halted={stats ? Boolean(stats.halted) : undefined}
-      alive={stats ? stats.alive !== false : undefined}
+      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
+      stale={Boolean(stats?.stale)}
+      mode={stats?.paused ? "PAUSED" : stats?.mode}
+      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
@@ -100,94 +83,49 @@ function DeskPage() {
       {conn === "overall" && (stats?.lanes?.length ?? 0) > 0 ? <LaneBoard stats={stats!} /> : null}
 
       <section className="grid gap-3 lg:grid-cols-3">
-        <div className="min-w-0 rounded-radius border border-border bg-surface p-5 lg:col-span-2">
-          <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="font-mono text-xs tracking-wide text-muted uppercase">System equity</p>
-              <p className={`mt-1 font-mono text-3xl tabular-nums ${staleBalance ? "text-muted line-through" : ""}`}>
-                {conn === "overall" ? `${unit === "VST" ? "VST" : "Mainnet"} ${fmtMoney(systemEquity, unit, 4)}` : fmtMoney(systemEquity, unit, 4)}
+        <div className="rounded-radius border border-border bg-surface p-5 lg:col-span-2">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-xs tracking-wide text-muted uppercase">Equity</p>
+              <p className="mt-1 font-mono text-3xl tabular-nums">
+                {conn === "overall"
+                  ? `Live $${fmt(stats?.equityLive, 4)}`
+                  : stats?.unit === "VST" || stats?.connType === "vst"
+                    ? `${fmt(stats?.equity, 4)} VST`
+                    : `$${fmt(stats?.equity, 4)}`}
               </p>
-              {staleBalance ? (
-                <p className="mt-1 font-mono text-xs text-warn" data-testid="desk-stale">Not current · {staleBalance}</p>
-              ) : null}
               <p className="mt-1 font-mono text-[11px] tracking-wide text-muted uppercase" data-testid="desk-identity">
                 {stats?.connType || conn} · {stats?.unit || (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED")}
                 {stats?.connection ? ` · ${stats.connection}` : ""}
               </p>
-              <p className="mt-1 text-xs text-muted">
-                Engine session equity from the last Start{stats?.returnOnEquityPct != null ? ` · return ${fmt(stats.returnOnEquityPct, 2)}%` : ""}
-                {conn === "overall" ? " · USDT and VST are never added together" : ""}
-              </p>
               {conn === "overall" ? (
-                <p className="mt-1 min-w-0 font-mono text-sm text-muted [overflow-wrap:anywhere]">
-                  live {fmt(stats?.equityLive, 4)} · vst {fmt(stats?.equityVst, 4)} · live pnl {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst pnl {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
+                <p className="mt-1 font-mono text-sm text-muted">
+                  VST {fmt(stats?.equityVst, 4)} · sess live {fmt(stats?.sessionPnlLive, 4)} / vst {fmt(stats?.sessionPnlVst, 4)}
                 </p>
               ) : null}
               <p className={`mt-1 font-mono text-sm ${pnlClass(session)}`}>
-                system {session >= 0 ? "+" : ""}
-                {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {stats?.pnlPct == null ? "—" : `${fmt(stats.pnlPct, 2)}% of traded notional`}
+                session {session >= 0 ? "+" : ""}
+                {fmt(session, 4)} · {fmt(stats?.pnlPct, 2)}%
               </p>
             </div>
-            <dl className="stat-rows w-full max-w-sm text-sm sm:w-auto">
-              <dt className="text-muted">Wallet equity</dt>
-              <dd className="font-mono text-fg">{fmtMoney(stats?.walletEquity, unit)}</dd>
-              {stats?.walletOwnEquity != null ? (
-                <>
-                  <dt className="text-muted">System capital (wallet − foreign)</dt>
-                  <dd className="font-mono text-fg">{fmtMoney(stats.walletOwnEquity, unit)}</dd>
-                </>
-              ) : null}
-              {stats?.accountNetSinceStart != null ? (
-                <>
-                  <dt className="text-muted">Account net since Start</dt>
-                  <dd className={`font-mono ${pnlClass(stats.accountNetSinceStart)}`}>{fmtMoney(stats.accountNetSinceStart, unit, 4)}</dd>
-                  <dt className="text-muted">Model PnL − account</dt>
-                  <dd className="font-mono text-muted" title="Model fees vs actual fees and funding; deposits or withdrawals after Start also show here">
-                    {fmtMoney(stats.modelVsAccountGap, unit, 4)}
-                  </dd>
-                </>
-              ) : null}
-              <dt className="text-muted">Wallet available</dt>
-              <dd className="font-mono text-fg">{fmtMoney(stats?.available, unit)}</dd>
-              <dt className="text-muted">Wallet used margin</dt>
-              <dd className="font-mono text-fg">{fmtMoney(stats?.usedMargin, unit)}</dd>
-              {conn === "overall" && stats?.walletEquityVst ? (
-                <>
-                  <dt className="text-muted">VST wallet (separate)</dt>
-                  <dd className="font-mono text-muted">{fmtMoney(stats.walletEquityVst, "VST")}</dd>
-                </>
-              ) : null}
-              <dt className="text-muted">System unrealized</dt>
-              <dd className={`font-mono ${pnlClass(stats?.systemUnrealized ?? stats?.unrealized ?? 0)}`}>
-                {fmt(stats?.systemUnrealized ?? stats?.unrealized, 4)}
-              </dd>
-              {foreignCount > 0 ? (
-                <>
-                  <dt className="text-muted">Foreign exposure</dt>
-                  <dd className="font-mono text-warn">{fmt(stats?.foreignExposure, 3)}</dd>
-                  <dt className="text-muted">Foreign Positions/Orders</dt>
-                  <dd className="font-mono text-warn">{formatPosOrders(stats?.foreignPositionCount, stats?.foreignOpenOrderCount)}</dd>
-                  <dt className="text-muted">Foreign PnL</dt>
-                  <dd className={`font-mono ${pnlClass((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0))}`}>
-                    {fmt((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0), 4)}
-                  </dd>
-                </>
-              ) : null}
-              <dt className="text-muted">Uptime</dt>
-              <dd className="font-mono text-fg">{stats ? ago(stats.uptimeS) : "—"}</dd>
-            </dl>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <span className="text-muted">Available</span>
+              <span className="font-mono text-right tabular-nums">${fmt(stats?.available, 3)}</span>
+              <span className="text-muted">Used margin</span>
+              <span className="font-mono text-right tabular-nums">${fmt(stats?.usedMargin, 3)}</span>
+              <span className="text-muted">Unrealized</span>
+              <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.unrealized ?? 0)}`}>
+                {fmt(stats?.unrealized, 4)}
+              </span>
+              <span className="text-muted">Uptime</span>
+              <span className="font-mono text-right">{stats?.uptimeS != null ? ago(stats.uptimeS) : "—"}</span>
+            </div>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <Meter label="Margin used" value={d.marginPct} danger={d.marginPct > 85} />
-            {(() => {
-              const cur = stats?.currentDrawdownPct ?? d.ddPct;
-              return (
-                <Meter label={`Drawdown now · max ${fmt(d.ddPct, 1)}%`} value={cur} max={18} warn={cur > 8 && cur <= 40} danger={cur > 40} />
-              );
-            })()}
+            <Meter label="Drawdown" value={d.ddPct} max={18} danger={d.ddPct > 8} />
           </div>
           <CoordStrip stats={stats} />
-          {stats && conn !== "overall" ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
           <div className="mt-3">
             <CoverageBar live={stats} />
           </div>
@@ -198,30 +136,26 @@ function DeskPage() {
           <VariantsStrip stats={stats} />
           <EngineStrip stats={stats} />
           <WorkStrip stats={stats} />
+          <IndicationStrip stats={stats} />
         </div>
         <div className="rounded-radius border border-border bg-surface p-5">
           <p className="mb-3 font-mono text-xs tracking-wide text-muted uppercase">Hit rate</p>
           <WinRing wins={stats?.wins ?? 0} losses={stats?.losses ?? 0} />
           <div className="mt-4 grid grid-cols-2 gap-2 font-mono text-xs text-muted">
-            <span>PF {d.pf >= 99 ? "∞" : d.pf.toFixed(2)}</span>
+            <span>PF {d.pf == null ? "—" : d.pf >= 99 ? "∞" : d.pf.toFixed(2)}</span>
             <span className="text-right">hold {d.avgHold.toFixed(0)}s</span>
             <span>
               E {d.expectancy >= 0 ? "+" : ""}
               {d.expectancy.toFixed(4)}
             </span>
-            <span className="text-right">{stats?.activityPerMin ?? 0}/min</span>
+            <span className="text-right">{stats?.activityPerMin ?? "—"}/min</span>
           </div>
         </div>
       </section>
 
-      <section className="grid gap-3">
-        <IndicationStrip stats={stats} />
-        <KindStrategyStrip stats={stats} />
-        <ComboEvalPanel job={stats} compact />
-        <ActivityPanel stats={stats} compact />
-      </section>
-
       <StatsOverview data={overview} compact live={stats} />
+
+      <OverviewSections stats={stats} />
 
       <section className="grid gap-3 lg:grid-cols-2">
         <Panel title="Realized equity path" icon={<Activity className="size-4" />}>
@@ -233,10 +167,10 @@ function DeskPage() {
       </section>
 
       <section className="rounded-radius border border-border bg-surface p-4">
-        <div className="mb-4 flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Open book</h2>
-          <span className="min-w-0 font-mono text-xs text-muted">
-            <PosOrdersLine stats={stats} extra={<> · {stats?.maxOpen ? `cap ${stats.maxOpen}` : "∞"} · {stats?.regime}</>} />
+          <span className="font-mono text-xs text-muted">
+            {stats?.openCount ?? 0}/{stats?.maxOpen === null ? "—" : stats?.maxOpen ? stats.maxOpen : "∞"} · {stats?.regime}
           </span>
         </div>
         {(stats?.open ?? []).length === 0 ? (
@@ -244,19 +178,14 @@ function DeskPage() {
         ) : (
           <>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {stats!.open.slice(0, 18).map((p, index) => (
-              <article key={`${p.connType || conn}-${p.symbol}-${p.side}-${p.setId || p.clientId || p.axisKey || "position"}-${index}`} className="rounded-xl border border-border bg-bg2 p-4">
+            {stats!.open.slice(0, 18).map((p) => (
+              <article key={`${p.connType || conn}-${p.symbol}-${p.side}-${p.setId || p.clientId || ""}`} className="rounded-xl border border-border bg-bg2 p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="text-lg font-medium">{p.symbol.replace("-USDT", "")}</div>
                     <div className="flex items-center gap-1">
                       <SideChip side={p.side} />
-                      {p.onExchange === false ? (
-                        <span className="rounded-full bg-bg2 px-1.5 py-0.5 font-mono text-[10px] text-warn uppercase" title="Not on the exchange: simulated lot, not money">
-                          sim
-                        </span>
-                      ) : null}
-                      {p.connType && conn === "overall" ? (
+                      {p.connType ? (
                         <span className="rounded-full bg-bg2 px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase">
                           {p.connType}
                         </span>
@@ -268,39 +197,27 @@ function DeskPage() {
                     {fmt(p.uPnlPct, 3)}%
                   </div>
                 </div>
-                <dl className="stat-rows mt-3 font-mono text-xs text-muted">
+                <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
                   <dt>Qty</dt>
-                  <dd className="text-fg">{fmt(p.qty, 4)}</dd>
-                  {p.uPnlUsdt != null ? (
-                    <>
-                      <dt>uPnL net</dt>
-                      <dd className={pnlClass(p.uPnlUsdt)}>{fmtMoney(p.uPnlUsdt, p.connType === "vst" || unit === "VST" ? "VST" : "USDT", 4)}</dd>
-                    </>
-                  ) : null}
+                  <dd className="text-right text-fg">{fmt(p.qty, 4)}</dd>
                   <dt>Entry</dt>
-                  <dd className="text-fg">{fmtPx(p.entry)}</dd>
+                  <dd className="text-right text-fg">{fmtPx(p.entry)}</dd>
                   <dt>Mark</dt>
-                  <dd className="text-fg">{fmtPx(p.px)}</dd>
+                  <dd className="text-right text-fg">{fmtPx(p.px)}</dd>
                   <dt>Age</dt>
-                  <dd className="text-fg">{ago(p.ageS)}</dd>
+                  <dd className="text-right text-fg">{ago(p.ageS)}</dd>
                   <dt>Controls</dt>
-                  <dd className={p.controls ? "text-primary" : "text-danger"}>
-                    {p.controls ? "SL+TP" : "none"}
+                  <dd className={`text-right ${hasControlCoverage(p) ? "text-primary" : "text-warn"}`}>
+                    {controlCoverage(p)}
                   </dd>
                   <dt>Security</dt>
-                  <dd className={p.secSlOid && p.secTpOid ? "text-primary" : "text-danger"}>
-                    {p.secSlOid && p.secTpOid ? "SEC" : "gap"}
+                  <dd className={`text-right ${hasControlCoverage(p) ? "text-primary" : "text-warn"}`}>
+                    {hasControlCoverage(p) ? (p.closePosition ? "Whole position" : `Qty ${p.ctrlQty}`) : "Unconfirmed"}
                   </dd>
-                  <dt>Control mode</dt>
-                  <dd className="text-fg">{p.controlMode || "aggregate"}</dd>
-                  <dt>Range</dt>
-                  <dd className="min-w-0 truncate text-fg" title={p.controlRangeKey || "aggregate"}>{p.controlRangeKey || "aggregate"}</dd>
-                  <dt>Members</dt>
-                  <dd className="text-fg">{p.memberCount ?? 1}</dd>
                   <dt>SL:TP</dt>
-                  <dd className="text-fg">{p.slRatio != null ? p.slRatio.toFixed(1) : "—"}</dd>
+                  <dd className="text-right text-fg">{p.slRatio != null ? p.slRatio.toFixed(1) : "—"}</dd>
                   <dt>Trail</dt>
-                  <dd className="text-fg">{p.trailKey || "—"}</dd>
+                  <dd className="text-right text-fg">{p.trailKey || "—"}</dd>
                 </dl>
                 <SlTpTape p={p} />
               </article>
@@ -308,8 +225,8 @@ function DeskPage() {
           </div>
           {stats!.open.length > 18 ? (
             <div className="mt-3 grid grid-cols-2 gap-1 font-mono text-[11px] text-muted sm:grid-cols-3 lg:grid-cols-4">
-              {stats!.open.slice(18).map((p, index) => (
-                <div key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || p.setId || p.axisKey || "position"}-${index}`} className="flex items-center justify-between rounded-md border border-border px-2 py-1">
+              {stats!.open.slice(18).map((p) => (
+                <div key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || ""}`} className="flex items-center justify-between rounded-md border border-border px-2 py-1">
                   <span>{p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"}</span>
                   <span className={pnlClass(p.uPnlPct)}>{p.uPnlPct >= 0 ? "+" : ""}{fmt(p.uPnlPct, 2)}%</span>
                 </div>
@@ -321,14 +238,14 @@ function DeskPage() {
       </section>
 
       <section className="grid gap-3 lg:grid-cols-2">
-        <Panel title="Block 1–6" icon={<Layers className="size-4" />}>
+        <Panel title="Block 1–12" icon={<Layers className="size-4" />}>
           {stats ? <BlockHeat stats={stats} /> : <p className="text-sm text-muted">Waiting</p>}
         </Panel>
         <Panel title="Risk tape" icon={<ShieldAlert className="size-4" />}>
           {(stats?.open ?? []).length ? (
             <div className="space-y-3">
-              {stats!.open.slice(0, 12).map((p, index) => (
-                <SlTpTape key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || p.setId || p.axisKey || "position"}-${index}`} p={p} />
+              {stats!.open.slice(0, 12).map((p) => (
+                <SlTpTape key={`${p.connType || ""}-${p.symbol}-${p.side}`} p={p} />
               ))}
             </div>
           ) : (
@@ -337,21 +254,9 @@ function DeskPage() {
         </Panel>
       </section>
 
-      {stats?.htf?.enabled || stats?.liveEdge || stats?.sizing ? (
-        <section className="grid gap-3 lg:grid-cols-2">
-          <Panel title="1h lane" icon={<Layers className="size-4" />}>
-            <HtfPanel htf={stats?.htf} />
-          </Panel>
-          <Panel title="Live edge" icon={<ShieldAlert className="size-4" />}>
-            <LiveEdgePanel edge={stats?.liveEdge} />
-            <SizingLine sizing={stats?.sizing} />
-          </Panel>
-        </section>
-      ) : null}
-
       <section className="rounded-radius border border-border bg-surface p-4">
         <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">
-          Universe · {stats?.symbolCount ?? stats?.symbols?.length ?? 0}/{stats?.symbolCap || stats?.symbolMax || "unlimited"}
+          Universe · {stats?.symbols?.length ?? 0}/{stats?.symbolMax ? stats.symbolMax : "unlimited"}
         </h2>
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8">
           {(() => {
@@ -367,12 +272,12 @@ function DeskPage() {
                   return (
                     <div
                       key={s}
-                      className={`min-w-0 rounded-lg border px-2 py-2 ${
+                      className={`rounded-lg border px-2 py-2 ${
                         open ? "border-primary bg-primary-dim/20" : "border-border bg-bg2"
                       }`}
                     >
-                      <div className="flex min-w-0 items-center justify-between gap-1">
-                        <span className="min-w-0 truncate font-mono text-xs">{s.replace("-USDT", "")}</span>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-xs">{s.replace("-USDT", "")}</span>
                         {open ? <SideChip side={open.side} compact /> : null}
                       </div>
                       <div className="mt-1 font-mono text-[11px] text-muted tabular-nums">{fmtPx(px)}</div>
@@ -389,7 +294,8 @@ function DeskPage() {
           })()}
         </div>
       </section>
-      <SystemHealthFooter conn={conn} />
+
+      <SystemFooter stats={stats} />
     </DeskShell>
   );
 }
@@ -397,106 +303,23 @@ function DeskPage() {
 const PROGRESS_PHASE_LABEL: Record<string, string> = {
   idle: "idle",
   starting: "starting",
-  catalog: "building catalog",
   fetch: "fetching history",
-  backfill: "backfilling history",
-  gap: "repairing history gaps",
-  initial: "initial history",
-  incremental: "updating closed bars",
   replay: "calculating sets",
   score: "scoring sets",
-  partial: "partial history coverage",
   ready: "ready",
-  deferred: "history deferred by load",
   error: "calc error",
-  evaluate: "evaluating symbols",
-  rank: "ranking symbols",
-  queued: "queued",
-  "hist-test": "test historic",
-  lanes: "per desk",
-  aggregate: "all desks",
-  stopped: "stopped",
-  paused: "paused",
-  "score-refresh": "rescoring sets",
 };
-
-function progressCount(...vals: Array<number | null | undefined>): number | undefined {
-  const nums = vals.filter((n): n is number => n != null && Number.isFinite(n));
-  return nums.length ? Math.max(...nums) : undefined;
-}
-
-const CALC_PHASES = new Set([
-  "fetch", "backfill", "gap", "catalog", "replay", "score", "partial", "initial",
-  "incremental", "evaluate", "rank", "queued", "hist-test", "score-refresh",
-]);
-
-function firstCount(...vals: Array<number | null | undefined>): number | undefined {
-  for (const value of vals) {
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-  }
-  return undefined;
-}
-
-function histProgressFromStats(stats: LiveStats): NonNullable<LiveStats["lanes"]>[number] {
-  const p = stats.sets?.progress;
-  const h = (stats as LiveStats & { historic?: { phase?: string; pct?: number; detail?: string; ready?: boolean } }).historic;
-  const nestedDetail = String(p?.detail || h?.detail || "");
-  const topDetail = String(stats.progressDetail || "");
-  const detail = /slice |continuing |replay [A-Z]/.test(nestedDetail) ? nestedDetail : topDetail || nestedDetail;
-  const enginePhase = String(stats.progressPhase || p?.phase || "");
-  const engineOwns = CALC_PHASES.has(enginePhase);
-  return {
-    type: stats.connType || "live",
-    id: stats.connection || "",
-    label: stats.connType || "desk",
-    unit: stats.unit || "",
-    exchange: stats.exchange || "",
-    running: stats.running,
-    halted: stats.halted,
-    equity: stats.equity,
-    available: stats.available,
-    unrealized: stats.unrealized,
-    openCount: stats.openCount,
-    wins: stats.wins,
-    losses: stats.losses,
-    sessionPnl: stats.sessionPnl,
-    pf: Number(stats.pf || 0),
-    errors: stats.errors,
-    alive: stats.alive ?? true,
-    progressPct: engineOwns ? firstCount(stats.progressPct, p?.pct) : firstCount(stats.progressPct, p?.pct, h?.pct),
-    progressPhase: stats.progressPhase ?? p?.phase ?? h?.phase,
-    progressDetail: detail,
-    progressReady: Boolean(stats.progressReady || p?.ready || h?.ready),
-    progressSymbol: stats.progressSymbol ?? p?.symbol,
-    progressSetId: stats.progressSetId ?? p?.setId,
-    progressSymbolsDone: firstCount(stats.progressSymbolsDone, p?.symbolsDone),
-    progressSymbolsTotal: firstCount(stats.progressSymbolsTotal, p?.symbolsTotal),
-    progressSetsDone: firstCount(stats.progressSetsDone, p?.setsDone),
-    progressSetsTotal: firstCount(stats.progressSetsTotal, p?.setsTotal),
-    progressBarsDone: firstCount(stats.progressBarsDone, p?.barsDone),
-    progressBarsTotal: firstCount(stats.progressBarsTotal, p?.barsTotal),
-    progressElapsedMs: firstCount(stats.progressElapsedMs, p?.elapsedMs),
-    progressLastRunMs: firstCount(stats.progressLastRunMs, p?.lastRunMs),
-    progressCycle: firstCount(stats.progressCycle, p?.cycle),
-    progressError: stats.progressError ?? p?.error,
-    klinesReady: stats.klinesReady,
-    symbolCount: stats.symbolCount,
-  };
-}
 
 function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   const pct = Math.max(0, Math.min(100, l.progressPct ?? 0));
   const starting = l.running && !l.progressReady && (!l.progressPhase || l.progressPhase === "idle" || pct <= 0);
   const phase = starting ? "starting" : String(l.progressPhase || "idle");
   const label = PROGRESS_PHASE_LABEL[phase] ?? phase;
-  const updating = ["fetch", "backfill", "gap", "catalog", "replay", "score", "partial", "initial", "incremental", "evaluate", "rank", "queued", "hist-test", "score-refresh"].includes(phase);
-  const busy = updating || !l.progressReady;
-  const gate = l.progressReady ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
+  const busy = !l.progressReady;
   const details: Array<[string, string]> = [];
   if (l.progressSymbol) details.push(["symbol", l.progressSymbol]);
   if (l.progressSymbolsTotal) details.push(["symbols", `${l.progressSymbolsDone ?? 0}/${l.progressSymbolsTotal}`]);
-  const symbolReplay = Boolean(l.progressSymbolsTotal) && (l.progressSetsDone ?? 0) === 0 && ["replay", "backfill", "fetch"].includes(phase);
-  if (l.progressSetsTotal && !symbolReplay) details.push(["sets", `${l.progressSetsDone ?? 0}/${l.progressSetsTotal}`]);
+  if (l.progressSetsTotal) details.push(["sets", `${l.progressSetsDone ?? 0}/${l.progressSetsTotal}`]);
   if (l.progressBarsDone) details.push(["bars", `${l.progressBarsDone}${l.progressBarsTotal ? `/${l.progressBarsTotal}` : ""}`]);
   if (l.klinesReady != null && l.symbolCount) details.push(["klines", `${l.klinesReady}/${l.symbolCount}`]);
   if (l.progressElapsedMs) details.push(["elapsed", `${(l.progressElapsedMs / 1000).toFixed(1)}s`]);
@@ -504,7 +327,7 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   return (
     <div className="mt-3" data-testid={`lane-progress-${l.type}`}>
       <div className="flex items-baseline justify-between gap-2 font-mono text-[10px] text-muted">
-        <span className={l.progressError ? "text-danger" : ""}>{l.progressError ? "calc error" : label}{updating ? " · updating" : ""}{gate}</span>
+        <span className={l.progressError ? "text-danger" : ""}>{l.progressError ? "calc error" : label}{l.progressReady ? " · ready" : ""}</span>
         <span className="text-sm font-medium text-fg tabular-nums">{pct.toFixed(0)}%</span>
       </div>
       <div className="mt-1 h-2 overflow-hidden rounded-full bg-border">
@@ -526,12 +349,8 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
 function LaneBoard({ stats }: { stats: LiveStats }) {
   const { setConn } = useConnection();
   return (
-    <section className="grid min-w-0 gap-3 sm:grid-cols-2" data-testid="lane-board">
+    <section className="grid gap-3 sm:grid-cols-2" data-testid="lane-board">
       {(stats.lanes ?? []).map((l) => {
-        const liveMismatch =
-          typeof l.exchangeOpenCount === "number" &&
-          l.exchangeOpenCount >= 0 &&
-          l.exchangeOpenCount !== (l.livePositionCount ?? l.exchangeOpenCount);
         return (
           <article
             key={l.id}
@@ -542,69 +361,42 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") setConn(l.type as ConnType);
             }}
-            className="min-w-0 cursor-pointer rounded-radius border border-border bg-surface p-4 text-left"
+            className="cursor-pointer rounded-radius border border-border bg-surface p-4 text-left"
           >
-            <div className="flex min-w-0 items-start justify-between gap-2">
-              <div className="min-w-0">
+            <div className="flex items-start justify-between gap-2">
+              <div>
                 <p className="font-mono text-xs tracking-wide text-muted uppercase">{l.label}</p>
-                <p className="mt-1 truncate text-lg font-medium">{l.exchange}</p>
+                <p className="mt-1 text-lg font-medium">{l.exchange}</p>
               </div>
-              <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : l.progressPhase === "ready" && !l.halted ? "bg-primary-dim text-primary" : l.halted ? "bg-warn/15 text-warn" : "bg-bg2 text-muted"}`}>
-                {l.paused ? "pause" : l.halted ? "halt" : l.running ? "live" : l.progressPhase === "ready" ? "ready" : "off"}
+              <span className={`rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : "bg-danger/15 text-danger"}`}>
+                {l.paused ? "pause" : l.halted ? "halt" : l.running ? "live" : "off"}
               </span>
             </div>
             <p className="mt-3 font-mono text-2xl tabular-nums">
               {l.unit === "VST" ? "" : "$"}
-              {fmt(l.systemEquity ?? l.equity, 2)}
+              {fmt(l.equity, 2)}
               {l.unit === "VST" ? " VST" : ""}
             </p>
-            <p className="mt-1 text-xs text-muted">System equity · wallet {l.walletEquity != null ? fmt(l.walletEquity, 2) : "—"}</p>
-            <div className="mt-3">
-              <PosOrdersBlock
-                stats={l}
-                realExtra={l.maxOpen ? `cap ${l.maxOpen}` : undefined}
-                liveClassName={liveMismatch ? "text-danger" : "text-fg"}
-              />
-            </div>
-            <dl className="stat-rows mt-3 font-mono text-xs text-muted">
-              <dt>Lanes</dt>
-              <dd className="text-fg" title="Independent intern / Block / DCA / config slots inside the symbol+direction parents">
-                {l.openCount ?? "—"}
-              </dd>
-              <dt>Sim</dt>
-              <dd
-                className={(l.simOpenCount ?? 0) > 0 ? "text-warn" : "text-fg"}
-                title="Simulated — Real positions not on the exchange; system-internal calcs (count · unrealized PnL)"
-              >
-                {typeof l.simOpenCount === "number" && l.simOpenCount >= 0
-                  ? `${l.simOpenCount}${typeof l.simUPnl === "number" && l.simOpenCount > 0 ? ` · ${l.simUPnl >= 0 ? "+" : ""}${fmt(l.simUPnl, 2)}` : ""}`
-                  : "—"}
-              </dd>
+            <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
+              <dt>Open</dt>
+              <dd className="text-right text-fg">{l.openCount}</dd>
               <dt>W / L</dt>
-              <dd className="text-fg">
+              <dd className="text-right text-fg">
                 {l.wins} / {l.losses}
               </dd>
-              <dt>Grow / Loss</dt>
-              <dd className={pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}>
-                {fmt(l.systemGrow, 3)} / {fmt(l.systemLoss, 3)}
-              </dd>
-              <dt>System PnL</dt>
-              <dd className={pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}>
-                {fmt(l.systemPnl ?? l.sessionPnl, 3)}
-              </dd>
-              <dt title="Cost-net PF over the last window, the same figure as this lane's own desk (classic gross PF is on Results)">PF · cost</dt>
-              <dd className="text-fg">{(l.pfCost ?? l.pf) >= 99 ? "∞" : (l.pfCost ?? l.pf).toFixed(2)}</dd>
+              <dt>PF</dt>
+              <dd className="text-right text-fg">{l.pf == null ? "—" : l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>
               <dt>Scan</dt>
-              <dd className="text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
+              <dd className="text-right text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
               <dt>SL+TP</dt>
-              <dd className={(l.controlPairsMissing ?? l.controlsMissing ?? 0) > 0 ? "text-danger" : "text-fg"} title={l.controlPairsExpected != null ? `Overall-Paare; Member: ${l.controlMemberOk ?? l.controlsOk ?? 0}/${l.openCount}` : undefined}>
-                {l.controlPairsExpected != null ? `${l.controlPairsOk ?? 0}/${l.controlPairsExpected}` : `${l.controlsOk ?? 0}/${l.openCount}`}
+              <dd className={`text-right ${(l.controlsMissing ?? 0) > 0 ? "text-danger" : "text-fg"}`}>
+                {l.controlsOk ?? 0}/{l.openCount}
               </dd>
               <dt>Symbols</dt>
-              <dd className="text-fg">{l.symbolCount ?? "—"}{l.symbolCap ? `/${l.symbolCap}` : ""}</dd>
+              <dd className="text-right text-fg">{l.symbolCount ?? "—"}</dd>
             </dl>
             <LaneProgress l={l} />
-            {l.haltReason ? <p className={`mt-2 text-xs [overflow-wrap:anywhere] ${haltClass(l.haltReason, l.halted)}`}>{l.haltReason}</p> : null}
+            {l.haltReason ? <p className="mt-2 text-xs text-danger">{l.haltReason}</p> : null}
           </article>
         );
       })}
@@ -618,18 +410,18 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
   const gate = c?.gate;
   const allow = gate?.allow !== false;
   const pc = stats?.pfCost;
-  const minPf = pc?.minPf ?? c?.minPf ?? 1.1;
-  const cost = pc?.costPct ?? 0.10;
+  const minPf = pc?.minPf ?? c?.minPf ?? DEFAULT_OVERLAY.minPf;
+  const cost = pc?.costPct ?? 0.12;
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={allow ? "text-primary" : "text-warn"}>{allow ? "coord open" : "coord pause"}</span>
+        <span className={allow ? "text-primary" : "text-danger"}>{allow ? "coord open" : "coord pause"}</span>
         <span className="text-muted">
-          last{costPfWindow(stats)} {fmt(pc?.ratio ?? gate?.metrics?.last15Ratio, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
+          last15 PF {fmt(pc?.pf ?? gate?.metrics?.last15Pf, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
-        {(["prev", "last", "cont", "pause"] as const).filter((k) => axes[k]?.enabled).map((k) => {
+        {(["prev", "last", "cont", "pause"] as const).map((k) => {
           const a = axes[k];
           return (
             <span key={k} className={a?.enabled ? "text-fg" : "text-faint"}>
@@ -638,11 +430,11 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
           );
         })}
         <span>{c?.rearrange ? "rearr on" : "rearr off"}</span>
-        <span className={pc?.pass === false ? "text-warn" : "text-primary"}>
+        <span className={pc?.pass === false ? "text-danger" : "text-primary"}>
           {pc?.pass === false ? "block new risk" : "PF pass"}
         </span>
       </div>
-      {gate?.reasons?.length ? <p className="mt-1 text-warn">{gate.reasons.join(" · ")}</p> : null}
+      {gate?.reasons?.length ? <p className="mt-1 text-danger">{gate.reasons.join(" · ")}</p> : null}
     </div>
   );
 }
@@ -654,16 +446,12 @@ function ControlsStrip({ stats }: { stats: LiveStats | null }) {
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const n = c?.open ?? open.length;
-  const mode = c?.mode ?? (((stats?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig === false) ? "aggregate" : "per-config");
-  const groupCount = c?.groupCount ?? n;
-  const mergedMembers = c?.mergedMembers;
-  const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 8);
+  const gaps = open.filter((p) => !hasControlCoverage(p)).slice(0, 8);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="controls-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={miss ? "text-danger" : "text-primary"}>
-          controls · {mode} · {ok}/{n} SL+TP · {sec} security · {groupCount} groups
-          {mergedMembers != null ? ` · ${mergedMembers} members` : ""}
+        <span className={miss || gaps.length || !stats ? "text-warn" : "text-primary"}>
+          controls · {ok}/{n} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {miss}</span>
       </div>
@@ -672,7 +460,7 @@ function ControlsStrip({ stats }: { stats: LiveStats | null }) {
           gap {gaps.map((p) => `${p.symbol.replace("-USDT", "")} ${p.side === "LONG" ? "L" : "S"}`).join(" · ")}
         </p>
       ) : (
-        <p className="mt-1 text-muted">order SL+TP and symbol+direction security both sides</p>
+        <p className="mt-1 text-muted">{open.length ? "Reported position coverage; venue reconciliation and freshness still required." : "No open-position evidence in this snapshot."}</p>
       )}
     </div>
   );
@@ -697,10 +485,10 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
     ["indications", p.stratIndications !== false],
     ["general", p.stratGeneral !== false],
     ["block", p.stratBlock !== false],
-    ["dca", Boolean(p.dcaEnabled) && stats?.dca?.enabled !== false],
+    ["dca", p.dcaEnabled !== false && stats?.dca?.enabled !== false],
     ["trailing", p.stratTrailing !== false],
   ];
-  const tp = (p.positionCostPct ?? 0.10) * (p.tpCostRatio ?? 5);
+  const tp = (p.positionCostPct ?? 0.12) * (p.tpCostRatio ?? 5);
   const sl = tp * (p.slToTpRatio ?? 0.6);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
@@ -724,72 +512,33 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
 function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const s = stats?.sets;
   const p = s?.progress;
-  const ht = stats?.histTest;
-  const htOn = histTestIsEnabled(ht);
-  const nested = (p as { lanes?: Array<{ pct?: number; phase?: string; progress?: { pct?: number; phase?: string } }> } | undefined)?.lanes || [];
-  const lanePcts = [
-    ...(s?.lanes || []).map((ln) => ln.progress?.pct),
-    ...nested.map((ln) => ln.pct ?? ln.progress?.pct),
-  ].filter((n): n is number => n != null && Number.isFinite(n));
-  const enginePhase = String(p?.phase || stats?.progressPhase || "idle");
-  const engineBusy = CALC_PHASES.has(enginePhase);
-  const histOwnsBar = htOn && !engineBusy;
-  const pct = Math.max(
-    0,
-    Math.min(100, (histOwnsBar ? ht?.pct : p?.pct ?? stats?.progressPct) ?? ht?.pct ?? p?.pct ?? (lanePcts.length ? Math.max(...lanePcts) : 0)),
-  );
-  const phase = String(histOwnsBar ? (ht?.phase || enginePhase) : (enginePhase || ht?.phase || "idle"));
-  const updating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test", "backfill", "gap", "initial", "incremental", "catalog"].includes(phase);
-  const gateReady = Boolean(histOwnsBar ? ht?.ready : p?.ready ?? stats?.progressReady);
+  const rows = (s?.rows ?? []).slice(0, 8);
+  const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
+  const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
-  const proc = histOwnsBar
-    ? (ht?.processingCount ?? s?.processingCount ?? 0)
-    : (s?.processingCount ?? (s as { processingRows?: unknown[] } | undefined)?.processingRows?.length ?? 0);
-  const catalogN = s?.catalogSetCount ?? 0;
-  const showProc = Boolean(proc) && !(engineBusy && catalogN && proc >= catalogN);
-  const phaseLabel = PROGRESS_PHASE_LABEL[phase] ?? phase;
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className={gateReady ? "text-primary" : "text-warn"}>
-          sets · {phaseLabel}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={p?.ready ? "text-primary" : "text-warn"}>
+          sets · {p?.phase ?? "idle"} · {active}/{s?.setCount ?? 0} live
+          {s?.lookbackPending ? " · expanding history; entries waiting" : ""}
+          {stats?.detailType ? ` · from ${stats.detailType}` : ""}
         </span>
-        <span className="min-w-0 [overflow-wrap:anywhere]">{formatEffectiveSets(stats)}</span>
-        {showProc ? <span className="whitespace-nowrap">proc {proc}</span> : null}
-        {updating ? <span>updating</span> : null}
-        <span>{gateReady ? (phase === "ready" ? "ready" : "gate ready") : "gate closed"}</span>
-        {stats?.detailType ? <span className="whitespace-nowrap">from {stats.detailType}</span> : null}
-        <span className="whitespace-nowrap">{histTestIsEnabled(stats?.histTest) ? "test historic ON" : "test historic OFF"}</span>
-        <span className="ml-auto text-muted">last{s?.pfWindow ?? 15} PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}</span>
+        <span className="text-muted">
+          last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? DEFAULT_OVERLAY.histLookbackBars}
+        </span>
       </div>
-      {histTestIsEnabled(ht) && ((ht?.runningSets && ht.runningSets.length) || (ht?.symbols && ht.symbols.length) || ht?.detail) ? (
-        <p className="mt-1 text-muted" data-testid="hist-test-sets-line">
-          {histTestOverviewLine(ht)}
-        </p>
-      ) : null}
       {lanes.length > 1 ? (
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
           {lanes.map((ln) => {
-            const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? (ln as { pct?: number }).pct ?? 0));
-            const lanePhase = String(ln.progress?.phase ?? (ln as { phase?: string }).phase ?? "idle");
-            const laneUpdating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(lanePhase);
-            const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
-            const internN = ln.internSetCount ?? 0;
-            const catalogN = ln.catalogSetCount ?? 0;
-            const sym = ln.progress?.symbolsTotal ? ` · ${ln.progress.symbolsDone ?? 0}/${ln.progress.symbolsTotal} sym` : "";
-            const laneSets = catalogN > Math.max(internN, 1)
-              ? `catalog ${catalogN} · intern ${internN} · validated ${ln.validatedCount ?? 0}${sym}`
-              : internN || htOn
-              ? `intern ${internN} · validated ${ln.validatedCount ?? 0} · active ${ln.activeCount ?? 0}`
-              : `valid ${ln.validatedCount ?? 0}/${ln.setCount ?? 0} · active ${ln.activeCount ?? 0}/${ln.setCount ?? 0}`;
-            const showProc = Boolean(ln.processingCount) && !(catalogN && (ln.processingCount ?? 0) >= catalogN);            return (
+            const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? 0));
+            return (
               <div key={ln.id || ln.type}>
-                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-muted">
-                  <span className={`min-w-0 ${ln.running && !ln.halted ? "text-primary" : "text-faint"}`}>
-                    {ln.type} {laneSets}
-                    {showProc ? ` · proc ${ln.processingCount}` : ""}
+                <div className="flex justify-between text-muted">
+                  <span className={ln.running && !ln.halted ? "text-primary" : "text-faint"}>
+                    {ln.type} {ln.activeCount ?? 0}/{ln.setCount ?? 0}
                   </span>
-                  <span className="shrink-0">{PROGRESS_PHASE_LABEL[lanePhase] ?? lanePhase}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
+                  <span>{ln.progress?.phase ?? "idle"} {fmt(lp, 0)}%</span>
                 </div>
                 <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
                   <div className="h-full rounded-full bg-primary" style={{ width: `${lp}%` }} />
@@ -805,28 +554,24 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
           </div>
           <p className="mt-1 text-muted">
-            {(histOwnsBar ? ht?.detail : p?.detail || stats?.progressDetail) || p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
-            {p?.symbolsTotal ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
-            {updating && (histOwnsBar ? ht?.ready : p?.ready) ? " · prior gate remains active" : ""}
+            {p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
           </p>
         </>
       )}
-      <div className="mt-3">
-        <SetGroups sets={s} axesEnabled={enabledAxes(stats).length > 0} limit={8}>{(rows) => (
-        <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
-          {rows.map((r, i) => (
-            <div key={setRowKey(r, i)} className="min-w-0 rounded-md border border-border px-2 pb-2">
-              <SetIdentity row={r} />
-              <div className={`flex min-w-0 flex-wrap gap-x-3 gap-y-1 [overflow-wrap:anywhere] ${r.active ? "text-primary" : "text-muted"}`}>
-                <span>PF {r.n ? setMetric(r.last15Ratio) : "—"}</span>
-                <span>DDT {r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)}</span>
-                <span>R {setMetric(r.last25AvgR, 1)}</span>
-              </div>
+      {rows.length ? (
+        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+          {rows.map((r) => (
+            <div key={r.id} className="flex items-center justify-between gap-2">
+              <span className={r.active ? "text-fg" : "text-faint"}>
+                {r.pack?.slice(0, 3) || r.id.slice(0, 8)} sl{Number(r.slRatio || 0).toFixed(1)} st{r.step ?? "—"}
+              </span>
+              <span className={r.active ? "text-primary" : "text-danger"}>
+                {r.pf15.toFixed(2)} · {formatDuration(r.maxDdS * 1000)} · R{r.last25AvgR.toFixed(1)}
+              </span>
             </div>
           ))}
         </div>
-        )}</SetGroups>
-      </div>
+      ) : null}
       {p?.error ? <p className="mt-1 text-danger">{p.error}</p> : null}
     </div>
   );
@@ -849,7 +594,7 @@ function ExitStrip({ stats }: { stats: LiveStats | null }) {
           const on = k === "hard" ? true : k === "lock" ? ex?.lockOn !== false : k === "peak" ? ex?.peakOn !== false : k === "rev" ? ex?.revOn !== false : ex?.timeOn !== false;
           return (
             <span key={k} className={ln?.active === false || !on ? "text-faint" : ln?.selected ? "text-primary" : "text-fg"}>
-              {k} {ln && ln.n > 0 ? ln.last15Ratio.toFixed(2) : on ? "on" : "off"}
+              {k} {ln && ln.n > 0 ? ln.last15Pf.toFixed(2) : on ? "on" : "off"}
             </span>
           );
         })}
@@ -859,15 +604,7 @@ function ExitStrip({ stats }: { stats: LiveStats | null }) {
 }
 
 function WorkStrip({ stats }: { stats: LiveStats | null }) {
-  const trailingOff = (stats?.pulse as { stratTrailing?: boolean } | undefined)?.stratTrailing === false;
-  const fails = (stats?.tests ?? []).filter((t) => {
-    if (t.pass) return false;
-    if (!trailingOff) return true;
-    const name = String(t.name || "");
-    if (name !== "qa-set-grid" && name !== "qa-set-cover") return true;
-    const detail = String(t.detail || "");
-    return !(detail.includes("trails=[]") || detail.includes("'trail': 0") || detail.includes('"trail": 0') || detail.includes("trailing=off") || detail.includes("trailing off"));
-  });
+  const fails = (stats?.tests ?? []).filter((t) => !t.pass);
   const last = (stats?.signals ?? []).slice(0, 3);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="work-strip">
@@ -880,11 +617,11 @@ function WorkStrip({ stats }: { stats: LiveStats | null }) {
           err {stats?.errors ?? 0} · rss {fmt((stats as LiveStats & { rssMb?: number })?.rssMb, 0)}MB
         </span>
       </div>
-      {stats?.haltReason ? <p className={`mt-1 ${haltClass(stats.haltReason, stats.halted)}`}>{stats.haltReason}</p> : null}
-      {stats?.lastError && !isBenignError(stats.lastError) ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
+      {stats?.haltReason ? <p className="mt-1 text-danger">{stats.haltReason}</p> : null}
+      {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
-          fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
+          fail {fails.map((t) => `${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
         </p>
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>
@@ -914,7 +651,7 @@ function EngineStrip({ stats }: { stats: LiveStats | null }) {
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={(e?.hotMs ?? 99) <= (e?.cycleMs ?? 200) + 40 && !e?.cycleOverrun ? "text-primary" : "text-warn"}>async engine</span>
+        <span className={(e?.hotMs ?? 99) <= (e?.cycleMs ?? 200) + 40 && !e?.cycleOverrun ? "text-primary" : "text-danger"}>async engine</span>
         <span className="text-muted">{qa}</span>
       </div>
       <div className="mt-1 flex flex-wrap gap-3 text-muted">
@@ -989,8 +726,6 @@ function VariantsStrip({ stats }: { stats: LiveStats | null }) {
 function IndicationStrip({ stats }: { stats: LiveStats | null }) {
   const ind = stats?.indications;
   const rows = ind?.primary ?? [];
-  const kinds = ind?.kindStats || {};
-  const samples = ind?.samples ?? [];
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2">
       <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
@@ -1003,127 +738,34 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
           {ind?.extraSources ? " · extra venues" : ""}
         </span>
       </div>
-      <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px]">
-        {(["state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse"] as const).map((k) => {
-          const row = kinds[k];
-          const on = ind?.types?.[k] !== false;
-          return (
-            <span key={k} className={on ? "text-fg" : "text-faint"}>
-              {k} {on ? row?.hits ?? 0 : "off"}
-              {row?.long || row?.short ? ` L${row.long ?? 0}/S${row.short ?? 0}` : ""}
-            </span>
-          );
-        })}
-      </div>
-      {rows.length === 0 && samples.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="mt-2 text-xs text-muted">No consensus yet — waiting on independent 1/5/15 lanes</p>
       ) : (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
-          {samples.slice(0, 6).map((s) => (
-            <div key={s.symbol} className="font-mono text-xs">
-              <span className="text-fg">{s.symbol.replace("-USDT", "")}</span>
-              <span className="ml-2 text-muted">
-                {Object.entries(s.kinds || {})
-                  .map(([k, v]) => `${kindShort(k)}${v.dir === "short" ? "−" : "+"}`)
-                  .join(" ")}
-              </span>
-            </div>
-          ))}
-          {samples.length === 0
-            ? rows.slice(0, 8).map((r) => {
-                const tag =
-                  r.mode === "tf_combined"
-                    ? "tf"
-                    : r.mode === "multi_source_consensus"
-                      ? "cons"
-                      : r.timeframe || "src";
-                return (
-                  <div key={r.symbol} className="flex items-center justify-between gap-2 font-mono text-xs">
-                    <span className="text-fg">
-                      {r.symbol.replace("-USDT", "")}{" "}
-                      <span className={r.direction === "long" ? "text-primary" : "text-fg"}>
-                        {r.direction}
-                      </span>
-                    </span>
-                    <span className="text-muted tabular-nums">
-                      {tag} · {fmt(r.agreement, 2)} · {fmt(r.confidence, 2)}
-                    </span>
-                  </div>
-                );
-              })
-            : null}
+          {rows.slice(0, 8).map((r) => {
+            const tag =
+              r.mode === "tf_combined"
+                ? "tf"
+                : r.mode === "multi_source_consensus"
+                  ? "cons"
+                  : r.timeframe || "src";
+            return (
+              <div key={r.symbol} className="flex items-center justify-between gap-2 font-mono text-xs">
+                <span className="text-fg">
+                  {r.symbol.replace("-USDT", "")}{" "}
+                  <span className={r.direction === "long" ? "text-primary" : "text-danger"}>
+                    {r.direction}
+                  </span>
+                </span>
+                <span className="text-muted tabular-nums">
+                  {tag} · {fmt(r.agreement, 2)} · {fmt(r.confidence, 2)}
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
-  );
-}
-
-function HtfPanel({ htf }: { htf?: LiveStats["htf"] }) {
-  if (!htf?.enabled) return <p className="text-sm text-muted">1h lane off on this desk</p>;
-  if (htf.error) return <p className="text-sm text-danger">{htf.error}</p>;
-  const kinds = Object.entries(htf.kinds ?? {});
-  return (
-    <div className="space-y-2 text-sm">
-      <p className="text-muted">
-        {htf.symbols ?? 0} symbols · {(htf.open ?? []).length} open · {htf.queued ?? 0} queued
-      </p>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[420px] text-xs tabular-nums">
-          <thead className="text-muted">
-            <tr><th className="text-left">kind</th><th className="text-left">exit</th><th>PF (n)</th><th>source</th><th>live</th><th>L</th><th>S</th></tr>
-          </thead>
-          <tbody>
-            {kinds.map(([k, v]) => (
-              <tr key={k} className="border-t border-border">
-                <td className="py-0.5 text-left">{k}</td>
-                <td className="text-left text-muted">{v.exit}</td>
-                <td className="text-center">{v.pf == null ? "–" : v.pf.toFixed(2)} ({v.n})</td>
-                <td className="text-center text-muted">{v.source}</td>
-                <td className="text-center">{v.liveN ? `${v.livePf?.toFixed(2) ?? "–"} (${v.liveN})` : "–"}</td>
-                <td className={`text-center ${v.long.ok ? "text-primary" : "text-danger"}`} title={v.long.why}>{v.long.ok ? "on" : "off"}</td>
-                <td className={`text-center ${v.short.ok ? "text-primary" : "text-danger"}`} title={v.short.why}>{v.short.ok ? "on" : "off"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function LiveEdgePanel({ edge }: { edge?: LiveStats["liveEdge"] }) {
-  if (!edge) return <p className="text-sm text-muted">Waiting</p>;
-  if (edge.oneMinuteLanes === "off") return <p className="text-sm text-muted">1m lanes off on this desk</p>;
-  if (edge.oneMinuteLanes === "probe") return <p className="text-sm text-warn">1m lanes on probe: minimum lots only, no Block/DCA</p>;
-  if (!edge.enabled) return <p className="text-sm text-muted">Live edge guard off</p>;
-  return (
-    <dl className="grid grid-cols-2 gap-2 text-sm">
-      {(["LONG", "SHORT"] as const).map((side) => {
-        const s = edge[side];
-        return (
-          <div key={side} className="rounded border border-border p-2">
-            <dt className="text-muted">{side}</dt>
-            <dd className={s?.state === "probe" ? "text-danger" : s?.state === "edge" ? "text-primary" : "text-fg"}>
-              {s?.state ?? "–"} · PF {s?.pf == null ? "–" : s.pf.toFixed(2)} · {s?.n ?? 0}/{s?.need ?? edge.n}
-            </dd>
-          </div>
-        );
-      })}
-    </dl>
-  );
-}
-
-function SizingLine({ sizing }: { sizing?: LiveStats["sizing"] }) {
-  if (!sizing) return null;
-  const minLot = sizing.orderSizing === "minQty";
-  const b = sizing.block;
-  return (
-    <p className="mt-3 text-xs text-muted">
-      {minLot ? "Minimum lot per order" : "Volume factor sizing"} ·{" "}
-      {sizing.leverageMode === "max" ? "max leverage" : "auto leverage"}
-      {sizing.pairs != null ? ` (${sizing.pairsAtMax ?? 0}/${sizing.pairs} pairs at max)` : ""}
-      {b ? ` · Block ${minLot ? "+1 lot" : `+${(b.effectiveRatio * 100).toFixed(0)}%`} per count, up to ${b.maxCounts}` : ""}
-    </p>
   );
 }
 
@@ -1144,7 +786,9 @@ function SideChip({ side, compact }: { side: string; compact?: boolean }) {
   const Icon = long ? ArrowUpRight : ArrowDownRight;
   return (
     <span
-      className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs font-medium ${sideChipClass(side)}`}
+      className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs font-medium ${
+        long ? "bg-primary-dim/40 text-primary" : "bg-danger/15 text-danger"
+      }`}
     >
       <Icon className="size-3" />
       {compact ? (long ? "L" : "S") : side}
@@ -1164,8 +808,13 @@ function fmtPx(n: number | null | undefined) {
   return n.toFixed(6);
 }
 
+function pnlClass(n: number) {
+  if (n > 0) return "text-primary";
+  if (n < 0) return "text-danger";
+  return "text-muted";
+}
+
 function ago(s: number) {
-  if (!Number.isFinite(s)) return "—";
   if (s < 60) return `${Math.floor(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;

@@ -1,0 +1,421 @@
+{
+  "reference": "2599b652b9429c34d290a07e8df1d70a62d80462",
+  "cases": 72,
+  "comparedBars": 86400,
+  "differences": [
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 19,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 20,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 21,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 22,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 23,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 24,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 25,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 26,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 31,
+      "reference": 0,
+      "actual": 1
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 35,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 36,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 37,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 38,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 39,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 40,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 41,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 42,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 43,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 44,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 45,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 46,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 47,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 48,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 49,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 50,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 51,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 52,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 53,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 54,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 55,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 56,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 57,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 58,
+      "reference": 1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 59,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 60,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 61,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 68,
+      "reference": 0,
+      "actual": -1
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 69,
+      "reference": 0,
+      "actual": -1
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 70,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 71,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 72,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 73,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 74,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 75,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 76,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 77,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 78,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 79,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 80,
+      "reference": -1,
+      "actual": 0
+    },
+    {
+      "source": "bb-bounce",
+      "range": "short",
+      "mode": "tiny",
+      "index": 81,
+      "reference": -1,
+      "actual": 0
+    }
+  ],
+  "differenceCount": 821,
+  "differenceGroups": {
+    "bb-bounce/short/tiny": 597,
+    "bb-bounce/medium/tiny": 171,
+    "cci-reversal/short/tiny": 2,
+    "cci-reversal/medium/tiny": 1,
+    "bb-bounce/short/steps": 50
+  },
+  "sourceHashes": {
+    "src/core/math/indicators.ts": "948c163cd7d9e18acc57a4757c698115c034ef1d657e033b1d2e1536e60ccd93",
+    "src/core/indications/registry.ts": "e3f05440da70223d7a42d01da69691e6493e833dedf9271089cd7dd57afb7042",
+    "src/core/indications/cache.ts": "f75792e9e7b2f74c50e59ef4f1cfbaa1a4cc7f02b0dae84f179be7ba501f48fa",
+    "src/core/signal-config.ts": "c506bcead1ba0802948dbdf2c41f9302135621d3a3f17b2a8d2b2f2a76a9827c"
+  }
+}

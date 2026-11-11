@@ -212,7 +212,7 @@ function tokenIdentityKey(token: string): string {
         }
       }
     } catch {
-      // Opaque or malformed tokens are still isolated by their full-token hash.
+      // An invalid token falls back to its hashed bytes below.
     }
   }
   return createHash("sha256").update(token).digest("base64url");

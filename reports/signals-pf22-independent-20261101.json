@@ -1,0 +1,72 @@
+{
+  "schema": "cts-g-signals-independent-audit-v1",
+  "scenarios": {
+    "baseline": {
+      "modeledOrders": 32,
+      "settled": 31,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0018617028753868945,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "cost-stress": {
+      "modeledOrders": 17,
+      "settled": 17,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 5.551115123125783e-17,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0018792058041283833,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "expanded": {
+      "modeledOrders": 62,
+      "settled": 61,
+      "marks": 721,
+      "allTypeStageContextsCompared": 27648,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0026606185057118535,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "maker-hypothesis": {
+      "modeledOrders": 66,
+      "settled": 65,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.0024780561821082852,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "smaller-book": {
+      "modeledOrders": 42,
+      "settled": 41,
+      "marks": 721,
+      "allTypeStageContextsCompared": 0,
+      "maxCashError": 3.469446951953614e-18,
+      "maxMarkError": 0.0,
+      "maxAdmissionMarkError": 0.0,
+      "drawdown": 0.001051803873583569,
+      "differenceCount": 0,
+      "differences": []
+    }
+  },
+  "activeStageOptimization": null,
+  "seconds": 32.31622428398987,
+  "limits": [
+    "shared source-onset inputs, separately registry-parity-tested",
+    "all three protection types independently replayed across every expanded stage context; no DCA/Active/venue oracle",
+    "cash/marks reconstruct modeled execution, not venue executions or untouched out-of-sample performance"
+  ]
+}

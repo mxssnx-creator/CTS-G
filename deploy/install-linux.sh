@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # CTS-G Linux install — unattended, skip software already present, run to the end.
 #
-#   sudo ./deploy/install-linux.sh --enable-live
-#   sudo ./deploy/install-linux.sh --enable-live --port 3102 --name cts-g
-#   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G
+#   sudo ./deploy/install-linux.sh
+#   sudo ./deploy/install-linux.sh --port 3102 --name cts-g
+#   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G --start-live
 #
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux-common.sh
 source "$HERE/linux-common.sh"
+# shellcheck source=git-update.sh
+source "$HERE/git-update.sh"
 
 FROM_DIR=""
 DO_CLONE=0
-START_LIVE=1
+START_LIVE=0
 NO_START=0
+NO_VST=0
 PORT_EXPLICIT=0
 NAME_EXPLICIT=0
 
@@ -27,36 +30,36 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --name NAME       Install name (default: cts-g) → /opt/NAME, /etc/NAME
   --port N          Desk listen port (default: 3102)
   --desk-port N     Same as --port
-  --pulse-port N    Separate loopback API port (default: desk + 1)
   --host HOST       Public hostname/IP for result URLs (default: 152.53.114.112)
   --from-dir PATH   Copy this checkout into /opt/NAME (default: this repo)
   --clone           git clone REPO_URL into /opt/NAME
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
   --branch NAME     Branch (default: main)
-  --enable-live     Enable and start Live engine (default; explicit in install string)
-  --start-live      Alias for --enable-live
-  --no-live         Install units but do not enable/start Live (tests only)
+  --start-live      Start grok-pulse@bingx-x01
+  --no-vst          Disable x02 auto-start; stop x02 when starting services
   --no-start        Install units but do not start services
   --yes             No-op (install never prompts)
   -h, --help
 
 Packages and Node are installed only if missing. Overlay/open positions are
-never flattened. Prints a results block with URLs at the end.
+never flattened. --no-vst does not cancel x02 orders or close its positions;
+stopping x02 also stops its position manager, so verify its protection first.
+with --no-start it disables auto-start but leaves an already running x02 alone.
+Prints a results block with URLs at the end.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name|-n) apply_name "${2:-}"; NAME_EXPLICIT=1; shift 2 ;;
-    --pulse-port) PULSE_PORT="${2:-}"; PULSE_PORT_EXPLICIT=1; shift 2 ;;
     --port|-p|--desk-port) DESK_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
     --host) PUBLIC_HOST="${2:-}"; REMOTE_HOST="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --clone) DO_CLONE=1; shift ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
-    --enable-live|--start-live) START_LIVE=1; shift ;;
-    --no-live) START_LIVE=0; shift ;;
+    --start-live) START_LIVE=1; shift ;;
+    --no-vst) NO_VST=1; shift ;;
     --no-start) NO_START=1; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
@@ -66,20 +69,24 @@ done
 
 require_linux
 require_root
+require_systemd
 
 log "install  name=$CTS_G_NAME  root=$CTS_G_ROOT  desk=:${DESK_PORT}  branch=$BRANCH"
 log "unattended — no prompts; skip software already present"
 
 ensure_base_packages
 ensure_node
-validate_instance
 ensure_dirs
 ensure_redis
 
 if [[ "$DO_CLONE" -eq 1 ]]; then
   if [[ -d "$CTS_G_ROOT/.git" ]]; then
     log "existing clone at $CTS_G_ROOT — fetch $BRANCH"
-    fast_forward_app
+    git -C "$CTS_G_ROOT" remote set-url origin "$REPO_URL" 2>/dev/null \
+      || git -C "$CTS_G_ROOT" remote add origin "$REPO_URL"
+    git -C "$CTS_G_ROOT" fetch --prune origin
+    cts_git_update "$CTS_G_ROOT" origin "$BRANCH" 0 \
+      || die "Git update failed. Resolve local changes/divergence; the installer will not reset them."
     ok "git updated $CTS_G_ROOT"
   elif [[ -f "$CTS_G_ROOT/server/pulse/pulse_trader.py" ]]; then
     skip "tree already at $CTS_G_ROOT (not a clone)"
@@ -99,24 +106,20 @@ else
 fi
 
 [[ -f "$CTS_G_ROOT/deploy/linux-common.sh" ]] || die "install did not land deploy/ in $CTS_G_ROOT"
-find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
+chmod 755 "$CTS_G_ROOT/deploy/"*.sh
 
 configure_git "$CTS_G_ROOT"
-migrate_redis_scope
 seed_env
 sync_pulse_tree
-ensure_python_deps
 npm_install_desk
 install_units
-apply_dynamic_resources
-enforce_retention
-enable_stack
+enable_stack "$((1 - NO_VST))"
 
 if [[ "$NO_START" -eq 1 ]]; then
   skip "start ( --no-start )"
   print_results
 else
-  start_stack "$START_LIVE"
+  start_stack "$START_LIVE" "$((1 - NO_VST))"
   health_report
 fi
 

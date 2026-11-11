@@ -2,51 +2,18 @@
 """CTS-accurate Main-stage axes, rearrangements, and threshold gates for pulse."""
 from __future__ import annotations
 
-import time
-from collections import OrderedDict
 from dataclasses import dataclass, asdict
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
-from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
-from set_engine import MAIN_EVAL_DEFAULT, PF_N_DEFAULT, REAL_EVAL_DEFAULT, row_equity_pnl
+from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, MIN_VALIDATION_N, POSITION_COST_PCT_DEFAULT, base_min_pf, last_n_cost_pf, net_pnl_pct, pf_floor, window_n
+from position_cost import row_net_pnl_pct
 
-# Relative-count windows per coordination axis: every count from min to the
-# configured max window (step 1 = the finest grid) is one child per Base
-# parent x direction. 100 relative positions equal one parent volume.
 AXIS_SPECS = {
-    "prev": {"min": 4, "max": 12, "step": 1, "default": 12},
+    "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
     "last": {"min": 1, "max": 4, "step": 1, "default": 4},
     "cont": {"min": 1, "max": 8, "step": 1, "default": 8},
     "pause": {"min": 1, "max": 8, "step": 1, "default": 8},
 }
-AXIS_EVENT_CAP = 8192
-PREV_POSITION_MIN = 5
-PREV_POSITION_MAX = 55
-LIVE_TAPE_HORIZON_S = 3 * 3600.0
-UNIX_TS_MIN = 1_000_000_000.0
-
-
-def _row_ts(row: Any) -> float:
-    if isinstance(row, dict):
-        return float(row.get("t") or 0)
-    return float(getattr(row, "t", 0) or 0)
-
-
-def recent_closed_rows(closed_rows: Sequence[Any], now: Optional[float] = None, horizon_s: float = LIVE_TAPE_HORIZON_S) -> List[Any]:
-    """Keep last-3h unix-timestamped live closes; leave synth/unit tapes intact."""
-    ordered = sorted(
-        [row for row in closed_rows if row is not None],
-        key=_row_ts,
-    )
-    if not ordered:
-        return []
-    newest = _row_ts(ordered[-1])
-    if newest < UNIX_TS_MIN:
-        return ordered
-    now = float(now if now is not None else time.time())
-    if now - newest > horizon_s:
-        return []
-    return [row for row in ordered if now - _row_ts(row) <= horizon_s]
 
 
 def clamp_window(axis: str, value: Any) -> int:
@@ -85,72 +52,38 @@ class Axis:
 
 class Coordinator:
     def __init__(self) -> None:
-        self.axes: Dict[str, Axis] = {name: Axis(False, int(spec["default"])) for name, spec in AXIS_SPECS.items()}
-        self.min_pf = POSITIVE_PF
-        # Stage PF floors use the shared 0.80–2.50 / 0.02 contract.
-        # 1.00 is break-even after cost; 1.15 is +1.5× PositionCost (live floor).
-        self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
+        self.axes: Dict[str, Axis] = {
+            "prev": Axis(True, 12),
+            "last": Axis(True, 4),
+            "cont": Axis(True, 8),
+            "pause": Axis(True, 8),
+        }
+        self.min_pf = 1.2
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
-        # The optional additional coordination evaluates the newest 50+
-        # closed positions as one independent coordination window. It only
-        # changes the evidence window used for coordination; the full Set
-        # catalog is still built and scored by SetBook, with PF unchanged.
-        self.optimization_n = 50
-        self.additional_coordination = True
-        # Deprecated internal alias for older callers during migration.
-        self.minimal_positive_coordination = self.additional_coordination
-        self.optimization_stats: Dict[str, Any] = {}
         self.noise = 0.05
         self.vol_weight = 0.3
         self.outbreak = [3, 5, 10]
-        self.prev_min_count = 5
+        self.prev_min_count = 8
         self.prev_window = 25
-        self.main_eval = MAIN_EVAL_DEFAULT
-        self.real_eval = REAL_EVAL_DEFAULT
-        self.min_step = 7
+        self.main_eval = 20
+        self.min_samples = 12
+        self.real_eval = 15
+        self.min_step = 6
         self.max_sl_ratio = 2.5
-        self.trailing_min_step = 7
+        self.trailing_min_step = 6
         self.pos_count_vol_ratio = 0.05
         self.rearrange = True
         self.rearrange_gap = 0.22
         self.last: Dict[str, Any] = {}
-        self.coordination: Dict[str, Dict[str, int]] = {
-            axis: {
-                "evaluated": 0,
-                "qualified": 0,
-                "selected": 0,
-                "entered": 0,
-                "exited": 0,
-                "blocked": 0,
-                "rejected": 0,
-                "paused": 0,
-                "long": 0,
-                "short": 0,
-            }
-            for axis in AXES
-        }
-        # Insertion-ordered so eviction drops the oldest events deterministically.
-        self._axis_seen: "OrderedDict[str, None]" = OrderedDict()
-
-    def _main_n(self) -> int:
-        """Main window: last-N (>= 3), or the Base window when Main is off (0)."""
-        main = getattr(self, "main_eval", MAIN_EVAL_DEFAULT)
-        main = int(MAIN_EVAL_DEFAULT if main is None else main)
-        return max(3, int(self.pf_window or PF_N_DEFAULT)) if main <= 0 else max(3, main)
-
-    def _real_n(self) -> int:
-        """Real window: last-N (>= 3), or the Main window when Real is off (0)."""
-        real = getattr(self, "real_eval", REAL_EVAL_DEFAULT)
-        real = int(REAL_EVAL_DEFAULT if real is None else real)
-        return self._main_n() if real <= 0 else max(3, real)
+        self.scopes: Dict[str, Any] = {}
 
     def load(self, cts: Dict[str, Any], ov: Dict[str, Any]) -> None:
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
         nested = coord.get("axes") if isinstance(coord, dict) else {}
         nested = nested or {}
 
-        def ax(name: str, cap: str, default_on: bool = False) -> Axis:
+        def ax(name: str, cap: str, default_on: bool = True) -> Axis:
             n = nested.get(name) or {}
             en = ov.get(f"axis{cap}Enabled")
             if en is None:
@@ -165,70 +98,44 @@ class Coordinator:
             "pause": ax("pause", "Pause"),
         }
         try:
-            stages_cts = (cts.get("strategies") or {}).get("main") or {}
-            st = stages_cts.get("real") or {}
-            self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or POSITIVE_PF)
+            st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
+            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or GATE_MIN_PF_DEFAULT)
         except Exception:
-            self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or POSITIVE_PF)
-        # Migrate a legacy overall Real PF to one setting when no overlay
-        # control is present. Any explicit overlay alias wins atomically.
-        from position_cost import PF_SETTING_KEYS, shared_pf_settings
-        unified = shared_pf_settings(ov if any(k in ov for k in PF_SETTING_KEYS) else {"minPf": self.min_pf})
-        self.min_pf = unified["minPf"]
-        self.stage_min_pf = {stage: self.min_pf for stage in ("base", "main", "real")}
-        self.pf_window = int(ov.get("pfWindow") or 15)
+            self.min_pf = float(ov.get("minPf") or GATE_MIN_PF_DEFAULT)
+        self.min_pf = pf_floor(self.min_pf)
+        self.min_pf_linked = bool(ov.get("minPfLinked", True))
+        if self.min_pf_linked:
+            self.min_pf = base_min_pf(ov)        # every validation gate asks the Base gate's PF
+        self.pf_window = window_n(ov, "pfWindow", fallback=LAST_N_DEFAULT)
+        self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
-        if self.position_cost_pct > 2:
-            self.position_cost_pct = self.position_cost_pct / 100.0
-        if self.position_cost_pct > 1:
+        # percent everywhere (0.12 = 0.12%), the same unit as position_cost.cost_as_frac; no magnitude guessing
+        if not self.position_cost_pct > 0:  # zero, negative or NaN is a config error: default, nothing else is guessed
             self.position_cost_pct = POSITION_COST_PCT_DEFAULT
-        try:
-            self.optimization_n = max(50, min(200, int(ov.get("coordOptimizationN") or 50)))
-        except Exception:
-            self.optimization_n = 50
-        self.additional_coordination = bool(
-            ov.get("additionalCoordination", ov.get("minimalPositiveCoordination", False))
-        )
-        self.minimal_positive_coordination = self.additional_coordination
-        # Percent, like the indication engine and the desk: 0.05 = 0.05%.
         self.noise = float(ov.get("noise") or cts.get("activeNoiseFilter") or 0.05)
         self.vol_weight = float(ov.get("volWeight") or cts.get("activeVolatilityWeight") or 0.3)
         raw_ob = ov.get("outbreak") or cts.get("activeOutbreakRanges") or [3, 5, 10]
         if isinstance(raw_ob, str):
             raw_ob = [int(x) for x in raw_ob.replace("[", "").replace("]", "").split(",") if x.strip().isdigit()]
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
-        try:
-            self.prev_min_count = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(
-                ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)))
-        except Exception:
-            self.prev_min_count = PREV_POSITION_MIN
-        try:
-            self.prev_window = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(
-                ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)))
-        except Exception:
-            self.prev_window = 25
-        raw_main = ov.get("mainEvalPosCount", coord.get("mainEvalPosCount"))
-        try:
-            raw_main = MAIN_EVAL_DEFAULT if raw_main is None or raw_main == "" else int(raw_main)
-        except (TypeError, ValueError):
-            raw_main = MAIN_EVAL_DEFAULT
-        # 0 = Main gate off: Main reuses the Base window (SetBook parity).
-        self.main_eval = 0 if raw_main <= 0 else raw_main
-        raw_real = ov.get("realEvalPosCount", coord.get("realEvalPosCount"))
-        try:
-            raw_real = REAL_EVAL_DEFAULT if raw_real is None or raw_real == "" else int(raw_real)
-        except (TypeError, ValueError):
-            raw_real = REAL_EVAL_DEFAULT
-        # 0 = Real gate off: Real reuses the Main window (SetBook parity).
-        self.real_eval = 0 if raw_real <= 0 else raw_real
-        self.min_step = int(ov.get("minStep") or coord.get("minStep") or ov.get("setMinStep") or 7)
+        # Disjoint Axis windows (axisDisjoint, off by default; the rule CTS-C runs): the previous window is the closes BEFORE the last window, so one close is
+        # never read by both; the previous PF must reach the floor itself, and the last window is judged by the sign of its net (axisLastOutcome: "any" = not
+        # at all, "positive" = the newest closes must be net positive, "negative" = net negative) instead of by a PF of a handful of closes.
+        self.disjoint = ov.get("axisDisjoint") is True
+        self.last_outcome = ov.get("axisLastOutcome") if ov.get("axisLastOutcome") in ("positive", "negative") else "any"
+        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 8)
+        self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
+        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 20)
+        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 15)
+        self.min_step = int(ov.get("minStep") or coord.get("minStep") or 6)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
-        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or self.min_step)
-        # An explicit 0 disables count-based trimming; only a missing value defaults.
-        raw_pcv = next((v for v in (ov.get("posCountsVolumeRatio"), coord.get("posCountsVolumeRatio"), cts.get("posCountsVolumeRatio")) if v is not None), 0.05)
-        self.pos_count_vol_ratio = float(raw_pcv)
+        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 6)
+        self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
         self.rearrange = bool(ov.get("rearrange", True))
         self.rearrange_gap = float(ov.get("rearrangeGap") or 0.22)
+
+    def size_mult(self, open_n: int) -> float:
+        return max(0.55, 1.0 - max(0, open_n) * self.pos_count_vol_ratio)
 
     def outbreak_ok(self, bars: Sequence[Sequence[float]]) -> bool:
         if len(bars) < max(self.outbreak + [self.min_step]):
@@ -241,7 +148,7 @@ class Coordinator:
             w = bars[-n:]
             hi = max(b[1] for b in w)
             lo = min(b[2] for b in w)
-            if (hi - lo) / last * 100.0 >= self.noise:
+            if (hi - lo) / last >= self.noise:
                 hits += 1
         return hits >= 1
 
@@ -261,399 +168,156 @@ class Coordinator:
         consec: int,
         intern: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[str], Dict[str, float]]:
-        reasons: List[str] = []
-        ordered = recent_closed_rows(closed_rows)
-        # Prev is an independent prior-position window.  The old
-        # ``axes.prev.max_window * 2`` cap silently truncated configured
-        # 25–55-position windows to 24 positions.
-        window_limit = max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2)
-        coord_rows = ordered[-window_limit:] if self.additional_coordination else ordered
-        pnls = [row_equity_pnl(row, self.position_cost_pct) for row in coord_rows]
-        last_w = self.axes["last"].max_window
-        prev_w = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(self.prev_window or 25)))
-        cost = last_n_cost_pf(coord_rows, self.pf_window, self.position_cost_pct)
-        last_cost = last_n_cost_pf(coord_rows, last_w, self.position_cost_pct)
-        # "Prev" is the closed segment immediately before the current
-        # segment.  Taking ``last_n`` directly here made Prev identical to
-        # Last and ignored the earlier positions that the axis promises.
-        prev_tape = coord_rows[-(prev_w * 2) : -prev_w] if len(coord_rows) >= prev_w * 2 else []
-        prev_cost = last_n_cost_pf(prev_tape, prev_w, self.position_cost_pct)
-        main_cost = last_n_cost_pf(coord_rows, self._main_n(), self.position_cost_pct)
-        real_cost = last_n_cost_pf(coord_rows, self._real_n(), self.position_cost_pct)
-        intern = intern or {}
-        intern_pf = float(intern.get("pf") or intern.get("indications") or intern.get("general") or 0)
-        intern_n = float(intern.get("n") or 0)
-        metrics: Dict[str, float] = {
-            "lastPf": round(float(last_cost["ratio"]), 3),
-            "prevPf": round(float(prev_cost["ratio"]), 3),
-            "consecLoss": float(consec),
-            "last15Ratio": cost["ratio"],
-            "last15R": cost["avgR"],
-            "last15N": cost["count"],
-            "classicPf15": cost["classicPf"],
-            "costPct": cost["costPct"],
-            "minPf": self.min_pf,
-            "baseMinPf": float(self.stage_min_pf.get("base", POSITIVE_PF)),
-            "mainMinPf": float(self.stage_min_pf.get("main", POSITIVE_PF)),
-            "realMinPf": float(self.stage_min_pf.get("real", POSITIVE_PF)),
-            "pfNeutral": 1.0,
-            "pfPlus1x": 1.1,
-            "internPf": round(intern_pf, 4) if intern_pf else 0.0,
-            "internN": intern_n,
-            "mainPf": round(float(main_cost["ratio"]), 4),
-            "mainN": float(main_cost["count"]),
-            "realPf": round(float(real_cost["ratio"]), 4),
-            "realN": float(real_cost["count"]),
-            "optimizationN": float(len(coord_rows)),
-            "optimizationWindow": float(window_limit if self.additional_coordination else len(ordered)),
-            "optimizationEnabled": 1.0 if self.additional_coordination else 0.0,
-            "prevWindow": float(prev_w),
-            "prevCount": float(prev_cost["count"]),
-        }
-        if coord_rows:
-            net = sum(pnls)
-            self.optimization_stats = {
-                "n": len(coord_rows),
-                "positive": sum(1 for value in pnls if value > 0),
-                "positiveRate": round(sum(1 for value in pnls if value > 0) / len(coord_rows), 4),
-                "pf": float(cost.get("ratio") or 1.0),
-                "netAvg": round(net / len(coord_rows), 8),
-                "costPct": float(cost.get("costPct") or self.position_cost_pct),
-                "costSource": cost.get("costSource") or "manual-fallback",
-                "window": window_limit if self.additional_coordination else len(ordered),
-                "enabled": bool(self.additional_coordination),
-            }
-        else:
-            self.optimization_stats = {
-                "n": 0,
-                "positive": 0,
-                "positiveRate": 0.0,
-                "pf": 1.0,
-                "netAvg": 0.0,
-                "costPct": self.position_cost_pct,
-                "costSource": "manual-fallback",
-                "window": window_limit if self.additional_coordination else 0,
-                "enabled": bool(self.additional_coordination),
-            }
-        allow = True
-        sample_ok = cost["count"] >= min(8, self.pf_window)
-        intern_ok = intern_n >= max(3, int(self.prev_min_count or 5)) and intern_pf + 1e-9 >= 1.0  # intern = cost-neutral, real edge is POSITIVE_PF
-        if intern_ok:
-            metrics["internOpen"] = 1.0
-        base_floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
-        main_floor = float(self.stage_min_pf.get("main", POSITIVE_PF))
-        real_floor = float(self.stage_min_pf.get("real", POSITIVE_PF))
-        last_n_ok = int(last_cost["count"]) >= min(3, last_w)
-        if self.axes["last"].enabled and last_n_ok:
-            if not clears_pf(last_cost["ratio"], base_floor):
-                allow = False
-                reasons.append(
-                    f"base/last {int(last_cost['count'])} PF {last_cost['ratio']:.2f}<{base_floor:.2f} (1.00=neutral 1.10=+1×cost)"
-                )
-        if self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
-            floor = base_floor
-            if not clears_pf(prev_cost["ratio"], floor) and not clears_pf(cost["ratio"], floor):
-                allow = False
-                reasons.append(f"prev PF {prev_cost['ratio']:.2f}<{floor:.2f} (cost-scale)")
-        if self.axes["pause"].enabled:
-            pause_n = self.axes["pause"].max_window
-            if consec >= pause_n or consec_loss(pnls[-pause_n:]) >= pause_n:
-                allow = False
-                reasons.append(f"pause {consec}/{pause_n}")
-        # Main / real stages are advisory intern: they do not freeze the book.
-        if sample_ok and float(main_cost["count"]) >= self._main_n() and not clears_pf(main_cost["ratio"], main_floor):
-            reasons.append(f"main {int(main_cost['count'])} PF {main_cost['ratio']:.2f}<{main_floor:.2f}")
-        if sample_ok and float(real_cost["count"]) >= self._real_n() and not clears_pf(real_cost["ratio"], real_floor):
-            reasons.append(f"real {int(real_cost['count'])} PF {real_cost['ratio']:.2f}<{real_floor:.2f}")
-        stages = {
-            "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},
-            "base": {"pf": float(cost["ratio"]), "n": float(cost["count"]), "minPf": base_floor},
-            "main": {"pf": float(main_cost["ratio"]), "n": float(main_cost["count"]), "minPf": main_floor},
-            "real": {"pf": float(real_cost["ratio"]), "n": float(real_cost["count"]), "minPf": real_floor},
-            "last": {"pf": float(last_cost["ratio"]), "n": float(last_cost["count"]), "minPf": base_floor},
-            "prev": {"pf": float(prev_cost["ratio"]), "n": float(prev_cost["count"])},
-        }
-        self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
-        return allow, reasons, metrics
+        """The overall verdict on one stream (the book's): judge() stored as self.last."""
+        r = self.judge(closed_rows, consec, intern)
+        self.last = r
+        return r["allow"], r["reasons"], r["metrics"]
 
-    def axes_active(self) -> bool:
-        return any(bool(ax.enabled) for ax in self.axes.values())
-
-    def coordinate_base_sets(self, book: Any) -> Dict[str, Any]:
-        """Coordinate from Base parent IDs, indexes, and already-scored vars.
-
-        Axis child windows (prev/last/cont/pause × N) stay off unless an axis
-        is explicitly enabled. Qualification reads last15_* on each parent Set
-        via the kind/id index — no extra PF walks.
-        """
-        floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
-        need = 8
-        try:
-            need = int(book.eval_need() or 8)
-        except Exception:
-            need = 8
-        ids: List[str] = []
-        indexed = getattr(book, "_ids_by_kind", None) or {}
-        if isinstance(indexed, dict) and indexed.get("base"):
-            ids = [str(x) for x in indexed.get("base") or []]
-        if not ids:
+    def net_streak(self, rows: Sequence[Any]) -> int:
+        """Consecutive measurable net losses, using the same cost and rows as the Axis PF."""
+        count = 0
+        for row in reversed(rows):
+            raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
             try:
-                ids = [st.id for st in (getattr(book, "by_idx", None) or []) if getattr(st, "kind", "") == "base"]
-            except Exception:
-                ids = []
-        sets = getattr(book, "sets", None) or {}
-        qualified = 0
-        parent_rows: List[Dict[str, Any]] = []
-        for sid in ids:
-            st = sets.get(sid) if isinstance(sets, dict) else None
-            if st is None:
+                gross = float(raw)
+            except (TypeError, ValueError, OverflowError):
                 continue
-            n = int(getattr(st, "last15_n", 0) or 0)
-            pf = float(getattr(st, "last15_ratio", 1.0) or 1.0)
-            ledger = getattr(st, "stage_ledger", None) or {}
-            # The scored Base ledger (sample, PF and DD-time) owns the parent
-            # decision; bare vars are only a fallback for unscored books.
-            ok = bool(ledger.get("base")) if "base" in ledger else (n >= need and clears_pf(pf, floor))
-            if not ok:
-                # Base-rejected Sets stay in Base evaluation, not coordination.
+            if not math.isfinite(gross):
                 continue
-            qualified += 1
-            parent_rows.append({
-                "parentSetId": sid,
-                "childCount": 0,
-                "qualifiedChildren": 1 if ok else 0,
-                "n": n,
-                "pf": round(pf, 6),
-                "idx": int(getattr(st, "idx", 0) or 0),
-                "pack": str(getattr(st, "pack", "") or ""),
-                "fromVars": True,
-            })
-        return {
-            "parentCount": len(parent_rows),
-            "parentSetIds": [row["parentSetId"] for row in parent_rows[:32]],
-            "parentSetIdCount": len(parent_rows),
-            "childCount": 0,
-            "volumeRatio": round(qualified * VOLUME_RATIO_UNIT, 6),
-            "childVolumeRatio": 0.0,
-            "volumeRatioUnit": VOLUME_RATIO_UNIT,
-            "qualifiedChildren": qualified,
-            "axes": {a: 0 for a in AXIS_SPECS},
-            "fromBaseVars": True,
-            "fromIds": True,
-            "fromIndex": True,
-            "parents": parent_rows[:24],
-            "parentRule": "Base parent Sets only; axis children off by default; vars/IDs/indexes",
-        }
+            if row_net_pnl_pct(row, self.position_cost_pct) < 0:
+                count += 1
+            else:
+                break
+        return count
 
-    def record_coordination(self, axis: str, outcome: str, direction: str = "", event_key: str = "") -> bool:
-        """Count one coordination outcome once per stable child/event key."""
-        axis_name = str(axis or "").strip().lower()
-        if axis_name not in self.coordination:
-            return False
-        key = event_key or stable_key(axis_name, outcome, direction)
-        if key in self._axis_seen:
-            return False
-        self._axis_seen[key] = None
-        while len(self._axis_seen) > AXIS_EVENT_CAP:
-            self._axis_seen.popitem(last=False)
-        bucket = self.coordination[axis_name]
-        name = str(outcome or "").strip().lower()
-        if name in bucket:
-            bucket[name] += 1
-        if str(direction or "").upper() in ("LONG", "SHORT"):
-            bucket[str(direction).upper().lower()] += 1
-        return True
-
-    def axis_variants(
-        self,
-        parent_set_id: str,
-        closed_rows: Sequence[Any],
-        open_rows: Optional[Sequence[Any]] = None,
-        side: str = "",
-    ) -> List[Dict[str, Any]]:
-        """Build deterministic count-pos children without counting a parent twice.
-
-        Prev/Last/Cont/Pause are evaluated from closed rows only. Open rows are
-        accepted separately so callers cannot accidentally leak an active
-        position into the Prev tape. Every child keeps the Base parent ID and a
-        stable dedupe key; 100 relative positions equals one parent volume.
-
-        ``side`` (LONG / SHORT) evaluates one direction's own tape, like Base
-        qualification; without it the merged tape is used (legacy callers).
-        """
-        if not self.axes_active():
-            return []
-        from position_cost import filter_side
-        want = str(side or "").strip().upper()
-        want = want if want in ("LONG", "SHORT") else ""
-        ordered = sorted(
-            [r for r in filter_side([r for r in closed_rows if r is not None], want or None) if r is not None],
-            key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
-        )
-        closed = ordered[-max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2) :] if self.additional_coordination else ordered
-        _ = list(open_rows or ())  # explicit boundary: never mixed into closed
-        out: List[Dict[str, Any]] = []
-        for axis, spec in AXIS_SPECS.items():
-            cfg = self.axes[axis]
-            if not cfg.enabled:
-                continue
-            start = int(spec["min"])
-            stop = min(int(cfg.max_window), int(spec["max"]))
-            step = int(spec["step"])
-            for count in range(start, stop + 1, step):
-                if axis == "prev":
-                    # Previous means the closed window immediately before the
-                    # current closed window. Open positions never enter either
-                    # window, even when a caller supplies open_rows.
-                    tape = closed[-(count * 2) : -count] if len(closed) >= count * 2 else []
-                else:
-                    tape = closed[-count:]
-                pf = last_n_cost_pf(tape, count, self.position_cost_pct)
-                # Cost-net equity move per close: works for live USDT rows and
-                # replayed CompactHistRows (which carry no raw ``pnl``).
-                losses = [row_equity_pnl(r, self.position_cost_pct) for r in tape]
-                paused = axis == "pause" and consec_loss(losses) >= count
-                qualifies = (
-                    len(tape) >= min(3, count)
-                    and not paused
-                    and clears_pf(pf.get("ratio"), self.stage_min_pf.get("base", POSITIVE_PF))
-                )
-                child_key = stable_key(parent_set_id, want, axis, count, len(tape), round(float(pf.get("ratio") or 0.0), 6))
-                self.record_coordination(axis, "evaluated", event_key=child_key + ":evaluated")
-                if paused:
-                    self.record_coordination(axis, "paused", event_key=child_key + ":paused")
-                elif qualifies:
-                    self.record_coordination(axis, "qualified", event_key=child_key + ":qualified")
-                else:
-                    self.record_coordination(axis, "blocked", event_key=child_key + ":blocked")
-                out.append({
-                    "axisKey": f"{axis}:{count}",
-                    "axis": axis,
-                    "side": want,
-                    "parentSetId": str(parent_set_id),
-                    "relativeCount": count,
-                    "volumeRatio": round(count * VOLUME_RATIO_UNIT, 6),
-                    "volumeRatioUnit": VOLUME_RATIO_UNIT,
-                    "closedOnly": True,
-                    "openExcluded": True,
-                    "closedN": len(tape),
-                    "pf": round(float(pf.get("ratio") or 1.0), 6),
-                    "paused": paused,
-                    "qualified": qualifies,
-                    "qualificationReason": "qualified" if qualifies else (
-                        "paused" if paused else f"closed={len(tape)} pf={float(pf.get('ratio') or 0.0):.2f}"
-                    ),
-                    "dedupeKey": child_key,
-                })
+    def judge_scopes(self, streams: Dict[str, Sequence[Any]], interns: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """The Real stage's overall strategies per scope, each on its own stream and independent of the others: "overall" (every
+        Real Set), "lane:pos" / "lane:neg" (the positive and the Real Negative lane), "pack:<pack>" (one strategy's Real Sets, both
+        lanes) and "pack:<pack>:<lane>".
+        Each scope gets its own consecutive losses, verdict and figures (self.scopes); scope_allows reads the pack's own lane per entry."""
+        out: Dict[str, Any] = {}
+        for scope, rows in streams.items():
+            consec = self.net_streak(rows)
+            r = self.judge(rows, consec, (interns or {}).get(scope))
+            m = r["metrics"]
+            out[scope] = {"allow": bool(r["allow"]), "reasons": list(r["reasons"]), "orders": len(rows), "consecLoss": consec,
+                          "lastPf": m["lastPf"], "prevPf": m["prevPf"], "pf": m["last15Pf"], "n": m["last15N"],
+                          "mainPf": m["mainPf"], "mainN": m["mainN"], "realPf": m["realPf"], "realN": m["realN"],
+                          "internPf": m["internPf"], "internN": m["internN"]}
+        self.scopes = out
         return out
 
-    @staticmethod
-    def aggregate_axis_variants(variants: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate relative children once per parent while retaining details."""
-        rows = [v for v in variants if isinstance(v, dict)]
-        parents = sorted({str(v.get("parentSetId") or "") for v in rows if v.get("parentSetId")})
-        # One parent x direction counts once (children are per direction).
-        by_parent: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for row in rows:
-            parent = str(row.get("parentSetId") or "")
-            if parent:
-                by_parent.setdefault((parent, str(row.get("side") or "")), []).append(row)
-        parent_rows = []
-        for parent, side in sorted(by_parent):
-            children = by_parent[(parent, side)]
-            qualified = [row for row in children if row.get("qualified")]
-            parent_rows.append({
-                "parentSetId": parent,
-                "side": side,
-                "childCount": len(children),
-                "qualifiedChildren": len(qualified),
-                "childVolumeRatio": round(sum(float(row.get("volumeRatio") or 0) for row in qualified), 6),
-                "countedVolumeRatio": VOLUME_RATIO_UNIT if qualified else 0.0,
-            })
-        return {
-            "parentCount": len(parents),
-            "parentSideCount": len(parent_rows),
-            "parentSetIds": parents,
-            "childCount": len(rows),
-            "volumeRatio": round(sum(float(row.get("countedVolumeRatio") or 0) for row in parent_rows), 6),
-            "childVolumeRatio": round(sum(float(row.get("childVolumeRatio") or 0) for row in parent_rows), 6),
-            "volumeRatioUnit": VOLUME_RATIO_UNIT,
-            "qualifiedChildren": sum(1 for v in rows if v.get("qualified")),
-            "axes": {a: sum(1 for v in rows if v.get("axis") == a) for a in AXIS_SPECS},
-            "parents": parent_rows,
-            "rows": rows,
-        }
+    def scope_allows(self, pack: str, lane: str) -> Tuple[bool, str]:
+        """A pack/lane is judged on its own evidence; pooled scopes are figures, not cross-pack gates."""
+        scopes = getattr(self, "scopes", {}) or {}
+        lane = lane or "pos"
+        for key in (f"pack:{pack}:{lane}",):
+            s = scopes.get(key)
+            if s is not None and not s.get("allow", True):
+                return False, key
+        return True, ""
 
-    def size_mult(self, open_n: int) -> float:
-        """Count-pos volume: each extra open trims new-entry size by posCountsVolumeRatio."""
-        ratio = max(0.0, min(0.3, float(self.pos_count_vol_ratio or 0)))
-        n = max(0, int(open_n or 0))
-        return max(0.35, 1.0 - n * ratio)
-
-    def add_stack_cap(self, configured_stack: int, last_pf: float) -> int:
-        """Cont axis on additional strategies: weak last-PF keeps only the first half of counts."""
-        stack = max(1, int(configured_stack or 1))
-        if not self.axes["cont"].enabled:
-            return stack
-        try:
-            pf = float(last_pf or 0)
-        except Exception:
-            pf = 0.0
-        if clears_pf(pf, self.min_pf):
-            return stack
-        return max(1, stack // 2)
-
-    def add_gate(
+    def judge(
         self,
         closed_rows: Sequence[Any],
         consec: int,
         intern: Optional[Dict[str, Any]] = None,
-        count: Optional[int] = None,
-        count_tape: Optional[Sequence[float]] = None,
-    ) -> Tuple[bool, List[str], Dict[str, float]]:
-        """Axis coordination for additional strategies (Block / DCA) using count-pos.
-
-        Pause / last / prev apply independently of new entries. When a Block
-        count tape is given, last+pause also run on that count's own history.
-        """
-        allow, reasons, metrics = self.gate(closed_rows, consec, intern=intern)
-        if count is not None:
-            n = max(1, int(count))
-            tape = [float(x) for x in (count_tape or []) if x is not None]
-            last_w = max(1, int(self.axes["last"].max_window))
-            tail = tape[-max(last_w, n) :]
-            metrics["count"] = float(n)
-            metrics["countN"] = float(len(tail))
-            if self.axes["last"].enabled and len(tail) >= min(3, last_w):
-                gp = sum(x for x in tail if x > 0)
-                gl = abs(sum(x for x in tail if x < 0))
-                pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
-                floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
-                metrics["countPf"] = round(pf, 4)
-                if not clears_pf(pf, floor):
+        min_pf: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """One stream's verdict, pure (no state): the axes (last, prev, pause) against the minimum PF, and the stage figures.
+        min_pf: the floor for THIS stream. A stream that is one Set's own Real Set is judged at that Set's floor (the one its Base, Main and Real windows ask), not
+        at the pooled floor; omitted, the coordinator's own."""
+        mp = self.min_pf if min_pf is None else float(min_pf)
+        reasons: List[str] = []
+        consec = max(int(consec), self.net_streak(closed_rows))
+        last_w = self.axes["last"].max_window
+        prev_w = min(self.prev_window, self.axes["prev"].max_window * 2)
+        cost = last_n_cost_pf(closed_rows, self.pf_window, self.position_cost_pct)
+        last_cost = last_n_cost_pf(closed_rows, last_w, self.position_cost_pct)
+        prev_cost = last_n_cost_pf(closed_rows, prev_w, self.position_cost_pct)
+        main_cost = last_n_cost_pf(closed_rows, max(3, self.main_eval), self.position_cost_pct)
+        real_cost = last_n_cost_pf(closed_rows, max(3, self.real_eval), self.position_cost_pct)
+        intern = intern or {}
+        # first key PRESENT wins: a real PF of 0.0 must not fall through to the next key
+        intern_pf = next((float(intern[k]) for k in ("pf", "indications", "general") if intern.get(k) is not None), 0.0)
+        intern_n = float(intern.get("n") or 0)
+        metrics: Dict[str, float] = {
+            "lastPf": round(float(last_cost["pf"]), 3),
+            "prevPf": round(float(prev_cost["pf"]), 3),
+            "consecLoss": float(consec),
+            "ratio": cost["ratio"],
+            "last15Pf": cost["pf"],
+            "last15R": cost["avgR"],
+            "last15N": cost["count"],
+            "costPct": cost["costPct"],
+            "minPf": mp,
+            "pfNeutral": 1.0,
+            "pfPlus1x": 1.1,
+            "internPf": round(intern_pf, 4) if intern_pf else 0.0,
+            "internN": intern_n,
+            "mainPf": round(float(main_cost["pf"]), 4),
+            "mainN": float(main_cost["count"]),
+            "realPf": round(float(real_cost["pf"]), 4),
+            "realN": float(real_cost["count"]),
+        }
+        allow = True
+        sample_ok = cost["count"] >= min(MIN_VALIDATION_N, self.pf_window)
+        intern_ok = intern_n >= max(5, self.min_samples) and intern_pf + 1e-9 >= 1.0
+        if intern_ok:
+            metrics["internOpen"] = 1.0
+        last_n_ok = int(last_cost["count"]) >= min(3, last_w)
+        if getattr(self, "disjoint", False):
+            before = list(closed_rows)[:-last_w] if last_w > 0 else list(closed_rows)
+            prev_n = self.axes["prev"].max_window
+            prev_cost = last_n_cost_pf(before, prev_n, self.position_cost_pct)
+            metrics["prevPf"] = round(float(prev_cost["pf"]), 3)
+            if self.axes["prev"].enabled and int(prev_cost["count"]) >= min(prev_n, max(1, self.prev_min_count)) and prev_cost["pf"] + 1e-9 < mp:
+                allow = False
+                reasons.append(f"prev {int(prev_cost['count'])} PF {prev_cost['pf']:.2f}<{mp:.2f}")
+            outcome = getattr(self, "last_outcome", "any")
+            if self.axes["last"].enabled and outcome != "any" and int(last_cost["count"]) >= 1:
+                net = float(last_cost["avgR"])
+                if (outcome == "positive" and not net > 0) or (outcome == "negative" and not net < 0):
                     allow = False
-                    reasons.append(f"count-pos n={n} last{len(tail)} PF {pf:.2f}<{floor:.2f}")
-            if self.axes["pause"].enabled and tail:
-                pause_n = max(1, int(self.axes["pause"].max_window))
-                cl = consec_loss(tail)
-                metrics["countConsec"] = float(cl)
-                if cl >= pause_n:
-                    allow = False
-                    reasons.append(f"count-pos pause n={n} {cl}/{pause_n}")
-        metrics["addsAllow"] = 1.0 if allow else 0.0
-        self.last = {**(self.last or {}), "addsAllow": allow, "addReasons": list(reasons), "metrics": metrics}
-        return allow, reasons, metrics
+                    reasons.append(f"last {int(last_cost['count'])} net not {outcome}")
+        elif self.axes["last"].enabled and last_n_ok:
+            if last_cost["pf"] + 1e-9 < mp:
+                allow = False
+                reasons.append(
+                    f"last {int(last_cost['count'])} PF {last_cost['pf']:.2f}<{mp:.2f}"
+                )
+        if not getattr(self, "disjoint", False) and self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
+            floor = mp * 0.85
+            if prev_cost["pf"] + 1e-9 < floor and cost["pf"] + 1e-9 < floor:
+                allow = False
+                reasons.append(f"prev PF {prev_cost['pf']:.2f}<{floor:.2f}")
+        if self.axes["pause"].enabled:
+            pause_n = self.axes["pause"].max_window
+            if consec >= pause_n:
+                allow = False
+                reasons.append(f"pause {consec}/{pause_n}")
+        # Main / real stages are advisory intern: they do not freeze the book.
+        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["pf"]) + 1e-9 < 1.0:
+            reasons.append(f"main {int(main_cost['count'])} PF {main_cost['pf']:.2f}<1.00")
+        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["pf"]) + 1e-9 < 1.0:
+            reasons.append(f"real {int(real_cost['count'])} PF {real_cost['pf']:.2f}<1.00")
+        stages = {
+            "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},
+            "main": {"pf": float(main_cost["pf"]), "n": float(main_cost["count"])},
+            "real": {"pf": float(real_cost["pf"]), "n": float(real_cost["count"])},
+            "last": {"pf": float(last_cost["pf"]), "n": float(last_cost["count"])},
+            "prev": {"pf": float(prev_cost["pf"]), "n": float(prev_cost["count"])},
+        }
+        return {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
 
-    def slot_cap(self, max_open: int, last_pf: float) -> int:
-        if max_open <= 0 or max_open >= 10**8:
-            return 10**9
-        cap = max_open
+    def slot_cap(self, max_open: int, last_pf: float, min_pf: Optional[float] = None) -> int:
+        cap = max_open if 0 < max_open < 10**8 else 10**9
         if self.axes["cont"].enabled:
             extra = self.axes["cont"].max_window
-            if clears_pf(last_pf, self.min_pf):
-                cap = min(max_open, extra)
+            if last_pf >= (self.min_pf if min_pf is None else float(min_pf)):
+                cap = min(cap, extra)
             else:
-                cap = min(max_open, max(2, extra // 2))
+                cap = min(cap, max(1, extra // 2))
         return max(1, cap)
 
     def pick_rearrange(
@@ -693,14 +357,8 @@ class Coordinator:
         return {
             "axes": {k: asdict(v) for k, v in self.axes.items()},
             "minPf": self.min_pf,
-            "stageMinPf": dict(self.stage_min_pf),
             "pfWindow": self.pf_window,
             "positionCostPct": self.position_cost_pct,
-            "additionalCoordination": self.additional_coordination,
-            # Deprecated response alias for older clients.
-            "minimalPositiveCoordination": self.additional_coordination,
-            "optimizationN": self.optimization_n,
-            "optimization": dict(self.optimization_stats or {}),
             "pfNeutral": 1.0,
             "pfPlus1xCost": 1.1,
             "noise": self.noise,
@@ -710,23 +368,40 @@ class Coordinator:
             "maxSlRatio": self.max_sl_ratio,
             "trailingMinStep": self.trailing_min_step,
             "posCountVolRatio": self.pos_count_vol_ratio,
-            "countPos": {
-                "openMult": True,
-                "addGate": True,
-                "prevMinCount": self.prev_min_count,
-                "prevWindow": self.prev_window,
-                "mainEval": self.main_eval,
-                "realEval": self.real_eval,
-            },
             "rearrange": self.rearrange,
             "rearrangeGap": self.rearrange_gap,
             "mainEval": self.main_eval,
             "realEval": self.real_eval,
             "stages": (self.last or {}).get("stages") or {},
-            "coordination": {
-                "axes": {axis: dict(self.coordination.get(axis) or {}) for axis in AXES},
-                "eventCount": len(self._axis_seen),
-                "volumeRatioUnit": VOLUME_RATIO_UNIT,
-            },
             "gate": self.last,
         }
+
+
+def self_test() -> List[Tuple[str, bool, str]]:
+    out: List[Tuple[str, bool, str]] = []
+    c = Coordinator()
+    c.load({}, {"setMinSamples": 7})
+    out.append(("coord-min-samples", c.min_samples == 7, f"min_samples={c.min_samples}"))
+    lo = Coordinator()
+    lo.load({}, {"pfWindow": 4, "windowsLinked": False})
+    out.append(("coord-pf-window-floor-8", lo.pf_window == 8, f"pf_window={lo.pf_window}"))
+    d = Coordinator()
+    d.load({}, {})
+    out.append(("coord-min-default", d.min_samples == 12, f"min_samples={d.min_samples}"))
+    e = Coordinator()
+    e.load({}, {"positionCostPct": 0.15})
+    out.append(("coord-cost-percent", abs(e.position_cost_pct - 0.15) < 1e-9, f"pct={e.position_cost_pct}"))
+    f = Coordinator()
+    f.load({}, {"positionCostPct": 3.0})
+    out.append(("coord-cost-no-guess", abs(f.position_cost_pct - 3.0) < 1e-9, f"pct={f.position_cost_pct}"))
+    return out
+
+
+if __name__ == "__main__":
+    failed = 0
+    for name, ok, detail in self_test():
+        print(("PASS" if ok else "FAIL"), name, detail)
+        failed += int(not ok)
+    if failed:
+        raise SystemExit(1)
+    print("coord_engine ok")

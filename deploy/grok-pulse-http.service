@@ -4,22 +4,23 @@ Documentation=https://github.com/mxssnx-creator/CTS-G
 After=network-online.target
 Wants=network-online.target
 PartOf=grok-pulse.target
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
 EnvironmentFile=-/etc/cts-g/cts-g.env
-EnvironmentFile=-/etc/cts-g/credentials.env
-WorkingDirectory=/opt/cts-g/server/pulse
-ExecStart=/usr/bin/python3 -O /opt/cts-g/server/pulse/pulse_http.py
+WorkingDirectory=/opt/grok-x01-pulse
+ExecStart=/usr/bin/python3 -O /opt/grok-x01-pulse/pulse_http.py
 Restart=always
-RestartSec=2
+RestartSec=15
 TimeoutStopSec=15
 KillMode=mixed
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 LimitNOFILE=4096
-StandardOutput=append:/var/log/cts-g/pulse-http.log
-StandardError=append:/var/log/cts-g/pulse-http.err.log
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=grok-pulse-http
 
 [Install]

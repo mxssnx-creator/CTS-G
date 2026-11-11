@@ -2,7 +2,6 @@
 
 1.00 = Neutral (net 0 after one PositionCost)
 1.10 = +1× PositionCost net  (gross move = 2× cost)
-1.15 = +1.5× PositionCost net — live real-edge floor
 Each 0.10 of ratio = one more PositionCost of net result.
 
 required net % = cost% × ((ratio − 1) / 0.10)
@@ -10,308 +9,109 @@ required net % = cost% × ((ratio − 1) / 0.10)
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+import json
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-POSITION_COST_PCT_DEFAULT = 0.10
+from fee_policy import DEFAULT_COST_PCT
+
+POSITION_COST_PCT_DEFAULT = DEFAULT_COST_PCT
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
-# User-facing PF controls share one contract across UI, overlay, and workers.
-PF_MIN = 1.02
-PF_MAX = 1.35
-PF_STEP = 0.01
-RATIO_MIN = PF_MIN
-RATIO_MAX = PF_MAX
-RATIO_STEP = PF_STEP
-LAST_N_DEFAULT = 30
-# Real-edge floor: +1.5× PositionCost net. Intern/cost-neutral stays 1.00 and
-# must never be treated as this real floor (or vice versa). +1× cost remains 1.10.
-POSITIVE_PF = 1.15
-INTERN_PF = 1.0
-# Micro tier: positive Sets below the real floor trade at venue-minimum size
-# only. Kept out of PF_SETTING_KEYS so the shared floor never collapses onto it.
-MICRO_PF = 1.05
-SL_MIN_PCT = 0.4
-# Default desk SL floor (wider than the hard floor above).
-SL_MIN_DEFAULT_PCT = 0.6
-# The live and historic coordinators share these named evaluation windows.  The
-# largest window is intentionally bounded so every set can retain enough
-# recent evidence without keeping its complete trade history in RAM.
-EVALUATION_WINDOWS = (5, 10, 15, 25, 30, 50, 75)
+RATIO_MIN = 1.02
+RATIO_MAX = 2.30
+RATIO_STEP = 0.02
+LAST_N_DEFAULT = 15
+MIN_VALIDATION_N = 8         # no last-N validation reads fewer orders than this
+OVERALL_N_DEFAULT = 50       # the overall validation's last N (setGateWindow, the Base gate window)
+# One shipped policy is consumed by both the Python engine and settings UI.
+_PROTECTION_POLICY = json.loads(Path(__file__).with_name("protection-policy.json").read_text())
+SL_TP_RATIOS = tuple(_PROTECTION_POLICY["slTpRatios"])
+SL_TP_MIN, SL_TP_MAX = SL_TP_RATIOS[0], SL_TP_RATIOS[-1]
+SL_TP_STEP = SL_TP_RATIOS[1] - SL_TP_RATIOS[0]
+SL_RATIO_MIN, SL_RATIO_MAX, SL_RATIO_STEP = SL_TP_MIN, SL_TP_MAX, SL_TP_STEP
+SL_RATIOS = SL_TP_RATIOS
+SL_RATIOS_LOW = ()  # legacy setSlLow adds no duplicate grid
+SL_RATIO_FLOOR = SL_RATIO_MIN
+SL_RATIOS_ALL = SL_RATIOS
+MIN_SL_DISTANCE_PCT_DEFAULT = _PROTECTION_POLICY["minSlDistancePct"]["default"]
 
 
-def _row_value(row: Any, *keys: str) -> Any:
-    """Read the first present field from dicts, dataclasses, or API rows."""
-    for key in keys:
-        if isinstance(row, Mapping):
-            if key in row:
-                value = row.get(key)
-                if value is not None:
-                    return value
-        elif hasattr(row, key):
-            value = getattr(row, key)
-            if value is not None:
-                return value
-    return None
+def normalize_min_sl_distance_pct(value: Any = None) -> float:
+    bounds = _PROTECTION_POLICY["minSlDistancePct"]
+    return max(bounds["min"], min(bounds["max"], finite(value, bounds["default"])))
+
+# TP grid (base Sets), owner 2026-11-02: the step is an ABSOLUTE distance, TP = k x TP_UNIT_PCT of price with k = 2..32, i.e. 0.2 % .. 3.2 % in 0.1 %
+# steps. It was k x PositionCost (a distance that moves with the venue's fees); PositionCost still pays for every order and floors the TP (TP_MIN_COSTS).
+TP_UNIT_PCT = 0.1
+TP_STEP_MIN = 2
+TP_STEP_MAX = 50                # the ceiling a setting can reach: 5.0 % (owner 2026-11-03: limits raised; was 32)
+TP_STEP_DEFAULT_MAX = 32        # the shipped grid's last step (3.2 %), unchanged
+TP_MIN_COSTS = 1.0              # a TP never sits under this many PositionCosts (was 2): the net at the TP stays positive
+# Named TP ranges (owner 2026-11-03: "Ranges Micro, Minimal, Short, Normal, Long, Wide"), each a band of TP steps switched on or off on its own
+# (overlay tpRanges {name: bool}). Micro .. Long cover the shipped grid 0.2 .. 3.2 %; Wide adds 3.3 .. 5.0 %. A switched-off range builds none of its Sets;
+# the other ranges' Sets are unchanged (every Set is its own step, lane and tape).
+TP_RANGES = (("micro", 2, 3), ("minimal", 4, 6), ("short", 7, 12), ("normal", 13, 20), ("long", 21, 32), ("wide", 33, 50))
+TP_RANGES_DEFAULT = {"micro": True, "minimal": True, "short": True, "normal": True, "long": True, "wide": False}
 
 
-def row_notional(row: Any) -> float:
-    """Return the executed quote notional represented by one row."""
-    direct = finite(_row_value(row, "notional", "quoteQty", "quoteQuantity", "cumQuote", "cumQuoteQty"))
-    if direct > 1e-12:
-        return direct
-    qty = finite(_row_value(row, "qty", "executedQty", "filledQty", "cumQty", "quantity"))
-    px = finite(_row_value(row, "entry", "avgPrice", "averagePrice", "price", "exit"))
-    return max(0.0, qty * px)
+def tp_range_of(step: int) -> str:
+    """The named TP range a TP step belongs to (TP_RANGES); a step outside every band (never on the grid) is "wide" above and "micro" below."""
+    k = int(step)
+    for name, lo, hi in TP_RANGES:
+        if lo <= k <= hi:
+            return name
+    return "micro" if k < TP_RANGES[0][1] else "wide"
 
 
-def _nested_amount(value: Any) -> float:
-    if isinstance(value, dict):
-        for key in ("amount", "value", "qty", "quantity", "fee", "commission"):
-            if value.get(key) is not None:
-                return abs(finite(value.get(key)))
-    return abs(finite(value))
+def tp_ranges_on(raw: Any) -> Dict[str, bool]:
+    """The range switches from an overlay value: a dict {name: bool} (unknown names ignored, missing names at their default) or a list of the names on."""
+    out = dict(TP_RANGES_DEFAULT)
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if str(k).lower() in out:
+                out[str(k).lower()] = bool(v)
+    elif isinstance(raw, (list, tuple)):
+        names = {str(x).lower() for x in raw}
+        out = {k: k in names for k in out}
+    return out
+# Trailing grid (trail Sets): arm = k x TP_UNIT_PCT and give = j x TP_UNIT_PCT, trailMinStep <= j <= k <= TRAIL_STEP_MAX (arms up to 2.2 %).
+TRAIL_STEP_SETTING_MIN = 2
+TRAIL_STEP_SETTING_MAX = 8
+TRAIL_STEP_DEFAULT = 3
+TRAIL_STEP_MAX = 22
+TRAIL_STEP_CEIL = 30            # trailStepMax may raise the largest arm to 3.0 % (the trailing distance limit); more trailing arms (owner 2026-11-03)
+# Trailing stop families (owner 2026-11-03: "more Trailing additionally"): besides the shipped trailing Sets (initial stop TRAIL_SL_RATIO x the mid-step
+# TP), each ratio r in trailSlRatios builds the same arm / give pairs again with the initial stop at r x the arm, as their own Sets (id suffix ":ts<r>").
+TRAIL_SL_RATIOS = SL_TP_RATIOS
+# Overall minimum distances, in PositionCost units, counted as "PositionCost + n steps" (one step = one PositionCost):
+# a stop is never tighter than PositionCost + SL_MIN_STEPS steps, and a trailing stop never trails closer than
+# PositionCost + TRAIL_MIN_STEPS steps. Defaults: 1 and 2, i.e. 2 x and 3 x PositionCost.
+SL_MIN_STEPS_DEFAULT = 1
+TRAIL_MIN_STEPS_DEFAULT = 2
+_MIN_STEPS = {"sl": SL_MIN_STEPS_DEFAULT, "trail": TRAIL_MIN_STEPS_DEFAULT}
 
 
-def row_fee_usdt(row: Any) -> float:
-    """Read an absolute exchange fee/commission from a fill or close row."""
-    value = _row_value(
-        row,
-        "fee_total", "feeTotal", "totalFee", "totalCommission",
-        "fee", "fees", "feeAmount", "commission", "commissionAmount",
-        "transactionFee", "realizedFee",
-    )
-    if value is not None:
-        return _nested_amount(value)
-    entry = _row_value(row, "entry_fee", "entryFee", "openFee", "openCommission")
-    exit_fee = _row_value(row, "exit_fee", "exitFee", "closeFee", "closeCommission")
-    return _nested_amount(entry) + _nested_amount(exit_fee)
+def configure_min_steps(sl: Any = None, trail: Any = None) -> Dict[str, int]:
+    """Set the overall minimums (the overlay keys slMinSteps and trailMinSteps). None keeps the current value."""
+    if sl is not None:
+        _MIN_STEPS["sl"] = int(max(0, min(5, round(finite(sl, SL_MIN_STEPS_DEFAULT)))))
+    if trail is not None:
+        _MIN_STEPS["trail"] = int(max(1, min(7, round(finite(trail, TRAIL_MIN_STEPS_DEFAULT)))))
+    return dict(_MIN_STEPS)
 
 
-_FEE_RATE_KEYS = ("fee_rate", "feeRate", "commissionRate", "makerFeeRate", "takerFeeRate")
+def sl_floor_frac(cost_pct: float, steps: Optional[int] = None, *, min_distance_pct: Any = None) -> float:
+    """Initial SL floor: modeled cost + configured net price percent. Legacy steps are ignored.
 
-
-def _row_rate_pct(row: Any) -> Optional[float]:
-    # ``costPct`` is a legacy/display field on historic simulation rows and
-    # must not masquerade as an exchange measurement.  The explicit
-    # position-cost aliases are authoritative; exchange fee-rate aliases are
-    # measured evidence and are handled below.
-    value = _row_value(row, "position_cost_pct", "positionCostPct", "cost_pct")
-    if value is None:
-        return None
-    parsed = finite(value, -1.0)
-    if parsed < 0:
-        return None
-    return normalize_position_cost_pct(parsed)
-
-
-def _fee_rate_cost_pct(row: Any) -> Optional[float]:
-    """Convert a one-leg exchange fee rate to round-trip PositionCost.
-
-    Exchange APIs commonly expose rates as fractions (0.0005 = 0.05%), while
-    the CTS contract stores PositionCost in percent (0.15 = 0.15%). Values up
-    to 0.02 are interpreted as fractions and the result is doubled for the
-    entry+exit position cost.
+    Explicit per-book input avoids one instance's settings changing another instance's stops.
     """
-    raw = _row_value(row, *_FEE_RATE_KEYS)
-    if raw is None:
-        return None
-    parsed = finite(raw, -1.0)
-    if parsed < 0:
-        return None
-    one_leg_pct = parsed * 100.0 if parsed <= 0.02 else parsed
-    return normalize_position_cost_pct(one_leg_pct * 2.0)
+    return (max(0.0, float(cost_pct)) + normalize_min_sl_distance_pct(min_distance_pct)) / 100.0
 
 
-def row_position_cost_pct(row: Any, fallback: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """Return the row's measured round-trip cost or the manual fallback.
-
-    A row with an explicit cost is authoritative.  When only one exchange
-    execution leg contains a fee, the measured leg rate is doubled because
-    PositionCost is a round-trip contract.  Rows carrying entry+exit/total
-    fees are used as-is.  This keeps historical rows deterministic while
-    allowing live exchange fills to replace the static estimate safely.
-    """
-    source = str(_row_value(row, "cost_source", "costSource", "source") or "").lower()
-    explicit = _row_rate_pct(row)
-    legacy_cost = _row_value(row, "costPct")
-    if explicit is not None:
-        return explicit
-    if legacy_cost is not None and ("cost" in source or "exchange" in source):
-        return normalize_position_cost_pct(legacy_cost, fallback)
-    notion = row_notional(row)
-    if notion <= 1e-12:
-        return normalize_position_cost_pct(fallback)
-    entry_fee = _nested_amount(_row_value(row, "entry_fee", "entryFee", "openFee", "openCommission"))
-    exit_fee = _nested_amount(_row_value(row, "exit_fee", "exitFee", "closeFee", "closeCommission"))
-    total_fee = _row_value(row, "fee_total", "feeTotal", "totalFee", "totalCommission")
-    # Normalized report rows carry zero-valued fee placeholders.  They are not
-    # measurements unless the row is explicitly marked as live/exchange cost
-    # data; otherwise the configured manual fallback must remain authoritative.
-    total_is_measured = total_fee is not None and (
-        _nested_amount(total_fee) > 0
-        or "exchange" in source
-        or "live" in source
-        or "cost" in source
-    )
-    if total_is_measured or (entry_fee > 0 and exit_fee > 0):
-        measured = (_nested_amount(total_fee) if total_fee is not None else entry_fee + exit_fee) / notion * 100.0
-        return normalize_position_cost_pct(measured, fallback)
-    fee = row_fee_usdt(row)
-    if fee > 0:
-        # ``fee`` on an order/fill is normally one leg.  An explicit scope can
-        # mark it as a complete position cost when the endpoint provides one.
-        scope = str(_row_value(row, "fee_scope", "feeScope", "fee_type", "feeType") or "").lower()
-        legs = 1.0 if scope in ("roundtrip", "position", "total", "both") else 2.0
-        return normalize_position_cost_pct(fee / notion * 100.0 * legs, fallback)
-    rate_cost = _fee_rate_cost_pct(row)
-    if rate_cost is not None:
-        return rate_cost
-    return normalize_position_cost_pct(fallback)
-
-
-def row_has_measured_cost(row: Any) -> bool:
-    """Whether a row contains exchange-derived fee/cost evidence."""
-    source = str(_row_value(row, "cost_source", "costSource") or "").lower()
-    return bool(
-        "exchange" in source
-        or (
-            _row_value(row, "position_cost_pct", "positionCostPct", "cost_pct") is not None
-            and ("cost" in source or "live" in source)
-        )
-        or (_row_value(row, "costPct") is not None and ("cost" in source or "exchange" in source))
-        or row_fee_usdt(row) > 0
-        or _row_value(row, *_FEE_RATE_KEYS) is not None
-    )
-
-
-def _is_simple_historic_row(row: Any) -> bool:
-    """Identify generated gross-move rows that cannot carry measured cost."""
-    # Historic replay may use the slots-backed CompactHistRow to keep a large
-    # independent catalog within its memory ceiling.  It exposes the same
-    # Mapping/attribute fields as the legacy dict row, so classify it by the
-    # shared row contract instead of requiring a concrete dict.
-    if not isinstance(row, Mapping) or _row_value(row, "pnl_pct") is None:
-        return False
-    if any(_row_value(row, key) is not None for key in (
-        "position_cost_pct", "positionCostPct", "cost_pct", "fee_total", "feeTotal",
-        "totalFee", "totalCommission", "entry_fee", "entryFee", "exit_fee", "exitFee",
-        "fee", "fees", "commission", "commissionAmount", "fee_rate", "feeRate",
-        "commissionRate", "makerFeeRate", "takerFeeRate",
-    )):
-        return False
-    source = str(_row_value(row, "cost_source", "costSource", "source") or "").lower()
-    return not any(token in source for token in ("live", "exchange", "cost"))
-
-
-def _simple_historic_tape(rows: Sequence[Any]) -> bool:
-    return all(_is_simple_historic_row(row) for row in rows)
-
-
-def exchange_order_cost_sample(row: Any, fallback: float = POSITION_COST_PCT_DEFAULT) -> Optional[Dict[str, float]]:
-    """Normalize one exchange order/fill into a measured round-trip sample."""
-    notion = row_notional(row)
-    fee = row_fee_usdt(row)
-    rate = _row_value(row, *_FEE_RATE_KEYS)
-    if notion <= 1e-12 and rate is None:
-        return None
-    if rate is not None and fee <= 0:
-        cost = _fee_rate_cost_pct(row)
-        if cost is None:
-            return None
-    elif notion > 1e-12 and fee > 0:
-        cost = row_position_cost_pct(row, fallback)
-    else:
-        return None
-    return {"notional": float(notion), "fee": float(fee), "costPct": float(cost)}
-
-
-def effective_position_cost_pct(rows: Sequence[Any], fallback: float = POSITION_COST_PCT_DEFAULT) -> Dict[str, Any]:
-    """Weighted measured PositionCost summary with an explicit fallback state."""
-    fallback_n = normalize_position_cost_pct(fallback)
-    total_n = 0.0
-    weighted = 0.0
-    measured = 0
-    for row in rows:
-        if not row_has_measured_cost(row):
-            continue
-        notion = row_notional(row)
-        if notion <= 1e-12:
-            continue
-        measured_cost = row_position_cost_pct(row, fallback_n)
-        total_n += notion
-        weighted += notion * measured_cost
-        measured += 1
-    if measured <= 0 or total_n <= 1e-12:
-        return {
-            "costPct": fallback_n,
-            "fallbackPct": fallback_n,
-            "sampleCount": 0,
-            "notional": 0.0,
-            "source": "manual-fallback",
-            "complete": False,
-        }
-    return {
-        "costPct": round(weighted / total_n, 8),
-        "fallbackPct": fallback_n,
-        "sampleCount": measured,
-        "notional": round(total_n, 8),
-        "source": "live-exchange",
-        "complete": True,
-    }
-
-
-def normalize_pf(value: Any, fallback: float) -> float:
-    """Clamp a configured PF floor at the shared 0.01 precision."""
-    try:
-        parsed = float(value)
-    except Exception:
-        parsed = float(fallback)
-    if parsed != parsed or abs(parsed) == float("inf"):
-        parsed = float(fallback)
-    return round(max(PF_MIN, min(PF_MAX, parsed)), 2)
-
-
-PF_SETTING_KEYS = ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf")
-
-
-def shared_pf_settings(overlay):
-    """One threshold; legacy stage keys are aliases, never extra PF multipliers."""
-    result = dict(overlay or {})
-    value = next((result[k] for k in PF_SETTING_KEYS if result.get(k) is not None), POSITIVE_PF)
-    floor = normalize_pf(value, POSITIVE_PF)
-    result.update({key: floor for key in PF_SETTING_KEYS})
-    return result
-
-
-def clears_pf(value, floor=POSITIVE_PF):
-    """Admit at/above the requested floor. Intern 1.00 is cost-neutral, not real."""
-    return finite(value) + 1e-9 >= 1.0 and finite(value) + 1e-9 >= finite(floor, POSITIVE_PF)
-SL_TP_MIN = 0.1
-SL_TP_MAX = 3.0
-SL_TP_STEP = 0.1
-SL_TP_RATIOS = tuple(round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(int(round((SL_TP_MAX - SL_TP_MIN) / SL_TP_STEP)) + 1))
-
-
-def sl_tp_grid(lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: float = SL_TP_STEP) -> List[float]:
-    """Inclusive SL:TP ratio axis: 0.1 … 3.0 in 0.1 increments."""
-    a = finite(lo, SL_TP_MIN)
-    b = finite(hi, SL_TP_MAX)
-    s = finite(step, SL_TP_STEP)
-    if s <= 0:
-        s = SL_TP_STEP
-    if b < a:
-        a, b = b, a
-    a = max(SL_TP_MIN, min(SL_TP_MAX, a))
-    b = max(SL_TP_MIN, min(SL_TP_MAX, b))
-    out: List[float] = []
-    x = a
-    guard = 0
-    while x <= b + 1e-9 and guard < 64:
-        out.append(round(x, 1))
-        x = round(x + s, 10)
-        guard += 1
-    return out or list(SL_TP_RATIOS)
+def trail_floor_steps(steps: Optional[int] = None) -> int:
+    """The smallest trailing distance in PositionCost units: 1 + steps."""
+    return 1 + (_MIN_STEPS["trail"] if steps is None else int(steps))
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
@@ -323,26 +123,43 @@ def finite(v: Any, fallback: float = 0.0) -> float:
 
 
 def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: float = SL_TP_STEP) -> float:
-    x = finite(value, 0.6)
+    x = finite(value, 0.5)
     if x <= 0:
-        x = 0.6
+        x = 0.5
     x = max(lo, min(hi, x))
     n = int((x - lo) / step + 0.5 + 1e-12)
     nmax = int((hi - lo) / step + 0.5)
     n = max(0, min(nmax, n))
-    return round(lo + n * step, 1)
+    return round(lo + n * step, 2)
+
+
+def snap_sl_ratio(value: Any) -> float:
+    """Snap every strategy to the same 0.25..2.5 by 0.25 grid."""
+    return snap_ratio(value)
+
+
+GATE_MIN_PF_DEFAULT = 1.25   # base gate: net PF must stay above this (every module reads this one constant)
+MIN_PF_FLOOR = 1.02          # no validation gate asks less than this net PF, whatever is configured (owner 2026-11-03: 1.02, was 1.05; Micro windows the same)
+# The one definition of the minimum PF by window size and of the Signals floor. SetBook (the engine's defaults and the overlay parse), the
+# regression pin and the docs read these; the desk (src/lib/config-model.ts PF_TYPE_DEFAULTS) and the shipped overlays/presets carry copies that
+# the check gates.pf-defaults-match-every-shipped-overlay holds equal to this table. Where an older note and this table disagree, the higher
+# value stands (Minimal 1.10, Short 1.15; the 2026-10-29 note said 1.08 / 1.12).
+PF_BY_SIZE_DEFAULTS = {"minPfMicro": 1.02, "minPfMinimal": 1.10, "minPfShort": 1.15, "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}
+PF_SIZE_BOUNDS_DEFAULT = {"minPfMicroN": 5, "minPfMinimalN": 10, "minPfShortN": 20, "minPfMediumN": 35}
+
+
+def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """PositionCost in PERCENT (0.15 = 0.15%). A negative or non-finite value falls back to the default.
+    There is no magnitude guessing: 3 means 3%, never 0.03%."""
+    x = finite(value, default)
+    return x if x >= 0 else default
 
 
 def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """PositionCost as a fraction.
-
-    CTS stores PositionCost in percent (0.15 means 0.15%). A small legacy
-    caller may still pass a fraction such as 0.0015; values strictly below 0.02
-    retain that compatibility convention. 0.02 is the desk slider minimum and
-    is a percent.
-    """
+    """PositionCost as a fraction. Input is always PERCENT: 0.15 → 0.0015, 0.04 → 0.0004.
+    (The old rule read any value <= 0.05 as a fraction, so 0.04% was charged as 4%.)"""
     c = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
-    return c / 100.0 if c >= 0.02 else c
+    return c / 100.0
 
 
 def net_pnl_pct(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
@@ -356,158 +173,19 @@ def net_pnl_usdt(pnl_pct: float, qty: float, entry: float, cost_pct: float = POS
     return notion * net_pnl_pct(pnl_pct, cost_pct)
 
 
-def row_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """Gross price-move fraction from a fill row.
-
-    New fills carry ``pnl_pct``. Older persisted tapes can contain only the
-    already cost-net USDT ``pnl`` plus quantity and entry. Reconstruct the
-    gross move in that case so a missing percentage cannot become a synthetic
-    cost-only loss in PF, expectancy, or DDT calculations.
+def row_net_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """Recorded execution net is immutable; paper/legacy rows use one allowance.
+    Never infer net from the ambiguous USDT pnl field or deduct fees twice.
     """
-    raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
-    if raw is not None:
-        return finite(raw)
-    if isinstance(row, dict):
-        pnl = finite(row.get("pnl"))
-        qty = finite(row.get("qty"))
-        entry = finite(row.get("entry"))
-    else:
-        pnl = finite(getattr(row, "pnl", 0))
-        qty = finite(getattr(row, "qty", 0))
-        entry = finite(getattr(row, "entry", 0))
-    notional = max(0.0, qty * entry)
-    row_cost = row_position_cost_pct(row, cost_pct)
-    return pnl / notional + cost_as_frac(row_cost) if notional > 1e-12 else 0.0
-
-
-def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """Net fraction after subtracting one PositionCost. Always from the gross move."""
-    if _is_simple_historic_row(row):
-        return net_pnl_pct(finite(row.get("pnl_pct")), cost_pct)
-    actual_cost = row_position_cost_pct(row, cost_pct)
-    return net_pnl_pct(row_pnl_pct(row, actual_cost), actual_cost)
-
-
-def accumulate_close(previous: Dict[str, Any], leg: Dict[str, Any]) -> Dict[str, Any]:
-    """One bounded, persistable close accumulator per independent position."""
-    old_qty = finite(previous.get("qty"))
-    qty = old_qty + finite(leg.get("qty"))
-    old_notion = row_notional(previous)
-    notion = old_notion + row_notional(leg)
-    result = {key: value for key, value in leg.items() if key != "roundtrip_result"}
-    result.update(
-        qty=qty, entry=notion / max(qty, 1e-12),
-        exit=(finite(previous.get("exit")) * old_qty + finite(leg.get("exit")) * finite(leg.get("qty"))) / max(qty, 1e-12),
-        pnl=finite(previous.get("pnl")) + finite(leg.get("pnl")),
-        pnl_pct=(row_pnl_pct(previous) * old_notion + row_pnl_pct(leg) * row_notional(leg)) / max(notion, 1e-12),
-        position_cost_pct=(row_position_cost_pct(previous) * old_notion + row_position_cost_pct(leg) * row_notional(leg)) / max(notion, 1e-12),
-        fee_total=finite(previous.get("fee_total")) + finite(leg.get("fee_total")),
-        entry_fee=finite(previous.get("entry_fee")) + finite(leg.get("entry_fee")),
-        exit_fee=finite(previous.get("exit_fee")) + finite(leg.get("exit_fee")),
-        closeLegs=int(previous.get("closeLegs") or 0) + 1,
-        exchange_confirmed=bool(leg.get("exchange_confirmed")) and (not previous or bool(previous.get("exchange_confirmed"))),
-    )
-    if previous and previous.get("cost_source") != leg.get("cost_source"):
-        result["cost_source"] = "mixed-cost"
-    return result
-
-
-def live_evidence(rows: Sequence[Any]) -> list[Dict[str, Any]]:
-    """Live exchange results only: confirmed, complete round trips of our own
-    positions (one sample per position, partial legs aggregated)."""
-    return completed_roundtrips(rows)
-
-
-def live_first_window(live: Sequence[Any], replay: Sequence[Any], n: int) -> tuple[list, str]:
-    """Evaluation window of ``n`` positions decided by live exchange results.
-
-    With >= n live rows the window is live only. Below that, live rows stay
-    the newest entries and the newest replay rows only fill the missing
-    slots, so replay never pushes a live result out of the window.
-    Returns (window rows in chronological order, "live" | "bootstrap")."""
-    n = max(1, int(n))
-    def stamp(r: Any) -> float:
-        return finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0))
-    lv = sorted(list(live), key=stamp)
-    if len(lv) >= n:
-        return lv[-n:], "live"
-    rp = sorted(list(replay), key=stamp)
-    fill = rp[-(n - len(lv)):] if n > len(lv) else []
-    return list(fill) + lv, ("live" if lv and not fill else "bootstrap")
-
-
-def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
-    """Aggregate confirmed close legs; partial fills are not extra samples."""
-    groups: Dict[tuple, list] = {}
-    seen: set = set()
-    for raw in rows:
-        row = raw if isinstance(raw, dict) else vars(raw)
-        if not row.get("exchange_confirmed") or not row.get("client_id"):
-            continue
-        fill_key = row.get("close_fill_id") or row.get("fillId")
-        if fill_key and fill_key in seen:
-            continue
-        if fill_key:
-            seen.add(fill_key)
-        key = (row.get("conn"), row.get("symbol"), row.get("side"), row["client_id"])
-        groups.setdefault(key, []).append(row)
-    out = []
-    for legs in groups.values():
-        legs.sort(key=lambda row: finite(row.get("t")))
-        if legs[-1].get("partial"):
-            continue
-        row = dict(legs[-1])
-        saved = row.get("roundtrip_result")
-        if (isinstance(saved, dict) and saved.get("exchange_confirmed")
-                and saved.get("client_id") == row.get("client_id")
-                and not saved.get("partial")
-                and finite(saved.get("qty")) >= finite(row.get("roundtrip_qty")) * (1 - 1e-8)):
-            # The persisted per-position accumulator remains complete even
-            # when interleaved partials have left the small shared UI tape.
-            out.append(dict(saved))
-            continue
-        notion = sum(row_notional(leg) for leg in legs)
-        if notion <= 0:
-            continue
-        qty = sum(finite(leg.get("qty")) for leg in legs)
-        expected_qty = max(finite(leg.get("roundtrip_qty")) for leg in legs)
-        if expected_qty > 0 and qty < expected_qty * (1 - 1e-8):
-            continue  # incomplete retained history cannot promote this config
-        cost = sum(row_position_cost_pct(leg) * row_notional(leg) for leg in legs) / notion
-        row.update(qty=qty, entry=notion / max(qty, 1e-12),
-                   pnl=sum(finite(leg.get("pnl")) for leg in legs),
-                   pnl_pct=sum(row_pnl_pct(leg) * row_notional(leg) for leg in legs) / notion,
-                   fee_total=sum(finite(leg.get("fee_total")) for leg in legs),
-                   position_cost_pct=cost, partial=False, closeLegs=len(legs))
-        out.append(row)
-    return sorted(out, key=lambda row: finite(row.get("t")))
-
-
-def row_side(row: Any) -> str:
-    raw = ""
-    if isinstance(row, dict):
-        raw = str(row.get("side") or row.get("direction") or "")
-    else:
-        raw = str(getattr(row, "side", "") or getattr(row, "direction", "") or "")
-    u = raw.strip().upper()
-    if u.startswith("L") or u in ("1", "BUY"):
-        return "LONG"
-    if u.startswith("S") or u in ("-1", "SELL"):
-        return "SHORT"
-    return ""
-
-
-def filter_side(rows: Sequence[Any], side: Optional[str] = None) -> List[Any]:
-    if not side:
-        return [r for r in rows]
-    want = str(side).strip().upper()
-    if want in ("L", "1", "BUY"):
-        want = "LONG"
-    elif want in ("S", "-1", "SELL"):
-        want = "SHORT"
-    if want not in ("LONG", "SHORT"):
-        return [r for r in rows]
-    return [r for r in rows if row_side(r) == want]
+    get = row.get if isinstance(row, dict) else lambda k: getattr(row, k, None)
+    raw = get("net_pnl_pct")
+    try:
+        net = float(raw)
+        if math.isfinite(net):
+            return net
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return net_pnl_pct(get("pnl_pct"), cost_pct)
 
 
 def signed_result_r(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
@@ -525,11 +203,6 @@ def r_from_ratio(ratio: float) -> float:
     return (finite(ratio, RATIO_BASE) - RATIO_BASE) / RATIO_SCALE
 
 
-def is_positive_pf(ratio: Any, floor: float = POSITIVE_PF) -> bool:
-    """Real-edge admission at the configured floor (default +1× PositionCost)."""
-    return clears_pf(ratio, floor)
-
-
 def net_move_pct(ratio: float, cost_pct: float) -> float:
     return finite(cost_pct) * r_from_ratio(ratio)
 
@@ -539,325 +212,83 @@ def gross_move_pct(ratio: float, cost_pct: float) -> float:
     return cost + net_move_pct(ratio, cost)
 
 
+def _pnl_pct_of(row: Any) -> Optional[float]:
+    """The row's pnl_pct as a finite float, or None when it is missing or not a number."""
+    raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def pf_evidence(gain: float, loss: float, count: int) -> Dict[str, Any]:
+    """Display evidence, separate from the legacy no-loss gate sentinel (99)."""
+    return {"netGain": gain, "netLoss": loss, "pfFinite": gain / loss if loss > 0 else None,
+            "pfState": "empty" if count == 0 else "finite" if loss > 0 else "no-loss" if gain > 0 else "flat"}
+
+
 def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
-    *,
-    ordered: bool = False,
-    simple: Optional[bool] = None,
-) -> Dict[str, float]:
-    # API surfaces provide both chronological and newest-first tapes. A
-    # timestamp-normalized tail makes every "last N" gate mean the same thing.
-    take = max(1, int(n))
-    if ordered:
-        seq = rows if isinstance(rows, list) else list(rows)
-        window = seq[-take:] if len(seq) > take else seq
+    scan_all: bool = True,
+) -> Dict[str, Any]:
+    """The net PF and the figures of the newest n measurable closes of rows. scan_all (default): every row is read, so `skipped` counts all the rows without a finite
+    pnl_pct. scan_all False (the scoring pass, which never reads `skipped`): the rows are read from the end until n measurable ones are found, the same window
+    without touching the rest of a long tape; `skipped` then counts only the rows met on the way."""
+    # a row without a finite pnl_pct is not a close we can measure: it is skipped and counted, never read as a loss
+    need = max(1, int(n))
+    if scan_all:
+        valid = [(r, v) for r, v in ((r, _pnl_pct_of(r)) for r in rows) if v is not None]
+        skipped = len(list(rows)) - len(valid)
+        window = valid[-need:]
     else:
-        window = sorted(
-            list(rows),
-            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
-        )[-take:]
-    use_simple = _simple_historic_tape(window) if simple is None else bool(simple)
-    if use_simple:
-        cost = normalize_position_cost_pct(cost_pct)
-        cost_frac = cost_as_frac(cost)
-        gross_values = [finite(_row_value(row, "pnl_pct")) for row in window]
-        net_values = [value - cost_frac for value in gross_values]
-        count = len(gross_values)
-        avg_r = sum(signed_result_r(value, cost) for value in gross_values) / count if count else 0.0
-        gp_fast = sum(value for value in net_values if value > 0)
-        gl_fast = abs(sum(value for value in net_values if value < 0))
-        classic_fast = gp_fast / gl_fast if gl_fast > 0 else (99.0 if gp_fast > 0 else 0.0)
-        return {
-            "n": float(n),
-            "count": float(count),
-            "avgR": round(avg_r, 4),
-            "ratio": round(ratio_from_r(avg_r), 4) if count else RATIO_BASE,
-            "classicPf": round(classic_fast, 4),
-            "costPct": cost,
-            "netPct": round(net_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
-            "grossPct": round(gross_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
-            "netAvg": round(sum(net_values) / count, 6) if count else 0.0,
-            "costSubtracted": True,
-            "costSource": "manual-fallback",
-            "costSamples": 0,
-        }
+        window, skipped = [], 0
+        for r in reversed(rows):
+            v = _pnl_pct_of(r)
+            if v is None:
+                skipped += 1
+                continue
+            window.append((r, v))
+            if len(window) >= need:
+                break
+        window.reverse()
     rs: List[float] = []
-    nets: List[float] = []
     gp = gl = 0.0
-    weighted_cost = 0.0
-    weighted_notional = 0.0
-    for row in window:
-        actual_cost = row_position_cost_pct(row, cost_pct)
-        pnl_pct = row_pnl_pct(row, actual_cost)
-        net = row_net_pnl(row, actual_cost)
-        rs.append(signed_result_r(pnl_pct, actual_cost))
-        nets.append(net)
-        notion = row_notional(row)
-        if row_has_measured_cost(row) and notion > 1e-12:
-            weighted_cost += actual_cost * notion
-            weighted_notional += notion
+    for _row, pnl_pct in window:
+        net = row_net_pnl_pct(_row, cost_pct)
+        rs.append(net / max(1e-9, cost_as_frac(cost_pct)))
+        # net PF from the gross fraction less one PositionCost: unit-safe, never the USDT pnl field
         if net > 0:
             gp += net
         elif net < 0:
             gl += abs(net)
+    net_sum_pct = 100.0 * (gp - gl)       # the window's net result, the sum over its positions (percent of one position): the same net the PF divides
     count = len(rs)
     avg_r = sum(rs) / count if count else 0.0
-    net_avg = sum(nets) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
-    effective_cost = weighted_cost / weighted_notional if weighted_notional > 1e-12 else normalize_position_cost_pct(cost_pct)
-    classic = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+    # PF neutral = 1 (owner 2026-11-03): a window of closes that all net exactly zero is neither a gain nor a loss and reads 1.0; an empty window 0
+    pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else (1.0 if count else 0.0))
+    # pf = net profit factor (the one decision and display PF); ratio = 1 + 0.10 x avgR (display only, never a PF)
     return {
         "n": float(n),
         "count": float(count),
         "avgR": round(avg_r, 4),
         "ratio": round(ratio, 4),
-        "classicPf": round(classic, 4),
-        "costPct": round(float(effective_cost), 8),
-        "netPct": round(net_move_pct(ratio, effective_cost), 4),
-        "grossPct": round(gross_move_pct(ratio, effective_cost), 4),
-        "netAvg": round(net_avg, 6),
-        "costSubtracted": True,
-        "costSource": "live-exchange" if weighted_notional > 1e-12 else "manual-fallback",
-        "costSamples": sum(1 for row in window if row_has_measured_cost(row)),
-    }
-
-
-def overall_last_pos_eval(
-    rows: Sequence[Any],
-    n: int = LAST_N_DEFAULT,
-    cost_pct: float = POSITION_COST_PCT_DEFAULT,
-    *,
-    ordered: bool = False,
-    simple: Optional[bool] = None,
-) -> Dict[str, float]:
-    """Canonical overall last-position PF/EV for one tape.
-
-    Named last5/10/15/25/50/75 windows are diagnostic only. Qualification,
-    promotion, and live gates use this overall last-N (typically ``pf_n`` /
-    ``baseEvalPosCount``), not every named horizon.
-    """
-    return last_n_cost_pf(rows, n, cost_pct, ordered=ordered, simple=simple)
-
-
-def evaluation_windows(
-    rows: Sequence[Any],
-    cost_pct: float = POSITION_COST_PCT_DEFAULT,
-    windows: Sequence[int] = EVALUATION_WINDOWS,
-    required_samples: int = 0,
-    *,
-    ordered: bool = False,
-    simple: Optional[bool] = None,
-) -> Dict[str, Dict[str, Any]]:
-    """Return named last-position-N PF/EV views for one independent tape.
-
-    Every window is calculated from the same timestamp-normalized tape and
-    deducts the measured row cost once, falling back to the configured manual
-    cost.  ``available`` distinguishes a real N-sample window from a cold
-    tape; ``validated`` is a positive-PF/sample signal and is deliberately
-    independent from any strategy-specific minimum PF floor.
-
-    These named horizons are diagnostic. Callers that admit, promote, or
-    deactivate a Set must use ``overall_last_pos_eval`` (the configured
-    last-N / ``pf_n``) so a partial last50/last75 cannot veto a qualified
-    overall last-position tape.
-    """
-    if ordered:
-        seq = [row for row in rows if row is not None]
-    else:
-        seq = sorted(
-            [row for row in rows if row is not None],
-            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
-        )
-    out: Dict[str, Dict[str, Any]] = {}
-    seen: set[int] = set()
-    for raw_n in windows:
-        try:
-            requested = max(1, int(raw_n))
-        except Exception:
-            continue
-        if requested in seen:
-            continue
-        seen.add(requested)
-        metric = last_n_cost_pf(seq, requested, cost_pct, ordered=True, simple=simple)
-        count = int(metric.get("count") or 0)
-        ratio = float(metric.get("ratio") or RATIO_BASE)
-        required = max(1, min(requested, int(required_samples or 1)))
-        out[f"last{requested}"] = {
-            "requestedN": requested,
-            "n": count,
-            "available": count >= requested,
-            "requiredSamples": required,
-            "validated": count >= required and is_positive_pf(ratio),
-            "pf": round(ratio, 4),
-            "classicPf": float(metric.get("classicPf") or 0.0),
-            "avgR": float(metric.get("avgR") or 0.0),
-            "netAvg": float(metric.get("netAvg") or 0.0),
-            "netPct": float(metric.get("netPct") or 0.0),
-            "costPct": float(metric.get("costPct") or normalize_position_cost_pct(cost_pct)),
-            "costSamples": int(metric.get("costSamples") or 0),
-            "costSubtracted": True,
-        }
-    return out
-
-
-def normalize_position_cost_pct(value: Any, fallback: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """Normalize PositionCost to the percent convention used by every tape."""
-    c = finite(value, fallback)
-    if c < 0:
-        c = 0.0
-    if c > 2.0:
-        c /= 100.0
-    return round(c if c <= 1.0 else fallback, 8)
-
-
-def _classic_pf(values: Sequence[float], fallback: float = 0.0) -> float:
-    gp = sum(value for value in values if value > 0)
-    gl = abs(sum(value for value in values if value < 0))
-    if gl > 0:
-        return gp / gl
-    return 99.0 if gp > 0 else fallback
-
-
-def cost_aware_metrics(
-    rows: Sequence[Any],
-    cost_pct: float = POSITION_COST_PCT_DEFAULT,
-    required_samples: int = 0,
-) -> Dict[str, Any]:
-    """Return gross/net PF and EV from one shared closed sample.
-
-    ``pnl_pct`` is the gross price move and PositionCost is deducted exactly
-    once. Confidence is deliberately a sample-coverage signal, not a claim of
-    statistical certainty; callers can show the explicit insufficient status.
-    """
-    cost = normalize_position_cost_pct(cost_pct)
-    if _simple_historic_tape(rows):
-        gross = [finite(row.get("pnl_pct")) for row in rows]
-        net = [value - cost_as_frac(cost) for value in gross]
-        sample = len(gross)
-        required = max(1, int(required_samples or 1))
-        gross_pf = _classic_pf(gross)
-        net_pf = _classic_pf(net)
-        return {
-            "sampleCount": sample,
-            "requiredSamples": required,
-            "grossPf": round(gross_pf, 6),
-            "netPf": round(net_pf, 6),
-            "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
-            "netEv": round(sum(net) / sample, 8) if sample else 0.0,
-            "ev": round(sum(net) / sample, 8) if sample else 0.0,
-            "confidence": round(min(1.0, sample / required), 4) if sample else 0.0,
-            "uncertainty": round(1.0 / math.sqrt(sample), 4) if sample else 1.0,
-            "insufficientSample": sample < required,
-            "status": "insufficient-sample" if sample < required else "qualified-sample",
-            "costPct": cost,
-            "costSubtracted": True,
-            "costSource": "manual-fallback",
-            "costSamples": 0,
-        }
-    gross: List[float] = []
-    net: List[float] = []
-    measured = 0
-    for row in rows:
-        row_cost = row_position_cost_pct(row, cost)
-        gross_value = row_pnl_pct(row, row_cost)
-        gross.append(gross_value)
-        net.append(gross_value - cost_as_frac(row_cost))
-        measured += int(row_has_measured_cost(row))
-    sample = len(gross)
-    required = max(1, int(required_samples or 1))
-    confidence = min(1.0, sample / required) if sample else 0.0
-    uncertainty = 1.0 / math.sqrt(sample) if sample else 1.0
-    return {
-        "sampleCount": sample,
-        "requiredSamples": required,
-        "grossPf": round(_classic_pf(gross), 6),
-        "netPf": round(_classic_pf(net), 6),
-        "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
-        "netEv": round(sum(net) / sample, 8) if sample else 0.0,
-        "ev": round(sum(net) / sample, 8) if sample else 0.0,
-        "confidence": round(confidence, 4),
-        "uncertainty": round(uncertainty, 4),
-        "insufficientSample": sample < required,
-        "status": "insufficient-sample" if sample < required else "qualified-sample",
-        "costPct": cost,
-        "costSubtracted": True,
-        "costSource": "live-exchange" if measured else "manual-fallback",
-        "costSamples": measured,
+        "pf": round(pf, 4),
+        **pf_evidence(gp, gl, count),
+        "costPct": float(cost_pct),
+        "netPct": round(net_sum_pct / count, 4) if count else 0.0,  # measured net, also correct when the allowance is zero
+        "grossPct": round(100 * sum(v for _, v in window) / count, 4) if count else 0.0,
+        "averageCostPct": round(100 * sum(v - row_net_pnl_pct(r, cost_pct) for r, v in window) / count, 6) if count else 0.0,
+        "netSumPct": round(net_sum_pct, 4),
+        "skipped": float(skipped),
     }
 
 
 def clamp_pct(value: float, lo: float, hi: float) -> float:
-    # Zero is the persisted, JSON-safe unlimited upper bound for TP.
-    return max(lo, min(hi, value) if hi > 0 else value)
-
-
-SL_TP_MAX_FACTOR = SL_TP_MAX  # operator rule: a stop never exceeds 3x its take-profit
-
-
-def cap_sl_to_tp(sl: float, tp: float, sl_min: float = 0.0) -> tuple[float, float]:
-    """Keep SL <= 3x TP. Tighten SL first (never below the SL floor); if the
-    floor still binds, lift TP so the ratio holds."""
-    sl = finite(sl)
-    tp = finite(tp)
-    if sl <= 0 or tp <= 0:
-        return sl, tp
-    if sl > SL_TP_MAX_FACTOR * tp + 1e-12:
-        sl = max(SL_TP_MAX_FACTOR * tp, finite(sl_min))
-        if sl > SL_TP_MAX_FACTOR * tp + 1e-12:
-            tp = sl / SL_TP_MAX_FACTOR
-    return sl, tp
-
-
-VENUE_SL_TICKS = 3
-LIQ_SL_SHARE = 0.9
-
-
-def venue_sl_floor(
-    px: float,
-    tick: float,
-    sl_min: float,
-    *,
-    ticks: float = VENUE_SL_TICKS,
-    learned: float = 0.0,
-    leverage: float = 0.0,
-) -> float:
-    """Smallest SL distance (fraction) the venue accepts for this lot.
-
-    The larger of the desk floor, ``ticks`` price ticks and a per-symbol
-    floor learned from trigger-price rejections. The tick/learned part is
-    capped inside the liquidation distance at ``leverage`` so the stop
-    still fires first; the desk floor itself is never lowered."""
-    lo = max(0.0, finite(sl_min, 0.0))
-    p, t = finite(px, 0.0), finite(tick, 0.0)
-    tick_floor = (max(0.0, finite(ticks, VENUE_SL_TICKS)) * t / p) if p > 0 and t > 0 else 0.0
-    want = max(lo, tick_floor, max(0.0, finite(learned, 0.0)))
-    lev = finite(leverage, 0.0)
-    if lev > 0:
-        want = min(want, max(lo, LIQ_SL_SHARE / lev))
-    return want
-
-
-def bind_ratio_sl_tp(
-    tp: float,
-    ratio: float,
-    sl_min: float,
-    sl_max: float,
-    tp_min: float,
-    tp_max: float,
-) -> tuple[float, float]:
-    """TP is primary. If the SL floor would bind, lift TP so the strategy ratio still holds."""
-    ratio = max(SL_TP_MIN, min(SL_TP_MAX, round(finite(ratio, 0.6), 1)))
-    if ratio <= 0:
-        ratio = 0.6
-    tp = clamp_pct(finite(tp, tp_min), tp_min, tp_max)
-    sl = tp * ratio
-    if sl + 1e-12 < sl_min and ratio > 0:
-        tp = clamp_pct(sl_min / ratio, tp_min, tp_max)
-        sl = tp * ratio
-    sl = clamp_pct(sl, sl_min, sl_max)
-    return sl, tp
+    return max(lo, min(hi, value))
 
 
 def resolve_sl_tp(
@@ -872,14 +303,13 @@ def resolve_sl_tp(
     ind_tp: float = 0.0,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
     tp_cost_ratio: float = 5.0,
-    sl_to_tp: float = 0.6,
+    sl_to_tp: float = 0.5,
     rr: float = 1.8,
     bind_sl_to_tp: bool = True,
+    min_sl_distance_pct: float = MIN_SL_DISTANCE_PCT_DEFAULT,
 ) -> tuple[float, float, str]:
-    """Return SL/TP as fractions; TP is primary and ratio is clamped to 0.1–3.0."""
-    ratio = max(SL_TP_MIN, min(SL_TP_MAX, round(finite(sl_to_tp, 0.6), 1)))
-    if ratio <= 0:
-        ratio = 0.6
+    """Return SL/TP as fractions. TP is primary; SL = TP × snapped ratio."""
+    ratio = snap_ratio(sl_to_tp)
     cost_tp = max(tp_min, (cost_pct * tp_cost_ratio) / 100.0)
     if ind_tp > 0:
         tp = clamp_pct(ind_tp, tp_min, tp_max)
@@ -890,10 +320,10 @@ def resolve_sl_tp(
     else:
         tp = clamp_pct(cost_tp, tp_min, tp_max)
         src = "cost"
+    floor = sl_floor_frac(cost_pct, min_distance_pct=min_sl_distance_pct)
     if bind_sl_to_tp:
-        sl, tp = bind_ratio_sl_tp(tp, ratio, sl_min, sl_max, tp_min, tp_max)
-        src = f"{src}:r{ratio:.1f}"
-        sl, tp = cap_sl_to_tp(sl, tp, sl_min)
+        sl = max(floor, clamp_pct(tp * ratio, sl_min, sl_max))   # never under PositionCost + SL_MIN_STEPS steps
+        src = f"{src}:r{ratio:.2f}"
         return sl, tp, src
     cost_sl = max(sl_min, cost_tp * ratio)
     sl, chosen_tp = cost_sl, cost_tp
@@ -905,9 +335,7 @@ def resolve_sl_tp(
         sl = clamp_pct(base_sl if base_sl > 0 else cost_sl, sl_min, sl_max)
         chosen_tp = clamp_pct(base_tp if base_tp > 0 else cost_tp, tp_min, tp_max)
         src = "overlay"
-    if chosen_tp < sl * 1.05:
-        chosen_tp = clamp_pct(sl * rr, tp_min, tp_max)
-    sl, chosen_tp = cap_sl_to_tp(sl, chosen_tp, sl_min)
+    sl = max(floor, sl)
     return sl, chosen_tp, src
 
 
@@ -916,28 +344,10 @@ if __name__ == "__main__":
     assert abs(ratio_from_r(1.0) - 1.10) < 1e-9
     assert abs(ratio_from_r(0.0) - 1.00) < 1e-9
     assert abs(cost_as_frac(0.15) - 0.0015) < 1e-12
-    assert abs(cost_as_frac(0.0015) - 0.0015) < 1e-12
+    assert abs(cost_as_frac(0.04) - 0.0004) < 1e-12
+    assert abs(cost_as_frac(0.0015) - 0.000015) < 1e-12
     assert abs(net_pnl_pct(0.003, 0.15) - 0.0015) < 1e-12
     assert abs(net_pnl_usdt(0.003, 1.0, 100.0, 0.15) - 0.15) < 1e-9
-    assert abs(row_net_pnl({"pnl_pct": 0.003, "pnl": 9}, 0.15) - 0.0015) < 1e-12
-    legacy = {"t": 1, "pnl": 1.0, "qty": 100.0, "entry": 1.0}
-    assert abs(row_pnl_pct(legacy, 0.15) - 0.0115) < 1e-12
-    assert abs(row_net_pnl(legacy, 0.15) - 0.01) < 1e-12
-    measured = {"t": 2, "pnl_pct": 0.004, "qty": 10, "entry": 100, "fee_total": 0.30, "cost_source": "live-exchange"}
-    assert abs(row_position_cost_pct(measured, 0.15) - 0.03) < 1e-12
-    assert abs(row_net_pnl(measured, 0.15) - 0.0037) < 1e-12
-    eff = effective_position_cost_pct([measured], 0.15)
-    assert eff["source"] == "live-exchange" and abs(float(eff["costPct"]) - 0.03) < 1e-12
-    sample = exchange_order_cost_sample({"executedQty": 10, "avgPrice": 100, "commission": 0.15}, 0.15)
-    assert sample and abs(float(sample["costPct"]) - 0.03) < 1e-12
-    assert row_side({"side": "long"}) == "LONG" and row_side({"side": "SELL"}) == "SHORT"
-    assert len(filter_side([{"side": "LONG"}, {"side": "SHORT"}], "LONG")) == 1
-    n = last_n_cost_pf([{"pnl_pct": 0.003, "pnl": 0.0015}] * 10, 10, 0.15)
-    assert n["costSubtracted"] and abs(n["netAvg"] - 0.0015) < 1e-9
-    windows = evaluation_windows([{"t": i, "pnl_pct": 0.003, "pnl": 0.0015} for i in range(80)], 0.15)
-    assert set(windows) == {"last5", "last10", "last15", "last25", "last30", "last50", "last75"}
-    assert windows["last75"]["n"] == 75 and windows["last75"]["available"]
-    print("position_cost ok")
     rows = [{"pnl_pct": 0.003, "pnl": 1.0}] * 15
     got = last_n_cost_pf(rows, 15, 0.15)
     assert abs(got["ratio"] - 1.10) < 1e-6, got
@@ -946,30 +356,70 @@ if __name__ == "__main__":
         sl_min=0.002, sl_max=0.012, tp_min=0.0035, tp_max=0.024,
         cost_pct=0.15, tp_cost_ratio=5, sl_to_tp=0.64,
     )
-    assert src.endswith("r0.6") and abs(tp - 0.0075) < 1e-9
-    assert abs(sl - 0.0075 * 0.6) < 1e-9, (sl, tp, src)
+    assert src.endswith("r0.75") and abs(tp - 0.0075) < 1e-9
+    assert abs(sl - 0.0075 * 0.75) < 1e-9, (sl, tp, src)
     sl15, tp15, src15 = resolve_sl_tp(
         base_sl=0.0048, base_tp=0.0075,
         sl_min=0.002, sl_max=0.02, tp_min=0.0035, tp_max=0.024,
         sl_to_tp=1.5,
     )
     assert abs(sl15 - 0.0075 * 1.5) < 1e-9 and sl15 > tp15
-    sl40, tp70, src40 = resolve_sl_tp(
-        base_sl=0.0, base_tp=0.0,
-        sl_min=0.004, sl_max=0.03, tp_min=0.003, tp_max=0.0,
-        cost_pct=0.10, tp_cost_ratio=7, sl_to_tp=0.6,
-    )
-    assert src40.startswith("cost") and abs(tp70 - 0.007) < 1e-9
-    assert abs(sl40 - 0.0042) < 1e-9, (sl40, tp70, src40)
-    tight_sl, tight_tp, _ = resolve_sl_tp(
-        base_sl=0.0, base_tp=0.003,
-        sl_min=0.004, sl_max=0.03, tp_min=0.003, tp_max=0.0,
-        sl_to_tp=0.6,
-    )
-    assert abs(tight_sl - 0.004) < 1e-9 and abs(tight_tp - 0.004 / 0.6) < 1e-9, (tight_sl, tight_tp)
-    r04_sl, r04_tp = bind_ratio_sl_tp(0.003, 0.4, 0.004, 0.03, 0.003, 0.0)
-    r10_sl, r10_tp = bind_ratio_sl_tp(0.003, 1.0, 0.004, 0.03, 0.003, 0.0)
-    assert abs(r04_tp - 0.01) < 1e-9 and abs(r10_tp - 0.004) < 1e-9
-    assert abs(r04_tp - r10_tp) > 1e-9
-    assert abs(snap_ratio(0.64) - 0.6) < 1e-9
+    assert abs(snap_ratio(0.64) - 0.75) < 1e-9
     print("position_cost ok", got, src, src15)
+
+
+def overall_validation_n(ov: Any) -> int:
+    """The overall validation's last N: the Base gate window every Set is judged on (setGateWindow, 1..200, default 50)."""
+    try:
+        n = int((ov or {}).get("setGateWindow") or OVERALL_N_DEFAULT)
+    except (TypeError, ValueError):
+        n = OVERALL_N_DEFAULT
+    return max(1, min(200, n))
+
+
+def window_n(ov: Any, *keys: str, fallback: Optional[int] = None) -> int:
+    """The last N a secondary validation reads (pfWindow, setPfWindow, exitPfWindow, dcaPfWindow, slToTpRecalcN, trailRecalcN).
+    windowsLinked (default on): it is the overall validation's last N, so every validation judges the same stretch of orders.
+    Off: the first of the keys that is set is its own N, never below MIN_VALIDATION_N; none set takes the fallback, then the overall N."""
+    ov = ov or {}
+    overall = overall_validation_n(ov)
+    if ov.get("windowsLinked", True):
+        return overall
+    for k in keys:
+        try:
+            v = int(ov.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            return max(MIN_VALIDATION_N, v)
+    return max(MIN_VALIDATION_N, int(fallback)) if fallback else overall
+
+
+def pf_floor(v: Any, default: float = GATE_MIN_PF_DEFAULT) -> float:
+    """A configured minimum PF, never under MIN_PF_FLOOR (a missing or broken value is the default)."""
+    try:
+        x = float(v) if v is not None else float(default)
+    except (TypeError, ValueError):
+        x = float(default)
+    return max(MIN_PF_FLOOR, x)
+
+
+def base_min_pf(ov: Any) -> float:
+    """The Base gate's minimum PF (setMinPf, default GATE_MIN_PF_DEFAULT, at least MIN_PF_FLOOR): the one value every validation gate uses."""
+    return pf_floor((ov or {}).get("setMinPf"))
+
+
+def gate_min_pf(ov: Any, *own_keys: str) -> float:
+    """The minimum PF of a validation gate (Real, Exit, DCA, Block, the coordinator). minPfLinked (default on): the Base gate's value, so
+    every gate asks the same PF. Off: the first of own_keys that is set, else the Base value."""
+    ov = ov or {}
+    if ov.get("minPfLinked", True):
+        return base_min_pf(ov)
+    for k in own_keys:
+        try:
+            v = float(ov.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return pf_floor(v)
+    return base_min_pf(ov)

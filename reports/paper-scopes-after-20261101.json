@@ -1,0 +1,22 @@
+{
+  "scope": "synthetic sorted paper tapes; not strategy profitability or live loop latency",
+  "sets": 1654,
+  "storedRows": 661600,
+  "lastN": 200,
+  "scopes": 12,
+  "outputRows": 2400,
+  "matchesIndependentOracle": true,
+  "outputSha256": "0f628091649b65c5c1b5e164de3d67463ede719294e055f473a994a78ed8c499",
+  "engineSha256": "29c6ff9fb97d7f14575ce0c3110cd28983e3de34adf1f117c63423e895a4e5e0",
+  "tapeItemsRead": 54122,
+  "milliseconds": [
+    32.56475999660324,
+    30.55753700027708,
+    55.145962003734894,
+    31.212668007356115,
+    30.640729004517198
+  ],
+  "medianMilliseconds": 31.212668007356115,
+  "maxMilliseconds": 55.145962003734894,
+  "peakRssKiB": 204176
+}

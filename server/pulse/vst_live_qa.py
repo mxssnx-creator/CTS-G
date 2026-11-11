@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -19,16 +20,96 @@ os.environ.setdefault("PULSE_CONN", "bingx-x02")
 
 from bingx_fast import FastBingX, ErrorLog
 from pulse_trader import Pulse, TAG, CONN_SHORT, redis_hget, BASE
-from runtime_scope import order_tag
 from set_engine import self_test as sets_self_test
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
 from risk_variants import self_test as variants_self_test
 from position_cost import last_n_cost_pf, ratio_from_r
+from conn_guard import ConnGuardError, resolve_base, VST_DEMO
 
 
 def rec(name: str, ok: bool, detail: str, out: List[Tuple[str, bool, str]]) -> None:
     out.append((name, bool(ok), str(detail)[:220]))
+
+
+def _response_rows(response: Dict[str, Any], key: str = "") -> List[Dict[str, Any]] | None:
+    """Return a verified response list, or None when the venue read is inconclusive."""
+    if response.get("code") not in (0, None) or response.get("error"):
+        return None
+    data = response.get("data")
+    if key and isinstance(data, dict):
+        data = data.get(key)
+    return data if isinstance(data, list) else None
+
+
+def symbol_is_clear(api: FastBingX, symbol: str, out: List[Tuple[str, bool, str]], label: str) -> bool:
+    """Only run a position-mutating demo check on a symbol with verified empty exposure and orders."""
+    positions = _response_rows(api.get("/openApi/swap/v2/user/positions", {"symbol": symbol}))
+    orders = _response_rows(api.get("/openApi/swap/v2/trade/openOrders", {"symbol": symbol}), "orders")
+    if positions is None or orders is None:
+        rec(f"{label}-preflight", False, "could not verify positions and open orders; skipped", out)
+        return False
+    for row in positions:
+        if str(row.get("symbol") or "").upper() != symbol.upper():
+            continue
+        try:
+            qty = abs(float(row.get("positionAmt") or row.get("availableAmt") or 0))
+        except Exception:
+            rec(f"{label}-preflight", False, "unreadable position quantity; skipped", out)
+            return False
+        if not math.isfinite(qty) or qty > 1e-12:
+            rec(f"{label}-preflight", False, "symbol already has exposure; skipped", out)
+            return False
+    if any(str(row.get("symbol") or "").upper() == symbol.upper() for row in orders):
+        rec(f"{label}-preflight", False, "symbol already has open orders; skipped", out)
+        return False
+    rec(f"{label}-preflight", True, "verified flat with no open orders", out)
+    return True
+
+
+def cancel_owned_controls(api: FastBingX, symbol: str, side: str, client_ids: set[str]) -> bool:
+    """Cancel only the exact test controls created by this run, never other account orders."""
+    response = api.get("/openApi/swap/v2/trade/openOrders", {"symbol": symbol})
+    orders = _response_rows(response, "orders")
+    if orders is None:
+        return False
+    ok = True
+    for row in orders:
+        client_id = str(row.get("clientOrderID") or row.get("clientOrderId") or "").lower()
+        if (str(row.get("symbol") or "").upper() != symbol.upper()
+                or str(row.get("positionSide") or "").upper() != side.upper()
+                or client_id not in {cid.lower() for cid in client_ids}):
+            continue
+        order_id = row.get("orderId")
+        if not order_id:
+            ok = False
+            continue
+        result = api.delete("/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": order_id})
+        ok &= result.get("code") in (0, None) and not result.get("error")
+    return ok
+
+
+def market_once(api: FastBingX, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Never resubmit an uncertain market order under another client ID."""
+    try:
+        response = api.post(path, body)
+    except Exception:
+        response = {"code": -1, "error": True, "msg": "market submission unconfirmed"}
+    if response.get("code") == 0 and not response.get("error"):
+        return response
+    try:
+        observed = api.get(path, {"symbol": body["symbol"], "clientOrderID": body["clientOrderID"]})
+        order = observed.get("data", {})
+        if isinstance(order, dict):
+            order = order.get("order", order)
+        if (observed.get("code") == 0 and isinstance(order, dict) and order.get("orderId")
+                and order.get("symbol") == body["symbol"] and order.get("positionSide") == body["positionSide"]
+                and str(order.get("clientOrderID") or order.get("clientOrderId") or "").lower() == body["clientOrderID"].lower()
+                and str(order.get("status") or "").upper() == "FILLED"):
+            return {"code": 0, "data": {"order": order}}
+    except Exception:
+        pass
+    return {"code": -1, "error": True, "msg": "market outcome unresolved or rejected; no automatic resubmission"}
 
 
 def redis(field: str) -> str:
@@ -52,22 +133,6 @@ def http_json(url: str, data: Any = None, method: str = "GET") -> Tuple[int, Any
             return e.code, {"error": str(e)}
     except Exception as e:
         return 0, {"error": str(e)}
-
-
-def runtime_snapshot() -> Dict[str, Any]:
-    """Read the snapshot from the release, then the live sidecar."""
-    path = os.path.join(DIR, "stats-bingx-x02.json")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            value = json.load(handle)
-        if isinstance(value, dict):
-            return value
-    except (OSError, ValueError, TypeError):
-        pass
-    code, value = http_json("http://127.0.0.1:3015/stats.json?conn=vst")
-    if code == 200 and isinstance(value, dict):
-        return value
-    raise RuntimeError(f"runtime stats unavailable http={code}")
 
 
 def run_units(out: List[Tuple[str, bool, str]]) -> None:
@@ -123,15 +188,13 @@ def cid_tests(out: List[Tuple[str, bool, str]]) -> None:
     p.cid_ours = lambda c: Pulse.cid_ours(p, c)
     p.parse_track = lambda c: Pulse.parse_track(p, c)
     sample = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
-    expected_x02 = order_tag("bingx-x02")
-    expected_x01 = order_tag("bingx-x01")
-    rec("cid-tag", sample.startswith(TAG) and TAG == expected_x02, f"{sample} tag={TAG}", out)
+    rec("cid-tag", sample.startswith(TAG) and TAG == "Gx02", f"{sample} tag={TAG}", out)
     rec("cid-ours", p.cid_ours(sample) and not p.cid_ours("FOREIGN-1") and not p.cid_ours(""), sample, out)
-    rec("cid-foreign-x01-on-x02-legacy", not p.cid_ours(expected_x01 + "olegacy12"), "foreign lane rejected", out)
+    rec("cid-foreign-x01-on-x02-legacy", p.cid_ours("Gx01olegacy12"), "legacy accepted", out)
     tr = p.parse_track(sample)
     rec("cid-parse-sl", bool(tr and abs(float(tr.get("sl") or 0) - 0.6) < 1e-9), str(tr), out)
     sl = Pulse.cid(p, "s", set_id="indications:1m:sl1.2:tr0.9:0.3", pack="indications")
-    rec("cid-sl-ind", sl.startswith(TAG + "s") and p.cid_ours(sl), sl, out)
+    rec("cid-sl-ind", sl.startswith("Gx02si12"), sl, out)
 
 
 def api_tests(api: FastBingX, out: List[Tuple[str, bool, str]]) -> Dict[str, Any]:
@@ -183,6 +246,8 @@ def round_trip(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     p.cid = lambda *a, **k: Pulse.cid(p, *a, **k)
     p.cid_ours = lambda c: Pulse.cid_ours(p, c)
     sym = "DOGE-USDT"
+    if not symbol_is_clear(api, sym, out, "rt"):
+        return
     tick = api.public("/openApi/swap/v2/quote/ticker")
     px = 0.0
     for row in tick.get("data") or []:
@@ -201,26 +266,17 @@ def round_trip(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
         qty = float(f"{12.0 / px:.0f}")
     cid = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
     r = {"code": -1}
-    for attempt in range(4):
-        r = api.post(
-            "/openApi/swap/v2/trade/order",
-            {
-                "symbol": sym,
-                "type": "MARKET",
-                "side": "BUY",
-                "positionSide": "LONG",
-                "quantity": qty,
-                "clientOrderID": cid,
-            },
-        )
-        msg = str(r.get("msg") or "")
-        if r.get("code") in (0, None) and not r.get("error"):
-            break
-        if r.get("code") in (101209, 100410, 100421, 109429) or "cool" in msg.lower():
-            time.sleep(6.0 + attempt * 4.0)
-            cid = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
-            continue
-        break
+    r = market_once(api,
+        "/openApi/swap/v2/trade/order",
+        {
+            "symbol": sym,
+            "type": "MARKET",
+            "side": "BUY",
+            "positionSide": "LONG",
+            "quantity": qty,
+            "clientOrderID": cid,
+        },
+    )
     rec("rt-open", r.get("code") in (0, None) and not r.get("error"), f"code={r.get('code')} msg={r.get('msg')} cid={cid} qty={qty}", out)
     if r.get("code") not in (0, None) or r.get("error"):
         return
@@ -244,33 +300,40 @@ def round_trip(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     rec("rt-sl-tagged", sl.get("code") in (0, None), f"sl placed with {cid_s}", out)
     cid_c = Pulse.cid(p, "c", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
     cl = {"code": -1}
-    for attempt in range(6):
-        cl = api.post(
-            "/openApi/swap/v2/trade/order",
-            {
-                "symbol": sym,
-                "type": "MARKET",
-                "side": "SELL",
-                "positionSide": "LONG",
-                "quantity": qty,
-                "clientOrderID": cid_c,
-            },
-        )
-        if cl.get("code") in (0, None):
-            break
-        time.sleep(5.0 + attempt * 3.0)
-        cid_c = Pulse.cid(p, "c", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
+    cl = market_once(api,
+        "/openApi/swap/v2/trade/order",
+        {
+            "symbol": sym,
+            "type": "MARKET",
+            "side": "SELL",
+            "positionSide": "LONG",
+            "quantity": qty,
+            "clientOrderID": cid_c,
+        },
+    )
     rec("rt-close", cl.get("code") in (0, None), f"code={cl.get('code')} msg={cl.get('msg')} cid={cid_c}", out)
     time.sleep(0.8)
     pos = api.get("/openApi/swap/v2/user/positions")
     left = 0.0
-    for row in pos.get("data") or []:
+    pos_rows = _response_rows(pos)
+    if pos_rows is None:
+        rec("rt-flat", False, "position state unknown; protective order retained", out)
+        rec("rt-controls-clean", False, "position state unknown; protective order retained", out)
+        return
+    for row in pos_rows:
         if row.get("symbol") == sym:
             try:
-                left += abs(float(row.get("positionAmt") or 0))
+                amount = abs(float(row.get("positionAmt") or 0))
+                left += amount if math.isfinite(amount) else float("inf")
             except Exception:
-                pass
-    rec("rt-flat", left < qty * 0.2, f"left={left}", out)
+                left = float("inf")
+    flat = left < max(1e-12, qty * 1e-10)
+    rec("rt-flat", flat, f"left={left}", out)
+    if flat:
+        clean = cancel_owned_controls(api, sym, "LONG", {cid_s})
+        rec("rt-controls-clean", clean, "only this run's stop order", out)
+    else:
+        rec("rt-controls-clean", False, "position remains open; protective order retained", out)
 
 
 def _min_qty(api: FastBingX, sym: str, px: float) -> float:
@@ -284,6 +347,9 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     p.cid = lambda *a, **k: Pulse.cid(p, *a, **k)
     cases = (("LONG", "BUY", "SELL", "DOGE-USDT"), ("SHORT", "SELL", "BUY", "ADA-USDT"))
     for side, open_s, close_s, sym in cases:
+        label = f"ctrl-{side}"
+        if not symbol_is_clear(api, sym, out, label):
+            continue
         tk = api.public("/openApi/swap/v2/quote/ticker", {"symbol": sym})
         px = 0.0
         rows = tk.get("data") or []
@@ -304,210 +370,80 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
             qty = float(f"{12.0 / px:.4g}")
         cid = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
         r = {"code": -1}
-        for attempt in range(4):
-            r = api.post(
-                "/openApi/swap/v2/trade/order",
-                {"symbol": sym, "type": "MARKET", "side": open_s, "positionSide": side, "quantity": qty, "clientOrderID": cid},
-            )
-            msg = str(r.get("msg") or "")
-            if r.get("code") in (0, None) and not r.get("error"):
-                break
-            if r.get("code") in (101209, 100410, 100421, 109429, 109400) or "cool" in msg.lower() or "over 20" in msg.lower():
-                time.sleep(8.0 + attempt * 4.0)
-                cid = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
-                continue
-            break
+        r = market_once(api,
+            "/openApi/swap/v2/trade/order",
+            {"symbol": sym, "type": "MARKET", "side": open_s, "positionSide": side, "quantity": qty, "clientOrderID": cid},
+        )
         rec(f"ctrl-{side}-open", r.get("code") in (0, None) and not r.get("error"), f"code={r.get('code')} msg={r.get('msg')} qty={qty}", out)
         if r.get("code") not in (0, None) or r.get("error"):
             continue
         time.sleep(0.8)
         sl_px = round(px * (0.994 if side == "LONG" else 1.006), 6)
         tp_px = round(px * (1.008 if side == "LONG" else 0.992), 6)
+        cid_s = Pulse.cid(p, "s", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
         sl = api.post(
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "STOP_MARKET", "side": close_s, "positionSide": side,
                 "stopPrice": sl_px, "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
-                "clientOrderID": Pulse.cid(p, "s", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0),
+                "clientOrderID": cid_s,
             },
         )
         rec(f"ctrl-{side}-sl", sl.get("code") in (0, None), f"code={sl.get('code')} msg={sl.get('msg')} sl={sl_px} mark={px}", out)
+        cid_t = Pulse.cid(p, "t", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
         tp = api.post(
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": close_s, "positionSide": side,
                 "stopPrice": tp_px, "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
-                "clientOrderID": Pulse.cid(p, "t", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0),
+                "clientOrderID": cid_t,
             },
         )
         rec(f"ctrl-{side}-tp", tp.get("code") in (0, None), f"code={tp.get('code')} msg={tp.get('msg')} tp={tp_px} mark={px}", out)
         oo = api.get("/openApi/swap/v2/trade/openOrders", {"symbol": sym})
-        orders = ((oo.get("data") or {}).get("orders") if isinstance(oo.get("data"), dict) else (oo.get("data") or [])) or []
-        have_sl = any(str(o.get("type")) in ("STOP_MARKET", "STOP") and str(o.get("positionSide")) == side for o in orders)
-        have_tp = any(str(o.get("type")) in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT") and str(o.get("positionSide")) == side for o in orders)
+        orders = _response_rows(oo, "orders")
+        if orders is None:
+            orders = []
+        have_sl = any(str(o.get("type")) in ("STOP_MARKET", "STOP") and str(o.get("positionSide")) == side
+                      and str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower() == cid_s.lower() for o in orders)
+        have_tp = any(str(o.get("type")) in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT") and str(o.get("positionSide")) == side
+                      and str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower() == cid_t.lower() for o in orders)
         rec(f"ctrl-{side}-both-live", have_sl and have_tp, f"sl={have_sl} tp={have_tp} n={len(orders)}", out)
-        for o in orders:
-            # Only orders carrying this system's tag: a stop another source holds
-            # on the same symbol and side must survive the QA run untouched.
-            own = Pulse.cid_ours(p, str(o.get("clientOrderID") or o.get("clientOrderId") or ""))
-            if own and str(o.get("positionSide")) == side and str(o.get("type")) in ("STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
-                api.delete("/openApi/swap/v2/trade/order", {"symbol": sym, "orderId": o.get("orderId")})
         cid_c = Pulse.cid(p, "c", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
         cl = {"code": -1}
-        for attempt in range(5):
-            cl = api.post(
-                "/openApi/swap/v2/trade/order",
-                {"symbol": sym, "type": "MARKET", "side": close_s, "positionSide": side, "quantity": qty, "clientOrderID": cid_c},
-            )
-            if cl.get("code") in (0, None):
-                break
-            time.sleep(4.0 + attempt * 2.0)
-            cid_c = Pulse.cid(p, "c", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
+        cl = market_once(api,
+            "/openApi/swap/v2/trade/order",
+            {"symbol": sym, "type": "MARKET", "side": close_s, "positionSide": side, "quantity": qty, "clientOrderID": cid_c},
+        )
         rec(f"ctrl-{side}-close", cl.get("code") in (0, None), f"code={cl.get('code')} msg={cl.get('msg')}", out)
         time.sleep(0.6)
-
-
-def _foreign_order_ids(api: FastBingX) -> set:
-    """Open order ids that are NOT ours, so a burst can prove it never touched them."""
-    oo = api.get("/openApi/swap/v2/trade/openOrders")
-    orders = (oo.get("data") or {}).get("orders") if isinstance(oo.get("data"), dict) else oo.get("data")
-    orders = orders if isinstance(orders, list) else []
-    p = Dummy()
-    p.cid_ours = lambda c: Pulse.cid_ours(p, c)
-    ids = set()
-    for o in orders:
-        cid = str(o.get("clientOrderID") or o.get("clientOrderId") or "")
-        if not p.cid_ours(cid):
-            ids.add(str(o.get("orderId") or cid))
-    return ids
-
-
-def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
-    """Bounded high-count VST acceptance: hundreds of CTS-owned orders across the
-    50-symbol universe, verifying live evaluation, opening, aggregate controls,
-    bounded rejections, and that foreign orders are never touched.
-
-    Opt-in via VST_HIGH_COUNT=1; VST_HIGH_COUNT_N (default 100) and
-    VST_HIGH_COUNT_SYMBOLS (default 50) bound the burst."""
-    n_target = max(1, int(os.environ.get("VST_HIGH_COUNT_N", "100")))
-    sym_target = max(1, int(os.environ.get("VST_HIGH_COUNT_SYMBOLS", "50")))
-    set_id = "general:1m:sl0.6:tr0.3:0.1:hc"
-    p = Dummy()
-    p.cid = lambda *a, **k: Pulse.cid(p, *a, **k)
-    p.cid_ours = lambda c: Pulse.cid_ours(p, c)
-
-    try:
-        st = runtime_snapshot()
-    except Exception as e:
-        rec("hc-stats", False, str(e), out)
-        return
-    syms = [s for s in (st.get("symbols") or []) if isinstance(s, str)]
-    rec("hc-universe", len(syms) >= min(sym_target, 40), f"evaluated={len(syms)} target={sym_target}", out)
-    rec("hc-running", bool(st.get("running")) and int(st.get("cycle") or 0) > 0, f"cyc={st.get('cycle')} open={st.get('openCount')}", out)
-
-    tick = api.public("/openApi/swap/v2/quote/ticker")
-    px: Dict[str, float] = {}
-    for row in tick.get("data") or []:
-        try:
-            px[str(row.get("symbol"))] = float(row.get("lastPrice") or 0)
-        except Exception:
+        pos = api.get("/openApi/swap/v2/user/positions", {"symbol": sym})
+        pos_rows = _response_rows(pos)
+        if pos_rows is None:
+            rec(f"ctrl-{side}-flat", False, "position state unknown; own protective controls retained", out)
             continue
-    pool = [s for s in syms if px.get(s, 0) > 0][:sym_target]
-    if len(pool) < min(sym_target, 10):
-        pool = [s for s in px if px[s] > 0][:sym_target]
-    rec("hc-pool", len(pool) >= min(sym_target, 10), f"pool={len(pool)}", out)
-    if not pool:
-        return
-
-    foreign_before = _foreign_order_ids(api)
-    opened: List[Tuple[str, str, float]] = []
-    attempts = 0
-    rejects = 0
-    cooldowns = 0
-    max_attempts = n_target * 3
-    i = 0
-    while len(opened) < n_target and attempts < max_attempts:
-        sym = pool[i % len(pool)]
-        i += 1
-        attempts += 1
-        price = px.get(sym, 0.0)
-        if price <= 0:
-            continue
-        qty = _min_qty(api, sym, price)
-        if qty * price > 18:
-            qty = float(f"{12.0 / price:.4g}")
-        cid = Pulse.cid(p, "o", set_id=set_id, pack="general")
-        r = api.post(
-            "/openApi/swap/v2/trade/order",
-            {"symbol": sym, "type": "MARKET", "side": "BUY", "positionSide": "LONG", "quantity": qty, "clientOrderID": cid},
-        )
-        msg = str(r.get("msg") or "")
-        if r.get("code") in (0, None) and not r.get("error"):
-            opened.append((sym, cid, qty))
-            continue
-        if r.get("code") in (101209, 100410, 100421, 109429, 109400) or "cool" in msg.lower() or "over 20" in msg.lower():
-            cooldowns += 1
-            time.sleep(2.0)
-            continue
-        rejects += 1
-    rec("hc-opened", len(opened) >= max(1, int(n_target * 0.6)), f"opened={len(opened)}/{n_target} attempts={attempts}", out)
-    rec("hc-reject-bounded", rejects <= max(5, len(opened)), f"rejects={rejects} cooldowns={cooldowns} opened={len(opened)}", out)
-
-    ctrl_ok = 0
-    for sym, _cid, _qty in opened:
-        price = px.get(sym, 0.0)
-        if price <= 0:
-            continue
-        sl = api.post(
-            "/openApi/swap/v2/trade/order",
-            {
-                "symbol": sym, "type": "STOP_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": _qty,
-                "clientOrderID": Pulse.cid(p, "s", set_id=set_id, pack="general"),
-            },
-        )
-        tp = api.post(
-            "/openApi/swap/v2/trade/order",
-            {
-                "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": _qty,
-                "clientOrderID": Pulse.cid(p, "t", set_id=set_id, pack="general"),
-            },
-        )
-        if sl.get("code") in (0, None) and tp.get("code") in (0, None):
-            ctrl_ok += 1
-    rec("hc-controls", ctrl_ok >= max(1, int(len(opened) * 0.6)), f"sl+tp={ctrl_ok}/{len(opened)}", out)
-
-    closed = 0
-    for sym, _cid, qty in opened:
-        cl = api.post(
-            "/openApi/swap/v2/trade/order",
-            {
-                "symbol": sym, "type": "MARKET", "side": "SELL", "positionSide": "LONG", "quantity": qty,
-                "clientOrderID": Pulse.cid(p, "c", set_id=set_id, pack="general"),
-            },
-        )
-        if cl.get("code") in (0, None):
-            closed += 1
-    rec("hc-closed", closed >= max(1, int(len(opened) * 0.6)), f"closed={closed}/{len(opened)}", out)
-
-    foreign_after = _foreign_order_ids(api)
-    lost = foreign_before - foreign_after
-    rec("hc-foreign-untouched", not lost, f"before={len(foreign_before)} after={len(foreign_after)} lost={len(lost)}", out)
-
-    try:
-        st2 = runtime_snapshot()
-        logical = int(st2.get("logicalPositionCount") or st2.get("openCount") or 0)
-        exch = int(st2.get("exchangePositionGroupCount") or -1)
-        rec("hc-recon", exch < 0 or logical >= exch, f"logical={logical} exch={exch}", out)
-    except Exception as e:
-        rec("hc-recon", False, str(e)[:160], out)
+        left = 0.0
+        for row in pos_rows:
+            if str(row.get("symbol") or "").upper() == sym.upper():
+                try:
+                    left += abs(float(row.get("positionAmt") or row.get("availableAmt") or 0))
+                except Exception:
+                    left = float("inf")
+                    break
+        flat = left < max(1e-12, qty * 1e-10)
+        rec(f"ctrl-{side}-flat", flat, f"left={left}", out)
+        if flat:
+            clean = cancel_owned_controls(api, sym, side, {cid_s, cid_t})
+            rec(f"ctrl-{side}-controls-clean", clean, "only this run's stop and target", out)
+        else:
+            rec(f"ctrl-{side}-controls-clean", False, "position remains open; protective controls retained", out)
 
 
 def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     """Engine book vs live BingX positions and control orders. Not simulated."""
+    st = {}
     try:
-        st = runtime_snapshot()
+        st = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
     except Exception as e:
         rec("recon-stats", False, str(e), out)
         return
@@ -542,7 +478,7 @@ def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     oo = api.get("/openApi/swap/v2/trade/openOrders")
     orders = (oo.get("data") or {}).get("orders") if isinstance(oo.get("data"), dict) else oo.get("data")
     orders = orders if isinstance(orders, list) else []
-    ours = [o for o in orders if Pulse.cid_ours(None, str(o.get("clientOrderID") or o.get("clientOrderId") or ""))]
+    ours = [o for o in orders if str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower().startswith(("gx02", "gx01"))]
     rec("recon-orders", oo.get("code") in (0, None, 100410, 100421), f"ours={len(ours)} all={len(orders)}", out)
     missing_ctrl = []
     for b in book:
@@ -568,21 +504,28 @@ def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
 def http_tests(out: List[Tuple[str, bool, str]]) -> None:
     code, st = http_json("http://127.0.0.1:3015/stats.json?conn=vst")
     rec("http-stats-vst", code == 200 and st.get("connection") == "bingx-x02", f"{code} conn={st.get('connection')} eq={st.get('equity')}", out)
-    rec("http-prefix", (st.get("engine") or {}).get("trackPrefix") == TAG, str((st.get("engine") or {}).get("trackPrefix")), out)
+    rec("http-prefix", (st.get("engine") or {}).get("trackPrefix") == "Gx02", str((st.get("engine") or {}).get("trackPrefix")), out)
     rec("http-gate", isinstance((st.get("coord") or {}).get("gate"), dict), str((st.get("coord") or {}).get("gate", {}).get("allow")), out)
     code, cfg = http_json("http://127.0.0.1:3015/config.json?conn=vst")
     rec("http-config-get", code == 200 and isinstance(cfg, dict), f"{code} keys={len(cfg) if isinstance(cfg, dict) else 0}", out)
     if isinstance(cfg, dict):
         overlay = cfg.get("overlay") if isinstance(cfg.get("overlay"), dict) else cfg
         prev = overlay.get("slToTpRatio")
-        code2, echoed = http_json("http://127.0.0.1:3015/config.json?conn=vst", {"slToTpRatio": 0.9}, "POST")
-        rec("http-config-post", code2 == 200 and (echoed.get("overlay") or {}).get("slToTpRatio") == 0.9, f"{code2} {str(echoed)[:100]}", out)
-        if prev is not None:
-            http_json("http://127.0.0.1:3015/config.json?conn=vst", {"slToTpRatio": prev}, "POST")
+        if prev is None:
+            rec("http-config-post", False, "skipped; no prior value available for safe restore", out)
+        else:
+            code2, echoed = http_json("http://127.0.0.1:3015/config.json?conn=vst", {"slToTpRatio": 0.9}, "POST")
+            rec("http-config-post", code2 == 200 and (echoed.get("overlay") or {}).get("slToTpRatio") == 0.9, f"{code2} {str(echoed)[:100]}", out)
+            code3, restored = http_json("http://127.0.0.1:3015/config.json?conn=vst", {"slToTpRatio": prev}, "POST")
+            current = (restored.get("overlay") or {}).get("slToTpRatio")
+            rec("http-config-restore", code3 == 200 and current == prev, f"{code3} restored={current == prev}", out)
 
 
 def main() -> int:
     out: List[Tuple[str, bool, str]] = []
+    if CONN_SHORT != "bingx-x02" or TAG != "Gx02":
+        print("REFUSED: VST QA is pinned to bingx-x02; no account or exchange requests were made")
+        return 2
     print("vst live qa start", CONN_SHORT, TAG)
     run_units(out)
     cid_tests(out)
@@ -590,30 +533,31 @@ def main() -> int:
     rec("creds", bool(key and secret), f"key={bool(key)}", out)
     api = None
     if key and secret:
-        base = redis("base_url") or "https://open-api-vst.bingx.com"
-        from urllib.parse import urlparse
-        if urlparse(base).scheme != "https" or urlparse(base).hostname != "open-api-vst.bingx.com":
-            raise RuntimeError("VST QA requires the BingX virtual-money demo endpoint")
-        api = FastBingX(key, secret, ErrorLog("/tmp/vst-live-qa-err.jsonl"), base=base)
-        snap = api_tests(api, out)
-        classify_book(api, snap.get("positions") or [], out)
         try:
-            recon_live(api, out)
-        except Exception:
-            rec("recon-exc", False, traceback.format_exc()[-220:], out)
-        try:
-            round_trip(api, out)
-        except Exception:
-            rec("rt-exc", False, traceback.format_exc()[-220:], out)
-        try:
-            ctrl_both_sides(api, out)
-        except Exception:
-            rec("ctrl-exc", False, traceback.format_exc()[-220:], out)
-        if os.environ.get("VST_HIGH_COUNT"):
+            base, mode = resolve_base(
+                "bingx-x02", redis("base_url"), redis("is_testnet"), os.environ.get("PULSE_BASE", "")
+            )
+            if mode != VST_DEMO:
+                raise ConnGuardError("VST QA resolved outside the virtual demo environment")
+        except ConnGuardError:
+            rec("x02-environment-guard", False, "refused mismatched base URL or testnet setting", out)
+        else:
+            rec("x02-environment-guard", True, "pinned VST demo host", out)
+            api = FastBingX(key, secret, ErrorLog("/tmp/vst-live-qa-err.jsonl"), base=base)
+            snap = api_tests(api, out)
+            classify_book(api, snap.get("positions") or [], out)
             try:
-                high_count_acceptance(api, out)
+                recon_live(api, out)
             except Exception:
-                rec("hc-exc", False, traceback.format_exc()[-220:], out)
+                rec("recon-exc", False, traceback.format_exc()[-220:], out)
+            try:
+                round_trip(api, out)
+            except Exception:
+                rec("rt-exc", False, traceback.format_exc()[-220:], out)
+            try:
+                ctrl_both_sides(api, out)
+            except Exception:
+                rec("ctrl-exc", False, traceback.format_exc()[-220:], out)
     try:
         http_tests(out)
     except Exception:

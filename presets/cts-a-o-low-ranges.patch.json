@@ -1,0 +1,93 @@
+{
+  "indicationConfigs": [
+    {
+      "label": "CTS-A-O Low-Range 1m",
+      "enabled": true,
+      "names": [
+        "ao_lr6_edge-turn_standalone_t1",
+        "ao_lr6_failed-break_activity_t1",
+        "ao_lr6_breakout_move-reverse_t1",
+        "ao_lr6_mid-reclaim_trend_t1",
+        "ao_lr6_compression-break_trend-breakout_t1"
+      ],
+      "stepMin": 2,
+      "stepMax": 12,
+      "slRatios": [
+        0.5,
+        1,
+        1.5
+      ],
+      "types": [
+        "base",
+        "exit",
+        "trail"
+      ],
+      "trailStepMin": 4,
+      "trailStepMax": 12
+    },
+    {
+      "label": "CTS-A-O Low-Range 5m",
+      "enabled": true,
+      "names": [
+        "ao_lr12_edge-turn_trend-move-follow_t5",
+        "ao_lr12_failed-break_breakout-move-reverse_t5",
+        "ao_lr12_breakout_move-follow_t5",
+        "ao_lr12_mid-reclaim_trend-breakout-move-follow_t5",
+        "ao_lr12_compression-break_breakout_t5"
+      ],
+      "stepMin": 2,
+      "stepMax": 12,
+      "slRatios": [
+        0.5,
+        1,
+        1.5
+      ],
+      "types": [
+        "base",
+        "exit",
+        "trail"
+      ],
+      "trailStepMin": 4,
+      "trailStepMax": 12
+    },
+    {
+      "label": "CTS-A-O Low-Range 15m",
+      "enabled": true,
+      "names": [
+        "ao_lr18_edge-turn_trend-move-reverse_t15",
+        "ao_lr18_failed-break_trend-breakout-move-reverse_t15",
+        "ao_lr18_breakout_breakout-move-follow_t15",
+        "ao_lr18_mid-reclaim_standalone_t15",
+        "ao_lr18_compression-break_activity_t15"
+      ],
+      "stepMin": 2,
+      "stepMax": 12,
+      "slRatios": [
+        0.5,
+        1,
+        1.5
+      ],
+      "types": [
+        "base",
+        "exit",
+        "trail"
+      ],
+      "trailStepMin": 4,
+      "trailStepMax": 12
+    }
+  ],
+  "minSlDistancePct": 0.1,
+  "setSlRatios": [
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    1.75,
+    2.0,
+    2.25,
+    2.5
+  ],
+  "slToTpRatio": 0.5
+}

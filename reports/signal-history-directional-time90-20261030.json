@@ -1,0 +1,157 @@
+{
+  "config": {
+    "time_bars": 90,
+    "scratch_bars": 10,
+    "scratch_min_pct": 0.16,
+    "cost_pct": 0.12
+  },
+  "scalar_lane_checks": 48,
+  "hourly_context_scores": {
+    "hourly": [
+      {
+        "t": 1792227600,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792231200,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792234800,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792238400,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792242000,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792245600,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792249200,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      },
+      {
+        "t": 1792252800,
+        "base": 1,
+        "all_stages": 0,
+        "base_gain": 0.10754249556457005,
+        "base_loss": 0.07002300707750699
+      },
+      {
+        "t": 1792256400,
+        "base": 3,
+        "all_stages": 0,
+        "base_gain": 0.3022488348055445,
+        "base_loss": 0.19379999999999986
+      },
+      {
+        "t": 1792260000,
+        "base": 12,
+        "all_stages": 0,
+        "base_gain": 1.3220412044495384,
+        "base_loss": 0.8415000000000005
+      },
+      {
+        "t": 1792263600,
+        "base": 3,
+        "all_stages": 0,
+        "base_gain": 0.34312414062216884,
+        "base_loss": 0.21810000000000013
+      },
+      {
+        "t": 1792267200,
+        "base": 0,
+        "all_stages": 0,
+        "base_gain": 0.0,
+        "base_loss": 0.0
+      }
+    ],
+    "base_validated_pct": 0.005982970576380492,
+    "all_stage_validated_pct": 0.0,
+    "base_pf": 1.5678710921188481,
+    "denominator": 317568
+  },
+  "pooled_baseline": null,
+  "directional_trials": {
+    "all": {
+      "closed": [],
+      "open_at_end": [],
+      "closed_pf": null,
+      "marked_pf": null,
+      "closed_net_pct_sum": 0,
+      "marked_net_pct_sum": 0,
+      "counts": {
+        "signal_minutes": 5426,
+        "gate_evaluations": 584482,
+        "eligible_entries": 0
+      }
+    },
+    "base_only": {
+      "closed": [],
+      "open_at_end": [],
+      "closed_pf": null,
+      "marked_pf": null,
+      "closed_net_pct_sum": 0,
+      "marked_net_pct_sum": 0,
+      "counts": {
+        "signal_minutes": 5426,
+        "gate_evaluations": 286955,
+        "eligible_entries": 0
+      }
+    },
+    "exit_only": {
+      "closed": [],
+      "open_at_end": [],
+      "closed_pf": null,
+      "marked_pf": null,
+      "closed_net_pct_sum": 0,
+      "marked_net_pct_sum": 0,
+      "counts": {
+        "signal_minutes": 5426,
+        "gate_evaluations": 137292,
+        "eligible_entries": 0
+      }
+    },
+    "trail_only": {
+      "closed": [],
+      "open_at_end": [],
+      "closed_pf": null,
+      "marked_pf": null,
+      "closed_net_pct_sum": 0,
+      "marked_net_pct_sum": 0,
+      "counts": {
+        "signal_minutes": 5426,
+        "gate_evaluations": 160235,
+        "eligible_entries": 0
+      }
+    }
+  },
+  "note": "offline strongest-pack selector, one position per symbol; equal notional, full cost applied to closing marks; not live Signal-source coordination"
+}

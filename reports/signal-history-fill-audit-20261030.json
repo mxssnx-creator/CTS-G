@@ -1,0 +1,13 @@
+{
+  "closes": 16,
+  "directions": {
+    "LONG": 2,
+    "SHORT": 14
+  },
+  "mismatches": [],
+  "unaudited_trailing": [],
+  "gain": 0.0043448673365969834,
+  "loss": 0.1404000000000004,
+  "pf": 0.030946348551260473,
+  "cost_pct": 0.12
+}

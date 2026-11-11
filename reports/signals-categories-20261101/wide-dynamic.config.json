@@ -1,0 +1,105 @@
+{
+  "fees": {
+    "entryLiquidity": "taker",
+    "exitLiquidity": "taker",
+    "maker": 0.0002,
+    "slippagePerLeg": 0.0001,
+    "source": "configured-scenario",
+    "taker": 0.0005
+  },
+  "historyMinutes": 720,
+  "lastNLanes": [
+    {
+      "base": 4,
+      "main": 4,
+      "real": 4
+    },
+    {
+      "base": 12,
+      "main": 8,
+      "real": 4
+    }
+  ],
+  "maxContextDrawdown": 0.04,
+  "minPf": 2.2,
+  "mode": "offline-only",
+  "normalEnabled": true,
+  "protections": [
+    {
+      "holdMinutes": 120,
+      "id": "trail-only-gap-0.5pct",
+      "kind": "trailing-only",
+      "sl": 0.01,
+      "tp": 0,
+      "trailArm": 0.01,
+      "trailGap": 0.005
+    },
+    {
+      "holdMinutes": 120,
+      "id": "trail-only-gap-1pct",
+      "kind": "trailing-only",
+      "sl": 0.01,
+      "tp": 0,
+      "trailArm": 0.015,
+      "trailGap": 0.01
+    },
+    {
+      "holdMinutes": 120,
+      "id": "trail-only-gap-2pct",
+      "kind": "trailing-only",
+      "sl": 0.01,
+      "tp": 0,
+      "trailArm": 0.025,
+      "trailGap": 0.02
+    },
+    {
+      "holdMinutes": 120,
+      "id": "trail-only-gap-3pct",
+      "kind": "trailing-only",
+      "sl": 0.01,
+      "tp": 0,
+      "trailArm": 0.034999999999999996,
+      "trailGap": 0.03
+    },
+    {
+      "holdMinutes": 120,
+      "id": "trail-only-gap-5pct",
+      "kind": "trailing-only",
+      "sl": 0.01,
+      "tp": 0,
+      "trailArm": 0.055,
+      "trailGap": 0.05
+    }
+  ],
+  "ranges": [
+    "short",
+    "medium"
+  ],
+  "risk": {
+    "initialEquity": 1000,
+    "maxDrawdown": 0.02,
+    "maxGrossExposure": 100,
+    "maxHourlyLoss": 0.005,
+    "maxOpen": 4,
+    "notionalPerOrder": 25
+  },
+  "schema": "cts-g-signals-replay-v1",
+  "sources": [
+    "ema-cross",
+    "macd-cross",
+    "rsi-reversal",
+    "ema-trend",
+    "rsi-momentum",
+    "donchian",
+    "bb-bounce",
+    "cci-reversal",
+    "obv-trend"
+  ],
+  "timeframes": [
+    1,
+    5,
+    15,
+    30
+  ],
+  "trailingEnabled": true
+}

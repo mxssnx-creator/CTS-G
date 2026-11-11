@@ -1,0 +1,620 @@
+"""Stage 1 gates: the engine's eligibility rules at their boundaries, one rule per check.
+
+PF gate: gate PF >= setMinPf over the last setGateWindow orders, judged only with at least setGateMinTrades (0 = off, the
+         default: a Set is judged on the orders it has; a Set without a closed order is never judged).
+DDT gate: the longest drawdown over the last N positions, from the last equity high until net is back at or above
+          that high, must be strictly LOWER than setMaxDdtHours (default 24 h).
+Lock: a locked Set is never eligible. Open drawdowns are measured to the clock, not cut short by idle time.
+"""
+from __future__ import annotations
+
+import sys
+
+from common import PULSE, Skip, overlay  # noqa: F401
+
+if PULSE not in sys.path:
+    sys.path.insert(0, PULSE)
+
+from set_engine import SetBook, drawdown_time  # noqa: E402
+
+HOUR = 3600.0
+# epoch origin for the fixtures: drawdown_time ignores rows at t <= 0 by design, so a peak at t = 0 would be dropped
+O = 1_700_000_000.0
+
+
+def _book(**extra):
+    b = SetBook()
+    b.load(overlay(**{"mainGateEnabled": False, "stagesEnabled": False, **extra}))     # these fixtures judge the Base gate alone
+    b.cost_pct = 0.15
+    return b
+
+
+def _set(b):
+    st = next(s for s in b.by_idx if s.kind == "base")
+    st.active = True
+    st.locked = False
+    st.gate_n = b.gate_min
+    st.gate_pf = b.min_pf
+    st.max_dd_s = 0.0
+    return st
+
+
+def pf_gate_boundary():
+    """PF exactly at setMinPf with the minimum sample is eligible; one order short, or just below, is not."""
+    b = _book(setMinPf=1.10, setGateMinTrades=30, setGateWindow=50)
+    st = _set(b)
+    st.gate_pf, st.gate_n = 1.10, 30
+    at = b.is_eligible(st)
+    st.gate_pf = 1.0999
+    below = b.is_eligible(st)
+    st.gate_pf, st.gate_n = 1.10, 29
+    short = b.is_eligible(st)
+    ok = at and not below and not short
+    return ok, f"at_1.10_n30={at} below_1.0999={below} at_1.10_n29={short}"
+
+
+def ddt_gate_boundary():
+    """A longest drawdown of 11.9 h is eligible at a 12 h threshold; 12.0 h is not (strictly lower)."""
+    b = _book(setMaxDdtHours=12)
+    st = _set(b)
+    peak = {"t": O, "pnl": 1.0}
+    # drawdown starts at the peak (O), net is back at the peak after the given time
+    rec_119 = [peak, {"t": O + 11.0 * HOUR, "pnl": -0.2}, {"t": O + 11.9 * HOUR, "pnl": 0.2}]
+    rec_120 = [peak, {"t": O + 11.0 * HOUR, "pnl": -0.2}, {"t": O + 12.0 * HOUR, "pnl": 0.2}]
+    d119 = drawdown_time(rec_119)["maxS"]
+    d120 = drawdown_time(rec_120)["maxS"]
+    st.max_dd_s = d119
+    eligible_119 = b.is_eligible(st)
+    st.max_dd_s = d120
+    eligible_120 = b.is_eligible(st)
+    ok = abs(d119 - 11.9 * HOUR) < 1 and abs(d120 - 12.0 * HOUR) < 1 and eligible_119 and not eligible_120
+    return ok, f"dd119h={d119 / HOUR:.2f} dd120h={d120 / HOUR:.2f} eligible119={eligible_119} eligible120={eligible_120}"
+
+
+def ddt_open_drawdown_to_clock():
+    """An open drawdown keeps counting to the clock; a long idle gap does not shorten it."""
+    rows = [{"t": O, "pnl": 1.0}, {"t": O + 1.0 * HOUR, "pnl": -0.3}]
+    at_clock = drawdown_time(rows, now=O + 6.0 * HOUR)["maxS"]
+    stale = drawdown_time(rows, now=O + 40.0 * HOUR)["maxS"]
+    ok = abs(at_clock - 6.0 * HOUR) < 1 and abs(stale - 40.0 * HOUR) < 1
+    return ok, f"at_6h={at_clock / HOUR:.2f} at_40h={stale / HOUR:.2f}"
+
+
+def lock_blocks_at_once():
+    """A locked Set is not eligible, before any replay rescores it."""
+    b = _book()
+    st = _set(b)
+    unlocked = b.is_eligible(st)
+    st.locked = True
+    locked = b.is_eligible(st)
+    ok = unlocked and not locked
+    return ok, f"unlocked={unlocked} locked={locked}"
+
+
+def minimum_order_count_off_judges_on_available_orders():
+    """setGateMinTrades 0 (the default, owner 2026-10-29) switches the minimum order count off: a Set with 5 orders at the minimum PF is
+    eligible, the same Set under a minimum of 25 is "n<min", a Set with no closed order is never eligible, and the setting is taken as it
+    is (no floor of 8, no replacement of an explicit 0 by a default). The independent collection target can grow history even while
+    that admission minimum is off."""
+    def reason(n, pf, **ov):
+        b = _book(setMinPf=1.25, setGateWindow=30, **ov)
+        st = _set(b)
+        st.gate_n, st.gate_pf = n, pf
+        return b.gate_reason(st), b.gate_min
+    off, off_min = reason(5, 2.0, setGateMinTrades=0)
+    absent_ov = overlay(mainGateEnabled=False, setGateWindow=30)
+    absent_ov.pop("setGateMinTrades", None)
+    ab = SetBook()
+    ab.load(absent_ov)
+    on, on_min = reason(5, 2.0, setGateMinTrades=25)
+    none_, _ = reason(0, 0.0, setGateMinTrades=0)
+    five = SetBook()
+    five.load(overlay(setGateMinTrades=5, setGateWindow=30))
+    bare = SetBook()
+    bare.load({})
+    # After a successful replay, three closes are sparse against the collection target as well as an explicit gate minimum.
+    def grown(**ov):
+        b = _book(histLookbackAuto=True, histLookbackBars=500, **ov)
+        for st in b.by_idx[:30]:
+            st.source_n, st.gate_n = 3, 3
+        b._hist_rows = {"replayed": {}}
+        l0 = b.lookback
+        b._adapt_lookback()
+        return b.lookback - l0
+    g_off, g_on = grown(setGateMinTrades=0), grown(setGateMinTrades=25)
+    ok = (off == "" and off_min == 1 and on == "n<min" and on_min == 25 and none_ == "n<min" and ab.gate_min == 1 and five.gate_min == 5
+          and bare.gate_min == 1 and g_off > 0 and g_on > 0)
+    return ok, f"5 orders: off={off!r} min=25 {on!r}; no order={none_!r}; absent key -> {ab.gate_min}; explicit 5 -> {five.gate_min}; bare load -> {bare.gate_min}; lookback growth off {g_off} / min 25 {g_on}"
+
+
+def stage_short_window_judges_the_orders_it_has():
+    """The Base short window (setGateShortN) is judged on the orders a Set has: a Set with 8 orders against a short window of 15 passes it at the
+    minimum PF, a PF under the minimum fails it, and strict mode also needs the complete Base long window."""
+    def reason(full, n, pf):
+        b = SetBook()
+        b.load(overlay(stagesEnabled=True, mainGateEnabled=False, realGateEnabled=False, mainNegEnabled=False, setGateShortN=15, setGateWindow=50,
+                       setMinPf=1.25, stageFullWindow=full))
+        st = _set(b)
+        st.gate_n, st.gate_pf, st.max_dd_s = n, 2.0, 0.0
+        st.base_short_n, st.base_short_pf = n, pf
+        return b.gate_reason(st)
+    avail, low, strict, full15 = reason(False, 8, 2.0), reason(False, 8, 1.0), reason(True, 8, 2.0), reason(True, 15, 2.0)
+    full50=reason(True,50,2.0)
+    ok = avail == "" and low == "short" and strict == "n<min" and full15 == "n<min" and full50 == ""
+    return ok, f"8 orders: available={avail!r} PF 1.0={low!r}; strict 8={strict!r}, 15={full15!r}, 50={full50!r}"
+
+
+def stage_windows_accept_one_and_two():
+    """The ongoing (Real) window may be one result and the Negative windows the last one or two results (owner 2026-10-29): realGateN 1 is read as 1
+    (not raised to 3), mainNegWindows "1,2" and [2, 1] as (1, 2), a value under 1 as 1; Main long starts at 1."""
+    def load(**ov):
+        b = SetBook()
+        b.load(overlay(**ov))
+        return b
+    a, b2, c = load(realGateN=1, mainNegWindows="1,2"), load(realGateN=0, mainNegWindows=[2, 1, 2]), load(mainGateN=1)
+    independent = load(setGateWindow=10, mainGateN=200)
+    ok = a.realst_n == 1 and a.neg_windows == (1, 2) and b2.realst_n == 1 and b2.neg_windows == (1, 2) and c.main_n == 1 and independent.main_n == 200
+    return ok, f"Real 1 -> {a.realst_n}, Negative '1,2' -> {a.neg_windows}; Real 0 -> {b2.realst_n}, [2,1,2] -> {b2.neg_windows}; Main static 1 -> {c.main_n}"
+
+
+def short_window_is_at_most_half_of_the_long_window():
+    """The Base short window is capped at setGateShortMaxRatio (default 0.5) of the long window (owner 2026-10-29): long 40 allows at most 20, long 50 allows
+    the default 25 (also the most it can be), a ratio of 0.3 caps long 40 at 12, a ratio of 1 at the long window, 0 stays off, the ratio is held to 0.1..1."""
+    def short(**ov):
+        b = SetBook()
+        b.load(overlay(**{"stagesEnabled": True, **ov}))
+        return b.base_short
+    got = {"40/25": short(setGateWindow=40, setGateShortN=25), "40/20": short(setGateWindow=40, setGateShortN=20), "50/default": short(setGateWindow=50),
+           "50/40": short(setGateWindow=50, setGateShortN=40), "40 ratio .3": short(setGateWindow=40, setGateShortN=25, setGateShortMaxRatio=0.3),
+           "40 ratio 1": short(setGateWindow=40, setGateShortN=25, setGateShortMaxRatio=1.0), "40 ratio 9": short(setGateWindow=40, setGateShortN=39, setGateShortMaxRatio=9),
+           "off": short(setGateWindow=40, setGateShortN=0), "20/15": short(setGateWindow=20, setGateShortN=15), "stages off": short(setGateWindow=40, setGateShortN=20, stagesEnabled=False)}
+    want = {"40/25": 20, "40/20": 20, "50/default": 25, "50/40": 25, "40 ratio .3": 12, "40 ratio 1": 25, "40 ratio 9": 39, "off": 0, "20/15": 10, "stages off": 0}
+    bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
+    bare.load({"setGateWindow": 40, "setGateShortN": 25})
+    got["engine default"] = bare.base_short
+    want["engine default"] = 20
+    return got == want, f"{got}"
+
+
+def main_short_windows_are_at_most_half_of_the_long_window():
+    """The Main short windows (the former Auto window) are capped at mainShortMaxRatio (default 0.5) of the Main long window (owner 2026-10-29): long 25 keeps
+    short 5 and 10 and drops 15, long 40 keeps up to 20, an empty intersection keeps no candidate, a ratio of 1 keeps every candidate, the ratio is held
+    to 0.1..1. The earlier mainAuto* keys still load when their mainShort* twin is absent, and the new key wins when both are given."""
+    def shorts(**ov):
+        b = SetBook()
+        b.load(overlay(**{"stagesEnabled": True, "setGateWindow": 50, **ov}))
+        return b.short_windows
+    got = {"25 default": shorts(mainGateN=25, mainShortWindows=[5, 10, 15]), "40": shorts(mainGateN=40, mainShortWindows=[5, 10, 15, 20, 25]),
+           "8": shorts(mainGateN=8, mainShortWindows=[5, 10, 15]), "25 ratio 1": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=1.0),
+           "25 ratio .3": shorts(mainGateN=25, mainShortWindows=[5, 10, 15], mainShortMaxRatio=0.3), "shipped": shorts(),
+           "no configured candidate under cap": shorts(mainGateN=20, mainShortWindows=[10, 15], mainShortMaxRatio=0.25),
+           "legacy keys": shorts(mainGateN=25, mainShortWindows=None, mainShortMaxRatio=None, mainAutoWindows=[5, 10, 15], mainAutoMaxRatio=0.3),
+           "new key wins": shorts(mainGateN=25, mainShortWindows=[5, 10], mainAutoWindows=[5]) }
+    want = {"25 default": (5, 10), "40": (5, 10, 15, 20), "8": (), "25 ratio 1": (5, 10, 15), "25 ratio .3": (5,), "shipped": (5, 10),
+            "no configured candidate under cap": (), "legacy keys": (5,), "new key wins": (5, 10)}
+    bare = SetBook()                                           # no overlay at all: the engine's own default share is 0.5
+    bare.load({"mainGateN": 25, "mainShortWindows": [5, 10, 15]})
+    got["engine default"] = bare.short_windows
+    want["engine default"] = (5, 10)
+    leg = SetBook()
+    leg.load(overlay(mainShortEnabled=None, mainShortMin=None, mainShortMargin=None, mainAutoEnabled=False, mainAutoMin=5, mainAutoMargin=1.1))    # the shipped overlay carries the new keys: a file written before the rename carries only the old ones
+    new = SetBook()
+    new.load(overlay(mainShortEnabled=True, mainShortMin=6, mainShortMargin=1.2, mainAutoEnabled=False, mainAutoMin=5))
+    got["legacy enabled/min/margin"] = (leg.short_on, leg.short_min, leg.short_margin)
+    want["legacy enabled/min/margin"] = (False, 5, 1.1)
+    got["new enabled/min/margin win"] = (new.short_on, new.short_min, new.short_margin)
+    want["new enabled/min/margin win"] = (True, 6, 1.2)
+    return got == want, f"{ {k: v for k, v in got.items() if v != want[k]} or 'every case as asked'}"
+
+
+def main_short_selection_never_invents_a_window():
+    """A capped-out configured range cannot create a new candidate, even when that candidate would otherwise win.
+
+    The same tape with 5 explicitly configured must still be able to select 5;
+    with every candidate capped out, all current and historical choices retain
+    the existing long-window reference. This is a synthetic selection test, not
+    evidence of profitability or a reason to bypass other gates.
+    """
+    import random
+    from set_engine import _main_short_choice, _main_windows
+
+    rng = random.Random(1947)
+    times = [O + 60 * i for i in range(50)]
+    entries = [t - 1 for t in times]
+    nets = [rng.choice([-0.004, -0.002, 0.001, 0.003, 0.006]) for _ in times]
+
+    def choose(windows):
+        b = SetBook()
+        b.load(overlay(mainGateN=20, mainShortMaxRatio=0.25, mainShortWindows=windows,
+                       mainShortMin=3, mainShortMargin=1.0, minPfBySize=False))
+        p = b.stage_params("general")
+        ends, starts, passes = _main_windows(times, nets, entries, p)
+        current, history = _main_short_choice(nets, ends, starts, p, passes)
+        return p.short_windows, current, history
+
+    capped, fallback, choices = choose([10, 15])
+    explicit, chosen, explicit_choices = choose([5, 10, 15])
+    ok = (capped == () and fallback == 20 and all(n == 20 for n in choices)
+          and explicit == (5,) and chosen == 5 and set(explicit_choices) <= {5, 20})
+    return ok, f"capped={capped}, selected={fallback}, explicit={explicit}, selected={chosen}"
+
+
+def main_minimal_window_positive_and_negative():
+    """The Main minimal window (mainMinN 1-3, mainMinMode), a third last-N next to the Main long and short window: the newest results of the Set's Main Set
+    (the orders it opened while Base passed) must all be positive (or all negative) after PositionCost. Judged through _score_one and gate_reason on a tape
+    whose Base and Main long windows pass throughout, so the minimal window is the only stage that can stop it; off by default; the count is held to 0..3
+    and to the smallest short window; a Main Set with fewer results is judged on the ones it has and, with stageFullWindow, is not; reason "mainminimal"."""
+    from set_engine import StageParams, stage_verdicts
+    def reason(nets, **ov):
+        b = SetBook()
+        b.load(overlay(**{"stagesEnabled": True, "mainGateEnabled": True, "mainGateN": 8, "mainShortEnabled": False, "realGateEnabled": False, "mainNegEnabled": False,
+                          "setGateShortN": 0, "setGateWindow": 50, "setGateMinTrades": 1, "setMinPf": 0.01, "setMaxDdtHours": 36, **ov}))
+        st = _set(b)
+        cf = b.cost_pct / 100.0
+        st.hist = [{"t": 1000.0 + 60.0 * i, "pnl": x, "pnl_pct": x + cf, "hold_s": 30.0, "reason": "tp", "symbol": "X", "side": "LONG"} for i, x in enumerate(nets)]
+        st.live = []
+        b._score_one(st, now=1000.0 + 60.0 * len(nets))
+        return b.gate_reason(st)
+    W, L = 0.006, -0.004
+    base = [W, W, W, W, W, W, W, W, L, W, W, W]               # Base and the Main long window pass at the end of this
+    cases = {
+        "off by default": reason(base + [L]),
+        "+1 last win": reason(base + [W], mainMinN=1, mainMinMode="positive"),
+        "+1 last loss": reason(base + [L], mainMinN=1, mainMinMode="positive"),
+        "+2 last win, loss before": reason(base + [L, W], mainMinN=2, mainMinMode="positive"),
+        "+2 last two wins": reason(base + [L, W, W], mainMinN=2, mainMinMode="positive"),
+        "-1 last loss": reason(base + [W, L], mainMinN=1, mainMinMode="negative"),
+        "-1 last win": reason(base + [W], mainMinN=1, mainMinMode="negative"),
+        "-2 last two losses": reason(base + [W, L, L], mainMinN=2, mainMinMode="negative"),
+        "-3 loss loss win": reason(base + [W, L, L, W], mainMinN=3, mainMinMode="negative"),
+        "-3 three losses": reason(base + [W, W, L, L, L], mainMinN=3, mainMinMode="negative"),
+        "count held to 3 (9 -> 3)": reason(base + [W, W, W], mainMinN=9, mainMinMode="positive"),
+        "both: two wins": reason(base + [L, W, W], mainMinN=2, mainMinMode="both"),
+        "both: two losses": reason(base + [W, L, L], mainMinN=2, mainMinMode="both"),
+        "both: a win and a loss": reason(base + [W, L, W], mainMinN=2, mainMinMode="both"),
+        "both: three, one differs": reason(base + [L, L, W], mainMinN=3, mainMinMode="both"),
+        "avg+2: a win and a smaller loss": reason(base + [W, L], mainMinN=2, mainMinMode="avgpositive"),
+        "avg+2: a loss and a smaller win": reason(base + [W, L, L, 0.003], mainMinN=2, mainMinMode="avgpositive"),
+        "avg-3: two losses, one smaller win": reason(base + [W, L, L, 0.003], mainMinN=3, mainMinMode="avgnegative"),
+        "avg-2: a win and a smaller loss": reason(base + [W, L], mainMinN=2, mainMinMode="avgnegative"),
+        "avg±2: mean above zero": reason(base + [L, W], mainMinN=2, mainMinMode="avgboth"),
+        "avg±2: mean below zero": reason(base + [W, L, 0.003], mainMinN=2, mainMinMode="avgboth"),
+        "avg±2: mean exactly zero": reason(base + [0.004, -0.004], mainMinN=2, mainMinMode="avgboth"),
+        "Main stage off": reason(base + [L], mainMinN=1, mainMinMode="positive", mainGateEnabled=False),
+        "stages off": reason(base + [L], mainMinN=1, mainMinMode="positive", stagesEnabled=False),
+    }
+    want = {"off by default": "", "+1 last win": "", "+1 last loss": "mainminimal", "+2 last win, loss before": "mainminimal", "+2 last two wins": "",
+            "-1 last loss": "", "-1 last win": "mainminimal", "-2 last two losses": "", "-3 loss loss win": "mainminimal", "-3 three losses": "",
+            "count held to 3 (9 -> 3)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "mainminimal",
+            "both: three, one differs": "mainminimal", "Main stage off": "", "stages off": "",
+            "avg+2: a win and a smaller loss": "", "avg+2: a loss and a smaller win": "mainminimal", "avg-3: two losses, one smaller win": "",
+            "avg-2: a win and a smaller loss": "mainminimal", "avg±2: mean above zero": "", "avg±2: mean below zero": "", "avg±2: mean exactly zero": "mainminimal"}
+    b9, b0, bs = SetBook(), SetBook(), SetBook()
+    b9.load(overlay(stagesEnabled=True, mainMinN=9))
+    b0.load(overlay())
+    bs.load(overlay(stagesEnabled=True, mainGateN=25, mainShortWindows=[2], mainMinN=3))     # no ratio rule on the minimal window: 3 stays 3 beside a short window of 2
+    bo = SetBook()
+    bo.load(overlay(stagesEnabled=True, mainGateEnabled=False, mainMinN=2))
+    # the verdict on its own: two Main results against a window of 3, the results it has or the strict rule
+    P = StageParams(base_long=50, base_short=0, gate_min=1, floor=1.1, max_dd_s=1e12, lookback_s=1e12, consistency=0.0, main_on=True, main_n=8, short_on=False,
+                    short_windows=(4,), short_min=8, short_margin=1.02, neg_on=False, neg_windows=(5, 10), real_on=False, real_n=15, full_window=False,
+                    main_min_n=3, main_min_positive=True)
+    from dataclasses import replace
+    v_av = stage_verdicts([W, W], [], [], 8, P)
+    v_st = stage_verdicts([W, W], [], [], 8, replace(P, full_window=True))
+    ok = (cases == want and b9.main_min_n == 3 and b0.main_min_n == 0 and b0.main_min_positive and bs.main_min_n == 3 and bo.main_min_n == 0
+          and v_av["minimal"] and v_av["minimal_n"] == 2 and not v_st["minimal"])
+    return ok, (f"{ {k: v for k, v in cases.items() if v != want[k]} or 'every case as asked'}; count 9 -> {b9.main_min_n}; default {b0.main_min_n}; "
+                f"short window 2, minimal 3 -> {bs.main_min_n} (no cap); Main off -> {bo.main_min_n}; 2 results against 3: available {v_av['minimal']}, strict {v_st['minimal']}")
+
+
+def base_minimal_window_positive_and_negative():
+    """The Base minimal window (setGateMinN 1-3, setGateMinMode): the newest results of the Set's own tape must all be positive (or all negative) after
+    PositionCost. Judged on the end of a real tape through _score_one and gate_reason; off by default; the count is held to 0..3; a Set with fewer results than
+    the count is judged on the ones it has, and with stageFullWindow it is not; the reason is "minimal"."""
+    def reason(nets, **ov):
+        b = SetBook()
+        b.load(overlay(**{"stagesEnabled": True, "mainGateEnabled": False, "realGateEnabled": False, "mainNegEnabled": False, "setGateShortN": 0,
+                          "setGateWindow": 50, "setMinPf": 0.01, "setMaxDdtHours": 36, **ov}))
+        st = _set(b)
+        cf = b.cost_pct / 100.0
+        st.hist = [{"t": 1000.0 + 60.0 * i, "pnl": x, "pnl_pct": x + cf, "hold_s": 60.0, "reason": "tp", "symbol": "X", "side": "LONG"} for i, x in enumerate(nets)]
+        st.live = []
+        b._score_one(st, now=1000.0 + 60.0 * len(nets))
+        return b.gate_reason(st)
+    W, L = 0.004, -0.004
+    base = [W] * 8 + [L] * 4
+    cases = {
+        "off by default": reason(base + [L], ),
+        "+1 last win": reason(base + [W], setGateMinN=1, setGateMinMode="positive"),
+        "+1 last loss": reason(base + [L], setGateMinN=1, setGateMinMode="positive"),
+        "+2 last win, loss before": reason(base + [L, W], setGateMinN=2, setGateMinMode="positive"),
+        "+2 last two wins": reason(base + [L, W, W], setGateMinN=2, setGateMinMode="positive"),
+        "-1 last loss": reason(base + [W, L], setGateMinN=1, setGateMinMode="negative"),
+        "-1 last win": reason(base + [W], setGateMinN=1, setGateMinMode="negative"),
+        "-2 last two losses": reason(base + [W, L, L], setGateMinN=2, setGateMinMode="negative"),
+        "-3 loss loss win": reason(base + [W, L, L, W], setGateMinN=3, setGateMinMode="negative"),
+        "-3 three losses": reason(base + [W, L, L, L], setGateMinN=3, setGateMinMode="negative"),
+        "count held to 3 (9 -> 3)": reason(base + [W, W, W], setGateMinN=9, setGateMinMode="positive"),
+        "both: two wins": reason(base + [L, W, W], setGateMinN=2, setGateMinMode="both"),
+        "both: two losses": reason(base + [W, L, L], setGateMinN=2, setGateMinMode="both"),
+        "both: a win and a loss": reason(base + [W, L, W], setGateMinN=2, setGateMinMode="both"),
+        "both: three, one differs": reason(base + [L, L, W], setGateMinN=3, setGateMinMode="both"),
+        "two results, N 3, available": reason([W, W], setGateMinN=3, setGateMinMode="positive"),
+        # Complete the primary Base window so this case isolates the secondary minimal-N rule.
+        "two results, N 3, full window": reason([W, W], setGateWindow=2, setGateMinN=3, setGateMinMode="positive", stageFullWindow=True),
+        "stages off": reason(base + [L], setGateMinN=1, setGateMinMode="positive", stagesEnabled=False),
+    }
+    want = {"off by default": "", "+1 last win": "", "+1 last loss": "minimal", "+2 last win, loss before": "minimal", "+2 last two wins": "",
+            "-1 last loss": "", "-1 last win": "minimal", "-2 last two losses": "", "-3 loss loss win": "minimal", "-3 three losses": "",
+            "count held to 3 (9 -> 3)": "", "both: two wins": "", "both: two losses": "", "both: a win and a loss": "minimal",
+            "both: three, one differs": "minimal", "two results, N 3, available": "", "two results, N 3, full window": "minimal", "stages off": ""}
+    b9 = SetBook()
+    b9.load(overlay(stagesEnabled=True, setGateMinN=9))
+    b0 = SetBook()
+    b0.load(overlay())
+    bs = SetBook()
+    bs.load(overlay(stagesEnabled=True, setGateShortN=2, setGateMinN=3))          # no ratio rule on the minimal window: 3 stays 3 beside a short window of 2
+    ok = cases == want and b9.base_min_n == 3 and b0.base_min_n == 0 and b0.base_min_positive and bs.base_min_n == 3
+    return ok, f"{ {k: v for k, v in cases.items() if v != want[k]} or 'every case as asked'}; count 9 -> {b9.base_min_n}; default {b0.base_min_n}; short 2, minimal 3 -> {bs.base_min_n} (no cap)"
+
+
+def default_max_drawdown_time_is_24_hours():
+    """The longest drawdown a Set may show over its gate window defaults to 24 h (owner 2026-10-29): the engine without the key, the four
+    shipped overlays and the desk default all say so; 12 h and 36 h stay settable (2..36 in steps of 2)."""
+    import json, os, re
+    bare = SetBook()
+    bare.load({})
+    o12, o36, odd = SetBook(), SetBook(), SetBook()
+    o12.load({"setMaxDdtHours": 12})
+    o36.load({"setMaxDdtHours": 36})
+    odd.load({"setMaxDdtHours": 49})
+    shipped = {n: json.load(open(os.path.join(PULSE, n), encoding="utf-8")).get("setMaxDdtHours")
+               for n in ("overlay-bingx-x01.json", "overlay-bingx-x02.json", "overlay-bybit-x01.json", "overlay-bybit-x02.json")}
+    from common import ROOT
+    src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    desk = re.findall(r"setMaxDdtHours: (?:num\(cts\.setMaxDdtHours, )?(\d+)", src)
+    ok = (bare.max_ddt_h == 24.0 and bare.max_dd_s == 24 * HOUR and o12.max_ddt_h == 12.0 and o36.max_ddt_h == 36.0 and odd.max_ddt_h == 36.0
+          and set(shipped.values()) == {24} and desk == ["24", "24"])
+    return ok, f"engine default {bare.max_ddt_h:g} h; 12 -> {o12.max_ddt_h:g}, 36 -> {o36.max_ddt_h:g}, 49 -> {odd.max_ddt_h:g}; overlays {sorted(set(shipped.values()))}; desk {desk}"
+
+
+def every_window_asks_the_minimum_pf_of_its_size():
+    """Minimum PF by window size (minPfBySize, default on): up to 5 orders Micro 1.02 (owner 2026-11-03, was 1.05), up to 10 Minimal 1.10, up to 20 Short 1.15, up to
+    35 Medium 1.25, above Long 1.5; the Base long window (50) asks 1.5, the Base short (25) and Main static (25) 1.25, the Real window (15)
+    1.15, the Main short windows 5 / 10 1.05 / 1.10. Off: setMinPf for every window. A class is never under MIN_PF_FLOOR (1.02)."""
+    import set_engine as se
+    from position_cost import MIN_PF_FLOOR
+    b = SetBook(); b.load(overlay(minPfBySize=True))
+    got = {n: b.floor_for(n, "indications") for n in (1, 5, 6, 10, 15, 20, 25, 35, 36, 50)}
+    want = {1: 1.02, 5: 1.02, 6: 1.10, 10: 1.10, 15: 1.15, 20: 1.15, 25: 1.25, 35: 1.25, 36: 1.5, 50: 1.5}
+    off = SetBook(); off.load(overlay(minPfBySize=False, setMinPf=1.3))
+    low = SetBook(); low.load(overlay(minPfBySize=True, minPfMicro=0.9))
+    P = b.stage_params("indications")
+    # stage verdicts: Real 15 at PF 1.15 passes (Short 1.15); Main short 5 at 1.06 passes (Micro)
+    win15 = [0.0023] * 10 + [-0.004] * 5                 # PF 1.15 over 15: passes the Short class
+    win15_low = [0.0022] * 10 + [-0.004] * 5             # PF 1.10: fails it
+
+    def pf(v):
+        g = sum(x for x in v if x > 0); l_ = -sum(x for x in v if x < 0)
+        return g / l_ if l_ else 99.0
+    m25 = [0.0024] * 15 + [-0.0024] * 10                 # PF 1.5 over 25: passes the Medium class (1.25)
+    v = se.stage_verdicts(main=m25, real=win15, realneg=[], short_n=5, P=P)
+    v_low = se.stage_verdicts(main=m25, real=win15_low, realneg=[], short_n=5, P=P)
+    # the Base gate on the long window: PF 1.4 over 50 fails, 1.5 passes
+    st = next(x for x in b.by_idx if x.kind == "base")
+    st.active, st.locked, st.last_error, st.gate_n, st.max_dd_s = True, False, "", 50, 0.0
+    st.gate_pf = 1.4
+    long_14 = b.gate_reason(st)
+    st.gate_pf = 1.5
+    st.base_short_n, st.base_short_pf = 25, 1.3
+    long_15 = b.gate_reason(st)
+    ok = (got == want and all(off.floor_for(n, "indications") == 1.3 for n in (5, 15, 50)) and low.floor_for(3, "x") == MIN_PF_FLOOR
+          and abs(pf(win15) - 1.15) < 1e-9 and v["real"] is True and v_low["real"] is False and v["main"] is True and long_14 == "pf<min" and long_15 not in ("pf<min", "short"))
+    return ok, f"floors {got}; off {off.floor_for(5, 'x')}; micro 0.9 -> {low.floor_for(3, 'x')}; Real 15 at 1.15 {v['real']}, at 1.10 {v_low['real']}; long 1.4 '{long_14}', 1.5 '{long_15}'"
+
+
+def modeled_stop_cap_rejects_unsafe_sets():
+    """The optional cap includes one modeled cost and rejects invalid configuration rather than disabling itself."""
+    import os
+    import sys
+    from array import array
+    from common import ROOT
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    import stage_eval as sg
+    # a step is 0.1 % of price: step 12 x ratio 3.5 = a 4.2 % stop (+ one cost 0.15 %) is over the 3 % cap, step 2 x 0.5 (the 0.24 % minimum stop) is under
+    b = SetBook(); b.load(overlay(positionCostPct=0.15, minPfBySize=False, setMinStep=2, setStepMax=12,
+                                  setSlRatios=[0.5, 2.5], maxModeledStopLossPct=3.0))
+    low = next(st for st in b.by_idx if st.kind == "base" and st.step == 2 and st.sl_ratio == 0.5)
+    high = next(st for st in b.by_idx if st.kind == "base" and st.step == 12 and st.sl_ratio == 2.5)
+    for st in (low, high):
+        st.active, st.locked, st.last_error, st.gate_n, st.gate_pf, st.max_dd_s = True, False, "", 50, 2.0, 0.0
+    before = (b.stop_cap_exceeded(low), b.stop_cap_exceeded(high), b.base_validation_reason(high))
+    tapes = sg.Tapes.__new__(sg.Tapes)
+    tapes.cf = b.cost_pct / 100.0
+    exits = array("d", (1000.0 + 60.0 * i for i in range(50)))
+    tapes.by_set = {high.idx: (exits, array("d", (x - 30 for x in exits)), array("d", [0.01] * 50))}
+    blocked = sg.gate_base(b, tapes, high, 5000.0)[0]
+    b.max_modeled_stop_loss_pct = 0.0
+    unblocked = sg.gate_base(b, tapes, high, 5000.0)[0]
+    b.load(overlay(positionCostPct=0.15, maxModeledStopLossPct="not-a-number"))
+    invalid = b.stop_cap_invalid and all(b.stop_cap_exceeded(st) for st in b.by_idx)
+    b.load(overlay(positionCostPct=0.15, maxModeledStopLossPct=0))
+    off = not b.stop_cap_invalid and all(not b.stop_cap_exceeded(st) for st in b.by_idx)
+    ok = before == (False, True, "stop-cap") and not blocked and unblocked and invalid and off
+    return ok, f"under/over/reason={before}; replay blocked={not blocked} off={unblocked}; invalid_blocks={invalid}; zero_off={off}"
+
+
+def signal_floor_is_separate_from_window_classes():
+    """Signal packs read their own configured floor through the complete stage parameter object."""
+    b = SetBook(); b.load(overlay(minPfBySize=True, minPfSignals=1.3))
+    values = [b.floor_for(n, "sig-example") for n in (5, 15, 25, 50)]
+    params = b.stage_params("sig-example")
+    stage = [params.floor_for(n) for n in (5, 15, 25, 50)]
+    ordinary = [b.floor_for(n, "indications") for n in (5, 15, 25, 50)]
+    b.load(overlay(minPfBySize=False, setMinPf=1.25, minPfSignals=2.7))
+    changed = [b.floor_for(5, "signals"), b.stage_params("signal.indicator").floor_for(50)]
+    ok = values == [2.2] * 4 and stage == values and ordinary == [1.02, 1.15, 1.25, 1.5] and changed == [2.7, 2.7]
+    return ok, f"signals={values}, stage={stage}, ordinary={ordinary}, changed={changed}"
+
+
+def no_minimum_orders_gate_can_be_forced_to_one():
+    """Owner 2026-11-04: no minimum-orders gate. Every order-count minimum accepts 1: the Auto per-step floor (minPfStepAutoMin, was clamped to 30), the Auto pause
+    (pauseAutoMin, was clamped to 8), the Main short window's candidate minimum (mainShortMin, was 3), the Exit strategies' samples (exitMinSamples, was 5) and
+    Block v2's observations (blockMinObservations); the Base gate's own minimum (setGateMinTrades) is 0 in every shipped overlay (a Set is judged on the orders it
+    has); MIN_VALIDATION_N only bounds a window's length."""
+    import json as _j
+    import os as _o
+    import set_engine as se
+    import block_rules as br
+    from common import PULSE, ROOT
+    b = se.SetBook()
+    b.load(overlay(minPfStepAutoMin=1, pauseAutoMin=1, mainShortMin=1, setGateMinTrades=0))
+    from exit_engine import ExitBook
+    ex = ExitBook.__new__(ExitBook)
+    try:
+        ex.load({"exitMinSamples": 1}, {})
+        exit_min = ex.min_samples
+    except Exception as exc:  # noqa: BLE001
+        exit_min = f"load failed: {exc}"
+    blk = br.clean_cfg({"blockMinObservations": 1}).min_obs
+    files = [_o.path.join(PULSE, f"overlay-{v}-{c}.json") for v in ("bingx", "bybit") for c in ("x01", "x02")]
+    gate_off = all(int(_j.load(open(f)).get("setGateMinTrades", 0) or 0) == 0 for f in files)
+    ok = b.pf_step_auto_min == 1 and b.pause_auto_min == 1 and b.short_min == 1 and b.gate_min <= 1 and exit_min == 1 and blk == 1 and gate_off
+    return ok, f"floors accepted at 1: step floor {b.pf_step_auto_min}, pause {b.pause_auto_min}, Main short {b.short_min}, Exit {exit_min}, Block v2 {blk}; Base minimum {b.gate_min}; shipped overlays off {gate_off}"
+
+
+def pf_defaults_match_every_shipped_overlay():
+    """The desk, each venue overlay and the engine agree on the six requested defaults."""
+    import json
+    import os
+    import re
+    from common import ROOT, PULSE
+    from position_cost import PF_BY_SIZE_DEFAULTS
+    want = dict(PF_BY_SIZE_DEFAULTS)      # the one table; the desk, overlays and presets must equal it
+    assert want == {"minPfMicro": 1.02, "minPfMinimal": 1.10, "minPfShort": 1.15,
+                    "minPfMedium": 1.25, "minPfLong": 1.5, "minPfSignals": 2.2}, "owner values moved: update the docs and the desk with them"
+    src = open(os.path.join(ROOT, "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    block = src.split("export const PF_TYPE_DEFAULTS = {", 1)[1].split("} as const;", 1)[0]
+    desk = {key: float(value) for key, value in re.findall(r"(minPf\w+):\s*([0-9.]+)", block)}
+    errors = []
+    for venue in ("bingx", "bybit"):
+        for conn in ("x01", "x02"):
+            path = os.path.join(PULSE, f"overlay-{venue}-{conn}.json")
+            ov = json.load(open(path, encoding="utf-8"))
+            if any(ov.get(k) != value for k, value in want.items()):
+                errors.append(path)
+            book = SetBook(); book.load(ov)
+            got = [book.floor_for(n, "indications") for n in (5, 10, 20, 35, 50)] + [book.floor_for(50, "signals")]
+            if got != list(want.values()):
+                errors.append(f"{venue}-{conn} engine={got}")
+    return desk == want and not errors, f"desk={desk}; overlay/engine errors={errors}"
+
+
+def minimal_coordination_is_not_pf_validation():
+    """Both stages and all sign modes coordinate entry without removing PF-valid Sets from statistics."""
+    from common import SMALL
+    b = SetBook()
+    b.load(overlay(**{**SMALL, "stagesEnabled": True, "setGateWindow": 10, "setGateShortN": 5,
+                      "mainGateN": 10, "mainShortWindows": [5], "mainNegEnabled": False,
+                      "realGateEnabled": False, "setMinPf": 1.1}))
+    st = _set(b)
+    b.by_idx = [st]
+    b.sets = {st.id: st}
+    modes = ("positive", "negative", "both", "avgpositive", "avgnegative", "avgboth")
+    cases = 0
+    errors = []
+    cf = b.cost_pct / 100.0
+
+    def expected(mode, xs):
+        if mode.startswith("avg"):
+            sign = sum(xs)
+            return sign > 1e-12 if mode == "avgpositive" else sign < -1e-12 if mode == "avgnegative" else abs(sign) > 1e-12
+        pos, neg = all(x > 0 for x in xs), all(x < 0 for x in xs)
+        return pos if mode == "positive" else neg if mode == "negative" else pos or neg
+
+    for n in (1, 2, 3):
+        samples = ([0.002] * n, [-0.002] * n, [0.0] * n, ([0.003, -0.002] * n)[:n])
+        for mode in modes:
+            for tail in samples:
+                vals = [0.02] * 7 + list(tail)
+                st.hist = [{"t": O + 60 * i, "symbol": "X", "side": "LONG", "hold_s": 30,
+                            "pnl": x, "pnl_pct": x + cf} for i, x in enumerate(vals)]
+                st.live = []
+                st.proc_replayed = True
+                st.proc = [(O + 60 * i, x) for i, x in enumerate(vals)]
+                st.main_short_win = 5
+                for stage in ("base", "main"):
+                    b.base_min_n = n if stage == "base" else 0
+                    b.main_min_n = n if stage == "main" else 0
+                    for prefix in ("base", "main"):
+                        setattr(b, prefix + "_min_positive", not mode.endswith("negative"))
+                        setattr(b, prefix + "_min_both", mode.endswith("both"))
+                        setattr(b, prefix + "_min_avg", mode.startswith("avg"))
+                    b._score_one(st, now=O + 60 * len(vals))
+                    want = expected(mode, tail)
+                    pb, counts = b.snapshot()["pfBase"], b.counts()
+                    win = pb["windows"]["baseMinimal" if stage == "base" else "mainMinimal"]
+                    actual = (b.validation_reason(st), b.gate_reason(st), b.state_of(st)[0], pb["valid"], pb["eligible"], counts["pfValid"], win["pf"], win["meanPf"])
+                    goal = ("", "" if want else ("minimal" if stage == "base" else "mainminimal"), "valid" if want else "waiting", 1, int(want), 1, None, None)
+                    if actual != goal or not (st.base_long_ok and st.base_short_ok and b._main_pf_pass(st)):
+                        errors.append((n, mode, tail, stage, actual, goal))
+                    cases += 1
+    # A true PF failure must not be masked by an unrelated coordination wait.
+    b.base_min_n, b.main_min_n, st.base_min_ok, st.gate_pf = 1, 0, False, 0.5
+    if b.state_of(st) != ("invalid", "pf<min") or b.validation_reason(st) != "pf<min":
+        errors.append(("masked PF failure", b.state_of(st), b.validation_reason(st)))
+    return not errors, f"{cases} Base/Main coordination cases (N 1–3, six modes, positive, negative, mixed and zero); mismatches {errors[:3] or 0}"
+
+
+
+def base_long_ten_is_judged_on_its_own_windows():
+    """Base long from 10 (owner 2026-11-03): with setGateWindow 10 the short window is at most 5, and nothing else blocks -- no minimum order count,
+    no full-window rule, no fixed sample floor in the chain: the first order after one winning close is in the Main Set, the first after one Main
+    close is in the Real Set, and a Set with two closes at the floor is valid on its lane."""
+    import set_engine as se
+    b = _book(setGateWindow=10, setGateShortN=10, mainGateN=10, realGateN=1, setGateMinTrades=0, stagesEnabled=True, mainGateEnabled=True, setMinPf=1.05)
+    st = next(x for x in b.by_idx if x.kind == "base")
+    P = b.stage_params(st.pack, st)
+    ts = [600.0 * i for i in range(1, 41)]
+    ents = [t - 60.0 for t in ts]
+    nets = [0.002] * 40
+    ch = se.stage_chain(ts, ents, nets, P)
+    v = se.stage_verdicts([0.002, 0.002], [0.002], [], P.main_n, P)
+    low = _book(setGateWindow=5)
+    ok = (b.gate_window == 10 and b.base_short == 5 and b.gate_min <= 1 and not P.full_window and ch["main"][:1] == [1] and ch["real"][:1] == [2]
+          and v["pos"] and low.gate_window == 5)
+    return ok, (f"long {b.gate_window} short {b.base_short} (asked 10, capped at half) minimum orders {b.gate_min}; first Main order #{ch['main'][:1]}, first Real "
+                f"order #{ch['real'][:1]}; two closes valid on the lane={v['pos']}; long 5 asked -> {low.gate_window}")
+
+CHECKS = [
+    ("gates.base-long-ten-is-judged-on-its-own-windows", base_long_ten_is_judged_on_its_own_windows),
+    ("gates.modeled-stop-cap", modeled_stop_cap_rejects_unsafe_sets),
+    ("gates.pf-defaults-match-shipped-overlays", pf_defaults_match_every_shipped_overlay),
+    ("gates.no-minimum-orders-gate-can-be-forced-to-one", no_minimum_orders_gate_can_be_forced_to_one),
+    ("gates.signal-floor-independent-of-window-class", signal_floor_is_separate_from_window_classes),
+    ("gates.minimal-coordination-is-not-pf-validation", minimal_coordination_is_not_pf_validation),
+    ("gates.every-window-asks-the-minimum-pf-of-its-size", every_window_asks_the_minimum_pf_of_its_size),
+    ("gates.base-minimal-window-positive-and-negative", base_minimal_window_positive_and_negative),
+    ("gates.main-short-windows-are-at-most-half-of-the-long-window", main_short_windows_are_at_most_half_of_the_long_window),
+    ("gates.main-short-selection-never-invents-a-window", main_short_selection_never_invents_a_window),
+    ("gates.main-minimal-window-positive-and-negative", main_minimal_window_positive_and_negative),
+    ("gates.short-window-is-at-most-half-of-the-long-window", short_window_is_at_most_half_of_the_long_window),
+    ("gates.stage-short-window-judges-the-orders-it-has", stage_short_window_judges_the_orders_it_has),
+    ("gates.stage-windows-accept-one-and-two", stage_windows_accept_one_and_two),
+    ("gates.minimum-order-count-off-judges-on-available-orders", minimum_order_count_off_judges_on_available_orders),
+    ("gates.default-max-drawdown-time-is-24-hours", default_max_drawdown_time_is_24_hours),
+    ("gates.pf-gate-boundary", pf_gate_boundary),
+    ("gates.ddt-gate-strictly-lower", ddt_gate_boundary),
+    ("gates.ddt-open-drawdown-to-clock", ddt_open_drawdown_to_clock),
+    ("gates.lock-blocks-at-once", lock_blocks_at_once),
+]
+
+
+if __name__ == "__main__":
+    bad = 0
+    for name, fn in CHECKS:
+        ok, detail = fn()
+        bad += 0 if ok else 1
+        print(("PASS " if ok else "FAIL ") + name, detail)
+    sys.exit(1 if bad else 0)

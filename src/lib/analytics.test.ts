@@ -1,75 +1,87 @@
-import assert from "node:assert/strict";
 import { test } from "node:test";
-import { calculateDrawdownTime, costAsFrac, lastNCostPf } from "./analytics.ts";
+import assert from "node:assert/strict";
+import { buildOverview, lastNCostPf } from "./analytics.ts";
+import { evidencePfText } from "./evidence-view.ts";
 
-test("drawdown time isolates interleaved symbols", () => {
-  const metric = calculateDrawdownTime(
-    [
-      { t: 1_700_000_100_000, symbol: "A", pnl: 1 },
-      { t: 1_700_000_160_000, symbol: "A", pnl: -2 },
-      { t: 1_700_000_500_000, symbol: "B", pnl: 1 },
-      { t: 1_700_000_560_000, symbol: "B", pnl: -0.2 },
-      { t: 1_700_000_620_000, symbol: "B", pnl: 1.5 },
-    ],
-    1_700_000_700_000,
-    3,
-  );
-  assert.equal(metric.samples, 5);
-  assert.equal(metric.episodes, 2);
-  assert.equal(metric.maxDurationMs, 540_000);
-  assert.equal(metric.currentDurationMs, 540_000);
-  assert.equal(metric.maxDepth, 2);
-  assert.equal(metric.inDrawdown, true);
+test("browser calculations preserve finite high PF, no-loss, flat and empty evidence", () => {
+  const calculate = (nets: number[]) => lastNCostPf(nets.map((net, t) => ({ t, pnl: net, pnl_pct: net, net_pnl_pct: net })), 15);
+  for (const [nets, state, display] of [
+    [[1, -.001], "finite", "1000.0000"],
+    [[.1, .2], "no-loss", "No observed losses"],
+    [[0, 0], "flat", "1.00 (neutral: every close nets zero)"],
+    [[], "empty", "— (no sample)"],
+  ] as const) {
+    const result = calculate([...nets]);
+    assert.equal(result.pfState, state);
+    assert.equal(evidencePfText(result, result.count), display);
+  }
 });
 
-test("last-N cost PF selects the newest timestamps", () => {
-  const metric = lastNCostPf([
-    { t: 4, pnl: 0, pnl_pct: 0.002 },
-    { t: 1, pnl: 0, pnl_pct: -0.002 },
-    { t: 3, pnl: 0, pnl_pct: 0.002 },
-    { t: 2, pnl: 0, pnl_pct: -0.002 },
-  ], 2);
-  assert.equal(metric.count, 2);
-  assert.equal(metric.avgR, 1);
-  assert.equal(metric.ratio, 1.1);
-});
-
-test("drawdown time uses cost-net pnl_pct when pnl is zero", () => {
-  const metric = calculateDrawdownTime(
-    [
-      { t: 1_700_000_100, symbol: "A", pnl: 0, pnl_pct: 0.01 },
-      { t: 1_700_000_160, symbol: "A", pnl: 0, pnl_pct: -0.02 },
-      { t: 1_700_000_220, symbol: "A", pnl: 0, pnl_pct: -0.01 },
-    ],
-    1_700_000_220_000,
-    3,
-  );
-  assert.equal(metric.samples, 3);
-  assert.ok(metric.episodes >= 1);
-  assert.ok(metric.maxDurationMs >= 60_000);
-});
-
-test("PositionCost between 0.02% and 0.05% stays a percent, matching the engine", () => {
-  // Engine (position_cost.cost_as_frac) treats values at or above 0.02 as percent.
-  assert.equal(costAsFrac(0.04), 0.0004);
-  assert.equal(costAsFrac(0.05), 0.0005);
-  assert.equal(costAsFrac(0.02), 0.0002);
-  const rows = Array.from({ length: 10 }, (_, i) => ({ t: 1_790_000_000 - i * 60, pnl: 0.26, pnl_pct: 0.003 }));
-  const metric = lastNCostPf(rows, 15, 0.04);
-  assert.equal(metric.classicPf, 99);
-  assert.equal(metric.netAvg, 0.0026);
-  assert.equal(metric.ratio, 1.65);
-});
-
-test("tied close timestamps resolve like the engine's chronological tape (rows arrive newest-first)", () => {
-  // Chronological: a +1 win, then a -2 loss, both stamped the same second. The
-  // desk receives the newest row first; ordering the tie backwards would end
-  // the tape one unit shallower than the engine's.
-  const newestFirst = [
-    { t: 1_700_000_100, symbol: "A", pnl: -2 },
-    { t: 1_700_000_100, symbol: "A", pnl: 1 },
+test("recorded execution net is not charged a second cost", () => {
+  const rows = [
+    { t: 1, pnl: 0.04, pnl_pct: 0.001, net_pnl_pct: 0.0004 },
+    { t: 2, pnl: -0.02, pnl_pct: 0.001, net_pnl_pct: -0.0002 },
   ];
-  const metric = calculateDrawdownTime(newestFirst, 1_700_000_200_000, 3);
-  assert.equal(metric.currentDepth, 2);
-  assert.equal(metric.inDrawdown, true);
+  for (const cost of [0.12, 0.3]) {
+    const metrics = lastNCostPf(rows, 2, cost);
+    assert.equal(metrics.pf, 2);
+    assert.equal(metrics.grossPct, 0.1);
+    assert.equal(metrics.netSumPct, 0.02);
+  }
+});
+
+test("every overview window keeps recorded net and uses the selected cost only for gross-only rows", () => {
+  const rows = [{ t: 1, pnl: .04, pnl_pct: .001, net_pnl_pct: .0004 },
+    { t: 2, pnl: -.02, pnl_pct: .001, net_pnl_pct: -.0002 },
+    { t: 3, pnl: .01, pnl_pct: .004 }];
+  for (const cost of [0, .12, .3]) {
+    const overview = buildOverview(rows, 4000, cost, 1.7);
+    for (const m of [overview.costPf, overview.last4, ...Object.values(overview.positionWindows), ...Object.values(overview.timeWindows)]) {
+      assert.equal(m.costPct, cost);
+      assert.equal(m.minPf, 1.7);
+      assert.equal(m.pf, Number(((.0004 + .004 - cost / 100) / .0002).toFixed(4)));
+      assert.equal(m.netPct, Number((100 * (.0004 - .0002 + .004 - cost / 100) / 3).toFixed(4)));
+    }
+  }
+});
+
+// The window's PF, its net summed over the positions and its mean net per position share one set of net results (gross fraction less one PositionCost).
+test("last-N cost PF: net sum, mean net per position and PF read the same nets", () => {
+  const rows = [
+    { t: 1, pnl: 0, pnl_pct: 0.004 },
+    { t: 2, pnl: 0, pnl_pct: -0.002 },
+    { t: 3, pnl: 0, pnl_pct: 0.003 },
+  ];
+  const m = lastNCostPf(rows, 15, 0.12);
+  // nets 0.0028, -0.0032, 0.0018: gross profit 0.0046, gross loss 0.0032
+  assert.equal(m.count, 3);
+  assert.equal(m.pf, 1.4375);
+  assert.ok(Math.abs(m.netSumPct - 0.14) < 1e-9, `net sum ${m.netSumPct}`);
+  assert.ok(Math.abs(m.netPct - 0.14 / 3) < 1e-3, `net per position ${m.netPct}`);
+  assert.ok(Math.abs(m.netPct * m.count - m.netSumPct) < 1e-3);
+});
+
+test("last-N cost PF: PF above 1 exactly when the net is positive", () => {
+  for (const [rows, positive] of [
+    [[{ t: 1, pnl: 0, pnl_pct: 0.0005 }, { t: 2, pnl: 0, pnl_pct: 0.0006 }], false], // both gains are under one PositionCost: net losses
+    [[{ t: 1, pnl: 0, pnl_pct: 0.005 }, { t: 2, pnl: 0, pnl_pct: -0.001 }], true],
+    [[{ t: 1, pnl: 0, pnl_pct: -0.004 }, { t: 2, pnl: 0, pnl_pct: 0.0015 }], false],
+  ] as const) {
+    const m = lastNCostPf([...rows], 15, 0.12);
+    assert.equal(m.netSumPct > 0, positive);
+    assert.equal(m.pf > 1, positive);
+    assert.equal(m.netPct > 0, positive);
+  }
+});
+
+test("PF is neutral at 1 and the cost ratio 1.10 is an average of +1 PositionCost", () => {
+  const cost = 0.12;
+  const cf = cost / 100;
+  const rows = (gross: number[]) => gross.map((g, t) => ({ t, pnl: g, pnl_pct: g }));
+  assert.equal(lastNCostPf(rows([cf, cf, cf]), 3, cost).pf, 1); // every close nets exactly zero
+  assert.equal(lastNCostPf(rows([cf + 0.004, cf - 0.004]), 2, cost).pf, 1); // gains equal losses
+  assert.equal(lastNCostPf([], 3, cost).pf, 0); // empty window
+  assert.equal(lastNCostPf(rows([2 * cf, 2 * cf]), 2, cost).ratio, 1.1); // +1 PositionCost each
+  assert.equal(lastNCostPf(rows([3 * cf, cf]), 2, cost).ratio, 1.1); // +2 and 0: average +1
+  assert.equal(lastNCostPf(rows([0, 0]), 2, cost).ratio, 0.9); // -1 PositionCost each
 });

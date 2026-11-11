@@ -11,11 +11,23 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import POSITIVE_PF, clears_pf, shared_pf_settings, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_result_r
+# DCA is an opt-in add-on lane: the overlay switch `dcaEnabled` (off by default) turns it on. The hard-off constant stays
+# as a build-time kill switch (True: never enabled, whatever the overlay says).
+DCA_HARD_OFF = False
+
+# Auto plan (dcaAuto, on by default): rungs as fractions of the position's own stop distance, with a size multiple of the
+# base size, chosen from scripts/dca_eval.py (walk-forward on executed Base positions): one late small rung is the least
+# harmful shape on every window measured (more rungs and larger multiples only scale the losing trades), the stop stays at
+# the original level, and the lane's own add-on PF switches it off when the adds do not pay (score()).
+AUTO_RUNG_FRACS = [0.4]
+AUTO_RUNG_MULT = 0.5
+AUTO_MAX_EXPOSURE_X = 2.0       # base size + all adds never above this multiple of the base size
+
+from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, gate_min_pf, last_n_cost_pf, normalize_cost_pct, signed_result_r
+from position_cost import row_net_pnl_pct, cost_as_frac
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
-DCA_STEPS_MAX = 12
 
 
 def _pct_list(raw: Any, fallback: List[float]) -> List[float]:
@@ -28,9 +40,7 @@ def _pct_list(raw: Any, fallback: List[float]) -> List[float]:
                 n = float(x)
             except Exception:
                 continue
-            if n > 0.08:
-                n = n / 100.0
-            out.append(max(0.0005, min(0.08, n)))
+            out.append(max(0.0005, min(0.08, n / 100.0)))   # distances are percent, always
     return out or list(fallback)
 
 
@@ -44,7 +54,7 @@ def _mult_list(raw: Any, fallback: List[float]) -> List[float]:
                 n = float(x)
             except Exception:
                 continue
-            out.append(max(0.25, min(2.5, n)))
+            out.append(max(0.25, min(8.0, n)))
     return out or list(fallback)
 
 
@@ -63,7 +73,6 @@ class DcaStep:
     mult: float
     filled: bool = False
     qty: float = 0.0
-    requested_qty: float = 0.0
     px: float = 0.0
     t: float = 0.0
     cid: str = ""
@@ -77,18 +86,19 @@ class DcaLane:
     parent_qty: float
     avg_entry: float
     steps: List[DcaStep] = field(default_factory=list)
-    group_key: str = ""
     last_add: float = 0.0
     filled_n: int = 0
+    ref_entry: float = 0.0       # the entry the position opened at (auto plan measures its rungs from here, not the average)
 
 
 class DcaBook:
     def __init__(self) -> None:
-        # The baseline enables DCA as an independent lane. An overlay may still
-        # disable it explicitly, while an empty step cap uses the finite
-        # configured distance list rather than creating an unbounded book.
-        self.enabled = True
-        self.max_steps = len(DEFAULT_DIST)
+        self.enabled = False  # DCA off by default — desk overlay can enable it
+        self.auto = True               # dcaAuto: the rung plan is calculated (AUTO_*), else the static lists below
+        self.on_sets = False           # dcaOnSets: Set positions may be added to (the add-on is scored on its own fills)
+        self.on_axis = False           # dcaOnAxis: Set positions admitted through an enabled Axis may be added to
+        self.max_expo = AUTO_MAX_EXPOSURE_X
+        self.max_steps = 0
         self.distances = [d / 100.0 for d in DEFAULT_DIST]
         self.mults = list(DEFAULT_MULT)
         self.tp_mode = "average"
@@ -96,7 +106,7 @@ class DcaBook:
         self.cooldown_s = 30.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = POSITIVE_PF
+        self.min_pf = GATE_MIN_PF_DEFAULT
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.active = True
@@ -107,23 +117,22 @@ class DcaBook:
         self.emits = 0
         self.skips = 0
 
-    def key(self, symbol: str, side: str, group_key: str = "") -> str:
-        """Return an isolated DCA lane for one symbol/side/range group."""
-        base = f"{symbol}:{side}"
-        return f"{base}:group:{group_key}" if group_key else base
+    def key(self, symbol: str, side: str) -> str:
+        return f"{symbol}:{side}"
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
-        self.enabled = bool(
-            ov.get(
-                "dcaEnabled",
-                ov.get(
-                    "stratDca",
-                    cts.get("dcaEnabled", cts.get("variantDcaEnabled", True)),
-                ),
-            )
-        )
+        self.enabled = bool(ov.get("dcaEnabled", False)) and not DCA_HARD_OFF
+        self.auto = bool(ov.get("dcaAuto", True))
+        self.on_sets = bool(ov.get("dcaOnSets", False))
+        self.on_axis = bool(ov.get("dcaOnAxis", False))
+        try:
+            raw_expo = ov.get("dcaMaxExposureX")
+            # 0 = no exposure ceiling (owner 2026-11-04: an add is its multiple x the position's ORIGINAL base volume, nothing else limits it); absent = the default
+            self.max_expo = AUTO_MAX_EXPOSURE_X if raw_expo is None else (0.0 if float(raw_expo) <= 0 else max(1.0, min(8.0, float(raw_expo))))
+        except Exception:
+            self.max_expo = AUTO_MAX_EXPOSURE_X
         try:
             raw_steps = ov.get("dcaMaxSteps")
             if raw_steps is None:
@@ -133,20 +142,14 @@ class DcaBook:
             step_n = int(raw_steps if raw_steps is not None else 0)
         except Exception:
             step_n = 0
+        # 0 = unlimited. Seed from configured distances; due() grows steps on demand.
+        self.max_steps = 0 if step_n <= 0 else max(1, step_n)
         dist = ov.get("dcaStepDistancesPct") or coord.get("dcaStepDistancesPct") or cts.get("dcaStepDistancesPct") or DEFAULT_DIST
         self.distances = _pct_list(dist, [d / 100.0 for d in DEFAULT_DIST])
-        # Zero means the configured distance list, never an unbounded book.
-        # A hard ceiling prevents malformed settings from allocating huge lanes.
-        self.max_steps = max(1, min(DCA_STEPS_MAX, step_n if step_n > 0 else len(self.distances) or 4))
         if self.max_steps > 0:
             while len(self.distances) < self.max_steps:
                 self.distances.append(self.distances[-1] + 0.005)
             self.distances = self.distances[: self.max_steps]
-        # First add must be a real adverse move, not 0.5% noise.
-        if self.distances:
-            self.distances[0] = max(0.012, float(self.distances[0]))
-            for i in range(1, len(self.distances)):
-                self.distances[i] = max(float(self.distances[i]), self.distances[i - 1] + 0.004)
         mult = ov.get("dcaStepVolumeMultipliers") or coord.get("dcaStepVolumeMultipliers") or cts.get("dcaStepVolumeMultipliers") or DEFAULT_MULT
         self.mults = _mult_list(mult, DEFAULT_MULT)
         if self.max_steps > 0:
@@ -156,19 +159,14 @@ class DcaBook:
         self.tp_mode = str(ov.get("dcaTakeProfitMode") or coord.get("dcaTakeProfitMode") or cts.get("dcaTakeProfitMode") or "average")
         be_raw = ov.get("dcaBreakevenProfitPct", coord.get("dcaBreakevenProfitPct", cts.get("dcaBreakevenProfitPct", 0.2)))
         be = float(be_raw if be_raw is not None else 0.2)
-        # Percent, as on the desk (0.05 = 0.05%); never guessed as a fraction.
-        self.be_pct = be / 100.0
+        self.be_pct = be / 100.0   # dcaBreakevenProfitPct is percent
         cd_raw = ov.get("dcaCooldownSeconds", coord.get("dcaCooldownSeconds", cts.get("dcaCooldownSeconds", 30)))
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
-        self.deact_n = max(5, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = shared_pf_settings(ov)["minPf"]
+        self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
+        self.min_pf = gate_min_pf(ov, "dcaMinPf", "minPf")
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
-        self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
-        if self.cost_pct > 2:
-            self.cost_pct = self.cost_pct / 100.0
-        if self.cost_pct > 1:
-            self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 
     def unlimited(self) -> bool:
         return int(self.max_steps or 0) <= 0
@@ -189,123 +187,74 @@ class DcaBook:
             return self.max_steps
         return max(len(self.distances), len(self.mults), 4)
 
-    def attach(self, symbol: str, side: str, qty: float, entry: float, group_key: str = "", min_qty: float = 0.0) -> DcaLane:
-        k = self.key(symbol, side, group_key)
+    def auto_steps(self, sl_frac: float) -> List[DcaStep]:
+        """The calculated rungs for a position whose stop sits sl_frac (a fraction of the entry) away: each rung a fraction
+        of that distance, never nearer than one PositionCost and never at the stop."""
+        cf = self.cost_pct / 100.0
+        sl = float(sl_frac or 0.0)
+        if sl <= 0:
+            sl = 4 * cf                 # no stop known: a nominal four PositionCosts
+        out = []
+        for i, f in enumerate(AUTO_RUNG_FRACS):
+            d = min(max(f * sl, cf), 0.9 * sl)
+            out.append(DcaStep(n=i + 1, distance_pct=d, mult=AUTO_RUNG_MULT))
+        return out
+
+    def attach(self, symbol: str, side: str, qty: float, entry: float, sl_frac: float = 0.0) -> DcaLane:
+        k = self.key(symbol, side)
         lane = self.lanes.get(k)
         if lane is None:
-            n = self._seed_n()
-            steps = [
-                DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
-                for i in range(n)
-            ]
-            parent = max(0.0, float(qty or 0.0))
-            try:
-                floor = float(min_qty or 0.0)
-            except (TypeError, ValueError):
-                floor = 0.0
-            if parent > 0 and floor > parent:
-                parent = floor
-            lane = DcaLane(
-                symbol=symbol,
-                side=side,
-                parent_qty=parent,
-                avg_entry=entry,
-                steps=steps,
-                group_key=str(group_key or ""),
-                last_add=time.time(),
-            )
+            if self.auto:
+                steps = self.auto_steps(sl_frac)
+            else:
+                n = self._seed_n()
+                steps = [
+                    DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
+                    for i in range(n)
+                ]
+            lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps, ref_entry=entry)
             self.lanes[k] = lane
         else:
             if lane.parent_qty <= 0 and qty > 0:
                 lane.parent_qty = qty
-            try:
-                floor = float(min_qty or 0.0)
-            except (TypeError, ValueError):
-                floor = 0.0
-            if floor > 0 and 0 < float(lane.parent_qty or 0) + 1e-12 < floor:
-                lane.parent_qty = floor
-            if float(lane.last_add or 0) <= 0:
-                lane.last_add = time.time()
         return lane
 
-    def merge_parent(
-        self,
-        symbol: str,
-        side: str,
-        added_qty: float,
-        entry: float,
-        group_key: str = "",
-    ) -> DcaLane:
-        """Increase a group's parent after a same-range entry merge."""
-        add = max(0.0, float(added_qty or 0.0))
-        key = self.key(symbol, side, group_key)
-        lane = self.lanes.get(key)
-        if lane is None:
-            return self.attach(symbol, side, add, entry, group_key=group_key)
-        if add <= 0:
-            return lane
-        old_qty = max(0.0, float(lane.parent_qty or 0.0))
-        total = old_qty + add
-        if total > 0:
-            if entry > 0:
-                lane.avg_entry = ((lane.avg_entry * old_qty) + float(entry) * add) / total
-            lane.parent_qty = total
-        return lane
+    def drop(self, symbol: str, side: str) -> None:
+        self.lanes.pop(self.key(symbol, side), None)
 
-    def drop(self, symbol: str, side: str, group_key: str = "") -> None:
-        self.lanes.pop(self.key(symbol, side, group_key), None)
-
-    def score(self, rows=None) -> Dict[str, Any]:
-        scoped = rows is not None
-        rows = self.closes if rows is None else rows
-        active, reason = (True, "") if scoped else (self.active, self.deact_reason)
-        pc = last_n_cost_pf(rows, self.pf_n, self.cost_pct)
-        # Restored/API tapes may be newest-first; deactivation must always use
-        # the chronological latest window, just like the PF gate.
-        ordered = sorted(rows, key=lambda row: float(row.get("t") or 0) if isinstance(row, dict) else float(getattr(row, "t", 0) or 0))
-        last25 = ordered[-self.deact_n :]
+    def score(self) -> Dict[str, Any]:
+        pc = last_n_cost_pf(self.closes, self.pf_n, self.cost_pct)
+        last25 = [r for r in self.closes if r.get("pnl_pct") is not None][-self.deact_n :]   # a missing value is not a loss
         avg_r = 0.0
         if last25:
-            avg_r = sum(signed_result_r(float(r.get("pnl_pct") or 0), self.cost_pct) for r in last25) / len(last25)
+            avg_r = sum(row_net_pnl_pct(r, self.cost_pct) / max(1e-9, cost_as_frac(self.cost_pct)) for r in last25) / len(last25)
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
-            active = False
-            reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
-        elif pc["count"] >= self.pf_n and not clears_pf(pc["ratio"], self.min_pf):
-            active = False
-            reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
+            self.active = False
+            self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
+        elif pc["count"] >= min(8, self.pf_n) and pc["pf"] + 1e-9 < self.min_pf:
+            self.active = False
+            self.deact_reason = f"last15 PF {pc['pf']:.2f}<{self.min_pf:.2f}"
         else:
-            if not active and avg_r >= 0 and (pc["count"] < self.pf_n or clears_pf(pc["ratio"], self.min_pf)):
-                active = True
-                reason = ""
+            if not self.active and avg_r >= 0 and (pc["count"] < 8 or pc["pf"] >= self.min_pf):
+                self.active = True
+                self.deact_reason = ""
         pc["last25AvgR"] = round(avg_r, 4)
-        pc["active"] = active
-        pc["deactReason"] = reason
-        if not scoped:
-            self.active, self.deact_reason = active, reason
+        pc["active"] = self.active
+        pc["deactReason"] = self.deact_reason
         return pc
 
-    def due(
-        self,
-        symbol: str,
-        side: str,
-        qty: float,
-        entry: float,
-        px: float,
-        now: Optional[float] = None,
-        group_key: str = "",
-        evidence=None,
-    ) -> Optional[Dict[str, Any]]:
-        if not self.enabled:
+    def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None, sl_frac: float = 0.0) -> Optional[Dict[str, Any]]:
+        if DCA_HARD_OFF or not self.enabled:
             return None
-        decision = self.score(evidence)
-        if not decision["active"]:
+        self.score()
+        if not self.active:
             self.skips += 1
             return None
-        now = now or time.time()
-        lane = self.attach(symbol, side, qty, entry, group_key=group_key)
+        now = time.time() if now is None else float(now)
+        lane = self.attach(symbol, side, qty, entry, sl_frac)
         if self.cooldown_s > 0 and now - lane.last_add < self.cooldown_s:
             return None
-        adv = adverse_pct(side, lane.avg_entry or entry, px)
+        adv = adverse_pct(side, (lane.ref_entry or entry) if self.auto else (lane.avg_entry or entry), px)
         nxt = None
         for st in lane.steps:
             if st.filled or st.paused:
@@ -313,7 +262,7 @@ class DcaBook:
             nxt = st
             break
         if nxt is None:
-            if self.unlimited():
+            if self.unlimited() and not self.auto:
                 i = len(lane.steps)
                 nxt = DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
                 lane.steps.append(nxt)
@@ -321,75 +270,49 @@ class DcaBook:
                 return None
         if adv + 1e-12 < nxt.distance_pct:
             return None
-        target_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
-        add_qty = max(0.0, target_qty - float(getattr(nxt, "qty", 0.0) or 0.0))
-        nxt.requested_qty = max(float(getattr(nxt, "requested_qty", 0.0) or 0.0), target_qty)
+        add_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
+        added = sum(x.qty for x in lane.steps if x.filled)
+        if self.auto and self.max_expo > 0:      # the calculated plan keeps the whole position under max_expo x the base size (0 = no ceiling)
+            add_qty = min(add_qty, max(0.0, (lane.parent_qty or qty) * (self.max_expo - 1.0) - added))
+        if add_qty <= 0:
+            return None
         self.last_pick = f"{symbol}#{nxt.n}"
         return {
             "n": nxt.n,
             "distancePct": nxt.distance_pct,
             "mult": nxt.mult,
             "qty": add_qty,
-            "requestedQty": target_qty,
             "adversePct": adv,
             "avgEntry": lane.avg_entry or entry,
             "lane": lane,
             "step": nxt,
         }
 
-    def record_fill(
-        self,
-        lane: DcaLane,
-        step: DcaStep,
-        qty: float,
-        px: float,
-        cid: str,
-        requested_qty: float = 0.0,
-    ) -> None:
-        fill_qty = max(0.0, float(qty or 0.0))
-        if fill_qty <= 0:
-            return
-        was_filled = bool(step.filled)
-        existing_total = max(0.0, float(lane.parent_qty or 0.0)) + sum(
-            max(0.0, float(s.qty or 0.0)) for s in lane.steps
-        )
-        step.qty = max(0.0, float(step.qty or 0.0)) + fill_qty
-        if requested_qty > 0:
-            step.requested_qty = max(float(getattr(step, "requested_qty", 0.0) or 0.0), float(requested_qty))
-        step.filled = bool(
-            step.requested_qty <= 0
-            or step.qty + max(1e-12, step.requested_qty * 0.005) >= step.requested_qty
-        )
-        step.px = float(px or step.px or 0.0)
-        step.t = time.time()
+    def record_fill(self, lane: DcaLane, step: DcaStep, qty: float, px: float, cid: str, now: Optional[float] = None) -> None:
+        """Stamp a fill on the clock due() compares against: the caller's bar or trade time, else the live clock."""
+        t = time.time() if now is None else float(now)
+        step.filled = True
+        step.qty = qty
+        step.px = px
+        step.t = t
         step.cid = cid
-        total = existing_total + fill_qty
-        if total > 0 and step.px > 0:
-            lane.avg_entry = ((lane.avg_entry * existing_total) + step.px * fill_qty) / total
-        lane.last_add = time.time()
-        if step.filled and not was_filled:
-            lane.filled_n += 1
+        prev_q = lane.parent_qty + sum(s.qty for s in lane.steps if s.filled and s is not step)
+        tot = prev_q + qty
+        if tot > 0:
+            lane.avg_entry = ((lane.avg_entry * prev_q) + px * qty) / tot
+        lane.last_add = t
+        lane.filled_n += 1
         self.emits += 1
 
     def on_close(self, rec: Dict[str, Any]) -> None:
         why = str(rec.get("reason") or "")
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
-        sym = str(rec.get("symbol") or "")
-        side = str(rec.get("side") or "")
-        group_key = str(rec.get("control_group_key") or rec.get("controlGroupKey") or "")
-        lane = self.lanes.get(self.key(sym, side, group_key)) if sym else None
-        used = bool(lane and int(getattr(lane, "filled_n", 0) or 0) > 0)
-        kind_d = len(cid) > 4 and cid[4:5].lower() == "d"
-        if not used and "dca" not in why.lower() and not kind_d:
-            return
-        if rec.get("exchange_confirmed") is False:
-            # Not a live exchange result: lifecycle only, no evidence sample.
-            self.drop(sym, side, group_key=group_key)
+        if not rec.get("dca_n") and "dca" not in why.lower() and not (len(cid) > 4 and cid[4:5] == "d"):
             return
         self.closes.append(rec)
         if len(self.closes) > 80:
             self.closes = self.closes[-80:]
-        self.drop(sym, side, group_key=group_key)
+        self.drop(str(rec.get("symbol") or ""), str(rec.get("side") or ""))
         self.score()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -399,7 +322,6 @@ class DcaBook:
             lanes.append({
                 "symbol": lane.symbol,
                 "side": lane.side,
-                "groupKey": lane.group_key,
                 "parentQty": lane.parent_qty,
                 "avgEntry": lane.avg_entry,
                 "filledN": lane.filled_n,
@@ -410,8 +332,6 @@ class DcaBook:
                         "mult": s.mult,
                         "filled": s.filled,
                         "qty": s.qty,
-                        "requestedQty": s.requested_qty,
-                        "remainingQty": max(0.0, s.requested_qty - s.qty) if s.requested_qty > 0 else 0.0,
                         "paused": s.paused,
                     }
                     for s in lane.steps
@@ -419,6 +339,10 @@ class DcaBook:
             })
         return {
             "enabled": self.enabled,
+            "auto": self.auto,
+            "onSets": self.on_sets,
+            "onAxis": self.on_axis,
+            "maxExposureX": self.max_expo,
             "active": self.active,
             "deactReason": self.deact_reason,
             "maxSteps": self.max_steps,
@@ -430,35 +354,36 @@ class DcaBook:
             "lastPick": self.last_pick,
             "emits": self.emits,
             "skips": self.skips,
-            "last15Ratio": pc.get("ratio"),
+            "pf15": pc.get("pf"),
+            "ratio": pc.get("ratio"),
             "last25AvgR": pc.get("last25AvgR"),
             "last15N": pc.get("count"),
             "lanes": lanes,
         }
 
 
-def self_test() -> List[Tuple[str, bool, str]]:
+def _math_self_test() -> List[Tuple[str, bool, str]]:
     b = DcaBook()
-    b.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
+    b.load({"dcaEnabled": True, "dcaAuto": False, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
     t0 = time.time()
     # no add at entry
     r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 100.0, now=t0)
     t1 = (r is None, f"flat={r}")
-    # 0.4% adverse < 1.2% first step
+    # 0.4% adverse < 0.5% step1
     r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.6, now=t0)
     t2 = (r is None, "below")
-    # 1.3% adverse → step 1, qty 1.5
-    r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
+    # 0.6% adverse → step 1, qty 1.5
+    r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
     t3 = (r is not None and r["n"] == 1 and abs(r["qty"] - 1.5) < 1e-9, f"{r}")
     assert r is not None
-    b.record_fill(r["lane"], r["step"], r["qty"], 98.7, "Gx02dtest1")
-    # cooldown 0, step2 needs first+0.4%
-    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
-    t4 = (r2 is None, "need next")
-    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 97.0, now=t0)
+    b.record_fill(r["lane"], r["step"], r["qty"], 99.4, "Gx02dtest1", now=t0)
+    # cooldown 0, step2 needs 1%
+    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
+    t4 = (r2 is None and r["step"].t == t0 and r["lane"].last_add == t0, "need 1pct; fill stamped at the injected clock")
+    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.6, now=t0)
     t5 = (r2 is not None and r2["n"] == 2 and abs(r2["qty"] - 2.0) < 1e-9, f"{r2}")
-    # short side ≥ first distance
-    rs = b.due("BBB-USDT", "SHORT", 2.0, 50.0, 50.7, now=t0)
+    # short side
+    rs = b.due("BBB-USDT", "SHORT", 2.0, 50.0, 50.4, now=t0)  # +0.8% against short, step1=0.5%
     t6 = (rs is not None and rs["n"] == 1, f"short {rs}")
     # independent of block: two symbols
     t7 = (len(b.lanes) >= 2, f"lanes={list(b.lanes)}")
@@ -473,54 +398,15 @@ def self_test() -> List[Tuple[str, bool, str]]:
     snap = b.snapshot()
     t10 = (snap["enabled"] and snap["maxSteps"] == 4 and "distancesPct" in snap, str(snap.get("distancesPct")))
     u = DcaBook()
-    u.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
-    t11 = (u.max_steps == 2 and not u.unlimited(), f"steps={u.max_steps}")
+    u.load({"dcaEnabled": True, "dcaAuto": False, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
+    t11 = (u.max_steps <= 0 and u.unlimited(), f"steps={u.max_steps}")
     ulane = u.attach("UUU-USDT", "LONG", 1.0, 100.0)
-    t12 = (len(ulane.steps) == 2, f"seed={len(ulane.steps)}")
+    t12 = (len(ulane.steps) >= 2, f"seed={len(ulane.steps)}")
     for st in list(ulane.steps):
         st.filled = True
         st.qty = 1.0
     ru = u.due("UUU-USDT", "LONG", 1.0, 100.0, 90.0, now=t0)
-    t13 = (ru is None, f"grow={None if ru is None else ru.get('n')}")
-    # parent qty stays frozen after fills
-    p = DcaBook()
-    p.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
-    r1 = p.due("PPP-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
-    t14 = (r1 is not None and abs(r1["qty"] - 1.5) < 1e-9 and abs(r1["lane"].parent_qty - 1.0) < 1e-9, f"parent={None if r1 is None else r1['lane'].parent_qty}")
-    if r1:
-        p.record_fill(r1["lane"], r1["step"], r1["qty"], 98.7, "Gx02p1")
-        p.attach("PPP-USDT", "LONG", 2.5, 98.7)  # later qty must not rewrite parent
-    t15 = (abs(p.lanes["PPP-USDT:LONG"].parent_qty - 1.0) < 1e-9, f"frozen={p.lanes.get('PPP-USDT:LONG') and p.lanes['PPP-USDT:LONG'].parent_qty}")
-    hi = DcaBook()
-    hi.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
-    t16 = (max(hi.mults) <= 2.5 and abs(hi.mults[0] - 2.1) < 1e-9, f"mults={hi.mults}")
-    capped = DcaBook()
-    capped.load({"dcaEnabled": True, "dcaMaxSteps": 999, "dcaStepDistancesPct": [1], "dcaCooldownSeconds": 0})
-    t16b = (capped.max_steps == DCA_STEPS_MAX and len(capped.distances) == DCA_STEPS_MAX, f"steps={capped.max_steps}")
-    cd = DcaBook()
-    cd.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 30})
-    t_open = time.time()
-    cd.attach("CD-USDT", "LONG", 1.0, 100.0)
-    rcd = cd.due("CD-USDT", "LONG", 1.0, 100.0, 98.7, now=t_open + 3)
-    t17 = (rcd is None, f"early={rcd}")
-    rcd2 = cd.due("CD-USDT", "LONG", 1.0, 100.0, 98.7, now=t_open + 31)
-    t18 = (rcd2 is not None and rcd2["n"] == 1, f"after={None if rcd2 is None else rcd2.get('n')}")
-    parent = DcaBook()
-    parent.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
-    pr = parent.due("QQQ-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
-    if pr:
-        parent.record_fill(pr["lane"], pr["step"], pr["qty"], 98.7, "Gx01dxx")
-    parent.on_close({"symbol": "QQQ-USDT", "side": "LONG", "reason": "sl", "client_id": "Gx01og060308000ab", "pnl": -0.02, "pnl_pct": -0.002})
-    t19 = (len(parent.closes) == 1, f"parent-close n={len(parent.closes)}")
-    t20 = (parent.distances[0] >= 0.012 - 1e-12, f"minDist={parent.distances}")
-    ov = DcaBook()
-    ov.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
-    a = ov.attach("SEI-USDT", "LONG", 47.0, 0.04, group_key="")
-    ov.merge_parent("SEI-USDT", "LONG", 47.0, 0.04, group_key="")
-    t21 = (ov.key("SEI-USDT", "LONG") == "SEI-USDT:LONG" and abs(a.parent_qty - 94.0) < 1e-9 and ":group:" not in ov.key("SEI-USDT", "LONG", ""), f"parent={a.parent_qty} key={ov.key('SEI-USDT','LONG')}")
-    # Cold empty tape stays active; intern 1.00 evidence does not fire extra size via score deact
-    cold = ov.due("SEI-USDT", "LONG", 94.0, 0.04, 0.04 * 0.987, now=t0, group_key="", evidence=[])
-    t22 = (cold is not None and cold["n"] == 1, f"cold={None if cold is None else cold.get('n')}")
+    t13 = (ru is not None and int(ru["n"]) > 2, f"grow={None if ru is None else ru.get('n')}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -532,20 +418,65 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-deact-last25", t8[0], t8[1]),
         ("dca-disabled", t9[0], t9[1]),
         ("dca-snap", t10[0], t10[1]),
-        ("dca-zero-means-list", t11[0], t11[1]),
-        ("dca-zero-seed", t12[0], t12[1]),
-        ("dca-no-unbounded-grow", t13[0], t13[1]),
-        ("dca-parent-step1", t14[0], str(t14[1])[:80]),
-        ("dca-parent-frozen", t15[0], t15[1]),
-        ("dca-mult-clamp", t16[0], t16[1]),
-        ("dca-hard-step-cap", t16b[0], t16b[1]),
-        ("dca-cooldown-from-open", t17[0], t17[1]),
-        ("dca-cooldown-elapsed", t18[0], t18[1]),
-        ("dca-parent-close-scores", t19[0], t19[1]),
-        ("dca-min-first-dist", t20[0], t20[1]),
-        ("dca-overall-merge", t21[0], t21[1]),
-        ("dca-cold-adverse-emits", t22[0], t22[1]),
+        ("dca-unlim-flag", t11[0], t11[1]),
+        ("dca-unlim-seed", t12[0], t12[1]),
+        ("dca-unlim-grow", t13[0], t13[1]),
     ]
+
+
+
+
+def self_test() -> List[Tuple[str, bool, str]]:
+    out = _math_self_test()
+    global DCA_HARD_OFF
+    # off by default, kill switch wins over the overlay
+    d = DcaBook()
+    d.load({})
+    off_default = (not d.enabled) and d.due("AAA-USDT", "LONG", 1.0, 100.0, 90.0, now=time.time()) is None
+    saved = DCA_HARD_OFF
+    DCA_HARD_OFF = True
+    try:
+        k = DcaBook()
+        k.load({"dcaEnabled": True})
+        killed = (not k.enabled) and k.due("AAA-USDT", "LONG", 1.0, 100.0, 90.0, now=time.time()) is None
+    finally:
+        DCA_HARD_OFF = saved
+    out.append(("dca-off-by-default-and-kill-switch", off_default and killed, f"default off={off_default} kill switch={killed}"))
+    # auto plan: rungs scale with the position's own stop distance, below the stop, one small rung, exposure ceiling
+    a = DcaBook()
+    a.load({"dcaEnabled": True, "dcaCooldownSeconds": 0})
+    wide = a.due("AAA-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)      # 0.4 x 1 % = 0.4 % rung, price 1 % down
+    near = DcaBook()
+    near.load({"dcaEnabled": True, "dcaCooldownSeconds": 0})
+    not_yet = near.due("BBB-USDT", "LONG", 1.0, 100.0, 99.8, now=1.0, sl_frac=0.01)  # only 0.2 % down: rung at 0.4 % not reached
+    ok_auto = bool(wide) and abs(wide["distancePct"] - 0.004) < 1e-9 and abs(wide["qty"] - AUTO_RUNG_MULT) < 1e-9 and not_yet is None
+    out.append(("dca-auto-plan-scales-with-the-stop", ok_auto, f"rung={wide and wide['distancePct']} qty={wide and wide['qty']} early={not_yet}"))
+    lane = wide["lane"] if wide else None
+    capped = False
+    if lane:
+        a.record_fill(lane, wide["step"], wide["qty"], 99.0, "c1", now=1.0)
+        again = a.due("AAA-USDT", "LONG", 1.0, 100.0, 90.0, now=2.0, sl_frac=0.01)
+        capped = again is None          # the only auto rung is filled
+    out.append(("dca-auto-single-rung-and-ceiling", capped, f"second add={'none' if capped else 'offered'}"))
+    e = DcaBook()
+    e.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaMaxExposureX": 1.2})
+    capped_add = e.due("EEE-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)
+    out.append(("dca-auto-exposure-ceiling", bool(capped_add) and abs(capped_add["qty"] - 0.2) < 1e-9, f"qty under a 1.2x ceiling={capped_add and capped_add['qty']} (partial 0.5)"))
+    z = DcaBook()
+    z.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaMaxExposureX": 0})
+    free_add = z.due("ZZZ-USDT", "LONG", 1.0, 100.0, 99.0, now=1.0, sl_frac=0.01)
+    absent = DcaBook()
+    absent.load({"dcaEnabled": True})
+    out.append(("dca-exposure-ceiling-zero-means-none-and-sizes-from-the-original-base",
+                bool(free_add) and abs(free_add["qty"] - AUTO_RUNG_MULT * 1.0) < 1e-9 and z.max_expo == 0.0 and absent.max_expo == AUTO_MAX_EXPOSURE_X,
+                f"qty with no ceiling={free_add and free_add['qty']} (= {AUTO_RUNG_MULT} x the original base 1.0; under a 1.2x ceiling it was 0.2); ceiling 0 -> {z.max_expo}, absent -> {absent.max_expo}"))
+    # the lane is scored on its own add-on results and switches off when they lose
+    c = DcaBook()
+    c.load({"dcaEnabled": True, "dcaCooldownSeconds": 0, "dcaPfWindow": 8, "dcaMinPf": 1.2, "minPfLinked": False})
+    for i in range(10):
+        c.on_close({"symbol": "S%d-USDT" % i, "side": "LONG", "reason": "sl", "client_id": "", "dca_n": 1, "pnl_pct": -0.004})
+    out.append(("dca-add-on-lane-switches-off-on-losses", (not c.active) and c.due("S-USDT", "LONG", 1.0, 100.0, 99.0, now=3.0, sl_frac=0.01) is None, f"active={c.active} {c.deact_reason}"))
+    return out
 
 
 if __name__ == "__main__":

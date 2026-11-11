@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import gzip
+import concurrent.futures
 import hmac
 import hashlib
 import json
-import math
 import re
 import threading
 import time
 import traceback
 import urllib.parse
-from email.utils import parsedate_to_datetime
-from collections import OrderedDict, deque
+from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 try:
@@ -50,59 +49,23 @@ try:
 except Exception:
     _ws = None
 
-from storage_paths import MAX_ERROR_LOG_LINES, append_bounded_line, retain_last_lines, read_jsonl
-
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
-RECV = 10000
+# VST account reads can take over five seconds. Keep the signed receive window
+# aligned with the bounded synchronous transport budget; never retry a write.
+HTTP_TIMEOUT_S = 10.0
+RECV = int(HTTP_TIMEOUT_S * 1000)
 UA = "grok-x01-pulse/2.0"
 
-# CTS connector numbers (UID / IP). BingX allows 10 order placements per second
-# per IP since 2025-10-16 (5 before); Mainnet and VST engines can share one IP,
-# so each lane keeps 4.0 / s (8 / s together) and never spends the whole quota.
-# Batch placing is a separate 5 / s quota (up to 5 orders each) used for controls.
-ORDER_RPS = 4.0
-REPLACE_RPS = 3.0  # /trade/order and cancelReplace share one tighter pacing bucket
-# /trade/batchOrders has its own venue quota (5 batches / s, up to 5 orders each).
-# Two lanes at 2.0 / s leave 20 % headroom; it no longer eats the single-order bucket.
-BATCH_RPS = 2.0
+# CTS connector numbers (UID / IP)
 LIMITS = {
     "public": (12.0, 20.0),
     "private": (5.0, 10.0),
-    "order": (ORDER_RPS, ORDER_RPS * 2),
-    "batch": (BATCH_RPS, BATCH_RPS * 2),
+    "order": (2.4, 5.0),
 }
-# Lanes that share one venue ban timer: a rate ban on either stops both.
-ORDER_LANES = ("order", "batch")
 
-RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
-# These are idempotent reconciliation outcomes: the local control/order book
-# asked about an object that the venue has already removed. They must not make
-# a healthy continuous loop look failed; the caller still receives the
-# response and applies its normal stale-state recovery.
-SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429, 109400, 109420, 109421, 101205, 109500, 109418}
-_OFFLINE_RE = re.compile(r"([A-Z0-9]+-USDT)\s+is offline", re.I)
-
-
-def offline_symbol_from_body(body: Any, extra: Optional[Dict[str, Any]] = None) -> str:
-    """Return the USDT-M symbol BingX just declared offline, else empty."""
-    if not isinstance(body, dict):
-        return ""
-    try:
-        code = int(body.get("code") or 0)
-    except (TypeError, ValueError):
-        code = 0
-    msg = str(body.get("msg") or "")
-    low = msg.lower()
-    if code != 109418 and "is offline currently" not in low and "all validted symbols" not in low:
-        return ""
-    token = str((extra or {}).get("symbol") or "").strip().upper()
-    if token.endswith("-USDT"):
-        return token
-    match = _OFFLINE_RE.search(msg)
-    if match:
-        return str(match.group(1) or "").upper()
-    return token if token.endswith("-USDT") else ""
+RATE_CODES = {100410, 100421, 109421, 109429, 100429, 101209}
+SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429}
 
 
 class TokenBucket:
@@ -113,7 +76,9 @@ class TokenBucket:
         self.ts = time.monotonic()
         self.lock = threading.Lock()
 
-    def take(self) -> float:
+    def reserve(self) -> float:
+        """Take one token without sleeping: the seconds the caller must wait before using it (0.0 when free).
+        Used by the event loop, which must never block."""
         with self.lock:
             now = time.monotonic()
             self.tokens = min(self.burst, self.tokens + (now - self.ts) * self.rate)
@@ -124,6 +89,10 @@ class TokenBucket:
             wait = (1.0 - self.tokens) / self.rate
             self.tokens = 0.0
             self.ts = now + wait
+            return wait
+
+    def take(self) -> float:
+        wait = self.reserve()
         if wait > 0:
             time.sleep(wait)
         return wait
@@ -135,63 +104,47 @@ class ErrorLog:
         self.lock = threading.Lock()
         self.ring: Deque[Dict[str, Any]] = deque(maxlen=80)
         self.n = 0
-        self._writes = 0
-        self._last: "OrderedDict[str, float]" = OrderedDict()
-        self._kind_counts: "OrderedDict[str, int]" = OrderedDict()
-        self._code_counts: "OrderedDict[str, int]" = OrderedDict()
-
-    @staticmethod
-    def _bump(mapping: "OrderedDict[str, int]", key: str, limit: int = 64) -> None:
-        mapping[key] = int(mapping.get(key, 0)) + 1
-        mapping.move_to_end(key)
-        while len(mapping) > limit:
-            mapping.popitem(last=False)
+        self._last: Dict[str, float] = {}
 
     def write(self, kind: str, **kw: Any) -> None:
         rec = {"t": round(time.time(), 3), "kind": kind}
         rec.update(kw)
         self.ring.appendleft(rec)
         self.n += 1
-        self._bump(self._kind_counts, str(kind or "unknown"))
-        if kw.get("code") is not None:
-            self._bump(self._code_counts, str(kw.get("code")))
         if kind in ("api", "rate-limit", "ws-session"):
             key = kind + str(kw.get("code") or kw.get("msg") or "")[:48]
             now = time.time()
             if now - self._last.get(key, 0.0) < 8.0:
                 return
             self._last[key] = now
-            self._last.move_to_end(key)
-            while len(self._last) > 256:
-                self._last.popitem(last=False)
         line = dumps(rec) + "\n"
         with self.lock:
             try:
-                append_bounded_line(self.path, line, max_lines=MAX_ERROR_LOG_LINES)
-                self._writes += 1
-                if self._writes % 80 == 0:
+                with open(self.path, "a") as f:
+                    f.write(line)
+                if self.n % 80 == 0:
                     self._rotate()
             except Exception:
                 pass
 
     def _rotate(self) -> None:
         try:
-            retain_last_lines(self.path, max_lines=MAX_ERROR_LOG_LINES)
+            import os
+            if os.path.getsize(self.path) < 120_000:
+                return
+            with open(self.path, "rb") as f:
+                f.seek(-min(160_000, os.path.getsize(self.path)), 2)
+                f.readline()
+                tail = f.read()
+            tmp = self.path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(tail)
+            os.replace(tmp, self.path)
         except Exception:
             pass
 
     def recent(self, n: int = 12) -> List[Dict[str, Any]]:
-        return list(self.ring)[:max(0, min(80, int(n or 0)))]
-
-    def summary(self) -> Dict[str, Any]:
-        """Return bounded error totals without exposing an unbounded key map."""
-        return {
-            "total": int(self.n),
-            "written": int(self._writes),
-            "byKind": dict(self._kind_counts),
-            "byCode": dict(self._code_counts),
-            "dedupKeys": len(self._last),
-        }
+        return list(self.ring)[:n]
 
 
 class PriceHub:
@@ -235,16 +188,6 @@ class PriceHub:
             enable_multithread=True,
         )
         self.ok = True
-        try:
-            self._listen(ws)
-        finally:
-            self.ok = False
-            try:
-                ws.close()
-            except Exception:
-                pass
-
-    def _listen(self, ws: Any) -> None:
         for i, s in enumerate(self.symbols):
             ws.send(dumps({"id": f"{i}-t", "reqType": "sub", "dataType": f"{s}@ticker"}))
             if i and i % 80 == 0:
@@ -265,8 +208,7 @@ class PriceHub:
                 txt = ""
             if txt.lower() in ("ping", "pong"):
                 try:
-                    if txt.lower() == "ping":
-                        ws.send("Pong")
+                    ws.send("Pong")
                 except Exception:
                     break
                 self.last_msg = time.time()
@@ -277,10 +219,10 @@ class PriceHub:
             if isinstance(data, dict) and data.get("ping") is not None:
                 try:
                     ping = data.get("ping")
-                    # The swap feed sends gzip-compressed text Ping frames.
-                    # Answer with text Pong, not a JSON heartbeat from a
-                    # different feed protocol (which caused repeated drops).
-                    ws.send("Pong" if data.get("_textHeartbeat") else dumps({"pong": ping}))
+                    # BingX's heartbeat is a gzip-compressed "Ping" (decoded to {"ping": True}) and wants the text "Pong" back; answering JSON left it
+                    # unanswered and the venue dropped the session every ~30 s (x02, 2026-11-03: about 100 "connection lost" an hour). A JSON ping with an
+                    # id gets its id back as JSON.
+                    ws.send("Pong" if ping is True or ping is False else dumps({"pong": ping}))
                 except Exception:
                     break
                 self.last_msg = time.time()
@@ -288,20 +230,21 @@ class PriceHub:
             self.last_msg = time.time()
             self.n += 1
             _apply_px(data, self.on_px)
+        try:
+            ws.close()
+        except Exception:
+            pass
+        self.ok = False
 
 
 def _decode_ws(raw: Any) -> Optional[Any]:
     try:
-        if isinstance(raw, (bytes, bytearray)):
+        if isinstance(raw, bytes):
             if raw[:2] == b"\x1f\x8b":
                 raw = gzip.decompress(raw)
             raw = raw.decode("utf-8", "ignore")
-        if not raw:
-            return None
-        if str(raw).lower() == "ping":
-            return {"ping": True, "_textHeartbeat": True}
-        if str(raw).lower() == "pong":
-            return None
+        if not raw or raw == "Ping" or raw == "ping":
+            return {"ping": True}
         return loads(raw)
     except Exception:
         return None
@@ -331,8 +274,28 @@ def _apply_px(data: Any, on_px: Callable[[str, float], None]) -> None:
         on_px(str(sym), f)
 
 
+BATCH_NUMERIC = ("price", "stopPrice", "quantity", "triggerPrice", "activationPrice")
+
+
+def _batch_numbers(order: Dict[str, Any]) -> Dict[str, Any]:
+    """batchOrders takes its JSON price and quantity fields as numbers (a numeric string is refused with 109400);
+    the single-order endpoints take query strings. Other fields (closePosition "true", ids) stay as they are."""
+    out = dict(order)
+    for k in BATCH_NUMERIC:
+        v = out.get(k)
+        if isinstance(v, str):
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+    return out
+
+
 class FastBingX:
-    def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: str = WS_URL) -> None:
+    def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: Optional[str] = None) -> None:
+        from conn_guard import resolve_bingx_price_stream
+        # Resolve before constructing HTTP clients or starting background threads.
+        selected_ws = resolve_bingx_price_stream(base or BASE, ws_url)
         self.key = key
         self.secret = secret
         self.err = err
@@ -349,67 +312,16 @@ class FastBingX:
                 timeout=httpx.Timeout(2.0, connect=1.0),
                 headers={"User-Agent": UA, "X-BX-APIKEY": key},
                 http2=False,
-                # The exchange client must not inherit a process-wide proxy;
-                # proxy settings can be SOCKS URLs without socksio installed
-                # and are unrelated to BingX connectivity.
-                trust_env=False,
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=30),
             )
-        self.request_timings: Dict[str, Deque[float]] = {}
         self.px: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
-        self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
+        self.hub = PriceHub(self._on_px, err, ws_url=selected_ws)
         self.on_event = None
-        self.stats = {
-            "rest": 0,
-            "ws": 0,
-            "wait": 0.0,
-            "rl": 0,
-            "err": 0,
-            "asyncN": 0,
-            "asyncSuppressed": 0,
-            "publicSuppressed": 0,
-            "asyncP50": 0.0,
-        }
-        self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err)
-        self.bridge.before_request = self._admit_public_async
-        self.bridge.on_response = self._trip
+        self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0}
+        self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err, gate=self)
         self._ts_lock = threading.Lock()
         self._last_ts = 0
-        self.offline_hits: List[str] = []
-        self._restore_retry_deadlines()
-
-    def request_latency(self):
-        result = {}
-        for key,tape in list(getattr(self,"request_timings",{}).items()):
-            values = sorted(list(tape))
-            if values:
-                result[key] = {"samples":len(values),"p50":round(values[len(values)//2],2),
-                    "p95":round(values[min(len(values)-1,math.ceil(len(values)*.95)-1)],2),"max":round(values[-1],2)}
-        return result
-
-    def _restore_retry_deadlines(self):
-        """A service update must not reset an active venue retry deadline."""
-        path = getattr(self.err, "path", "")
-        if not path:
-            return
-        now = time.time()
-        for row in read_jsonl(path):
-            if row.get("kind") != "rate-limit":
-                continue
-            try:
-                endpoint = str(row.get("path") or "")
-                at, wait = float(row["t"]), float(row["wait"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if not endpoint.startswith("/openApi/") or not all(math.isfinite(v) for v in (at, wait)):
-                continue
-            until = at + max(0, wait) + .5  # serialized timestamp/wait rounding
-            if until <= now:
-                continue
-            self.path_cd[endpoint] = max(self.path_cd.get(endpoint, 0), until)
-            shared = until if self._lane(endpoint, "POST") in ORDER_LANES else min(until, at+12.5)
-            self.cooldown_until = max(self.cooldown_until, shared)
 
     def _next_ts(self) -> int:
         """BingX rejects bursts that reuse the same millisecond timestamp."""
@@ -423,16 +335,6 @@ class FastBingX:
     def start_ws(self, symbols: List[str]) -> None:
         self.hub.start(symbols)
 
-    def configure_limits(self, settings):
-        from system_settings import normalize_system_settings
-        limits = normalize_system_settings(settings)
-        for lane, key in (("public", "systemPublicRps"), ("private", "systemPrivateRps"), ("order", "systemOrderRps"), ("batch", "systemBatchRps")):
-            bucket = self.buckets[lane]
-            with bucket.lock:
-                bucket.rate = limits[key]
-                bucket.burst = min(LIMITS[lane][1], max(1, bucket.rate * 2))
-                bucket.tokens = min(bucket.tokens, bucket.burst)
-
     def _on_px(self, symbol: str, px: float) -> None:
         self.px[symbol] = px
         self.stats["ws"] += 1
@@ -444,9 +346,7 @@ class FastBingX:
                 pass
 
     def _lane(self, path: str, method: str) -> str:
-        if "/trade/batchOrders" in path:
-            return "batch"
-        if "/trade/order" in path or "/trade/closePosition" in path or "/trade/cancelReplace" in path:
+        if "/trade/order" in path or "/trade/batchOrders" in path or "/trade/closePosition" in path:
             return "order"
         if path.startswith("/openApi/swap") and method != "PUBLIC":
             if "/quote/" in path:
@@ -455,75 +355,43 @@ class FastBingX:
         return "public"
 
     def _sign(self, params: Dict[str, Any]) -> str:
+        """The signature covers the sorted parameters with their RAW values; the request carries the percent-encoded
+        query. Signing the encoded text is only right while every value is plain, and a JSON value (batchOrders) is not:
+        the exchange then answers 100001 signature mismatch."""
         items = sorted((k, params[k]) for k in params)
-        # BingX verifies the HMAC over the RAW (unencoded) query string.
-        # For plain alnum values raw == encoded, but the batchOrders JSON
-        # payload differs once percent-encoded and used to fail with 100001.
         raw = "&".join(f"{k}={v}" for k, v in items)
-        qs = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
         sig = hmac.new(self.secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
+        qs = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
         return qs + "&signature=" + sig
 
     def _take(self, lane: str, path: str = "") -> bool:
         now = time.time()
         until = self.path_cd.get(path, 0.0)
         gate = until
-        if lane in ORDER_LANES:
+        if lane == "order":
             gate = max(self.cooldown_until, until)
         if now < gate:
             return False
         w = self.buckets[lane].take()
-        if path.endswith("/cancelReplace") or (lane == "order" and path.endswith("/trade/order")):
-            if not hasattr(self,"_replace_bucket"):
-                self._replace_bucket = TokenBucket(REPLACE_RPS, 2.0)
-            w += self._replace_bucket.take()
         self.stats["wait"] += w
-        # Another worker may receive a venue ban while this worker waits for
-        # its token. Recheck without submitting a request inside that ban.
-        gate = self.path_cd.get(path, 0.0)
-        if lane in ORDER_LANES:
-            gate = max(self.cooldown_until, gate)
-        return time.time() >= gate
-
-    def order_retry_after(self) -> float:
-        """Read-only admission hint; does not spend a token or shorten a ban."""
-        return max(0.0, max(self.cooldown_until, self.path_cd.get("/openApi/swap/v2/trade/order", 0.0)) - time.time())
+        return True
 
     def _trip(self, path: str, body: Dict[str, Any]) -> None:
         code = body.get("code")
-        try:
-            code = int(code)
-        except (TypeError, ValueError):
-            pass
         msg = str(body.get("msg") or "")
-        if code == 109421 and "order" in msg.lower() and "not exist" in msg.lower():
-            return
         if code not in RATE_CODES and "rate limit" not in msg.lower() and "100410" not in msg and "frequency limit" not in msg.lower():
             return
         self.stats["rl"] += 1
-        now = time.time()
-        wait = 8.0
-        m = re.search(r"(?:unblocked\s+after|retry\s+after\s+time)\s*:?\s*(\d{10,})", msg, re.I)
+        wait = 1.2
+        m = re.search(r"(?:unblocked after|retry after time:\s*)(\d{10,})", msg)
         if m:
             raw = int(m.group(1))
             until = raw / 1000.0 if raw > 10_000_000_000 else float(raw)
-            # Honor the complete server deadline, including waits >15 min.
-            wait = max(0.8, until - now + 0.4)
-        retry = body.get("retryAfter")
-        if retry is not None:
-            try:
-                delay = float(retry)
-            except (TypeError, ValueError):
-                try:
-                    delay = parsedate_to_datetime(str(retry)).timestamp() - now
-                except (TypeError, ValueError, OverflowError):
-                    delay = 0.0
-            wait = max(wait, delay + 0.4)
-        self.path_cd[path] = max(self.path_cd.get(path, 0.0), now + wait)
-        # Batch and single orders share admission. Switching endpoints must
-        # never bypass the full venue deadline; private reads stay available.
-        shared_wait = wait if self._lane(path, "POST") in ORDER_LANES else min(wait, 12.0)
-        self.cooldown_until = max(self.cooldown_until, now + shared_wait)
+            wait = max(0.8, min(900.0, until - time.time() + 0.4))
+            self.path_cd[path] = time.time() + wait
+        else:
+            self.path_cd[path] = time.time() + 8.0
+        self.cooldown_until = max(self.cooldown_until, time.time() + min(wait, 12.0))
         self.err.write("rate-limit", path=path, code=code, msg=msg[:180], wait=round(wait, 2))
 
     def _req(self, method: str, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -539,69 +407,25 @@ class FastBingX:
         qs = self._sign(params)
         url = f"{path}?{qs}"
         self.stats["rest"] += 1
-        request_started = time.perf_counter()
         try:
             body = self._http(method, url)
         except Exception as e:
             self.stats["err"] += 1
             self.err.write("http", method=method, path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
-        finally:
-            timings = getattr(self, "request_timings", None)
-            if timings is None:
-                timings = self.request_timings = {}
-            timing_key = method + " " + path
-            if timing_key not in timings and len(timings) >= 128:
-                timings.pop(next(iter(timings)), None)
-            timings.setdefault(timing_key, deque(maxlen=256)).append((time.perf_counter()-request_started)*1000)
         if isinstance(body, dict) and body.get("code") not in (0, None):
             if body.get("code") not in (100404, 109400, 100001, *SKIP_API_LOG) or "signature" in str(body.get("msg") or "").lower():
                 if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
                     self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg"))[:220])
             self._trip(path, body)
-            hit = offline_symbol_from_body(body, extra)
-            if hit:
-                hits = getattr(self, "offline_hits", None)
-                if not isinstance(hits, list):
-                    hits = []
-                    self.offline_hits = hits
-                if hit not in hits:
-                    hits.append(hit)
-        if isinstance(body, dict) and body.get("code") in (0, "0", None):
-            data = body.get("data") or {}
-            rows = data.get("orders", []) if isinstance(data, dict) else data
-            if isinstance(rows, list):
-                for row in rows:
-                    if isinstance(row, dict):
-                        self._trip(path, row)
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def _http(self, method: str, url: str) -> Dict[str, Any]:
-        # Submit the already-signed raw target without a params= round-trip.
-        # This retains HMAC bytes while reusing the existing HTTP connection.
+        # Always urllib for signed query strings. httpx re-encodes `?` params and
+        # BingX then reports "signature mismatch" on burst entries with attach JSON.
         import urllib.request
         import urllib.error
         full = url if url.startswith("http") else self.base + url
-        if httpx is not None and getattr(self,"http",None) is not None:
-            try:
-                target = httpx.URL(full)
-                request = self.http.build_request(method,target,content=b"" if method not in ("GET","DELETE") else None,timeout=5)
-                if request.url.raw_path != target.raw_path:
-                    return {"code":-1,"msg":"signed request target changed","error":True}
-                response = self.http.send(request)
-                try:
-                    body = loads(response.content)
-                except Exception:
-                    body = {"code":response.status_code,"msg":"non-JSON response","error":True}
-                if response.status_code == 429:
-                    if not isinstance(body,dict):body={}
-                    body.update(code=429,error=True)
-                    if response.headers.get("Retry-After"):
-                        body["retryAfter"] = response.headers["Retry-After"]
-                return body
-            except Exception as e:
-                # Never replay a possibly accepted order through another client.
-                return {"code":-1,"msg":type(e).__name__,"error":True}
         req = urllib.request.Request(
             full,
             method=method,
@@ -609,20 +433,13 @@ class FastBingX:
             headers={"X-BX-APIKEY": self.key, "User-Agent": UA},
         )
         try:
-            with self._opener.open(req, timeout=5) as resp:
+            with self._opener.open(req, timeout=HTTP_TIMEOUT_S) as resp:
                 return loads(resp.read())
         except urllib.error.HTTPError as e:
             try:
-                body = loads(e.read())
+                return loads(e.read())
             except Exception:
-                body = {"code": e.code, "msg": str(e)[:400], "error": True}
-            if e.code == 429:
-                if not isinstance(body, dict):
-                    body = {}
-                body.update(code=429, error=True)
-                if e.headers and e.headers.get("Retry-After"):
-                    body["retryAfter"] = e.headers.get("Retry-After")
-            return body
+                return {"code": e.code, "msg": str(e)[:400], "error": True}
         except Exception as e:
             return {"code": -1, "msg": str(e)[:400], "error": True}
 
@@ -635,12 +452,19 @@ class FastBingX:
     def delete(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._req("DELETE", path, extra)
 
+    def reserve_public(self, path: str) -> Optional[float]:
+        """A public-GET slot: None while the path is cooling (no request may be sent), else the wait in seconds."""
+        if time.time() < self.path_cd.get(path, 0.0):
+            return None
+        return self.buckets["public"].reserve()
+
     def public(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        # Public quote endpoints use the same path cooldown as signed calls.
-        # Do not burn a request (or pretend it was sent) while an endpoint is cooled.
-        if not self._take("public", path):
-            self.stats["publicSuppressed"] += 1
+        wait = self.reserve_public(path)
+        if wait is None:
             return {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
+        if wait > 0:
+            self.stats["wait"] += wait
+            time.sleep(wait)
         qs = urllib.parse.urlencode(extra or {})
         url = path + (f"?{qs}" if qs else "")
         self.stats["rest"] += 1
@@ -650,107 +474,54 @@ class FastBingX:
             self.stats["err"] += 1
             self.err.write("public", path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
-        if not isinstance(body, dict):
-            self.stats["err"] += 1
-            body = {"code": -1, "msg": "bad-json", "error": True}
-        else:
-            if body.get("error") and not body.get("cooled"):
-                self.stats["err"] += 1
+        if isinstance(body, dict) and body.get("code") not in (0, None):
             self._trip(path, body)
-            hit = offline_symbol_from_body(body, extra)
-            if hit:
-                hits = getattr(self, "offline_hits", None)
-                if not isinstance(hits, list):
-                    hits = []
-                    self.offline_hits = hits
-                if hit not in hits:
-                    hits.append(hit)
-        return body
+        return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not orders:
             return {"code": 0, "data": {"orders": []}}
-        # Query parameters are strings for single orders; nested batch JSON
-        # requires numeric quantities and prices (venue 109400 otherwise). Copy inputs
-        # so retry intents and client IDs remain unchanged.
-        normalized = []
-        for raw in orders:
-            row = dict(raw)
-            for key in ("quantity", "price", "stopPrice"):
-                if key in row:
-                    value = float(row[key])
-                    if not math.isfinite(value) or value <= 0:
-                        raise ValueError(f"Batch {key} must be finite and positive")
-                    row[key] = value
-            normalized.append(row)
-        orders = normalized
-        path = "/openApi/swap/v2/trade/batchOrders"
-        if len(orders) <= 5:
-            response = self.post(path, {"batchOrders": dumps(orders)})
-            if not isinstance(response, dict):
-                return {"code": -1, "msg": "bad-json", "error": True, "complete": False,
-                        "pendingIndexes": list(range(len(orders)))}
-            if response.get("cooled") or response.get("code") not in (0, "0", None) or response.get("error"):
-                return response
-            data = response.get("data") or {}
-            rows = data.get("orders", []) if isinstance(data, dict) else data
-            if isinstance(rows, list) and len(rows) == len(orders):
-                out = dict(response)
-                out["complete"] = True
-                out["pendingIndexes"] = []
-                return out
-            return response
-        results = []
-        for start in range(0, len(orders), 5):
-            chunk = orders[start:start + 5]
-            response = self.post(path, {"batchOrders": dumps(chunk)})
-            data = response.get("data") or {}
-            rows = data.get("orders", []) if isinstance(data, dict) else data
-            if response.get("code") in (0, "0", None) and isinstance(rows, list) and len(rows) == len(chunk):
-                results.extend(rows)
-                continue
-            # Retain every input's outcome, including work not submitted.
-            # Never replay accepted chunks after a partial batch or ban.
-            pending = list(range(start + len(chunk), len(orders)))
-            for index in range(start, len(orders)):
-                unsubmitted = index >= start + len(chunk) or bool(response.get("cooled"))
-                results.append({"clientOrderID": orders[index].get("clientOrderID"),
-                                "code": response.get("code") or -1,
-                                "msg": response.get("msg") or "Incomplete batch response; reconcile before retry",
-                                "submitted": not unsubmitted,
-                                "cooled": bool(response.get("cooled")),
-                                "error": True})
-            if response.get("cooled"):
-                pending = list(range(start, len(orders)))
-            return {"code": 0, "data": {"orders": results}, "complete": False,
-                    "pendingIndexes": pending, "partialResponse": response}
-        return {"code": 0, "data": {"orders": results}, "complete": True, "pendingIndexes": []}
+        chunk = [_batch_numbers(o) for o in orders[:5]]
+        return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
 
-    def _admit_public_async(self, path: str) -> bool:
-        admitted = self._take("public", path)
-        if admitted:
-            self.stats["rest"] += 1
-            self.stats["asyncN"] += 1
-        else:
-            self.stats["asyncSuppressed"] += 1
-        return admitted
+    cancel_replace_ok = True        # False once the venue answered that the endpoint does not exist (BingX mainnet, x01 2026-11-03: 76 refusals in 12 minutes)
+
+    def cancel_replace(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self.cancel_replace_ok:
+            return {"code": 100400, "msg": "cancelReplace unsupported on this venue", "error": True, "unsupported": True}
+        r = self.post("/openApi/swap/v2/trade/order/cancelReplace", extra or {})
+        if str(r.get("code")) == "100400" and "not exist" in str(r.get("msg") or "").lower():
+            self.cancel_replace_ok = False            # never asked again this session: the callers move a stop by placing the new one and cancelling the old
+        return r
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-        if not reqs:
-            return []
-        # Admission belongs immediately before each network request. Spending
-        # every token first then releasing a whole batch creates a fresh burst.
+        if not getattr(getattr(self, "bridge", None), "ok", False):
+            # no asyncio bridge (httpx is not installed): the same requests in parallel on a small thread pool, through
+            # the sync client's own rate gate. Without this every batched public GET (klines, history) came back empty.
+            return self._gather_threads(reqs, timeout)
+        self.stats["rest"] += len(reqs)
+        self.stats["asyncN"] += len(reqs)
         rows = self.bridge.gather(reqs, timeout=timeout)
-        for path, _extra, body in rows:
-            if not isinstance(body, dict):
-                self.stats["err"] += 1
-                continue
-            if body.get("error") and not body.get("cooled"):
-                self.stats["err"] += 1
         snap = self.bridge.latency()
         if snap:
             self.stats["asyncP50"] = snap
         return rows
+
+    def _gather_threads(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+        if not reqs:
+            return []
+        pool = getattr(self, "_pub_pool", None)
+        if pool is None:
+            pool = self._pub_pool = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="bx-pub")
+        futs = [(p, e, pool.submit(self.public, p, e)) for p, e in reqs]
+        out: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        end = time.monotonic() + max(0.5, float(timeout)) + 5.0      # each GET has its own 5 s socket timeout
+        for p, e, f in futs:
+            try:
+                out.append((p, e, f.result(timeout=max(0.05, end - time.monotonic()))))
+            except Exception as exc:
+                out.append((p, e, {"error": True, "msg": f"thread-gather: {str(exc)[:80]}"}))
+        return out
 
     def snapshot(self) -> Dict[str, Any]:
         return {
@@ -762,34 +533,31 @@ class FastBingX:
             "rateTrips": self.stats["rl"],
             "httpErr": self.stats["err"],
             "asyncN": self.stats.get("asyncN", 0),
-            "asyncSuppressed": self.stats.get("asyncSuppressed", 0),
-            "publicSuppressed": self.stats.get("publicSuppressed", 0),
             "asyncP50": round(self.stats.get("asyncP50", 0.0), 1),
             "errors": self.err.recent(8),
             "errorN": self.err.n,
-            "errorSummary": self.err.summary(),
-            "requestLatencyMs": self.request_latency(),
         }
 
 
 class AsyncBridge:
     """Dedicated asyncio loop for parallel public GETs. Orders stay on the sync client."""
 
-    def __init__(self, base: str, headers: Dict[str, str], err: ErrorLog) -> None:
+    def __init__(self, base: str, headers: Dict[str, str], err: ErrorLog, gate: Any = None) -> None:
         self.base = base.rstrip("/")
         self.headers = headers
         self.err = err
+        # the owning FastBingX: its reserve_public (cooldown and token bucket) and trip gate every request
+        self.gate = gate
         self.lat: Deque[float] = deque(maxlen=48)
         self.ok = False
         self.loop = None
         self.client = None
-        self.thread: Optional[threading.Thread] = None
         if asyncio is None or httpx is None:
             return
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
-        self.thread = threading.Thread(target=self._run, name="bx-async", daemon=True)
-        self.thread.start()
+        t = threading.Thread(target=self._run, name="bx-async", daemon=True)
+        t.start()
         self.ready.wait(2.5)
 
     def _run(self) -> None:
@@ -800,37 +568,11 @@ class AsyncBridge:
             timeout=httpx.Timeout(3.0, connect=1.4),
             headers=self.headers,
             http2=False,
-            trust_env=False,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=20),
         )
         self.ok = True
         self.ready.set()
-        try:
-            self.loop.run_forever()
-        finally:
-            try:
-                if self.client is not None and not self.client.is_closed:
-                    self.loop.run_until_complete(self.client.aclose())
-            except Exception:
-                pass
-            self.ok = False
-            try:
-                self.loop.close()
-            except Exception:
-                pass
-
-    def close(self) -> None:
-        """Stop the async transport and close its loop without leaking sockets."""
-        loop = self.loop
-        if loop is None or loop.is_closed():
-            return
-        try:
-            loop.call_soon_threadsafe(loop.stop)
-        except RuntimeError:
-            return
-        thread = self.thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+        self.loop.run_forever()
 
     def latency(self) -> float:
         if not self.lat:
@@ -847,40 +589,36 @@ class AsyncBridge:
         try:
             return fut.result(timeout)
         except Exception as e:
+            # Timed-out batches used to keep running while the caller submitted
+            # replacements. Cancel both in-flight reads and queued semaphore work.
+            fut.cancel()
             self.err.write("async-gather", msg=str(e)[:200])
-            fut.cancel()  # Timed-out batches must not keep consuming connections.
             return [(p, e2, {"error": True, "msg": str(e)[:180]}) for p, e2 in reqs]
 
     async def _gather(self, reqs: List[Tuple[str, Dict[str, Any]]]):
-        # Keep a bounded transport fan-out and share tokens with sync GETs.
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(8)
 
         async def one(path: str, extra: Dict[str, Any]):
             async with sem:
-                admission = getattr(self, "before_request", None)
-                if admission is not None and not await asyncio.to_thread(admission, path):
-                    return path, extra, {"code":101209, "msg":"cooling", "error":True, "cooled":True}
+                if self.gate is not None:
+                    wait = self.gate.reserve_public(path)
+                    if wait is None:   # the path is cooling: no request is sent
+                        return path, extra, {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
+                    if wait > 0:
+                        await asyncio.sleep(wait)   # wait on the loop; never block it
                 qs = urllib.parse.urlencode(extra or {})
                 url = path + (("?" + qs) if qs else "")
                 t0 = time.perf_counter()
                 try:
                     r = await self.client.get(url)
-                    try:
-                        body = loads(r.content) if r.content else {"code": r.status_code, "error": True}
-                    except Exception:
-                        body = {"code":r.status_code, "error":True, "msg":"non-JSON response"}
-                    if r.status_code == 429:
-                        if not isinstance(body, dict):
-                            body = {}
-                        body.update(code=429, error=True)
-                        if r.headers.get("Retry-After"):
-                            body["retryAfter"] = r.headers.get("Retry-After")
-                    response_hook = getattr(self, "on_response", None)
-                    if response_hook is not None and isinstance(body, dict):
-                        response_hook(path, body)
+                    body = loads(r.content) if r.content else {"code": r.status_code, "error": True}
                 except Exception as e:
                     return path, extra, {"error": True, "msg": str(e)[:180]}
                 self.lat.append((time.perf_counter() - t0) * 1000)
-                return path, extra, body if isinstance(body, dict) else {"error": True, "msg": "bad-json"}
+                if not isinstance(body, dict):
+                    return path, extra, {"error": True, "msg": "bad-json"}
+                if self.gate is not None and body.get("code") not in (0, None):
+                    self.gate._trip(path, body)   # a rate-limit reply starts the path cooldown, as on the sync path
+                return path, extra, body
 
         return await asyncio.gather(*[one(p, e) for p, e in reqs])

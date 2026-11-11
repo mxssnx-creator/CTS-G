@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "connection": "vst",
+  "lookbackBars": 4320,
+  "maxBars": 4320,
+  "targetSamples": 24,
+  "scratchMinPct": 0.3,
+  "reloaded": true,
+  "appliedToIsolatedSetBook": {
+    "lookback": 4320,
+    "maximum": 4320,
+    "target": 24,
+    "scratch": 0.003
+  },
+  "pageErrors": [],
+  "note": "mocked browser transport and isolated SetBook; no live Pulse API or account written"
+}

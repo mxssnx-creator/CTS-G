@@ -17,7 +17,21 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import POSITIVE_PF, clears_pf, shared_pf_settings, last_n_cost_pf, signed_result_r, POSITION_COST_PCT_DEFAULT
+from config_num import num
+from modules import trailing_enabled
+from position_cost import (
+    GATE_MIN_PF_DEFAULT,
+    MIN_VALIDATION_N,
+    gate_min_pf,
+    window_n,
+    POSITION_COST_PCT_DEFAULT,
+    cost_as_frac,
+    last_n_cost_pf,
+    net_pnl_pct,
+    row_net_pnl_pct,
+    normalize_cost_pct,
+    signed_result_r,
+)
 from set_engine import drawdown_time
 
 LANES = ("hard", "lock", "peak", "rev", "time")
@@ -32,8 +46,8 @@ def finite(v: Any, fallback: float = 0.0) -> float:
 
 
 def pct_to_frac(v: float) -> float:
-    x = finite(v)
-    return x / 100.0 if x > 0.02 else x
+    """Exit settings are percent (0.15 = 0.15%). No magnitude guessing."""
+    return finite(v) / 100.0
 
 
 def lane_of(reason: str) -> str:
@@ -59,6 +73,7 @@ class LaneScore:
     n: int = 0
     wins: int = 0
     last15_ratio: float = 1.0
+    last15_pf: float = 1.0
     last25_avg_r: float = 0.0
     max_dd_s: float = 0.0
     active: bool = True
@@ -94,11 +109,11 @@ class ExitBook:
         self.time_stop_s = 21600.0
         self.scratch_s = 600.0
         self.scratch_min = 0.0025
-        self.trail_min_step = 7
+        self.trail_min_step = 6.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = POSITIVE_PF
-        self.min_samples = self.pf_n
+        self.min_pf = GATE_MIN_PF_DEFAULT
+        self.min_samples = 8
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.lanes: Dict[str, LaneScore] = {k: LaneScore(key=k) for k in LANES}
@@ -110,31 +125,26 @@ class ExitBook:
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
         self.best_of = bool(ov.get("exitBestOf", True))
         self.lock_on = bool(ov.get("exitLockOn", True))
-        self.peak_on = bool(ov.get("exitPeakOn", True))
+        self.peak_on = trailing_enabled(ov) and bool(ov.get("exitPeakOn", True))
         self.rev_on = bool(ov.get("exitRevOn", False))
         self.time_on = bool(ov.get("exitTimeOn", False))
-        self.lock_pct = pct_to_frac(float(ov.get("exitLockPct") or 0.15))
-        # Percent (0.01-0.2 on the desk); every value is divided, none is guessed a fraction.
-        self.be_buffer = float(ov.get("exitBeBuffer") or 0.04) / 100.0
-        self.opt_sl = pct_to_frac(float(ov.get("exitOptSlPct") or 0.30))
-        self.opt_sl_min = pct_to_frac(float(ov.get("exitOptSlMin") or 0.10))
-        self.opt_sl_max = pct_to_frac(float(ov.get("exitOptSlMax") or 0.90))
+        self.lock_pct = pct_to_frac(num(ov, "exitLockPct", 0.15))
+        self.be_buffer = pct_to_frac(num(ov, "exitBeBuffer", 0.04))
+        self.opt_sl = pct_to_frac(num(ov, "exitOptSlPct", 0.30))
+        self.opt_sl_min = pct_to_frac(num(ov, "exitOptSlMin", 0.10))
+        self.opt_sl_max = pct_to_frac(num(ov, "exitOptSlMax", 0.90))
         self.opt_sl = max(self.opt_sl_min, min(self.opt_sl_max, self.opt_sl))
-        self.min_hold_s = float(ov.get("exitMinHoldS") or 45)
-        self.time_stop_s = float(ov.get("timeStopS") or 21600)
-        self.scratch_s = float(ov.get("scratchS") or 600)
-        self.scratch_min = pct_to_frac(float(ov.get("scratchMin") or ov.get("scratchMinPct") or 0.25))
-        self.trail_min_step = max(1, int(float(ov.get("trailingMinStep") or 7)))
-        self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
-        self.deact_n = max(5, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = shared_pf_settings(ov)["minPf"]
-        self.min_samples = max(5, int(ov.get("exitMinSamples") or self.pf_n))
+        self.min_hold_s = num(ov, "exitMinHoldS", 45)
+        self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))   # one clamp, desk minimum 30 s
+        self.scratch_s = num(ov, "scratchS", 600)
+        self.scratch_min = pct_to_frac(num(ov, ("scratchMin", "scratchMinPct"), 0.16))
+        self.trail_min_step = num(ov, "trailingMinStep", 6)
+        self.pf_n = max(MIN_VALIDATION_N, window_n(ov, "exitPfWindow", "setPfWindow", fallback=15))
+        self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
+        self.min_pf = gate_min_pf(ov, "exitMinPf")
+        self.min_samples = max(1, int(ov.get("exitMinSamples") or 8))       # no minimum-orders gate (owner 2026-11-04): down to 1
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
-        self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
-        if self.cost_pct > 2:
-            self.cost_pct = self.cost_pct / 100.0
-        if self.cost_pct > 1:
-            self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 
     def optimal_sl(self, side: str, entry: float, peak: float, hard_sl: float) -> float:
         """SL that takes profit from peak — independent of TP."""
@@ -177,7 +187,7 @@ class ExitBook:
             return candidates[0]
         def score(d: ExitDecision) -> Tuple[float, float]:
             ln = self.lanes.get(d.lane)
-            ratio = ln.last15_ratio if ln and ln.n >= self.min_samples else 1.0
+            ratio = ln.last15_pf if ln and ln.n >= self.min_samples else 1.0
             return (ratio, d.conf)
         return max(candidates, key=score)
 
@@ -216,7 +226,7 @@ class ExitBook:
             if improved:
                 tightens.append(ExitDecision("tighten", "exit:lock", target, "lock", 0.7))
 
-        if self.peak_on and self._lane_ok("peak") and fav_peak >= max(self.lock_pct, trail_arm, self.opt_sl) and age >= self.min_hold_s:
+        if self.peak_on and self._lane_ok("peak") and fav_peak >= max(self.lock_pct, trail_arm, self.opt_sl) and age >= self.trail_min_step:
             target = self.optimal_sl(side, entry, peak, sl)
             improved = (long and target > sl + 1e-12) or ((not long) and target < sl - 1e-12)
             if improved:
@@ -229,8 +239,8 @@ class ExitBook:
                 closes.append(ExitDecision("close", "exit:rev", self.mark_sl(side, px), "rev", 0.8))
 
         if self.time_on and self._lane_ok("time"):
-            # Never scratch a trade that has not paid 1× position-cost.
-            paid = max(0.0025, self.cost_pct / 100.0 * 1.1)
+            # Never scratch a trade that has not paid 1× position-cost (gross move >= one PositionCost).
+            paid = cost_as_frac(self.cost_pct)
             if age >= self.time_stop_s and pnl_pct >= paid:
                 closes.append(ExitDecision("close", "exit:time", self.mark_sl(side, px), "time", 0.6))
             elif age >= max(600.0, self.scratch_s) and pnl_pct >= max(self.scratch_min, paid):
@@ -247,42 +257,50 @@ class ExitBook:
         return ExitDecision("hold", "hold")
 
     def on_close(self, rec: Any) -> None:
+        if (rec.get("set_id") or rec.get("setId")) if isinstance(rec, dict) else getattr(rec, "set_id", ""):
+            return   # Set exits belong to their own lane, including during restart seeding
+        if (rec.get("pnl_pct") if isinstance(rec, dict) else getattr(rec, "pnl_pct", None)) is None:
+            return   # no gross move recorded: not a loss, not scored (as in position_cost and the Set tapes)
         if isinstance(rec, dict):
             reason = str(rec.get("reason") or "")
             row = {
                 "t": finite(rec.get("t")),
-                "pnl": finite(rec.get("pnl")),
+                "pnl_usdt": finite(rec.get("pnl")),
                 "pnl_pct": finite(rec.get("pnl_pct")),
             }
         else:
             reason = str(getattr(rec, "reason", "") or "")
             row = {
                 "t": finite(getattr(rec, "t", 0)),
-                "pnl": finite(getattr(rec, "pnl", 0)),
+                "pnl_usdt": finite(getattr(rec, "pnl", 0)),
                 "pnl_pct": finite(getattr(rec, "pnl_pct", 0)),
             }
+        # tape pnl is a NET FRACTION (as in set_engine replay rows); the USDT figure is display-only
+        row["net_pnl_pct"] = rec.get("net_pnl_pct") if isinstance(rec, dict) else getattr(rec, "net_pnl_pct", None)
+        row["pnl"] = row_net_pnl_pct(row, self.cost_pct)
         key = lane_of(reason)
         ln = self.lanes.setdefault(key, LaneScore(key=key))
         ln.rows.append(row)
         ln.rows = ln.rows[-80:]
-        self._score(ln)
+        self._score(ln, now=row["t"] or None)
 
     def seed(self, closed: Sequence[Any]) -> None:
         for rec in closed:
             self.on_close(rec)
 
-    def _score(self, ln: LaneScore) -> None:
+    def _score(self, ln: LaneScore, now: Optional[float] = None) -> None:
         tape = ln.rows
         ln.n = len(tape)
         ln.wins = sum(1 for r in tape if finite(r.get("pnl")) > 0)
         pf = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
         ln.last15_ratio = float(pf["ratio"])
+        ln.last15_pf = float(pf["pf"])
         last25 = tape[-self.deact_n :]
         if last25:
-            ln.last25_avg_r = sum(signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25) / len(last25)
+            ln.last25_avg_r = sum(row_net_pnl_pct(r, self.cost_pct) / max(1e-9, cost_as_frac(self.cost_pct)) for r in last25) / len(last25)
         else:
             ln.last25_avg_r = 0.0
-        ln.max_dd_s = float(drawdown_time(tape)["maxS"])
+        ln.max_dd_s = float(drawdown_time(tape, now=now)["maxS"])
         if ln.key == "hard":
             ln.active = True
             ln.deact_reason = ""
@@ -294,8 +312,8 @@ class ExitBook:
         reasons = []
         if len(last25) >= self.deact_n and ln.last25_avg_r < 0:
             reasons.append(f"last{len(last25)} avgR {ln.last25_avg_r:.2f}<0")
-        if int(pf["count"]) >= min(self.pf_n, self.min_samples) and not clears_pf(ln.last15_ratio, self.min_pf):
-            reasons.append(f"last{self.pf_n} PF {ln.last15_ratio:.2f}<{self.min_pf:.2f}")
+        if int(pf["count"]) >= min(self.pf_n, self.min_samples) and ln.last15_pf + 1e-9 < self.min_pf:
+            reasons.append(f"last15 PF {ln.last15_pf:.2f}<{self.min_pf:.2f}")
         ln.active = not reasons
         ln.deact_reason = "; ".join(reasons)
 
@@ -308,7 +326,8 @@ class ExitBook:
                     "key": ln.key,
                     "n": ln.n,
                     "wins": ln.wins,
-                    "last15Ratio": round(ln.last15_ratio, 4),
+                    "ratio": round(ln.last15_ratio, 4),
+                    "last15Pf": round(ln.last15_pf, 4),
                     "last25AvgR": round(ln.last25_avg_r, 4),
                     "maxDdS": ln.max_dd_s,
                     "active": ln.active,
@@ -331,9 +350,6 @@ class ExitBook:
             "optSlMax": round(self.opt_sl_max * 100, 3),
             "minHoldS": self.min_hold_s,
             "lastPick": self.last_pick,
-            # Window behind each lane's last15Ratio (exitPfWindow), for labels.
-            "pfWindow": self.pf_n,
-            "deactN": self.deact_n,
             "lanes": rows,
         }
 
@@ -361,12 +377,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("ex-deact-peak", not b.lanes["peak"].active, b.lanes["peak"].deact_reason))
     # best-of prefers high PF lane
     b2 = ExitBook()
-    b2.load({"exitBestOf": True, "exitMinHoldS": 1, "trailingMinStep": 1, "exitMinPf": 1.05})
+    b2.load({"exitBestOf": True, "exitMinHoldS": 1, "trailingMinStep": 1, "exitMinPf": 1.05, "minPfLinked": False})
     for i in range(12):
         b2.on_close({"t": 2000 + i, "pnl": 0.02, "pnl_pct": 0.003, "reason": "exit:peak"})
         b2.on_close({"t": 3000 + i, "pnl": -0.01, "pnl_pct": -0.002, "reason": "exit:time"})
     d4 = b2.decide(side="LONG", entry=100, px=100.4, peak=100.8, sl=100.2, opened_at=0, trail_arm=0.001, signal_dir=1, now=400)
-    out.append(("ex-best-peak", d4.lane in ("peak", "lock", "time") and b2.lanes["peak"].last15_ratio > b2.lanes["time"].last15_ratio, f"{d4.lane} {b2.lanes['peak'].last15_ratio:.2f}>{b2.lanes['time'].last15_ratio:.2f}"))
+    out.append(("ex-best-peak", d4.lane in ("peak", "lock", "time") and b2.lanes["peak"].last15_pf > b2.lanes["time"].last15_pf, f"{d4.lane} {b2.lanes['peak'].last15_pf:.2f}>{b2.lanes['time'].last15_pf:.2f}"))
     out.append(("ex-lane-of", lane_of("exit:peak") == "peak" and lane_of("trail") == "peak", lane_of("tp")))
     b3 = ExitBook()
     b3.load({"exitPeakOn": True, "exitMinHoldS": 0, "trailingMinStep": 0, "exitRevOn": False, "exitTimeOn": False})

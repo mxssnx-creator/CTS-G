@@ -1,0 +1,68 @@
+{
+  "schema": "cts-g-signals-independent-audit-v1",
+  "scenarios": {
+    "baseline": {
+      "modeledOrders": 57,
+      "settled": 55,
+      "marks": 721,
+      "normalStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "expanded": {
+      "modeledOrders": 93,
+      "settled": 91,
+      "marks": 721,
+      "normalStageContextsCompared": 9216,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "cost-stress": {
+      "modeledOrders": 60,
+      "settled": 59,
+      "marks": 721,
+      "normalStageContextsCompared": 0,
+      "maxCashError": 3.469446951953614e-18,
+      "maxMarkError": 0.0,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "maker-hypothesis": {
+      "modeledOrders": 103,
+      "settled": 101,
+      "marks": 721,
+      "normalStageContextsCompared": 0,
+      "maxCashError": 6.938893903907228e-18,
+      "maxMarkError": 0.0,
+      "differenceCount": 0,
+      "differences": []
+    },
+    "smaller-book": {
+      "modeledOrders": 49,
+      "settled": 48,
+      "marks": 721,
+      "normalStageContextsCompared": 0,
+      "maxCashError": 3.469446951953614e-18,
+      "maxMarkError": 0.0,
+      "differenceCount": 0,
+      "differences": []
+    }
+  },
+  "activeStageOptimization": {
+    "beforeSha256": "58792ca3a9aa6fd1fad5b1e8eba9bf26e3c9ac67393731c253556e32743c1e10",
+    "afterSha256": "58792ca3a9aa6fd1fad5b1e8eba9bf26e3c9ac67393731c253556e32743c1e10",
+    "equal": true,
+    "beforeSeconds": 6.569415638994542,
+    "afterSeconds": 5.195003925997298
+  },
+  "seconds": 12.409439075010596,
+  "limits": [
+    "shared source-onset inputs, separately registry-parity-tested",
+    "normal exits independently replayed across every expanded context; trailing paths fixture-tested only",
+    "cash/marks reconstruct modeled execution, not venue executions or untouched out-of-sample performance"
+  ]
+}

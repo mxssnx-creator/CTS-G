@@ -16,7 +16,6 @@ export type Derived = {
   worst: LiveClosed | null;
   longs: number;
   shorts: number;
-  byDirection: { direction: string; pnl: number; n: number; wins: number; expectancy: number }[];
   marginPct: number;
   ddPct: number;
 };
@@ -67,15 +66,6 @@ export function derive(stats: LiveStats | null): Derived {
   const avail = stats?.available ?? 0;
   const best = closed.reduce<LiveClosed | null>((a, c) => (!a || c.pnl > a.pnl ? c : a), null);
   const worst = closed.reduce<LiveClosed | null>((a, c) => (!a || c.pnl < a.pnl ? c : a), null);
-  const dirMap = new Map<string, { pnl: number; n: number; wins: number }>();
-  for (const c of closed) {
-    const d = c.side === "SHORT" ? "SHORT" : "LONG";
-    const cur = dirMap.get(d) ?? { pnl: 0, n: 0, wins: 0 };
-    cur.pnl += c.pnl;
-    cur.n += 1;
-    if (c.pnl > 0) cur.wins += 1;
-    dirMap.set(d, cur);
-  }
   return {
     equityCurve,
     tradeBars,
@@ -87,7 +77,7 @@ export function derive(stats: LiveStats | null): Derived {
       .sort((a, b) => b.n - a.n),
     gp,
     gl,
-    pf: stats?.pfCost?.ratio ?? (gl > 0 ? gp / gl : gp > 0 ? 99 : 0),
+    pf: stats?.pfCost?.pf ?? (gl > 0 ? gp / gl : gp > 0 ? 99 : 0),
     avgWin: wins.length ? gp / wins.length : 0,
     avgLoss: losses.length ? gl / losses.length : 0,
     avgHold: closed.length ? holdSum / closed.length : 0,
@@ -96,10 +86,6 @@ export function derive(stats: LiveStats | null): Derived {
     worst,
     longs,
     shorts,
-    byDirection: ["LONG", "SHORT"].map((direction) => {
-      const v = dirMap.get(direction) ?? { pnl: 0, n: 0, wins: 0 };
-      return { direction, ...v, expectancy: v.n ? v.pnl / v.n : 0 };
-    }),
     marginPct: used + avail > 0 ? (used / (used + avail)) * 100 : 0,
     ddPct: stats?.drawdownPct ?? 0,
   };

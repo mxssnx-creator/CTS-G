@@ -4,7 +4,7 @@
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=l
+export NEEDRESTART_MODE=a
 export APT_LISTCHANGES_FRONTEND=none
 export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=/bin/true
@@ -14,16 +14,11 @@ export npm_config_update_notifier=false
 export npm_config_yes=true
 
 CTS_G_NAME="${CTS_G_NAME:-cts-g}"
-CTS_INSTALL_PREFIX="${CTS_INSTALL_PREFIX:-}"
-CTS_G_ROOT="${CTS_INSTALL_PREFIX}/opt/${CTS_G_NAME}"
-PULSE_DIR="$CTS_G_ROOT/server/pulse"
-CTS_DATA_DIR="${CTS_INSTALL_PREFIX}/var/lib/${CTS_G_NAME}"
-LEGACY_PULSE_DIR="${CTS_LEGACY_PULSE_DIR:-}"
-ETC_DIR="${CTS_INSTALL_PREFIX}/etc/${CTS_G_NAME}"
-LOG_DIR="${CTS_INSTALL_PREFIX}/var/log/${CTS_G_NAME}"
-UNIT_DIR="${CTS_INSTALL_PREFIX}/etc/systemd/system"
+CTS_G_ROOT="${CTS_G_ROOT:-/opt/${CTS_G_NAME}}"
+PULSE_DIR="${PULSE_DIR:-/opt/grok-x01-pulse}"
+ETC_DIR="${ETC_DIR:-/etc/${CTS_G_NAME}}"
+LOG_DIR="${LOG_DIR:-/var/log/${CTS_G_NAME}}"
 ENV_FILE="${ENV_FILE:-$ETC_DIR/cts-g.env}"
-CREDENTIALS_ENV_FILE="${CREDENTIALS_ENV_FILE:-$ETC_DIR/credentials.env}"
 REPO_URL="${REPO_URL:-https://github.com/mxssnx-creator/CTS-G.git}"
 BRANCH="${BRANCH:-main}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
@@ -32,9 +27,6 @@ GIT_USER_EMAIL="${GIT_USER_EMAIL:-mxssnx@gmail.com}"
 DESK_HOST="${DESK_HOST:-0.0.0.0}"
 DESK_PORT="${DESK_PORT:-3102}"
 PULSE_PORT="${PULSE_PORT:-3015}"
-PULSE_PORT_EXPLICIT=0
-CTS_REDIS_PREFIX="${CTS_G_NAME}:"
-PYTHON_BIN="$CTS_G_ROOT/.venv/bin/python"
 REMOTE_HOST="${REMOTE_HOST:-152.53.114.112}"
 PUBLIC_HOST="${PUBLIC_HOST:-}"
 LIVE_SLOT="${LIVE_SLOT:-bingx-x01}"
@@ -52,7 +44,7 @@ die()  { printf '[%s] ERROR %s\n' "$CTS_G_NAME" "$*" >&2; exit 1; }
 
 ok()   { STEPS_OK+=("$1"); log "ok    $1"; }
 skip() { STEPS_SKIP+=("$1"); log "skip  $1"; }
-fail() { STEPS_FAIL+=("$1"); warn "fail $1"; }
+fail() { STEPS_FAIL+=("$1"); warn "fail  $1"; }
 
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || die "run as root (sudo $0)"
@@ -60,6 +52,20 @@ require_root() {
 
 require_linux() {
   [[ "$(uname -s)" == Linux ]] || die "Linux only"
+}
+
+systemd_runtime_present() {
+  [[ -d /run/systemd/system ]]
+}
+
+require_systemd() {
+  # Check the manager, not just the binary (containers can ship a stub systemctl).
+  # Called before packages, file copies or service mutations. Never print the
+  # manager environment: it may contain secrets.
+  if ! systemd_runtime_present || ! command -v systemctl >/dev/null 2>&1 \
+      || ! systemctl --system show-environment >/dev/null 2>&1; then
+    die "a running systemd manager is required; installer made no package, file or service changes"
+  fi
 }
 
 script_repo_root() {
@@ -72,70 +78,15 @@ script_repo_root() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 apply_name() {
-  # --name changes every CTS-owned path. A separate pulse/data root prevents
-  # another checkout using generic grok-* runtime files on the same host.
-  [[ "${1:-}" =~ ^[a-z][a-z0-9-]{1,39}$ ]] || die "invalid install name (2–40 lowercase letters/digits/hyphens)"
-  CTS_G_NAME="$1"
-  CTS_G_ROOT="${CTS_INSTALL_PREFIX}/opt/${CTS_G_NAME}"
-  PULSE_DIR="$CTS_G_ROOT/server/pulse"
-  PYTHON_BIN="$CTS_G_ROOT/.venv/bin/python"
-  CTS_DATA_DIR="${CTS_INSTALL_PREFIX}/var/lib/${CTS_G_NAME}"
-  ETC_DIR="${CTS_INSTALL_PREFIX}/etc/${CTS_G_NAME}"
-  LOG_DIR="${CTS_INSTALL_PREFIX}/var/log/${CTS_G_NAME}"
+  # --name changes install root / etc / logs. Pulse dir stays hardcoded in the engine.
+  CTS_G_NAME="${1:-$CTS_G_NAME}"
+  CTS_G_NAME="${CTS_G_NAME//[^A-Za-z0-9._-]/}"
+  [[ -n "$CTS_G_NAME" ]] || CTS_G_NAME=cts-g
+  CTS_G_ROOT="/opt/${CTS_G_NAME}"
+  ETC_DIR="/etc/${CTS_G_NAME}"
+  LOG_DIR="/var/log/${CTS_G_NAME}"
   ENV_FILE="$ETC_DIR/cts-g.env"
-  CREDENTIALS_ENV_FILE="$ETC_DIR/credentials.env"
-  CTS_REDIS_PREFIX="${CTS_G_NAME}:"
 }
-
-env_value() { sed -n "s/^${1}=//p" "$ENV_FILE" 2>/dev/null | tail -1; }
-
-can_bind_port() {
-  # Match the HTTP servers' restart semantics. A stopped listener may leave
-  # accepted connections in TIME_WAIT; that is not another installation.
-  # SO_REUSEADDR does not allow binding over an active listening socket.
-  python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("0.0.0.0",int(sys.argv[1]))); s.close()' "$1" 2>/dev/null
-}
-
-validate_instance() {
-  [[ "$CTS_G_NAME" =~ ^[a-z][a-z0-9-]{1,39}$ ]] || die "invalid install name"
-  local saved_desk saved_pulse port unit
-  saved_desk="$(env_value PORT || true)"
-  saved_pulse="$(env_value PULSE_PORT || true)"
-  [[ "$saved_pulse" =~ ^[0-9]+$ ]] || saved_pulse=""
-  [[ -n "$saved_pulse" ]] || saved_pulse="$(env_value PULSE_URL | sed -n 's|.*:\([0-9][0-9]*\)$|\1|p' || true)"
-  [[ "$saved_pulse" =~ ^[0-9]+$ ]] || saved_pulse=""
-  if [[ "${PORT_EXPLICIT:-0}" != 1 && -n "$saved_desk" ]]; then DESK_PORT="$saved_desk"; fi
-  if [[ "$PULSE_PORT_EXPLICIT" != 1 && -n "$saved_pulse" ]]; then PULSE_PORT="$saved_pulse"; fi
-  [[ "$DESK_PORT" =~ ^[0-9]+$ ]] || die "invalid desk port"
-  DESK_PORT=$((10#$DESK_PORT))
-  PULSE_PORT="${PULSE_PORT:-3015}"
-  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
-  PULSE_PORT=$((10#$PULSE_PORT))
-  (( DESK_PORT >= 1024 && DESK_PORT <= 65535 && PULSE_PORT >= 1024 && PULSE_PORT <= 65535 && DESK_PORT != PULSE_PORT )) || die "ports must be distinct and between 1024 and 65535"
-  for port in "$DESK_PORT" "$PULSE_PORT"; do
-    if ! can_bind_port "$port"; then
-      unit="$(desk_unit)"
-      [[ "$port" == "$PULSE_PORT" ]] && unit="$(pulse_http_unit)"
-      if [[ "$port" != "$saved_desk" && "$port" != "$saved_pulse" ]] || ! systemctl is-active --quiet "$unit"; then
-        die "port $port is already in use; choose a free --port/--pulse-port"
-      fi
-    fi
-  done
-  export CTS_G_NAME CTS_G_ROOT PULSE_DIR CTS_DATA_DIR LOG_DIR CTS_REDIS_PREFIX PYTHON_BIN PULSE_PORT ENV_FILE
-}
-
-# Unit names are scoped to the installation name. Older releases used the
-# shared grok-* names, which allowed another checkout on the same host to
-# overwrite this project's desk or restart it with a different port.
-desk_unit() { printf '%s-desk.service' "$CTS_G_NAME"; }
-pulse_http_unit() { printf '%s-pulse-http.service' "$CTS_G_NAME"; }
-pulse_template_unit() { printf '%s-pulse@.service' "$CTS_G_NAME"; }
-pulse_instance_unit() { printf '%s-pulse@%s.service' "$CTS_G_NAME" "$1"; }
-pulse_target_unit() { printf '%s-pulse.target' "$CTS_G_NAME"; }
-retention_service_unit() { printf '%s-retention.service' "$CTS_G_NAME"; }
-retention_timer_unit() { printf '%s-retention.timer' "$CTS_G_NAME"; }
-resource_service_unit() { printf '%s-resources.service' "$CTS_G_NAME"; }
-resource_timer_unit() { printf '%s-resources.timer' "$CTS_G_NAME"; }
 
 detect_pkg() {
   if have apt-get; then echo apt
@@ -193,7 +144,10 @@ ensure_base_packages() {
   [[ "$kind" != apt ]] && redis="redis"
   pkg_install_missing ca-certificates curl git rsync python3 "$redis"
   if [[ "$kind" == apt ]]; then
-    pkg_install_missing gnupg redis-tools python3-venv
+    pkg_install_missing gnupg redis-tools python3-venv || true
+    # engine extras: httpx (parallel public GETs) and websocket-client (the price stream). The engine runs without them
+    # (thread-pool GETs, REST prices), only slower, so a missing package is not fatal.
+    pkg_install_missing python3-httpx python3-websocket || true
   fi
   have python3 || die "python3 is required"
   have git || die "git is required"
@@ -208,7 +162,7 @@ node_major() {
 ensure_node() {
   local major kind
   major="$(node_major)"
-  if have node && node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit((a===20&&b>=19)||(a===22&&b>=12)||a>=24?0:1)' && have npm; then
+  if [[ "$major" -ge 20 ]] && have npm; then
     skip "node $(node -v) / npm $(npm -v)"
     return 0
   fi
@@ -225,19 +179,6 @@ ensure_node() {
   fi
   have node && have npm || die "node/npm install failed"
   ok "node $(node -v) npm $(npm -v)"
-}
-
-redis_ready() {
-  # A running unit may still be loading its database. Bound every attempt and
-  # require PONG: redis-cli can exit zero for an error such as NOAUTH/LOADING.
-  local attempt reply
-  for attempt in 1 2 3 4 5; do
-    reply="$(timeout 2s redis-cli --raw ping 2>/dev/null || true)"
-    [[ "$reply" == PONG ]] && return 0
-    [[ "$reply" == *NOAUTH* || "$reply" == *WRONGPASS* ]] && return 1
-    [[ "$attempt" == 5 ]] || sleep 0.25
-  done
-  return 1
 }
 
 ensure_redis() {
@@ -257,53 +198,34 @@ ensure_redis() {
   else
     warn "no redis systemd unit — start redis yourself if needed"
   fi
-  # Redis may be shared with other projects. Never change global eviction,
-  # persistence or memory settings as a side effect of installing this app.
   if have redis-cli; then
-    redis_ready && ok "redis ping" || fail "redis ping"
+    redis-cli ping >/dev/null 2>&1 && ok "redis ping" || fail "redis ping"
   fi
 }
 
-
 ensure_dirs() {
-  mkdir -p "$CTS_G_ROOT" "$CTS_DATA_DIR" "$ETC_DIR" "$LOG_DIR" "$UNIT_DIR"
-  chmod 755 "$CTS_G_ROOT"
-  chmod 700 "$ETC_DIR"
-  chmod 750 "$LOG_DIR"
-  chmod 750 "$CTS_DATA_DIR"
-  ok "dirs $CTS_G_ROOT $PULSE_DIR $CTS_DATA_DIR $ETC_DIR $LOG_DIR"
+  mkdir -p "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR" "$LOG_DIR"
+  chmod 755 "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR" "$LOG_DIR"
+  ok "dirs $CTS_G_ROOT $PULSE_DIR $ETC_DIR $LOG_DIR"
 }
 
 write_env_file() {
   mkdir -p "$ETC_DIR"
-  PULSE_PORT="${PULSE_PORT:-3015}"
-  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
   cat >"$ENV_FILE" <<EOF
 PULSE_URL=http://127.0.0.1:${PULSE_PORT}
+CTS_URL=http://127.0.0.1
 HOST=${DESK_HOST}
 PORT=${DESK_PORT}
 PYTHONUNBUFFERED=1
 PYTHONDONTWRITEBYTECODE=1
 CTS_G_NAME=${CTS_G_NAME}
 CTS_G_ROOT=${CTS_G_ROOT}
-PULSE_DIR=${PULSE_DIR}
-CTS_DATA_DIR=${CTS_DATA_DIR}
-CTS_STATE_DIR=${CTS_DATA_DIR}
-LOG_DIR=${LOG_DIR}
-CTS_MAX_RETAINED_LINES=1000
-CTS_MAX_ERROR_LOG_LINES=500
-PULSE_PORT=${PULSE_PORT}
-CTS_REDIS_PREFIX=${CTS_REDIS_PREFIX}
-PYTHON_BIN=${PYTHON_BIN}
-CTS_URL=
 EOF
-  chmod 0600 "$ENV_FILE"
+  chmod 0644 "$ENV_FILE"
 }
 
 seed_env() {
   mkdir -p "$ETC_DIR"
-  PULSE_PORT="${PULSE_PORT:-3015}"
-  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
   if [[ ! -f "$ENV_FILE" ]]; then
     write_env_file
     ok "env $ENV_FILE (desk :$DESK_PORT)"
@@ -322,52 +244,7 @@ seed_env() {
     else
       skip "env $ENV_FILE"
     fi
-    for pair in \
-      "CTS_G_NAME=$CTS_G_NAME" \
-      "CTS_G_ROOT=$CTS_G_ROOT" \
-      "PULSE_DIR=$PULSE_DIR" \
-      "CTS_DATA_DIR=$CTS_DATA_DIR" \
-      "CTS_STATE_DIR=$CTS_DATA_DIR" \
-      "LOG_DIR=$LOG_DIR" \
-      "PULSE_PORT=$PULSE_PORT" \
-      "PULSE_URL=http://127.0.0.1:$PULSE_PORT" \
-      "CTS_REDIS_PREFIX=$CTS_REDIS_PREFIX" \
-      "PYTHON_BIN=$PYTHON_BIN" \
-      "CTS_MAX_RETAINED_LINES=1000" \
-      "CTS_MAX_ERROR_LOG_LINES=500"; do
-      key="${pair%%=*}"
-      value="${pair#*=}"
-      if grep -q "^${key}=" "$ENV_FILE"; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-      else
-        printf '%s\n' "$pair" >>"$ENV_FILE"
-      fi
-    done
-    chmod 600 "$ENV_FILE"
   fi
-}
-
-ensure_python_deps() {
-  python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ required"' || die "Python 3.11+ required"
-  [[ -x "$PYTHON_BIN" ]] || python3 -m venv "$CTS_G_ROOT/.venv"
-  "$PYTHON_BIN" -m pip install --disable-pip-version-check --no-input -r "$PULSE_DIR/requirements.txt"
-  "$PYTHON_BIN" -m pip check
-  "$PYTHON_BIN" -c 'import numpy, httpx, websocket, orjson, redis'
-  ok "isolated Python dependencies"
-}
-
-migrate_redis_scope() {
-  # Only migrate the canonical existing install. A new named install must
-  # never inherit another project's exchange credentials or settings.
-  [[ "$CTS_G_NAME" == cts-g && -f "$ENV_FILE" ]] || return 0
-  grep -q '^CTS_REDIS_PREFIX=' "$ENV_FILE" && return 0
-  local slot key
-  for slot in "$LIVE_SLOT" "$VST_SLOT"; do
-    for key in "connection:$slot" "settings:connection_settings:$slot"; do
-      redis-cli COPY "$key" "$CTS_REDIS_PREFIX$key" >/dev/null || die "Redis namespace migration failed"
-    done
-  done
-  ok "copied existing connection keys into install namespace; originals retained"
 }
 
 configure_git() {
@@ -387,73 +264,93 @@ configure_git() {
   else
     git -C "$root" remote add "$GIT_REMOTE" "$REPO_URL"
   fi
+  git -C "$root" branch -M "$BRANCH" 2>/dev/null || true
   ok "git $GIT_REMOTE=$REPO_URL  $GIT_USER_NAME <$GIT_USER_EMAIL>"
 }
 
-sync_pulse_tree() {
-  [[ -f "$PULSE_DIR/pulse_trader.py" ]] || die "in-place engine missing"
-  migrate_legacy_state
-  local file
-  for file in "overlay-${LIVE_SLOT}.json" "overlay-${VST_SLOT}.json" universe.json; do
-    if [[ ! -e "$CTS_DATA_DIR/$file" && -f "$PULSE_DIR/$file" ]]; then
-      cp -a "$PULSE_DIR/$file" "$CTS_DATA_DIR/$file"
-    fi
-  done
-  ok "engine source stays in $PULSE_DIR; state in $CTS_DATA_DIR"
+pulse_rsync_excludes() {
+  cat <<'EOF'
+--exclude=__pycache__/
+--exclude=*.pyc
+--exclude=open-*.json
+--exclude=block-state-*.json
+--exclude=trades-*.jsonl
+--exclude=stats-*.json
+--exclude=STOP
+--exclude=STOP-*
+--exclude=PAUSE-*
+--exclude=errors-*.jsonl
+--exclude=lev-set-*.json
+--exclude=cts-settings-*.json
+--exclude=pulse-*.log
+EOF
 }
 
-migrate_legacy_state() {
-  # The former CTS-G install kept durable state beside its source tree. Copy
-  # only recognized state files, only when the new scoped data root is empty
-  # for that name; never move/delete legacy files and never copy code/logs.
-  local legacy="$LEGACY_PULSE_DIR" src name copied=0
-  [[ -d "$legacy" && "$legacy" != "$CTS_DATA_DIR" ]] || return 0
-  local names=(
-    universe.json user-presets.json hist-calc.json hist-calc-req.json
-    hist-calc-checkpoint.json overlay.json overlay-bingx-x01.json
-    overlay-bingx-x02.json
-  )
-  local pattern
-  for pattern in stats-*.json trades-*.jsonl block-state-*.json open-*.json pending-*.json \
-    cts-settings-*.json errors-*.jsonl lev-set-*.json start-eq-*.json \
-    results-export-*.json results-export-*.md events-*.json live-position-cost-*.json; do
-    names+=("$pattern")
-  done
-  shopt -s nullglob
-  for name in "${names[@]}"; do
-    local matches=()
-    if [[ "$name" == *'*'* ]]; then
-      matches=("$legacy"/$name)
-    else
-      matches=("$legacy/$name")
-    fi
-    for src in "${matches[@]}"; do
-      [[ -f "$src" ]] || continue
-      local base="${src##*/}" dst="$CTS_DATA_DIR/${src##*/}"
-      [[ -e "$dst" ]] && continue
-      cp -a "$src" "$dst"
-      copied=$((copied + 1))
-    done
-  done
-  shopt -u nullglob
-  if [[ "$copied" -gt 0 ]]; then
-    ok "legacy state migrated $copied file(s) $legacy -> $CTS_DATA_DIR"
-  else
-    skip "legacy state (already scoped or empty)"
+restore_pulse_trader() {
+  # server/pulse/pulse_trader.py is a placeholder in git (233KB engine). Rebuild the
+  # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
+  # verify both input and output git blob hashes. Runs on every install/update.
+  local pt="$PULSE_DIR/pulse_trader.py"
+  local pt_want="5dbc8905c53aa8e4e6ba303edd447efb2ff32879"
+  local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
+  local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
+  if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
+    skip "pulse_trader.py already current"
+    return 0
   fi
+  [[ -f "$pt_patch" ]] || die "restore patch missing: $pt_patch"
+  local scratch
+  scratch="$(mktemp -d)"
+  mkdir -p "$scratch/server/pulse"
+  if curl -fsSL -m 90 -o "$scratch/server/pulse/pulse_trader.py" \
+      "https://raw.githubusercontent.com/mxssnx-creator/CTS-G/2b3432d7b3/server/pulse/pulse_trader.py" \
+    && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_base" ]] \
+    && git -C "$scratch" apply --unidiff-zero "$pt_patch" \
+    && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_want" ]]; then
+    cp -a "$scratch/server/pulse/pulse_trader.py" "$pt"
+    rm -rf "$scratch"
+    ok "pulse_trader.py restored from verified patch"
+    return 0
+  fi
+  rm -rf "$scratch"
+  die "pulse_trader.py restore failed (base/patch/result hash mismatch)"
+}
+
+sync_pulse_tree() {
+  local src="$CTS_G_ROOT/server/pulse"
+  [[ -d "$src" ]] || die "pulse tree missing at $src"
+  mkdir -p "$PULSE_DIR"
+  local keep_overlay=0
+  [[ -f "$PULSE_DIR/overlay-${LIVE_SLOT}.json" ]] && keep_overlay=1
+
+  local args=(-a)
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && args+=("$line")
+  done < <(pulse_rsync_excludes)
+  if [[ "$keep_overlay" -eq 1 ]]; then
+    args+=(--exclude='overlay-*.json')
+  fi
+  rsync "${args[@]}" "$src/" "$PULSE_DIR/"
+
+  local f
+  for f in "overlay-${LIVE_SLOT}.json" "overlay-${VST_SLOT}.json" universe.json; do
+    if [[ ! -f "$PULSE_DIR/$f" && -f "$src/$f" ]]; then
+      cp -a "$src/$f" "$PULSE_DIR/$f"
+    fi
+  done
+  [[ -f "$src/universe.json" ]] && cp -a "$src/universe.json" "$PULSE_DIR/universe.json"
+  restore_pulse_trader
+  python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
+    "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py \
+    "$PULSE_DIR"/set_block.py "$PULSE_DIR"/execution_cost.py "$PULSE_DIR"/market_features.py
+  ok "pulse tree $PULSE_DIR"
 }
 
 sync_app_tree() {
   local from="$1"
   [[ -d "$from" ]] || die "source tree missing: $from"
   mkdir -p "$CTS_G_ROOT"
-  [[ ! -d "$CTS_G_ROOT/.git" ]] || die "existing Git install: use fast-forward update, not --from-dir overwrite"
   rsync -a \
-    --exclude '.git/' \
-    --exclude '.venv/' \
-    --exclude 'deploy/units/' \
-    --exclude 'deploy/instance.json' \
-    --exclude '.env*' \
     --exclude 'node_modules/' \
     --exclude 'dist/' \
     --exclude '.tanstack/' \
@@ -466,35 +363,15 @@ sync_app_tree() {
     --exclude 'preview.log' \
     --exclude '__pycache__/' \
     "$from/" "$CTS_G_ROOT/"
-  find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} + 2>/dev/null || true
+  chmod 755 "$CTS_G_ROOT/deploy/"*.sh 2>/dev/null || true
   ok "app tree $CTS_G_ROOT"
 }
 
 render_unit() {
   local src="$1" dest="$2"
-  # Units ship rooted at the canonical in-project tree (/opt/cts-g and its
-  # server/pulse). The pulse path is parked on a placeholder before the generic
-  # root rewrite so that rewrite cannot re-match it: an install name extending
-  # the default (e.g. cts-gx) would otherwise expand /opt/cts-g/server/pulse to
-  # /opt/cts-gxx/server/pulse and the unit would fail to start.
-  # The /opt/grok-x01-pulse rule is retained only to migrate any older unit
-  # that still names the former standalone pulse tree.
   sed \
-    -e "s|/opt/cts-g/server/pulse|__CTS_PULSE_DIR__|g" \
     -e "s|/opt/cts-g|${CTS_G_ROOT}|g" \
-    -e "s|__CTS_PULSE_DIR__|${PULSE_DIR}|g" \
-    -e "s|/opt/grok-x01-pulse|${PULSE_DIR}|g" \
     -e "s|/etc/cts-g|${ETC_DIR}|g" \
-    -e "s|/var/log/cts-g|${LOG_DIR}|g" \
-    -e "s|grok-pulse@|${CTS_G_NAME}-pulse@|g" \
-    -e "s|grok-pulse-http|${CTS_G_NAME}-pulse-http|g" \
-    -e "s|grok-desk|${CTS_G_NAME}-desk|g" \
-    -e "s|grok-pulse.target|${CTS_G_NAME}-pulse.target|g" \
-    -e "s|grok-retention|${CTS_G_NAME}-retention|g" \
-    -e "s|grok-resources|${CTS_G_NAME}-resources|g" \
-    -e "s|__CTS_G_NAME__|${CTS_G_NAME}|g" \
-    -e "s|:3015|:${PULSE_PORT}|g" \
-    -e "s|/usr/bin/python3|${PYTHON_BIN}|g" \
     -e "s|:3102|:${DESK_PORT}|g" \
     -e "s|PORT=3102|PORT=${DESK_PORT}|g" \
     -e "s|CTS-G desk UI|${CTS_G_NAME} desk UI|g" \
@@ -502,160 +379,93 @@ render_unit() {
 }
 
 install_units() {
-  local source target name
-  mkdir -p "$CTS_G_ROOT/deploy/units"
-  for source in grok-pulse@.service grok-pulse-http.service grok-desk.service grok-pulse.target grok-retention.service grok-retention.timer grok-resources.service grok-resources.timer; do
-    name="${source/grok-/$CTS_G_NAME-}"
-    target="$CTS_G_ROOT/deploy/units/$name"
-    render_unit "$CTS_G_ROOT/deploy/$source" "$target"
-    # Refuse replacement of another installation's unit definition.
-    if [[ -e "$UNIT_DIR/$name" ]] && ! grep -Fq "$CTS_G_ROOT" "$UNIT_DIR/$name" && ! grep -Fq "$CTS_G_NAME-" "$UNIT_DIR/$name"; then
-      die "unit ownership mismatch: $name"
-    fi
-    ln -sfn "$target" "$UNIT_DIR/$name"
+  local unit
+  for unit in grok-pulse@.service grok-pulse-http.service grok-desk.service grok-pulse.target; do
+    render_unit "$CTS_G_ROOT/deploy/$unit" "/etc/systemd/system/$unit"
   done
   systemctl daemon-reload
-  "$PYTHON_BIN" "$CTS_G_ROOT/deploy/instance-manifest.py" write
-  ok "scoped units (canonical files under project/deploy/units)"
-}
-
-apply_dynamic_resources() {
-  if [[ -f "$CTS_G_ROOT/deploy/dynamic-resources.py" ]]; then
-    "$PYTHON_BIN" "$CTS_G_ROOT/deploy/dynamic-resources.py" \
-      --name "$CTS_G_NAME" --root "$CTS_G_ROOT" --apply \
-      >/dev/null || warn "dynamic resource policy could not be applied"
-    ok "dynamic pulse memory / maximum CPU policy"
-  else
-    warn "dynamic resource helper missing at $CTS_G_ROOT/deploy/dynamic-resources.py"
-  fi
+  ok "systemd units"
 }
 
 npm_install_desk() {
-  local digest
-  [[ -f "$CTS_G_ROOT/package-lock.json" ]] || die "package-lock.json required"
-  digest="$(sha256sum "$CTS_G_ROOT/package-lock.json" "$CTS_G_ROOT/package.json" | sha256sum | cut -d' ' -f1)"
-  if [[ -f "$CTS_G_ROOT/.cts-deps.sha256" && "$(<"$CTS_G_ROOT/.cts-deps.sha256")" == "$digest" ]] && (cd "$CTS_G_ROOT" && npm ls --omit=optional --depth=0 >/dev/null 2>&1); then
-    skip "npm lockfile dependencies verified"
+  [[ -f "$CTS_G_ROOT/package.json" ]] || die "package.json missing in $CTS_G_ROOT"
+  local oldpwd="$PWD"
+  cd "$CTS_G_ROOT"
+  if [[ -d node_modules/vite && -f package-lock.json && ! package.json -nt node_modules ]]; then
+    skip "npm (node_modules current)"
+    cd "$oldpwd"
+    return 0
+  fi
+  if [[ -f package-lock.json ]]; then
+    npm ci --no-fund --no-audit --no-progress
   else
-    (cd "$CTS_G_ROOT" && npm ci --no-fund --no-audit --no-progress)
-    printf '%s\n' "$digest" > "$CTS_G_ROOT/.cts-deps.sha256"
-    ok "npm ci"
+    npm install --no-fund --no-audit --no-progress
   fi
-}
-
-fast_forward_app() {
-  local preserve_dir file
-  local -a live_files=(
-    "public/hist-test.json"
-    "public/step-sweep-24h.json"
-    "reports/hist-test/summary.json"
-    "reports/hist-test/last-ready.json"
-    "reports/hist-test/validated-ids.json"
-  )
-  preserve_dir="$(mktemp -d "${TMPDIR:-/tmp}/cts-ga-live-job.XXXXXX")"
-  for file in "${live_files[@]}"; do
-    if [[ -f "$CTS_G_ROOT/$file" ]]; then
-      mkdir -p "$preserve_dir/$(dirname "$file")"
-      cp -a "$CTS_G_ROOT/$file" "$preserve_dir/$file"
-    fi
-  done
-  # Live Test Historic / intern sidecar must not block ff-only merge.
-  git -C "$CTS_G_ROOT" checkout -- "${live_files[@]}" 2>/dev/null || true
-  if [[ -n "$(git -C "$CTS_G_ROOT" status --porcelain --untracked-files=no)" ]]; then
-    rm -rf "$preserve_dir"
-    die "tracked edits present; preserve and commit/review them first"
-  fi
-  [[ "$(git -C "$CTS_G_ROOT" branch --show-current)" == "$BRANCH" ]] || { rm -rf "$preserve_dir"; die "branch differs; no forced checkout"; }
-  git -C "$CTS_G_ROOT" fetch "$GIT_REMOTE" "$BRANCH"
-  git -C "$CTS_G_ROOT" merge --ff-only "$GIT_REMOTE/$BRANCH" || { rm -rf "$preserve_dir"; die "non-fast-forward update blocked"; }
-  for file in "${live_files[@]}"; do
-    if [[ -f "$preserve_dir/$file" ]]; then
-      mkdir -p "$CTS_G_ROOT/$(dirname "$file")"
-      cp -a "$preserve_dir/$file" "$CTS_G_ROOT/$file"
-    fi
-  done
-  rm -rf "$preserve_dir"
+  cd "$oldpwd"
+  ok "npm install"
 }
 
 redis_has_keys() {
   local slot="$1"
   have redis-cli || return 1
   local key sec
-  key="$(redis-cli HGET "${CTS_REDIS_PREFIX}connection:$slot" api_key 2>/dev/null || true)"
-  sec="$(redis-cli HGET "${CTS_REDIS_PREFIX}connection:$slot" api_secret 2>/dev/null || true)"
+  key="$(redis-cli HGET "connection:$slot" api_key 2>/dev/null || true)"
+  sec="$(redis-cli HGET "connection:$slot" api_secret 2>/dev/null || true)"
   [[ -n "$key" && -n "$sec" && "$key" != "(nil)" && "$sec" != "(nil)" ]]
 }
 
-ensure_prefixed_credentials() {
-  # Fill an empty prefixed connection hash from the unprefixed original so this
-  # sidecar can trade the shared BingX lanes. Never overwrite a dest that
-  # already has keys. Never print values. Originals are retained.
-  have redis-cli || return 0
-  [[ -n "${CTS_REDIS_PREFIX:-}" ]] || return 0
-  local slot src dst
-  for slot in "$LIVE_SLOT" "$VST_SLOT"; do
-    src="connection:$slot"
-    dst="${CTS_REDIS_PREFIX}connection:$slot"
-    [[ "$src" != "$dst" ]] || continue
-    redis-cli COPY "$src" "$dst" NX >/dev/null 2>&1 || \
-      redis-cli EVAL 'if redis.call("EXISTS", KEYS[2]) == 1 then return 0 end local d = redis.call("DUMP", KEYS[1]) if not d then return -1 end redis.call("RESTORE", KEYS[2], 0, d) return 1' 2 "$src" "$dst" >/dev/null 2>&1 || true
-  done
+disable_vst_autostart() {
+  if systemctl disable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1; then
+    ok "vst auto-start disabled"
+  else
+    fail "disable vst auto-start"
+    return 1
+  fi
 }
 
 enable_stack() {
-  [[ "${NO_START:-0}" != 1 ]] || { skip "enable (--no-start)"; return; }
-  ensure_prefixed_credentials
-  systemctl enable "$(pulse_http_unit)" "$(desk_unit)" "$(retention_timer_unit)" "$(resource_timer_unit)" >/dev/null
-  if redis_has_keys "$VST_SLOT"; then systemctl enable "$(pulse_instance_unit "$VST_SLOT")" >/dev/null; fi
-  if [[ "${START_LIVE:-1}" != 0 ]] && redis_has_keys "$LIVE_SLOT"; then
-    systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null
+  local enable_vst="${1:-1}"
+  systemctl enable grok-pulse.target grok-pulse-http.service grok-desk.service >/dev/null 2>&1 || true
+  if [[ "$enable_vst" == "1" ]]; then
+    systemctl enable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1 || true
+  else
+    disable_vst_autostart || return 1
   fi
-  ok "configured units enabled"
-}
-
-clear_live_halt_flags() {
-  local slot="${1:-$LIVE_SLOT}"
-  local dir
-  for dir in "$CTS_DATA_DIR" "$PULSE_DIR" "${LEGACY_PULSE_DIR:-}"; do
-    [[ -n "$dir" && -d "$dir" ]] || continue
-    rm -f "$dir/STOP-$slot" "$dir/PAUSE-$slot"
-  done
+  systemctl enable "grok-pulse@${LIVE_SLOT}.service" >/dev/null 2>&1 || true
+  ok "units enabled"
 }
 
 start_stack() {
-  local start_live="${1:-1}"
-  ensure_prefixed_credentials
-  systemctl restart "$(pulse_http_unit)"
-  systemctl restart "$(desk_unit)"
-  systemctl start "$(retention_timer_unit)"
-  systemctl start "$(resource_timer_unit)"
-  if redis_has_keys "$VST_SLOT"; then
-    systemctl restart "$(pulse_instance_unit "$VST_SLOT")"
+  local start_live="${1:-0}"
+  local start_vst="${2:-1}"
+  systemctl restart grok-pulse-http.service || fail "start grok-pulse-http"
+  systemctl restart grok-desk.service || fail "start grok-desk"
+  case "$start_vst" in
+    1) systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst" ;;
+    0)
+      # Stopping an engine does not flatten positions or cancel its venue orders.
+      warn "stopping $VST_SLOT also stops its active position manager; verify existing protection separately"
+      systemctl stop "grok-pulse@${VST_SLOT}.service" || { fail "stop vst"; return 1; }
+      ok "vst stopped (positions and orders unchanged)"
+      ;;
+    preserve)
+      if systemctl is-enabled --quiet "grok-pulse@${VST_SLOT}.service"; then
+        systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst"
+      else
+        skip "vst restart (auto-start disabled)"
+      fi
+      ;;
+    *) fail "invalid vst start mode"; return 1 ;;
+  esac
+  if [[ "$start_live" == "1" ]]; then
+    systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
+  elif redis_has_keys "$LIVE_SLOT"; then
+    log "Live keys present — starting $LIVE_SLOT"
+    systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
   else
-    skip "VST engine: no credentials in this instance"
+    skip "live engine (no Redis api_key/api_secret)"
   fi
-  if [[ "$start_live" == 1 ]]; then
-    if redis_has_keys "$LIVE_SLOT"; then
-      clear_live_halt_flags "$LIVE_SLOT"
-      rm -f "$CTS_DATA_DIR/STOP" "$PULSE_DIR/STOP"
-      systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null
-      systemctl restart "$(pulse_instance_unit "$LIVE_SLOT")"
-      ok "live engine enabled and started"
-    else
-      skip "live engine: no credentials in this instance"
-    fi
-  else
-    skip "live engine: --no-live (existing manager left running)"
-  fi
-}
-
-enforce_retention() {
-  if [[ -x "$CTS_G_ROOT/deploy/retention.sh" ]]; then
-    "$CTS_G_ROOT/deploy/retention.sh" --once >/dev/null 2>&1 || warn "retention pass failed"
-    ok "runtime retention (logs last 1000 lines; errors last 500 / 8 MiB per file)"
-  else
-    warn "retention helper missing at $CTS_G_ROOT/deploy/retention.sh"
-  fi
+  systemctl start grok-pulse.target >/dev/null 2>&1 || true
 }
 
 wait_http() {
@@ -713,12 +523,10 @@ print_results() {
   echo "desk bind   ${DESK_HOST}:${DESK_PORT}"
   echo
   echo "units"
-  printf '  %-36s %s\n' "$(pulse_http_unit)" "$(unit_state "$(pulse_http_unit)")"
-  printf '  %-36s %s\n' "$(desk_unit)" "$(unit_state "$(desk_unit)")"
-  printf '  %-36s %s\n' "$(pulse_instance_unit "$VST_SLOT")" "$(unit_state "$(pulse_instance_unit "$VST_SLOT")")"
-  printf '  %-36s %s\n' "$(pulse_instance_unit "$LIVE_SLOT")" "$(unit_state "$(pulse_instance_unit "$LIVE_SLOT")")"
-  printf '  %-36s %s\n' "$(retention_timer_unit)" "$(unit_state "$(retention_timer_unit)")"
-  printf '  %-36s %s\n' "$(resource_timer_unit)" "$(unit_state "$(resource_timer_unit)")"
+  printf '  %-36s %s\n' grok-pulse-http.service "$(unit_state grok-pulse-http.service)"
+  printf '  %-36s %s\n' grok-desk.service "$(unit_state grok-desk.service)"
+  printf '  %-36s %s\n' "grok-pulse@${VST_SLOT}.service" "$(unit_state grok-pulse@${VST_SLOT}.service)"
+  printf '  %-36s %s\n' "grok-pulse@${LIVE_SLOT}.service" "$(unit_state grok-pulse@${LIVE_SLOT}.service)"
   echo
   echo "packages installed  ${PKG_INSTALLED[*]:-(none)}"
   echo "packages skipped    ${PKG_SKIPPED[*]:-(none)}"
@@ -735,7 +543,6 @@ print_results() {
   echo "  Pulse VST         ${pulse}/stats.json?conn=vst"
   echo "  Pulse control     ${pulse}/control.json"
   echo "  Pulse config      ${pulse}/config.json?conn=live"
-  echo "  Pulse connection  ${pulse}/connection.json?conn=live"
   echo "  GitHub            https://github.com/mxssnx-creator/CTS-G"
   echo "  Commit            https://github.com/mxssnx-creator/CTS-G/commit/${sha}"
   echo
@@ -744,7 +551,7 @@ print_results() {
   else
     echo "Live keys           missing — set then restart:"
     echo "  redis-cli HSET connection:${LIVE_SLOT} api_key '…' api_secret '…'"
-    echo "  systemctl restart $(pulse_instance_unit "$LIVE_SLOT")"
+    echo "  systemctl restart grok-pulse@${LIVE_SLOT}"
   fi
   echo "=============================================="
 }

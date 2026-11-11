@@ -1,8 +1,4 @@
-import type { EvaluationWindow } from "./hist-calc";
-import type { SetOverview } from "./set-overview";
-import { requestPreferredJson } from "./request-json.ts";
-import { BASE_EVAL_DEFAULT } from "./stage-windows.ts";
-
+import type { SetIndexRow } from "./sets-view.ts";
 export type LiveOpen = {
   symbol: string;
   side: string;
@@ -21,56 +17,54 @@ export type LiveOpen = {
   secSlOid?: string;
   secTpOid?: string;
   controls?: boolean;
+  ctrlVerified?: boolean;
+  ctrlUndercovered?: boolean;
+  closePosition?: boolean;
+  ctrlQty?: number;
   overall?: boolean;
   security?: boolean;
-  controlMode?: "per-config" | "aggregate" | string;
-  controlGroupKey?: string;
-  controlGroupToken?: string;
-  controlRangeKey?: string;
-  controlRangeBp?: { sl?: number; tp?: number };
-  controlStatus?: "protected" | "missing" | string;
-  memberCount?: number;
-  lineageSetIds?: string[];
-  lineageParentSetIds?: string[];
-  lineageAxisKeys?: string[];
-  lineagePacks?: string[];
-  systemId?: string;
-  trackingScope?: string;
   connection?: string;
   connType?: string;
   unit?: string;
   slRatio?: number;
   trailKey?: string;
-  trail?: number | null;
-  trailPending?: number | null;
   slPct?: number;
   tpPct?: number;
-  aggregateSlPct?: number;
-  aggregateTpPct?: number;
   setId?: string;
-  executionLane?: string;
-  strategy?: string;
-  parentSetId?: string;
-  axisKey?: string;
-  relativeCount?: number;
-  volumeRatio?: number;
   pack?: string;
   clientId?: string;
   ours?: boolean;
   indKind?: string;
-  /** exchange position list has this symbol+side (null = not known yet); false = simulated lot */
-  onExchange?: boolean | null;
-  /** mark-to-market in USDT net of the round-trip cost */
-  uPnlUsdt?: number;
+};
+
+export type PfEvidence = {
+  pfFinite?: number | null;
+  pfState?: "finite" | "no-loss" | "empty" | "flat";
+  netGain?: number;
+  netLoss?: number;
+};
+
+export type CostModel = {
+  paperCostPct?: number;
+  slippageAllowancePct?: number;
+  executionSlippage?: string;
+  error?: string;
+  symbols?: Record<string, { makerRate: number | null; takerRate: number | null; source: string }>;
+};
+
+export type LanePfDetail = PfEvidence & {
+  n?: number;
+  count?: number;
+  avgR?: number;
+  ratio?: number;
+  pf?: number;
+  costPct?: number;
+  netPct?: number;
+  netSumPct?: number;
+  grossPct?: number;
 };
 
 export type LiveClosed = {
-  systemId?: string;
-  trackingScope?: string;
-  connection?: string;
-  connType?: string;
-  unit?: string;
-  clientId?: string;
   t: number;
   symbol: string;
   side: string;
@@ -79,331 +73,256 @@ export type LiveClosed = {
   exit: number;
   pnl: number;
   pnl_pct: number;
+  net_pnl_pct?: number | null;
+  fees_usdt?: number | null;
+  fee_source?: string;
   reason: string;
   hold_s: number;
   set_id?: string;
-  parent_set_id?: string;
-  axis_key?: string;
-  relative_count?: number;
-  volume_ratio?: number;
   pack?: string;
-  strategy?: string;
   sl_ratio?: number;
   trail_key?: string;
-  ind_kind?: string;
-  indKind?: string;
-};
-
-export type SideStat = {
-  n?: number;
-  pf?: number;
-  wr?: number;
-  maxDdS?: number;
-  netAvg?: number;
-  validated?: boolean;
-  ok?: boolean;
-  direction?: string;
-};
-
-export type KindStat = {
-  kind?: string;
-  n?: number;
-  pf?: number;
-  /** null when the replay gate supplied n/pf (it carries no win rate). */
-  wr?: number | null;
-  /** "replay" when every count/PF field came from the replay gate. */
-  source?: string;
-  maxDdS?: number;
-  avgDdS?: number;
-  ddEpisodes?: number;
-  netAvg?: number;
-  validated?: boolean;
-  profitable?: boolean;
-  ok?: boolean;
-  gateOpen?: boolean | null;
-  enabled?: boolean;
-  processed?: boolean;
-  evaluated?: number;
-  qualified?: number;
-  entered?: number;
-  exited?: number;
-  blocked?: number;
-  rejected?: number;
-  noSignal?: number;
-  hits?: number;
-  symbols?: number;
-  long?: number;
-  short?: number;
-  scanSymbols?: number;
-  scanLong?: number;
-  scanShort?: number;
-  avgConf?: number;
-  avgStrength?: number;
-  costSubtracted?: boolean;
-  bySide?: Record<string, SideStat>;
-  evaluationWindows?: Record<string, EvaluationWindow>;
-};
-
-export type StrategyStat = {
-  strategy?: string;
-  n?: number;
-  pf?: number;
-  wr?: number;
-  maxDdS?: number;
-  avgDdS?: number;
-  netAvg?: number;
-  validated?: boolean;
-  enabled?: boolean;
-  processed?: boolean;
-  evaluated?: number;
-  qualified?: number;
-  entered?: number;
-  exited?: number;
-  blocked?: number;
-  rejected?: number;
-  costSubtracted?: boolean;
-  bySide?: Record<string, SideStat>;
-  evaluationWindows?: Record<string, EvaluationWindow>;
-};
-
-export type ActivityEvent = {
-  event_id?: string;
-  event_type?: string;
-  ts?: number;
-  system_id?: string;
-  tracking_scope?: string;
-  track_prefix?: string;
+  /** Which lane closed it (bingx-x01 or bingx-x02). The overall snapshot sets it; a lane view filters on it. */
   connection?: string;
-  status?: string;
-  symbol?: string;
-  side?: string;
-  set_id?: string;
-  parent_set_id?: string;
-  axis_key?: string;
-  indication_kind?: string;
-  strategy?: string;
-  control_group_key?: string;
-  control_range_key?: string;
-  control_mode?: string;
-  member_count?: number;
-  order_id?: string;
-  client_id?: string;
-  code?: string;
-  qty?: number;
-  price?: number;
-  pnl?: number;
-  fee?: number;
-  detail?: string;
-  metadata?: Record<string, unknown>;
+  connType?: string;
+  unit?: string;
 };
 
-export type ActivityCounts = {
-  evaluated?: number;
-  qualified?: number;
-  selected?: number;
-  entered?: number;
-  exited?: number;
-  blocked?: number;
-  rejected?: number;
-  paused?: number;
-  long?: number;
-  short?: number;
-};
-
-export type ActivitySummary = {
-  eventCount?: number;
-  grossPnl?: number;
-  fees?: number;
-  duplicateCount?: number;
-  byType?: Record<string, number>;
-  byStatus?: Record<string, number>;
-  responseCodes?: Record<string, number>;
-  requestCount?: number;
-  responseCount?: number;
-  fillCount?: number;
-  openEventCount?: number;
-  closeEventCount?: number;
-  protectionEventCount?: number;
-  cancellationCount?: number;
-  errorCount?: number;
-  internalOpen?: number;
-  internalPositionGroups?: number;
-  exchangeOpen?: number;
-  internalClosed?: number;
-  parity?: "match" | "pending" | "discrepant" | string;
-  pendingCount?: number;
-  recoveredCount?: number;
-  discrepantCount?: number;
-  byIndication?: Record<string, ActivityCounts>;
-  byStrategy?: Record<string, ActivityCounts>;
-  byAxis?: Record<string, ActivityCounts>;
-  tail?: ActivityEvent[];
-  source?: string;
-};
-
-export type HtfKindStat = {
-  family: string;
-  exit: string;
-  volRegime: boolean;
-  n: number;
+/** Post-Base standard figures: the effective PF of the Sets that pass Base validation, the unfiltered PF of every
+ * Set (all configured Sets), and the share of Sets validated, in total and per strategy pack. */
+export type PfPool = PfEvidence & { pf: number; n: number; sets: number };
+/** One stage's figures over the Sets that pass it (`pfBase.stages`): `n` is the window orders behind the PF, `orders` all orders of the stage's Set. */
+export type StageFigure = PfEvidence & { sets: number; pct: number; pf: number; meanPf: number; n: number; orders: number };
+/**
+ * One last-N window on its own (`pfBase.windows`): the Sets of the stage's population that pass THIS window alone (`pop` of them are judged: all Sets for Base,
+ * the Base-passing Sets for Main, the Main-passing Sets for Real), their share of that population (`pct`) and of every configured Set (`pctAll`), the pooled PF of
+ * the orders this window reads (`pf`, `orders` behind it) and the mean of the Sets' own PFs. `n` is the configured window (a list for the Main short and
+ * Negative candidates), `chosen` (Main short) how many Sets run each candidate, `mode` (minimal windows) positive / negative / both.
+ */
+export type WindowFigure = PfEvidence & {
+  on: boolean;
+  n: number | number[] | null;
+  pop: number;
+  sets: number;
+  pct: number;
+  pctAll: number;
   pf: number | null;
-  source: string;
-  liveN: number;
-  livePf: number | null;
-  long: { ok: boolean; why: string };
-  short: { ok: boolean; why: string };
+  meanPf: number | null;
+  orders: number;
+  chosen?: Record<string, number>;
+  configuredSets?: Record<string, number>;
+  samples?: { population: number; full: number; insufficient: number; unavailable: number; disabled: number; pct: number | null; at: number | null; oldestAt: number | null; basis: string };
+  mode?: "positive" | "negative" | "both" | "avgpositive" | "avgnegative" | "avgboth";
+  role?: "coordination";
+};
+export type WindowKey = "baseLong" | "baseShort" | "baseMinimal" | "mainLong" | "mainShort" | "mainMinimal" | "negative" | "real" | "realNeg";
+export type PfBase = {
+  /** The end figure: the pool of the Sets that pass every gate (Base and Main). */
+  base: PfPool;
+  /** The pool of the Sets that pass the Base gate alone. */
+  baseOnly?: PfPool;
+  /** The same pools with one Set per identical tape: Sets whose exits never differ trade the same orders, so `base` counts those orders once per copy. */
+  baseDistinct?: PfPool;
+  baseOnlyDistinct?: PfPool;
+  /** How many Sets traded, how many distinct tapes they make (`copies` are the rest), the largest group of identical Sets and the validated distinct share. */
+  distinct?: { traded: number; tapes: number; copies: number; largestGroup: number; valid: number; validPct: number; baseOnly: number };
+  /** The same window orders, one result per entry (the best-ranked Set's): a pack's Sets share entries, the pool counts each once per Set. */
+  baseEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
+  baseOnlyEntry?: { pf: number; entries: number; orders: number; setsPerEntry: number };
+  /** Main PF-passing Sets over their Main long windows. */
+  main?: PfPool & { on: boolean; lastN: number | number[] };
+  /** Main windows of all final PF-validated Sets, including the separate Negative lane. */
+  mainAllLanes?: PfPool & { lastN: number | number[] };
+  /** The Main Sets of every Base-passing Set. */
+  processed?: PfPool & { orders: number; lastN: number | number[] };
+  /** Real stage: the Real Sets (orders opened while Base and Main passed) of the Sets valid on the positive lane, over the Real last N. */
+  real?: { pf: number; sets: number; n?: number; orders: number; lastN: number | number[]; on: boolean };
+  /** Real stage, Negative lane: the Real Negative Sets of the Sets valid on it. */
+  realneg?: { pf: number; sets: number; n?: number; orders: number; lastN: number | number[]; on: boolean };
+  stageSets?: { base: number; main: number; negative: number; real: number; realNeg: number };
+  /** Per stage, over the Sets that pass it (never over all Sets): how many, their share of every configured Set, the pooled PF and the mean of their own PFs. */
+  stages?: Record<"base" | "main" | "real" | "realNeg" | "valid", StageFigure> & { allSets: number };
+  /** Per last-N window (Base long / short / minimal, Main long / short / minimal, Negative, Real, Real Negative), each judged on its own. */
+  windows?: Record<WindowKey, WindowFigure>;
+  validatedBasePct?: number;
+  unfiltered: PfPool;
+  total?: number;
+  valid?: number;
+  eligible?: number;
+  eligiblePct?: number;
+  coordinationWaiting?: number;
+  validatedPct?: number;
+  byPack?: Record<string, { base: PfPool; baseOnly?: PfPool; unfiltered: PfPool; total: number; valid: number;
+    validatedPct: number; validatedBasePct?: number; minPf?: number }>;
+  /** "gate-window": pooled over each Set's last setGateWindow orders, never the whole tape. */
+  basis?: string;
+  /** Continuous progress of the effective PF and the validated share, one point per scoring pass (oldest first). */
+  history?: Array<{ t: number; pf: number; n: number; valid: number; validatedPct: number; unfiltered: number;
+    /** Per stage at that pass: the Sets passing it, their share of all Sets and the PF of their own window. */
+    stages?: Record<string, { sets: number; pct: number; pf: number | null }>;
+    /** Relation lanes built and passing at that pass; `by` = [passing, built] per relation. */
+    relations?: { lanes: number; passing: number; by?: Record<string, [number, number]> } }>;
 };
 
-export type HtfStats = {
-  enabled: boolean;
-  symbols?: number;
-  kinds?: Record<string, HtfKindStat>;
-  open?: { symbol: string; side: string; kind: string; exit: string; openedAt: number; holdS: number }[];
-  queued?: number;
-  error?: string;
+export type RelationLaneRow = {
+  id: string; relation: string; role: string; pack: string; side: string; value: string; sets: number;
+  entries: number; orders: number; mainN: number; mainPf: number; mainOk: boolean;
+  realEntries: number; realN: number; realPf: number; realOk: boolean; ok: boolean; ratio: number;
+};
+export type RelationSummary = {
+  role: string; on: boolean; ratio: number; lanes: number; mainOk: number; ok: number; entries: number; orders: number;
+  mainPf: number; mainObs: number; passPf: number; passObs: number;
+};
+export type RelationReport = {
+  config?: { enabled?: boolean; mainN?: number; realN?: number; minPf?: number; maxMult?: number; fullWindow?: boolean;
+    relations?: Record<string, { on?: boolean; ratio?: number; role?: string }> };
+  at?: number; ms?: number; lanes?: number; passing?: number;
+  byRelation?: Record<string, RelationSummary>;
+  rows?: RelationLaneRow[]; rowsOmitted?: number;
 };
 
-export type LiveEdgeSide = { state: string; n: number; need: number; pf: number | null };
+/** Per relation, in the fixed order, the figures of the relation lanes for the desk; empty when the lanes are off or not built yet. */
+export function relationFigures(report: RelationReport | undefined | null): Array<RelationSummary & { key: string }> {
+  const by = report?.byRelation;
+  if (!report?.config?.enabled || !by) return [];
+  return ["overall", "indication", "type", "range", "step"].filter((k) => by[k]).map((k) => ({ key: k, ...by[k] }));
+}
 
-export type SizingStats = {
-  orderSizing: "minQty" | "factor" | string;
-  leverageMode: "max" | "auto" | string;
-  pairs?: number;
-  pairsAtMax?: number;
-  pairsBelowMax?: string[];
-  block?: { specifiedRatio: number; effectiveRatio: number; extraCap: number; maxCounts: number };
+/** Sets and orders as executed, after every validation gate (Pulse.execution_snapshot). */
+export type OverallScope = {
+  allow?: boolean;
+  reasons?: string[];
+  orders?: number;
+  consecLoss?: number;
+  lastPf?: number;
+  prevPf?: number;
+  pf?: number;
+  n?: number;
+  realPf?: number;
+  realN?: number;
+  executed: {
+    orders: number;
+    wins: number;
+    pf: number | null;
+    basis?: string;
+    returnOrders?: number;
+    missingReturns?: number;
+    noLoss?: boolean;
+    cashOrders?: number;
+    missingCash?: number;
+    cashPf?: number | null;
+    cashNoLoss?: boolean;
+    feeSources?: Record<string, number>;
+  };
+};
+
+export type Execution = {
+  sets: {
+    configured: number;
+    valid: number;
+    waiting?: number;
+    pfValid?: number;
+    baseValid: number;
+    invalid: number;
+    reasons: Record<string, number>;
+    /** Sets at each stage now: passed Base, passed Main, in a Main dip, valid on Real, valid on Real Negative. */
+    stages?: { base: number; main: number; negative: number; real: number; realNeg: number };
+  };
+  /** Positions and closes per lane: Real (positive) and Real Negative. */
+  lanes?: { openPos: number; openNeg: number; closedPos: number; closedNeg: number; winsPos: number; lossesPos: number; winsNeg: number; lossesNeg: number };
+  /** The Real stage's overall strategies per scope ("overall", "lane:pos|neg", "pack:<pack>"), each judged on its own paper stream. */
+  overall?: { scopes: Record<string, OverallScope>; blocked: number };
+  open: { positions: number; setPositions: number; noSet: number; sets: number; underInvalidSet: number; setRetired: number; byPack: Record<string, { open: number; underInvalidSet: number }> };
+  closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number; blockAddFills?: number };
+  /** The settled Set parents once without and once with each stack type (server: pulse_trader.lift_report), returns on the original base notional. */
+  lift?: ExecutionLift;
+};
+export type LiftPair = { pf: number | null; netPct: number };
+export type ExecutionLift = {
+  parents: number; unknown: number;
+  block: { parentsWithAdds: number; adds: number; without: LiftPair; with: LiftPair; addParentsWithout: LiftPair; addParentsWith: LiftPair };
+  relation: { raised: number; volume: number; without: LiftPair; with: LiftPair; netPerVolumeWithoutPct: number | null; netPerVolumeWithPct: number | null;
+    raisedUnit: LiftPair; notRaisedUnit: LiftPair };
+  relationAsked?: number; relationRaised?: number; basis?: string;
+};
+export type LiftRow = { key: string; label: string; n: number; without: LiftPair; with: LiftPair; note: string };
+
+/** The with / without rows the desk shows: only stack types that acted on at least one settled parent. A PF of 99 is "no loss"; null = no result. */
+export function liftRows(lift: ExecutionLift | undefined | null): LiftRow[] {
+  if (!lift || !lift.parents) return [];
+  const rows: LiftRow[] = [];
+  if (lift.block.parentsWithAdds > 0) {
+    rows.push({ key: "block-all", label: "Block · every Set parent", n: lift.parents, without: lift.block.without, with: lift.block.with,
+      note: `${lift.block.adds} adds on ${lift.block.parentsWithAdds} parents` });
+    rows.push({ key: "block-add", label: "Block · the parents that got an add", n: lift.block.parentsWithAdds, without: lift.block.addParentsWithout, with: lift.block.addParentsWith,
+      note: "base position alone against base + adds" });
+  }
+  if (lift.relation.raised > 0) {
+    rows.push({ key: "relation-all", label: "Relation lanes · every Set parent", n: lift.parents, without: lift.relation.without, with: lift.relation.with,
+      note: `volume ${lift.relation.volume.toFixed(2)} on ${lift.parents} parents · net per volume ${lift.relation.netPerVolumeWithoutPct ?? "—"} % → ${lift.relation.netPerVolumeWithPct ?? "—"} %` });
+    rows.push({ key: "relation-raised", label: "Relation lanes · raised against not raised (volume 1)", n: lift.relation.raised, without: lift.relation.notRaisedUnit, with: lift.relation.raisedUnit,
+      note: "left: the parents that were not raised · right: the raised parents" });
+  }
+  return rows;
+}
+
+/** Session and machine figures for the desk footer (server: Pulse.system_info). */
+export type SystemInfo = {
+  pid?: number;
+  conn?: string;
+  base?: string;
+  startedAt?: number;
+  uptimeS?: number;
+  cpuPct?: number | null;
+  cpuCount?: number | null;
+  rssMb?: number;
+  machineMb?: number | null;
+  availMb?: number | null;
+  restPerS?: number | null;
+  wsPerS?: number | null;
+  restTotal?: number;
+  wsTotal?: number;
+  db?: string;
+  lastRun?: { previousStartedAt?: number | null; previousEnd?: number | null; clean?: boolean; reason?: string; openAtStart?: number };
+  restore?: Array<{ t: number; what: string; symbol: string; side: string; detail: string }>;
+  errors?: number;
+  lastError?: string;
+  recentErrors?: Array<{ t?: number; kind?: string; path?: string; code?: number | string; msg?: string; method?: string; wait?: number }>;
 };
 
 export type LiveStats = {
-  system?: import("./system-settings").SystemStatus;
-  htf?: HtfStats;
-  liveEdge?: { enabled: boolean; n: number; probeShare: number; oneMinuteLanes?: string; LONG?: LiveEdgeSide; SHORT?: LiveEdgeSide };
-  sizing?: SizingStats;
-  positionCost?: {
-    manualPct?: number;
-    effectivePct?: number;
-    useLive?: boolean;
-    source?: string;
-    samples?: number;
-    complete?: boolean;
-    updatedAt?: number;
-    fallback?: boolean;
-  };
-  forcedConfigs?: import("./hist-calc").ForcedConfigSummary;
-  histTest?: import("./hist-test").HistTestLive;
+  /** Compact Overall fallback: only explicitly attributed connection fields are available. */
+  compactFallback?: boolean;
+  costModel?: CostModel;
+  /** Sets and orders after every validation gate, as executed (open positions stay handled until closed). */
+  execution?: Execution;
   running: boolean;
-  svcActive?: boolean;
-  stale?: boolean;
-  statsAgeS?: number;
   mode: string;
-  systemId?: string;
-  trackingScope?: string;
-  trackPrefix?: string;
   connection: string;
   exchange: string;
-  startedAt: number;
+  startedAt?: number;
   now: number;
-  uptimeS: number;
+  uptimeS?: number;
   equity: number;
-  systemEquity?: number;
-  systemStartEquity?: number;
-  walletEquity?: number;
-  /** BingX wallet minus foreign positions: the real capital the system sizes from */
-  walletOwnEquity?: number;
-  /** drawdown right now (drawdownPct is the all-time maximum) */
-  currentDrawdownPct?: number;
-  /** wallet − foreign now minus the Start baseline: the real account result (fees and funding included) */
-  accountNetSinceStart?: number | null;
-  /** model systemPnl − accountNetSinceStart: what model costs and missing funding add up to */
-  modelVsAccountGap?: number | null;
-  /** (systemEquity − startEquity) / startEquity × 100, the session return on the account */
-  returnOnEquityPct?: number | null;
-  allTimeStartEquity?: number;
-  allTimeSystemEquity?: number;
-  /** epoch seconds of the last successful BingX balance read */
-  balanceAt?: number;
-  balanceAgeS?: number | null;
-  /** Overall: the unit its money fields are in (never a USDT + VST sum) */
-  moneyUnit?: "USDT" | "VST";
-  walletEquityLive?: number;
-  walletEquityVst?: number;
-  availableLive?: number;
-  availableVst?: number;
-  startEquity: number;
+  startEquity?: number;
   available: number;
-  usedMargin: number;
+  usedMargin: number | null;
   unrealized: number;
-  foreignUnrealized?: number;
-  foreignRealized?: number;
-  foreignExposure?: number;
-  foreignPositionCount?: number;
-  foreignOpenOrderCount?: number;
-  realizedPnl: number;
+  realizedPnl?: number;
   sessionPnl: number;
-  systemPnl?: number;
-  systemGrow?: number;
-  systemLoss?: number;
-  systemRealized?: number;
-  systemUnrealized?: number;
-  executionEvidence?: {
-    systemId?: string;
-    trackingScope?: string;
-    trackPrefix?: string;
-    connection?: string;
-    systemSource?: string;
-    systemClosed?: number;
-    systemPnl?: number;
-    systemRealized?: number;
-    systemUnrealized?: number;
-    internalOpen?: number;
-    internalPositionGroups?: number;
-    exchangeOpen?: number;
-    exchangeOwnOpen?: number;
-    exchangePositionGroups?: number;
-    entryCandidateCount?: number;
-    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
-    activeSetCap?: number;
-    activeSetUnlimited?: boolean;
-    foreignPositionCount?: number;
-    foreignOpenOrderCount?: number;
-    foreignUnrealized?: number;
-    foreignRealized?: number;
-    openParity?: "match" | "pending" | "discrepant" | string;
-    realStage?: Record<string, unknown>;
-    setCount?: number;
-    validatedSetCount?: number;
-    activeSetCount?: number;
-    progressPhase?: string;
-    progressPct?: number;
-    progressReady?: boolean;
-    snapshotAt?: number;
-  };
-  walletUnrealized?: number;
   pnlPct: number | null;
-  drawdownPct: number;
+  drawdownPct: number | null;
   wins: number;
   losses: number;
   winRate: number;
   openCount: number;
-  realPositionCount?: number;
-  realPositionGroupCount?: number;
-  realOrderCount?: number;
-  logicalPositionCount?: number;
-  exchangeOpenCount?: number;
-  livePositionCount?: number;
-  liveOrderCount?: number;
-  liveTotalOrderCount?: number;
-  exchangePositionGroupCount?: number;
-  simOpenCount?: number;
-  simUPnl?: number;
-  maxOpen: number;
-  logicalPositionCap?: number;
+  maxOpen: number | null;
   symbols: string[];
   symbolCount?: number;
-  symbolCap?: number;
   symbolMax?: number;
   scanMs?: number;
   rssMb?: number;
+  system?: SystemInfo;
   klinesReady?: number;
   regime?: string;
   coord?: {
@@ -421,11 +340,6 @@ export type LiveStats = {
     enabled?: boolean;
     types?: Record<string, boolean>;
     typeHits?: Record<string, number>;
-    kindStats?: Record<string, KindStat>;
-    samples?: Array<{
-      symbol: string;
-      kinds?: Record<string, { dir?: string; conf?: number; sl?: number; mode?: string }>;
-    }>;
     minSources?: number;
     minAgreement?: number;
     extraSources?: boolean;
@@ -454,21 +368,17 @@ export type LiveStats = {
   };
   halted: boolean;
   haltReason: string | null;
-  leverage: number;
+  leverage?: number;
   useMaxLeverage?: boolean;
   leverageMap?: Record<string, number>;
-  slPct: number;
-  tpPct: number;
-  targetNotional: number;
-  activityPerMin: number;
-  consecLoss: number;
+  slPct?: number;
+  tpPct?: number;
+  targetNotional?: number;
+  activityPerMin?: number;
+  consecLoss?: number;
   errors: number;
-  lastError: string;
-  cycle: number;
-  lastEvent?: string;
-  eventN?: number;
-  activity?: ActivitySummary;
-  events?: ActivityEvent[];
+  lastError?: string;
+  cycle?: number;
   progressPct?: number;
   progressPhase?: string;
   progressDetail?: string;
@@ -485,12 +395,10 @@ export type LiveStats = {
   progressLastRunMs?: number;
   progressCycle?: number;
   progressError?: string;
-  entryPolicy?: string;
   alive?: boolean;
-  tests?: Array<{name:string;pass:boolean;detail:string;connection?:string}>;
+  tests?: Array<{name:string;pass:boolean;detail:string}>;
   open: LiveOpen[];
   closed: LiveClosed[];
-  closedN?: number;
   signals: Array<Record<string, unknown>>;
   prices: Record<string, number | undefined>;
   block?: {
@@ -501,8 +409,6 @@ export type LiveStats = {
     pauseCountRatio: number;
     activeLive: boolean;
     activeReal: boolean;
-    overall?: boolean;
-    overallReal?: Array<{ symbol: string; side: string; pf: number; n: number }>;
     defaultMinPF: number;
     allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
     countN?: number;
@@ -512,8 +418,6 @@ export type LiveStats = {
       baseQty: number;
       confirmedAdd: number;
       aggregate: number;
-      realPf?: number;
-      realN?: number;
       counts: Array<{
         n: number;
         kind: string;
@@ -522,7 +426,6 @@ export type LiveStats = {
         requested: number;
         minPF: number;
         obsPF: number;
-        internPf?: number;
         pass: boolean;
         paused: boolean;
         satisfied: boolean;
@@ -540,7 +443,8 @@ export type LiveStats = {
     tpMode?: string;
     lastPick?: string;
     emits?: number;
-    last15Ratio?: number;
+    pf15?: number;
+    ratio?: number;
     last25AvgR?: number;
     last15N?: number;
     lanes?: Array<{
@@ -557,24 +461,10 @@ export type LiveStats = {
     strategies?: Record<string, boolean>;
     indicationTypes?: Record<string, boolean>;
     indicationHits?: Record<string, number>;
-    indicationGate?: Record<string, KindStat>;
-    stageFlow?: {
-      stages?: Record<string, { evaluated?: number; qualified?: number; blocked?: number; rejected?: number; selected?: number; entered?: number; exited?: number; parents?: number; sampleCount?: number; confidence?: number; insufficientSample?: number; volumeRatio?: number }>;
-      stageOrder?: string[];
-      parentRule?: string;
-      requiredSamples?: number;
-      costSubtracted?: boolean;
-    };
-    evaluations?: { requiredSamples?: number; positionCostPct?: number; pairedNormalAdjusted?: boolean; costSubtracted?: boolean };
     evals?: { n?: number; symbols?: number; typeHits?: Record<string, number> };
     coord?: {
       allow?: boolean;
       stages?: Record<string, { pf?: number; n?: number; open?: boolean }>;
-      variants?: Record<string, unknown>;
-      coordination?: Record<string, ActivityCounts>;
-      volumeRatioUnit?: number;
-      closedOnlyPrev?: boolean;
-      oneOpenOrderPerSet?: boolean;
       mainEval?: number;
       realEval?: number;
       axes?: Record<string, { enabled?: boolean; maxWindow?: number }>;
@@ -594,28 +484,12 @@ export type LiveStats = {
       allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
       liveLanes?: number;
       activeReal?: boolean;
-      overall?: boolean;
-      overallReal?: Array<{ symbol?: string; side?: string; pf?: number; n?: number }>;
     };
     sets?: {
       families?: { base?: number; trail?: number };
       setCount?: number;
-      internSetCount?: number;
-      catalogSetCount?: number;
-      internSymbolCount?: number;
       activeCount?: number;
-      validatedCount?: number;
-      processingCount?: number;
-      entryCandidateCount?: number;
-    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
-      entryCandidateCap?: number;
       histFills?: number;
-      liveFills?: number;
-      liveProcessed?: number;
-      liveActive?: number;
-      livePf?: number;
-      liveNetAvg?: number;
-      costSubtracted?: boolean;
       trailCover?: boolean;
       independentTrail?: boolean;
       slCover?: boolean;
@@ -626,48 +500,8 @@ export type LiveStats = {
       steps?: number[];
       dims?: { pack?: number; sl?: number; trail?: number; step?: number };
     };
-  controls?: {
-    open?: number;
-    ok?: number;
-    missing?: number;
-    security?: number;
-    mode?: string;
-    pairCount?: number;
-    expectedPairs?: number;
-    protectedPairs?: number;
-    pairGaps?: number;
-    aggregatePairCount?: number;
-    logicalPositionCap?: number;
-    logicalOpen?: number;
-    exchangePositionGroups?: number;
-    groupCount?: number;
-    protectedGroups?: number;
-      mergedMembers?: number;
-      groups?: Array<{
-        key?: string;
-        symbol?: string;
-        side?: string;
-        range?: string;
-  rangeBp?: { sl?: number; tp?: number };
-  slPct?: number;
-  tpPct?: number;
-  qty?: number;
-
-        exchangeQty?: number | null;
-        pendingQty?: number;
-        memberCount?: number;
-        protected?: boolean;
-        status?: string;
-        slOid?: string;
-        tpOid?: string;
-        secSlOid?: string;
-        secTpOid?: string;
-        lineageSetIds?: string[];
-      }>;
-    };
-    recon?: { ok?: boolean; pending?: boolean; detail?: string; logicalOpen?: number; exchangePositionGroups?: number };
-    activity?: ActivitySummary;
-    events?: ActivityEvent[];
+    controls?: { open?: number; ok?: number; missing?: number; security?: number; undercovered?: number };
+    recon?: { ok?: boolean; detail?: string };
     px?: number;
     symbols?: number;
     scan?: {
@@ -695,19 +529,12 @@ export type LiveStats = {
   connType?: string;
   paused?: boolean;
   volumeFactor?: number;
-  sizingMode?: "balance" | "fixed";
-  targetNotionalPct?: number;
-  sizingEquity?: number;
-  baseNotional?: number;
-  effectiveNotional?: number;
-  sizingSource?: "equity" | "fixed";
+  /** The three exchange slots the desk lists; none is connected yet. */
+  slots?: Array<{ type: string; label: string; ready: boolean }>;
   lanes?: Array<{
     type: string;
     id: string;
     label: string;
-    systemId?: string;
-    trackingScope?: string;
-    trackPrefix?: string;
     unit: string;
     exchange: string;
     mode?: string;
@@ -715,49 +542,13 @@ export type LiveStats = {
     halted: boolean;
     haltReason?: string;
     equity: number;
-    systemEquity?: number;
-    systemStartEquity?: number;
-    walletEquity?: number;
-    walletOwnEquity?: number;
-    accountNetSinceStart?: number | null;
-    modelVsAccountGap?: number | null;
-    returnOnEquityPct?: number | null;
-    balanceAgeS?: number | null;
-    stale?: boolean;
-    statsAgeS?: number;
     available: number;
-    usedMargin?: number;
     unrealized: number;
-    walletUnrealized?: number;
-    foreignUnrealized?: number;
-    foreignRealized?: number;
-    foreignExposure?: number;
-    foreignPositionCount?: number;
-    foreignOpenOrderCount?: number;
-    realizedPnl?: number;
-    systemRealized?: number;
-    systemUnrealized?: number;
-    drawdownPct?: number;
-    pnlPct?: number | null;
     openCount: number;
-    realPositionCount?: number;
-    realPositionGroupCount?: number;
-    realOrderCount?: number;
-    exchangeOpenCount?: number;
-    livePositionCount?: number;
-    liveOrderCount?: number;
-    liveTotalOrderCount?: number;
-    simOpenCount?: number;
-    simUPnl?: number;
-    maxOpen?: number;
-    symbolCap?: number;
     wins: number;
     losses: number;
     sessionPnl: number;
-    systemPnl?: number;
-    systemGrow?: number;
-    systemLoss?: number;
-    pf: number;
+    pf: number | null;
     scanMs?: number;
     rssMb?: number;
     errors: number;
@@ -782,36 +573,34 @@ export type LiveStats = {
     klinesReady?: number;
     hotMs?: number;
     pfCost?: number;
+    /** The lane's own PF block (null when the lane reports none). */
+    pfDetail?: LanePfDetail | null;
+    costModel?: CostModel | null;
+    pfUsdt?: number;
+    progressErrors?: number;
+    statsAgeS?: number;
+    svcActive?: boolean;
+    /** null when the lane does not report it: never a fake zero. */
+    usedMargin?: number | null;
+    pnlPct?: number | null;
+    drawdownPct?: number | null;
+    maxOpen?: number | null;
+    stale?: boolean;
     controlsOk?: number;
     controlsMissing?: number;
-  controlsSecurity?: number;
-  controlPairsOk?: number;
-  controlPairsExpected?: number;
-  controlPairsMissing?: number;
-  controlMemberOk?: number;
-  controlMemberMissing?: number;
-    entryPolicy?: string;
-    executionEvidence?: LiveStats["executionEvidence"];
+    controlsSecurity?: number;
     symbolCount?: number;
     lastError?: string;
+    trackPrefix?: string;
     cycle?: number;
   }>;
   equityLive?: number;
   equityVst?: number;
   sessionPnlLive?: number;
   sessionPnlVst?: number;
-  systemGrowLive?: number;
-  systemLossLive?: number;
-  systemGrowVst?: number;
-  systemLossVst?: number;
   detailConn?: string;
   detailType?: string;
   engine?: {
-    hotCpuMs?: number;
-    stagesMs?: Record<string, number>;
-    activeStage?: string;
-    activeStageMs?: number;
-    cycleWallOverrun?: boolean;
     hotMs?: number;
     warmMs?: number;
     asyncP50?: number;
@@ -861,28 +650,24 @@ export type LiveStats = {
     wsAgeMs?: number;
     rest?: number;
     ws?: number;
+    rateTrips?: number;
+    httpErr?: number;
   };
-  pfCost?: {
+  pfCost?: PfEvidence & {
     n?: number;
     count?: number;
     avgR?: number;
     ratio?: number;
-    classicPf?: number;
+    pf?: number;
     costPct?: number;
     netPct?: number;
+    netSumPct?: number;
     grossPct?: number;
     minPf?: number;
-    /** Sample floor before the cost PF can pass (engine eval_need). */
-    requiredSamples?: number;
     pass?: boolean;
     scale?: string;
     neutral?: number;
     plus1x?: number;
-    evaluationWindows?: Record<string, EvaluationWindow>;
-    maxDdS?: number;
-    avgDdS?: number;
-    ddEpisodes?: number;
-    currentS?: number;
   };
   profitFactor?: number;
   pf?: number;
@@ -903,66 +688,64 @@ export type LiveStats = {
     trailScores?: Array<{ key: string; n: number; ratio: number; pf: number; selected: boolean; inRange?: boolean }>;
   };
   sets?: {
+    normalEntriesEnabled?: boolean;
+    lastNMode?: string;
+    independentLastNLanes?: boolean;
+    stageContextBars?: number;
+    stageContextFullSymbols?: number;
+    stageContextShortSymbols?: number;
     enabled?: boolean;
     ready?: boolean;
-    entryPolicy?: string;
-    entryPolicyMaxCandidates?: number;
-    entryPolicyMinLiveSamples?: number;
     lookback?: number;
+    lookbackPending?: boolean;
     pfWindow?: number;
     deactN?: number;
     minPf?: number;
     maxDdS?: number;
-    autoDeact?: boolean;
     useHistoricGate?: boolean;
-    indGate?: Record<string, KindStat>;
     setCount?: number;
-    internSetCount?: number;
-    catalogSetCount?: number;
-    internSymbolCount?: number;
-    internSetIds?: string[];
-    internSetIdCount?: number;
-    processingSetIds?: string[];
+    /** Every configured Set in compact form, with the gate-window fields that pool the PF of any selection. */
+    index?: SetIndexRow[];
+    /** Minimum PF per TP step: the settings and, per step 0.2-3.5 %, the manual floor, what Auto learned (null: the manual value stands) and the figures behind it. */
+    stepPf?: {
+      on?: boolean;
+      auto?: boolean;
+      ratio?: number;
+      autoN?: number;
+      autoMin?: number;
+      steps?: Array<{ step: number; side?: number; source?: string; tpPct: number; manual: number; auto: number | null; used: number; orders: number; admitted: number; pfAll: number; pfAdmitted: number }>;
+    };
+    /** Relation lanes (SetBook.relation_report): the configuration, per relation the lanes built / passing with the pooled PF of ALL the observations their
+     * windows read, and the lanes themselves (passing first). One observation = one entry, the mean net of its member Sets' closed post-Base orders. */
+    relations?: RelationReport;
+    /** Pause after success: the mode and settings, and per indication (pack) the minutes the Auto Mode chose across symbols. */
+    pause?: {
+      mode?: string;
+      fixedMin?: number;
+      candidates?: number[];
+      autoMax?: number;
+      autoMin?: number;
+      packs?: Record<string, number>;
+      off?: string[];
+      chosen?: Record<string, { symbols: number; withPause: number; median: number; max: number }>;
+    };
+    /** The engine's expansion of `indicationConfigs`: names built per entry and the combinations it dropped (with the reason). */
+    indicationConfigs?: {
+      names?: number;
+      entries?: Array<{ label: string; names: number; stepMin: number; stepMax: number; ratios: number; types: string[]; steps: number }>;
+      dropped?: Array<{ entry: string; name: string; reason: string }>;
+    };
+    /** Pooled PF: `base` = Sets that pass Base validation (the effective PF), `unfiltered` = every Set before Base (under 1 is normal). */
+    pfBase?: PfBase;
+    counts?: { valid: number; waiting?: number; pfValid?: number; invalid: number; locked: number; error: number; configured: number; retired?: number;
+      reasons?: Record<string, number> };
     minStep?: number;
     minStepCfg?: number;
     stepMax?: number;
     stepAdapt?: boolean;
     steps?: number[];
     activeCount?: number;
-    validatedCount?: number;
-    overview?: SetOverview;
     histFills?: number;
-    processingCount?: number;
-    processingRows?: Array<{ id?: string; processingActive?: boolean; evaluating?: boolean; processingReason?: string }>;
-    liveFills?: number;
-    liveProcessed?: number;
-    liveActive?: number;
-    liveOverview?: {
-      processed?: number;
-      active?: number;
-      deactivated?: number;
-      fills?: number;
-      last15Ratio?: number;
-      last15N?: number;
-      evaluationWindows?: Record<string, EvaluationWindow>;
-      netAvg?: number;
-      wr?: number;
-      maxDdS?: number;
-      costSubtracted?: boolean;
-      source?: string;
-      rows?: Array<{
-        id?: string;
-        pack?: string;
-        n?: number;
-        last15Ratio?: number;
-        netAvg?: number;
-        maxDdS?: number;
-        wr?: number;
-        active?: boolean;
-        deactReason?: string;
-        costSubtracted?: boolean;
-      }>;
-    };
     barsSymbols?: number;
     lanes?: Array<{
       type?: string;
@@ -974,20 +757,11 @@ export type LiveStats = {
         detail?: string;
         ready?: boolean;
         cycle?: number;
-        symbolsDone?: number;
-        symbolsTotal?: number;
-        setsDone?: number;
-        setsTotal?: number;
       };
       activeCount?: number;
-      validatedCount?: number;
       setCount?: number;
-      internSetCount?: number;
-      catalogSetCount?: number;
-      internSymbolCount?: number;
       ready?: boolean;
       histFills?: number;
-      processingCount?: number;
       running?: boolean;
       halted?: boolean;
     }>;
@@ -1011,20 +785,7 @@ export type LiveStats = {
     };
     rows?: Array<{
       id: string;
-      kind?: string;
-      pack?: string;
-      parentSetId?: string;
-      stage?: string;
-      stageQualified?: string;
-      stageLedger?: Record<string, unknown>;
-      basePf?: number;
-      mainPf?: number;
-      realPf?: number;
-      axisKey?: string;
-      relativeCount?: number;
-      volumeRatio?: number;
-      indicationKind?: string;
-      strategyAdjustments?: Record<string, unknown>;
+      pack: string;
       tf: string;
       slRatio: number;
       trailKey: string;
@@ -1032,10 +793,11 @@ export type LiveStats = {
       tpPct?: number;
       n: number;
       liveN: number;
-      histN?: number;
       wins: number;
-      last15Ratio: number;
-      last15Classic: number;
+      pf: number;
+      gateN: number;
+      pf15: number;
+      ratio: number;
       last15N: number;
       last15R: number;
       last25AvgR: number;
@@ -1046,16 +808,8 @@ export type LiveStats = {
       ddEpisodes: number;
       wr?: number;
       expectancy?: number;
-      grossPf?: number;
-      netPf?: number;
-      grossEv?: number;
-      netEv?: number;
-      evaluation?: Record<string, unknown>;
-      evaluationWindows?: Record<string, EvaluationWindow>;
-      pairedEvaluation?: { normal?: Record<string, unknown>; adjusted?: Record<string, unknown>; deltas?: Record<string, unknown> };
-      adjustmentDeltas?: Record<string, unknown>;
       avgHoldS?: number;
-      classicPf?: number;
+      pfAll?: number;
       intern?: {
         pf15?: number;
         classic15?: number;
@@ -1072,39 +826,10 @@ export type LiveStats = {
       active: boolean;
       deactReason: string;
       locked: boolean;
-      source?: string;
-      live?: {
-        n?: number;
-        last15Ratio?: number;
-        last15N?: number;
-        evaluationWindows?: Record<string, EvaluationWindow>;
-        netAvg?: number;
-        wr?: number;
-        maxDdS?: number;
-        validated?: boolean;
-        costSubtracted?: boolean;
-        source?: string;
-      };
     }>;
   };
-  internBest?: Array<{
-    id?: string;
-    pack?: string;
-    last15Ratio?: number;
-    last25AvgR?: number;
-    maxDdS?: number;
-    n?: number;
-    liveN?: number;
-    netAvg?: number;
-    active?: boolean;
-    deactReason?: string;
-    source?: string;
-  }>;
   exits?: {
     enabled?: boolean;
-    /** Window behind each lane's last15Ratio (exitPfWindow). */
-    pfWindow?: number;
-    deactN?: number;
     ignoreTp?: boolean;
     bestOf?: boolean;
     lockOn?: boolean;
@@ -1118,7 +843,8 @@ export type LiveStats = {
       key: string;
       n: number;
       wins: number;
-      last15Ratio: number;
+      ratio: number;
+      last15Pf: number;
       last25AvgR: number;
       maxDdS: number;
       active: boolean;
@@ -1126,15 +852,10 @@ export type LiveStats = {
       selected?: boolean;
     }>;
   };
-  byIndication?: Record<string, KindStat>;
-  byStrategy?: Record<string, StrategyStat>;
-  pfStats?: Record<string, { pf?: number; n?: number; wr?: number; evalN?: number; validated?: boolean }>;
-  withWithout?: Record<string, { with?: { pf?: number; n?: number; wr?: number; validated?: boolean }; without?: { pf?: number; n?: number; wr?: number; validated?: boolean } }>;
-  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean }>;
-  successfulConfigs?: Array<{ indication?: string; config?: string; strategy?: string; setId?: string; pf?: number; n?: number; wr?: number; validated?: boolean }>;
-  combo?: { engine?: string; journal?: string; cells?: number; successfulCount?: number; validatedCount?: number };
   klinesTf?: Record<string, number>;
   cts?: Record<string, unknown>;
+  /** The engine stats file has not moved for more than 20 s: the engine is not running. */
+  stale?: boolean;
 };
 
 
@@ -1142,86 +863,33 @@ export function statsMatchesConn(s: LiveStats, conn: string): boolean {
   const got = String(s.connType || "").toLowerCase();
   const cid = String(s.connection || "").toLowerCase();
   const unit = String(s.unit || "").toLowerCase();
+  const bybit = cid.startsWith("bybit") || got.startsWith("bybit");
   if (conn === "live") {
-    if (got === "overall" || cid === "overall") return false;
+    if (got === "overall" || cid === "overall" || bybit) return false;
     if (got === "vst" || cid.includes("x02") || unit === "vst") return false;
     return got === "live" || cid.includes("x01") || unit === "usdt";
   }
   if (conn === "vst") {
-    if (got === "overall" || cid === "overall") return false;
+    if (got === "overall" || cid === "overall" || bybit) return false;
     if (got === "live" || cid.includes("x01") || unit === "usdt") return false;
     return got === "vst" || cid.includes("x02") || unit === "vst";
   }
   if (conn === "overall") return got === "overall" || cid === "overall";
+  // another venue's lane (Bybit): its own connection type, matched by the type or the connection id
+  if (conn.startsWith("bybit")) return got === conn || cid === (conn === "bybit" ? "bybit-x01" : "bybit-x02");
   return false;
 }
 
 export function pickView(stats: LiveStats | null, conn: string): LiveStats | null {
   if (!stats) return null;
-  if (statsMatchesConn(stats, conn)) return stats;
-  const sliced = viewFromSnapshot(stats, conn);
-  if (sliced) return sliced;
-  return null;
-}
-
-/** Cheap identity for poll skip — omits wall-clock `now` so a frozen snapshot does not re-render.
- * Engine cycle, errors, failing tests and ledger/validation counters are included so a flat desk still updates. */
-export function statsTickKey(s: LiveStats): string {
-  return [
-    Number(s.running),
-    Number(s.halted),
-    Number(s.paused),
-    s.haltReason || "",
-    s.openCount ?? "",
-    s.realPositionCount ?? "",
-    s.realOrderCount ?? "",
-    s.livePositionCount ?? "",
-    s.liveOrderCount ?? "",
-    s.wins ?? "",
-    s.losses ?? "",
-    s.equity ?? "",
-    s.unrealized ?? "",
-    s.sessionPnl ?? "",
-    s.systemPnl ?? "",
-    s.progressCycle ?? "",
-    s.progressPct ?? "",
-    s.closedN ?? s.closed?.length ?? "",
-    s.sets?.activeCount ?? "",
-    s.sets?.histFills ?? "",
-    s.block?.lanes?.length ?? "",
-    s.stale ? 1 : 0,
-    s.histTest?.enabled,
-    s.histTest?.internSetCount ?? "",
-    s.histTest?.validatedCount ?? "",
-    s.histTest?.phase || "",
-    s.errors ?? "",
-    s.lastError || "",
-    s.cycle ?? "",
-    (s.tests ?? []).filter((t) => !t.pass).map((t) => t.name).join(","),
-    s.activity?.eventCount ?? "",
-    s.activity?.errorCount ?? "",
-    s.sets?.validatedCount ?? "",
-  ].join("|");
-}
-
-export function statsUnchanged(prev: LiveStats | null | undefined, next: LiveStats | null | undefined): boolean {
-  if (!prev || !next) return false;
-  return statsTickKey(prev) === statsTickKey(next);
-}
-
-export function deskPollMs(
-  stats?: { halted?: boolean; running?: boolean; stale?: boolean; haltReason?: string | null } | null,
-  hidden = false,
-): number {
-  if (hidden) return 8000;
-  if (stats?.halted && (stats.stale || stats.haltReason === "sidecar-down")) return 12000;
-  if (stats?.running && !stats.halted) return 3500;
-  return 5000;
+  return statsMatchesConn(stats, conn) ? stats : null;
 }
 
 function cidPrefix(conn: string): string {
   if (conn === "live") return "Gx01";
   if (conn === "vst") return "Gx02";
+  if (conn === "bybit") return "Gb01";
+  if (conn === "bybit-demo") return "Gb02";
   return "";
 }
 
@@ -1233,93 +901,64 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   const lane = (s.lanes || []).find((l) => l.type === conn);
   if (!lane) return null;
   const prefix = cidPrefix(conn);
-  const unitWant = conn === "vst" ? "vst" : "usdt";
-  const belongsToLane = (p: {
-  clientId?: string;
-  unit?: string;
-  connection?: string;
-  connType?: string;
-  trackingScope?: string;
-  }) => {
-  const expectedScope = lane.trackingScope || (lane.systemId && lane.id ? `${lane.systemId}:${lane.id}` : "");
-  if (p.trackingScope) return Boolean(expectedScope && p.trackingScope === expectedScope);
-  if (p.connection) return p.connection === lane.id;
-  if (p.connType) return p.connType === conn;
-  if (p.unit) return p.unit.toLowerCase() === unitWant;
-  return Boolean(prefix && String(p.clientId || "").startsWith(prefix));
-  };
-
-  const open = (s.open || []).filter(belongsToLane);
-  const closed = (s.closed || []).filter(belongsToLane);
-  // A lane summary cannot supply aggregate sets, events, costs, or the other
-  // desk's financial fields. Only carry measurements attributable to this lane.
+  const open = (s.open || []).filter((p) => {
+    if (p.connection) return p.connection === lane.id;
+    if (p.connType) return p.connType === conn;
+    const cid = String(p.clientId || "");
+    return Boolean(prefix) && cid.startsWith(prefix);
+  });
   return {
+    // An allowlist prevents every future Overall-only field from silently
+    // acquiring this connection's label. Detailed stats use the direct endpoint.
+    compactFallback: true,
     now: s.now,
+    lanes: [lane],
+    signals: [],
+    prices: {},
     connType: conn,
     connection: lane.id || (conn === "live" ? "bingx-x01" : "bingx-x02"),
     unit: lane.unit || (conn === "vst" ? "VST" : "USDT"),
-  mode: lane.mode || (conn === "vst" ? "VST_DEMO" : "LIVE_MAINNET"),
-  exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
-  running: lane.running,
-  halted: lane.halted,
-  haltReason: lane.haltReason ?? null,
-  paused: lane.paused,
-  systemId: lane.systemId,
-  trackingScope: lane.trackingScope,
-  trackPrefix: lane.trackPrefix,
-  equity: lane.systemEquity ?? lane.equity,
-  systemEquity: lane.systemEquity ?? lane.equity,
-  systemStartEquity: lane.systemStartEquity,
-  walletEquity: lane.walletEquity,
-  walletOwnEquity: lane.walletOwnEquity,
-  accountNetSinceStart: lane.accountNetSinceStart,
-  modelVsAccountGap: lane.modelVsAccountGap,
-  returnOnEquityPct: lane.returnOnEquityPct,
-  balanceAgeS: lane.balanceAgeS,
-  stale: Boolean(lane.stale || s.stale),
-  statsAgeS: lane.statsAgeS,
-  startEquity: lane.systemStartEquity,
-  available: lane.available,
-  usedMargin: lane.usedMargin ?? 0,
-  walletUnrealized: lane.walletUnrealized,
-  unrealized: lane.systemUnrealized ?? lane.unrealized ?? 0,
-  foreignUnrealized: lane.foreignUnrealized,
-  foreignRealized: lane.foreignRealized,
-  foreignExposure: lane.foreignExposure,
-  foreignPositionCount: lane.foreignPositionCount,
-  foreignOpenOrderCount: lane.foreignOpenOrderCount,
-  realizedPnl: lane.realizedPnl ?? lane.systemRealized ?? 0,
-  systemPnl: lane.systemPnl ?? lane.sessionPnl,
-  systemGrow: lane.systemGrow,
-  systemLoss: lane.systemLoss,
-  systemRealized: lane.systemRealized,
-  systemUnrealized: lane.systemUnrealized,
-  pnlPct: lane.pnlPct ?? null,
-  drawdownPct: lane.drawdownPct ?? 0,
-  executionEvidence: lane.executionEvidence,
-  wins: lane.wins,
-
+    mode: lane.mode || (conn === "vst" ? "VST_DEMO" : "LIVE_MAINNET"),
+    exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
+    running: lane.running,
+    halted: lane.halted,
+    haltReason: lane.haltReason ?? null,
+    paused: lane.paused,
+    equity: lane.equity,
+    available: lane.available,
+    unrealized: lane.unrealized,
+    sessionPnl: lane.sessionPnl,
+    wins: lane.wins,
     losses: lane.losses,
-    errors: lane.errors,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
     openCount: lane.openCount,
-    realPositionCount: lane.realPositionCount,
-    realPositionGroupCount: lane.realPositionGroupCount,
-    realOrderCount: lane.realOrderCount,
-    exchangeOpenCount: lane.exchangeOpenCount,
-    livePositionCount: lane.livePositionCount,
-    liveOrderCount: lane.liveOrderCount,
-    liveTotalOrderCount: lane.liveTotalOrderCount,
-    simOpenCount: lane.simOpenCount,
-    simUPnl: lane.simUPnl,
-    maxOpen: lane.maxOpen ?? 0,
-    symbolCap: lane.symbolCap,
     open,
-    closed,
+    // everything the overall snapshot merges across lanes is taken from this lane only
+    // These blocks have no per-lane payload in this compact fallback. Missing is
+    // safer than relabeling pooled results as this account's independent evidence.
+    sets: undefined,
+    execution: undefined,
+    coord: undefined,
+    variants: undefined,
+    block: undefined,
+    exits: undefined,
+    dca: undefined,
+    closed: (s.closed ?? []).filter((c) => c.connection === lane.id),
+    symbols: Array.from(new Set(open.map((p) => String(p.symbol)))).sort(),
+    usedMargin: lane.usedMargin ?? null,
+    pnlPct: lane.pnlPct ?? null,
+    drawdownPct: lane.drawdownPct ?? null,
+    maxOpen: lane.maxOpen ?? null,
+    pfCost: lane.pfDetail ?? undefined,
+    costModel: lane.costModel ?? undefined,
+    profitFactor: lane.pf ?? undefined,
+    stale: Boolean(lane.stale),
     symbolCount: lane.symbolCount,
     scanMs: lane.scanMs,
+    rssMb: lane.rssMb,
+    errors: lane.errors,
     lastError: lane.lastError,
-    pf: lane.pf,
+    pf: lane.pf ?? undefined,
     progressPct: lane.progressPct,
     progressPhase: lane.progressPhase,
     progressDetail: lane.progressDetail,
@@ -1339,280 +978,33 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     klinesReady: lane.klinesReady,
     alive: lane.alive,
     cycle: lane.cycle,
-  } as LiveStats;
-}
-
-export async function fetchLiveStats(conn = "overall", signal?: AbortSignal): Promise<LiveStats | null> {
-  return requestPreferredJson(`/stats.json?conn=${encodeURIComponent(conn)}`, "/live-stats.json", (value, url) => {
-    const stats = value as LiveStats;
-    // A stopped desk is valid. Error objects and another desk's snapshot are not.
-    if (typeof stats.running !== "boolean") return null;
-    // The desk proxy answers /live-stats.json with a "sidecar-down" placeholder when it has no synced
-    // snapshot. That must never beat a healthy-but-slow /stats.json (it painted HALT over a running lane).
-    if (url.startsWith("/live-stats.json") && stats.haltReason === "sidecar-down") return null;
-    return viewFromSnapshot(stats, conn);
-  }, signal);
-}
-
-export function knownCount(value: number | null | undefined): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
-  return value;
-}
-
-/** Engine gate for an indication kind. `ok` is the profitability flag; the gate is `gateOpen`. */
-export function kindGateOpen(blob?: KindStat, gate?: KindStat): boolean | undefined {
-  const open = blob?.gateOpen ?? gate?.ok;
-  return typeof open === "boolean" ? open : undefined;
-}
-
-/** Last-N window behind the headline cost PF (configured pfWindow, not a fixed 15). */
-export function costPfWindow(stats: { pfCost?: { n?: number }; sets?: { pfWindow?: number } } | null | undefined): number {
-  return knownCount(stats?.pfCost?.n) || knownCount(stats?.sets?.pfWindow) || BASE_EVAL_DEFAULT;
-}
-
-/** Positions/Orders pair. Never falls order counts back onto position counts. */
-export function formatPosOrders(
-  positions?: number | null,
-  orders?: number | null,
-  positionFallback?: number | null,
-): string {
-  const p = knownCount(positions) ?? knownCount(positionFallback);
-  const o = knownCount(orders);
-  return `${p ?? "—"}/${o ?? "—"}`;
-}
-
-export function posOrdersCounts(stats: {
-  realPositionCount?: number;
-  realPositionGroupCount?: number;
-  realOrderCount?: number;
-  livePositionCount?: number;
-  liveOrderCount?: number;
-  exchangeOpenCount?: number;
-  openCount?: number;
-} | null | undefined): {
-  realPositions: number | null;
-  livePositions: number | null;
-  realOrders: number | null;
-  liveOrders: number | null;
-} {
-  const realPositions =
-    knownCount(stats?.realPositionGroupCount) ?? knownCount(stats?.realPositionCount);
-  const livePositions =
-    knownCount(stats?.livePositionCount) ?? knownCount(stats?.exchangeOpenCount);
-  const liveOrdersRaw = knownCount(stats?.liveOrderCount);
-  const realOrd = knownCount(stats?.realOrderCount);
-  const lanes = knownCount(stats?.openCount);
-  let realOrders = realOrd;
-  // Older engines copied lane/openCount onto realOrderCount. That is not orders.
-  if (realOrders != null && lanes != null && lanes > 0 && realOrders === lanes) realOrders = liveOrdersRaw;
-  // Live is the venue subset of the working book. Leftover or stale venue
-  // rows must not display as more orders than Real.
-  let liveOrders = liveOrdersRaw;
-  if (liveOrders != null && realOrders != null && liveOrders > realOrders) liveOrders = realOrders;
-  return { realPositions, livePositions, realOrders, liveOrders };
-}
-
-export type EffectiveSetCounts = {
-  on: boolean;
-  running: boolean;
-  catalog: number | null;
-  intern: number | null;
-  validated: number | null;
-  active: number | null;
-  processing: number | null;
-  setCount: number | null;
-  symbols: number | null;
-  coordinations: number | null;
-  catalogBusy: boolean;
-  symbolsDone: number | null;
-  symbolsTotal: number | null;
-};
-
-const HIST_RUN_PHASES = new Set(["queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh", "paused"]);
-const CALC_BUSY_PHASES = new Set([
-  "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
-  "gap", "incremental", "queued", "partial", "catalog", "rank", "evaluate", "hist-test",
-]);
-
-export function effectiveSetCounts(stats: {
-  histTest?: {
-    enabled?: boolean;
-    ownsCatalog?: boolean;
-    phase?: string;
-    running?: boolean;
-    paused?: boolean;
-    internSetCount?: number;
-    validatedCount?: number;
-    processingCount?: number;
-    setsDone?: number;
-    setsTotal?: number;
-    internSymbols?: string[];
-    symbols?: string[];
-    selectedCoordinations?: unknown[];
-  } | null;
-  sets?: {
-    setCount?: number;
-    catalogSetCount?: number;
-    internSetCount?: number;
-    validatedCount?: number;
-    activeCount?: number;
-    processingCount?: number;
-    internSymbolCount?: number;
-    progress?: { phase?: string; ready?: boolean; setsDone?: number; setsTotal?: number; symbolsDone?: number; symbolsTotal?: number };
-  } | null;
-  coverage?: { sets?: { setCount?: number; validatedCount?: number; activeCount?: number; internSetCount?: number; catalogSetCount?: number; internSymbolCount?: number; processingCount?: number } };
-  progress?: { phase?: string; ready?: boolean; setsDone?: number; setsTotal?: number; symbolsDone?: number; symbolsTotal?: number };
-} | null | undefined): EffectiveSetCounts {
-  const ht = stats?.histTest;
-  const on = Boolean(
-    ht &&
-      ht.enabled !== false &&
-      ht.ownsCatalog !== false &&
-      ht.phase !== "off" &&
-      (ht.enabled === true || ht.ownsCatalog === true),
-  );
-  const running = Boolean(ht && (ht.running || ht.paused || HIST_RUN_PHASES.has(String(ht.phase || ""))));
-  const sets = stats?.sets;
-  const cov = stats?.coverage?.sets;
-  const catalog =
-    knownCount(sets?.catalogSetCount) ?? knownCount(sets?.setCount) ?? knownCount(cov?.catalogSetCount) ?? knownCount(cov?.setCount);
-  let intern =
-    knownCount(sets?.internSetCount) ??
-    knownCount(cov?.internSetCount) ??
-    null;
-  if (on && !(intern && intern > 0)) {
-    intern = knownCount(ht?.internSetCount) ?? intern;
-    if (!(intern && intern > 0)) intern = knownCount(ht?.validatedCount) ?? intern;
-  }
-  const histIntern = knownCount(ht?.internSetCount);
-  if (on && histIntern != null && histIntern > 1 && (intern == null || intern <= 1)) intern = histIntern;
-  const proven = knownCount(ht?.validatedCount);
-  const internReported = knownCount(ht?.internSetCount);
-  let validated = knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount) ?? null;
-  if (proven != null && internReported != null && proven > 0 && proven < internReported && (validated == null || proven > validated)) {
-    validated = proven;
-  } else if (validated == null && on) {
-    validated = proven;
-  }
-  const jobTotal = knownCount(ht?.setsTotal);
-  const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
-  let processing = knownCount(sets?.processingCount) ?? knownCount(ht?.processingCount);
-  const progress = stats?.progress ?? stats?.sets?.progress;
-  const phase = String(progress?.phase || "");
-  const busy = CALC_BUSY_PHASES.has(phase) || running;
-  if (busy) {
-    const remainSourceDone = running ? knownCount(ht?.setsDone) ?? knownCount(progress?.setsDone) : knownCount(progress?.setsDone);
-    const remainSourceTotal = running ? jobTotal ?? knownCount(progress?.setsTotal) : knownCount(progress?.setsTotal);
-    const remain = remainSourceTotal != null && remainSourceDone != null && remainSourceTotal > remainSourceDone
-      ? remainSourceTotal - remainSourceDone
-      : null;
-    const candidates = [processing, running ? knownCount(ht?.processingCount) : null, remain].filter((n): n is number => n != null);
-    processing = candidates.length ? Math.max(...candidates) : processing;
-    if ((processing == null || processing === 0) && progress && progress.ready !== true && phase && phase !== "ready") {
-      processing = 1;
-    }
-  } else if (on && intern != null && processing != null && processing > intern) {
-    processing = intern;
-  }
-  const internSymbols = Array.isArray(ht?.internSymbols) && ht.internSymbols.length
-    ? ht.internSymbols
-    : (Array.isArray(ht?.symbols) ? ht.symbols : null);
-  const symbols =
-    knownCount(sets?.internSymbolCount) ??
-    (internSymbols ? internSymbols.length : null);
-  const coordinations = Array.isArray(ht?.selectedCoordinations) ? ht.selectedCoordinations.length : null;
-  const progPhase = phase;
-  const progTotal = knownCount(progress?.setsTotal);
-  const symbolsDone = knownCount(progress?.symbolsDone);
-  const symbolsTotal = knownCount(progress?.symbolsTotal);
-  const jobForCatalog = knownCount(ht?.setsTotal);
-  const catalogBusy = Boolean(
-    on &&
-      CALC_BUSY_PHASES.has(progPhase) &&
-      progTotal != null &&
-      (jobForCatalog == null || progTotal > jobForCatalog),
-  );
-  const headline = catalogBusy
-    ? catalog
-    : on
-      ? (running && jobTotal != null && (intern == null || jobTotal > intern) ? jobTotal : intern ?? catalog)
-      : catalog;
-  return {
-    on, running, catalog, intern, validated, active, processing,
-    setCount: headline, symbols, coordinations, catalogBusy, symbolsDone, symbolsTotal,
   };
 }
 
-export function formatEffectiveSets(stats: Parameters<typeof effectiveSetCounts>[0]): string {
-  const c = effectiveSetCounts(stats);
-  if (c.on && c.catalogBusy) {
-    const parts = [`catalog ${c.setCount ?? c.catalog ?? 0}`];
-    if (c.symbolsTotal) parts.push(`symbols ${c.symbolsDone ?? 0}/${c.symbolsTotal}`);
-    parts.push(`validated ${c.validated ?? 0}`);
-    if (c.intern) parts.push(`intern ${c.intern}`);
-    if (c.active != null) parts.push(`active ${c.active}`);
-    return parts.join(" · ");
+async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { cache: "no-store", signal: ac.signal });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && typeof j === "object" ? j : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
-  if (c.on && c.running) {
-    const parts = [`processing ${c.processing ?? 0}`, `validated ${c.validated ?? 0}`];
-    if (c.setCount) parts.push(`sets ${c.setCount}`);
-    if (c.active != null) parts.push(`active ${c.active}`);
-    return parts.join(" · ");
+}
+
+export async function fetchLiveStats(conn = "overall"): Promise<LiveStats | null> {
+  const snapP = fetchJson("/live-stats.json", 4000);
+  const live = (await fetchJson(`/stats.json?conn=${encodeURIComponent(conn)}`, 1600)) as LiveStats | null;
+  if (live && statsMatchesConn(live, conn)) return live;
+  if (live) {
+    const fromLive = viewFromSnapshot(live, conn);
+    if (fromLive) return fromLive;
   }
-  if (c.on) {
-    const parts = [`intern ${c.intern ?? 0} · validated ${c.validated ?? 0}`];
-    if (c.processing != null) parts.push(`processing ${c.processing}`);
-    if (c.active != null) parts.push(`active ${c.active}`);
-    if (c.symbols) parts.push(`${c.symbols} symbols`);
-    if (c.coordinations) parts.push(`${c.coordinations} coord`);
-    if (c.catalog != null && c.intern != null && c.catalog > c.intern) parts.push(`catalog ${c.catalog} skipped`);
-    return parts.join(" · ");
-  }
-  const parts = [`valid ${c.validated ?? 0}/${c.setCount ?? 0}`, `active ${c.active ?? 0}/${c.setCount ?? 0}`];
-  if (c.processing) parts.push(`processing ${c.processing}`);
-  return parts.join(" · ");
-}
-
-export function realPosOrders(stats: {
-  realPositionCount?: number;
-  realPositionGroupCount?: number;
-  realOrderCount?: number;
-  liveOrderCount?: number;
-  openCount?: number;
-} | null | undefined): string {
-  const { realPositions, realOrders } = posOrdersCounts(stats);
-  return formatPosOrders(realPositions, realOrders);
-}
-
-export function livePosOrders(stats: {
-  livePositionCount?: number;
-  liveOrderCount?: number;
-  exchangeOpenCount?: number;
-} | null | undefined): string {
-  const { livePositions, liveOrders } = posOrdersCounts(stats);
-  return formatPosOrders(livePositions, liveOrders);
-}
-
-/** Seconds after which a balance read counts as stale (3 × the engine's 6 s balance cadence). */
-export const BALANCE_STALE_S = 18;
-
-/** The unit a stats view's money is in: Overall reports its moneyUnit, a lane its own unit. */
-export function moneyUnitOf(stats: Pick<LiveStats, "moneyUnit" | "unit" | "connType"> | null | undefined): "USDT" | "VST" {
-  if (stats?.moneyUnit) return stats.moneyUnit;
-  return stats?.unit === "VST" || stats?.connType === "vst" ? "VST" : "USDT";
-}
-
-/** A money amount in its unit: "$1.234" for USDT, "1.234 VST" for demo funds. */
-export function fmtMoney(v: number | null | undefined, unit: "USDT" | "VST", digits = 3): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  const s = v.toFixed(digits);
-  return unit === "VST" ? `${s} VST` : v < 0 ? `-$${s.slice(1)}` : `$${s}`;
-}
-
-/** Why the balance on screen may not be current (null = fresh). */
-export function balanceStaleReason(stats: Pick<LiveStats, "stale" | "statsAgeS" | "balanceAgeS"> | null | undefined): string | null {
-  if (!stats) return null;
-  if (stats.stale) return `stats file ${stats.statsAgeS != null ? `${Math.round(stats.statsAgeS)} s old` : "stale"}`;
-  if (stats.balanceAgeS != null && stats.balanceAgeS > BALANCE_STALE_S) return `balance read ${Math.round(stats.balanceAgeS)} s ago`;
-  return null;
+  const snap = (await snapP) as LiveStats | null;
+  if (!snap) return null;
+  return viewFromSnapshot(snap, conn);
 }

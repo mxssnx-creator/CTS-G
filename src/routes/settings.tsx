@@ -1,103 +1,84 @@
+import { stepPfRows } from "../lib/step-pf-view.ts";
+import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
+import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
+import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
+import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
+import { SetsOverview } from "@/components/sets-overview";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AXIS_SPECS,
+  MIN_PF_FLOOR,
+  MICRO_RANGE_PF_DEFAULT,
+  BLOCK_COUNTS_MAX,
+  BLOCK_RATIO_MAX,
+  BLOCK_RATIO_MIN,
+  BLOCK_RELATIONS,
   blockTable,
   bool,
   DEFAULT_OVERLAY,
-  HTF_KINDS,
-  DEFAULT_SYMBOL_COUNT,
-  MAIN_EVAL_DEFAULT,
-  REAL_EVAL_DEFAULT,
+  defaultOverlay,
   fetchCtsBundle,
   loadLocalOverlay,
   num,
-  normalizePf,
-  PF_MAX,
-  PF_MIN,
-  PF_STEP,
-  POSITIVE_PF,
-  overlayEdits,
   overlayFromCts,
+  PF_TYPE_DEFAULTS,
   saveOverlay,
-  SCRATCH_S_MAX,
-  slTpGrid,
-  trailGrid,
+  snapSlToTp,
+  SL_SET_RATIOS,
+  SL_TP_RATIOS,
+  TRAIL_VARIANTS,
   trailGiveFromArm,
-  syncOverlayFlags,
-  clampHistTestHours,
-  clampHistTestRefreshHours,
-  histTestLookbackBars,
-  HIST_TEST_HOURS_DEFAULT,
-  HIST_TEST_HOURS_MAX,
-  HIST_TEST_HOURS_MIN,
-  HIST_TEST_HOURS_STEP,
-  HIST_TEST_REFRESH_DEFAULT,
-  HIST_TEST_REFRESH_MAX,
-  HIST_TEST_REFRESH_MIN,
-  isUnlimitedSymbolBook,
-  DEFAULT_MIN_STEP,
-  SL_MIN_PCT,
-  effectiveNotional,
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, formatEffectiveSets, type LiveStats } from "@/lib/live-stats";
-import { startPolling } from "@/lib/polling";
+import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
 import { formatDuration } from "@/lib/analytics";
+import { createSaveGate } from "@/lib/poll";
 import { DeskShell } from "@/components/desk-shell";
-import { PosOrdersLine } from "@/components/pos-orders";
-import { HistTestControls, HistTestStatus } from "@/components/hist-test-controls";
-import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
-import { fetchConnection, saveConnection, type ConnectionCreds } from "@/lib/connections";
-import { CONFIG_PRESETS, applyPresetPatch } from "@/lib/config-presets";
+import { CostEvidencePanel } from "@/components/evidence-panel";
+import { secureMinimalPreset } from "@/lib/presets";
 import {
-  applyUserPreset,
-  deleteUserPreset,
-  deleteAllExceptDefaultUserPresets,
-  fetchUserPresets,
-  loadUserPreset,
-  renameUserPreset,
-  saveDefaultUserPreset,
-  saveUserPreset,
-  suggestPresetName,
-  overlayOverview,
-  type UserPreset,
-} from "@/lib/user-presets";
-import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions, type IndTypeFlags } from "@/lib/hist-calc";
-import { INDICATION_KINDS, indTypeKey, kindLabel } from "@/lib/indication-kinds";
-import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, histTestAssignment, applyHistTestSymbols, histTestSelectionMatches, type HistTestAssignment, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
-import { HistoricCalcResults } from "@/components/historic-calc-results";
-import { ForcedConfigsPanel } from "@/components/forced-configs";
-import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setMetric, setRowKey } from "@/lib/set-overview";
-import { SetIdentity } from "@/components/set-identity";
-import { SystemSettingsPanel } from "@/components/system-settings";
-import { SystemHealthFooter } from "@/components/system-health";
-import { pnlClass, pfClass, activeClass, haltClass, isBenignError } from "@/lib/status-tone";
+  DEFAULT_INDICATION_CONFIG,
+  GATE_MIN_PF_DEFAULT,
+  INDICATION_TIMEFRAMES,
+  indicationConfigList,
+  MAX_SYMBOLS,
+  minMode,
+  PAUSE_MAX,
+  PAUSE_MODES,
+  SET_TYPES,
+  STEP_PF_RATIO_DEFAULT,
+  STEP_PF_RATIO_MAX,
+  STEP_PF_RATIO_MIN,
+  STEP_PF_RATIO_STEP,
+  manualStepPf,
+  stepPfRatio,
+  TP_RANGES,
+  LAST_N_FIELDS,
+  lastNByRangeOf,
+  BLOCK_KINDS,
+  blockKindsOf,
+  TP_STEP_MAX,
+  TP_STEP_DEFAULT_MAX,
+  TP_STEP_MIN,
+  TP_UNIT_PCT,
+  TRAIL_SL_RATIOS,
+  TRAIL_STEP_CEIL,
+  TRAIL_STEP_MAX_DEFAULT,
+  tpPctOfStep,
+  type IndicationConfig,
+  type TrailPick,
+  type PauseMode,
+} from "@/lib/config-model";
+import { controlCoverage, hasControlCoverage } from "@/lib/control-coverage";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
-const MAJOR_USDT = new Set([
-  "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
-  "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
-  "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
-  "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
-  "ETC-USDT", "LDO-USDT", "HBAR-USDT", "TIA-USDT", "WLD-USDT", "JUP-USDT",
-  "RENDER-USDT", "FET-USDT", "TAO-USDT", "SEI-USDT", "WIF-USDT", "1000PEPE-USDT",
-  "STX-USDT", "IMX-USDT", "GRT-USDT", "ALGO-USDT", "VET-USDT", "EOS-USDT",
-  "THETA-USDT", "AXS-USDT", "SAND-USDT", "MANA-USDT", "CRV-USDT", "MKR-USDT",
-  "SNX-USDT", "COMP-USDT",
-]);
-
 const SECTIONS = [
   "overview",
-  "historic",
-  "system",
-  "presets",
   "connection",
   "profit",
   "risk",
@@ -107,7 +88,6 @@ const SECTIONS = [
   "sets",
   "exits",
   "stages",
-  "engine",
   "block",
   "dca",
   "axes",
@@ -117,32 +97,6 @@ const SECTIONS = [
   "pulse",
   "symbols",
 ] as const;
-
-const CALC_RANGE_PRESETS = [
-  { label: "2h", hours: 2 },
-  { label: "7h", hours: 7 },
-  { label: "24h", hours: 24 },
-  { label: "2d", hours: 48 },
-  { label: "72h", hours: 72 },
-  { label: "7d", hours: 168 },
-  { label: "14d", hours: 336 },
-] as const;
-
-function calcOptionsFromOverlay(overlay: PulseOverlay, prev: HistCalcOptions): HistCalcOptions {
-  const minStep = Math.max(1, Math.min(30, Math.round(Number(overlay.setMinStep ?? overlay.minStep ?? prev.minStep) || prev.minStep)));
-  const stepMax = Math.max(minStep, Math.min(30, Math.round(Number(overlay.setStepMax ?? prev.stepMax) || prev.stepMax)));
-  return {
-    ...prev,
-    minStep,
-    stepMax,
-    stratBlock: overlay.blockEnabled !== false,
-    stratDca: Boolean(overlay.dcaEnabled || overlay.stratDca),
-    trailing: overlay.stratTrailing !== false,
-    preferMinimalRange: Boolean(overlay.preferMinimalRange),
-    additionalCoordination: overlay.additionalCoordination !== false,
-    coordOptimizationN: Math.max(50, Math.min(200, Math.round(Number(overlay.coordOptimizationN) || prev.coordOptimizationN))),
-  };
-}
 
 function SettingsPage() {
   const { conn } = useConnection();
@@ -154,479 +108,69 @@ function SettingsPage() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [ready, setReady] = useState(false);
-  const [creds, setCreds] = useState<ConnectionCreds | null>(null);
-  const [apiKey, setApiKey] = useState("");
-  const [apiSecret, setApiSecret] = useState("");
-  const [connType, setConnType] = useState<"mainnet" | "vst">("mainnet");
-  const [connMethod, setConnMethod] = useState("library");
-  const [asDefaultMainnet, setAsDefaultMainnet] = useState(true);
-  const [credMsg, setCredMsg] = useState<string | null>(null);
-  const [credSaving, setCredSaving] = useState(false);
-  const [calcOpt, setCalcOpt] = useState<HistCalcOptions>(DEFAULT_CALC_OPTIONS);
-  const [calcJob, setCalcJob] = useState<HistCalcJob | null>(null);
-  const [calcBusy, setCalcBusy] = useState(false);
-  const [histTestJob, setHistTestJob] = useState<HistTestJob | null>(null);
-  const [presetId, setPresetId] = useState<string | null>(null);
-  const [resetAsk, setResetAsk] = useState(false);
-  const [userPresets, setUserPresets] = useState<UserPreset[]>([]);
-  const [userName, setUserName] = useState("Preset-1");
-  const [userSel, setUserSel] = useState<string | null>(null);
-  const [userBusy, setUserBusy] = useState(false);
-  const [renameId, setRenameId] = useState<string | null>(null);
-  const [renameVal, setRenameVal] = useState("");
-  const [deleteId, setDeleteId] = useState<string | null>(null);
-  const [cleanupAsk, setCleanupAsk] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
-  const calcJobRef = useRef<HistCalcJob | null>(null);
-  const calcPollRef = useRef<{ refresh: () => void; stop: () => void } | null>(null);
-  const histTestJobRef = useRef<HistTestJob | null>(null);
-  const histTestSeqRef = useRef(0);
-  const rawRef = useRef<LiveStats | null>(null);
-  // The overlay the form was last loaded from and the keys set since then;
-  // an Overall save applies only these edits to the target lane.
-  const baselineRef = useRef<PulseOverlay>(DEFAULT_OVERLAY);
-  const touchedRef = useRef<Set<string>>(new Set());
-  // Test Historic auto-assign: the last validated result already assigned, and
-  // whether the assignment may save itself (only when it starts from a clean form).
-  const credsDirtyRef = useRef(false);
-  const autoAssignSigRef = useRef("");
-  const autoSavePendingRef = useRef(false);
-  const calcSyncedRef = useRef(false);
-
-  useEffect(() => {
-    setCts(null);
-    setRaw(null);
-    rawRef.current = null;
-    setCalcJob(null);
-    setCalcBusy(false);
-    setHistTestJob(null);
-    setDirty(false);
-    dirtyRef.current = false;
-    autoAssignSigRef.current = "";
-    autoSavePendingRef.current = false;
-    calcSyncedRef.current = false;
-    setSaveMsg(null);
-    setReady(false);
-    setCreds(null);
-    setApiKey("");
-    setApiSecret("");
-    setCredMsg(null);
-    credsDirtyRef.current = false;
-    setConnType(conn === "vst" ? "vst" : "mainnet");
-    setAsDefaultMainnet(conn !== "vst");
-    setResetAsk(false);
-    setCleanupAsk(false);
-    const local = loadLocalOverlay(conn);
-    baselineRef.current = overlayFromCts({}, local || {});
-    touchedRef.current = new Set();
-    setOverlay(baselineRef.current);
-    const delay = () => deskPollMs(rawRef.current, document.hidden);
-    const statsPoll = startPolling(async (signal) => {
-      const s = await fetchLiveStats(conn, signal);
-      if (signal.aborted || !s) return;
-      if (!statsUnchanged(rawRef.current, s)) {
-        rawRef.current = s;
-        setRaw(s);
-      }
-    }, delay);
-    const configPoll = startPolling(async (signal) => {
-      const c = await fetchCtsBundle(conn, signal);
-      if (signal.aborted) return;
-      if (c.ok) setCts(c.cts);
-      if (c.ok && !dirtyRef.current) {
-        const stored = loadLocalOverlay(conn);
-        baselineRef.current = overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) });
-        touchedRef.current = new Set();
-        setOverlay(baselineRef.current);
-        if (!calcSyncedRef.current && c.overlay) {
-          calcSyncedRef.current = true;
-          setCalcOpt((prev) => calcOptionsFromOverlay(baselineRef.current, prev));
-        }
-      }
-      setReady(true);
-    }, delay);
-    const connectionPoll = startPolling(async (signal) => {
-      const k = await fetchConnection(conn, signal);
-      if (signal.aborted) return;
-      if (k) {
-        setCreds(k);
-        if (!credsDirtyRef.current) {
-          setConnType(k.connectionType === "vst" ? "vst" : "mainnet");
-          setConnMethod(k.connectionMethod || "library");
-          if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
-        }
-      }
-    }, delay);
-    const refreshAfterControl = () => {
-      statsPoll.refresh();
-      configPoll.refresh();
-      connectionPoll.refresh();
-    };
-    window.addEventListener("pulse:control", refreshAfterControl);
-    return () => {
-      window.removeEventListener("pulse:control", refreshAfterControl);
-      statsPoll.stop();
-      configPoll.stop();
-      connectionPoll.stop();
-    };
-  }, [conn]);
-
-  useEffect(() => {
-    if (!resetAsk) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setResetAsk(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [resetAsk]);
+  // a poll started before a save must not overwrite the saved values when it returns (see lib/poll.ts)
+  const saveGate = useRef(createSaveGate());
 
   useEffect(() => {
     let alive = true;
-    void fetchUserPresets().then((rows) => {
+    setCts(null);
+    setRaw(null);
+    setDirty(false);
+    dirtyRef.current = false;
+    setSaveMsg(null);
+    setReady(false);
+    const local = loadLocalOverlay(conn);
+    setOverlay(overlayFromCts({}, local || {}));
+    const pull = async () => {
+      const snap = saveGate.current.snapshot();
+      const sP = fetchLiveStats(conn);
+      const cP = fetchCtsBundle(conn);
+      const s = await sP;
       if (!alive) return;
-      setUserPresets(rows);
-      setUserName(suggestPresetName(rows));
-    });
+      setRaw(s);
+      const c = await cP;
+      if (!alive) return;
+      setCts(c.cts);
+      if (!dirtyRef.current && saveGate.current.fresh(snap)) {
+        const stored = loadLocalOverlay(conn);
+        setOverlay(overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) }));
+      }
+      setReady(true);
+    };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const chain = async () => {
+      await pull();
+      if (alive) timer = setTimeout(chain, 4000);
+    };
+    void chain();
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
     };
-  }, []);
-
+  }, [conn]);
   const stats = pickView(raw, conn);
-  const histConn = conn === "overall" ? "live" : conn;
-
-  useEffect(() => {
-    calcJobRef.current = calcJob;
-  }, [calcJob]);
-
-  useEffect(() => {
-    histTestJobRef.current = histTestJob;
-  }, [histTestJob]);
-
-  useEffect(() => {
-    const poll = startPolling(async (signal) => {
-      const seq = histTestSeqRef.current;
-      const j = await fetchHistTest(signal);
-      if (signal.aborted || seq !== histTestSeqRef.current) return;
-      histTestJobRef.current = j;
-      setHistTestJob(j);
-    }, () => histTestPollMs(histTestJobRef.current, document.hidden));
-    return () => poll.stop();
-  }, []);
-
-  useEffect(() => {
-    const poll = startPolling(async (signal) => {
-      const j = await fetchHistCalc(histConn, signal);
-      if (signal.aborted) return;
-      calcJobRef.current = j;
-      setCalcJob(j);
-      if (!calcIsRunning(j.phase)) setCalcBusy(false);
-    }, () => calcPollMs(calcJobRef.current, document.hidden));
-    calcPollRef.current = poll;
-    return () => {
-      calcPollRef.current = null;
-      poll.stop();
-    };
-  }, [histConn]);
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
-    touchedRef.current.add(k);
-    setOverlay((o) => {
-      const next = { ...o, [k]: v };
-      if (["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"].includes(k)) {
-        for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-          next[key] = normalizePf(Number(v), 1.02);
-      }
-      if (k === "setPfWindow" || k === "baseEvalPosCount") {
-        next.baseEvalPosCount = Number(v); next.setPfWindow = Number(v); next.setMinSamples = Number(v);
-      }
-      if (k === "histTestHours") {
-        next.histTestHours = clampHistTestHours(Number(v), HIST_TEST_HOURS_DEFAULT);
-      }
-      if (k === "histTestRefreshHours") {
-        next.histTestRefreshHours = clampHistTestRefreshHours(Number(v), HIST_TEST_REFRESH_DEFAULT);
-      }
-      if (k === "histTestMinPf") {
-        next.histTestMinPf = normalizePf(Number(v), POSITIVE_PF);
-      }
-      return next;
-    });
+    setOverlay((o) => ({ ...o, [k]: v }));
     setDirty(true);
     setSaveMsg(null);
   };
 
-  const onApplyPreset = (id: string) => {
-    const preset = CONFIG_PRESETS.find((p) => p.id === id);
-    dirtyRef.current = true;
-    for (const key of Object.keys(preset?.patch ?? {})) touchedRef.current.add(key);
-    setOverlay((o) => applyPresetPatch(o, id));
-    setPresetId(id);
-    setDirty(true);
-    if (preset) {
-      setCalcOpt((o) => ({
-        ...o,
-        minStep: preset.minStep,
-        stepMax: preset.stepMax,
-        trailing: true,
-        stratBlock: true,
-        stratDca: false,
-        hours: Math.max(1, Math.round(Number(preset?.patch.histLookbackBars || 2880) / 60)),
-        allConfigs: true,
-      }));
-    }
-    setSaveMsg(`Preset ${preset?.name || id} applied · save Live or VST to persist`);
-  };
-
-  const onSaveSystemPreset = async () => {
-    setUserBusy(true);
-    const r = await saveUserPreset({ name: userName, overlay, calcOpt });
-    setUserBusy(false);
-    setUserPresets(r.presets);
-    if (r.preset) {
-      setUserSel(r.preset.id);
-      setUserName(suggestPresetName(r.presets));
-    }
-    setSaveMsg(r.ok ? `${r.preset?.name || userName} saved · overall system (Live + VST)` : r.detail);
-  };
-
-  const onSaveDefault = async () => {
-    setUserBusy(true);
-    const r = await saveDefaultUserPreset({ overlay, calcOpt });
-    setUserBusy(false);
-    setUserPresets(r.presets);
-    if (r.preset) setUserSel(r.preset.id);
-    setSaveMsg(r.ok ? "Default saved · active settings named Default" : r.detail);
-  };
-
-  const onDeleteExceptDefault = async () => {
-    setUserBusy(true);
-    const r = await deleteAllExceptDefaultUserPresets();
-    setUserBusy(false);
-    setCleanupAsk(false);
-    setUserPresets(r.presets);
-    setUserSel(r.presets.find((p) => p.name.toLowerCase() === "default")?.id ?? null);
-    setUserName(suggestPresetName(r.presets));
-    setSaveMsg(r.detail);
-  };
-
-  const onLoadSystemPreset = async (id: string) => {
-    setUserBusy(true);
-    const r = await loadUserPreset(id);
-    if (!r.ok || !r.preset) {
-      setUserBusy(false);
-      setSaveMsg(r.detail);
-      return;
-    }
-    const preset = r.preset;
-    const next = applyUserPreset(overlay, preset);
-    dirtyRef.current = false;
-    setOverlay(next);
-    setDirty(false);
-    setPresetId(null);
-    setUserSel(id);
-    const nextCalcOpt = r.calcOpt ? { ...calcOpt, ...r.calcOpt } : calcOpt;
-    if (r.calcOpt) setCalcOpt(nextCalcOpt);
-    // Apply the preset on top of each lane's own overlay so neither lane
-    // receives the other's universe or forced winners.
-    const saveLane = async (lane: "live" | "vst") => {
-      const bundle = await fetchCtsBundle(lane);
-      if (!bundle.ok || !bundle.overlay) return { ok: false };
-      return saveOverlay(applyUserPreset(overlayFromCts(bundle.cts ?? {}, bundle.overlay), preset), lane);
-    };
-    const live = await saveLane("live");
-    const vst = await saveLane("vst");
-    setUserBusy(false);
-    const lanes = [live.ok ? "Live" : null, vst.ok ? "VST" : null].filter(Boolean).join(" + ");
-    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · historic replay stays continuous on the shared lane`);
-  };
-
-  const onRenameSystemPreset = async () => {
-    if (!renameId) return;
-    setUserBusy(true);
-    const r = await renameUserPreset(renameId, renameVal);
-    setUserBusy(false);
-    setUserPresets(r.presets);
-    setRenameId(null);
-    setSaveMsg(r.ok ? r.detail : r.detail);
-  };
-
-  const onDeleteSystemPreset = async () => {
-    if (!deleteId) return;
-    setUserBusy(true);
-    const r = await deleteUserPreset(deleteId);
-    setUserBusy(false);
-    setUserPresets(r.presets);
-    setUserName(suggestPresetName(r.presets));
-    if (userSel === deleteId) setUserSel(null);
-    setDeleteId(null);
-    setSaveMsg(r.ok ? "Preset deleted" : r.detail);
-  };
-
-  const onCalcAll = async (activeOverlay = overlay, activeCalcOpt = calcOpt) => {
-    setCalcBusy(true);
-    setSaveMsg(null);
-    const cap = Math.max(0, Math.round(Number(activeOverlay.symbolCap) || 0));
-    const allSym = Boolean(activeCalcOpt.allSymbols);
-    const selected = (activeOverlay.symbols || []).filter((s) => s !== "*" && s !== "ALL");
-    const j = await startHistCalc({
-      ...activeCalcOpt,
-      allConfigs: true,
-      allSymbols: allSym,
-      symbolCap: cap,
-      symbols: allSym ? [] : selected,
-      preferMinimalRange: activeOverlay.preferMinimalRange,
-      additionalCoordination: activeOverlay.additionalCoordination,
-      coordOptimizationN: activeOverlay.coordOptimizationN,
-      connection: histConn,
-      overlay: {
-        ...activeOverlay,
-        symbolCap: cap,
-        histLookbackBars: Math.round(activeCalcOpt.hours * 60),
-        histRefreshS: activeOverlay.histRefreshS,
-      },
-      selectedSymbols: allSym ? [] : selected,
-      continuous: true,
-      mode: "hourly",
-      refreshS: activeOverlay.histRefreshS,
-    });
-    calcJobRef.current = j;
-    setCalcJob(j);
-    if (j.phase === "error") setCalcBusy(false);
-    calcPollRef.current?.refresh();
-  };
-
-  const onStopCalc = async () => {
-    if (!calcIsRunning(calcJob?.phase) && !calcBusy) return;
-    setCalcBusy(true);
-    const j = await stopHistCalc(histConn);
-    calcJobRef.current = j;
-    setCalcJob(j);
-    setCalcBusy(false);
-    setSaveMsg(j.error || j.detail || "Historic replay stop requested · next hourly stays on the shared lane");
-    calcPollRef.current?.refresh();
-  };
-
-  const histTestTarget = clampHistTestTarget(overlay.symbolCap);
-
-  // A new validated Test Historic result moves its validated majors into the
-  // symbol selection. A wildcard book is left alone (the engine already narrows
-  // it to the validated intern book) and hand edits stand until the next new
-  // result. Configs need no write: the engine applies the validated allow-list.
-  const autoAssign = overlay.histTestAutoAssign !== false && overlay.histTestEnabled !== false;
-  const histAssignment = useMemo(
-    () => histTestAssignment(histTestJob, (s) => MAJOR_USDT.has(s), overlay.symbolCap),
-    [histTestJob, overlay.symbolCap],
-  );
-  useEffect(() => {
-    if (!ready || conn === "overall" || !autoAssign || !histAssignment) return;
-    if (histAssignment.signature === autoAssignSigRef.current) return;
-    autoAssignSigRef.current = histAssignment.signature;
-    if (!histAssignment.symbols.length) return;
-    if (isUnlimitedSymbolBook(overlay) || (Array.isArray(overlay.symbols) && overlay.symbols.includes("*"))) return;
-    const next = applyHistTestSymbols(overlay, histAssignment.symbols);
-    if (next === overlay) return;
-    autoSavePendingRef.current = !dirtyRef.current;
-    dirtyRef.current = true;
-    for (const key of ["symbols", "symbolsAll", "symbolCap"]) touchedRef.current.add(key);
-    setOverlay(next);
-    setDirty(true);
-    setSaveMsg(
-      `Auto-assigned ${histAssignment.symbols.length} validated symbols · ${histAssignment.configs.length} validated configs run on the engine allow-list` +
-        (autoSavePendingRef.current ? " · saving" : " · unsaved edits present, save Live or VST to persist"),
-    );
-  }, [ready, conn, autoAssign, histAssignment, overlay]);
-
-  const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
-    if (action === "start" && overlay.histTestEnabled === false) return;
-    const seq = ++histTestSeqRef.current;
-    setSaveMsg(null);
-    const hours = clampHistTestHours(overlay.histTestHours, HIST_TEST_HOURS_DEFAULT);
-    const minPf = normalizePf(Number(overlay.histTestMinPf || overlay.minPf), POSITIVE_PF);
-    const refreshHours = clampHistTestRefreshHours(overlay.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
-    const payload = {
-      hours,
-      minPf,
-      refreshHours,
-      symbolCap: histTestTarget,
-      overlay: {
-        ...overlay,
-        connection: conn,
-        histTestHours: hours,
-        histTestMinPf: minPf,
-        histTestRefreshHours: refreshHours,
-        symbolCap: histTestTarget,
-      },
-    };
-    const j =
-      action === "stop"
-        ? await stopHistTest()
-        : action === "pause"
-          ? await pauseHistTest()
-          : await startHistTest({ ...payload, action: action === "resume" ? "resume" : "start" });
-    if (seq !== histTestSeqRef.current) return;
-    histTestJobRef.current = j;
-    setHistTestJob(j);
-    if (j.phase === "error") setSaveMsg(j.error || j.detail || `Historic test ${action} failed`);
-    else if (action === "stop" || action === "pause") setSaveMsg(j.detail || `Historic test ${action} requested`);
-  };
-
-  const onApplyPositiveSymbols = () => {
-    // The run's validated symbols only; internSymbols is the padded intern pool.
-    const names = (Array.isArray(histTestJob?.positive) ? histTestJob.positive : histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
-    const majors = names.filter((s) => MAJOR_USDT.has(String(s).toUpperCase()));
-    setOverlay((o) => {
-      const wild = isUnlimitedSymbolBook(o) || (Array.isArray(o.symbols) && o.symbols.includes("*"));
-      const stack = Math.max(Number(o.blockMaxStack) || 6, 6);
-      if (!majors.length || wild) {
-        return {
-          ...o,
-          blockEnabled: true,
-          blockOverall: true,
-          blockActive: true,
-          blockMaxStack: stack,
-          symbolCap: Math.max(Number(o.symbolCap) || DEFAULT_SYMBOL_COUNT, DEFAULT_SYMBOL_COUNT),
-        };
-      }
-      return {
-        ...o,
-        symbols: majors,
-        symbolsAll: false,
-        symbolCap: Math.max(majors.length, DEFAULT_SYMBOL_COUNT),
-        blockEnabled: true,
-        blockOverall: true,
-        blockActive: true,
-        blockMaxStack: stack,
-      };
-    });
-    if (!majors.length) {
-      setSaveMsg("Historic positives are not majors · Live/VST books and Block stay as they are");
-      return;
-    }
-    dirtyRef.current = true;
-    setDirty(true);
-    setSaveMsg(`Kept majors and Block on (${majors.length}) · save Live or VST to persist`);
-  };
-
-  const onApplyWinner = () => {
-    const apply = calcJob?.apply;
-    if (!apply || typeof apply !== "object") return;
-    dirtyRef.current = true;
-    for (const key of Object.keys(apply)) touchedRef.current.add(key);
-    setOverlay((o) => syncOverlayFlags({ ...o, ...(apply as Partial<typeof o>) }));
-    setDirty(true);
-    setSaveMsg("Winner applied · Block on · DCA off · save to persist");
-  };
-
+  const coord = (cts?.coordination_settings ?? cts?.coordinationSettings ?? {}) as Record<
+    string,
+    unknown
+  >;
   const strategies = (cts?.strategies ?? {}) as {
     main?: Record<string, { enabled?: boolean; min_profit_factor?: number; max_drawdown_time?: number; max_positions?: number }>;
     mainTradePfRatioSemantics?: string;
   };
-  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, DEFAULT_OVERLAY.realMinPf);
+  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, GATE_MIN_PF_DEFAULT);
   const table = useMemo(
-    () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1, overlay.blockMaxStack, overlay.blockMaxVolumeMultiplier, overlay.blockCounts),
-    [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, overlay.blockMaxStack, overlay.blockMaxVolumeMultiplier, overlay.blockCounts],
+    () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1),
+    [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf],
   );
 
   const onSave = async (target = conn) => {
@@ -638,109 +182,37 @@ function SettingsPage() {
       setSaveMsg("Wait for overlay to load");
       return;
     }
-    let payload = overlay;
-    if (conn === "overall") {
-      // The Overall form holds no lane's values. Apply only its edits on top
-      // of the target lane's saved overlay instead of overwriting the lane.
-      const edits = overlayEdits(baselineRef.current, overlay, touchedRef.current);
-      if (!Object.keys(edits).length) {
-        setSaveMsg(`No edited settings to save to ${target}`);
-        return;
-      }
-      setSaving(true);
-      const lane = await fetchCtsBundle(target);
-      if (!lane.ok || !lane.overlay) {
-        setSaving(false);
-        setSaveMsg(`Could not load ${target} settings · nothing saved`);
-        return;
-      }
-      payload = { ...overlayFromCts(lane.cts ?? {}, lane.overlay), ...edits };
-    }
     setSaving(true);
-    const r = await saveOverlay(payload, target);
+    saveGate.current.mark();   // polls that started before this save are now stale
+    const r = await saveOverlay(overlay, target);
     setSaving(false);
     setSaveMsg(r.detail);
     if (r.ok) {
       dirtyRef.current = false;
       setDirty(false);
-      if (r.overlay && conn !== "overall") setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
-      setSaveMsg(`${r.detail} · coordinations rebound`);
-      try {
-        window.dispatchEvent(new Event("pulse:control"));
-      } catch {
-        /* ignore */
-      }
+      if (r.overlay) setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
     }
-  };
-
-  // Persist an auto-assignment that started from a clean form. It never bundles
-  // a person's unsaved edits: those keep waiting for the explicit Save.
-  useEffect(() => {
-    if (!autoSavePendingRef.current || !dirty || saving || !ready) return;
-    autoSavePendingRef.current = false;
-    void onSave(conn);
-  });
-
-  const onSaveCreds = async () => {
-    setCredSaving(true);
-    setCredMsg(null);
-    const payload: {
-      api_key?: string;
-      api_secret?: string;
-      connection_type: string;
-      connection_method: string;
-      as_default_mainnet: boolean;
-    } = {
-      connection_type: connType,
-      connection_method: connMethod,
-      as_default_mainnet: asDefaultMainnet || connType === "mainnet",
-    };
-    if (apiKey && !apiKey.includes("…") && !apiKey.includes("•")) payload.api_key = apiKey.trim();
-    if (apiSecret && !apiSecret.includes("•")) payload.api_secret = apiSecret.trim();
-    const r = await saveConnection(conn === "vst" && !payload.as_default_mainnet ? "vst" : conn === "vst" ? "live" : conn, payload);
-    setCredSaving(false);
-    setCredMsg(r.detail);
-    if (r.ok && r.creds) {
-      credsDirtyRef.current = false;
-      setCreds(r.creds);
-      setApiSecret("");
-      if (r.creds.apiKeyMasked) setApiKey(r.creds.apiKeyMasked);
-    }
-  };
-
-  const onResetOverlay = () => {
-    setOverlay(overlayFromCts(cts ?? {}));
-    setDirty(true);
-    dirtyRef.current = true;
-    setPresetId(null);
-    setSaveMsg("Reset to CTS defaults");
-    setResetAsk(false);
   };
 
   return (
     <DeskShell
-      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
-      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
-      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
-      halted={stats ? Boolean(stats.halted) : undefined}
-      alive={stats ? stats.alive !== false : undefined}
+      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
+      stale={Boolean(stats?.stale)}
+      mode={stats?.paused ? "PAUSED" : stats?.mode}
+      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
-      <div className="flex min-w-0 flex-col gap-4 lg:flex-row">
-        <aside className="min-w-0 lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto">
-          <nav className="flex min-w-0 gap-1 overflow-x-auto pb-1 lg:flex-col lg:pb-0">
+      <div className="flex flex-col gap-4 lg:flex-row">
+        <aside className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto">
+          <nav className="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:pb-0">
             {SECTIONS.map((id) => (
               <button
                 key={id}
                 type="button"
                 onClick={() => setSection(id)}
                 className={`min-h-11 shrink-0 rounded-lg px-3 text-left text-sm capitalize ${
-                  section === id
-                    ? "bg-bg2 text-fg ring-1 ring-primary"
-                    : id === "historic"
-                      ? "text-fg"
-                      : "text-muted"
+                  section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"
                 }`}
                 data-section={id}
                 data-testid={`section-${id}`}
@@ -765,12 +237,6 @@ function SettingsPage() {
                                   ? "Exits · SL"
                                   : id === "overview"
                                     ? "Overview"
-                                    : id === "historic"
-                                      ? (overlay.histTestEnabled !== false ? "Test Historic · ON" : "Test Historic · OFF")
-                                    : id === "presets"
-                                      ? "Presets · calc"
-                                    : id === "connection"
-                                      ? "Connection · keys"
                                     : id === "controls"
                                       ? "Control orders"
                                       : id}
@@ -780,918 +246,187 @@ function SettingsPage() {
         </aside>
 
         <div className="min-w-0 flex-1 space-y-4">
-          {(section === "overview" || section === "historic") && (
-            <TestHistoricCard
-              assignment={histAssignment}
-              unsaved={dirty}
-              overlay={overlay}
-              histTestTarget={histTestTarget}
-              histTestJob={histTestJob}
-              onControl={onHistTestControl}
-              onApply={onApplyPositiveSymbols}
-              patch={patch}
-            />
-          )}
-          {section === "system" && <SystemSettingsPanel conn={conn} overlay={overlay} patch={patch} navigate={setSection} />}
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
+          {section === "overview" && (
+            <Card title="Secure, Minimal" hint="Saved run preset · load it here, review it, then save to the selected connection">
+              <p className="text-sm text-muted">
+                Scans up to 50 symbols with at most two positions, 1× leverage, strict balance-relative sizing,
+                a 3% modeled stop-plus-cost filter and a 3% session drawdown halt. Exchange minimums that exceed
+                the entry budget are skipped. Actual fills and account losses can exceed modeled limits.
+              </p>
+              <button
+                type="button"
+                data-testid="load-secure-minimal"
+                onClick={() => {
+                  dirtyRef.current = true;
+                  setOverlay(secureMinimalPreset());
+                  setDirty(true);
+                  setSaveMsg("Secure, Minimal loaded · unsaved");
+                }}
+                className="min-h-11 rounded-lg border border-primary px-4 text-sm text-fg"
+              >
+                Load Secure, Minimal
+              </button>
+            </Card>
+          )}
           {section === "overview" && (
             <Card title="Coverage · controls · live overviews" hint="Scan, packs, indication types, block counts, set families, recon and order protection — all live">
               <CoveragePanel live={stats} />
-              <div data-testid="capacity-caps" className="rounded-lg border border-border bg-bg2 p-3">
-                <div>
-                  <p className="font-mono text-xs uppercase text-muted">Capacity caps</p>
-                  <p className="mt-1 text-sm text-muted">Set the effective-position ceiling (symbol × side) and ranked symbol book. Independent intern, Block, DCA and control orders are unlimited.</p>
-                </div>
-                <div className="mt-3">
-                  <Grid>
-                    <Num
-                      label="Effective-position cap"
-                      value={overlay.maxOpen}
-                      min={0}
-                      max={10000}
-                      step={1}
-                      hint="Default 100 unique symbol×side groups. Independent intern orders are unlimited. 0 = unlimited groups · margin, API and exchange limits still apply"
-                      onChange={(v) => patch("maxOpen", Math.round(v))}
-                    />
-                    <Num
-                      label="Ranked symbol cap"
-                      value={overlay.symbolCap}
-                      min={0}
-                      max={10000}
-                      step={1}
-                      hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked symbols · All/unlimited is a separate opt-in universe`}
-                      onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
-                    />
-                    <Num label="Step range · minimum" value={overlay.setMinStep} min={DEFAULT_MIN_STEP} max={30} step={1} onChange={(v) => patch("setMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
-                    <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
-                    <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
-                    <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
-                    <Toggle label="Overall SL/TP by symbol and direction" hint="Shared exchange protection using the widest member SL/TP; each Set keeps its own targets and fills." on={overlay.controlOrdersOverall} onChange={(v) => patch("controlOrdersOverall", v)} />
-                  </Grid>
-                </div>
-              </div>
-              <div data-testid="risk-volume" className="rounded-lg border border-border bg-bg2 p-3">
-                <div>
-                  <p className="font-mono text-xs uppercase text-muted">Risk · volume</p>
-                  <p className="mt-1 text-sm text-muted">Drawdown halt and pulse volume factor for this connection.</p>
-                </div>
-                <div className="mt-3">
-                  <Grid>
-                    <Num
-                      label="Equity drawdown halt"
-                      value={overlay.drawdownHaltPct}
-                      min={0}
-                      max={80}
-                      step={1}
-                      unit="%"
-                      hint="0 = disabled · stops new entries at this session equity drawdown"
-                      onChange={(v) => patch("drawdownHaltPct", Math.round(v))}
-                    />
-                    <Slider
-                      label="Volume factor"
-                      value={overlay.volumeFactor ?? 1}
-                      min={0.1}
-                      max={5}
-                      step={0.1}
-                      hint="Scales every order's notional. 1 = base. Independent per Live / VST."
-                      onChange={(v) => patch("volumeFactor", v)}
-                    />
-                    <Toggle
-                      label="Size from account balance"
-                      hint="On: one order = % of this connection's system equity × volume factor · Off: fixed USDT × volume factor"
-                      on={overlay.sizingMode !== "fixed"}
-                      onChange={(v) => patch("sizingMode", v ? "balance" : "fixed")}
-                    />
-                    {overlay.sizingMode !== "fixed" ? (
-                      <Num
-                        label="Order notional · % of equity"
-                        value={overlay.targetNotionalPct}
-                        min={0.05}
-                        max={20}
-                        step={0.05}
-                        unit="%"
-                        hint="Before volume factor, volatility and Set ratio"
-                        onChange={(v) => patch("targetNotionalPct", Math.max(0.05, Math.min(20, v)))}
-                      />
-                    ) : null}
-                    <KV k="Sizing equity" v={stats?.sizingEquity ? `${fmtNum(stats.sizingEquity, 2)} ${stats?.unit ?? ""}`.trim() : "— (waiting for balance)"} />
-                    <KV
-                      k="Effective notional"
-                      v={(() => {
-                        const e = effectiveNotional(overlay, stats?.sizingEquity);
-                        const engine = stats?.effectiveNotional != null ? ` · engine ${stats.effectiveNotional.toFixed(2)}` : "";
-                        return `${e.value.toFixed(2)} · ${e.source === "equity" ? "from equity" : "fixed"}${engine}`;
-                      })()}
-                    />
-                      value={overlay.volumeFactor || 0.1}
-                      min={0.05}
-                      max={10}
-                      step={0.05}
-                      hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
-                      onChange={(v) => patch("volumeFactor", v)}
-                    />
-                    <KV k="Effective notional" v={overlay.orderSizing === "factor"
-                      ? `${(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} USDT · raised to each pair's minimum lot`
-                      : "each pair's minimum lot (min qty / min USDT)"} />
-                    <EnableSlider label="Minimum lot sizing" on={overlay.orderSizing !== "factor"}
-                      hint="On: every order is the venue minimum lot · off: volume-factor notional" onChange={(v) => patch("orderSizing", v ? "minQty" : "factor")} />
-                    <EnableSlider label="Auto leverage for SL" on={overlay.slAutoLeverage === true}
-                      hint="Off (default): every pair at its venue max leverage, minimum-lot sizing, stops clamped inside the exchange-reported liquidation (cross margin) · on: leverage lowered so the per-lot liquidation lies beyond the widest lane SL" onChange={(v) => patch("slAutoLeverage", v)} />
-                  </Grid>
-                </div>
-              </div>
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
+                <EnableSlider label="Normal Set entries" on={overlay.stratNormal} hint="Off disables new Normal entries; internal paper Sets and enabled additional strategy types continue processing." onChange={(v) => patch("stratNormal", v)} />
+                <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
+                <EnableSlider label="Trend (Sets and Base evaluation)" on={overlay.stratTrend} onChange={(v) => patch("stratTrend", v)} />
+                <EnableSlider label="Breakout (Sets and Base evaluation)" on={overlay.stratBreakout} onChange={(v) => patch("stratBreakout", v)} />
+                <EnableSlider label="Reversion (Sets and Base evaluation)" on={overlay.stratReversion} onChange={(v) => patch("stratReversion", v)} />
+                <EnableSlider label="Flow (Sets and Base evaluation)" on={overlay.stratFlow} onChange={(v) => patch("stratFlow", v)} />
+                <EnableSlider label="Multi (Sets and Base evaluation)" on={overlay.stratMulti} onChange={(v) => patch("stratMulti", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
-                <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
-                <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Default ON · OFF stops new Normal entries · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
-                <p className="text-sm text-muted">Control orders (SL/TP on exchange) · always on</p>
-                <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
+                <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="Off disables trailing Sets, peak-following and recalculation. Existing protective stops remain managed." onChange={(v) => patch("stratTrailing", v)} />
+                <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
+                <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
               <p className="text-sm text-muted">
-                General calculations remain active as the common basis. Normal (General) only controls effective simple positions. Save persists the settings for the selected connection.
+                These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
               </p>
-              <div className="rounded-lg border border-border bg-bg2 p-3">
-                <p className="font-mono text-xs uppercase text-muted">Best configs · low drawdown</p>
-                <p className="mt-1 text-sm text-muted">
-                  Live was stacking Block + DCA and using SL:TP 1.5 (stop larger than take-profit). Apply a coordinated preset, then run Historic calc — it does not start the engine.
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {CONFIG_PRESETS.filter((p) => p.recommended).map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      className="min-h-11 rounded-lg bg-primary px-3 text-sm text-bg"
-                      onClick={() => {
-                        onApplyPreset(p.id);
-                        setSection("presets");
-                      }}
-                    >
-                      Apply {p.name}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    className="min-h-11 rounded-lg border border-border px-3 text-sm"
-                    onClick={() => setSection("presets")}
-                  >
-                    All 8 presets · calc
-                  </button>
-                </div>
-              </div>
             </Card>
-          )}
-          {section === "presets" && (
-            <>
-              <Card title="Config presets · low drawdown" hint="8 coordinated books. Block on · DCA off · SL 0.3 or 0.6. Apply then save to Live or VST.">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {CONFIG_PRESETS.map((p) => {
-                    const on = presetId === p.id;
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        data-testid={`preset-${p.id}`}
-                        onClick={() => onApplyPreset(p.id)}
-                        className={`min-h-11 rounded-lg border px-3 py-3 text-left ${
-                          on ? "border-primary bg-primary-dim/40 text-fg" : "border-border bg-bg2 text-fg"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-sm font-medium">{p.name}</div>
-                          {p.recommended ? (
-                            <span className="rounded bg-primary-dim/50 px-1.5 font-mono text-[10px] uppercase text-primary">best</span>
-                          ) : null}
-                        </div>
-                        <p className="mt-1 text-xs text-muted">{p.hint}</p>
-                        <p className="mt-2 text-xs text-fg/80">{p.why}</p>
-                        <p className="mt-2 font-mono text-[11px] text-muted">
-                          SL {p.sl.toFixed(1)} · step {p.minStep}–{p.stepMax} · trail {p.trail} · PF {p.minPf.toFixed(2)} · DDt {formatDuration(p.maxDdS * 1000)}
-                        </p>
-                        <p className="font-mono text-[11px] text-primary">Block ON · DCA OFF · cost subtracted</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </Card>
-              <Card
-                title="System presets · Live + VST"
-                hint="Save the current book as Preset-N for overall use. Load applies every section (SL, steps, trail, Block/DCA, indications) to Live and VST immediately."
-              >
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <input
-                    data-testid="user-preset-name"
-                    value={userName}
-                    onChange={(e) => setUserName(e.target.value)}
-                    placeholder="Preset-1"
-                    className="min-h-11 flex-1 rounded-lg border border-border bg-bg2 px-3 font-mono text-sm"
-                  />
-                  <button
-                    type="button"
-                    data-testid="user-preset-save"
-                    disabled={userBusy || !ready}
-                    onClick={() => void onSaveSystemPreset()}
-                    className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
-                  >
-                    {userBusy ? "Saving…" : "Save as system preset"}
-                  </button>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    data-testid="user-preset-save-default"
-                    disabled={userBusy || !ready}
-                    onClick={() => void onSaveDefault()}
-                    className="min-h-11 rounded-lg border border-primary px-4 text-sm text-primary disabled:opacity-40"
-                  >
-                    {userBusy ? "Saving…" : "Save active as Default"}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="user-preset-delete-except-default"
-                    disabled={userBusy || !userPresets.some((p) => p.name.trim().toLowerCase() === "default")}
-                    onClick={() => setCleanupAsk(true)}
-                    className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted disabled:opacity-40"
-                  >
-                    Delete all except Default
-                  </button>
-                  <span className="font-mono text-[11px] text-muted">
-                    {userPresets.some((p) => p.name.trim().toLowerCase() === "default") ? "Default protected" : "Save Default first"}
-                  </span>
-                </div>
-                <p className="font-mono text-[11px] text-muted">{overlayOverview(overlay)}</p>
-                {userPresets.length === 0 ? (
-                  <p className="text-sm text-muted">No saved system presets yet. Tune sliders, then save.</p>
-                ) : (
-                  <div className="grid gap-2">
-                    {userPresets.map((p) => {
-                      const on = userSel === p.id;
-                      const renaming = renameId === p.id;
-                      return (
-                        <div
-                          key={p.id}
-                          data-testid={`user-preset-${p.id}`}
-                          className={`rounded-lg border px-3 py-3 ${on ? "border-primary bg-primary-dim/30" : "border-border bg-bg2"}`}
-                        >
-                          {renaming ? (
-                            <div className="flex flex-col gap-2 sm:flex-row">
-                              <input
-                                value={renameVal}
-                                onChange={(e) => setRenameVal(e.target.value)}
-                                className="min-h-11 flex-1 rounded-lg border border-border bg-surface px-3 font-mono text-sm"
-                                autoFocus
-                              />
-                              <button type="button" className="min-h-11 rounded-lg bg-primary px-3 text-sm text-bg" onClick={() => void onRenameSystemPreset()}>
-                                Save name
-                              </button>
-                              <button type="button" className="min-h-11 rounded-lg border border-border px-3 text-sm" onClick={() => setRenameId(null)}>
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div>
-                                  <p className="text-sm font-medium">{p.name}</p>
-                                  <p className="mt-1 font-mono text-[11px] text-muted">{p.overview || p.hint}</p>
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                  <button
-                                    type="button"
-                                    data-testid={`user-preset-load-${p.id}`}
-                                    disabled={userBusy}
-                                    className="min-h-11 rounded-lg bg-primary px-3 text-sm text-bg disabled:opacity-40"
-                                    onClick={() => void onLoadSystemPreset(p.id)}
-                                  >
-                                    Load
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="min-h-11 rounded-lg border border-border px-3 text-sm"
-                                    onClick={() => {
-                                      setRenameId(p.id);
-                                      setRenameVal(p.name);
-                                    }}
-                                  >
-                                    Rename
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={p.name.trim().toLowerCase() === "default"}
-                                    className="min-h-11 rounded-lg border border-border px-3 text-sm text-muted disabled:cursor-not-allowed disabled:opacity-50"
-                                    onClick={() => setDeleteId(p.id)}
-                                  >
-                                    {p.name.trim().toLowerCase() === "default" ? "Protected" : "Delete"}
-                                  </button>
-                                </div>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </Card>
-              <Card
-                title="Historic calculations · continuous replay"
-                hint="Start queues a generation on the shared lane. The 1m tape keeps refreshing on the lookback interval. Stop cancels an in-flight run; the next hourly remains on the engine lane."
-              >
-                <Grid>
-                  <Slider
-                    label="Minimal Step Range"
-                    value={calcOpt.minStep}
-                    min={1}
-                    max={30}
-                    step={1}
-                    hint={`Sets below step ${calcOpt.minStep} are not calculated`}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, minStep: Math.round(v), stepMax: Math.max(o.stepMax, Math.round(v)) }))}
-                  />
-                  <Slider
-                    label="Step max"
-                    value={calcOpt.stepMax}
-                    min={2}
-                    max={30}
-                    step={1}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}
-                  />
-                  <Slider
-                    label="Evaluation range (hours)"
-                    value={calcOpt.hours}
-                    min={2}
-                    max={336}
-                    step={1}
-                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars · applied on Start, then kept on the hourly tape`}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, hours: Math.round(v) }))}
-                  />
-                  <EnableSlider
-                    label="Trailing"
-                    on={calcOpt.trailing}
-                    hint="off = SL:TP books only"
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, trailing: v }))}
-                  />
-                  <EnableSlider
-                    label="Block"
-                    on={calcOpt.stratBlock}
-                    hint="enabled by default"
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratBlock: v }))}
-                  />
-                  <EnableSlider
-                    label="DCA"
-                    on={calcOpt.stratDca}
-                    hint="enabled by default · independent add-on lane"
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratDca: v }))}
-                  />
-                  <EnableSlider
-                    label="Indications"
-                    on={calcOpt.stratIndications}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratIndications: v }))}
-                  />
-                  <EnableSlider
-                    label="General pulse"
-                    on={calcOpt.stratGeneral}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratGeneral: v }))}
-                  />
-                  <EnableSlider
-                    label="Ranked universe"
-                    on={calcOpt.allSymbols}
-                    hint={
-                      overlay.symbolCap > 0
-                        ? `top ${overlay.symbolCap} by leverage then 1H vol · not the full book`
-                        : "every listed USDT-M swap"
-                    }
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, allSymbols: v }))}
-                  />
-                  {INDICATION_KINDS.map((kind) => {
-                    const key = indTypeKey(kind) as keyof IndTypeFlags;
-                    return (
-                      <EnableSlider
-                        key={kind}
-                        label={kindLabel(kind)}
-                        on={calcOpt[key] !== false}
-                        onChange={(v) => setCalcOpt((o) => ({ ...o, [key]: v }))}
-                      />
-                    );
-                  })}
-                </Grid>
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg2 px-3 py-3" data-testid="calc-range-presets">
-                  <span className="font-mono text-xs uppercase text-muted">Quick range</span>
-                  {CALC_RANGE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.hours}
-                      type="button"
-                      aria-pressed={calcOpt.hours === preset.hours}
-                      onClick={() => setCalcOpt((o) => ({ ...o, hours: preset.hours }))}
-                      className={`min-h-9 rounded-md border px-3 font-mono text-xs ${calcOpt.hours === preset.hours ? "border-primary bg-primary-dim/40 text-primary" : "border-border text-muted"}`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                  <span className="ml-auto text-xs text-muted" data-testid="calc-continuous-hint">Continuous · hourly refresh after Start</span>
-                </div>
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    data-testid="hist-calc-start"
-                    disabled={calcBusy || calcIsRunning(calcJob?.phase)}
-                    onClick={() => void onCalcAll()}
-                    className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
-                  >
-                    {calcStartLabel(calcJob)}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="hist-calc-stop"
-                    disabled={!calcBusy && !calcIsRunning(calcJob?.phase)}
-                    onClick={() => void onStopCalc()}
-                    className="min-h-11 rounded-lg border border-danger/50 px-4 text-sm text-danger disabled:opacity-40"
-                  >
-                    Stop
-                  </button>
-                  {calcJob?.winner ? (
-                    <button
-                      type="button"
-                      data-testid="hist-calc-apply"
-                      onClick={onApplyWinner}
-                      className="min-h-11 rounded-lg border border-border px-4 text-sm"
-                    >
-                      Apply winner
-                    </button>
-                  ) : null}
-                  <span className="text-sm text-muted" data-testid="hist-calc-status">
-                    {calcStatusLine(calcJob, calcOpt.hours)}
-                  </span>
-                </div>
-                {calcJob && hasCalcSnapshot(calcJob) ? (
-                  <div className="space-y-3">
-                    <HistoricCalcResults job={calcJob} />
-                    <div className="h-1.5 overflow-hidden rounded-full bg-border">
-                      <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, calcJob.pct || 0))}%` }} />
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <KV k="Validated rows" v={`${calcJob.validatedCount ?? 0}/${calcJob.rowCount ?? 0}`} />
-                      <KV
-                        k="Catalog valid sets"
-                        v={`${calcJob.coverage?.validatedCount ?? 0}/${calcJob.coverage?.setCount ?? calcJob.coverage?.product ?? 0}`}
-                      />
-                      <KV
-                        k="Lane"
-                        v={`${calcJob.continuous === false ? "one-shot" : "continuous"} · ${calcJob.running || calcIsRunning(calcJob.phase) ? "in flight" : "waiting"}`}
-                      />
-                      <KV k="Source" v={String(calcJob.source || "shared lane")} />
-                      <KV k="Run" v={`${calcJob.mode || "shared"} · generation ${calcJob.generation ?? 0}`} />
-                      <KV
-                        k="Evaluation window"
-                        v={`${calcJob.evaluationBars ?? calcJob.lookback ?? calcOpt.hours * 60} bars + ${calcJob.warmupBars ?? 0} warmup`}
-                      />
-                      <KV
-                        k="Replay timing"
-                        v={
-                          calcJob.timings
-                            ? `fetch ${Math.round(calcJob.timings.fetchMs ?? 0)}ms · replay ${Math.round(calcJob.timings.replayWallMs ?? 0)}ms · score ${Math.round(calcJob.timings.scoreMs ?? 0)}ms`
-                            : "—"
-                        }
-                      />
-                      <KV
-                        k="Replay queue"
-                        v={
-                          calcJob.replayTasks
-                            ? `${calcJob.replayTasks.completed ?? 0}/${calcJob.replayTasks.requested ?? 0} tasks · ${calcJob.replayTasks.workers ?? calcJob.workers ?? 0} workers`
-                            : "—"
-                        }
-                      />
-                      <KV k="Lookback" v={`${calcJob.lookback ?? calcOpt.hours * 60} bars`} />
-                      <KV
-                        k="Set product"
-                        v={
-                          calcJob.coverage?.product
-                            ? `${calcJob.coverage.product} · base ${calcJob.coverage.families?.base ?? "—"} / trail ${calcJob.coverage.families?.trail ?? "—"}`
-                            : "—"
-                        }
-                      />
-                      <KV
-                        k="Symbol coverage"
-                        v={`${calcJob.coverage?.symbols?.completed ?? calcJob.validSymbols?.length ?? 0}/${calcJob.coverage?.symbols?.valid ?? calcJob.selectedSymbols?.length ?? 0} valid · ${calcJob.gappedSymbols?.length ?? 0} gapped`}
-                      />
-                      <KV k="Backfill gaps" v={String(calcJob.coverage?.bars?.missing ?? calcJob.missingSymbols?.length ?? 0)} />
-                      <KV
-                        k="Next refresh"
-                        v={calcJob.nextRunAt ? new Date(calcJob.nextRunAt * 1000).toLocaleTimeString() : calcIsRunning(calcJob.phase) ? "in flight" : "pending"}
-                      />
-                      <KV
-                        k="Published tape"
-                        v={`${calcJob.coordinationComplete ? "complete" : "partial"} · ${Object.keys(calcJob.lastPublishedWatermark || {}).length} symbols · ${calcJob.stale ? "stale while refreshing" : "current"}`}
-                      />
-                      <KV
-                        k="Last complete run"
-                        v={calcJob.lastCompleteRun ? new Date(calcJob.lastCompleteRun * 1000).toLocaleTimeString() : "not published"}
-                      />
-                      <KV k="Deferred reason" v={calcJob.deferredReason || "—"} />
-                    </div>
-                    {calcJob.winner ? (
-                      <p className="text-sm">
-                        Winner <span className="font-mono text-primary">{calcJob.winner.id}</span>
-                        {calcJob.winner.direction ? ` · ${calcJob.winner.direction}` : ""}
-                        {" "}· PF {calcJob.winner.last15Ratio.toFixed(2)}
-                        {typeof calcJob.winner.netAvg === "number" ? ` · net ${(calcJob.winner.netAvg * 100).toFixed(3)}%` : ""}
-                        {" "}· DDt {formatDuration(calcJob.winner.maxDdS * 1000)} · SL {calcJob.winner.slRatio.toFixed(1)}
-                      </p>
-                    ) : null}
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[640px] text-left text-sm">
-                        <thead className="font-mono text-[11px] text-muted">
-                          <tr>
-                            <th className="pb-2 font-medium">Set</th>
-                            <th className="pb-2 font-medium">Dir</th>
-                            <th className="pb-2 font-medium">Pack</th>
-                            <th className="pb-2 text-right font-medium">SL</th>
-                            <th className="pb-2 text-right font-medium">Step</th>
-                            <th className="pb-2 text-right font-medium">PF</th>
-                            <th className="pb-2 text-right font-medium">Max DDt</th>
-                            <th className="pb-2 text-right font-medium">n</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(calcJob.rows || []).slice(0, 16).map((r, i) => (
-                            <tr key={`${r.id}-${r.direction || "BOTH"}-${i}`} className={`border-t border-border font-mono ${r.validated ? "text-fg" : "text-muted"}`}>
-                              <td className="py-1.5">{r.id.replace("-USDT", "")}</td>
-                              <td className="py-1.5">{r.direction || "BOTH"}</td>
-                              <td className="py-1.5">{r.pack}</td>
-                              <td className="py-1.5 text-right">{r.kind === "trail" ? r.trailKey || "trail" : r.slRatio.toFixed(1)}</td>
-                              <td className="py-1.5 text-right">{r.step || "—"}</td>
-                              <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                              <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
-                              <td className="py-1.5 text-right">{r.n}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div>
-                        <p className="mb-2 font-mono text-xs text-muted uppercase">Indication kinds · PF / DDT</p>
-                        <div className="space-y-1">
-                          {Object.entries(calcJob.kinds || {}).map(([k, v]) => (
-                            <div key={k} className="flex justify-between gap-3 font-mono text-xs">
-                              <span className={v.validated && v.profitable ? "text-primary" : "text-muted"}>{k}</span>
-                              <span className="text-right">
-                                PF {(v.pf ?? 0).toFixed(2)} · DDt {formatDuration((v.maxDdS ?? 0) * 1000)}
-                                {v.bySide ? ` · L ${(v.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(v.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div>
-                        <p className="mb-2 font-mono text-xs text-muted uppercase">Direction · net PF</p>
-                        <div className="space-y-1">
-                          {Object.entries(calcJob.byDirection || {}).map(([k, v]) => (
-                            <div key={k} className="flex justify-between font-mono text-xs">
-                              <span className={v.validated ? "text-primary" : "text-muted"}>{k}</span>
-                              <span>PF {v.pf.toFixed(2)} · net {((v.netAvg ?? 0) * 100).toFixed(3)}% · DDt {formatDuration(v.maxDdS * 1000)} · n {v.n}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div>
-                        <p className="mb-2 font-mono text-xs text-muted uppercase">Strategy · pack / kind</p>
-                        <div className="space-y-1">
-                          {Object.entries(calcJob.byStrategy || {}).map(([k, v]) => (
-                            <div key={k} className="flex justify-between gap-3 font-mono text-xs">
-                              <span className={v.validated ? "text-primary" : "text-muted"}>{k}</span>
-                              <span className="text-right">
-                                PF {v.pf.toFixed(2)}
-                                {v.bySide ? ` · L ${(v.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(v.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div>
-                        <p className="mb-2 font-mono text-xs text-muted uppercase">Symbols · PF / DDT</p>
-                        <div className="space-y-1">
-                          {(calcJob.bySymbol || []).slice(0, 8).map((s) => (
-                            <div key={s.symbol} className="flex justify-between gap-3 font-mono text-xs">
-                              <span className={s.validated ? "text-primary" : "text-muted"}>{s.symbol.replace("-USDT", "")}</span>
-                              <span className="text-right">
-                                PF {s.pf.toFixed(2)} · DDt {formatDuration(s.maxDdS * 1000)}
-                                {s.bySide ? ` · L ${(s.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(s.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                    {calcJob.error ? <p className="text-sm text-danger">{calcJob.error}</p> : null}
-                  </div>
-                ) : null}
-                <p className="text-sm text-muted">
-                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol × every indication type. Position cost is subtracted from PF, expectancy and averages. Settings Start attaches to the shared continuous replay; the live engine is never started from this page.
-                </p>
-              </Card>
-            </>
           )}
           {section === "connection" && (
             <Card title="Connection" hint={connHint(conn, stats)}>
               <Grid>
                 <KV k="Selected" v={conn === "vst" ? "VST demo" : conn === "live" ? "Live mainnet" : "Overall"} />
                 <KV k="Name" v={conn === "vst" ? "BingX X02" : conn === "live" ? "BingX X01" : "All desks"} />
-                <KV k="Exchange" v={String(stats?.exchange ?? creds?.exchange ?? "BingX")} />
-                <KV k="Connection type" v={connType === "vst" ? "VST demo" : "Live mainnet"} />
-                <KV k="Connection method" v={connMethod} />
-                <KV k="API key" v={creds?.apiKeyMasked || (creds?.apiKeySet ? "set" : "missing")} />
-                <KV k="API secret" v={creds?.apiSecretSet ? "set · hidden" : "missing"} />
-                <KV k="Base URL" v={String(creds?.baseUrl ?? (connType === "vst" ? "https://open-api-vst.bingx.com" : "https://open-api.bingx.com"))} />
-                <KV k="Testnet" v={connType === "vst" ? "yes" : "no"} />
-                <KV k="Live trade" v={bool(cts?.live_trading_enabled) || creds?.liveTradeEnabled ? "on" : "off"} />
-                <KV k="Last status" v={String(creds?.lastTestStatus || stats?.mode || "—")} />
+                <KV k="Exchange" v={String(stats?.exchange ?? "BingX")} />
+                <KV k="Mode" v={String(stats?.mode ?? "—")} />
                 <KV k="Position mode" v={String(cts?.position_mode ?? "hedge")} />
                 <KV k="Margin" v={String(cts?.margin_mode ?? "cross")} />
                 <KV k="Leverage % (CTS)" v={`${num(cts?.leveragePercentage, 100)}%`} />
                 <KV k="Maximal leverage" v={bool(cts?.useMaximalLeverage) ? "on" : "off"} />
+                <KV k="Live requested" v={bool(cts?.live_trade_requested) ? "yes" : "no"} />
+                <KV k="CTS engine live flag" v={bool(cts?.live_trading_enabled) ? "on" : "off"} />
+                <KV k="Close-only" v={bool(cts?.useSystemCloseOnly) ? "on" : "off"} />
+                <KV k="PF semantics" v={String(cts?.mainTradePfRatioSemantics ?? "position-cost-net-v3")} />
+                <KV k="Settings version" v={String(cts?.settings_version ?? "—")} />
+                <KV k="Updated" v={String(cts?.updated_at ?? "—")} />
                 <KV k="Pulse running" v={stats?.paused ? "paused" : stats?.running && !stats?.halted ? "yes" : stats?.haltReason || "halted"} />
                 <KV k="Scan" v={`${fmtNum(stats?.scanMs, 1)} ms · cycle ${stats?.cycle ?? "—"}`} />
-                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.1))} />
+                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.05))} />
                 <KV k="Unit" v={String(stats?.unit ?? (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED"))} />
               </Grid>
-              <div className="space-y-3 rounded-lg border border-border bg-bg2 p-3">
-                <p className="font-mono text-xs text-muted uppercase">Credentials · submitted as live mainnet default</p>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="block text-sm">
-                    <span className="font-mono text-xs text-muted">Connection type</span>
-                    <select
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
-                      value={connType}
-                      onChange={(e) => {
-                        credsDirtyRef.current = true;
-                        const v = e.target.value === "vst" ? "vst" : "mainnet";
-                        setConnType(v);
-                        if (v === "mainnet") setAsDefaultMainnet(true);
-                      }}
-                    >
-                      <option value="mainnet">Live mainnet (BingX X01)</option>
-                      <option value="vst">VST demo (BingX X02)</option>
-                    </select>
-                  </label>
-                  <label className="block text-sm">
-                    <span className="font-mono text-xs text-muted">Connection method</span>
-                    <select
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
-                      value={connMethod}
-                      onChange={(e) => {
-                        credsDirtyRef.current = true;
-                        setConnMethod(e.target.value);
-                      }}
-                    >
-                      <option value="library">library (HMAC)</option>
-                      <option value="rest">REST signed</option>
-                    </select>
-                  </label>
-                  <label className="block text-sm sm:col-span-2">
-                    <span className="font-mono text-xs text-muted">API key</span>
-                    <input
-                      type="text"
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm"
-                      value={apiKey}
-                      placeholder={creds?.apiKeySet ? "leave to keep current" : "BingX API key"}
-                      onChange={(e) => {
-                        credsDirtyRef.current = true;
-                        setApiKey(e.target.value);
-                      }}
-                    />
-                  </label>
-                  <label className="block text-sm sm:col-span-2">
-                    <span className="font-mono text-xs text-muted">API secret</span>
-                    <input
-                      type="password"
-                      autoComplete="new-password"
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm"
-                      value={apiSecret}
-                      placeholder={creds?.apiSecretSet ? "leave blank to keep current" : "BingX API secret"}
-                      onChange={(e) => {
-                        credsDirtyRef.current = true;
-                        setApiSecret(e.target.value);
-                      }}
-                    />
-                  </label>
-                </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={asDefaultMainnet}
-                    onChange={(e) => setAsDefaultMainnet(e.target.checked)}
-                  />
-                  Save submitted credentials as the default for live mainnet
-                </label>
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    className="min-h-11 rounded-lg bg-primary px-4 text-sm text-bg"
-                    disabled={credSaving}
-                    onClick={() => void onSaveCreds()}
-                  >
-                    {credSaving ? "Saving…" : "Save credentials"}
-                  </button>
-                  {credMsg ? <span className="text-sm text-muted">{credMsg}</span> : null}
-                </div>
-                <p className="text-sm text-muted">
-                  Secrets stay in Redis on the desk host and are never written to git. Submitted keys become the Live mainnet (X01) default unless you uncheck that box.
-                </p>
-              </div>
+              <p className="text-sm text-muted">
+                This desk is independent of the CTS engine. Overlay saves apply only to Live or VST —
+                Overall is a mixed view and will not write either book.
+              </p>
             </Card>
           )}
 
           {section === "profit" && (
-            <div className="grid min-w-0 gap-4">
             <Card
               title="Profit factor · PositionCost"
-              hint={`One overall threshold · independent evaluation windows in every stage · Base ${DEFAULT_OVERLAY.baseEvalPosCount ?? DEFAULT_OVERLAY.setPfWindow} / Main ${MAIN_EVAL_DEFAULT} / Real ${REAL_EVAL_DEFAULT} · PF ${DEFAULT_OVERLAY.setMinPf.toFixed(2)}`}
+              hint="PF = net gains ÷ net losses over the selected window"
             >
+              <CostEvidencePanel stats={stats} />
               <Grid>
+                <Num label="Fallback taker fee" value={overlay.takerFeeRate * 100}
+                  min={0} max={5} step={0.001} unit="%"
+                  hint="Used when the exchange has not supplied a current fee rate."
+                  onChange={(v) => patch("takerFeeRate", v / 100)} />
+                <Num label="Fallback maker fee" value={overlay.makerFeeRate * 100}
+                  min={0} max={5} step={0.001} unit="%"
+                  hint="Maker requires confirmed maker liquidity; LIMIT alone is not evidence."
+                  onChange={(v) => patch("makerFeeRate", v / 100)} />
+                <Num label="Slippage / fee ratio" value={overlay.slippageFeeRatio}
+                  min={0} max={10} step={0.05} unit="× fee"
+                  hint="0.1 = 10% of fees. Paper estimates only; actual fill prices already contain slippage."
+                  onChange={(v) => patch("slippageFeeRatio", v)} />
                 <Slider
-                  label="Position cost fallback"
-                  value={overlay.positionCostFallbackPct}
-                  min={0.02}
-                  max={1}
-                  step={0.01}
-                  unit="%"
-                  hint="Default 0.10% round trip. Used until complete exchange fee samples are available."
-                  onChange={(v) => { patch("positionCostFallbackPct", v); if (!overlay.useLivePositionCosts) patch("positionCostPct", v); }}
-                />
-                <Slider
-                  label="Overall minimum PF"
+                  label="Min PF"
                   value={overlay.minPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  hint={`Shared by Base, Main, Real, DCA and exits. Default ${DEFAULT_OVERLAY.minPf.toFixed(2)}. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
-                  onChange={(v) => patch("minPf", normalizePf(v, DEFAULT_OVERLAY.minPf))}
+                  min={MIN_PF_FLOOR}
+                  max={2.3}
+                  step={0.02}
+                  hint={pfHint(overlay.minPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("minPf", v)}
+                />
+                <Toggle
+                  label="Windows follow the overall validation N (PF, Set PF, Exit PF, SL:TP and trail recalc)"
+                  on={overlay.windowsLinked !== false}
+                  onChange={(v) => patch("windowsLinked", v)}
                 />
                 <Slider
-                  label="PF window"
+                  label="PF window (own N when windows are unlinked)"
                   value={overlay.pfWindow}
-                  min={5}
-                  max={75}
+                  min={8}
+                  max={50}
                   step={1}
                   hint="Last N closed trades for the average Result-R."
                   onChange={(v) => patch("pfWindow", v)}
                 />
-                <Toggle
-                  label="Use live exchange costs"
-                  on={overlay.useLivePositionCosts}
-                  onChange={(v) => patch("useLivePositionCosts", v)}
-                />
-                <Toggle
-                  label="Minimal range configuration"
-                  on={overlay.preferMinimalRange}
-                  hint="After validation gates, prefer the smallest stable ranges; PF is always ranked first and never minimized."
-                  onChange={(v) => patch("preferMinimalRange", v)}
-                />
-                <Toggle
-                  label="Additional 50+ coordination"
-                  on={overlay.additionalCoordination}
-                  hint="Evaluate the independent last-50+ position coordination window without reducing the full historic matrix."
-                  onChange={(v) => patch("additionalCoordination", v)}
-                />
-                <Slider
-                  label="Coordination last-N"
-                  value={overlay.coordOptimizationN}
-                  min={50}
-                  max={200}
-                  step={10}
-                  hint="Independent live optimization window; historic catalog coverage is unchanged."
-                  onChange={(v) => patch("coordOptimizationN", Math.max(50, Math.min(200, Math.round(v / 10) * 10)))}
-                />
+                <PfWindowControls overlay={overlay} patch={patch} stats={stats} />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
-                <KV k="Effective position cost" v={`${(stats?.positionCost?.effectivePct ?? overlay.positionCostPct).toFixed(4)}%`} />
-                <KV k="Configured fallback" v={`${overlay.positionCostFallbackPct.toFixed(2)}%`} />
-                <KV k="Cost source / samples" v={`${stats?.positionCost?.source ?? "No measurement received"} · ${stats?.positionCost?.samples ?? 0} samples${stats?.positionCost?.fallback ? " · fallback active" : ""}`} />
-                <KV k="Cost measured at" v={stats?.positionCost?.updatedAt ? new Date(stats.positionCost.updatedAt * 1000).toLocaleString() : "No exchange measurement"} />
-                <KV k="1.00 Neutral" v={`net 0 · gross ${overlay.positionCostPct.toFixed(2)}%`} />
-                <KV k="1.10 = +1× cost" v={`net +${overlay.positionCostPct.toFixed(2)}% · gross ${(overlay.positionCostPct * 2).toFixed(2)}%`} />
+                <KV k="PF 1.00" v="Net gains equal net losses" />
+                <KV k="PF 1.10" v="Net gains are 1.10× net losses" />
                 <KV
                   k={`Last ${overlay.pfWindow} live`}
-                  v={pfLive(stats)}
+                  v={pfLive(stats, overlay)}
                 />
               </div>
               <p className="text-sm text-muted">
-                Ratio = 1 + avg( (move% − cost%) / cost% ) × 0.10. Gate uses this scale, not classic
-                gross-profit / gross-loss. Classic PF still shows on Results.
+                Gates use profit factor after costs. Result-R and its return score are separate metrics.
+                A selected paper PF and an executed PF measure different trades.
               </p>
             </Card>
-            <ForcedConfigsPanel live={stats?.forcedConfigs} />
-            </div>
           )}
 
           {section === "risk" && (
-            <>
-              <Card title="Risk thresholds & gates" hint="The live halt, position protection, Set validation and entry pacing thresholds are saved with this connection.">
-                <Grid>
-                  <Num
-                    label="Equity drawdown halt"
-                    value={overlay.drawdownHaltPct}
-                    min={0}
-                    max={80}
-                    step={1}
-                    unit="%"
-                    hint="0 = disabled · stops new entries at this session equity drawdown; recovery requires a real capital increase."
-                    onChange={(v) => patch("drawdownHaltPct", Math.round(v))}
-                  />
-                  <Num
-                    label="Minimum equity floor"
-                    value={overlay.minimumEquity}
-                    min={0}
-                    max={1000000}
-                    step={0.01}
-                    unit="USDT"
-                    hint="0 = disabled; protects very small or depleted account equity."
-                    onChange={(v) => patch("minimumEquity", Math.max(0, v))}
-                  />
-                  <Num
-                    label="Position max DD time"
-                    value={overlay.maxDdTimeS / 60}
-                    min={10}
-                    max={1440}
-                    step={10}
-                    unit="min"
-                    hint="Underwater positions close after this continuous drawdown time."
-                    onChange={(v) => patch("maxDdTimeS", Math.round(v / 10) * 600)}
-                  />
-                  <Num
-                    label="Set max DD time"
-                    value={overlay.setMaxDdTimeS / 60}
-                    min={10}
-                    max={1440}
-                    step={10}
-                    unit="min"
-                    hint="Historic Set gate: maximum drawdown duration allowed in the scored tape."
-                    onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)}
-                  />
-                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
-                  <Num
-                    label="Validation samples"
-                    value={overlay.setMinSamples}
-                    min={5}
-                    max={75}
-                    step={1}
-                    hint="Minimum historic closes before a Set can qualify."
-                    onChange={(v) => patch("setMinSamples", Math.round(v))}
-                  />
-                  <Num
-                    label="Deactivation window"
-                    value={overlay.setDeactN}
-                    min={5}
-                    max={80}
-                    step={1}
-                    hint="Latest live fills used by the negative-result deactivation gate."
-                    onChange={(v) => patch("setDeactN", Math.round(v))}
-                  />
-                  <Num
-                    label="Entry cooldown"
-                    value={overlay.cooldownS}
-                    min={0}
-                    max={120}
-                    step={0.5}
-                    unit="s"
-                    hint="Per-symbol cooldown between admitted entries."
-                    onChange={(v) => patch("cooldownS", v)}
-                  />
-                  <Num
-                    label="Entry stagger"
-                    value={overlay.staggerS}
-                    min={0}
-                    max={30}
-                    step={0.1}
-                    unit="s"
-                    hint="Global pacing guard; 0 disables the stagger delay."
-                    onChange={(v) => patch("staggerS", v)}
-                  />
-                  <Toggle label="Automatic Set deactivation" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
-                  <Toggle label="Reactivate after recovery" on={overlay.setReactivate} onChange={(v) => patch("setReactivate", v)} />
-                  <Toggle label="Live negative-result deactivation" on={overlay.setLiveNegativeDeact} onChange={(v) => patch("setLiveNegativeDeact", v)} />
-                </Grid>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <ThresholdReadout label="Equity halt" value={`${overlay.drawdownHaltPct.toFixed(0)}%`} tone="text-warn" />
-                  <ThresholdReadout label="Set PF gate" value={overlay.setMinPf.toFixed(2)} tone="text-primary" />
-                  <ThresholdReadout label="Pacing" value={`${overlay.cooldownS.toFixed(1)}s + ${overlay.staggerS.toFixed(1)}s`} />
-                </div>
-              </Card>
-              <Card title="Stop loss vs take profit" hint="All 30 SL:TP ratios × every TP step always run as independent Sets · no ratio picker">
-              <p className="text-sm text-muted">
-                Catalog is fixed system-wide: SL:TP 0.1–3.0 step 0.1 ({slTpGrid().length} books) × TP steps {overlay.setMinStep}–{overlay.setStepMax}.
-                Every combo is historic-scored and live-gated on its own tape. Nothing in Settings turns a ratio off.
+            <Card title="Set grid · SL = TP × ratio" hint="Every ratio below runs as its own Set, for every TP step and pack. Read-only.">
+              <div className="flex flex-wrap gap-2 font-mono text-xs">
+                {SL_SET_RATIOS.map((r) => (
+                  <span key={r} className="rounded-md border border-border px-2 py-1 text-muted">
+                    {r.toFixed(2)}
+                  </span>
+                ))}
+              </div>
+              <p className="font-mono text-xs text-muted">
+                TP = k × {TP_UNIT_PCT}% of price for k = {overlay.setMinStep}–{overlay.setStepMax} ({tpPctOfStep(overlay.setMinStep)}–{tpPctOfStep(overlay.setStepMax)}%); the net at TP is the step minus PositionCost ({overlay.positionCostPct}%), which never lifts or lowers the step. The TP never sits under PositionCost.
               </p>
+            </Card>
+          )}
+          {section === "risk" && (
+            <Card title="Live SL:TP pick" hint="Live variant pick (auto-recalc) · grid 0.3–1.5 step 0.3 · separate from the Set grid below">
+              <div className="flex flex-wrap gap-2">
+                {SL_TP_RATIOS.map((r) => {
+                  const active = Math.abs(overlay.slToTpRatio - r) < 1e-9;
+                  const tp = overlay.positionCostPct * overlay.tpCostRatio;
+                  const sl = tp * r;
+                  return (
+                    <button
+                      key={r}
+                      type="button"
+                      data-ratio={r}
+                      onClick={() => patch("slToTpRatio", snapSlToTp(r))}
+                      className={`min-h-11 min-w-20 rounded-lg border px-3 py-2 font-mono text-sm ${
+                        active ? "border-primary bg-primary-dim/40 text-fg" : "border-border text-muted"
+                      }`}
+                    >
+                      <div>{r.toFixed(1)}</div>
+                      <div className="text-[10px] tracking-wide uppercase">
+                        RR {(1 / r).toFixed(2)} · SL {sl.toFixed(2)}%
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
               <Grid>
-                <Toggle label="Auto-recalc live attach" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />
+                <Toggle label="Auto-recalc SL:TP" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />
                 <Slider
                   label="Recalc min samples"
                   value={overlay.slToTpRecalcN}
-                  min={3}
+                  min={8}
                   max={20}
                   step={1}
                   hint="Last-N closes tagged with that ratio"
@@ -1705,11 +440,10 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
-                <Slider label="SL min" value={overlay.slMinPct} min={SL_MIN_PCT} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
-                <Slider label="SL max" value={overlay.slMaxPct} min={SL_MIN_PCT} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
-                <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
-                <Slider label="TP step unit" value={overlay.tpStepPct} min={0.02} max={1} step={0.01} unit="%" onChange={(v) => patch("tpStepPct", v)} />
-                <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
+                <Slider label="SL min" value={overlay.slMinPct} min={0.05} max={1} step={0.01} unit="%" onChange={(v) => patch("slMinPct", v)} />
+                <Slider label="SL max" value={overlay.slMaxPct} min={0.2} max={3} step={0.05} unit="%" onChange={(v) => patch("slMaxPct", v)} />
+                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={2} step={0.05} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Slider label="TP max" value={overlay.tpMaxPct} min={0.4} max={6} step={0.05} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
                   value={overlay.tpCostRatio}
@@ -1721,20 +455,6 @@ function SettingsPage() {
                 />
                 <Slider label="Base TP" value={overlay.tpPct} min={0.2} max={4} step={0.05} unit="%" onChange={(v) => patch("tpPct", v)} />
               </Grid>
-              {overlay.forcedBest && Object.keys(overlay.forcedBest).length ? (
-                <div className="rounded-lg border border-primary-dim bg-surface p-3" data-testid="forced-applied-values">
-                  <div className="text-xs text-muted">
-                    Applied from forced 24h winners{overlay.forcedVariant ? ` · ${overlay.forcedVariant}` : ""} · desk TP {overlay.tpPct.toFixed(2)}% / SL {overlay.slPct.toFixed(2)}%
-                  </div>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                    {Object.entries(overlay.forcedBest).sort(([a], [b]) => a.localeCompare(b)).map(([sym, row]) => (
-                      <div key={sym} className="font-mono text-xs">
-                        {sym.replace("-USDT", "")} · {row.indication} {row.direction} · TP {(row.tpPct ?? 0).toFixed(2)}% / SL {(row.slPct ?? 0).toFixed(2)}%
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="font-mono text-xs text-muted">
@@ -1747,12 +467,13 @@ function SettingsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {slTpGrid().map((r) => {
+                    {SL_TP_RATIOS.map((r) => {
                       const tp = overlay.positionCostPct * overlay.tpCostRatio;
                       const sl = tp * r;
                       const wr = sl / (sl + tp);
+                      const on = Math.abs(overlay.slToTpRatio - r) < 1e-9;
                       return (
-                        <tr key={r} data-ratio={r.toFixed(1)} className="border-t border-border font-mono">
+                        <tr key={r} className={`border-t border-border font-mono ${on ? "text-primary" : ""}`}>
                           <td className="py-1.5">{r.toFixed(1)}</td>
                           <td className="py-1.5">{(1 / r).toFixed(2)}</td>
                           <td className="py-1.5">{sl.toFixed(2)}</td>
@@ -1765,44 +486,214 @@ function SettingsPage() {
                 </table>
               </div>
               <p className="text-sm text-muted">
-                All {slTpGrid().length} ratios stay in eval. Auto-recalc only chooses the live attach for a new fill from the scored set — it does not disable the others.
+                Active {overlay.slToTpRatio.toFixed(2)} · TP {(overlay.positionCostPct * overlay.tpCostRatio).toFixed(2)}% × ratio → SL{" "}
+                {(overlay.positionCostPct * overlay.tpCostRatio * overlay.slToTpRatio).toFixed(2)}%. Auto picks the ratio with the best last-{overlay.slToTpRecalcN} PositionCost score.
               </p>
             </Card>
-            </>
           )}
 
           {section === "packs" && (
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
-                <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Default ON · OFF stops new Normal entries · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
-                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
+                <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals" onChange={(v) => patch("stratIndications", v)} />
+                <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="all counts, 0 = unlimited" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
-                <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
-                Indications and general run in parallel for entries. Block Active executes an adjusted quantity from a virtual reference. Normal exchange entries follow the separate Normal (General) setting.
-                Trailing only moves SL after min-step, only in the protective direction, and retries a failed exchange update while retaining the old stop. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
+                Indications and general run in parallel for entries. Block adds on a live parent for every count (max stack {overlay.blockMaxStack || "unlimited"}).
+                Trailing only moves SL after min-step. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
           )}
 
+          {section === "packs" && (
+            <Card
+              title="Indications by range"
+              hint="Each entry builds indications from library families x ranges x timeframes x relations; every name it makes is its own strategy with its own Sets and its own Base validation, with this entry's TP-step range, SL ratios, types and pause. Combinations the library does not know are dropped and listed below. A wide entry multiplies the Set count: keep ranges and steps narrow."
+            >
+              <IndicationConfigEditor
+                value={overlay.indicationConfigs}
+                onChange={(v) => patch("indicationConfigs", v)}
+                report={stats?.sets?.indicationConfigs}
+              />
+            </Card>
+          )}
+
+          {section === "sets" && <SetsOverview stats={stats} />}
+          {section === "sets" && (
+            <Card
+              title="Long and short are independent"
+              hint="Split (default): every Set exists once per trade direction. The long Set trades long signals only and the short Set short signals only, each with its own lane, tape, Base/Main/Real windows, pause after success and learned minimum PF, so one direction never moves the other's verdict. A signal is judged only by a Set of its direction. Both: one Set trades both directions and its single position couples them. Split doubles the Set count; the replay work grows far less, because every entry bar belongs to one side."
+            >
+              <Grid>
+                <Toggle
+                  label="Independent long and short Sets"
+                  on={overlay.directionMode !== "both"}
+                  onChange={(v) => patch("directionMode", v ? "split" : "both")}
+                />
+              </Grid>
+            </Card>
+          )}
+          {section === "sets" && (
+            <Card
+              title="Pause after success"
+              hint="After a WINNING close (net of PositionCost above zero) a Set lane rests at least this long before its next entry, on top of the cooldown. Auto Mode picks the pause for every indication and symbol from a few reference Sets of that indication, using only results that closed before the moment of the choice; it needs enough orders and a clear lead over no extra rest, else the cooldown alone applies. A pause per indication below overrides the mode. Replay and live use the same rule."
+            >
+              <Grid>
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Mode</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.pauseMode}
+                    onChange={(e) => patch("pauseMode", (PAUSE_MODES as string[]).includes(e.target.value) ? (e.target.value as PauseMode) : "off")}
+                    data-testid="pause-mode"
+                  >
+                    <option value="off">off (cooldown only)</option>
+                    <option value="auto">auto (best pause per indication and symbol)</option>
+                    <option value="fixed">fixed (the same pause for every indication)</option>
+                  </select>
+                </label>
+                <Slider
+                  label="Fixed pause"
+                  value={overlay.pauseFixedMin}
+                  min={0}
+                  max={PAUSE_MAX}
+                  step={1}
+                  unit=" min"
+                  hint={overlay.pauseMode === "fixed" ? "rest after every winning close" : "used in fixed mode"}
+                  onChange={(v) => patch("pauseFixedMin", v)}
+                />
+                <Slider
+                  label="Auto: orders judged (max)"
+                  value={overlay.pauseAutoMax}
+                  min={10}
+                  max={500}
+                  step={5}
+                  hint="newest pooled reference orders read per candidate"
+                  onChange={(v) => patch("pauseAutoMax", v)}
+                />
+                <Slider
+                  label="Auto: orders needed (min)"
+                  value={overlay.pauseAutoMin}
+                  min={8}
+                  max={500}
+                  step={1}
+                  hint="below this a candidate cannot replace no extra rest"
+                  onChange={(v) => patch("pauseAutoMin", v)}
+                />
+              </Grid>
+              <Grid>
+                <CsvField
+                  label="Auto candidates (minutes)"
+                  value={overlay.pauseCandidates.join(", ")}
+                  hint={`whole minutes 1-${PAUSE_MAX}`}
+                  onCommit={(t) => patch("pauseCandidates", t.split(/[,;\s]+/).map((x) => Math.round(Number(x))).filter((x) => x >= 1 && x <= PAUSE_MAX))}
+                />
+                <CsvField
+                  label="Pause per indication (pack=minutes)"
+                  value={Object.entries(overlay.pausePack).map(([k, m]) => `${k}=${m}`).join(", ")}
+                  hint="e.g. general=15, extra.donch_n8_t5=30; wins over the mode"
+                  onCommit={(t) => {
+                    const out: Record<string, number> = {};
+                    for (const part of t.split(",")) {
+                      const [k, m] = part.split("=").map((x) => x.trim());
+                      const n = Math.round(Number(m));
+                      if (k && Number.isFinite(n) && n > 0) out[k] = Math.min(PAUSE_MAX, n);
+                    }
+                    patch("pausePack", out);
+                  }}
+                />
+              </Grid>
+              <PauseChosen stats={stats} />
+            </Card>
+          )}
+          {section === "sets" && (
+            <Card
+              title="Hold time per step"
+              hint="Hold time on: positions leave on a time exit of their own. Auto Mode picks it for every Set (pack × range × step, trailing pair) from that Set's own last orders (as many as it has, at most the limit); a step with its manual hold on keeps the manual value. Steps 1–5: 1–50 min; steps 6–12: 30–350 min. Replay and live use the same hold."
+            >
+              <Grid>
+                <Toggle label="Hold time" on={overlay.holdEnabled !== false} onChange={(v) => patch("holdEnabled", v)} />
+                <Toggle label="Auto Mode (best hold per Set, never on trailing Sets; off by default: measured worse than no hold)" on={overlay.holdEnabled !== false && overlay.holdAuto !== false} onChange={(v) => patch("holdAuto", v)} />
+                <Slider
+                  label="Auto: orders judged (max)"
+                  value={overlay.holdAutoMax ?? 50}
+                  min={10}
+                  max={50}
+                  step={1}
+                  hint={`last ${overlay.holdAutoMax ?? 50} orders of the Set at most`}
+                  onChange={(v) => patch("holdAutoMax", v)}
+                />
+                <Slider
+                  label="Auto: orders needed (min)"
+                  value={overlay.holdAutoMin ?? 10}
+                  min={3}
+                  max={50}
+                  step={1}
+                  hint={`below ${overlay.holdAutoMin ?? 10} orders a Set keeps the global stop`}
+                  onChange={(v) => patch("holdAutoMin", v)}
+                />
+              </Grid>
+              <div className="grid gap-2 sm:grid-cols-2" data-testid="step-hold">
+                {Array.from({ length: 12 }, (_, i) => {
+                  const step = i + 1;
+                  const [lo, hi] = step <= 5 ? [1, 50] : [30, 350];
+                  const on = overlay.stepHoldOn?.[i] === true;
+                  const raw = Number(overlay.stepHoldMin?.[i] ?? lo);
+                  const minutes = Math.max(lo, Math.min(hi, Math.round(raw)));
+                  const setAt = <T,>(arr: T[] | undefined, v: T, fill: T): T[] => {
+                    const next = Array.from({ length: 12 }, (_, j) => (arr?.[j] ?? fill));
+                    next[i] = v;
+                    return next;
+                  };
+                  return (
+                    <div key={step} className="rounded-lg border border-border bg-bg2 px-3 py-2" data-testid={`step-hold-${step}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs">Step {step}</span>
+                        <label className="flex items-center gap-2 font-mono text-xs text-muted">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            data-testid={`step-hold-on-${step}`}
+                            onChange={(e) => patch("stepHoldOn", setAt(overlay.stepHoldOn, e.target.checked, false))}
+                          />
+                          hold {on ? "on" : "off"}
+                        </label>
+                        <span className="font-mono text-xs">{on ? `${minutes} min` : "global"}</span>
+                      </div>
+                      <input
+                        type="range"
+                        className="mt-2 w-full"
+                        min={lo}
+                        max={hi}
+                        step={1}
+                        value={minutes}
+                        disabled={!on}
+                        data-testid={`step-hold-min-${step}`}
+                        aria-label={`Step ${step} hold minutes`}
+                        onChange={(e) => patch("stepHoldMin", setAt(overlay.stepHoldMin, Number(e.target.value), lo))}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
           {section === "sets" && (
             <Card
               title="Independent Sets · 1m historic"
-              hint="Settings min/max is the catalog. Every pack × SL in range × TP-step in range is its own book. Live only fires validated +EV Sets."
+              hint="Each pack × SL:TP × TP-step (2–30 × position cost) is its own book. Sets below Minimal Step Range are not calculated. Live losses raise min step to the count of positive/successful fills."
             >
               <Grid>
-                <p className="text-sm text-muted">Historic 1m basis · always active</p>
-                <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
-                <Toggle label="Strict validated gate" on={overlay.setStrictGate !== false} onChange={(v) => patch("setStrictGate", v)} />
-                <Toggle label="Auto-deactivate" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
-                <Toggle label="Reactivate on recovery" on={overlay.setReactivate} onChange={(v) => patch("setReactivate", v)} />
+                <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
+                <Toggle label="Base gate (always on: entries open only under a Base-validated Set)" on={true} onChange={() => patch("setUseHistoricGate", true)} />
                 <Slider
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
                   min={120}
-                  max={20160}
+                  max={4320}
                   step={60}
                   hint={`${overlay.histLookbackBars} × 1m = ${(overlay.histLookbackBars / 60).toFixed(1)}h`}
                   onChange={(v) => patch("histLookbackBars", v)}
@@ -1824,103 +715,397 @@ function SettingsPage() {
                   onChange={(v) => patch("histWarmup", v)}
                 />
                 <Slider
-                  label="Complete refresh interval"
+                  label="Refresh"
                   value={overlay.histRefreshS}
-                  min={60}
-                  max={86400}
-                  step={60}
+                  min={30}
+                  max={600}
+                  step={10}
                   unit="s"
-                  hint="3600s = one complete rolling replay per hour"
                   onChange={(v) => patch("histRefreshS", v)}
                 />
                 <Slider
-                  label="Control trades · holdout"
-                  value={overlay.controlMinTrades}
-                  min={0}
-                  max={75}
-                  step={1}
-                  hint="Default 0 = off. Later control results stay visible; training validates each Set independently."
-                  onChange={(v) => patch("controlMinTrades", Math.round(v))}
-                />
-                <Slider
-                  label="Base evaluation · last positions"
+                  label="PF window"
                   value={overlay.setPfWindow}
-                  min={5}
-                  max={75}
-                  step={5}
-                  hint="Default 30 closed positions · one shared PF floor across all stages"
+                  min={8}
+                  max={40}
+                  step={1}
+                  hint="Last N historic+live fills for PositionCost PF"
                   onChange={(v) => patch("setPfWindow", v)}
                 />
                 <Slider
                   label="Deact window"
                   value={overlay.setDeactN}
-                  min={5}
+                  min={10}
                   max={80}
                   step={1}
                   hint="Latest N live fills · overall average loss deactivates that Set"
                   onChange={(v) => patch("setDeactN", v)}
                 />
                 <Slider
-                  label="Minimal Step Range"
+                  label="Min TP step"
                   value={overlay.setMinStep}
-                  min={DEFAULT_MIN_STEP}
-                  max={30}
+                  min={2}
+                  max={TP_STEP_MAX}
                   step={1}
-                  hint={`TP = step × ${overlay.tpStepPct}% (TP step unit, independent of the ${overlay.positionCostPct}% cost) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.tpStepPct).toFixed(2)}% … step ${overlay.setStepMax} = ${(overlay.setStepMax * overlay.tpStepPct).toFixed(2)}%. Every integer step through max is processed. Trailing only from step ${overlay.trailingMinStep}.`}
-                  onChange={(v) => patch("setMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))}
+                  hint={`TP = k × ${TP_UNIT_PCT}% of price, whatever PositionCost is. Default 2 (grid start 0.2%). k = ${overlay.setMinStep} → TP ${tpPctOfStep(overlay.setMinStep).toFixed(1)}%. Losing live fills raise min step.`}
+                  onChange={(v) => patch("setMinStep", Math.max(TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
-                  min={DEFAULT_MIN_STEP}
-                  max={30}
+                  min={2}
+                  max={TP_STEP_MAX}
                   step={1}
-                  hint="Upper TP step. Every integer from min through max is its own Set."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))}
+                  hint={`Upper TP step k. Default ${TP_STEP_DEFAULT_MAX} (${tpPctOfStep(TP_STEP_DEFAULT_MAX).toFixed(1)}%). Range ${TP_STEP_MIN}–${TP_STEP_MAX}.`}
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || TP_STEP_MIN, Math.min(TP_STEP_MAX, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
-                  on={overlay.setStepAdapt !== false}
+                  on={overlay.setStepAdapt === true}
                   onChange={(v) => patch("setStepAdapt", v)}
                 />
-                <Toggle
-                  label="Deactivate set on negative live PF"
-                  on={overlay.setLiveNegativeDeact}
-                  onChange={(v) => patch("setLiveNegativeDeact", v)}
-                />
-                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
+                {TP_RANGES.map((r) => (
+                  <Toggle
+                    key={r.id}
+                    label={`${r.label} range · TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}%${r.id === "wide" ? " (on extends the grid past Step max to 5.0 %)" : ""}`}
+                    on={(overlay.tpRanges ?? {})[r.id] ?? r.id !== "wide"}
+                    onChange={(v) => patch("tpRanges", { ...overlay.tpRanges, [r.id]: v })}
+                  />
+                ))}
+                {TP_RANGES.filter((r) => r.id === "normal" || r.id === "long" || r.id === "wide").map((r) => (
+                  <Slider
+                    key={`slmax-${r.id}`}
+                    label={`${r.label} range · largest SL ratio (0 = no limit)`}
+                    value={(overlay.slMaxByRange ?? {})[r.id] ?? 0}
+                    min={0}
+                    max={3.5}
+                    step={0.25}
+                    hint={`Sets of TP ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}% are built only with SL ratio up to this. Default: Long and Wide 1.0, Normal none.`}
+                    onChange={(v) => {
+                      const next = { ...(overlay.slMaxByRange ?? {}) };
+                      if (v < 0.2) delete next[r.id];
+                      else next[r.id] = Math.round(v * 4) / 4;
+                      patch("slMaxByRange", next);
+                    }}
+                  />
+                ))}
+                <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
+                  Last N per TP range · each range its own Base / Main / Negative / Real windows (blank = the global window); the Real and Real Neg lanes take their own N
+                </div>
+                <div className="col-span-full overflow-x-auto">
+                  <table className="w-full font-mono text-[11px]">
+                    <thead>
+                      <tr>
+                        <th className="text-left">Range</th>
+                        {LAST_N_FIELDS.map((f) => (
+                          <th key={f.key} className="text-left">{f.label}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {TP_RANGES.map((r) => (
+                        <tr key={`lastn-${r.id}`}>
+                          <td>{r.label}</td>
+                          {LAST_N_FIELDS.map((f) => {
+                            const cur = (overlay.lastNByRange ?? {})[r.id]?.[f.key];
+                            return (
+                              <td key={f.key}>
+                                <input
+                                  className="w-20 rounded border border-line bg-transparent px-1"
+                                  defaultValue={Array.isArray(cur) ? cur.join(",") : cur ?? ""}
+                                  placeholder="global"
+                                  onBlur={(e) => {
+                                    const next = { ...(overlay.lastNByRange ?? {}) } as Record<string, Record<string, unknown>>;
+                                    const row = { ...(next[r.id] ?? {}) };
+                                    if (e.target.value.trim() === "") delete row[f.key];
+                                    else row[f.key] = e.target.value;
+                                    if (Object.keys(row).length) next[r.id] = row;
+                                    else delete next[r.id];
+                                    patch("lastNByRange", lastNByRangeOf(next));
+                                  }}
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
                 <Slider
-                  label="Max DD time"
-                  value={Math.round(overlay.setMaxDdTimeS / 60)}
-                  min={10}
-                  max={960}
-                  step={10}
-                  unit="min"
-                  hint="10–960 min · default 960 (16h) · a Set must stay under this DDt cap"
-                  onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)}
+                  label="Set min PF"
+                  value={overlay.setMinPf}
+                  min={MIN_PF_FLOOR}
+                  max={2.3}
+                  step={0.02}
+                  hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("setMinPf", v)}
+                />
+                <Slider
+                  label="Max DD time (h)"
+                  value={overlay.setMaxDdtHours}
+                  min={2}
+                  max={36}
+                  step={2}
+                  unit="h"
+                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 24 h, owner 2026-10-29)."
+                  onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
+                />
+                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Stages · Base → Main → Real</div>
+                <p className="col-span-full text-xs text-muted">
+                  Each stage validates only on the orders the stage before it let through, and those orders form a new Set of the Base Set:
+                  the Main Set (opened while Base passed), the Real Set (opened while Main passed) and the Real Negative Set (opened in a
+                  Main dip). Execution uses Sets that pass Real; their orders mirror to the exchange.
+                </p>
+                <Toggle label="Stages after Base (off: the Base long window alone)" on={overlay.stagesEnabled !== false} onChange={(v) => patch("stagesEnabled", v)} />
+                <Toggle
+                  label="Stage windows need their full N orders (off, default: a window judges the orders it has, at least one; on: a Set with fewer never passes Main or Real)"
+                  on={overlay.stageFullWindow === true}
+                  onChange={(v) => patch("stageFullWindow", v)}
+                />
+                <Toggle
+                  label="Last-N windows by count (on: the newest N orders of the configuration whatever their age; off, default: the newest N inside the lookback period)"
+                  on={overlay.lastNBasis === "count"}
+                  onChange={(v) => patch("lastNBasis", v ? "count" : "time")}
+                />
+                <PfWindowControls overlay={overlay} patch={patch} stats={stats} />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
+                <Slider
+                  label="Base · long window (last N orders)"
+                  value={overlay.setGateWindow}
+                  min={1}
+                  max={200}
+                  step={1}
+                  hint="default 50 · each Set on its own last N orders, at the minimum PF, with the drawdown time"
+                  onChange={(v) => patch("setGateWindow", v)}
+                />
+                <Slider
+                  label="Base · short window (last N orders)"
+                  value={Math.min(overlay.setGateShortN, Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)))}
+                  min={0}
+                  max={Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
+                  step={1}
+                  hint={`the second Base window, 0 = off · at most ${Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))} with the long window ${overlay.setGateWindow} and the ratio below · default 25: best of the 24 h grid (scripts/base_window_grid.py)`}
+                  onChange={(v) => patch("setGateShortN", v)}
+                />
+                <Slider
+                  label="Base · minimal window (newest results)"
+                  value={overlay.setGateMinN}
+                  min={0}
+                  max={3}
+                  step={1}
+                  hint="0 = off · newest 1–3 Base results coordinate entry using the selected sign or average below; this does not change PF validation"
+                  onChange={(v) => patch("setGateMinN", v)}
+                />
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Base · minimal window results</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.setGateMinMode}
+                    onChange={(e) => patch("setGateMinMode", minMode(e.target.value))}
+                  >
+                    <option value="positive">positive (every one of the newest results above zero)</option>
+                    <option value="negative">negative (every one of the newest results below zero)</option>
+                    <option value="both">both (the newest results share one sign: all positive or all negative)</option>
+                    <option value="avgpositive">average positive (the mean of the newest results above zero)</option>
+                    <option value="avgnegative">average negative (the mean of the newest results below zero)</option>
+                    <option value="avgboth">average both (the mean of the newest results above or below zero)</option>
+                  </select>
+                </label>
+                <Slider
+                  label="Base · short window max share of the long window"
+                  value={overlay.setGateShortMaxRatio}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  hint="default 0.5 (50 %): long 40 allows a short window of at most 20; the engine clamps the short window to this share"
+                  onChange={(v) => patch("setGateShortMaxRatio", v)}
+                />
+                <Slider
+                  label="Base · min orders"
+                  value={overlay.setGateMinTrades}
+                  min={0}
+                  max={100}
+                  step={1}
+                  hint="0 = off (default, owner 2026-10-29): a Set is judged on the orders it has. Above 0: fewer orders than this are not judged (at most the long window)."
+                  onChange={(v) => patch("setGateMinTrades", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Main · additional strategies, coordinations, processings · the last-N validation, on the Main Set</div>
+                <Toggle label="Main · stage (long and short PF, plus minimal coordination on each Main Set)" on={overlay.mainGateEnabled !== false} onChange={(v) => patch("mainGateEnabled", v)} />
+                <Slider
+                  label="Main · long window (last N Main orders)"
+                  value={overlay.mainGateN}
+                  min={1}
+                  max={200}
+                  step={1}
+                  hint="default 25 · the first Main window, at the Base minimum PF"
+                  onChange={(v) => patch("mainGateN", v)}
+                />
+                <Toggle label="Main · short window (each Set picks its own; the long and the short window must both pass)" on={overlay.mainShortEnabled !== false} onChange={(v) => patch("mainShortEnabled", v)} />
+                <Slider
+                  label="Main · short window max share of the long window"
+                  value={overlay.mainShortMaxRatio}
+                  min={0.1}
+                  max={1}
+                  step={0.05}
+                  hint="default 0.5 (50 %): long 25 allows short windows of at most 12; candidates above it are dropped by the engine"
+                  onChange={(v) => patch("mainShortMaxRatio", v)}
+                />
+                <WindowChips
+                  label="Main · short candidates"
+                  value={overlay.mainShortWindows}
+                  options={[5, 10, 15, 20, 25]}
+                  hint={`Candidate selection, not simultaneous independent lanes. Effective candidates: ${overlay.mainShortWindows.filter(n => n <= Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}; excluded by ratio: ${overlay.mainShortWindows.filter(n => n > Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}. Long reference ${overlay.mainGateN} remains if none qualify.`}
+                  onChange={(v) => patch("mainShortWindows", v)}
+                />
+                <Slider
+                  label="Main · short window min orders"
+                  value={overlay.mainShortMin}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="a candidate needs this many validated Main orders"
+                  onChange={(v) => patch("mainShortMin", v)}
+                />
+                <Slider
+                  label="Main · short window margin"
+                  value={overlay.mainShortMargin}
+                  min={1}
+                  max={1.5}
+                  step={0.01}
+                  hint="a candidate must beat the long window's PF by this factor (default 1.02)"
+                  onChange={(v) => patch("mainShortMargin", v)}
+                />
+                <Slider
+                  label="Main · minimal window (newest results)"
+                  value={overlay.mainMinN}
+                  min={0}
+                  max={3}
+                  step={1}
+                  hint="0 = off · newest 1–3 Main results coordinate entry using the selected sign or average below; this does not change PF validation"
+                  onChange={(v) => patch("mainMinN", v)}
+                />
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Main · minimal window results</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.mainMinMode}
+                    onChange={(e) => patch("mainMinMode", minMode(e.target.value))}
+                  >
+                    <option value="positive">positive (every one of the newest results above zero)</option>
+                    <option value="negative">negative (every one of the newest results below zero)</option>
+                    <option value="both">both (the newest results share one sign: all positive or all negative)</option>
+                    <option value="avgpositive">average positive (the mean of the newest results above zero)</option>
+                    <option value="avgnegative">average negative (the mean of the newest results below zero)</option>
+                    <option value="avgboth">average both (the mean of the newest results above or below zero)</option>
+                  </select>
+                </label>
+                <Toggle label="Main · Negative lane (a dip opens Real Negative)" on={overlay.mainNegEnabled !== false} onChange={(v) => patch("mainNegEnabled", v)} />
+                <WindowChips
+                  label="Main · Negative windows"
+                  value={overlay.mainNegWindows}
+                  options={[1, 2, 5, 10]}
+                  hint="Default 5 and 10 · a negative Main window opens a separate same-direction Real Negative tape. An independently simulated opposite-direction strategy is not yet connected."
+                  onChange={(v) => patch("mainNegWindows", v)}
+                />
+                <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Real · evals and overall strategies · Active execution and mirroring to the exchange</div>
+                <Toggle label="Real · validation (last N of the lane's Real Set)" on={overlay.realGateEnabled !== false} onChange={(v) => patch("realGateEnabled", v)} />
+                <Slider
+                  label="Real · last N orders"
+                  value={overlay.realGateN}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="default 15 · single window, on the Real Set (positive lane) and on the Real Negative Set (Negative lane)"
+                  onChange={(v) => patch("realGateN", v)}
+                />
+                <Toggle label="Real · overall strategies read the Real Sets' paper stream" on={overlay.realStagePaper !== false} onChange={(v) => patch("realStagePaper", v)} />
+                <Toggle label="All validation gates use the Base minimum PF (Real, Exit, DCA, Block, coordinator)" on={overlay.minPfLinked !== false} onChange={(v) => patch("minPfLinked", v)} />
+                <Toggle label="Pre-history grows when too many Sets lack samples" on={overlay.histLookbackAuto !== false} onChange={(v) => patch("histLookbackAuto", v)} />
+                <Slider
+                  label="Pre-history · target samples per Set"
+                  value={overlay.histLookbackTargetN}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="collection target only; does not change the admission minimum or PF gates"
+                  onChange={(v) => patch("histLookbackTargetN", v)}
+                />
+                <Slider
+                  label="Pre-history · max bars"
+                  value={overlay.histLookbackMax}
+                  min={480}
+                  max={4320}
+                  step={240}
+                  hint="the lookback may grow up to this many 1m bars (4,320 = 72 hours)"
+                  onChange={(v) => patch("histLookbackMax", v)}
                 />
                 <Slider
                   label="Min samples"
                   value={overlay.setMinSamples}
                   min={5}
-                  max={75}
+                  max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
                 />
-                <Num
-                  label="Max active Sets"
-                  value={overlay.setMaxActive}
-                  min={0}
-                  max={10000}
+                <Slider
+                  label="Short Range · TP step min"
+                  value={overlay.shortRangeStepMin}
+                  min={2}
+                  max={6}
                   step={1}
-                  hint="All validated Sets by default · 0 = unlimited"
-                  onChange={(v) => patch("setMaxActive", v)}
+                  hint="Short Range (Low-Range signals) trades TP steps min..max, one step = 0.1 % of price (steps 2–6 = 0.2–0.6 %). Default 2–6."
+                  onChange={(v) => patch("shortRangeStepMin", Math.max(2, Math.min(overlay.shortRangeStepMax || 6, Math.round(v))))}
+                />
+                <Slider
+                  label="Short Range · TP step max"
+                  value={overlay.shortRangeStepMax}
+                  min={2}
+                  max={6}
+                  step={1}
+                  onChange={(v) => patch("shortRangeStepMax", Math.max(overlay.shortRangeStepMin || 2, Math.min(6, Math.round(v))))}
+                />
+                <Slider
+                  label="Short Range · min PF"
+                  value={overlay.shortRangeMinPf}
+                  min={MIN_PF_FLOOR}
+                  max={2.3}
+                  step={0.02}
+                  hint={overlay.minPfBySize !== false ? "The window-size PF controls currently take precedence; turn them off to use this Short Range floor for its windows." : "PF floor for the Short Range strategy's windows (default 1.10); other strategies use the Set minimum."}
+                  onChange={(v) => patch("shortRangeMinPf", v)}
+                />
+                <Slider
+                  label="Minimum SL above costs (%)"
+                  value={overlay.minSlDistancePct}
+                  min={0.1}
+                  max={1}
+                  step={0.1}
+                  hint={`Initial SL floor = modeled costs + ${overlay.minSlDistancePct.toFixed(1)}% of entry price. Requested TP is unchanged.`}
+                  onChange={(v) => patch("minSlDistancePct", Math.max(0.1, Math.min(1, v)))}
+                />
+                <Slider
+                  label="Min trailing distance · steps over cost"
+                  value={overlay.trailMinSteps}
+                  min={1}
+                  max={7}
+                  step={1}
+                  hint={`Minimum trailing distance = PositionCost + n steps = ${(((overlay.trailMinSteps ?? 2) + 1) * overlay.positionCostPct).toFixed(2)}% (default n = 2).`}
+                  onChange={(v) => patch("trailMinSteps", Math.max(1, Math.min(7, Math.round(v))))}
+                />
+                <Slider
+                  label="Min trailing lock · arm − give (%)"
+                  value={overlay.trailMinLockPct}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  hint="A trailing pair whose arm minus give is under this builds no Set (0 = every pair). The stop of such a pair sits at the entry when it arms, so an exit through it pays the PositionCost: live x01 closed 53 pairs with a lock of 0.1 % or less, 4 won (PF 0.14)."
+                  onChange={(v) => patch("trailMinLockPct", Math.max(0, Math.min(3, Math.round(v * 100) / 100)))}
                 />
               </Grid>
               <SetsLiveTable stats={stats} overlay={overlay} />
               <p className="text-sm text-muted">
-                1.00 = Neutral after cost · 1.10 = +1× PositionCost. Historic walks 1-minute OHLC, SL-first on
-                same-bar, trail after arm, time/scratch stops. Live fills merge into the same Set book.
+                Historic replay uses one-minute OHLC, SL first on the same bar, trailing after arm, and time/scratch stops.
+                Paper validation and actual executions have separate samples and PFs for each Set and lane.
               </p>
             </Card>
           )}
@@ -1933,6 +1118,14 @@ function SettingsPage() {
               <Grid>
                 <Toggle label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
                 <Toggle label="Ignore TP (SL takes profit)" on={overlay.exitIgnoreTp} onChange={(v) => patch("exitIgnoreTp", v)} />
+                {["indications", "general", "shortrange"].map((pk) => (
+                  <Toggle
+                    key={pk}
+                    label={`Exit Sets for ${pk} (no-TP Sets of this pack, their own lanes)`}
+                    on={overlay.exitIgnoreTp !== false && (overlay.exitSetsByPack ?? {})[pk] !== false}
+                    onChange={(v) => patch("exitSetsByPack", { ...(overlay.exitSetsByPack ?? {}), [pk]: v })}
+                  />
+                ))}
                 <Toggle label="Best-of last-15 PF" on={overlay.exitBestOf} onChange={(v) => patch("exitBestOf", v)} />
                 <Toggle label="Auto-deactivate lanes" on={overlay.exitAutoDeact} onChange={(v) => patch("exitAutoDeact", v)} />
                 <Toggle label="Lock to breakeven" on={overlay.exitLockOn} onChange={(v) => patch("exitLockOn", v)} />
@@ -1971,9 +1164,18 @@ function SettingsPage() {
                 <Slider label="Opt SL min" value={overlay.exitOptSlMin} min={0.05} max={0.5} step={0.01} unit="%" onChange={(v) => patch("exitOptSlMin", v)} />
                 <Slider label="Opt SL max" value={overlay.exitOptSlMax} min={0.2} max={1.5} step={0.05} unit="%" onChange={(v) => patch("exitOptSlMax", v)} />
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
-                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={75} step={1} onChange={(v) => patch("exitPfWindow", v)} />
-                <Slider label="Exit deact N" value={overlay.exitDeactN} min={5} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
-                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
+                <Slider label="Exit min samples" value={overlay.exitMinSamples} min={5} max={40} step={1} hint="default 8 · closes of a lane before it is judged" onChange={(v) => patch("exitMinSamples", v)} />
+                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={8} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
+                <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
+                <Slider
+                  label="Exit min PF"
+                  value={overlay.exitMinPf}
+                  min={MIN_PF_FLOOR}
+                  max={2.3}
+                  step={0.02}
+                  hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("exitMinPf", v)}
+                />
               </Grid>
               <ExitLanesTable stats={stats} />
               <p className="text-sm text-muted">
@@ -2014,265 +1216,299 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
-              </Grid>
-              <Grid>
-                <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
-                <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
-                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, MAIN_EVAL_DEFAULT))} />
-                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, REAL_EVAL_DEFAULT))} />
-                <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 3))} />
-                <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />
+                <Slider label="Prev window" value={overlay.prevPosWindow} min={5} max={100} step={1} hint="closes the coordinator's previous-positions axis reads" onChange={(v) => patch("prevPosWindow", v)} />
+                <Slider label="Prev min count" value={overlay.prevPosMinCount} min={1} max={50} step={1} hint="default 8" onChange={(v) => patch("prevPosMinCount", v)} />
+                <Slider label="Main eval pos count" value={overlay.mainEvalPosCount} min={3} max={50} step={1} hint="default 20" onChange={(v) => patch("mainEvalPosCount", v)} />
+                <Slider label="Real eval pos count" value={overlay.realEvalPosCount} min={3} max={50} step={1} hint="default 15" onChange={(v) => patch("realEvalPosCount", v)} />
+                <KV k="Min step" v={String(overlay.minStep)} />
+                <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>
             </Card>
           )}
 
-          {section === "engine" && (
-            <>
-              <Card title="Validation stages" hint="Base validates the last-N closes for min PF; Main and Real re-check shorter windows. 0 = stage off (reuses the previous window).">
-                <Grid>
-                  <Num label="Main eval last N" value={overlay.mainEvalPosCount} min={0} max={75} step={1}
-                    hint="0 = Main off (Main reuses the Base window)" onChange={(v) => patch("mainEvalPosCount", Math.max(0, Math.round(v)))} />
-                  <Num label="Real eval last N" value={overlay.realEvalPosCount} min={0} max={75} step={1}
-                    hint="0 = Real off (Real reuses the Main window)" onChange={(v) => patch("realEvalPosCount", Math.max(0, Math.round(v)))} />
-                  <Num label="DDT window (closes)" value={overlay.setDdtWindow} min={0} max={200} step={1}
-                    hint="0 = the Base PF window · drawdown time is measured over these last closes" onChange={(v) => patch("setDdtWindow", Math.max(0, Math.round(v)))} />
-                  <Num label="Set max DD time" value={Math.round(overlay.setMaxDdTimeS / 60)} min={10} max={1440} step={10} unit="min"
-                    hint="DDT cap for a validated Set · default 1080 min (18h)" onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
-                  <EnableSlider label="Strict gate (Base → Main → Real)" on={overlay.setStrictGate !== false}
-                    hint="Execution needs the full chain; off = Base only" onChange={(v) => patch("setStrictGate", v)} />
-                  <EnableSlider label="Historic gate" on={overlay.setUseHistoricGate !== false}
-                    hint="Indication kinds/configs need their own validated tape" onChange={(v) => patch("setUseHistoricGate", v)} />
-                </Grid>
-              </Card>
-              <Card title="Micro tier" hint="Sets positive only between the Micro floor and the Base floor trade one venue-minimum lot, capped to a share of maxOpen">
-                <Grid>
-                  <EnableSlider label="Micro on" on={overlay.microEnabled !== false} onChange={(v) => patch("microEnabled", v)} />
-                  <Num label="Micro min PF" value={overlay.microMinPf} min={1} max={1.35} step={0.01}
-                    hint="never above the Base floor" onChange={(v) => patch("microMinPf", Math.round(v * 100) / 100)} />
-                  <Num label="Micro max share" value={Math.round(overlay.microMaxShare * 100)} min={0} max={100} step={1} unit="%"
-                    hint="of maxOpen positions · 0 blocks Micro entries" onChange={(v) => patch("microMaxShare", Math.max(0, Math.min(100, v)) / 100)} />
-                </Grid>
-              </Card>
-              <Card title="Live edge guard" hint="Per direction: when this desk's own last N confirmed exchange round trips are net negative (cost-PF < 1.00), entries trade one venue-minimum probe lot and Block/DCA adds stop, until the last N clear the Real floor again">
-                <Grid>
-                  <EnableSlider label="Live edge guard" on={overlay.liveEdgeGuard !== false} onChange={(v) => patch("liveEdgeGuard", v)} />
-                  <Num label="Live window" value={overlay.liveEdgeN} min={10} max={500} step={5} unit="closes"
-                    hint="confirmed round trips per direction" onChange={(v) => patch("liveEdgeN", Math.max(10, Math.min(500, Math.round(v))))} />
-                  <Num label="Probe share" value={Math.round(overlay.liveEdgeProbeShare * 100)} min={0} max={100} step={1} unit="%"
-                    hint="of maxOpen positions while guarded · 0 = no entries" onChange={(v) => patch("liveEdgeProbeShare", Math.max(0, Math.min(100, v)) / 100)} />
-                </Grid>
-                <label className="mt-3 block rounded-lg border border-border bg-bg2 px-3 py-3">
-                  <div className="font-mono text-xs text-muted">1m lanes</div>
-                  <select
-                    className="mt-2 min-h-11 w-full rounded-lg border border-border bg-surface px-2 font-mono text-sm"
-                    value={overlay.oneMinuteLanes || "on"}
-                    onChange={(e) => patch("oneMinuteLanes", e.target.value as "on" | "probe" | "off")}
-                  >
-                    <option value="on">on · full size</option>
-                    <option value="probe">probe · minimum lots, no Block/DCA</option>
-                    <option value="off">off · no new 1m entries</option>
-                  </select>
-                  <div className="mt-1 font-mono text-xs text-faint">The 1h lane has its own switch. Live x01 ships on probe until a change passes the 24h checks.</div>
-                </label>
-              </Card>
-              <Card title="1h lane (HTF)" hint="CTS-A-O robust core on 1h bars: RSI-momentum + 1h/4h-agreement kinds, volatility regime, wide exits (TP 3–10%, 24–48h), validated on 2 years of BingX 1h data (reports/htf-validation-20261007). Own SL/TP pair per lot; no Block/DCA adds">
-                <Grid>
-                  <EnableSlider label="1h lane" on={overlay.htfEnabled === true} hint="Live x01 ships off · VST x02 on" onChange={(v) => patch("htfEnabled", v)} />
-                  <Num label="Evidence PF floor" value={overlay.htfMinPf} min={0.8} max={2} step={0.01}
-                    hint="PF over the live-first window (gross win / gross loss after cost)" onChange={(v) => patch("htfMinPf", Math.round(v * 100) / 100)} />
-                  <Num label="Evidence window" value={overlay.htfWindow} min={5} max={500} step={5} unit="closes"
-                    hint="live exchange closes decide once they fill it" onChange={(v) => patch("htfWindow", Math.round(v))} />
-                  <Num label="Min evidence" value={overlay.htfMinN} min={1} max={500} step={1} unit="closes"
-                    hint="fewer closes: the validated preset decides" onChange={(v) => patch("htfMinN", Math.round(v))} />
-                  <Num label="Last-N gate" value={overlay.htfLastN} min={0} max={100} step={1} unit="closes"
-                    hint="CTS-A-O last-N PF ≥ 1 · 0 = off (it lowered PF on our data)" onChange={(v) => patch("htfLastN", Math.round(v))} />
-                  <Num label="Direction acceptance" value={overlay.htfSideHours} min={1} max={168} step={1} unit="h"
-                    hint={`family × side PF ≥ ${overlay.htfSideMinPf} once ≥ ${overlay.htfSideMinTrades} closes`} onChange={(v) => patch("htfSideHours", Math.round(v))} />
-                  <Num label="Max open" value={overlay.htfMaxOpen} min={0} max={200} step={1} unit="lots"
-                    hint="0 = unlimited" onChange={(v) => patch("htfMaxOpen", Math.round(v))} />
-                </Grid>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {HTF_KINDS.map((k) => {
-                    const on = (overlay.htfKinds ?? []).includes(k);
-                    return (
-                      <button key={k} type="button"
-                        className={`rounded border px-2 py-0.5 text-xs ${on ? "border-emerald-500/60 bg-emerald-500/10" : "border-border opacity-60"}`}
-                        onClick={() => patch("htfKinds", on ? (overlay.htfKinds ?? []).filter((x) => x !== k) : [...(overlay.htfKinds ?? []), k])}>
-                        {k}
-                      </button>
-                    );
-                  })}
-                </div>
-              </Card>
-              <Card title="Risk, sizing and stops" hint="Volume is always raised to the venue minimum lot; stops never tighter than the venue accepts">
-                <Grid>
-                  <Num label="Margin cap" value={Math.round(overlay.marginCapPct * 100)} min={0} max={100} step={1} unit="% equity"
-                    hint="used margin limit · 0 or 100 = uncapped" onChange={(v) => patch("marginCapPct", Math.max(0, Math.min(100, v)) / 100)} />
-                  <Num label="Lots per symbol · side" value={overlay.maxLotsPerSymbolSide} min={0} max={100} step={1}
-                    hint="Sets agreeing on one signal share this many lots · 0 = unlimited" onChange={(v) => patch("maxLotsPerSymbolSide", Math.max(0, Math.round(v)))} />
-                  <Num label="Venue SL ticks" value={overlay.venueSlTicks} min={1} max={50} step={1}
-                    hint="minimum SL distance in price ticks (plus floors learned from rejections)" onChange={(v) => patch("venueSlTicks", Math.round(v))} />
-                  <Num label="Manual-close lane hold" value={Math.round(overlay.manualCloseLaneHoldS / 60)} min={0} max={1440} step={10} unit="min"
-                    hint="a manually closed lane is not reopened for this long" onChange={(v) => patch("manualCloseLaneHoldS", Math.round(v) * 60)} />
-                  <Num label="SL:TP ratio min" value={overlay.slToTpMin} min={0.1} max={3} step={0.1}
-                    onChange={(v) => patch("slToTpMin", Math.round(v * 10) / 10)} />
-                  <Num label="SL:TP ratio max" value={overlay.slToTpMax} min={0.1} max={3} step={0.1}
-                    onChange={(v) => patch("slToTpMax", Math.round(v * 10) / 10)} />
-                  <Num label="SL:TP ratio step" value={overlay.slToTpStep} min={0.1} max={1} step={0.1}
-                    onChange={(v) => patch("slToTpStep", Math.round(v * 10) / 10)} />
-                  <Num label="Trail arm min" value={overlay.trailArmMin} min={0.3} max={1.5} step={0.3} unit="%" hint="Default 0.6"
-                    onChange={(v) => patch("trailArmMin", v)} />
-                  <Num label="Trail arm max" value={overlay.trailArmMax} min={0.3} max={1.5} step={0.3} unit="%"
-                    onChange={(v) => patch("trailArmMax", v)} />
-                  <Num label="Trail give min" value={overlay.trailGiveMin} min={0.1} max={0.5} step={0.1} unit="%" hint="Default 0.2"
-                    onChange={(v) => patch("trailGiveMin", v)} />
-                  <Num label="Trail give max" value={overlay.trailGiveMax} min={0.1} max={0.5} step={0.1} unit="%"
-                    onChange={(v) => patch("trailGiveMax", v)} />
-                  <Num label="Exit lane min samples" value={overlay.exitMinSamples} min={0} max={200} step={1}
-                    hint="0 = the PF window" onChange={(v) => patch("exitMinSamples", Math.round(v))} />
-                </Grid>
-              </Card>
-              <Card title="Historic replay" hint="How the intern Set replay simulates each configuration (the evidence the stages validate)">
-                <Grid>
-                  <Num label="Hold time (bars)" value={overlay.setHistTimeBars} min={8} max={120} step={1} unit="min"
-                    hint="time exit of a replayed position" onChange={(v) => patch("setHistTimeBars", Math.round(v))} />
-                  <Num label="Scratch min" value={Math.round(overlay.setScratchMin * 10000) / 100} min={0} max={2} step={0.01} unit="%"
-                    hint="replay scratch exit gain (after scratchS)" onChange={(v) => patch("setScratchMin", Math.max(0, v) / 100)} />
-                  <Num label="Cooldown (bars)" value={overlay.setCooldownBars} min={1} max={12} step={1}
-                    onChange={(v) => patch("setCooldownBars", Math.round(v))} />
-                  <EnableSlider label="Honor TP in replay" on={overlay.setHonorTp !== false} onChange={(v) => patch("setHonorTp", v)} />
-                  <EnableSlider label="Simulate Block lanes" on={overlay.histSimulateBlock !== false} onChange={(v) => patch("histSimulateBlock", v)} />
-                  <EnableSlider label="Simulate DCA lanes" on={overlay.histSimulateDca !== false} onChange={(v) => patch("histSimulateDca", v)} />
-                  <EnableSlider label="Exact replay window" on={overlay.histExactWindow === true}
-                    hint="replay exactly the evaluation window instead of warmup + lookback" onChange={(v) => patch("histExactWindow", v)} />
-                  <Num label="Entry policy candidates" value={overlay.entryPolicyMaxCandidates} min={0} max={500} step={1}
-                    hint="0 = unlimited" onChange={(v) => patch("entryPolicyMaxCandidates", Math.max(0, Math.round(v)))} />
-                  <Num label="Entry policy live samples" value={overlay.entryPolicyMinLiveSamples} min={0} max={25} step={1}
-                    onChange={(v) => patch("entryPolicyMinLiveSamples", Math.max(0, Math.round(v)))} />
-                  <Num label="Prev window" value={overlay.prevPosWindow} min={5} max={75} step={1}
-                    onChange={(v) => patch("prevPosWindow", Math.round(v))} />
-                  <Num label="Prev min count" value={overlay.prevPosMinCount} min={1} max={30} step={1}
-                    onChange={(v) => patch("prevPosMinCount", Math.round(v))} />
-                </Grid>
-              </Card>
-              <Card title="Block variants" hint="Block-active variants per stage">
-                <Grid>
-                  <EnableSlider label="Block variants" on={overlay.variantBlockEnabled !== false} onChange={(v) => patch("variantBlockEnabled", v)} />
-                  <EnableSlider label="Block active · Real" on={overlay.blockActiveRealEnabled !== false} onChange={(v) => patch("blockActiveRealEnabled", v)} />
-                  <EnableSlider label="Block active · Live" on={overlay.blockActiveLiveEnabled !== false} onChange={(v) => patch("blockActiveLiveEnabled", v)} />
-                </Grid>
-              </Card>
-              <Card title="Indication tuning" hint="Situation thresholds per kind · activity = minimum ATR(14) % of price before a kind may fire">
-                <Grid>
-                  <Num label="Direction range" value={overlay.indDirRange} min={4} max={55} step={1} onChange={(v) => patch("indDirRange", Math.round(v))} />
-                  <Num label="Direction min change" value={Math.round(overlay.indDirMinChange * 10000) / 100} min={0} max={2} step={0.01} unit="%"
-                    onChange={(v) => patch("indDirMinChange", Math.max(0, v) / 100)} />
-                  <Num label="Move range" value={overlay.indMoveRange} min={4} max={55} step={1} onChange={(v) => patch("indMoveRange", Math.round(v))} />
-                  <Num label="Move min change" value={Math.round(overlay.indMoveMinChange * 10000) / 100} min={0} max={2} step={0.01} unit="%"
-                    onChange={(v) => patch("indMoveMinChange", Math.max(0, v) / 100)} />
-                  {(overlay.indMoveRanges ?? [20, 30, 40]).map((period, index, periods) => (
-                    <Num key={`move-range-${index}`} label={`Move fade range ${index + 1}`} value={period} min={8} max={55} step={1}
-                      hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indMoveRanges", periods.map((n, i) => (i === index ? value : n)))} />
-                  ))}
-                  <Num label="Active threshold" value={overlay.indActiveThreshold} min={0.1} max={10} step={0.1} onChange={(v) => patch("indActiveThreshold", v)} />
-                  <Num label="Active move" value={overlay.indActiveMovePct} min={0} max={5} step={0.05} unit="%" onChange={(v) => patch("indActiveMovePct", v)} />
-                  <Num label="MSI min RSI gap" value={overlay.indMsiMinGap} min={0.5} max={30} step={0.5} onChange={(v) => patch("indMsiMinGap", v)} />
-                  <Num label="VWAP deviation z" value={overlay.indVwapDevZ} min={0.5} max={6} step={0.1} onChange={(v) => patch("indVwapDevZ", v)} />
-                  <Num label="VWAP volume surge" value={overlay.indVwapVolMult} min={1} max={10} step={0.1} unit="x" onChange={(v) => patch("indVwapVolMult", v)} />
-                  <Num label="Retest tolerance" value={overlay.indRetestTol} min={0.01} max={2} step={0.01} unit="%" onChange={(v) => patch("indRetestTol", v)} />
-                  <Num label="Retest min break" value={overlay.indRetestMinBreak} min={0.01} max={2} step={0.01} unit="%" onChange={(v) => patch("indRetestMinBreak", v)} />
-                  <Num label="Squeeze width percentile" value={Math.round(overlay.indSqueezePctl * 100)} min={5} max={50} step={1} unit="%"
-                    onChange={(v) => patch("indSqueezePctl", Math.max(5, Math.min(50, v)) / 100)} />
-                  <Num label="Sweep wick" value={overlay.indSweepWickAtr} min={0} max={3} step={0.05} unit="ATR" onChange={(v) => patch("indSweepWickAtr", v)} />
-                  <Num label="RSI(2) low" value={overlay.indRsi2Low} min={1} max={49} step={1} onChange={(v) => patch("indRsi2Low", v)} />
-                  <Num label="RSI(2) high" value={overlay.indRsi2High} min={51} max={99} step={1} onChange={(v) => patch("indRsi2High", v)} />
-                  <Num label="Keltner band" value={overlay.indKeltnerMult} min={0.5} max={5} step={0.1} unit="ATR" onChange={(v) => patch("indKeltnerMult", v)} />
-                  <Num label="Impulse sigma" value={overlay.indImpulseSigma} min={1} max={10} step={0.1} onChange={(v) => patch("indImpulseSigma", v)} />
-                  <Num label="Impulse volume surge" value={overlay.indImpulseVolMult} min={1} max={10} step={0.1} unit="x" onChange={(v) => patch("indImpulseVolMult", v)} />
-                  <Num label="Activity · sweep" value={overlay.actSweepMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actSweepMin", v)} />
-                  <Num label="Activity · RSI(2)" value={overlay.actRsi2Min} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actRsi2Min", v)} />
-                  <Num label="Activity · Keltner" value={overlay.actKeltnerMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actKeltnerMin", v)} />
-                  <Num label="Activity · impulse" value={overlay.actImpulseMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actImpulseMin", v)} />
-                  <Num label="Exit tactic min gain" value={overlay.exitTacticMinGainPct} min={0} max={2} step={0.01} unit="%"
-                    hint="a target tactic closes only once the gain covers this (round-trip cost)" onChange={(v) => patch("exitTacticMinGainPct", Math.max(0, v))} />
-                </Grid>
-              </Card>
-            </>
+          {section === "block" && (
+            <Card
+              title="Relation lanes"
+              hint="Last-N lanes of the post-Base orders by relation, next to every configuration's own lane. A passing lane raises the volume of its Sets' positive-lane entries; it never opens, blocks or closes a position."
+            >
+              {(() => {
+                const cfg = relationLanesOf(overlay.relationLanes);
+                const update = (change: Partial<typeof cfg>) => patch("relationLanes", relationLanesOf({ ...cfg, ...change }));
+                const all = RELATIONS.filter((r) => cfg.relations[r].on);
+                return (
+                  <div data-testid="relation-lanes-settings">
+                    <Grid>
+                      <Toggle label="Relation lanes" on={cfg.enabled} onChange={(enabled) => update({ enabled })} />
+                      <Num label="Main window (entries)" value={cfg.mainN} min={1} max={200} step={1} hint="last N post-Base entries of the relation, each entry once" onChange={(mainN) => update({ mainN })} />
+                      <Num label="Real window (entries)" value={cfg.realN} min={0} max={200} step={1} hint="entries opened while the Main window passed; 0 = no Real stage" onChange={(realN) => update({ realN })} />
+                      <Num label="Minimum PF" value={cfg.minPf} min={RELATION_PF_FLOOR} max={10} step={0.01} onChange={(minPf) => update({ minPf })} />
+                      <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={RELATION_MULT_MAX} step={0.25} hint="1 + the passing relations' ratios, never above this" onChange={(maxMult) => update({ maxMult })} />
+                      <Toggle label="Windows need their full N" on={cfg.fullWindow} onChange={(fullWindow) => update({ fullWindow })} />
+                    </Grid>
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="w-full min-w-[520px] text-left text-sm">
+                        <thead className="font-mono text-[11px] text-muted">
+                          <tr>
+                            <th className="pb-2 font-medium">Relation</th>
+                            <th className="pb-2 font-medium">Lane type</th>
+                            <th className="pb-2 font-medium">Built</th>
+                            <th className="pb-2 font-medium">Volume ratio when passing</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {RELATIONS.map((name) => (
+                            <tr key={name} className="border-t border-border">
+                              <td className="py-1.5">{RELATION_LABEL[name]}</td>
+                              <td className="py-1.5 font-mono text-xs text-muted">{RELATION_ROLE[name]}</td>
+                              <td className="py-1.5">
+                                <Toggle label={`Build ${name}`} on={cfg.relations[name].on} onChange={(on) => update({ relations: { ...cfg.relations, [name]: { ...cfg.relations[name], on } } })} />
+                              </td>
+                              <td className="py-1.5">
+                                <Num label={`${name} ratio`} value={cfg.relations[name].ratio} min={0} max={RELATION_RATIO_MAX} step={0.05}
+                                  onChange={(ratio) => update({ relations: { ...cfg.relations, [name]: { ...cfg.relations[name], ratio } } })} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-3 text-xs opacity-70">
+                      With every built relation passing an entry opens at ×{relationMultiple({ ...cfg, enabled: true }, all).toFixed(2)} the volume factor's size; with none at ×1.00.
+                      Ratio 0 = the lane is built and shown, and raises nothing. The Real Negative lane is never raised. The raise is rounded down to the lot step and stays under the size ceiling,
+                      the book room and the available margin; when it does not fit, the entry opens at its base size. A larger volume weights results, it does not change a per-order PF.
+                    </p>
+                  </div>
+                );
+              })()}
+            </Card>
           )}
 
           {section === "block" && (
-            <Card title="Block strategy" hint="Counts 1–6 · Active can open only the adjusted portion of a virtual reference · no compounding">
+            <Card
+              title="Block rounds"
+              hint="A group's positions form blocks of N. A losing block raises the group's next entries by ratio × level of the original volume, until the volume-weighted net since that block is back at zero. Every block count 1–6 runs its own procedure on its own blocks."
+            >
+              {(() => {
+                const cfg = blockRoundsOf(overlay.blockRounds);
+                const update = (change: Partial<typeof cfg>) => patch("blockRounds", blockRoundsOf({ ...cfg, ...change }));
+                const setCount = (n: number, change: Partial<(typeof cfg.counts)[string]>) => update({ counts: { ...cfg.counts, [String(n)]: { ...cfg.counts[String(n)], ...change } } });
+                return (
+                  <div data-testid="block-rounds-settings">
+                    <Grid>
+                      <Toggle label="Block rounds" on={cfg.enabled} onChange={(enabled) => update({ enabled })} />
+                      <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={ROUND_MULT_MAX} step={0.25} hint="1 + the raised procedures' ratio × level, never above this" onChange={(maxMult) => update({ maxMult })} />
+                    </Grid>
+                    <div className="mt-3 flex flex-wrap gap-3">
+                      {ROUND_RELATIONS.map((name) => (
+                        <Toggle key={name} label={ROUND_RELATION_LABEL[name]} on={cfg.relations.includes(name)}
+                          onChange={(on) => update({ relations: ROUND_RELATIONS.filter((r) => (r === name ? on : cfg.relations.includes(r))) })} />
+                      ))}
+                    </div>
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="w-full min-w-[620px] text-left text-sm">
+                        <thead className="font-mono text-[11px] text-muted">
+                          <tr>
+                            <th className="pb-2 font-medium">Block count</th>
+                            <th className="pb-2 font-medium">Raises</th>
+                            <th className="pb-2 font-medium">Volume ratio</th>
+                            <th className="pb-2 font-medium">Step</th>
+                            <th className="pb-2 font-medium">Top level</th>
+                            <th className="pb-2 font-medium">Pause (blocks)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ROUND_COUNTS.map((n) => {
+                            const c = cfg.counts[String(n)];
+                            return (
+                              <tr key={n} className="border-t border-border">
+                                <td className="py-1.5 font-mono">{n}</td>
+                                <td className="py-1.5"><Toggle label={`Count ${n} raises`} on={c.on} onChange={(on) => setCount(n, { on })} /></td>
+                                <td className="py-1.5"><Num label={`Count ${n} ratio`} value={c.ratio} min={0} max={ROUND_RATIO_MAX} step={0.05} onChange={(ratio) => setCount(n, { ratio })} /></td>
+                                <td className="py-1.5"><Toggle label={`Count ${n} step`} on={c.step} onChange={(step) => setCount(n, { step })} /></td>
+                                <td className="py-1.5"><Num label={`Count ${n} top level`} value={c.maxLevel} min={1} max={ROUND_LEVEL_MAX} step={1} onChange={(maxLevel) => setCount(n, { maxLevel })} /></td>
+                                <td className="py-1.5"><Num label={`Count ${n} pause`} value={c.pause} min={0} max={ROUND_PAUSE_MAX} step={1} onChange={(pause) => setCount(n, { pause })} /></td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-3 text-xs opacity-70">
+                      Largest multiple of one entry with these settings: ×{blockRoundsMax(cfg).toFixed(2)}. A count that does not raise still forms its blocks and keeps its record.
+                      Shipped: relation Step, block count 5, ratio 1.0, step to level 2, ceiling ×3 — the only procedure measured at or above “without” on all nine windows
+                      (volume-weighted PF 0.750 against 0.648, net −480.2 against −495.1 points; both below 1). A raise weights results; it does not change a per-order PF.
+                    </p>
+                  </div>
+                );
+              })()}
+            </Card>
+          )}
+
+          {section === "block" && (
+            <Card title="Relate strategy" hint="Independent post-Base sizing policies. Twelve winning steps by default; a loss resets its relation. Stops must stay at or below half the TP distance after costs and minimum-distance adjustments.">
+              {overlay.relateConfigs.map((cfg, index) => {
+                const update = (change: Partial<RelateConfig>) => patch("relateConfigs", overlay.relateConfigs.map((c, i) => i === index ? { ...c, ...change } : c));
+                return <fieldset key={cfg.id} className="mb-5 rounded-xl border border-white/10 p-4">
+                  <legend className="px-2 text-sm font-medium">{cfg.id}</legend>
+                  <Grid>
+                    <Toggle label="Enable policy" on={cfg.enabled} onChange={enabled => update({ enabled })} />
+                    <Num label="Winning steps" value={cfg.steps} min={2} max={15} step={1} onChange={steps => update({ steps })} />
+                    <Num label="Increase ratio" value={cfg.ratio} min={.2} max={6} step={.2} onChange={ratio => update({ ratio })} />
+                    <Num label="Maximum SL / TP" value={cfg.maxSlRatio} min={.01} max={.5} step={.01} onChange={maxSlRatio => update({ maxSlRatio })} />
+                    <Num label="Policy stack ceiling" value={cfg.maxStack} min={1} max={8} step={.25} hint="Parallel policies share a total 8× ceiling, including Block and DCA." onChange={maxStack => update({ maxStack })} />
+                    <Num label="Minimum return PF" value={cfg.minPf} min={1.01} max={10} step={.01} onChange={minPf => update({ minPf })} />
+                    <Num label="Last-N parent closes" value={cfg.lastN} min={cfg.minTrades} max={250} step={1} onChange={lastN => update({ lastN })} />
+                    <Num label="Minimum parent closes" value={cfg.minTrades} min={60} max={cfg.lastN} step={1} onChange={minTrades => update({ minTrades })} />
+                    <label className="text-sm">Relation combination<select className="mt-1 block w-full rounded border p-2" value={cfg.mode} onChange={e => update({ mode: e.target.value === "additive" ? "additive" : "shared" })}><option value="shared">Shared average</option><option value="additive">Additive</option></select></label>
+                    {RELATE_SOURCES.map(source => <Toggle key={source} label={source} on={cfg.sources.includes(source)} onChange={on => {
+                      const sources = on ? [...cfg.sources, source] : cfg.sources.filter(s => s !== source);
+                      if (sources.length) update({ sources });
+                    }} />)}
+                  </Grid>
+                  {overlay.relateConfigs.length > 1 && <button className="mt-3 text-sm underline" onClick={() => patch("relateConfigs", overlay.relateConfigs.filter((_, i) => i !== index))}>Remove policy</button>}
+                </fieldset>;
+              })}
+              <button className="rounded border px-3 py-2 text-sm" disabled={overlay.relateConfigs.length >= 12} onClick={() => {
+                let n = 1; while (overlay.relateConfigs.some(c => c.id === `relate-${n}`)) n++;
+                patch("relateConfigs", [...overlay.relateConfigs, { ...structuredClone(DEFAULT_RELATE_CONFIG), id: `relate-${n}` }]);
+              }}>Add independent policy</button>
+              <p className="mt-3 text-xs opacity-70">Policies start disabled. Only confirmed owned parent closes build this live record; simulated or sibling wins cannot stand in for it. A passing window does not guarantee subsequent profit.</p>
+            </Card>
+          )}
+
+          {section === "block" && (
+            <Card title="Block strategy" hint="Each Set, lane and group keeps its own evidence">
               <Grid>
                 <EnableSlider
                   label="Block enabled"
-                  on={overlay.blockEnabled && overlay.stratBlock}
+                  on={overlay.blockEnabled}
                   hint="default ON · all counts"
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
                 />
-                <div className="min-w-0 space-y-3 rounded-lg border border-border bg-bg2 p-3 sm:col-span-2">
-                <h3 className="text-sm font-medium">Block → Active</h3>
-                <Grid>
                 <Toggle
-                  label="Active"
-                  hint="Always on"
-                  on
-                  locked
-                  onChange={() => patch("blockActive", true)}
-                />
-                <Toggle
-                  label="Active Live overlay"
+                  label="Non-Set Live overlay"
                   on={overlay.blockActiveLive}
                   onChange={(v) => patch("blockActiveLive", v)}
                 />
                 <Toggle
-                  label="Active Real overlay"
+                  label="Non-Set Real overlay"
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
-                <Toggle
-                  label="Overall Block (Real)"
-                  hint="Always on"
-                  on
-                  locked
-                  onChange={() => patch("blockOverall", true)}
-                />
-                <Num label="Minimum valid Block level" value={overlay.blockActiveMinLevel} min={0} max={overlay.blockMaxStack || 6} step={1}
-                  hint="0 = normal virtual basis (default) · higher = minimum Block count · adjusted quantity only"
-                  onChange={(v) => patch("blockActiveMinLevel", Math.max(0, Math.min(overlay.blockMaxStack || 6, Math.trunc(v))))} />
-                </Grid>
-                <p className="text-sm text-muted">Independent of Normal (General). Active observes its qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; its own existing and pending quantities reduce the order. Level 0 uses the normal virtual basis and never makes an unadjusted Block order valid. Overall Block (Real) adds on every own open position by symbol and direction, independent of the opening Set, gated at stage Real (PF 1.10). Intern 1.00 is not extra size.</p>
+                <div className="col-span-full mt-2 font-mono text-[11px] tracking-wide text-muted uppercase">Block v2 · each block count on its own (no windows)</div>
+                <p className="col-span-full text-xs text-muted">
+                  Every count has its own step (PositionCosts after the count before: 2 + 2 + 2 = three counts at 2, 4 and 6), its own volume ratio of the parent's original
+                  volume and its own cumulative evidence (all observations since the start, no last-N). Additive: each count adds its ratio. Shared: one budget (R × original
+                  volume) split equally over the counts that are on. A count adds only when every selected relation shows enough observations at a PF above its threshold.
+                </p>
+                <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">Stack type</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={overlay.blockStackType}
+                    onChange={(ev) => patch("blockStackType", ev.target.value === "shared" ? "shared" : "additive")}
+                  >
+                    <option value="additive">Additive · each count adds its own ratio × original volume</option>
+                    <option value="shared">Shared · one total budget split over the counts that are on</option>
+                  </select>
+                </label>
+                {overlay.blockStackType === "shared" ? (
+                  <Slider label="Shared budget R (× original volume)" value={overlay.blockSharedTotal} min={0.1} max={3} step={0.1}
+                    hint="The whole add budget of one parent; each count that is on adds R / counts." onChange={(v) => patch("blockSharedTotal", Math.round(v * 10) / 10)} />
+                ) : null}
+                {overlay.blockCounts.map((c, i) => (
+                  <div key={`bc-${i}`} className="col-span-full grid gap-2 rounded-lg border border-border bg-bg2 px-3 py-2 sm:grid-cols-[3rem_1fr_1fr_auto]">
+                    <span className="self-center font-mono text-xs text-muted">count {i + 1}</span>
+                    <Slider label="Step (PositionCosts)" value={c.step} min={0.5} max={10} step={0.5} hint={`trigger ${overlay.blockCounts.slice(0, i + 1).reduce((a, x) => a + x.step, 0)} PositionCosts in profit`}
+                      onChange={(v) => patch("blockCounts", overlay.blockCounts.map((x, j) => (j === i ? { ...x, step: v } : x)))} />
+                    <Slider label="Volume ratio" value={c.ratio} min={BLOCK_RATIO_MIN} max={BLOCK_RATIO_MAX} step={0.1} hint="× the parent's original volume (additive)"
+                      onChange={(v) => patch("blockCounts", overlay.blockCounts.map((x, j) => (j === i ? { ...x, ratio: Math.round(v * 10) / 10 } : x)))} />
+                    <div className="flex items-center gap-2">
+                      <Toggle label="on" on={c.on} onChange={(v) => patch("blockCounts", overlay.blockCounts.map((x, j) => (j === i ? { ...x, on: v } : x)))} />
+                      <button type="button" className="rounded border border-border px-2 py-1 font-mono text-xs" disabled={overlay.blockCounts.length <= 1}
+                        onClick={() => patch("blockCounts", overlay.blockCounts.filter((_, j) => j !== i))}>remove</button>
+                    </div>
+                  </div>
+                ))}
+                <button type="button" className="col-span-full rounded border border-border px-3 py-1 text-left font-mono text-xs" disabled={overlay.blockCounts.length >= BLOCK_COUNTS_MAX}
+                  onClick={() => patch("blockCounts", [...overlay.blockCounts, { ...(overlay.blockCounts[overlay.blockCounts.length - 1] ?? { step: 2, ratio: 0.5, on: true }) }])}>
+                  + add a block count
+                </button>
+                <div className="col-span-full flex flex-wrap gap-2">
+                  {BLOCK_RELATIONS.map((r) => (
+                    <Toggle
+                      key={`br-${r}`}
+                      label={`relation ${r}${r === "set" ? " (Ordinary · Main Set parents)" : r === "step" ? " (Overall · Real, per TP step)" : ""}`}
+                      on={overlay.blockRelations.includes(r)}
+                      onChange={(v) => {
+                        const next = v ? [...new Set([...overlay.blockRelations, r])] : overlay.blockRelations.filter((x) => x !== r);
+                        patch("blockRelations", next.length ? next : ["set"]);
+                      }}
+                    />
+                  ))}
                 </div>
+                <Num label="Min observations per count" value={overlay.blockMinObservations} min={1} max={200} step={1}
+                  hint="A count adds only after its own record holds this many observations (a count, not a window)." onChange={(v) => patch("blockMinObservations", Math.max(1, Math.round(v)))} />
+                <Toggle label="Carry: keep the stack of a losing parent until the relation's net is back positive, then pause" on={overlay.blockCarry} onChange={(v) => patch("blockCarry", v)} />
+                <Num label="Pause after the reset (parents)" value={overlay.blockPauseSteps} min={0} max={20} step={1} hint="Parents of the relation without adds after the net is back positive."
+                  onChange={(v) => patch("blockPauseSteps", Math.max(0, Math.round(v)))} />
+                <Num label="Skip the first x counts" value={overlay.blockSkipFirst} min={0} max={12} step={1} hint="Those counts never add; they still collect evidence."
+                  onChange={(v) => patch("blockSkipFirst", Math.max(0, Math.round(v)))} />
+                <Toggle label="Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back" on={overlay.blockGuard !== false} onChange={(v) => patch("blockGuard", v)} />
+                <Num label="Add only up to this share of the way to the target" value={overlay.blockTargetShare ?? 0.5} min={0} max={1} step={0.05} hint="Fixed-target parents. 0 = no rule; 0.5 = no add past the middle of the way."
+                  onChange={(v) => patch("blockTargetShare", Math.max(0, Math.min(1, v)))} />
+                {BLOCK_KINDS.map((kind) => (
+                  <Toggle key={kind} label={`Adds on ${kind === "base" ? "base (target)" : kind === "exit" ? "Exit" : "trailing"} Set parents`} on={(overlay.blockKinds ?? ["base", "trail"]).includes(kind)}
+                    onChange={(on) => patch("blockKinds", blockKindsOf(on ? [...(overlay.blockKinds ?? []), kind] : (overlay.blockKinds ?? []).filter((k) => k !== kind)))} />
+                ))}
+                <Num
+                  label="Block min samples"
+                  value={overlay.blockMinSamples}
+                  min={1}
+                  max={50}
+                  step={1}
+                  hint="Block's own count (default 8) — independent of the PF windows and the coordinator's prev counts"
+                  onChange={(v) => patch("blockMinSamples", v)}
+                />
+                <Num
+                  label="Block window"
+                  value={overlay.blockWindow}
+                  min={8}
+                  max={100}
+                  step={1}
+                  hint="closes the Block evidence reads (default 25)"
+                  onChange={(v) => patch("blockWindow", v)}
+                />
                 <Num
                   label="Max stack"
                   value={overlay.blockMaxStack}
                   min={0}
-                  max={6}
+                  max={10000}
                   step={1}
-                  hint="0 = default 6 · six independent evaluations · shared total volume cap"
+                  hint="default 6 groups; 0 = unlimited"
                   onChange={(v) => patch("blockMaxStack", v)}
                 />
                 <Num
                   label="Volume ratio"
                   value={overlay.blockVolumeRatio}
-                  min={0.05}
-                  max={2}
+                  min={0.25}
+                  max={3}
                   step={0.05}
                   onChange={(v) => patch("blockVolumeRatio", v)}
                 />
-                <Num label="Maximum total volume" value={overlay.blockMaxVolumeMultiplier}
-                  min={1} max={2} step={0.05} hint="Base 1 = original parent · maximum 2×"
-                  onChange={(v) => patch("blockMaxVolumeMultiplier", v)} />
-                {[1, 2, 3, 4, 5, 6].map((count) => (
-                  <Toggle key={count} label={`Count ${count}`} on={overlay.blockCounts.includes(count)}
-                    onChange={(enabled) => patch("blockCounts", enabled
-                      ? [...new Set([...overlay.blockCounts, count])].sort((a, b) => a - b)
-                      : overlay.blockCounts.filter((n) => n !== count))} />
-                ))}
+                <Toggle label="Deposits / withdrawals move the drawdown basis (not a gain or loss)" on={overlay.transferAdjust !== false}
+                  onChange={(v) => patch("transferAdjust", v)} />
+                <Num label="Rest after a manual close" value={overlay.manualCloseRestMin} min={0} max={10080} step={30} unit="min"
+                  hint="A position closed by hand on the venue is not opened again in the same direction for this long; every other symbol and the other direction keep trading. 0 = off."
+                  onChange={(v) => patch("manualCloseRestMin", v)} />
+                <Num label="Set Block risk budget" value={overlay.blockRiskPctOfBalance}
+                  min={0} max={5} step={0.05} unit="%"
+                  hint="0 (default, owner 2026-11-04): no cap - each Block add is its count's ratio x the parent's ORIGINAL base volume. Above 0: maximum parent loss at its current stop, including costs, as a share of equity; adds are reduced to fit. Gaps can exceed it."
+                  onChange={(v) => patch("blockRiskPctOfBalance", v)} />
                 <Num
                   label="PF ratio"
                   value={overlay.blockProfitFactorRatio}
-                  min={0.5}
+                  min={0.2}
                   max={5}
                   step={0.1}
                   onChange={(v) => patch("blockProfitFactorRatio", v)}
@@ -2285,19 +1521,14 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("blockPauseCountRatio", v)}
                 />
-                <Num
-                  label="Main eval last positions"
-                  value={overlay.blockEvalPosCount ?? 50}
-                  min={5}
-                  max={75}
-                  step={1}
-                  hint="Each Block count is scored independently at stage Main. Fewer samples stay valid. Failed counts keep intern calcs but do not emit Real/Live."
-                  onChange={(v) => patch("blockEvalPosCount", Math.max(5, Math.min(75, Math.round(v))))}
-                />
                 <KV k="Default min PF" v={String(defaultMinPf)} />
               </Grid>
+              <p className="text-sm text-muted">
+                Set parents: each qualified group adds at most the volume ratio × original base quantity.
+                Its PF requirement stays at or above the default minimum. Risk and margin limits can reduce the add.
+              </p>
               <p className="font-mono text-xs text-muted">
-                targetAdd = parentBase × min(count × ratio, totalCap − 1) · requested = max(0, targetAdd − confirmedAdd) ·
+                Non-Set overlays: targetAdd = parentBase × (count × ratio) · requested = targetAdd − confirmedAdd ·
                 minPF = 1 + (({defaultMinPf} − 1) × {overlay.blockProfitFactorRatio} × increment)
               </p>
               <div className="overflow-x-auto">
@@ -2328,65 +1559,203 @@ function SettingsPage() {
           )}
 
           {section === "trailing" && (
-            <Card title="Trailing · independent recals" hint="All arm × give combos always run as independent Sets · no trail picker">
-              <p className="text-sm text-muted">
-                Catalog is fixed system-wide: arm 0.3–1.5 step 0.3 × give 0.1–0.5 step 0.1 ({trailGrid().length} trail Sets)
-                plus the matching Normal (no-trail) book. Auto-recalc only chooses live attach. Nothing in Settings turns a trail off.
-              </p>
+            <Card title="Trailing · independent recals" hint="Own range, own scores — not coupled to SL:TP">
               <Grid>
                 <Toggle
                   label="Trailing pack"
                   on={overlay.stratTrailing}
                   onChange={(v) => patch("stratTrailing", v)}
                 />
-                <Toggle label="Auto-recalc live attach" on={overlay.trailAuto} onChange={(v) => patch("trailAuto", v)} />
+                <Toggle label="Auto-recalc trail" on={overlay.trailAuto} onChange={(v) => patch("trailAuto", v)} />
                 <Toggle
                   label="Recalc give from arm × factor"
                   on={overlay.trailRecalcGive}
                   onChange={(v) => {
                     patch("trailRecalcGive", v);
-                    if (v) patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, overlay.trailGiveFactor, 0.1, 0.5));
+                    if (v) patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax));
                   }}
                 />
+              </Grid>
+              <Slider
+                label="Min trailing step"
+                value={overlay.trailMinStep}
+                min={2}
+                max={8}
+                step={1}
+                hint="Smallest arm and give of a trail Set, in PositionCost units. Default 3, range 2–8. Every arm k and give j from this step up to 22 runs as a Set, with j ≤ k."
+                onChange={(v) => patch("trailMinStep", Math.max(2, Math.min(8, Math.round(v))))}
+              />
+              <Slider
+                label="Largest trailing arm (steps of 0.1 %)"
+                value={overlay.trailStepMax ?? TRAIL_STEP_MAX_DEFAULT}
+                min={2}
+                max={TRAIL_STEP_CEIL}
+                step={1}
+                hint={`Every arm up to ${((overlay.trailStepMax ?? TRAIL_STEP_MAX_DEFAULT) * TP_UNIT_PCT).toFixed(1)}% runs as a trailing Set. Default ${TRAIL_STEP_MAX_DEFAULT} (2.2%), at most ${TRAIL_STEP_CEIL} (3.0%).`}
+                onChange={(v) => patch("trailStepMax", Math.max(2, Math.min(TRAIL_STEP_CEIL, Math.round(v))))}
+              />
+              {TP_RANGES.map((r) => (
+                <Toggle
+                  key={`tr-${r.id}`}
+                  label={`Trailing ${r.label} range · arms ${tpPctOfStep(r.lo).toFixed(1)}–${tpPctOfStep(r.hi).toFixed(1)}%`}
+                  on={(overlay.trailRanges ?? {})[r.id] !== false}
+                  onChange={(v) => patch("trailRanges", { ...overlay.trailRanges, [r.id]: v })}
+                />
+              ))}
+              <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                <span className="font-mono text-xs text-muted">Trailing Sets compete with base / Exit Sets</span>
+                <select
+                  className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                  value={overlay.trailPick ?? "after"}
+                  onChange={(ev) => patch("trailPick", ev.target.value as TrailPick)}
+                >
+                  <option value="after">after: only when no base / Exit Set of the pack is valid (default)</option>
+                  <option value="together">together: every valid Set of the lane by rank</option>
+                  <option value="first">first: trailing Sets before base / Exit Sets (per lane)</option>
+                  <option value="first-any">first-any: a trailing Set valid on any lane before base / Exit Sets</option>
+                </select>
+              </label>
+              {(
+                [
+                  ["group:trend", "Trend signals (trend pack, trend families)"],
+                  ["group:break", "Break signals (breakout pack, break families)"],
+                  ["group:revert", "Reversion signals"],
+                ] as const
+              ).map(([key, label]) => (
+                <label key={key} className="rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <span className="font-mono text-xs text-muted">{label} · trailing order</span>
+                  <select
+                    className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                    value={(overlay.trailPickByPack ?? {})[key] ?? ""}
+                    onChange={(ev) => {
+                      const next = { ...(overlay.trailPickByPack ?? {}) };
+                      if (ev.target.value) next[key] = ev.target.value as TrailPick;
+                      else delete next[key];
+                      patch("trailPickByPack", next);
+                    }}
+                  >
+                    <option value="">as above</option>
+                    <option value="after">after</option>
+                    <option value="together">together</option>
+                    <option value="first">first</option>
+                    <option value="first-any">first-any</option>
+                  </select>
+                </label>
+              ))}
+              <p className="font-mono text-xs text-muted">Own volume multiples · size = volume factor size × pack × type × range (each 0.1–5, under the size ceiling)</p>
+              {(
+                [
+                  ["volumeByPack", ["indications", "general", "shortrange"]],
+                  ["volumeByKind", ["base", "exit", "trail"]],
+                  ["volumeByRange", ["micro", "minimal", "short", "normal", "long", "wide", "trail"]],
+                ] as const
+              ).map(([key, names]) =>
+                names.map((n) => (
+                  <Slider
+                    key={`${key}:${n}`}
+                    label={`${key === "volumeByPack" ? "Pack" : key === "volumeByKind" ? "Type" : "Range"} ${n} · volume ×`}
+                    value={(overlay[key] ?? {})[n] ?? 1}
+                    min={0.1}
+                    max={5}
+                    step={0.1}
+                    hint="1 = the volume factor's size; the hard size ceiling and the venue minimum lot still apply."
+                    onChange={(v) => patch(key, { ...(overlay[key] ?? {}), [n]: Math.max(0.1, Math.min(5, Math.round(v * 10) / 10)) })}
+                  />
+                )),
+              )}
+              <Slider
+                label="Indications trailing · volume × (on top of the multiples above)"
+                value={(overlay.volumeByPackKind ?? {})["indications:trail"] ?? 1}
+                min={0.1}
+                max={5}
+                step={0.1}
+                hint="Default 3 (owner 2026-11-03): an indications trailing Set opens at 3 × the volume factor's size; the hard size ceiling and the venue minimum lot still apply."
+                onChange={(v) => patch("volumeByPackKind", { ...(overlay.volumeByPackKind ?? {}), "indications:trail": Math.max(0.1, Math.min(5, Math.round(v * 10) / 10)) })}
+              />
+              <p className="font-mono text-xs text-muted">Trailing stop families · each builds every arm / give pair again with the initial stop at r × the arm</p>
+              <div className="flex flex-wrap gap-2">
+                {TRAIL_SL_RATIOS.map((r) => (
+                  <Toggle
+                    key={r}
+                    label={`stop ${r} × arm`}
+                    on={(overlay.trailSlRatios ?? []).includes(r)}
+                    onChange={(v) =>
+                      patch("trailSlRatios", v ? [...new Set([...(overlay.trailSlRatios ?? []), r])].sort((a, b) => a - b) : (overlay.trailSlRatios ?? []).filter((x) => x !== r))
+                    }
+                  />
+                ))}
+              </div>
+              <p className="font-mono text-xs text-muted">Live CTS variants · arm:give · filtered by optimal range</p>
+              <div className="flex flex-wrap gap-2">
+                {(Array.isArray(cts?.strategyBaseTrailingVariants) ? cts!.strategyBaseTrailingVariants : [...TRAIL_VARIANTS]).map((t) => {
+                  const raw = String(t);
+                  const [a, g] = raw.split(":");
+                  const arm = Number(a) || 0;
+                  const give = overlay.trailRecalcGive
+                    ? trailGiveFromArm(arm, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax)
+                    : Number(g) || 0;
+                  const inRange =
+                    arm + 1e-9 >= overlay.trailArmMin &&
+                    arm - 1e-9 <= overlay.trailArmMax &&
+                    give + 1e-9 >= overlay.trailGiveMin &&
+                    give - 1e-9 <= overlay.trailGiveMax;
+                  const active =
+                    Math.abs(arm - overlay.trailArmPct) < 1e-6 &&
+                    Math.abs(give - overlay.trailGivePct) < 0.02;
+                  return (
+                    <button
+                      key={raw}
+                      type="button"
+                      data-trail={raw}
+                      disabled={!inRange}
+                      onClick={() => {
+                        patch("trailArmPct", arm);
+                        patch("trailGivePct", give);
+                      }}
+                      className={`min-h-11 rounded-lg border px-3 font-mono text-sm ${
+                        active
+                          ? "border-primary bg-primary-dim/40 text-fg"
+                          : inRange
+                            ? "border-border text-muted"
+                            : "border-border text-faint opacity-40"
+                      }`}
+                    >
+                      {arm.toFixed(1)}:{give.toFixed(1)}
+                    </button>
+                  );
+                })}
+              </div>
+              <Grid>
+                <Slider label="Arm min" value={overlay.trailArmMin} min={0.3} max={1.5} step={0.3} unit="%" onChange={(v) => patch("trailArmMin", v)} />
+                <Slider label="Arm max" value={overlay.trailArmMax} min={0.3} max={1.5} step={0.3} unit="%" onChange={(v) => patch("trailArmMax", v)} />
+                <Slider label="Give min" value={overlay.trailGiveMin} min={0.05} max={0.5} step={0.05} unit="%" onChange={(v) => patch("trailGiveMin", v)} />
+                <Slider label="Give max" value={overlay.trailGiveMax} min={0.1} max={0.8} step={0.05} unit="%" onChange={(v) => patch("trailGiveMax", v)} />
                 <Slider
                   label="Give factor"
                   value={overlay.trailGiveFactor}
                   min={0.2}
                   max={0.6}
                   step={0.01}
-                  hint={`auto give = arm × factor`}
+                  hint={`give = arm × factor → ${trailGiveFromArm(overlay.trailArmPct, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax).toFixed(2)}%`}
                   onChange={(v) => {
                     patch("trailGiveFactor", v);
                     if (overlay.trailRecalcGive) {
-                      patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, v, 0.1, 0.5));
+                      patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, v, overlay.trailGiveMin, overlay.trailGiveMax));
                     }
                   }}
                 />
-                <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={3} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
+                <Slider label="Arm %" value={overlay.trailArmPct} min={0.3} max={1.5} step={0.3} unit="%" onChange={(v) => {
+                  patch("trailArmPct", v);
+                  if (overlay.trailRecalcGive) {
+                    patch("trailGivePct", trailGiveFromArm(v, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax));
+                  }
+                }} />
+                <Slider label="Giveback %" value={overlay.trailGivePct} min={0.05} max={0.8} step={0.05} unit="%" onChange={(v) => patch("trailGivePct", v)} />
+                <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={8} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
                 <Slider label="Recalc every N closes" value={overlay.trailRecalcEvery} min={3} max={30} step={1} onChange={(v) => patch("trailRecalcEvery", v)} />
               </Grid>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="font-mono text-xs text-muted">
-                    <tr>
-                      <th className="pb-2 font-medium">Trail</th>
-                      <th className="pb-2 font-medium">Arm %</th>
-                      <th className="pb-2 font-medium">Give %</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trailGrid().map((t) => (
-                      <tr key={t.key} className="border-t border-border font-mono">
-                        <td className="py-1.5">{t.key}</td>
-                        <td className="py-1.5">{t.arm.toFixed(1)}</td>
-                        <td className="py-1.5">{t.give.toFixed(1)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
               <p className="text-sm text-muted">
-                All {trailGrid().length} trail ratios stay in eval, independent of the SL:TP book. Auto-recalc only picks the live attach for a new fill.
+                Live uses {overlay.trailArmPct.toFixed(1)}:{overlay.trailGivePct.toFixed(1)} locked on the fill. Recals only pick for new entries. Scores are independent of the SL:TP book.
               </p>
             </Card>
           )}
@@ -2433,28 +1802,52 @@ function SettingsPage() {
           )}
 
           {section === "dca" && (
-            <Card title="DCA" hint="Independent of Block · fires on adverse % from average entry · own last-15 PF / last-25 deact">
+            <Card title="DCA" hint="Independent of Block · adds against a position · scored on its own adds (last-15 PF / last-25 deact) · off by default">
               <Toggle
                 label="DCA enabled"
-                on={Boolean(overlay.dcaEnabled)}
-                onChange={(v) => {
-                  patch("dcaEnabled", v);
-                  patch("stratDca", v);
-                }}
+                on={overlay.dcaEnabled === true}
+                onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }}
               />
+              <Toggle
+                label="Auto calculation (rungs from each position's own stop, one small rung, exposure ceiling)"
+                on={overlay.dcaAuto !== false}
+                onChange={(v) => patch("dcaAuto", v)}
+              />
+              <Toggle
+                label="Also on Set positions (the Set keeps its own stop and TP; the Set is scored on its base result)"
+                on={overlay.dcaOnSets === true}
+                onChange={(v) => patch("dcaOnSets", v)}
+              />
+              <Toggle
+                label="Also on Axis-admitted positions (only while an Axis is on and the coordinator allows)"
+                on={overlay.dcaOnAxis === true}
+                onChange={(v) => patch("dcaOnAxis", v)}
+              />
+              <Grid>
+                <Num
+                  label="Max exposure × base size (auto; 0 = no ceiling)"
+                  value={overlay.dcaMaxExposureX}
+                  min={0}
+                  max={8}
+                  step={0.5}
+                  onChange={(v) => patch("dcaMaxExposureX", v)}
+                />
+              </Grid>
               <Toggle
                 label="Auto-deact on last-25 avg loss"
                 on={overlay.dcaAutoDeact !== false}
                 onChange={(v) => patch("dcaAutoDeact", v)}
               />
+              <details className="mt-3" open={overlay.dcaAuto === false} data-testid="dca-manual">
+              <summary className="cursor-pointer font-mono text-xs text-muted">Manual static settings (used when Auto calculation is off)</summary>
               <Grid>
                 <Num
                   label="Max steps"
                   value={overlay.dcaMaxSteps}
                   min={0}
-                  max={12}
+                  max={10000}
                   step={1}
-                  hint="0 = configured distance list (default 4) · hard max 12"
+                  hint="0 = unlimited"
                   onChange={(v) => patch("dcaMaxSteps", v)}
                 />
                 <Num
@@ -2473,19 +1866,26 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("dcaBreakevenProfitPct", v)}
                 />
-                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
+                <Num
+                  label="Min PF"
+                  value={overlay.dcaMinPf}
+                  min={MIN_PF_FLOOR}
+                  max={1.5}
+                  step={0.05}
+                  onChange={(v) => patch("dcaMinPf", v)}
+                />
                 <Num
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
                   min={5}
-                  max={75}
+                  max={40}
                   step={1}
                   onChange={(v) => patch("dcaPfWindow", v)}
                 />
                 <Num
                   label="DCA deact N"
                   value={overlay.dcaDeactN ?? overlay.setDeactN}
-                  min={5}
+                  min={10}
                   max={80}
                   step={1}
                   onChange={(v) => patch("dcaDeactN", v)}
@@ -2507,7 +1907,7 @@ function SettingsPage() {
               </div>
               <p className="mt-3 font-mono text-xs text-muted">Step distances % from average entry</p>
               <Grid>
-                {(overlay.dcaStepDistancesPct || [0.5, 1, 1.5, 2]).slice(0, overlay.dcaMaxSteps || 4).map((d, i) => (
+                {(overlay.dcaStepDistancesPct || [0.5, 1, 1.5, 2]).slice(0, overlay.dcaMaxSteps || undefined).map((d, i) => (
                   <Num
                     key={`dist-${i}`}
                     label={`Distance #${i + 1}`}
@@ -2526,15 +1926,14 @@ function SettingsPage() {
               </Grid>
               <p className="mt-3 font-mono text-xs text-muted">Volume multipliers vs parent</p>
               <Grid>
-                {(overlay.dcaStepVolumeMultipliers || [1.5, 2, 2.3, 2.5]).slice(0, overlay.dcaMaxSteps || 4).map((m, i) => (
+                {(overlay.dcaStepVolumeMultipliers || [1.5, 2, 2.3, 2.5]).slice(0, overlay.dcaMaxSteps || undefined).map((m, i) => (
                   <Num
                     key={`mult-${i}`}
                     label={`Vol × #${i + 1}`}
                     value={m}
-                    min={0.25}
-                    max={2.5}
+                    min={0.5}
+                    max={8}
                     step={0.1}
-                    hint="Backend clamp 0.25–2.5×"
                     onChange={(v) => {
                       const next = [...(overlay.dcaStepVolumeMultipliers || [])];
                       next[i] = v;
@@ -2543,6 +1942,7 @@ function SettingsPage() {
                   />
                 ))}
               </Grid>
+              </details>
             </Card>
           )}
 
@@ -2551,56 +1951,56 @@ function SettingsPage() {
               <div className="space-y-2">
                 <LiveAxis
                   name="Previous"
-                  range={`${AXIS_SPECS.prev.min}–${AXIS_SPECS.prev.max}`}
+                  range="4–12 step 2"
                   enabled={overlay.axisPrevEnabled}
                   window={overlay.axisPrevMaxWindow}
-                  min={AXIS_SPECS.prev.min}
-                  max={AXIS_SPECS.prev.max}
-                  step={AXIS_SPECS.prev.step}
+                  min={4}
+                  max={12}
+                  step={2}
                   onEn={(v) => patch("axisPrevEnabled", v)}
                   onWin={(v) => patch("axisPrevMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Last"
-                  range={`${AXIS_SPECS.last.min}–${AXIS_SPECS.last.max}`}
+                  range="1–4"
                   enabled={overlay.axisLastEnabled}
                   window={overlay.axisLastMaxWindow}
-                  min={AXIS_SPECS.last.min}
-                  max={AXIS_SPECS.last.max}
-                  step={AXIS_SPECS.last.step}
+                  min={1}
+                  max={4}
+                  step={1}
                   onEn={(v) => patch("axisLastEnabled", v)}
                   onWin={(v) => patch("axisLastMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Continuous"
-                  range={`${AXIS_SPECS.cont.min}–${AXIS_SPECS.cont.max}`}
+                  range="1–8"
                   enabled={overlay.axisContEnabled}
                   window={overlay.axisContMaxWindow}
-                  min={AXIS_SPECS.cont.min}
-                  max={AXIS_SPECS.cont.max}
-                  step={AXIS_SPECS.cont.step}
+                  min={1}
+                  max={8}
+                  step={1}
                   onEn={(v) => patch("axisContEnabled", v)}
                   onWin={(v) => patch("axisContMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Pause"
-                  range={`${AXIS_SPECS.pause.min}–${AXIS_SPECS.pause.max}`}
+                  range="1–8"
                   enabled={overlay.axisPauseEnabled}
                   window={overlay.axisPauseMaxWindow}
-                  min={AXIS_SPECS.pause.min}
-                  max={AXIS_SPECS.pause.max}
-                  step={AXIS_SPECS.pause.step}
+                  min={1}
+                  max={8}
+                  step={1}
                   onEn={(v) => patch("axisPauseEnabled", v)}
                   onWin={(v) => patch("axisPauseMaxWindow", v)}
                 />
               </div>
               <Grid>
-                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
-                <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} unit="%" onChange={(v) => patch("noise", v)} />
+                <Num label="Min PF" value={overlay.minPf} min={0.8} max={3} step={0.05} onChange={(v) => patch("minPf", v)} />
+                <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
-                <Num label="Min step" value={Math.max(DEFAULT_MIN_STEP, overlay.minStep)} min={DEFAULT_MIN_STEP} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
+                <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
-                <Num label="Trail min step" value={overlay.trailingMinStep} min={DEFAULT_MIN_STEP} max={30} step={1} hint="Trailing Sets start at this range step. TP = step × position cost." onChange={(v) => patch("trailingMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
+                <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
                   label="Pos-count vol ratio"
                   value={overlay.posCountsVolumeRatio}
@@ -2620,10 +2020,8 @@ function SettingsPage() {
               </Grid>
               <Toggle label="Rearrange weak slots" on={overlay.rearrange} onChange={(v) => patch("rearrange", v)} />
               <p className="text-sm text-muted">
-                Last/Prev PF gates entries by position-count windows. Pause halts on a loss streak.
-                Cont caps live slots and, on additional strategies (Block / DCA), halves the live
-                count stack when last-PF is below min. Count-pos vol ratio trims new-entry size as
-                more positions are open. Each Block count keeps its own last-N tape for the add gate.
+                Last/Prev PF gates entries. Pause halts on a loss streak. Cont caps live slots.
+                Rearrange frees a weak open for a stronger signal when the confidence gap clears.
               </p>
             </Card>
           )}
@@ -2637,39 +2035,100 @@ function SettingsPage() {
                 <KV k="Preset volume factor" v={String(num(cts?.volume_factor_preset, 1))} />
                 <KV k="Signal volume factor" v={String(num(cts?.volume_factor_signal, 1))} />
                 <KV k="Volume step ratio" v={String(num(cts?.volume_step_ratio, 0.6))} />
-                <KV k="Pos-count volume ratio" v={String(num(cts?.posCountsVolumeRatio, 0.05))} />
-                <KV k="Exchange position cost" v={String(num(cts?.exchangePositionCost ?? cts?.positionCost, 0.1))} />
+                <KV k="Pos-count volume ratio" v={String(overlay.posCountsVolumeRatio)} />
+                <KV k="Exchange position cost" v={String(overlay.positionCostPct)} />
                 <Slider
                   label="Volume factor"
-                  value={overlay.volumeFactor || 0.1}
+                  value={overlay.volumeFactor ?? 0.05}
                   min={0.05}
-                  max={10}
+                  max={5}
                   step={0.05}
-                  hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
+                  hint="Scales pulse notional (0.05 = the minimum and the default). Independent per Live / VST."
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
-                  label={overlay.sizingMode === "fixed" ? "Pulse notional USDT" : "Fallback notional USDT (before the first balance)"}
+                  label="Pulse notional USDT"
                   value={overlay.targetNotional}
                   min={1}
                   max={20}
                   step={0.05}
                   onChange={(v) => patch("targetNotional", v)}
                 />
+                <Num
+                  label="Max position USDT"
+                  value={overlay.sizeMaxNotional ?? 25}
+                  min={0.2}
+                  max={5000}
+                  step={0.5}
+                  hint="Hard ceiling for one position's notional, whatever the balance or the factor."
+                  onChange={(v) => patch("sizeMaxNotional", v)}
+                />
+                <Num
+                  label="Max entry slippage %"
+                  value={overlay.maxEntrySlipPct ?? 0.75}
+                  min={0.05}
+                  max={5}
+                  step={0.05}
+                  hint="A fill farther than this from the price the entry was decided at is closed at once and the symbol rests 30 min."
+                  onChange={(v) => patch("maxEntrySlipPct", v)}
+                />
+                <Num
+                  label="Drawdown halt %"
+                  value={overlay.ddHaltPct ?? 80}
+                  min={0}
+                  max={90}
+                  step={1}
+                  hint="Entries halt when equity falls this far below the start equity of the active session (owner default 80). 0 = off (no drawdown protection)."
+                  onChange={(v) => patch("ddHaltPct", v)}
+                />
+                <Toggle
+                  label="Drawdown halt measures from the active session's start (off: the stored start equity)"
+                  on={(overlay.ddHaltBasis ?? "session") === "session"}
+                  onChange={(v) => patch("ddHaltBasis", v ? "session" : "start")}
+                />
+                <Num
+                  label="Size % of balance"
+                  value={overlay.sizePctOfBalance ?? 1}
+                  min={0}
+                  max={25}
+                  step={0.1}
+                  hint="Position notional = balance x this % x volume factor (raised to the exchange minimum). 0 = fixed pulse notional."
+                  onChange={(v) => patch("sizePctOfBalance", v)}
+                />
+                <Toggle
+                  label="Strict entry budget (skip instead of exceeding the balance-relative amount)"
+                  on={overlay.strictSizeCap}
+                  onChange={(v) => patch("strictSizeCap", v)}
+                />
+                <Num
+                  label="Max modeled stop loss + cost %"
+                  value={overlay.maxModeledStopLossPct}
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  hint="0 = off. Filters Sets by initial stop distance plus modeled cost; live losses can exceed it."
+                  onChange={(v) => patch("maxModeledStopLossPct", v)}
+                />
                 <KV
                   k="Effective notional"
-                  v={(() => {
-                    const e = effectiveNotional(overlay, stats?.sizingEquity);
-                    return `${e.value.toFixed(2)} · ${e.source === "equity" ? `${overlay.targetNotionalPct}% of equity` : "fixed"}`;
-                  })()}
-                  v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)}
+                  v={
+                    Math.min(
+                      (overlay.sizePctOfBalance ?? 0) > 0 && Number(stats?.equity) > 0
+                        ? ((Number(stats?.equity) * (overlay.sizePctOfBalance ?? 0)) / 100) * (overlay.volumeFactor || 0.05)
+                        : overlay.targetNotional * (overlay.volumeFactor || 0.05),
+                      overlay.sizeMaxNotional ?? 25,
+                    ).toFixed(2)
+                  }
                 />
                 <Toggle
                   label="Always max leverage"
-                  hint="Always on · the engine trades at each contract's maximum"
-                  on
-                  locked
-                  onChange={() => patch("useMaxLeverage", true)}
+                  on={overlay.useMaxLeverage !== false}
+                  onChange={(v) => patch("useMaxLeverage", v)}
+                />
+                <Toggle
+                  label="Lower the leverage to keep liquidation beyond the Set's stop (off, default: always the exchange maximum; on: 1 / (2 × stop + 0.5 %))"
+                  on={overlay.leverageStopCap === true}
+                  onChange={(v) => patch("leverageStopCap", v)}
                 />
                 <Num
                   label={overlay.useMaxLeverage !== false ? "Fallback leverage" : "Pulse leverage"}
@@ -2684,42 +2143,31 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Shared quantity-matched SL/TP by symbol and direction using the widest member range · independent Set lots and fills">
-              <div className="flex flex-col gap-2">
-                <Toggle
-                  label="Place SL/TP on exchange"
-                  hint="Always on · SL at most 3× TP"
-                  on
-                  locked
-                  onChange={() => patch("controlOrders", true)}
-                />
-                <Toggle
-                  label="Overall SL/TP by symbol and direction"
-                  hint="ON = one shared pair per symbol and direction at the widest member SL/TP; individual Set lots, targets and fills stay separate"
-                  on={overlay.controlOrdersOverall}
-                  onChange={(v) => patch("controlOrdersOverall", v)}
-                />
-              </div>
+            <Card title="Control orders" hint="Per-order SL+TP plus symbol+direction security range · hedge, no reduceOnly">
+              <Toggle
+                label="Place SL/TP on exchange"
+                on={overlay.controlOrders}
+                onChange={(v) => patch("controlOrders", v)}
+              />
               <Grid>
                 <Num label="Stop %" value={overlay.slPct} min={0.1} max={5} step={0.02} onChange={(v) => patch("slPct", v)} />
                 <Num label="Take profit %" value={overlay.tpPct} min={0.1} max={8} step={0.05} onChange={(v) => patch("tpPct", v)} />
                 <KV k="CTS SL cost ratios" v={arrJoin(cts?.activeStopLossPositionCostRatios, "2, 3, 5")} />
                 <KV k="CTS TP multipliers" v={arrJoin(cts?.activeTakeProfitMultipliers, "1.25, 1.5, 1")} />
                 <KV k="CTS control_orders" v={bool(cts?.control_orders, true) ? "1" : "0"} />
-                <KV k="Applied control mode" v={overlay.controlOrdersOverall ? "OVERALL · SYMBOL / DIRECTION" : "PER-CONFIG RANGE"} />
                 <KV k="Working type" v="MARK_PRICE" />
               </Grid>
               <ControlsLive stats={stats} />
               <p className="text-sm text-muted">
-                {overlay.controlOrdersOverall
-                  ? "One exchange SL/TP pair protects the total own quantity for each symbol and direction. The pair uses the widest member range (LONG: lowest SL and highest TP; SHORT: highest SL and lowest TP). Each Set keeps its own lots, targets, trailing and confirmed fills."
-                  : "Each independent configuration has its own quantity-matched exchange SL/TP pair."}
+                After every parent fill and every Block add, protection is rebuilt for the exact
+                aggregate quantity. Trail replaces the live STOP_MARKET. Security SL/TP always exist
+                on the symbol+direction book using the widest order range.
               </p>
             </Card>
           )}
 
           {section === "indication" && (
-            <Card title="Indications" hint="CTS types: State is the consensus Indication · Direction / Move / Active / Common / Signals / Trend / Break run independently">
+            <Card title="Indications" hint="CTS types: State is the consensus Indication · Direction / Move / Active / Common / Signals run independently">
               <Grid>
                 <EnableSlider label="Indications on" on={overlay.indEnabled} onChange={(v) => patch("indEnabled", v)} />
                 <EnableSlider label="State" on={overlay.indTypeState !== false} hint="tf_combined + low-stop consensus — the Indication" onChange={(v) => patch("indTypeState", v)} />
@@ -2728,73 +2176,20 @@ function SettingsPage() {
                 <EnableSlider label="Active" on={overlay.indTypeActive !== false} hint="outbreak 3/5/10 vs previous window" onChange={(v) => patch("indTypeActive", v)} />
                 <EnableSlider label="Common" on={overlay.indTypeCommon !== false} hint="RSI + MACD + EMA + Bollinger" onChange={(v) => patch("indTypeCommon", v)} />
                 <EnableSlider label="Signals" on={overlay.indTypeSignals !== false} hint="per-TF evaluateSignalCandles" onChange={(v) => patch("indTypeSignals", v)} />
-                <EnableSlider label="Trend" on={overlay.indTypeTrend !== false} hint="trend slope / direction vote" onChange={(v) => patch("indTypeTrend", v)} />
-                <EnableSlider label="Break" on={overlay.indTypeBreak !== false} hint="breakout / range vote" onChange={(v) => patch("indTypeBreak", v)} />
-                <EnableSlider label="MSI divergence" on={overlay.indTypeMsi !== false} hint="price extreme not confirmed by RSI · exit: swing fail" onChange={(v) => patch("indTypeMsi", v)} />
-                <EnableSlider label="VWAP reversion" on={overlay.indTypeVwap !== false} hint="z-stretch from VWAP on a volume surge · exit: VWAP touch" onChange={(v) => patch("indTypeVwap", v)} />
-                <EnableSlider label="Break retest" on={overlay.indTypeRetest !== false} hint="broken level retested and held · exit: level fail" onChange={(v) => patch("indTypeRetest", v)} />
-                <EnableSlider label="Squeeze release" on={overlay.indTypeSqueeze !== false} hint="low band-width percentile, close outside band · exit: back through mid" onChange={(v) => patch("indTypeSqueeze", v)} />
-                <EnableSlider label="Liquidity sweep" on={overlay.indTypeSweep !== false} hint="wick through range high/low, close back inside · exit: beyond the wick" onChange={(v) => patch("indTypeSweep", v)} />
-                <EnableSlider label="RSI(2) pullback" on={overlay.indTypeRsi2 !== false} hint="RSI(2) extreme against the EMA trend · exit: EMA5 snap-back" onChange={(v) => patch("indTypeRsi2", v)} />
-                <EnableSlider label="Keltner fade" on={overlay.indTypeKeltner !== false} hint="wick outside Keltner band + StochRSI turn · exit: middle line" onChange={(v) => patch("indTypeKeltner", v)} />
-                <EnableSlider label="Impulse fade" on={overlay.indTypeImpulse !== false} hint="sigma impulse bar on a volume surge · exit: beyond the extreme" onChange={(v) => patch("indTypeImpulse", v)} />
-                <EnableSlider label="Exit tactics" on={overlay.exitTacticOn !== false} hint="per-indication price-only exit (target or invalidation)" onChange={(v) => patch("exitTacticOn", v)} />
-                <Num label="Exit tactic buffer" value={overlay.exitTacticBufferPct ?? 0.1} min={0} max={1} step={0.05} unit="%"
-                  hint="close beyond the invalidation level by this much" onChange={(v) => patch("exitTacticBufferPct", v)} />
-                {(overlay.indTrendRanges ?? [13, 21, 34]).map((period, index, periods) => (
-                  <Num key={`trend-${index}`} label={`Trend EMA range ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent EMA calculation · fast period = 0.38 × range" onChange={(value) => patch("indTrendRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indBreakRanges ?? [8, 16, 32]).map((period, index, periods) => (
-                  <Num key={`break-${index}`} label={`Break range ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent breakout calculation in candles" onChange={(value) => patch("indBreakRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indMsiRanges ?? [14, 21, 34]).map((period, index, periods) => (
-                  <Num key={`indMsiRanges-${index}`} label={`MSI range ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indMsiRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indVwapRanges ?? [20, 30, 40]).map((period, index, periods) => (
-                  <Num key={`indVwapRanges-${index}`} label={`VWAP range ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indVwapRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indRetestRanges ?? [12, 20, 32]).map((period, index, periods) => (
-                  <Num key={`indRetestRanges-${index}`} label={`Retest range ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRetestRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indSweepRanges ?? [12, 20, 34]).map((period, index, periods) => (
-                  <Num key={`indSweepRanges-${index}`} label={`Sweep range ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indSweepRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indRsi2Ranges ?? [21, 34, 55]).map((period, index, periods) => (
-                  <Num key={`indRsi2Ranges-${index}`} label={`RSI(2) trend EMA ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRsi2Ranges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indKeltnerRanges ?? [14, 20, 30]).map((period, index, periods) => (
-                  <Num key={`indKeltnerRanges-${index}`} label={`Keltner period ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indKeltnerRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indImpulseRanges ?? [20, 30, 45]).map((period, index, periods) => (
-                  <Num key={`indImpulseRanges-${index}`} label={`Impulse sigma window ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indImpulseRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
-                {(overlay.indSqueezeRanges ?? [16, 20, 26]).map((period, index, periods) => (
-                  <Num key={`indSqueezeRanges-${index}`} label={`Squeeze period ${index + 1}`} value={period} min={8} max={55} step={1}
-                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indSqueezeRanges", periods.map((n, i) => i === index ? value : n))} />
-                ))}
                 <EnableSlider label="Extra venues (Binance/Bybit)" on={overlay.indExtraSources} onChange={(v) => patch("indExtraSources", v)} />
                 <Num label="Min sources" value={overlay.indMinSources} min={2} max={8} step={1} onChange={(v) => patch("indMinSources", v)} />
                 <Num label="Min agreement" value={overlay.indMinAgreement} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinAgreement", v)} />
                 <Num label="Min confidence" value={overlay.indMinConfidence} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinConfidence", v)} />
                 <Num label="Min strength" value={overlay.indMinStrength} min={0.05} max={0.6} step={0.05} onChange={(v) => patch("indMinStrength", v)} />
-                <Num label="SL min %" value={overlay.indStopMinPct} min={SL_MIN_PCT} max={1} step={0.05} onChange={(v) => patch("indStopMinPct", v)} />
-                <Num label="SL max %" value={overlay.indStopMaxPct} min={SL_MIN_PCT} max={3} step={0.05} onChange={(v) => patch("indStopMaxPct", v)} />
+                <Num label="SL min %" value={overlay.indStopMinPct} min={0.1} max={1} step={0.05} onChange={(v) => patch("indStopMinPct", v)} />
+                <Num label="SL max %" value={overlay.indStopMaxPct} min={0.4} max={3} step={0.05} onChange={(v) => patch("indStopMaxPct", v)} />
                 <Num label="ATR × SL" value={overlay.indAtrMult} min={0.4} max={2} step={0.05} onChange={(v) => patch("indAtrMult", v)} />
-                <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.1} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
+                <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.05} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
                 <KV k="Outbreak ranges" v={arrJoin(cts?.activeOutbreakRanges, "3, 5, 10")} />
                 <KV k="Noise filter" v={String(num(cts?.activeNoiseFilter, 0.05))} />
               </Grid>
               <p className="mt-3 text-xs text-muted">
-                State is the actual Indication (combined TF + multi-source consensus). Direction, Move, Active, Common, Signals, Trend and Break
+                State is the actual Indication (combined TF + multi-source consensus). Direction, Move, Active, Common and Signals
                 process additionally and independently when their slider is ON.
               </p>
             </Card>
@@ -2803,69 +2198,43 @@ function SettingsPage() {
           {section === "pulse" && (
             <Card title="Pulse overlay" hint="Always max leverage per contract. Order qty is raised to exchange min lot / min USDT if the target is smaller.">
               <Grid>
-                <Num label="Effective positions" value={overlay.maxOpen} min={0} max={10000} step={1} hint="Default 100 unique symbol×side groups. Independent intern orders are unlimited. 0 = unlimited groups" onChange={(v) => patch("maxOpen", v)} />
+                <Num label="Max open" value={overlay.maxOpen} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxOpen", v)} />
                 <Num label="Max per group" value={overlay.maxPerGroup} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxPerGroup", v)} />
                 <Num label="Cycle s" value={overlay.scanS} min={0.2} max={8} step={0.05} onChange={(v) => patch("scanS", v)} />
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
-                <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
-                <Toggle
-                  label="Batch entry orders"
-                  hint="Up to 5 entries per batchOrders call (its own venue quota) · each keeps its own client id and retries alone · off by default, try it on VST first"
-                  on={overlay.entryBatchOrders}
-                  onChange={(v) => patch("entryBatchOrders", v)}
-                />
-                <Num label="Entries per batch" value={overlay.entryBatchSize} min={2} max={5} step={1} onChange={(v) => patch("entryBatchSize", v)} />
-                <Num label="Short-trade hold min" value={Math.round(overlay.shortMaxHoldS / 60)} min={5} max={360} step={5}
-                  hint="5–360 min · default 30 · 1m lanes close at this age; the Set replay uses the same hold (1h lane keeps its own 24–48h)"
-                  onChange={(v) => patch("shortMaxHoldS", Math.max(5, Math.min(360, Math.round(v / 5) * 5)) * 60)} />
+                <Num label="Stagger s" value={overlay.staggerS} min={0.05} max={5} step={0.01} onChange={(v) => patch("staggerS", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={1440} step={10} hint="10–1440 min · default 1080 (18h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
-                <Num label="Scratch s" value={overlay.scratchS} min={20} max={SCRATCH_S_MAX} step={5} onChange={(v) => patch("scratchS", v)} />
+                <Num label="Scratch s" value={overlay.scratchS} min={20} max={1800} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>
             </Card>
           )}
 
           {section === "symbols" && (
-            <Card title="Symbols" hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked names · max leverage then Volatility 1H · 0 = unlimited`}>
+            <Card title="Symbols" hint={`Default rank · max leverage then Volatility 1H · cap ${MAX_SYMBOLS > 0 ? MAX_SYMBOLS : "unlimited"}`}>
               <Toggle
-                label="All unlimited"
-                on={isUnlimitedSymbolBook(overlay)}
+                label="All USDT-M swaps"
+                on={overlay.symbolsAll || overlay.symbols.includes("*") || overlay.symbols.includes("ALL")}
                 onChange={(v) => {
-                  dirtyRef.current = true;
-                  setOverlay((o) =>
-                    v
-                      ? { ...o, symbolCap: 0, symbolsAll: true, symbols: ["*"] }
-                      : {
-                          ...o,
-                          symbolCap: o.symbolCap > 0 ? o.symbolCap : DEFAULT_SYMBOL_COUNT,
-                          symbolsAll: true,
-                          symbols: ["*"],
-                        },
-                  );
-                  setDirty(true);
-                  setSaveMsg(null);
+                  patch("symbolsAll", v);
+                  patch("symbols", v ? ["*"] : [...overlay.symbols.filter((s) => s !== "*" && s !== "ALL")]);
                 }}
               />
-              <p className="mt-2 text-xs text-muted">
-                Off keeps the default {DEFAULT_SYMBOL_COUNT}-name ranked book. On processes every USDT-M swap.
-              </p>
               <div className="mt-3">
                 <Grid>
-                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint={`Default ${DEFAULT_SYMBOL_COUNT}. 0 = unlimited. Live scan and historic calc use only this many ranked names.`} onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
+                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="0 = unlimited. With Dynamic on, the engine keeps every USDT-M name (ranked max leverage then 1H vol) plus any open positions." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
                 </Grid>
               </div>
               <div className="mt-3">
                 <SymbolPicker
                   selected={overlay.symbols}
-                  cap={overlay.symbolCap}
                   sort={overlay.symbolSort}
                   dynamic={overlay.symbolsDynamic !== false}
                   onSortChange={(s) => patch("symbolSort", s)}
                   onDynamicChange={(v) => patch("symbolsDynamic", v)}
                   onCap={(n) => {
                     patch("symbolCap", n);
-                    if (n === 0) patch("symbolsAll", true);
+                    patch("symbolsAll", false);
                   }}
                   onChange={(next) => {
                     patch("symbols", next);
@@ -2911,388 +2280,478 @@ function SettingsPage() {
             )}
             <button
               type="button"
-              onClick={() => setResetAsk(true)}
-              data-testid="reset-overlay"
+              onClick={() => {
+                dirtyRef.current = true;
+                setOverlay(overlayFromCts(cts ?? {}));
+                setDirty(true);
+                setSaveMsg("Reset to CTS defaults");
+              }}
               className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
             >
               Reset from CTS
             </button>
             <button
               type="button"
-              data-testid="save-system-preset"
-              disabled={userBusy || !ready}
+              data-testid="reset-defaults"
+              title="Restore all settings as unsaved values; review before saving"
               onClick={() => {
-                setSection("presets");
-                void onSaveSystemPreset();
+                dirtyRef.current = true;
+                setOverlay(defaultOverlay());
+                setDirty(true);
+                setSaveMsg("Defaults restored · unsaved");
               }}
-              className="min-h-11 rounded-lg border border-primary px-4 text-sm text-fg disabled:opacity-40"
+              className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
             >
-              Save as Preset
+              Reset defaults
             </button>
             <span className="text-sm text-muted" data-testid="save-status">
               {saving
                 ? "Saving…"
                 : dirty
-                  ? "Unsaved overlay"
+                  ? saveMsg || "Unsaved overlay"
                   : saveMsg || (conn === "overall" ? "Save writes Live or VST independently" : `Live values · ${conn}`)}
             </span>
           </div>
         </div>
       </div>
-      {resetAsk ? (
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-bg/80 p-4 sm:items-center"
-          role="presentation"
-          onClick={() => setResetAsk(false)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="reset-overlay-title"
-            data-testid="reset-confirm"
-            className="w-full max-w-md space-y-4 rounded-radius border border-border bg-surface p-4 shadow-lg"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={dialogKeys(() => setResetAsk(false))}
-          >
-            <div>
-              <h2 id="reset-overlay-title" className="text-sm font-medium tracking-wide text-muted uppercase">
-                Reset overlay?
-              </h2>
-              <p className="mt-2 text-sm text-fg">
-                This replaces the current sliders with CTS defaults
-                {conn === "vst" ? " for VST" : conn === "live" ? " for Live" : ""}.
-                Unsaved edits are discarded. Nothing is written until you save.
-              </p>
-            </div>
-            <div className="flex flex-wrap justify-end gap-2">
-              <button
-                type="button"
-                data-testid="reset-cancel"
-                autoFocus
-                onClick={() => setResetAsk(false)}
-                className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="reset-confirm-yes"
-                onClick={onResetOverlay}
-                className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
-              >
-                Reset overlay
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {cleanupAsk ? (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4" onKeyDown={dialogKeys(() => setCleanupAsk(false))}>
-            <h3 className="text-sm font-medium">Delete all system presets except Default?</h3>
-            <p className="mt-2 text-sm text-muted">
-              Every saved preset except the protected Default will be removed. The currently applied overlay is not changed.
-            </p>
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button type="button" autoFocus className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setCleanupAsk(false)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="user-preset-delete-except-default-yes"
-                className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
-                onClick={() => void onDeleteExceptDefault()}
-              >
-                Delete others
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {deleteId ? (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4" onKeyDown={dialogKeys(() => setDeleteId(null))}>
-            <h3 className="text-sm font-medium">Delete system preset?</h3>
-            <p className="mt-2 text-sm text-muted">
-              {userPresets.find((p) => p.id === deleteId)?.name || "This preset"} will be removed for Live and VST. Overlay on the engine is not changed until you load another.
-            </p>
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button type="button" autoFocus className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setDeleteId(null)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="user-preset-delete-yes"
-                className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
-                onClick={() => void onDeleteSystemPreset()}
-              >
-                Delete preset
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {section === "overview" && <SystemHealthFooter conn={conn} />}
     </DeskShell>
   );
 }
 
-function TestHistoricCard({
-  assignment,
-  unsaved,
-  overlay,
-  histTestTarget,
-  histTestJob,
-  onControl,
-  onApply,
-  patch,
-}: {
-  assignment: HistTestAssignment | null;
-  /** The form holds edits that are not saved to the lane yet. */
-  unsaved: boolean;
-  overlay: PulseOverlay;
-  histTestTarget: number;
-  histTestJob: HistTestJob | null;
-  onControl: (action: "start" | "stop" | "pause" | "resume") => Promise<void>;
-  onApply: () => void;
-  patch: <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => void;
-}) {
-  const enabled = overlay.histTestEnabled !== false;
+function StepPfTable({ overlay, stats }: { overlay: PulseOverlay; stats: LiveStats | null }) {
+  const live = stats?.sets?.stepPf;
+  const rows = stepPfRows(overlay, live?.steps);
   return (
-    <div data-testid="test-historic" id="test-historic" className="scroll-mt-4">
-      <section className="min-w-0 space-y-4 rounded-radius border-2 border-primary bg-surface p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">Settings · Overview</p>
-            <h2 className="mt-1 text-2xl font-semibold tracking-tight text-fg">Test Historic</h2>
-            <p className="mt-1 text-sm text-muted">
-              Default ON. The engine skips full-catalog historic progress and only runs validated Test Historic configs. Every refresh interval those configs are recalculated and revalidated from scratch.
-            </p>
-          </div>
-          <span
-            className={`shrink-0 rounded-full px-3 py-1 text-sm font-medium ${enabled ? "bg-primary text-bg" : "bg-bg2 text-muted"}`}
-            data-testid="hist-test-enabled-badge"
-          >
-            {enabled ? "ON" : "OFF"}
-          </span>
-        </div>
-        <EnableSlider
-          label="Test Historic"
-          on={enabled}
-          hint="default ON · engine skips full-catalog calcs; only validated Test Historic configs"
-          onChange={(v) => patch("histTestEnabled", v)}
-        />
-        <EnableSlider
-          label="Auto-assign validated"
-          on={overlay.histTestAutoAssign !== false}
-          testId="hist-test-auto-assign"
-          hint="each new validated result puts its symbols into the selection · validated configs run on the engine allow-list"
-          onChange={(v) => patch("histTestAutoAssign", v)}
-        />
-        <HistTestStatus
-          histTest={
-            histTestJob
-              ? {
-                  ...(histTestJob as HistTestLive),
-                  symbols: histTestJob.positive || histTestJob.symbols || histTestJob.internSymbols,
-                }
-              : null
-          }
-          enabled={enabled}
-        />
-        <p className="text-sm text-muted">
-          Replay intern majors on a {overlay.histTestHours}h tape with this connection's catalog and stage windows. A config is validated when its Base window (n≥{overlay.setMinSamples}) clears PF ≥ {overlay.histTestMinPf.toFixed(2)}; each direction is assigned only on its own evidence. Intern extras never replace the 50 majors.
-        </p>
+    <details className="col-span-full rounded-lg border border-border bg-bg2 px-3 py-2" data-testid="step-pf-table">
+      <summary className="cursor-pointer font-mono text-xs text-muted">
+        Shared PF by TP step and direction (0.2–5.0%) · targets above 3.5% use the final Auto bucket
+      </summary>
+      <p className="mt-2 text-xs text-muted">Each direction keeps its own learned evidence. A range override replaces Auto; config-specific step and SL-ratio overrides take precedence within their own lanes.</p>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-left font-mono text-xs">
+          <thead className="text-muted">
+            <tr>
+              <th className="py-1">TP</th>
+              <th>Direction</th>
+              <th>Manual</th>
+              <th>Auto</th>
+              <th>Used</th>
+              <th>Source</th>
+              <th>Orders read</th>
+              <th>Admitted</th>
+              <th>PF admitted</th>
+              <th>PF all</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ step, tp, side, manual, used, source, evidence: r }) => {
+              return (
+                <tr key={`${step}:${side}`} className="border-t border-border">
+                  <td className="py-0.5">{tp.toFixed(1)}%</td>
+                  <td>{side > 0 ? "Long" : side < 0 ? "Short" : "Both"}</td>
+                  <td>{manual.toFixed(2)}</td>
+                  <td>{r?.auto != null ? r.auto.toFixed(2) : "–"}</td>
+                  <td>{used.toFixed(3)}</td>
+                  <td>{source}</td>
+                  <td>{r?.orders ?? "–"}</td>
+                  <td>{r?.admitted ?? "–"}</td>
+                  <td>{r && r.orders ? r.pfAdmitted.toFixed(2) : "–"}</td>
+                  <td>{r && r.orders ? r.pfAll.toFixed(2) : "–"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
+function PfWindowControls({
+  overlay,
+  patch,
+  stats,
+}: {
+  overlay: PulseOverlay;
+  patch: <K extends keyof PulseOverlay>(key: K, value: PulseOverlay[K]) => void;
+  stats?: LiveStats | null;
+}) {
+  const byStep = overlay.minPfByStep !== false;
+  return (
+    <>
+      <div className="col-span-full mt-1 font-mono text-[11px] text-muted">
+        Minimum PF by TP step · one floor per Set for every window of every stage (Base, Main, Real, Real Negative) and for the Axis / Block / DCA gates on that Set's own stream. The drawdown time and the minimum order count are Base-stage rules
+      </div>
+      <Toggle
+        label="Minimum PF by TP step (on: replaces the window-size classes below)"
+        on={byStep}
+        onChange={(v) => patch("minPfByStep", v)}
+      />
+      {byStep ? <>
+        <Toggle label="Use a separate Micro range PF floor"
+          on={overlay.minPfByRange?.micro != null}
+          onChange={(on) => {
+            const floors = { ...overlay.minPfByRange };
+            if (on) floors.micro = MICRO_RANGE_PF_DEFAULT;
+            else delete floors.micro;
+            patch("minPfByRange", floors);
+          }} />
+        {overlay.minPfByRange?.micro != null ? <Slider
+          label="Micro range · minimum PF"
+          value={overlay.minPfByRange.micro} min={1.001} max={2} step={0.001} digits={3}
+          hint="One positive PF floor for Micro TP steps 2–3 across Base, Main, Real and their strategy gates. PF 1.000 is break-even after modeled costs."
+          onChange={(value) => patch("minPfByRange", { ...overlay.minPfByRange, micro: value })} /> : null}
+      </> : null}
+      <Toggle
+        label="Choose among valid Sets by the lane's own Set (Real / Real Negative orders), not the raw Base tape"
+        on={overlay.rankByLane !== false}
+        onChange={(v) => patch("rankByLane", v)}
+      />
+      <Toggle
+        label="Profit group gate: a group (indication × type × TP range × lane) opens positions only while its own newest executed results are profitable (PF ≥ the floor below, judged on the results it has)"
+        on={overlay.groupGate === true}
+        onChange={(v) => patch("groupGate", v)}
+      />
+      {overlay.groupGate === true ? (
         <Grid>
-          <Slider
-            label="Historic time range"
-            value={overlay.histTestHours}
-            min={HIST_TEST_HOURS_MIN}
-            max={HIST_TEST_HOURS_MAX}
-            step={HIST_TEST_HOURS_STEP}
-            unit="h"
-            testId="hist-test-hours"
-            hint={`${overlay.histTestHours}h prev · ${histTestLookbackBars(overlay.histTestHours)} × 1m bars · default ${HIST_TEST_HOURS_DEFAULT}h · engine lookback stays two days`}
-            onChange={(v) => patch("histTestHours", Math.round(v))}
-          />
-          <Slider
-            label="Min PF · test results"
-            value={overlay.histTestMinPf}
-            min={PF_MIN}
-            max={PF_MAX}
-            step={PF_STEP}
-            testId="hist-test-min-pf"
-            hint="A symbol counts as positive only when its cost-PF meets this floor"
-            onChange={(v) => patch("histTestMinPf", v)}
-          />
-          <Slider
-            label="Refresh interval"
-            value={overlay.histTestRefreshHours}
-            min={HIST_TEST_REFRESH_MIN}
-            max={HIST_TEST_REFRESH_MAX}
-            step={1}
-            unit="h"
-            testId="hist-test-refresh-hours"
-            hint={`Rerun the independent combo eval every ${overlay.histTestRefreshHours}h using only positive successful sets. Default ${HIST_TEST_REFRESH_DEFAULT}h.`}
-            onChange={(v) => patch("histTestRefreshHours", Math.round(v))}
-          />
-          <KV k="Fill until" v={`${histTestTarget} positive symbols`} />
-          <KV k="Lookback" v={`${histTestLookbackBars(overlay.histTestHours)} bars`} />
+          <Slider label="Group gate · newest executed results" value={overlay.groupGateN} min={1} max={50} step={1}
+            hint="At most this many of the group's newest executed results are judged (fewer if it has fewer)."
+            onChange={(v) => patch("groupGateN", Math.max(1, Math.min(200, Math.round(v))))} />
+          <Slider label="Group gate · minimum PF" value={overlay.groupGatePf} min={0.5} max={2} step={0.05}
+            hint="1.00 = break-even after costs. A group below it opens nothing new; its open positions run on."
+            onChange={(v) => patch("groupGatePf", Math.max(0.5, Math.min(3, Math.round(v * 100) / 100)))} />
+          <Slider label="Group gate · window (hours)" value={overlay.groupGateHours} min={1} max={72} step={1}
+            hint="Results older than this are forgotten, so a blocked group re-tests itself."
+            onChange={(v) => patch("groupGateHours", Math.max(1, Math.min(72, Math.round(v))))} />
+          <Slider label="Group gate · results needed to judge" value={overlay.groupGateMin} min={1} max={10} step={1}
+            hint="1 = judged on the results it has (owner rule: no minimum-orders gate); more lets a group lose that many times before it is blocked."
+            onChange={(v) => patch("groupGateMin", Math.max(1, Math.min(50, Math.round(v))))} />
         </Grid>
-        <HistTestControls
-          job={histTestJob}
-          enabled={enabled}
-          hours={overlay.histTestHours}
-          minPf={overlay.histTestMinPf}
-          onControl={onControl}
-          testId="hist-test-start-settings"
-        >
-          {histTestJob?.positive?.length ? (
-            <button
-              type="button"
-              data-testid="hist-test-apply"
-              onClick={onApply}
-              className="min-h-11 rounded-lg border border-border px-3 text-sm"
-            >
-              Apply {histTestJob.positive.length} positive
+      ) : null}
+      <Toggle
+        label="Scratch exit on Set lanes (off: a Set leaves only by its own stop, target and time; the global +0.16 % scratch cut every range's winners)"
+        on={overlay.setScratchEnabled === true}
+        onChange={(v) => patch("setScratchEnabled", v)}
+      />
+      <Toggle
+        label="Auto: learn the best floor for every step 0.2-3.5%"
+        on={byStep && overlay.minPfStepAuto !== false}
+        onChange={(v) => patch("minPfStepAuto", v)}
+      />
+      <Slider
+        label="Manual: ratio (floor = 1 + TP% × ratio)"
+        value={overlay.minPfStepRatio}
+        min={STEP_PF_RATIO_MIN}
+        max={STEP_PF_RATIO_MAX}
+        step={STEP_PF_RATIO_STEP}
+        hint={`0.2% → ${manualStepPf(0.2, overlay.minPfStepRatio).toFixed(2)} · 1.0% → ${manualStepPf(1, overlay.minPfStepRatio).toFixed(2)} · 3.5% → ${manualStepPf(3.5, overlay.minPfStepRatio).toFixed(2)}. A TP between two grid values uses the lower one. Default ${STEP_PF_RATIO_DEFAULT}; also the fallback of Auto`}
+        onChange={(v) => patch("minPfStepRatio", stepPfRatio(v))}
+      />
+      <Slider
+        label="Auto: last N orders selected on"
+        value={overlay.minPfStepAutoN}
+        min={3}
+        max={50}
+        step={1}
+        hint="the Set's PF over its last N closed orders at entry (default 10) is what a floor is tried on"
+        onChange={(v) => patch("minPfStepAutoN", v)}
+      />
+      <Slider
+        label="Auto: orders a floor needs"
+        value={overlay.minPfStepAutoMin}
+        min={1}
+        max={5000}
+        step={10}
+        hint="admitted orders (one per distinct Set tape) a floor needs before Auto can choose it; with too few on a step Auto uses its direction's pooled floor, and only without any the manual value"
+        onChange={(v) => patch("minPfStepAutoMin", v)}
+      />
+      <Slider
+        label="Auto: tolerance to the best PF (%)"
+        value={overlay.minPfStepAutoTol}
+        min={1}
+        max={20}
+        step={1}
+        hint="Auto takes the LOWEST floor whose delivered PF is within this much of the best one: the most valid Sets and orders at nearly the best PF. It does not use the manual ratio."
+        onChange={(v) => patch("minPfStepAutoTol", v)}
+      />
+      <Slider
+        label="Auto: lowest floor it may choose"
+        value={overlay.minPfStepAutoLow ?? 1}
+        min={1}
+        max={2}
+        step={0.01}
+        hint="Auto never chooses a floor under this. At 1.00 it can admit break-even Sets after costs (x02 showed 1.00 for most steps above 1.6 %)."
+        onChange={(v) => patch("minPfStepAutoLow", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
+      />
+      <Slider
+        label="Highest floor a TP step may ask"
+        value={overlay.minPfStepAutoHigh ?? 2}
+        min={1}
+        max={2}
+        step={0.01}
+        hint="Caps the learned Auto floor and the manual 1 + TP % x ratio at this value in every stage (owner 2026-11-04: 1.27). 2.00 = no cap."
+        onChange={(v) => patch("minPfStepAutoHigh", Math.max(1, Math.min(2, Math.round(v * 100) / 100)))}
+      />
+      <StepPfTable overlay={overlay} stats={stats ?? null} />
+      <div className="col-span-full mt-2 font-mono text-[11px] text-muted">
+        Minimum PF by last-N window size · used when the TP-step floor is off
+      </div>
+      <Toggle
+        label="Minimum PF by window size (off = the one Set min PF for every window)"
+        on={overlay.minPfBySize !== false}
+        onChange={(v) => patch("minPfBySize", v)}
+      />
+      {(
+        [
+          ["Micro", "minPfMicro", "minPfMicroN"],
+          ["Minimal", "minPfMinimal", "minPfMinimalN"],
+          ["Short", "minPfShort", "minPfShortN"],
+          ["Normal", "minPfMedium", "minPfMediumN"],
+        ] as const
+      ).map(([name, pfKey, nKey]) => (
+        <div key={pfKey} className="contents">
+          <Slider
+            label={`${name} · min PF`}
+            value={overlay[pfKey]}
+            min={MIN_PF_FLOOR}
+            max={2.5}
+            step={0.01}
+            hint={`default ${PF_TYPE_DEFAULTS[pfKey].toFixed(2)} · windows of up to ${overlay[nKey]} orders`}
+            onChange={(v) => patch(pfKey, v)}
+          />
+          <Slider
+            label={`${name} · up to N orders`}
+            value={overlay[nKey]}
+            min={1}
+            max={100}
+            step={1}
+            hint="the largest window of this class"
+            onChange={(v) => patch(nKey, v)}
+          />
+        </div>
+      ))}
+      <Slider
+        label="Long · min PF"
+        value={overlay.minPfLong}
+        min={MIN_PF_FLOOR}
+        max={3}
+        step={0.01}
+        hint={`default 1.50 · windows of more than ${overlay.minPfMediumN} orders`}
+        onChange={(v) => patch("minPfLong", v)}
+      />
+      <Slider
+        label="Signals · min PF"
+        value={overlay.minPfSignals}
+        min={2.2}
+        max={3}
+        step={0.01}
+        hint="minimum 2.20 · own Signal evidence only; the full CTS-A-O Signal adapter is not yet connected in CTS-G"
+        onChange={(v) => patch("minPfSignals", v)}
+      />
+    </>
+  );
+}
+
+function CsvField({ label, value, hint, onCommit }: { label: string; value: string; hint?: string; onCommit: (v: string) => void }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  return (
+    <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+      <span className="font-mono text-xs text-muted">{label}</span>
+      <input
+        className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => onCommit(text)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onCommit(text);
+        }}
+      />
+      {hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
+    </label>
+  );
+}
+
+function PauseChosen({ stats }: { stats: LiveStats | null }) {
+  const chosen = stats?.sets?.pause?.chosen ?? {};
+  const rows = Object.entries(chosen).sort((a, b) => b[1].median - a[1].median).slice(0, 24);
+  if (!rows.length) return <p className="text-sm text-muted">No automatic choice yet: it appears after the next replay with the mode on auto.</p>;
+  return (
+    <div className="overflow-x-auto" data-testid="pause-chosen">
+      <table className="w-full text-left font-mono text-xs">
+        <thead className="text-muted">
+          <tr>
+            <th className="py-1">Indication</th>
+            <th>Symbols</th>
+            <th>With a pause</th>
+            <th>Median min</th>
+            <th>Max min</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([pack, r]) => (
+            <tr key={pack} className="border-t border-border">
+              <td className="py-1">{pack}</td>
+              <td>{r.symbols}</td>
+              <td>{r.withPause}</td>
+              <td>{r.median}</td>
+              <td>{r.max}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LastNLaneEditor({value,onChange}:{value:LastNLane[];onChange:(value:LastNLane[])=>void}) {
+  const [error,setError]=useState("");
+  const update=(i:number,patch:Partial<LastNLane>)=>{
+    try { onChange(lastNLanes(value.map((p,k)=>k===i?{...p,...patch}:p)));setError(""); }
+    catch(e) { setError(e instanceof Error?e.message:"Invalid window settings"); }
+  };
+  const numbers=(text:string)=>text.split(/[,;\s]+/).filter(Boolean).map(Number);
+  return <details className="rounded border border-border p-3" data-testid="last-n-lane-editor">
+    <summary className="cursor-pointer text-sm">Independent Last-N profiles ({value.length || "global windows"})</summary>
+    <p className="my-2 text-xs text-muted">Each profile evaluates its own prior results. Changing a profile rebuilds its qualification history. Recent-loss filters pause new entries; held positions retain their exits.</p>
+    {value.map((p,i)=><details key={p.id} className="my-2 rounded border border-border p-2">
+      <summary className="cursor-pointer text-sm">{p.id} · {p.role}</summary>
+      <Grid>
+        <label className="text-xs">Role<select className="mt-1 block w-full rounded border border-border bg-bg p-2" value={p.role}
+          onChange={e=>update(i,{role:e.target.value as LastNLane['role']})}>
+          {['major','minor','independent','additional'].map(r=><option key={r}>{r}</option>)}
+        </select></label>
+        {([['baseLong','Base N',30],['baseShort','Base secondary N (0 = off)',15],['mainLong','Main N',20],['realN','Real N',12],['realNegN','Real negative N',12]] as const).map(([key,label,fallback])=>
+          <Slider key={key} label={label} value={p.lastN[key]??fallback} min={key==='baseShort'?0:1} max={200} step={1}
+            onChange={v=>update(i,{lastN:{...p.lastN,[key]:v}})} />)}
+        <CsvField label="Main short candidates" value={(p.lastN.mainShort??[5,10]).join(', ')} hint="1–200; limited by the configured short/long ratio"
+          onCommit={text=>update(i,{lastN:{...p.lastN,mainShort:numbers(text)}})} />
+        <CsvField label="Negative recovery windows" value={(p.lastN.negWindows??[5,10]).join(', ')} hint="1–200; the negative lane still needs its own positive Real PF"
+          onCommit={text=>update(i,{lastN:{...p.lastN,negWindows:numbers(text)}})} />
+        <Toggle label="Recent-loss filter" on={!!p.negativeFilter} onChange={on=>update(i,{negativeFilter:on?{windows:[3,5],mode:'all',maxPf:1}:null})} />
+        {p.negativeFilter && <>
+          <CsvField label="Loss windows" value={p.negativeFilter.windows.join(', ')} hint="1–200; complete own Main and Real windows required"
+            onCommit={text=>update(i,{negativeFilter:{...p.negativeFilter!,windows:numbers(text)}})} />
+          <label className="text-xs">Pause when<select className="mt-1 block w-full rounded border border-border bg-bg p-2" value={p.negativeFilter.mode}
+            onChange={e=>update(i,{negativeFilter:{...p.negativeFilter!,mode:e.target.value as 'any'|'all'}})}>
+            <option value="any">Any loss window is negative</option><option value="all">All loss windows are negative</option>
+          </select></label>
+          <Slider label="Negative PF threshold" value={p.negativeFilter.maxPf} min={0} max={1} step={.05}
+            onChange={v=>update(i,{negativeFilter:{...p.negativeFilter!,maxPf:v}})} />
+        </>}
+      </Grid>
+      <button type="button" className="mt-2 rounded border border-border px-2 py-1 text-xs" onClick={()=>onChange(value.filter((_,k)=>k!==i))}>Remove profile</button>
+    </details>)}
+    {error && <p role="alert" className="text-sm text-red-500">{error}</p>}
+    <button type="button" disabled={value.length>=8} className="mt-2 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" onClick={()=>{
+      let n=1;while(value.some(p=>p.id===`lane-${n}`))n++;
+      onChange([...value,{...structuredClone(DEFAULT_LAST_N_LANES[2]),id:`lane-${n}`}]);
+    }}>Add independent profile</button>
+  </details>;
+}
+
+function IndicationConfigEditor({
+  value,
+  onChange,
+  report,
+}: {
+  value: IndicationConfig[];
+  onChange: (v: IndicationConfig[]) => void;
+  report?: NonNullable<NonNullable<LiveStats["sets"]>["indicationConfigs"]>;
+}) {
+  const set = (i: number, part: Partial<IndicationConfig>) => onChange(indicationConfigList(value.map((e, k) => (k === i ? { ...e, ...part } : e))));
+  const list = (t: string) => t.split(/[,;]/).map((x) => x.trim());
+  return (
+    <div className="space-y-3" data-testid="indication-configs">
+      {value.map((e, i) => (
+        <div key={i} className="space-y-2 rounded-lg border border-border bg-bg2 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Toggle label="On" on={e.enabled} onChange={(v) => set(i, { enabled: v })} />
+            <CsvField label="Label" value={e.label} onCommit={(t) => set(i, { label: t })} />
+            <button type="button" className="rounded border border-border px-2 py-1 font-mono text-xs" onClick={() => onChange(value.filter((_, k) => k !== i))}>
+              Remove
             </button>
-          ) : null}
-          <a href="/step-sweep" className="min-h-11 inline-flex items-center rounded-lg border border-border px-3 text-sm text-muted">
-            Open report
-          </a>
-        </HistTestControls>
-        {assignment ? (
-          <div className="grid gap-2 sm:grid-cols-2" data-testid="hist-test-assigned">
-            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">
-                Assigned symbols · {assignment.symbols.length} ·{" "}
-                {isUnlimitedSymbolBook(overlay) || overlay.symbols.includes("*")
-                  ? "wildcard book · engine narrows to these"
-                  : histTestSelectionMatches(overlay.symbols, assignment.symbols)
-                    ? unsaved
-                      ? "in form · unsaved, save Live or VST to persist"
-                      : "in selection"
-                    : overlay.histTestAutoAssign !== false
-                      ? "assigns on the next save"
-                      : "selection differs · auto-assign off"}
-              </p>
-              <p className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{assignment.symbols.join(" · ") || "—"}</p>
-            </div>
-            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">
-                Assigned configs · {assignment.configs.length} · engine allow-list
-              </p>
-              <ul className="mt-1 space-y-0.5 font-mono text-xs text-fg" data-testid="hist-test-assigned-configs">
-                {assignment.configs.slice(0, 8).map((c) => (
-                  <li key={c.id} className="[overflow-wrap:anywhere]">
-                    {c.id}
-                    {c.pf != null ? ` · PF ${Number(c.pf).toFixed(2)}` : ""}
-                    {c.n != null ? ` · n ${c.n}` : ""}
-                  </li>
+          </div>
+          <Grid>
+            <CsvField label="Families" value={e.families.join(", ")} hint="e.g. donch, kelt, brk" onCommit={(t) => set(i, { families: list(t).filter(Boolean) })} />
+            <CsvField label="Exact names" value={e.names.join(", ")} hint="group votes or composites, e.g. g_trend_min" onCommit={(t) => set(i, { names: list(t).filter(Boolean) })} />
+            <CsvField label="Ranges" value={e.ranges.join(", ")} hint="2-60, e.g. 5, 8, 14, 21" onCommit={(t) => set(i, { ranges: t.split(/[,;\s]+/).map(Number).filter((x) => x >= 2 && x <= 60) })} />
+            <CsvField
+              label="Timeframes"
+              value={e.timeframes.join(", ")}
+              hint={`${INDICATION_TIMEFRAMES.join(" / ")} minutes; c = vote over 1/5/15, x = over 1/5/15/30`}
+              onCommit={(t) => set(i, { timeframes: t.split(/[,;\s]+/).filter(Boolean).map((x) => (x === "c" || x === "x" ? x : Number(x))) as IndicationConfig["timeframes"] })}
+            />
+            <CsvField label="Relations" value={e.relations.join(", ")} hint="empty = none; trend T5 / B15 / M30; RSI regime RS5 / rs5 (dip); drawdown DR240 / dr240; recovery RC240 / rc240; VWAP VW240 / vw240; past PR480 / YD1440; average MA60 / ma60; I inverts. Upper case with the direction, lower case against it." onCommit={(t) => set(i, { relations: t.split(",").map((x) => x.trim()) })} />
+            <CsvField label="SL ratios" value={e.slRatios.join(", ")} hint="0.25–3.5" onCommit={(t) => set(i, { slRatios: t.split(/[,;\s]+/).map(Number) })} />
+            <Slider label="TP step from" value={e.stepMin} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMin).toFixed(1)}%`} onChange={(v) => set(i, { stepMin: v, stepMax: Math.max(v, e.stepMax) })} />
+            <Slider label="TP step to" value={e.stepMax} min={TP_STEP_MIN} max={TP_STEP_MAX} step={1} hint={`${tpPctOfStep(e.stepMax).toFixed(1)}%`} onChange={(v) => set(i, { stepMax: v, stepMin: Math.min(v, e.stepMin) })} />
+            <Slider label="Trailing arm from (0 = every arm)" value={e.trailStepMin ?? 0} min={0} max={TP_STEP_MAX} step={1} hint={e.trailStepMin ? `${tpPctOfStep(e.trailStepMin).toFixed(1)}%` : "every arm up to the TP step to"} onChange={(v) => set(i, { trailStepMin: v < 2 ? 0 : v, trailStepMax: v < 2 ? e.trailStepMax : Math.max(v, e.trailStepMax ?? 0) })} />
+            <Slider label="Trailing arm to (0 = TP step to)" value={e.trailStepMax ?? 0} min={0} max={TP_STEP_MAX} step={1} hint={e.trailStepMax ? `${tpPctOfStep(e.trailStepMax).toFixed(1)}%` : "up to the TP step to"} onChange={(v) => set(i, { trailStepMax: v < 2 ? 0 : v, trailStepMin: v < 2 ? e.trailStepMin : Math.min(v, e.trailStepMin || v) })} />
+            <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+              <span className="font-mono text-xs text-muted">Pause after success</span>
+              <select
+                className="mt-1 w-full rounded border border-border bg-bg px-2 py-1 font-mono text-sm"
+                value={e.pause === "auto" ? "auto" : String(e.pause)}
+                onChange={(ev) => set(i, { pause: ev.target.value === "auto" ? "auto" : Number(ev.target.value) })}
+              >
+                <option value="auto">follow the mode</option>
+                <option value="0">none</option>
+                {[5, 10, 15, 30, 60, 120].map((m) => (
+                  <option key={m} value={String(m)}>
+                    {m} min
+                  </option>
                 ))}
-                {assignment.configs.length > 8 ? <li className="text-muted">+{assignment.configs.length - 8} more</li> : null}
-                {assignment.configs.length === 0 ? <li className="text-muted">—</li> : null}
-              </ul>
-            </div>
+              </select>
+            </label>
+          </Grid>
+          <LastNLaneEditor value={e.lastNLanes??[]} onChange={lastNLanes=>set(i,{lastNLanes})} />
+          <div className="flex flex-wrap gap-3 font-mono text-xs">
+            {SET_TYPES.map((t) => (
+              <label key={t} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={e.types.includes(t)}
+                  onChange={(ev) => set(i, { types: ev.target.checked ? [...e.types, t] : e.types.filter((x) => x !== t) })}
+                />
+                {t}
+              </label>
+            ))}
+            {report?.entries?.[i] && (
+              <span className="text-muted">
+                engine: {report.entries[i].names} names x {report.entries[i].steps} steps
+              </span>
+            )}
           </div>
-        ) : null}
-        {(histTestJob?.positive?.length || (Array.isArray(histTestJob?.rejected) && histTestJob.rejected.length) || histTestIsRunning(histTestJob?.phase) || histTestJob?.ready) ? (
-          <div className="grid gap-2 sm:grid-cols-2">
-            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Intern majors · {(histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).length}/{histTestJob?.targetCount ?? histTestTarget}</p>
-              <p className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{(histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).join(" · ") || "—"}</p>
-            </div>
-            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Rejected · evaluated {histTestJob?.evaluated ?? 0}</p>
-              <p className="mt-1 font-mono text-xs text-muted [overflow-wrap:anywhere]">
-                {(Array.isArray(histTestJob?.rejected) ? histTestJob.rejected.map((r) => typeof r === "string" ? r : r.symbol) : []).join(" · ") || "none"}
-              </p>
-            </div>
-          </div>
-        ) : null}
-        {(histTestJob?.bySymbol || []).length > 0 ? (
-          <div className="max-w-full overflow-x-auto">
-          <table className="w-full text-sm" data-testid="hist-test-symbols">
-            <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
-              <tr>
-                <th className="py-1 text-left">Symbol</th>
-                <th className="text-left">PF</th>
-                <th className="text-left">N</th>
-                <th className="text-left">WR</th>
-                <th className="text-left">DDT</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(histTestJob?.bySymbol || []).slice(0, 12).map((row) => (
-                <tr key={row.symbol} className="border-t border-border/60">
-                  <td className="py-1.5">{row.symbol}</td>
-                  <td className={`font-mono ${pfClass(Number(row.pf || 0), Number(row.n || 0), overlay.histTestMinPf)}`}>{(row.pf ?? 0).toFixed(2)}</td>
-                  <td className="font-mono">{row.evalN ?? row.n ?? 0}</td>
-                  <td className="font-mono">{row.wr ?? 0}</td>
-                  <td className="font-mono">{Math.round(Number(row.maxDdS || 0))}s</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
-        ) : null}
-        <ComboEvalPanel job={histTestJob} compact />
-        {Object.keys(histTestJob?.byIndication || histTestJob?.kinds || {}).length ? (
-          <div className="max-w-full overflow-x-auto">
-          <table className="w-full text-sm" data-testid="hist-test-indications">
-            <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
-              <tr>
-                <th className="py-1 text-left">Indication</th>
-                <th className="text-left">PF</th>
-                <th className="text-left">N</th>
-                <th className="text-left">DDT</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(histTestJob?.byIndication || histTestJob?.kinds || {}).slice(0, 18).map(([name, row]) => (
-                <tr key={name} className="border-t border-border/60">
-                  <td className="py-1.5">{name}</td>
-                  <td className={`font-mono ${pfClass(Number(row?.pf || 0), Number(row?.n || 0), overlay.histTestMinPf)}`}>{(row?.pf ?? 0).toFixed(2)}</td>
-                  <td className="font-mono">{row?.n ?? 0}</td>
-                  <td className="font-mono">{Math.round(Number(row?.maxDdS || 0))}s</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
-        ) : null}
-        {Object.keys(histTestJob?.byStrategy || {}).length ? (
-          <div className="max-w-full overflow-x-auto">
-          <table className="w-full text-sm" data-testid="hist-test-strategies">
-            <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
-              <tr>
-                <th className="py-1 text-left">Relation / strategy</th>
-                <th className="text-left">PF</th>
-                <th className="text-left">N</th>
-                <th className="text-left">DDT</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(histTestJob?.byStrategy || {}).slice(0, 16).map(([name, row]) => (
-                <tr key={name} className="border-t border-border/60">
-                  <td className="py-1.5">{name}</td>
-                  <td className={`font-mono ${pfClass(Number(row?.pf || 0), Number(row?.n || 0), overlay.histTestMinPf)}`}>{(row?.pf ?? 0).toFixed(2)}</td>
-                  <td className="font-mono">{row?.n ?? 0}</td>
-                  <td className="font-mono">{Math.round(Number(row?.maxDdS || 0))}s</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
-        ) : null}
-      </section>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="rounded border border-border px-3 py-1.5 font-mono text-xs"
+        onClick={() => onChange([...value, { ...DEFAULT_INDICATION_CONFIG, label: `entry ${value.length + 1}` }])}
+        data-testid="add-indication-config"
+      >
+        Add entry
+      </button>
+      {report && (report.dropped?.length ?? 0) > 0 && (
+        <details className="text-xs text-muted">
+          <summary>{report.dropped?.length} combinations dropped by the engine</summary>
+          <ul className="mt-1 list-disc pl-5 font-mono">
+            {report.dropped?.slice(0, 40).map((d, k) => (
+              <li key={k}>
+                {d.entry}: {d.name} ({d.reason})
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }
 
 function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="min-w-0 space-y-4 rounded-radius border border-border bg-surface p-4">
+    <section className="space-y-4 rounded-radius border border-border bg-surface p-4">
       <div>
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
         {hint ? <p className="mt-1 text-sm text-muted">{hint}</p> : null}
@@ -3308,18 +2767,9 @@ function Grid({ children }: { children: React.ReactNode }) {
 
 function KV({ k, v }: { k: string; v: string }) {
   return (
-    <div className="min-w-0 rounded-lg border border-border bg-bg2 px-3 py-2">
-      <div className="font-mono text-xs text-muted">{k}</div>
-      <div className="mt-0.5 break-words text-sm leading-snug">{v || "—"}</div>
-    </div>
-  );
-}
-
-function ThresholdReadout({ label, value, tone = "text-fg" }: { label: string; value: string; tone?: "text-fg" | "text-primary" | "text-danger" | "text-warn" }) {
-  return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-      <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted">{label}</p>
-      <p className={`mt-1 font-mono text-sm tabular-nums ${tone}`}>{value}</p>
+      <div className="font-mono text-xs text-muted">{k}</div>
+      <div className="mt-0.5 break-all text-sm">{v || "—"}</div>
     </div>
   );
 }
@@ -3328,19 +2778,16 @@ function EnableSlider({
   label,
   on,
   hint,
-  testId,
   onChange,
 }: {
   label: string;
   on: boolean;
   hint?: string;
-  testId?: string;
   onChange: (v: boolean) => void;
 }) {
   return (
     <Slider
       label={label}
-      testId={testId}
       value={on ? 1 : 0}
       min={0}
       max={1}
@@ -3351,84 +2798,6 @@ function EnableSlider({
   );
 }
 
-/**
- * Number box that can be typed into. The draft is committed as typed while it is
- * in range and clamped on blur/Enter. Clamping on every keystroke turned "24"
- * into 44, "1.2" into 1.02 and "3600" into 21600.
- */
-function DraftNumber({
-  value,
-  min,
-  max,
-  step,
-  onCommit,
-  className,
-  label,
-  testId,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onCommit: (n: number) => void;
-  className?: string;
-  label?: string;
-  testId?: string;
-}) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const commit = () => {
-    if (draft === null) return;
-    const n = Number(draft);
-    setDraft(null);
-    if (draft.trim() !== "" && Number.isFinite(n)) onCommit(Math.min(max, Math.max(min, n)));
-  };
-  return (
-    <input
-      type="number"
-      min={min}
-      max={max}
-      step={step}
-      aria-label={label}
-      data-testid={testId}
-      value={draft ?? String(value)}
-      onChange={(e) => {
-        setDraft(e.target.value);
-        const n = Number(e.target.value);
-        if (e.target.value.trim() !== "" && Number.isFinite(n) && n >= min && n <= max) onCommit(n);
-      }}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") commit();
-      }}
-      className={className}
-      suppressHydrationWarning
-    />
-  );
-}
-
-/** Escape closes, Tab wraps inside the dialog panel. */
-function dialogKeys(close: () => void) {
-  return (e: React.KeyboardEvent<HTMLElement>) => {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      close();
-      return;
-    }
-    if (e.key !== "Tab") return;
-    const items = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not([disabled]), input, select, textarea, a[href]")];
-    if (!items.length) return;
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  };
-}
-
 function Slider({
   label,
   value,
@@ -3436,8 +2805,8 @@ function Slider({
   max,
   step,
   unit = "",
+  digits = 2,
   hint,
-  testId,
   onChange,
 }: {
   label: string;
@@ -3446,27 +2815,31 @@ function Slider({
   max: number;
   step: number;
   unit?: string;
+  digits?: number;
   hint?: string;
-  testId?: string;
   onChange: (n: number) => void;
 }) {
   const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
   return (
-    <label className="block rounded-lg border border-border bg-bg2 px-3 py-3" data-testid={testId}>
-      <div className="flex flex-nowrap items-center justify-between gap-2">
-        <span className="min-w-0 truncate font-mono text-xs text-muted">{label}</span>
-        <span className="ml-auto inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-sm tabular-nums">
-          <DraftNumber
+    <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="font-mono text-xs text-muted">{label}</span>
+        <span className="flex items-center gap-1 font-mono text-sm tabular-nums">
+          <input
+            type="number"
             min={min}
             max={max}
             step={step}
-            label={label}
-            testId={testId ? `${testId}-input` : undefined}
-            value={Number.isInteger(step) && step >= 1 ? value : Number(Number(value).toFixed(2))}
-            onCommit={onChange}
-            className="w-20 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
+            value={Number.isInteger(step) && step >= 1 ? value : Number(value.toFixed(digits))}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (!Number.isFinite(n)) return;
+              onChange(Math.min(max, Math.max(min, n)));
+            }}
+            className="w-16 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
+            suppressHydrationWarning
           />
-          {unit ? <span>{unit}</span> : null}
+          {unit}
         </span>
       </div>
       <input
@@ -3474,8 +2847,6 @@ function Slider({
         min={min}
         max={max}
         step={step}
-        aria-label={label}
-        data-testid={testId ? `${testId}-range` : undefined}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         className="mt-2 w-full"
@@ -3487,18 +2858,14 @@ function Slider({
   );
 }
 
-function pfHint(ratio: number, cost: number) {
-  const r = (ratio - 1) / 0.1;
-  const net = cost * r;
-  const gross = cost + net;
-  if (ratio <= 1) return "Neutral — net 0 after one PositionCost";
-  return `Net +${net.toFixed(2)}% · gross ${gross.toFixed(2)}% (${r.toFixed(2)}× cost)`;
+function pfHint(pf: number, _cost: number) {
+  return `Requires net gains of at least ${pf.toFixed(2)}× net losses in this window.`;
 }
 
-function pfLive(stats: LiveStats | null) {
-  const p = (stats as LiveStats & { pfCost?: { ratio?: number; avgR?: number; count?: number; pass?: boolean } })?.pfCost;
+function pfLive(stats: LiveStats | null, overlay: PulseOverlay) {
+  const p = (stats as LiveStats & { pfCost?: { pf?: number; avgR?: number; count?: number; pass?: boolean } })?.pfCost;
   if (!p) return "waiting";
-  return `${(p.ratio ?? 0).toFixed(2)} · R ${(p.avgR ?? 0).toFixed(2)} · n ${p.count ?? 0} · ${p.pass ? "pass" : "block"}`;
+  return `PF ${(p.pf ?? 0).toFixed(2)} · R ${(p.avgR ?? 0).toFixed(2)} · n ${p.count ?? 0} · ${p.pass ? "pass" : "block"}`;
 }
 
 function Num({
@@ -3525,17 +2892,23 @@ function Num({
   const pct = max === min ? 0 : ((clamped - min) / (max - min)) * 100;
   const digits = Number.isInteger(step) && step >= 1 ? 0 : step < 0.05 ? 2 : 2;
   return (
-    <label className="block rounded-lg border border-border bg-bg2 px-3 py-3">
+    <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="min-w-0 truncate font-mono text-xs text-muted">{label}</span>
-        <span className="flex shrink-0 items-center gap-1 font-mono text-sm tabular-nums">
-          <DraftNumber
+        <span className="font-mono text-xs text-muted">{label}</span>
+        <span className="flex items-center gap-1 font-mono text-sm tabular-nums">
+          <input
+            type="number"
             min={min}
             max={max}
             step={step}
             value={Number(clamped.toFixed(digits))}
-            onCommit={onChange}
-            className="w-28 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (!Number.isFinite(n)) return;
+              onChange(Math.min(max, Math.max(min, n)));
+            }}
+            className="w-16 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
+            suppressHydrationWarning
           />
           {unit}
         </span>
@@ -3558,18 +2931,56 @@ function Num({
   );
 }
 
+function WindowChips({
+  label,
+  value,
+  options,
+  hint,
+  onChange,
+}: {
+  label: string;
+  value: number[] | undefined;
+  options: number[];
+  hint?: string;
+  onChange: (v: number[]) => void;
+}) {
+  const on = new Set(value ?? options);
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-border bg-bg2 px-3 py-2 text-sm">
+      <span>{label}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((n) => (
+          <button
+            key={n}
+            type="button"
+            aria-pressed={on.has(n)}
+            onClick={() => {
+              const next = new Set(on);
+              if (next.has(n)) next.delete(n);
+              else next.add(n);
+              if (next.size) onChange([...next].sort((a, b) => a - b));
+            }}
+            className={`min-h-9 min-w-11 rounded-md border px-2 font-mono text-xs ${on.has(n) ? "border-primary text-primary" : "border-border text-muted"}`}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+      {hint ? <span className="text-xs text-muted">{hint}</span> : null}
+    </div>
+  );
+}
+
 function Toggle({
   label,
   on,
   onChange,
   locked,
-  hint,
 }: {
   label: string;
   on: boolean;
   onChange: (v: boolean) => void;
   locked?: boolean;
-  hint?: string;
 }) {
   return (
     <button
@@ -3578,12 +2989,9 @@ function Toggle({
       onClick={() => onChange(!on)}
       className="flex min-h-11 items-center justify-between rounded-lg border border-border bg-bg2 px-3 text-left text-sm disabled:opacity-70"
     >
-      <span className="pr-3">
-        <span>
-          {label}
-          {locked ? <span className="ml-2 font-mono text-xs text-faint">CTS</span> : null}
-        </span>
-        {hint ? <span className="mt-0.5 block text-xs text-muted">{hint}</span> : null}
+      <span>
+        {label}
+        {locked ? <span className="ml-2 font-mono text-xs text-faint">CTS</span> : null}
       </span>
       <span className={`font-mono text-xs ${on ? "text-primary" : "text-muted"}`}>{on ? "ON" : "OFF"}</span>
     </button>
@@ -3619,21 +3027,41 @@ function LiveAxis({
   );
 }
 
+function AxisRow({
+  name,
+  enabled,
+  window,
+  range,
+}: {
+  name: string;
+  enabled: boolean;
+  window: number;
+  range: string;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-border bg-bg2 px-3 py-2 text-sm">
+      <span>
+        {name} <span className="font-mono text-xs text-muted">{range}</span>
+      </span>
+      <span className="font-mono text-xs text-muted">
+        {enabled ? "on" : "off"} · window {window}
+      </span>
+    </div>
+  );
+}
+
 function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: PulseOverlay }) {
   const sets = stats?.sets;
   const p = sets?.progress;
-  const liveOv = sets?.liveOverview;
+  const rows = sets?.rows ?? [];
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
-  const phase = String(p?.phase ?? "idle");
-  const updating = ["fetch", "replay", "score", "partial"].includes(phase);
-  const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   return (
     <div className="space-y-3">
       <div className="rounded-lg border border-border bg-bg2 px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
-          <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}{updating ? " · updating" : ""}{gate}</span>
+          <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}</span>
           <span className="text-muted">
-            {formatEffectiveSets(stats)} · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
+            {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist fills · last {fmtNum(p?.lastRunMs, 0)}ms
           </span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
@@ -3641,23 +3069,17 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         </div>
         <p className="mt-2 font-mono text-[11px] text-muted">
           {p?.detail || "waiting 1m bars"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} {p?.error ? `· ${p.error}` : ""}
-          {p?.symbolsTotal ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
-          {updating && p?.ready ? " · prior gate remains active" : ""}
-        </p>
-        <p className="mt-1 font-mono text-[11px] text-primary">
-          live on-exchange {liveOv?.active ?? sets?.liveActive ?? 0}/{liveOv?.processed ?? sets?.liveProcessed ?? 0} processed · fills {liveOv?.fills ?? sets?.liveFills ?? 0} · PF {Number(liveOv?.last15Ratio ?? 0).toFixed(2)} net {(Number(liveOv?.netAvg ?? 0) * 100).toFixed(3)}% · cost subtracted · deact from live only
         </p>
       </div>
-      <SetGroups sets={sets} axesEnabled={enabledAxes(stats).length > 0} limit={40}>{(rows) => (
-      <div className="max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label="Configuration set measurements">
-        <table className="w-full min-w-[720px] table-fixed text-left text-sm">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>
-              <th className="w-56 pb-2 font-medium">Set</th>
+              <th className="pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium" title={`Cost PF · configured ${overlay.setPfWindow}-result window`}>PF</th>
-              <th className="pb-2 text-right font-medium" title="Average R · last 25 results">R25</th>
+              <th className="pb-2 text-right font-medium">Gate PF</th>
+              <th className="pb-2 text-right font-medium">Last {overlay.setDeactN} R</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
             </tr>
@@ -3670,32 +3092,30 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 </td>
               </tr>
             ) : (
-              rows.map((r, i) => {
-                const pf = r.last15Ratio;
-                const ddt = r.maxDdS;
-                return (
-                <tr key={setRowKey(r, i)} className="border-t border-border font-mono text-xs">
-                  <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
-                  <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
+              rows.slice(0, 40).map((r) => (
+                <tr key={r.id} className="border-t border-border font-mono text-xs">
+                  <td className="py-1.5">
+                    {r.pack} · sl{r.slRatio.toFixed(1)} · st{r.step ?? "—"} · {r.trailKey}
+                  </td>
+                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
+                    {r.liveN ? `+${r.liveN}` : ""}
                   </td>
-                  <td className={`py-1.5 text-right ${pfClass(pf ?? 0, r.n, overlay.setMinPf)}`}>
-                    {r.n ? setMetric(pf) : "—"}
+                  <td className={`py-1.5 text-right ${r.pf + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
+                    {r.pf.toFixed(2)}
                   </td>
-                  <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>
-                    {setMetric(r.last25AvgR)}
+                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>
+                    {r.last25AvgR.toFixed(2)}
                   </td>
-                  <td className="py-1.5 text-right">{ddt == null ? "—" : formatDuration(ddt * 1000)}</td>
-                  <td className="py-1.5 text-muted [overflow-wrap:anywhere]">{r.deactReason || "—"}</td>
+                  <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
+                  <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
                 </tr>
-                );
-              })
+              ))
             )}
           </tbody>
         </table>
       </div>
-      )}</SetGroups>
     </div>
   );
 }
@@ -3717,8 +3137,8 @@ function ExitLanesTable({ stats }: { stats: LiveStats | null }) {
               <th className="pb-2 font-medium">Lane</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last {ex?.pfWindow ?? 15} PF</th>
-              <th className="pb-2 text-right font-medium">Last {ex?.deactN ?? 25} R</th>
+              <th className="pb-2 text-right font-medium">Last 15 PF</th>
+              <th className="pb-2 text-right font-medium">Last 25 R</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
             </tr>
@@ -3734,10 +3154,10 @@ function ExitLanesTable({ stats }: { stats: LiveStats | null }) {
               lanes.map((r) => (
                 <tr key={r.key} className="border-t border-border font-mono text-xs">
                   <td className={`py-1.5 ${r.selected ? "text-primary" : ""}`}>{r.key}</td>
-                  <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
+                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">{r.n}</td>
-                  <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                  <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>{r.last25AvgR.toFixed(2)}</td>
+                  <td className="py-1.5 text-right">{r.last15Pf.toFixed(2)}</td>
+                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
                   <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
                 </tr>
@@ -3768,67 +3188,27 @@ function connHint(conn: string, stats: LiveStats | null) {
 function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const c = stats?.coverage?.controls;
   const open = stats?.open ?? [];
-  const groups = c?.groups ?? open.map((p) => ({
-    key: p.controlGroupKey ?? `${p.symbol}:${p.side}`,
-    symbol: p.symbol,
-    side: p.side,
-    range: p.controlRangeKey ?? "aggregate",
-    qty: p.qty,
-    memberCount: p.memberCount ?? 1,
-    protected: Boolean(p.controls),
-    status: p.controlStatus,
-    slOid: p.slOid,
-    tpOid: p.tpOid,
-    secSlOid: p.secSlOid,
-    secTpOid: p.secTpOid,
-  }));
-  const missing = groups.filter((group) => !group.protected);
+  const missing = open.filter((p) => !hasControlCoverage(p));
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
-  const mode = c?.mode ?? (stats?.pulse?.controlOrdersOverall ? "overall" : stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
-        <span className={missing.length ? "text-danger" : "text-primary"}>
-          live controls · {mode} · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
+        <span className={missing.length || c?.missing || !stats ? "text-warn" : "text-primary"}>
+          live controls · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {c?.missing ?? missing.length}</span>
       </div>
-      <p className="mt-1 text-muted">
-        {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
-      </p>
-      <p className="mt-1 min-w-0 text-muted">
-        <PosOrdersLine stats={stats} extra={<> · {stats?.openCount ?? 0} lanes</>} />
-      </p>
-      {groups.length ? (
-        <div className="mt-2 grid gap-1 sm:grid-cols-2">
-          {groups.slice(0, 12).map((group) => {
-            const slOid = group.slOid || group.secSlOid || "";
-            const tpOid = group.tpOid || group.secTpOid || "";
-            const protectedGroup = Boolean(group.protected ?? (slOid && tpOid));
-            return (
-              <div key={group.key} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-border px-2 py-1">
-                <span className="min-w-0 truncate text-muted">
-                  {group.symbol?.replace("-USDT", "")} {group.side === "LONG" ? "L" : "S"} · {group.range ?? "aggregate"} · q {group.qty ?? "—"}
-                </span>
-                <span className={protectedGroup ? "shrink-0 text-primary" : "shrink-0 text-danger"} title={`${slOid || "missing SL"} / ${tpOid || "missing TP"}`}>
-                  {protectedGroup ? `${String(slOid).slice(-8)}/${String(tpOid).slice(-8)}` : group.status ?? "missing"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
       {missing.length ? (
         <div className="mt-2 flex flex-wrap gap-2 text-danger">
-          {missing.slice(0, 12).map((group) => (
-            <span key={group.key}>
-              {group.symbol?.replace("-USDT", "")} {group.side === "LONG" ? "L" : "S"} · {group.range ?? "aggregate"}
+          {missing.slice(0, 12).map((p) => (
+            <span key={`${p.symbol}-${p.side}`}>
+              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {controlCoverage(p)}
             </span>
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">{mode === "overall" ? "Each symbol and direction shares protection for its own total quantity; Set targets and fills stay independent" : mode === "aggregate" ? "Every symbol + direction has one common close-position SL + TP pair" : "Every logical group has quantity-matched SL + TP protection"}</p>
+        <p className="mt-2 text-muted">{open.length ? "Coverage reported for listed positions; not a fresh independent venue check." : "No open-position evidence in this snapshot."}</p>
       )}
     </div>
   );
@@ -3847,10 +3227,6 @@ function LiveApplied({
 }) {
   const p = (stats?.pulse ?? {}) as PulseOverlay & Record<string, unknown>;
   const v = stats?.variants;
-  const controls = stats?.coverage?.controls;
-  const controlMode = controls?.mode ?? (overlay.controlOrdersOverall ? "overall" : overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
-  const controlGroups = controls?.groupCount ?? stats?.openCount ?? 0;
-  const controlPairs = controls?.pairCount ?? (overlay.controlOrders ? controlGroups : 0);
   const sl = v?.slRatio ?? p.slToTpRatio ?? overlay.slToTpRatio;
   const trail = v?.trailKey ?? `${Number(p.trailArmPct ?? overlay.trailArmPct).toFixed(1)}:${Number(p.trailGivePct ?? overlay.trailGivePct).toFixed(1)}`;
   const tf = [
@@ -3863,8 +3239,8 @@ function LiveApplied({
   return (
     <div className="rounded-radius border border-border bg-surface px-4 py-3 font-mono text-xs" data-testid="live-applied">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={stats?.paused ? "text-warn" : stats?.running && !stats?.halted ? "text-primary" : stats?.halted ? "text-warn" : "text-danger"}>
-          {stats?.paused ? "paused" : "live"} {conn} · SL:TP {Number(sl).toFixed(1)} · tr {trail} · vol ×{Number(stats?.volumeFactor ?? overlay.volumeFactor ?? 1).toFixed(1)}
+        <span className={stats?.paused ? "text-warn" : stats?.running && !stats?.halted ? "text-primary" : "text-danger"}>
+          {stats?.paused ? "paused" : stats?.running && !stats?.halted ? "live" : stats?.halted ? "halted" : "offline"} {conn} · SL:TP {Number(sl).toFixed(2)} · tr {trail} · vol ×{Number(stats?.volumeFactor ?? overlay.volumeFactor ?? 1).toFixed(2)}
         </span>
         <span className="text-muted">
           {dirty ? "unsaved overlay" : "applied"} · cycle {stats?.cycle ?? "—"} · {fmtNum(stats?.engine?.hotMs ?? stats?.scanMs, 0)}ms
@@ -3872,118 +3248,20 @@ function LiveApplied({
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
-        <span>controls {controlMode} · {controlPairs} SL+TP pairs · {controlGroups} groups</span>
-        <PosOrdersLine stats={stats} />
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F
         </span>
       </div>
-      {stats?.haltReason ? <p className={`mt-1 ${haltClass(stats.haltReason, stats.halted)}`}>{stats.haltReason}</p> : null}
-      {stats?.lastError && !isBenignError(stats.lastError) ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
+      {stats?.haltReason ? <p className="mt-1 text-danger">{stats.haltReason}</p> : null}
+      {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
-          fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}`).join(", ")}
+          fail {fails.map((t) => t.name).join(", ")}
         </p>
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>
       )}
-      <EffectiveSettingsSummary conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
-    </div>
-  );
-}
-
-function EffectiveSettingsSummary({
-  conn,
-  stats,
-  overlay,
-  dirty,
-}: {
-  conn: string;
-  stats: LiveStats | null;
-  overlay: PulseOverlay;
-  dirty: boolean;
-}) {
-  const livePulse = Boolean(stats?.pulse && Object.keys(stats.pulse).length > 0);
-  const pulse = { ...overlay, ...(livePulse ? stats!.pulse : {}) } as Record<string, unknown>;
-  const remoteReady = livePulse || Boolean(overlay);
-  const remote = (value: unknown, suffix = "") =>
-    remoteReady && value != null && value !== "" ? formatAppliedSetting(value, suffix) : "—";
-  const coverage = stats?.coverage;
-  const controls = coverage?.controls;
-  const setCoverage = coverage?.sets;
-  const scan = coverage?.scan;
-  const stages = coverage?.coord?.stages ?? stats?.coord?.stages;
-  const logicalCap = pulse?.logicalPositionCap ?? pulse?.maxOpen;
-  const controlPairs = controls?.pairCount ?? controls?.groupCount;
-  const controlRanges = controls?.groups?.length
-    ? controls.groups
-        .slice(0, 3)
-        .map((group) => `${group.symbol?.replace("-USDT", "")} ${group.side === "LONG" ? "L" : "S"} ${group.range || "range"}`)
-        .join(" · ")
-    : remoteReady
-      ? "none reported"
-      : "waiting for applied snapshot";
-  return (
-    <div className="mt-3 rounded-lg border border-border bg-bg2 p-3" data-testid="effective-settings-summary">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-mono text-xs uppercase text-muted">Effective settings</span>
-        <span className={remoteReady ? "font-mono text-xs text-primary" : "font-mono text-xs text-warn"}>
-          {livePulse ? "applied remote" : "overlay · sidecar offline"}
-        </span>
-      </div>
-      <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" data-testid="lane-status">
-        <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf ?? pulse?.setMinPf)} · ${remote(pulse?.pfWindow ?? pulse?.setPfWindow ?? pulse?.baseEvalPosCount)}`} />
-        <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
-        <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${formatEffectiveSets(stats)}`} />
-        <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
-        <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controlPairs)} SL+TP pairs`} />
-        <AppliedKV label="Positions" value={`R ${posOrdersCounts(stats).realPositions ?? "—"} · L ${posOrdersCounts(stats).livePositions ?? "—"}`} />
-        <AppliedKV label="Orders" value={`R ${posOrdersCounts(stats).realOrders ?? "—"} · L ${posOrdersCounts(stats).liveOrders ?? "—"}`} />
-        <AppliedKV label="Effective cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
-        <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · normal ${remote(pulse?.normalExecutionEnabled)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
-        <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.pairGaps ?? controls?.missing)} missing · ${remote(controls?.security)} security`} />
-        <AppliedKV label="Live ranges" value={controlRanges} />
-        <AppliedKV label="Volume · target" value={`${remote(pulse?.volumeFactor, "×")} · ${remote(pulse?.targetNotional, " USDT")}`} />
-        <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />
-        <AppliedKV label="Symbols · cap" value={`${remote(stats?.symbolCount)} ranked · ${remote(scan?.px)} active · ${remote(pulse?.symbolCap)} cap`} />
-        <AppliedKV label="Connection" value={`${remote(stats?.connection)} · ${remote(stats?.connType)} · age ${remote(stats?.statsAgeS, "s")}`} />
-        <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
-        <AppliedKV label="Sets · fills" value={`${formatEffectiveSets(stats)} · ${remote(setCoverage?.histFills ?? stats?.sets?.histFills)} hist`} />
-        <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
-        <AppliedKV label="System vs wallet" value={`${remote(stats?.systemEquity)} system eq · ${remote(stats?.walletEquity)} wallet eq · ${remote(stats?.executionEvidence?.foreignPositionCount)} foreign pos · ${remote(stats?.executionEvidence?.foreignOpenOrderCount)} foreign orders`} />
-        <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
-        <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
-      </div>
-      <p className="mt-2 font-mono text-[11px] text-muted">
-        {dirty
-          ? `Form values pending save · cap ${formatAppliedSetting(overlay.symbolCap)} · Set ${formatAppliedSetting(overlay.setMinStep)}–${formatAppliedSetting(overlay.setStepMax)} · SL/TP ${formatAppliedSetting(overlay.slPct)} / ${formatAppliedSetting(overlay.tpPct)}`
-          : `No unsaved form values · selected lane ${conn}`}
-      </p>
-    </div>
-  );
-}
-
-function formatLogicalCap(value: unknown) {
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(number) && number === 0 ? "unlimited" : formatAppliedSetting(value);
-}
-
-function formatAppliedSetting(value: unknown, suffix = "") {
-  if (value == null || (typeof value === "number" && !Number.isFinite(value))) return "—";
-  if (typeof value === "boolean") return value ? "ON" : "OFF";
-  if (typeof value === "number") {
-    const text = Number.isInteger(value) ? String(value) : value.toFixed(2);
-    return `${text}${suffix}`;
-  }
-  return `${String(value)}${suffix}`;
-}
-
-function AppliedKV({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0 rounded-md border border-border bg-surface px-2.5 py-2">
-      <div className="font-mono text-[11px] text-muted">{label}</div>
-      <div className="mt-0.5 break-words text-xs leading-snug text-fg" title={value}>{value}</div>
     </div>
   );
 }

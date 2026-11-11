@@ -1,18 +1,9 @@
-const PULSE_BASE = (process.env.PULSE_URL || "http://127.0.0.1:3015").replace(/\/$/, "");
+const PULSE_BASE = (process.env.PULSE_URL || "http://152.53.114.112:3015").replace(/\/$/, "");
 const PULSE = `${PULSE_BASE}/stats.json?conn=overall`;
-const CTS = (process.env.CTS_URL || "").replace(/\/$/, "");
+const CTS = (process.env.CTS_URL || "http://152.53.114.112").replace(/\/$/, "");
 const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
 const DEST = new URL("../public/live-stats.json", import.meta.url);
-
-async function writeSnapshot(text) {
-  const fs = await import("node:fs/promises");
-  const { fileURLToPath } = await import("node:url");
-  const dest = fileURLToPath(DEST);
-  const tmp = `${dest}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, text);
-  await fs.rename(tmp, dest);
-}
 
 async function readJson(url, timeoutMs = 8000) {
   const ac = new AbortController();
@@ -48,18 +39,6 @@ function applyCtsLane(lane, progression, engineStates, engRow) {
   if (pp.symbolsTotal) lane.symbolCount = pp.symbolsTotal;
   else if (pr.details && pr.details.symbolCount) lane.symbolCount = pr.details.symbolCount;
   return lane;
-}
-
-/** The kept snapshot's balances, PnL and positions are from the last sidecar read, not current. */
-function markStale(s, reason) {
-  const since = s.staleSince || s.now || Math.floor(Date.now() / 1000);
-  s.stale = true;
-  s.staleReason = reason;
-  s.staleSince = since;
-  for (const l of s.lanes || []) {
-    l.stale = true;
-    l.staleReason = reason;
-  }
 }
 
 async function fromCts() {
@@ -100,11 +79,16 @@ async function fromCts() {
     s.progressReady = liveLane.progressReady;
     s.cycle = liveLane.cycle;
   }
-  // Engine status comes from CTS; every money and position field is still the
-  // last sidecar snapshot, so the desk must show it as not current. `now`
-  // keeps the snapshot's own epoch-seconds time.
-  markStale(s, "pulse sidecar unreachable; balances and positions are from the last snapshot");
-  await writeSnapshot(JSON.stringify(s));
+  s.now = Date.now();
+  await writeDest(JSON.stringify(s));
+}
+
+/** Write the desk snapshot beside its target and rename it into place: a reader never sees a partial file. */
+async function writeDest(text) {
+  const fs = await import("node:fs/promises");
+  const tmp = `${DEST}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, text);
+  await fs.rename(tmp, DEST);
 }
 
 async function markOffline(reason) {
@@ -130,19 +114,20 @@ async function markOffline(reason) {
       l.progressPhase = "offline";
       l.progressReady = false;
     }
-    markStale(s, err);
-    await writeSnapshot(JSON.stringify(s));
+    await writeDest(JSON.stringify(s));
   } catch {
     /* keep last snapshot if we cannot rewrite it */
   }
 }
 
 async function once() {
-  const r = await fetch(PULSE, { cache: "no-store" });
+  // a sidecar that accepts the connection and never answers must not hang the loop
+  const r = await fetch(PULSE, { cache: "no-store", signal: AbortSignal.timeout(8000) });
   if (!r.ok) throw new Error("status " + r.status);
   const text = await r.text();
   JSON.parse(text);
-  await writeSnapshot(text);
+  const fs = await import("node:fs/promises");
+  await writeDest(text);
 }
 
 async function loop() {

@@ -4,23 +4,20 @@ Documentation=https://github.com/mxssnx-creator/CTS-G
 After=network-online.target redis-server.service redis.service grok-pulse-http.service
 Wants=network-online.target
 PartOf=grok-pulse.target
-StartLimitBurst=20
+# Leave room for repeated automatic retries without disabling the rate limit.
 StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=notify
 NotifyAccess=all
-# A full symbol slice can legitimately run for several minutes while the
-# bounded replay emits inner WATCHDOG heartbeats. Keep a generous systemd
-# safety ceiling so reclaim/CPU scheduling cannot kill a healthy long slice.
-WatchdogSec=900
+WatchdogSec=300
 WatchdogSignal=SIGKILL
 EnvironmentFile=-/etc/cts-g/cts-g.env
-EnvironmentFile=-/etc/cts-g/credentials.env
-WorkingDirectory=/opt/cts-g/server/pulse
-ExecStart=/usr/bin/python3 -O /opt/cts-g/server/pulse/pulse_trader.py
+WorkingDirectory=/opt/grok-x01-pulse
+ExecStart=/usr/bin/python3 -O /opt/grok-x01-pulse/pulse_trader.py
 Restart=always
-RestartSec=2
+RestartSec=15
 TimeoutStartSec=90
 TimeoutStopSec=25
 KillMode=mixed
@@ -28,19 +25,14 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PULSE_CONN=%i
 Nice=-5
-CPUWeight=10000
-# A 50-symbol full catalog plus klines sits around 2.6–3.3G RSS. The 3GiB
-# dynamic floor OOM-killed VST twice after reinstall. These are conservative
-# fallbacks; the scoped dynamic-resources timer writes a host-aware 99-*
-# drop-in (MIN 4608M) and applies the current policy at runtime.
-MemoryHigh=4144M
-MemoryMax=4608M
-MemorySwapMax=0
+CPUWeight=200
+MemoryHigh=400M
+MemoryMax=640M
 TasksMax=128
 LimitNOFILE=4096
 OOMPolicy=kill
-StandardOutput=append:/var/log/cts-g/pulse-%i.log
-StandardError=append:/var/log/cts-g/pulse-%i.err.log
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=grok-pulse-%i
 
 [Install]

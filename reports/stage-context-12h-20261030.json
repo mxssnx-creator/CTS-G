@@ -1,0 +1,214 @@
+{
+  "summary": {
+    "base": {
+      "observations": 4,
+      "gain": 0.20753770352910766,
+      "loss": 0.12375823626737717,
+      "orders": 200,
+      "percent": 0.010442773600668337,
+      "pf": 1.6769607404611573,
+      "no_loss": false
+    },
+    "main": {
+      "observations": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "percent": 0.0,
+      "pf": null,
+      "no_loss": false
+    },
+    "real": {
+      "observations": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "percent": 0.0,
+      "pf": null,
+      "no_loss": false
+    },
+    "realNeg": {
+      "observations": 0,
+      "gain": 0.0,
+      "loss": 0.0,
+      "orders": 0,
+      "percent": 0.0,
+      "pf": null,
+      "no_loss": false
+    }
+  },
+  "checkpoints": [
+    {
+      "t": 1792227600.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792231200.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792234800.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792238400.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792242000.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792245600.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792249200.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792252800.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792256400.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792260000.0,
+      "base": 4,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792263600.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    },
+    {
+      "t": 1792267200.0,
+      "base": 0,
+      "main": 0,
+      "real": 0,
+      "realNeg": 0
+    }
+  ],
+  "boundary_comparison": {
+    "set_observations": 976,
+    "closes": 990,
+    "different_n_or_pf": 973,
+    "strict_pass_runtime_fail": [],
+    "strict_fail_runtime_pass": [],
+    "note": "Same paper rows, Base only: simulator excludes closes at the checkpoint; runtime scorer includes them. This is not a live execution test."
+  },
+  "symbols": [
+    "ADA-USDT",
+    "AVAX-USDT",
+    "BCH-USDT",
+    "BNB-USDT",
+    "BTC-USDT",
+    "DOGE-USDT",
+    "DOT-USDT",
+    "ETH-USDT"
+  ],
+  "sets": 3192,
+  "lookback_bars": 720,
+  "cost_pct": 0.15,
+  "history_context_target_bars": 2910,
+  "market_rows": {
+    "ADA-USDT": 1500,
+    "AVAX-USDT": 1500,
+    "BCH-USDT": 1500,
+    "BNB-USDT": 1500,
+    "BTC-USDT": 1500,
+    "DOGE-USDT": 1500,
+    "DOT-USDT": 1500,
+    "ETH-USDT": 1500
+  },
+  "contiguous_valid_ohlcv": true,
+  "market_bars_before_first_checkpoint": {
+    "ADA-USDT": 780,
+    "AVAX-USDT": 780,
+    "BCH-USDT": 780,
+    "BNB-USDT": 780,
+    "BTC-USDT": 780,
+    "DOGE-USDT": 780,
+    "DOT-USDT": 780,
+    "ETH-USDT": 780
+  },
+  "market_bars_before_last_checkpoint": {
+    "ADA-USDT": 1440,
+    "AVAX-USDT": 1440,
+    "BCH-USDT": 1440,
+    "BNB-USDT": 1440,
+    "BTC-USDT": 1440,
+    "DOGE-USDT": 1440,
+    "DOT-USDT": 1440,
+    "ETH-USDT": 1440
+  },
+  "context_count_full_at_first_checkpoint": false,
+  "context_count_full_at_last_checkpoint": false,
+  "pf_by_window_size": true,
+  "size_floors": [
+    [
+      5,
+      1.05
+    ],
+    [
+      10,
+      1.08
+    ],
+    [
+      20,
+      1.12
+    ],
+    [
+      35,
+      1.25
+    ]
+  ],
+  "long_floor": 1.5,
+  "market_file_sha256": {
+    "ADA-USDT": "1a05b2dd626e8e0941422946898a257bafb4278e093027cc0d6f1253dc311dab",
+    "AVAX-USDT": "576b929deb42a5ecd0c0ddf01d2ba99157ab12ffa4efba990daf826086551a51",
+    "BCH-USDT": "8a90af8129436778ab896a2b1d4382a702a39705c1e4dc965a96934edc1621f6",
+    "BNB-USDT": "9db36cd51f5af868c4e39936c59c69a5b4c2edad78d9b32248bc5d7fdef9c8fa",
+    "BTC-USDT": "0a0b72b76f88bfb31bbd21df076fe5d0434761795a96863857dbd87adb2aadfa",
+    "DOGE-USDT": "dd4632564a105052586785a1f0bcee667fec7f913c37b110c08a4910f47184b1",
+    "DOT-USDT": "ccec6360b47a9efced69a9d52c14e04f0fd7c60a62fe6fd0e3bd20573fc4d837",
+    "ETH-USDT": "8483a25e5367b5c153555bd7bc4a374b74e44ded24e2fe74eabb25f12e1b727e"
+  },
+  "cache_sha256": "95a4f9753ecbc0b54bf2a821ab3ad8de910d3b6f1e875b9f356092dca5f262d3",
+  "reference_sha256": "dde40b9be04337f1d344d0441084ba792888b85e9fac515b08f42060ce55abfe",
+  "note": "Fixed-hold offline replay; overlapping Set windows are not independent. Grid count and recorded settings do not authenticate cache identity or every setting. No exchange data was accessed."
+}

@@ -6,18 +6,19 @@ lowStopConsensus) plus the indication-stage RSI/MACD/EMA pack.
 """
 from __future__ import annotations
 
+import threading
 import time
-import hashlib
-import math
-import re
 import urllib.parse
 import urllib.request
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
-from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from contracts import INDICATION_KINDS
-from position_cost import SL_MIN_PCT
+from position_cost import POSITION_COST_PCT_DEFAULT
+from config_num import num
+
+# Stop-loss margin added on top of the round-trip cost (percent). Named so it is not a hidden literal.
+STOP_COST_MARGIN_PCT = 0.08
 
 try:
     import httpx
@@ -37,66 +38,6 @@ class Candle:
     low: float
     close: float
     volume: float
-
-
-@dataclass
-class IndicationFrame:
-    """Parsed candle window with memoized features shared by indication lanes."""
-
-    candles: List[Candle]
-    closes: List[float]
-    _ema_cache: Dict[Tuple[int, int], float] = field(default_factory=dict, repr=False)
-    _ema_series_cache: Dict[int, List[float]] = field(default_factory=dict, repr=False)
-    _rsi_cache: Dict[int, float] = field(default_factory=dict, repr=False)
-    _atr_cache: Dict[int, float] = field(default_factory=dict, repr=False)
-    _bollinger_cache: Dict[int, Optional[Tuple[float, float, float]]] = field(default_factory=dict, repr=False)
-
-    def tail(self, limit: int) -> "IndicationFrame":
-        limit = max(0, int(limit))
-        if len(self.candles) <= limit:
-            return self
-        return IndicationFrame(self.candles[-limit:], self.closes[-limit:])
-
-    def window(self, start: int, end: int) -> "IndicationFrame":
-        start = max(0, int(start))
-        end = max(start, min(len(self.candles), int(end)))
-        return IndicationFrame(self.candles[start:end], self.closes[start:end])
-
-    def ema(self, period: int, span: Optional[int] = None) -> float:
-        period = max(1, int(period))
-        span_key = max(0, int(span or 0))
-        key = (period, span_key)
-        if key not in self._ema_cache:
-            values = self.closes[-span_key:] if span_key else self.closes
-            self._ema_cache[key] = ema(values, period)
-        return self._ema_cache[key]
-
-    def ema_series(self, period: int) -> List[float]:
-        period = max(1, int(period))
-        if period not in self._ema_series_cache:
-            self._ema_series_cache[period] = ema_series(self.closes, period)
-        return self._ema_series_cache[period]
-
-    def rsi(self, period: int = 14) -> float:
-        period = max(1, int(period))
-        if period not in self._rsi_cache:
-            self._rsi_cache[period] = rsi(self.closes, period)
-        return self._rsi_cache[period]
-
-    def atr(self, period: int = 14) -> float:
-        period = max(1, int(period))
-        if period not in self._atr_cache:
-            self._atr_cache[period] = atr(self.candles, period)
-        return self._atr_cache[period]
-
-    def bollinger(self, period: int = 20) -> Optional[Tuple[float, float, float]]:
-        period = max(1, int(period))
-        if period not in self._bollinger_cache:
-            self._bollinger_cache[period] = bollinger(self.closes, period)
-        return self._bollinger_cache[period]
-
-    def recent_return(self, periods: int) -> float:
-        return recent_return(self.closes, periods)
 
 
 @dataclass
@@ -134,15 +75,6 @@ class Indication:
     t: float
     timeframe: str = ""
     kind: str = "state"
-    # Per-indication exit tactic (price-only) and its reference level. Not
-    # part of the entry identity: a moved level is the same configuration.
-    exit_tactic: str = ""
-    exit_level: float = 0.0
-
-    @property
-    def entry_key(self) -> str:
-        identity = repr((self.kind, self.mode, self.timeframe, self.direction))
-        return hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
@@ -152,13 +84,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "minimumAgreement": 0.6,
     "minimumConfidence": 0.6,
     "minimumStrength": 0.2,
-    "stopLossMinPct": 0.4,
+    "stopLossMinPct": 0.2,
     "stopLossMaxPct": 1.5,
     "stopLossAtrMultiplier": 0.85,
     "takeProfitRewardRisk": 1.8,
     "takeProfitMaxPct": 5.0,
     "extraSources": True,
-    "positionCostPct": 0.1,
+    "positionCostPct": POSITION_COST_PCT_DEFAULT,
     "tf1m": True,
     "tf5m": True,
     "tf15m": True,
@@ -170,94 +102,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "typeActive": True,
     "typeCommon": True,
     "typeSignals": True,
-    "typeTrend": True,
-    "typeBreak": True,
-    "typeMsi": True,
-    "typeVwap": True,
-    "typeRetest": True,
-    "typeSqueeze": True,
-    "trendRanges": [13, 21, 34],
-    "breakRanges": [8, 16, 32],
-    # Extended kinds: every range is an independent configuration (own tape,
-    # own PF validation). Situation thresholds below are the fine-tuning knobs.
-    "msiRanges": [14, 21, 34],
-    "msiRsiPeriod": 14,
-    "msiMinGap": 5.0,
-    "vwapRanges": [20, 30, 40],
-    "vwapDevZ": 2.0,
-    "vwapVolMult": 1.8,
-    "retestRanges": [12, 20, 32],
-    "retestTol": 0.12,
-    "retestMinBreak": 0.08,
-    "squeezeRanges": [16, 20, 26],
-    "squeezePctl": 0.2,
-    "typeSweep": True,
-    "typeRsi2": True,
-    "typeKeltner": True,
-    "typeImpulse": True,
-    "sweepRanges": [12, 20, 34],
-    "sweepWickAtr": 0.25,
-    "rsi2Ranges": [21, 34, 55],
-    "rsi2Low": 10.0,
-    "rsi2High": 90.0,
-    "keltnerRanges": [14, 20, 30],
-    "keltnerMult": 2.0,
-    "impulseRanges": [20, 30, 45],
-    "impulseSigma": 3.0,
-    "impulseVolMult": 2.0,
-    # Activity specialization: minimum ATR(14) % of price per kind.
-    "actSweepMin": 0.04,
-    "actRsi2Min": 0.03,
-    "actKeltnerMin": 0.04,
-    "actImpulseMin": 0.03,
-    "exitTacticOn": True,
-    "exitTacticBufferPct": 0.1,
-    "exitTacticMinGainPct": 0.15,
     "dirRange": 10,
     "dirMinChange": 0.001,
     "moveRange": 10,
     "moveMinChange": 0.001,
     "activeOutbreak": [3, 5, 10],
     "activeThreshold": 1.0,
-    "activeNoise": 0.05,  # percent, like the desk's Noise setting
+    "activeNoise": 0.0005,
     "activeMovePct": 0.5,
     "activeVolatilityWeight": 0.3,
-}
-
-# Kind -> settings flag. One map for live filters, stats, snapshot and match.
-KIND_FLAGS: Dict[str, str] = {
-    "state": "typeState",
-    "signals": "typeSignals",
-    "active": "typeActive",
-    "direction": "typeDirection",
-    "move": "typeMove",
-    "common": "typeCommon",
-    "trend": "typeTrend",
-    "break": "typeBreak",
-    "msi": "typeMsi",
-    "vwap": "typeVwap",
-    "retest": "typeRetest",
-    "squeeze": "typeSqueeze",
-    "sweep": "typeSweep",
-    "rsi2": "typeRsi2",
-    "keltner": "typeKeltner",
-    "impulse": "typeImpulse",
-}
-KIND_ORDER: Dict[str, int] = {
-    "state": 5, "signals": 4, "trend": 4, "break": 4, "msi": 4, "retest": 3, "squeeze": 3,
-    "vwap": 3, "active": 3, "direction": 2, "move": 2, "common": 1,
-    "sweep": 4, "rsi2": 3, "keltner": 3, "impulse": 3,
-}
-# Extended kinds evaluated per range: kind -> (ranges key, defaults, range setting).
-RANGE_KINDS: Dict[str, Tuple[str, Tuple[int, ...], str]] = {
-    "msi": ("msiRanges", (14, 21, 34), "msiRange"),
-    "vwap": ("vwapRanges", (20, 30, 40), "vwapRange"),
-    "retest": ("retestRanges", (12, 20, 32), "retestRange"),
-    "squeeze": ("squeezeRanges", (16, 20, 26), "squeezePeriod"),
-    "sweep": ("sweepRanges", (12, 20, 34), "sweepRange"),
-    "rsi2": ("rsi2Ranges", (21, 34, 55), "rsi2Trend"),
-    "keltner": ("keltnerRanges", (14, 20, 30), "keltnerPeriod"),
-    "impulse": ("impulseRanges", (20, 30, 45), "impulseRange"),
 }
 
 TIMEFRAMES = ("1m", "5m", "15m")
@@ -318,181 +171,19 @@ def recent_return(closes: List[float], periods: int) -> float:
     return cur / prev - 1.0 if prev > 0 else 0.0
 
 
-def ohlcv_row(bar: Sequence[float]) -> Optional[Tuple[float, float, float, float, float]]:
-    """Normalize a bar to (o, h, l, c, v). Accepts [o,h,l,c,v] or [ts,o,h,l,c,v]."""
-    if bar is None:
-        return None
-    try:
-        n = len(bar)
-    except Exception:
-        return None
-    if n < 5:
-        return None
-    try:
-        if n >= 6:
-            ts = float(bar[0])
-            if ts > 1e11:
-                ts = ts / 1000.0
-            if ts > 1e9:
-                o, h, l, c, v = (float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4]), float(bar[5]))
-            else:
-                o, h, l, c, v = (float(bar[0]), float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4]))
-        else:
-            o, h, l, c, v = (float(bar[0]), float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4]))
-    except Exception:
-        return None
-    if o <= 0 or c <= 0 or h <= 0 or l <= 0:
-        return None
-    if h < l:
-        h, l = l, h
-    return o, h, l, c, v
-
-
-def build_indication_frame(
-    bars: Sequence[Sequence[float]],
-    now: Optional[float] = None,
-    period_s: float = 60.0,
-) -> IndicationFrame:
-    now = now or time.time()
-    step = period_s if period_s > 0 else 60.0
-    parsed: List[Tuple[float, float, float, float, float]] = []
-    for b in bars:
-        row = ohlcv_row(b)
-        if row:
-            parsed.append(row)
-    n = len(parsed)
-    candles = [
-        Candle(now - (n - 1 - i) * step, o, h, l, c, v)
-        for i, (o, h, l, c, v) in enumerate(parsed)
-    ]
-    return IndicationFrame(candles, [row[3] for row in parsed])
-
-
-def frame_from_candles(candles: Sequence[Candle]) -> IndicationFrame:
-    values = list(candles)
-    return IndicationFrame(values, [c.close for c in values])
-
-
 def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period_s: float = 60.0) -> List[Candle]:
-    return build_indication_frame(bars, now=now, period_s=period_s).candles
-
-
-# Signals "revert" model (volatility-normalized fade with turn confirmation).
-# Chosen on the TRAIN split of the 48-symbol research week and confirmed once on
-# VALID and SIM against the legacy composite; see scripts/test_indication_signals.py.
-# Keys are read with settings.get(key, default) so the shared defaults stay untouched.
-SIGNALS_REVERT_DEFAULTS: Dict[str, Any] = {
-    "signalsModel": "revert",      # "revert" | "trend" (legacy composite)
-    "signalsFrameBars": 60,        # the model is defined on the full engine frame
-    "signalsZWindow": 20,          # displacement window R (bars)
-    "signalsZMin": 1.5,            # |z| = |ln(c/c[-R])| / (sigma_prior * sqrt(R))
-    "signalsAtrMinPct": 0.15,      # ATR band (% of price, 1m): below it cost dominates
-    "signalsAtrMaxPct": 0.6,       # above it fades get run over
-    "signalsTurnConfirm": True,    # last bar must already move in the fade direction
-}
-
-
-def _signals_setting(settings: Dict[str, Any], key: str) -> Any:
-    value = settings.get(key)
-    return SIGNALS_REVERT_DEFAULTS[key] if value is None else value
-
-
-def signal_revert_features(closes: Sequence[float], window: int) -> Optional[Dict[str, float]]:
-    """Causal fade features on one frame of closes (oldest first).
-
-    z compares the last ``window`` log returns with the dispersion of the
-    returns *before* that window (own volatility), so a move is only extreme
-    relative to how the symbol was trading before it started.
-    """
-    from math import log, sqrt
-
-    n = len(closes)
-    window = int(window)
-    prior = n - 1 - window
-    if window < 2 or prior < 20:
-        return None
-    if any(c <= 0 for c in closes):
-        return None
-    rets = [log(closes[i] / closes[i - 1]) for i in range(1, n)]
-    before = rets[:prior]
-    mean = sum(before) / prior
-    var = max(0.0, sum(r * r for r in before) / prior - mean * mean)
-    sigma = sqrt(var)
-    if not sigma > 0:
-        return None
-    move = log(closes[-1] / closes[-1 - window])
-    return {"z": move / (sigma * sqrt(window)), "move": move, "sigma": sigma, "last": rets[-1]}
-
-
-def _signals_revert_applies(candles: Sequence[Candle], settings: Dict[str, Any]) -> bool:
-    """Revert model needs the full engine frame; shorter (warm-up) frames keep the legacy composite.
-
-    Deliberately independent of candle timestamps: a prepared frame and the
-    public vote wrapper must score the same bars identically.
-    """
-    if str(_signals_setting(settings, "signalsModel")).strip().lower() != "revert":
-        return False
-    return len(candles) >= max(2, int(_signals_setting(settings, "signalsFrameBars")))
-
-
-def _evaluate_signal_revert(
-    source_id: str,
-    source_name: str,
-    frame: IndicationFrame,
-    settings: Dict[str, Any],
-    weight: float,
-    atr_pct: float,
-) -> Optional[SignalEval]:
-    candles = frame.candles
-    latest = candles[-1]
-    lo = float(_signals_setting(settings, "signalsAtrMinPct"))
-    hi = float(_signals_setting(settings, "signalsAtrMaxPct"))
-    if not (lo <= atr_pct < hi):
-        return None
-    feat = signal_revert_features(frame.closes, int(_signals_setting(settings, "signalsZWindow")))
-    if feat is None:
-        return None
-    z = feat["z"]
-    if not abs(z) >= float(_signals_setting(settings, "signalsZMin")):
-        return None
-    direction = -1 if z > 0 else 1
-    if bool(_signals_setting(settings, "signalsTurnConfirm")) and not feat["last"] * direction > 0:
-        return None
-    # TRAIN win rate was flat across |z| >= 1.5, so confidence stays in a narrow
-    # band just above the default minimumConfidence instead of implying skill.
-    strength = clamp(abs(z) / 4.0, 0.0, 1.0)
-    if not (strength >= float(settings.get("minimumStrength", 0.2))):
-        return None
-    confidence = clamp(0.6 + 0.1 * strength, 0.5, 0.99)
-    if confidence < float(settings.get("minimumConfidence", 0.6)):
-        return None
-    cost = max(0.0, float(settings.get("positionCostPct", 0.1))) + 0.08
-    raw_sl = atr_pct * float(settings.get("stopLossAtrMultiplier", 0.85)) + cost
-    sl_max = float(settings.get("stopLossMaxPct", 1.5))
-    if raw_sl > sl_max * 1.25:
-        return None
-    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", SL_MIN_PCT)), sl_max)
-    rr = float(settings.get("takeProfitRewardRisk", 1.8))
-    min_tp = sl * rr
-    tp_max = float(settings.get("takeProfitMaxPct", 5.0))
-    if min_tp > tp_max:
-        return None
-    # A fade targets part of the stretched move, never less than the RR floor.
-    tp = clamp(max(min_tp, abs(feat["move"]) * 100.0 * 0.5), min_tp, tp_max)
-    return SignalEval(
-        source_id=source_id,
-        source_name=source_name,
-        direction="long" if direction > 0 else "short",
-        confidence=confidence,
-        strength=strength,
-        stop_loss_pct=sl,
-        take_profit_pct=tp,
-        reward_risk=tp / sl if sl else rr,
-        atr_pct=atr_pct,
-        last_price=latest.close,
-        candle_count=len(candles),
-        weight=clamp(weight, 0.1, 2.0),
-    )
+    now = now or time.time()
+    n = len(bars)
+    step = period_s if period_s > 0 else 60.0
+    out: List[Candle] = []
+    for i, b in enumerate(bars):
+        if len(b) < 5:
+            continue
+        o, h, l, c, v = (float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4]))
+        if o <= 0 or c <= 0 or h <= 0 or l <= 0:
+            continue
+        out.append(Candle(now - (n - 1 - i) * step, o, h, l, c, v))
+    return out
 
 
 def evaluate_signal_candles(
@@ -501,31 +192,27 @@ def evaluate_signal_candles(
     candles: List[Candle],
     settings: Dict[str, Any],
     weight: float = 1.0,
-    frame: Optional[IndicationFrame] = None,
 ) -> Optional[SignalEval]:
     limit = max(20, int(settings.get("candleLimit", 60)))
-    frame = (frame or frame_from_candles(candles)).tail(limit)
-    candles = frame.candles
+    candles = candles[-limit:]
     if len(candles) < 20:
         return None
-    closes = frame.closes
+    closes = [c.close for c in candles]
     latest = candles[-1]
     if latest.close <= 0:
         return None
-    average_true_range = frame.atr()
+    average_true_range = atr(candles)
     fallback = sum(abs(c.close - c.open) for c in candles[-10:]) / min(10, len(candles))
     atr_pct = (max(average_true_range, fallback) / latest.close) * 100.0
-    if _signals_revert_applies(candles, settings):
-        return _evaluate_signal_revert(source_id, source_name, frame, settings, weight, atr_pct)
-    fast = frame.ema(5, 30)
-    slow = frame.ema(13, 45)
+    fast = ema(closes[-30:], 5)
+    slow = ema(closes[-45:], 13)
     trend_scale = max(average_true_range, latest.close * 0.0005)
     trend_score = clamp((fast - slow) / trend_scale, -1, 1)
-    momentum3 = frame.recent_return(3)
-    momentum9 = frame.recent_return(9)
+    momentum3 = recent_return(closes, 3)
+    momentum9 = recent_return(closes, 9)
     movement_scale = max(atr_pct / 100.0, 0.0005)
     momentum_score = clamp(momentum3 / movement_scale, -1, 1)
-    rsi_score = clamp((frame.rsi() - 50.0) / 30.0, -1, 1)
+    rsi_score = clamp((rsi(closes) - 50.0) / 30.0, -1, 1)
     window = candles[-14:]
     range_high = max(c.high for c in window)
     range_low = min(c.low for c in window)
@@ -536,32 +223,27 @@ def evaluate_signal_candles(
     )
     vols = [c.volume for c in candles[-20:] if c.volume > 0]
     avg_vol = sum(vols) / len(vols) if vols else 0.0
-    vol_ratio = (latest.volume / avg_vol) if avg_vol > 0 and latest.volume > 0 else 1.0
-    # Low-volume bars are noise: skip unless the move is already strong.
-    if avg_vol > 0 and vol_ratio < 0.45 and abs(momentum3) < 0.004:
-        return None
     volume_impulse = (
-        clamp((vol_ratio - 1.0) * (1 if (momentum3 or trend_score) >= 0 else -1), -1, 1)
+        clamp((latest.volume / avg_vol - 1.0) * (1 if (momentum3 or trend_score) >= 0 else -1), -1, 1)
         if avg_vol > 0
         else 0.0
     )
-    vol_w = 0.12 if vol_ratio >= 1.0 else 0.18
     raw = (
-        trend_score * 0.32
-        + momentum_score * 0.28
-        + rsi_score * 0.16
+        trend_score * 0.35
+        + momentum_score * 0.3
+        + rsi_score * 0.18
         + range_score * 0.12
-        + volume_impulse * vol_w
+        + volume_impulse * 0.05
     )
     strength = abs(raw)
     if not (strength >= float(settings.get("minimumStrength", 0.2))):
         return None
-    cost = max(0.0, float(settings.get("positionCostPct", 0.1))) + 0.08
+    cost = max(0.0, float(settings.get("positionCostPct", POSITION_COST_PCT_DEFAULT))) + STOP_COST_MARGIN_PCT
     raw_sl = atr_pct * float(settings.get("stopLossAtrMultiplier", 0.85)) + cost
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     if raw_sl > sl_max * 1.25:
         return None
-    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", SL_MIN_PCT)), sl_max)
+    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", 0.2)), sl_max)
     rr = float(settings.get("takeProfitRewardRisk", 1.8))
     min_tp = sl * rr
     tp_max = float(settings.get("takeProfitMaxPct", 5.0))
@@ -588,21 +270,25 @@ def evaluate_signal_candles(
     )
 
 
-STATE_FRAME_BARS = 60
-
-
-def _ta_signal(
-    frame: IndicationFrame,
-    settings: Dict[str, Any],
-    raw: float,
-    strength: float,
-    source_name: str,
-) -> Optional[SignalEval]:
-    """Shared State risk/confidence envelope for both TA pack modes."""
-    latest = frame.candles[-1]
+def evaluate_ta_pack(candles: List[Candle], settings: Dict[str, Any]) -> Optional[SignalEval]:
+    if len(candles) < 26:
+        return None
+    closes = [c.close for c in candles]
+    latest = candles[-1]
+    r = rsi(closes, 14)
+    ema12 = ema(closes, 12)
+    ema26 = ema(closes, 26)
+    macd = ema12 - ema26
+    ema20 = ema(closes, 20)
+    ema50 = ema(closes, 50)
+    rsi_score = clamp((r - 50.0) / 30.0, -1, 1)
+    macd_score = clamp(macd / max(latest.close * 0.0008, 1e-9), -1, 1)
+    ema_score = clamp((ema20 - ema50) / max(latest.close * 0.001, 1e-9), -1, 1)
+    raw = rsi_score * 0.4 + macd_score * 0.3 + ema_score * 0.3
+    strength = abs(raw)
     if strength < float(settings.get("minimumStrength", 0.2)):
         return None
-    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
+    sl_min = float(settings.get("stopLossMinPct", 0.2))
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     sl = clamp(sl_min * 1.6, sl_min, sl_max)
     tp = clamp(sl * float(settings.get("takeProfitRewardRisk", 1.8)), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
@@ -611,84 +297,18 @@ def _ta_signal(
         return None
     return SignalEval(
         source_id="ta-rsi-macd-ema",
-        source_name=source_name,
+        source_name="RSI/MACD/EMA pack",
         direction="long" if raw >= 0 else "short",
         confidence=conf,
         strength=strength,
         stop_loss_pct=sl,
         take_profit_pct=tp,
         reward_risk=tp / sl if sl else 1.8,
-        atr_pct=frame.atr() / latest.close * 100 if latest.close else 0,
+        atr_pct=atr(candles) / latest.close * 100 if latest.close else 0,
         last_price=latest.close,
-        candle_count=len(frame.candles),
+        candle_count=len(candles),
         weight=1.0,
     )
-
-
-def evaluate_ta_pack(
-    candles: List[Candle],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[SignalEval]:
-    """State TA pack.
-
-    Default ``stateMode="fade"``: fade an over-extended EMA20/EMA50 trend once
-    the short-term move has turned.  Research (1m, 48 symbols, engine kind-tape
-    exits) found that following RSI/MACD/EMA extension loses (PF ~0.57), while
-    fading it is consistently better, more so when the stretch is large in ATR
-    units, the symbol is volatile enough to reach the step TP, and RSI(7) has
-    already crossed back toward the fade side.  Conditions (60-bar frame):
-
-    * stretch = (EMA20 - EMA50) / ATR14, |stretch| >= ``stateStretchAtr`` (1.5)
-    * ATR14 / close >= ``stateMinAtrPct`` % (0.25): own-volatility gate
-    * direction = -sign(stretch) and direction * (RSI7 - 50) > ``stateTurnRsi`` (0)
-
-    ``stateMode="follow"`` keeps the previous RSI/MACD/EMA follow pack.
-    """
-    frame = frame or frame_from_candles(candles)
-    mode = str(settings.get("stateMode", "fade") or "fade").lower()
-    if mode in ("follow", "legacy"):
-        return evaluate_ta_pack_follow(frame, settings)
-    frame = frame.tail(STATE_FRAME_BARS)
-    candles = frame.candles
-    if len(candles) < 50:
-        return None
-    latest = candles[-1]
-    atr14 = frame.atr(14)
-    if latest.close <= 0 or atr14 <= 0:
-        return None
-    if atr14 / latest.close * 100.0 < float(settings.get("stateMinAtrPct", 0.25)):
-        return None
-    threshold = max(1e-9, float(settings.get("stateStretchAtr", 1.5)))
-    stretch = (frame.ema(20) - frame.ema(50)) / atr14
-    if abs(stretch) < threshold:
-        return None
-    direction = -1.0 if stretch > 0 else 1.0
-    if direction * (frame.rsi(7) - 50.0) <= float(settings.get("stateTurnRsi", 0.0)):
-        return None
-    # Calibrated so the threshold stretch maps to strength 0.5 (confidence
-    # 0.725) and twice the threshold saturates at 1.0.
-    strength = clamp(abs(stretch) / (2.0 * threshold), 0.0, 1.0)
-    return _ta_signal(frame, settings, direction, strength, "State stretch fade")
-
-
-def evaluate_ta_pack_follow(frame: IndicationFrame, settings: Dict[str, Any]) -> Optional[SignalEval]:
-    """Previous State pack: follow the RSI/MACD/EMA composite."""
-    candles = frame.candles
-    if len(candles) < 26:
-        return None
-    latest = candles[-1]
-    r = frame.rsi(14)
-    ema12 = frame.ema(12)
-    ema26 = frame.ema(26)
-    macd = ema12 - ema26
-    ema20 = frame.ema(20)
-    ema50 = frame.ema(50)
-    rsi_score = clamp((r - 50.0) / 30.0, -1, 1)
-    macd_score = clamp(macd / max(latest.close * 0.0008, 1e-9), -1, 1)
-    ema_score = clamp((ema20 - ema50) / max(latest.close * 0.001, 1e-9), -1, 1)
-    raw = rsi_score * 0.4 + macd_score * 0.3 + ema_score * 0.3
-    return _ta_signal(frame, settings, raw, abs(raw), "RSI/MACD/EMA pack")
 
 
 def evaluate_pulse_local(
@@ -782,12 +402,7 @@ def low_stop_consensus(
 
 
 def _closes(bars: List[List[float]]) -> List[float]:
-    out: List[float] = []
-    for b in bars:
-        row = ohlcv_row(b)
-        if row:
-            out.append(row[3])
-    return out
+    return [float(b[3]) for b in bars if len(b) >= 4 and float(b[3]) > 0]
 
 
 def _dir_of(pxs: List[float]) -> float:
@@ -858,7 +473,7 @@ def _kind_indication(
     mode: Optional[str] = None,
     conf: Optional[float] = None,
 ) -> Indication:
-    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
+    sl_min = float(settings.get("stopLossMinPct", 0.2))
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     sl = clamp(sl_pct if sl_pct is not None else sl_min * 1.4, sl_min, sl_max)
     rr = float(settings.get("takeProfitRewardRisk", 1.8))
@@ -886,23 +501,8 @@ def _kind_indication(
     )
 
 
-def evaluate_direction(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window.
-
-    Qualified reversal (post-Base research, train-chosen, valid/sim-confirmed):
-    the first window must be a strong move for this symbol (|d1| >= dirMinFirstZ
-    sigma-units, sigma = per-bar log-return stdev of the <=60-bar frame), the
-    frame must be active enough to pay the fixed cost (sigma >= dirMinSigma),
-    and the new window must be an early, partial turn (|d2| <= dirMaxRetrace *
-    |d1|), not an already-completed V. Confidence is calibrated on that z.
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
+def evaluate_direction(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+    """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window."""
     rng = max(4, int(settings.get("dirRange") or 10))
     if len(closes) < rng * 2:
         return None
@@ -915,918 +515,40 @@ def evaluate_direction(
         return None
     if d1 * d2 >= 0:
         return None
-    max_retrace = float(settings.get("dirMaxRetrace", 0.5))
-    if abs(d2) > max_retrace * abs(d1):
-        return None
-    from math import log, sqrt  # local: keeps this kind's diff self-contained
-
-    tail = [px for px in closes[-60:] if px > 0]
-    rets = [log(tail[i] / tail[i - 1]) for i in range(1, len(tail))]
-    if len(rets) < 2:
-        return None
-    mean = sum(rets) / len(rets)
-    sigma = sqrt(max(0.0, sum(r * r for r in rets) / len(rets) - mean * mean))
-    if sigma < float(settings.get("dirMinSigma", 0.0012)):
-        return None
-    z1 = abs(d1) / max(1e-9, sigma * sqrt(rng - 1))
-    if z1 < float(settings.get("dirMinFirstZ", 0.8)):
-        return None
     steps = [second[i] - second[i - 1] for i in range(1, len(second))]
     ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.5)
     want = "long" if d2 > 0 else "short"
     if ev["selected"] and ev["selected"] != want:
         return None
-    strength = clamp(z1 / 4.0, 0.0, 1.0)
-    conf = clamp(0.52 + 0.05 * min(z1, 6.0), 0.52, 0.82)
+    strength = clamp(abs(d1) + abs(d2), 0.0, 1.0)
     agr = float((ev.get(want) or {}).get("agreement") or 1.0)
     return _kind_indication(
-        symbol, "direction", want, strength, closes[-1], settings, [f"dir:{rng}:z{z1:.2f}"],
-        agreement=agr, mode="direction", conf=conf,
+        symbol, "direction", want, strength, closes[-1], settings, [f"dir:{rng}"],
+        agreement=agr, mode="direction",
     )
 
 
-import math  # noqa: E402  (kept with the Move block)
-
-MOVE_FRAME = 60  # engine frame: current bar + 59 prior closes
-MOVE_MIN_PRIOR_RETURNS = 10
-
-
-def move_fade_stats(closes: Sequence[float], rng: int) -> Optional[Dict[str, float]]:
-    """Move extreme statistics inside the engine frame (last 60 closes).
-
-    d  = R-bar displacement close[-R] -> close[-1]
-    sd = sample std of the 1m log returns strictly before the R-bar window
-    z  = |d| / (sd * sqrt(R - 1))
-    last = last-bar return (reversal confirmation when opposite to d)
-    """
-    c = [float(x) for x in list(closes)[-MOVE_FRAME:]]
-    rng = int(rng)
-    if rng < 2 or len(c) < rng or any(x <= 0 for x in c):
+def evaluate_move(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+    """CTS Move: same-window displacement, independent direction agrees with the net move."""
+    rng = max(4, int(settings.get("moveRange") or 10))
+    if len(closes) < rng:
         return None
-    prior = c[: len(c) - rng + 1]
-    rets = [math.log(prior[i] / prior[i - 1]) for i in range(1, len(prior))]
-    if len(rets) < MOVE_MIN_PRIOR_RETURNS:
-        return None
-    mean = sum(rets) / len(rets)
-    sd = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
-    d = c[-1] / c[-rng] - 1.0
-    z = abs(d) / (sd * math.sqrt(rng - 1)) if sd > 0 else float("inf")
-    return {"d": d, "sd": sd, "z": z, "last": c[-1] / c[-2] - 1.0}
-
-
-def evaluate_move(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """CTS Move: fade volatility-normalized extreme R-bar moves.
-
-    Fires opposite to the R-bar displacement when moveZMin <= z < moveZMax
-    (z vs the frame's pre-window 1m sigma) and the last bar already ticks
-    against the move. Extreme z (>= moveZMax) keeps running, so it is skipped.
-    Each range is its own config identity: mode "move:<R>".
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    rng = max(8, min(55, int(settings.get("moveFadeRange") or 30)))
-    st = move_fade_stats(closes, rng)
-    if st is None:
-        return None
-    d, z = st["d"], st["z"]
+    window = closes[-rng:]
+    d = _dir_of(window)
     min_ch = float(settings.get("moveMinChange") or 0.001)
-    z_min = float(settings.get("moveZMin", 2.0))
-    z_max = float(settings.get("moveZMax", 3.0))
-    if abs(d) < min_ch or not (z_min <= z < z_max):
+    if abs(d) < min_ch:
         return None
-    if bool(settings.get("moveConfirm", True)) and st["last"] * d >= 0:
-        return None
-    want = "short" if d > 0 else "long"
-    band = clamp((z - z_min) / max(1e-9, z_max - z_min), 0.0, 1.0)
-    strength = clamp(z / max(1e-9, z_max), 0.0, 1.0)
-    conf = clamp(0.6 + 0.1 * band, 0.5, 0.99)
-    return _kind_indication(
-        symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}:z{z:.2f}"],
-        agreement=1.0, mode=f"move:{rng}", conf=conf,
-    )
-
-
-def _frame_sigma(closes: List[float]) -> float:
-    """Population std of the frame's 1-bar log returns (own-volatility unit)."""
-    from math import log
-
-    rets = []
-    for i in range(1, len(closes)):
-        a, b = closes[i - 1], closes[i]
-        if a > 0 and b > 0:
-            rets.append(log(b / a))
-    if len(rets) < 2:
-        return 0.0
-    mean = sum(rets) / len(rets)
-    return max(0.0, sum(r * r for r in rets) / len(rets) - mean * mean) ** 0.5
-
-
-def _turned(closes: List[float], direction: str, bars: int) -> bool:
-    """The last `bars` close steps all point in `direction` (the stretch has started to revert)."""
-    if bars <= 0:
-        return True
-    if len(closes) < bars + 1:
-        return False
-    sign = 1.0 if direction == "long" else -1.0
-    return all((closes[-i] - closes[-i - 1]) * sign > 0 for i in range(1, bars + 1))
-
-
-def evaluate_trend(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Independent configurable EMA pair: fade a volatility-stretched trend once it turns.
-
-    Default ("fade"): the fast/slow EMA spread, measured in the frame's own 1-bar
-    volatility, must be >= trendFadeZ; the lane then trades AGAINST the spread
-    once the last trendFadeTurn closes already step that way. Research on 48
-    symbols (train-selected, valid/sim-confirmed) showed following 1m EMA trends
-    loses gross edge while fading stretched ones keeps it. trendMode="follow"
-    restores the legacy EMA-cross follower.
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    slow_period = max(8, min(55, int(settings.get("trendSlow") or 21)))
-    fast_period = max(2, min(slow_period - 1, int(settings.get("trendFast") or 8)))
-    if len(closes) < max(30, slow_period + 1):
-        return None
-    if str(settings.get("trendMode") or "fade").lower() != "follow":
-        return _evaluate_trend_fade(symbol, frame, settings, fast_period, slow_period)
-    fast = frame.ema_series(fast_period)
-    slow = frame.ema_series(slow_period)
-    if len(fast) < 6 or len(slow) < 6:
-        return None
-    last = closes[-1]
-    if last <= 0:
-        return None
-    spread = (fast[-1] - slow[-1]) / last
-    min_ch = float(settings.get("dirMinChange") or 0.001)
-    if abs(spread) < min_ch:
-        return None
-    want = "long" if spread > 0 else "short"
-    consec = 0
-    for i in range(1, min(8, len(fast))):
-        s = fast[-i] - slow[-i]
-        if (want == "long" and s > 0) or (want == "short" and s < 0):
-            consec += 1
-        else:
-            break
-    if consec < 3:
-        return None
-    steps = [closes[i] - closes[i - 1] for i in range(-min(10, len(closes) - 1), 0)]
-    ev = evaluate_independent_directions(steps, min_evidence=2, min_agreement=0.5)
-    if ev["selected"] and ev["selected"] != want:
-        return None
-    strength = clamp(abs(spread) * 40.0 + consec * 0.04, 0.0, 1.0)
-    agr = float((ev.get(want) or {}).get("agreement") or consec / 8.0)
-    conf = clamp(0.52 + min(0.4, abs(spread) * 80.0) + consec * 0.03, 0.5, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
-        return None
-    return _kind_indication(
-        symbol, "trend", want, strength, last, settings, [f"trend:ema{fast_period}/{slow_period}:{consec}"],
-        agreement=agr, mode=f"trend:ema{fast_period}/{slow_period}", conf=conf,
-    )
-
-
-def _evaluate_trend_fade(
-    symbol: str,
-    frame: IndicationFrame,
-    settings: Dict[str, Any],
-    fast_period: int,
-    slow_period: int,
-) -> Optional[Indication]:
-    closes = frame.closes
-    last = closes[-1]
-    if last <= 0:
-        return None
-    fast = frame.ema_series(fast_period)
-    slow = frame.ema_series(slow_period)
-    spread = (fast[-1] - slow[-1]) / last
-    sigma = _frame_sigma(closes)
-    if sigma <= 0 or spread == 0:
-        return None
-    z = abs(spread) / sigma
-    z_min = float(settings.get("trendFadeZ", 1.5))
-    if z < z_min:
-        return None
-    want = "short" if spread > 0 else "long"
-    turn = max(0, int(settings.get("trendFadeTurn", 3)))
-    if not _turned(closes, want, turn):
-        return None
-    steps = [closes[i] - closes[i - 1] for i in range(-min(10, len(closes) - 1), 0)]
-    ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.0)
-    agr = float((ev.get(want) or {}).get("agreement") or 0.0)
-    over = min(1.0, (z - z_min) / max(z_min, 1e-9))
-    strength = clamp(0.4 + over * 0.6, 0.0, 1.0)
-    # Out-of-sample edge was flat across z >= trendFadeZ, so confidence stays modest.
-    conf = clamp(0.62 + over * 0.08, 0.5, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
-        return None
-    return _kind_indication(
-        symbol, "trend", want, strength, last, settings,
-        [f"trend:ema{fast_period}/{slow_period}:fade:z{z:.2f}:turn{turn}"],
-        agreement=agr, mode=f"trend:ema{fast_period}/{slow_period}", conf=conf,
-    )
-
-
-def _break_prior_sigma(closes: List[float], bars: int = 30) -> float:
-    """Population std of the last ``bars`` 1m log returns before the current bar."""
-    import math
-
-    window = closes[-(bars + 2) : -1]
-    if len(window) < bars + 1 or min(window) <= 0:
-        return 0.0
-    rets = [math.log(window[i] / window[i - 1]) for i in range(1, len(window))]
-    mean = sum(rets) / len(rets)
-    return math.sqrt(sum((r - mean) ** 2 for r in rets) / len(rets))
-
-
-def evaluate_break(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Reversal break: a fresh close beyond the prior N-bar high/low that runs
-    against the frame's larger move.
-
-    Research (48 BingX symbols, 1 week, engine kind-tape exits, train-only
-    selection): plain N-bar breaks carry ~zero gross edge in either direction,
-    but a break that turns against the 59-bar move by >= ``breakContextSigma``
-    prior-bar sigmas has a clearly positive gross edge (1m mean reversion
-    triggered by structure). ``breakContextSigma`` <= 0 restores the classic
-    break (any context, no freshness gate).
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    rng = max(8, int(settings.get("breakRange") or settings.get("dirRange") or 16))
-    if len(closes) < rng + 2:
-        return None
-    prior = closes[-(rng + 1) : -1]
-    last = closes[-1]
-    if last <= 0 or not prior:
-        return None
-    hi, lo = max(prior), min(prior)
-    long_brk = last > hi
-    short_brk = last < lo
-    if long_brk == short_brk:
-        return None
-    want = "long" if long_brk else "short"
-    sign = 1.0 if want == "long" else -1.0
-    ref = hi if want == "long" else lo
-    brk = abs(_pct(ref, last))
-    noise = float(settings.get("activeNoise") or 0.05)
-    if brk + 1e-12 < max(0.04, noise * 0.5):
-        return None
-    ctx_sigma = float(settings.get("breakContextSigma", 6.0) or 0.0)
-    ctx_z = 0.0
-    if ctx_sigma > 0:
-        # Stay inside the 60-bar frame: context return spans bars[-60..-1].
-        ctx_bars = max(20, min(59, int(settings.get("breakContextBars", 59) or 59)))
-        if len(closes) < max(ctx_bars + 1, 32, rng + 2):
-            return None
-        # Freshness: fire on the first bar of the break only.
-        if settings.get("breakFresh", True):
-            prev = closes[-2]
-            p_prior = closes[-(rng + 2) : -2]
-            if (want == "long" and prev > max(p_prior)) or (want == "short" and prev < min(p_prior)):
-                return None
-        sigma = _break_prior_sigma(closes, 30)
-        base = closes[-(ctx_bars + 1)]
-        if sigma <= 0 or base <= 0:
-            return None
-        ctx_z = (last / base - 1.0) * sign / sigma
-        if ctx_z > -ctx_sigma:
-            return None
-    steps = [closes[i] - closes[i - 1] for i in range(-min(8, len(closes) - 1), 0)]
+    steps = [window[i] - window[i - 1] for i in range(1, len(window))]
     ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.45)
+    want = "long" if d > 0 else "short"
     if ev["selected"] and ev["selected"] != want:
         return None
-    strength = clamp(brk / max(0.15, noise), 0.0, 1.0)
+    strength = clamp(abs(d) * 25.0, 0.0, 1.0)
     agr = float((ev.get(want) or {}).get("agreement") or 1.0)
-    conf = clamp(0.55 + min(0.35, brk * 8.0) + agr * 0.08, 0.5, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.88:
-        return None
-    source = f"break:{rng}:{brk:.3f}" + (f":rev{ctx_z:.1f}" if ctx_sigma > 0 else "")
     return _kind_indication(
-        symbol, "break", want, strength, last, settings, [source],
-        agreement=agr, mode=f"break:{rng}", conf=conf,
+        symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}"],
+        agreement=agr, mode="move",
     )
-
-
-# ---------------------------------------------------------------------------
-# Extended indication kinds (appended after "break"; existing kinds untouched).
-# Each is evaluated per range (independent configuration, own tape, own PF
-# validation) and carries a price-only exit tactic with its reference level.
-#
-#   kind     situation                          relation calc                     exit tactic
-#   msi      price extreme not confirmed by RSI  RSI gap at the two swing extremes  msi-swing-fail
-#   vwap     stretched from VWAP on a vol surge  z-score of VWAP deviation, vol x   vwap-touch
-#   retest   broken range level retested, held   break size vs retest distance      retest-fail
-#   squeeze  band width in its low percentile,   width percentile, close vs band     squeeze-fail
-#            then a close outside the band
-# ---------------------------------------------------------------------------
-
-
-def rsi_series(values: Sequence[float], period: int = 14) -> List[float]:
-    """Wilder RSI per bar (bars before ``period`` read 50.0)."""
-    n = len(values)
-    out = [50.0] * n
-    if n <= period:
-        return out
-    gains = losses = 0.0
-    for i in range(1, period + 1):
-        d = values[i] - values[i - 1]
-        gains += max(0.0, d)
-        losses += max(0.0, -d)
-    avg_g, avg_l = gains / period, losses / period
-    out[period] = 100.0 if avg_l <= 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
-    for i in range(period + 1, n):
-        d = values[i] - values[i - 1]
-        avg_g = (avg_g * (period - 1) + max(0.0, d)) / period
-        avg_l = (avg_l * (period - 1) + max(0.0, -d)) / period
-        out[i] = 100.0 if avg_l <= 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
-    return out
-
-
-def _min_conf_ok(conf: float, settings: Dict[str, Any]) -> bool:
-    return conf >= float(settings.get("minimumConfidence", 0.6)) * 0.88
-
-
-def evaluate_msi(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Momentum divergence over ``msiRange`` bars.
-
-    Bearish: a higher high in the second half of the range with an RSI high
-    at least ``msiMinGap`` points lower than at the first-half high, the high
-    at least one bar old and the last bar turned down -> short. Bullish is the
-    mirror -> long. Exit tactic ``msi-swing-fail``: void once price trades
-    beyond the swing extreme that formed the divergence.
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    rng = max(10, min(55, int(settings.get("msiRange") or 21)))
-    period = max(5, min(21, int(settings.get("msiRsiPeriod") or 14)))
-    if len(closes) < rng + period + 2:
-        return None
-    r = rsi_series(closes[-(rng + period + 2):], period)
-    half = rng // 2
-    px_w, r_w = closes[-rng:], r[-rng:]
-    a_px, b_px = px_w[:half], px_w[half:]
-    a_r, b_r = r_w[:half], r_w[half:]
-    gap_min = float(settings.get("msiMinGap", 5.0))
-    last, prev = closes[-1], closes[-2]
-    if last <= 0:
-        return None
-    want, gap, level = "", 0.0, 0.0
-    hi_a, hi_b = max(a_px), max(b_px)
-    lo_a, lo_b = min(a_px), min(b_px)
-    if hi_b > hi_a:
-        ib = len(b_px) - 1 - b_px[::-1].index(hi_b)
-        ia = a_px.index(hi_a)
-        g = a_r[ia] - b_r[ib]
-        if g >= gap_min and ib < len(b_px) - 1 and last < prev and a_r[ia] >= 55.0:
-            want, gap, level = "short", g, hi_b
-    if not want and lo_b < lo_a:
-        ib = len(b_px) - 1 - b_px[::-1].index(lo_b)
-        ia = a_px.index(lo_a)
-        g = b_r[ib] - a_r[ia]
-        if g >= gap_min and ib < len(b_px) - 1 and last > prev and a_r[ia] <= 45.0:
-            want, gap, level = "long", g, lo_b
-    if not want:
-        return None
-    dist = abs(_pct(last, level))
-    strength = clamp(gap / 20.0, 0.0, 1.0)
-    conf = clamp(0.56 + min(0.32, gap / 40.0) + (0.04 if dist < 0.4 else 0.0), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    sl = max(dist * 1.15, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-    ind = _kind_indication(
-        symbol, "msi", want, strength, last, settings, [f"msi:{rng}:gap{gap:.1f}"],
-        sl_pct=sl, mode=f"msi:{rng}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "msi-swing-fail", float(level)
-    return ind
-
-
-def evaluate_vwap(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Volume-surge VWAP reversion over ``vwapRange`` bars.
-
-    Price deviates >= ``vwapDevZ`` deviations from the rolling VWAP on a bar
-    whose volume is >= ``vwapVolMult`` x the window mean, and the bar already
-    turns back toward VWAP. Exit tactic ``vwap-touch``: take the reversion
-    when price reaches VWAP.
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    cs = frame.candles
-    rng = max(10, min(55, int(settings.get("vwapRange") or 30)))
-    if len(cs) < rng + 1:
-        return None
-    win = cs[-rng:]
-    vols = [max(0.0, float(c.volume or 0.0)) for c in win]
-    vsum = sum(vols)
-    if vsum <= 0:
-        return None
-    vwap = sum(((c.high + c.low + c.close) / 3.0) * v for c, v in zip(win, vols)) / vsum
-    if vwap <= 0:
-        return None
-    devs = [(c.close - vwap) / vwap for c in win]
-    mean_d = sum(devs) / len(devs)
-    sd = math.sqrt(sum((d - mean_d) ** 2 for d in devs) / len(devs))
-    if sd <= 0:
-        return None
-    last, prev = win[-1].close, win[-2].close
-    z = devs[-1] / sd
-    vol_mean = sum(vols[:-1]) / max(1, len(vols) - 1)
-    surge = vols[-1] / vol_mean if vol_mean > 0 else 0.0
-    z_min = float(settings.get("vwapDevZ", 2.0))
-    v_min = float(settings.get("vwapVolMult", 1.8))
-    if abs(z) < z_min or surge < v_min:
-        return None
-    want = "short" if z > 0 else "long"
-    turned = (last < prev or win[-1].close < win[-1].open) if want == "short" else (last > prev or win[-1].close > win[-1].open)
-    if not turned:
-        return None
-    dist = abs(_pct(last, vwap))
-    if dist < 0.08:
-        return None
-    strength = clamp((abs(z) - 1.5) / 2.5 + (surge - 1.5) / 6.0, 0.0, 1.0)
-    conf = clamp(0.56 + min(0.25, (abs(z) - z_min) * 0.1) + min(0.12, (surge - v_min) * 0.04), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    a = frame.atr(14)
-    sl = (a / last * 100.0 * float(settings.get("stopLossAtrMultiplier", 0.85)) * 1.6) if a > 0 and last > 0 else dist * 0.8
-    ind = _kind_indication(
-        symbol, "vwap", want, strength, last, settings, [f"vwap:{rng}:z{z:.1f}:v{surge:.1f}"],
-        sl_pct=sl, tp_pct=max(dist, sl * 1.1), mode=f"vwap:{rng}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "vwap-touch", float(vwap)
-    return ind
-
-
-def evaluate_retest(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Break-retest over ``retestRange`` bars.
-
-    Price broke the prior range by >= ``retestMinBreak`` percent 2..8 bars
-    ago, came back within ``retestTol`` percent of the broken level, held it,
-    and the last bar moves in the break direction. Exit tactic
-    ``retest-fail``: void once price closes back through the level.
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    rng = max(8, min(55, int(settings.get("retestRange") or 16)))
-    tol = float(settings.get("retestTol", 0.12)) / 100.0
-    min_brk = float(settings.get("retestMinBreak", 0.08)) / 100.0
-    if len(closes) < rng + 4:
-        return None
-    last, prev = closes[-1], closes[-2]
-    if last <= 0:
-        return None
-    for k in range(2, 9):
-        if len(closes) < rng + k + 2:
-            break
-        prior = closes[-(rng + k + 1):-(k + 1)]
-        after = closes[-(k + 1):-1]
-        hi, lo = max(prior), min(prior)
-        recent_lo, recent_hi = min(closes[-3:]), max(closes[-3:])
-        if (max(after) > hi * (1 + min_brk) and abs(recent_lo / hi - 1) <= tol
-                and last > hi and last > prev and min(after) >= hi * (1 - tol)):
-            want, level, brk = "long", hi, max(after) / hi - 1
-        elif (min(after) < lo * (1 - min_brk) and abs(recent_hi / lo - 1) <= tol
-                and last < lo and last < prev and max(after) <= lo * (1 + tol)):
-            want, level, brk = "short", lo, 1 - min(after) / lo
-        else:
-            continue
-        strength = clamp(brk / max(0.002, min_brk * 4), 0.0, 1.0)
-        conf = clamp(0.58 + min(0.25, brk * 60) + 0.03 * (8 - k) / 6, 0.5, 0.99)
-        if not _min_conf_ok(conf, settings):
-            return None
-        sl = max(abs(_pct(last, level)) + tol * 100 * 1.5, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-        ind = _kind_indication(
-            symbol, "retest", want, strength, last, settings, [f"retest:{rng}:k{k}:{brk * 100:.2f}"],
-            sl_pct=sl, mode=f"retest:{rng}", conf=conf,
-        )
-        ind.exit_tactic = "retest-fail"
-        ind.exit_level = float(level * (1 - tol) if want == "long" else level * (1 + tol))
-        return ind
-    return None
-
-
-def evaluate_squeeze(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Volatility squeeze release with a ``squeezePeriod`` Bollinger band.
-
-    The band width before the last bar sits in its lowest ``squeezePctl``
-    share of the frame, and the last close leaves the band. Exit tactic
-    ``squeeze-fail``: a breakout that falls back through the band mid failed.
-    """
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    period = max(10, min(30, int(settings.get("squeezePeriod") or 20)))
-    if len(closes) < period + 16:
-        return None
-    # Rolling band width (upper - lower) / mid over the frame, O(n).
-    widths: List[float] = []
-    s1 = sum(closes[:period])
-    s2 = sum(x * x for x in closes[:period])
-    for t in range(period, len(closes)):
-        mid = s1 / period
-        var = max(0.0, s2 / period - mid * mid)
-        if mid <= 0:
-            return None
-        widths.append(4.0 * math.sqrt(var) / mid)
-        s1 += closes[t] - closes[t - period]
-        s2 += closes[t] * closes[t] - closes[t - period] * closes[t - period]
-    if len(widths) < 15:
-        return None
-    pctl = clamp(float(settings.get("squeezePctl", 0.2)), 0.05, 0.5)
-    ranked = sorted(widths)
-    cutoff = ranked[max(0, int(len(ranked) * pctl) - 1)]
-    if widths[-1] > cutoff:
-        return None
-    band = bollinger(closes[:-1], period)
-    if not band:
-        return None
-    upper, mid, lower = band
-    last = closes[-1]
-    if last > upper:
-        want = "long"
-    elif last < lower:
-        want = "short"
-    else:
-        return None
-    out = abs(_pct(upper if want == "long" else lower, last))
-    expand = widths[-1] / max(1e-12, sum(widths) / len(widths))
-    strength = clamp(out / 0.15 + (1.0 - expand) * 0.5, 0.0, 1.0)
-    conf = clamp(0.57 + min(0.3, out * 1.5) + min(0.08, max(0.0, 1.0 - expand) * 0.2), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    sl = max(abs(_pct(last, mid)) * 1.05, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-    ind = _kind_indication(
-        symbol, "squeeze", want, strength, last, settings, [f"squeeze:{period}:w{widths[-1] * 100:.3f}"],
-        sl_pct=sl, mode=f"squeeze:{period}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "squeeze-fail", float(mid)
-    return ind
-
-
-# ---------------------------------------------------------------------------
-# Researched short-horizon kinds (appended after squeeze; 16 kinds total).
-# Short-horizon crypto reversal concentrates after aggressive moves (arXiv
-# 2608.21888); a liquidity sweep needs a rejection back through the level;
-# RSI(2) pullbacks inside a trend exit on the EMA5 snap-back (Connors);
-# Keltner wick fades confirm with a StochRSI turn. Every kind carries an
-# activity specialization: it stays quiet below its minimum ATR% of price.
-#
-#   kind     situation                                    exit tactic
-#   sweep    wick through N-bar high/low, close back in   sweep-fail (beyond the wick)
-#   rsi2     RSI(2) extreme against the EMA(N) trend      ema5-cross (snap-back target)
-#   keltner  wick outside Keltner(N), close back inside   keltner-mid (middle-line target)
-#   impulse  >= k sigma bar on a volume surge, fade it    impulse-fail (beyond the extreme)
-# ---------------------------------------------------------------------------
-
-
-def _activity_pct(frame: "IndicationFrame", px: float) -> float:
-    a = frame.atr(14) if frame.candles else 0.0
-    return (a / px * 100.0) if a > 0 and px > 0 else 0.0
-
-
-def _activity_ok(frame: "IndicationFrame", px: float, settings: Dict[str, Any], kind: str, default: float) -> Tuple[bool, float]:
-    act = _activity_pct(frame, px)
-    key = "act" + kind[:1].upper() + kind[1:] + "Min"
-    return act >= float(settings.get(key, default)), act
-
-
-def evaluate_sweep(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Liquidity sweep reversal over ``sweepRange`` bars: the last bar's wick
-    runs through the prior range high/low by >= ``sweepWickAtr`` x ATR and
-    the bar closes back inside the range (the rejection). Fade the sweep.
-    Exit tactic ``sweep-fail``: price trades back beyond the sweep wick."""
-    frame = frame or IndicationFrame([], list(closes))
-    cs = frame.candles
-    rng = max(8, min(55, int(settings.get("sweepRange") or 20)))
-    if len(cs) < rng + 2:
-        return None
-    last = cs[-1]
-    prior = cs[-(rng + 1):-1]
-    hi = max(c.high for c in prior)
-    lo = min(c.low for c in prior)
-    px = last.close
-    ok, act = _activity_ok(frame, px, settings, "sweep", 0.04)
-    if not ok:
-        return None
-    a = frame.atr(14)
-    if a <= 0 or px <= 0:
-        return None
-    k = float(settings.get("sweepWickAtr", 0.25))
-    if last.high > hi + k * a and last.close < hi and last.close < last.open + (last.high - last.open) * 0.5:
-        want, wick, extreme = "short", (last.high - hi) / a, last.high
-    elif last.low < lo - k * a and last.close > lo and last.close > last.open - (last.open - last.low) * 0.5:
-        want, wick, extreme = "long", (lo - last.low) / a, last.low
-    else:
-        return None
-    strength = clamp(wick / 1.5, 0.0, 1.0)
-    conf = clamp(0.58 + min(0.3, wick * 0.15) + min(0.06, act * 0.3), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    sl = max(abs(_pct(px, extreme)) * 1.1, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-    ind = _kind_indication(
-        symbol, "sweep", want, strength, px, settings, [f"sweep:{rng}:w{wick:.2f}:a{act:.3f}"],
-        sl_pct=sl, mode=f"sweep:{rng}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "sweep-fail", float(extreme)
-    return ind
-
-
-def evaluate_rsi2(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Connors-style RSI(2) pullback inside the EMA(``rsi2Trend``) trend:
-    long when price is above the trend EMA, below EMA5 and RSI(2) <=
-    ``rsi2Low``; short mirrored with ``rsi2High``. Exit tactic ``ema5-cross``:
-    take the snap-back when price closes back through EMA5."""
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    trend_n = max(8, min(55, int(settings.get("rsi2Trend") or 34)))
-    if len(closes) < trend_n + 3:
-        return None
-    px = closes[-1]
-    ok, act = _activity_ok(frame, px, settings, "rsi2", 0.03)
-    if not ok or px <= 0:
-        return None
-    trend = frame.ema(trend_n)
-    ema5 = frame.ema(5)
-    r2 = rsi(closes, 2)
-    lo_t = float(settings.get("rsi2Low", 10.0))
-    hi_t = float(settings.get("rsi2High", 90.0))
-    if px > trend and px < ema5 and r2 <= lo_t:
-        want, depth = "long", (lo_t - r2) / max(1.0, lo_t)
-    elif px < trend and px > ema5 and r2 >= hi_t:
-        want, depth = "short", (r2 - hi_t) / max(1.0, 100.0 - hi_t)
-    else:
-        return None
-    gap = abs(_pct(px, ema5))
-    strength = clamp(0.4 + depth * 0.6, 0.0, 1.0)
-    conf = clamp(0.58 + depth * 0.25 + min(0.08, abs(_pct(trend, px)) * 0.2), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    a = frame.atr(14)
-    sl = max((a / px * 100.0 * 1.5) if a > 0 else gap * 2.0, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-    ind = _kind_indication(
-        symbol, "rsi2", want, strength, px, settings, [f"rsi2:{trend_n}:r{r2:.1f}:a{act:.3f}"],
-        sl_pct=sl, tp_pct=max(gap * 1.2, sl * 1.1), mode=f"rsi2:{trend_n}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "ema5-cross", float(ema5)
-    return ind
-
-
-def stoch_rsi(values: Sequence[float], period: int = 14) -> Tuple[float, float]:
-    """(%K now, %K previous bar) of StochRSI over ``period``."""
-    r = rsi_series(list(values), period)
-    if len(r) < period * 2 + 1:
-        return 50.0, 50.0
-
-    def k_at(end: int) -> float:
-        w = r[end - period:end]
-        lo, hi = min(w), max(w)
-        return 50.0 if hi - lo <= 1e-9 else (w[-1] - lo) / (hi - lo) * 100.0
-
-    return k_at(len(r)), k_at(len(r) - 1)
-
-
-def evaluate_keltner(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Keltner(``keltnerPeriod``, ``keltnerMult`` x ATR) wick fade: the last
-    bar's wick pierces a band, the close is back inside, and StochRSI turns
-    from its extreme. Exit tactic ``keltner-mid``: target the middle line."""
-    frame = frame or IndicationFrame([], list(closes))
-    cs = frame.candles
-    n = max(10, min(40, int(settings.get("keltnerPeriod") or 20)))
-    if len(cs) < n + 16:
-        return None
-    px = cs[-1].close
-    ok, act = _activity_ok(frame, px, settings, "keltner", 0.04)
-    if not ok or px <= 0:
-        return None
-    mid = frame.ema(n)
-    a = frame.atr(14)
-    if a <= 0:
-        return None
-    mult = float(settings.get("keltnerMult", 2.0))
-    upper, lower = mid + mult * a, mid - mult * a
-    k_now, k_prev = stoch_rsi(frame.closes, 14)
-    last = cs[-1]
-    if last.high > upper and last.close < upper and k_prev >= 80 and k_now < k_prev:
-        want, pierce = "short", (last.high - upper) / a
-    elif last.low < lower and last.close > lower and k_prev <= 20 and k_now > k_prev:
-        want, pierce = "long", (lower - last.low) / a
-    else:
-        return None
-    dist = abs(_pct(px, mid))
-    if dist < 0.08:
-        return None
-    strength = clamp(0.35 + pierce * 0.5, 0.0, 1.0)
-    conf = clamp(0.58 + min(0.25, pierce * 0.3) + min(0.08, abs(k_now - k_prev) / 200.0), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    sl = max(abs(_pct(px, last.high if want == "short" else last.low)) + a / px * 100.0 * 0.5,
-             float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-    ind = _kind_indication(
-        symbol, "keltner", want, strength, px, settings, [f"keltner:{n}:p{pierce:.2f}:k{k_now:.0f}:a{act:.3f}"],
-        sl_pct=sl, tp_pct=max(dist, sl * 1.1), mode=f"keltner:{n}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "keltner-mid", float(mid)
-    return ind
-
-
-def evaluate_impulse(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Impulse fade: the last bar's return is >= ``impulseSigma`` x the
-    ``impulseRange``-bar return sigma on volume >= ``impulseVolMult`` x mean
-    (aggressive taker flow); fade it. Exit tactic ``impulse-fail``: price
-    trades beyond the impulse extreme."""
-    frame = frame or IndicationFrame([], list(closes))
-    cs = frame.candles
-    rng = max(10, min(55, int(settings.get("impulseRange") or 30)))
-    if len(cs) < rng + 2:
-        return None
-    px = cs[-1].close
-    ok, act = _activity_ok(frame, px, settings, "impulse", 0.03)
-    if not ok or px <= 0:
-        return None
-    rets = [(cs[i].close / cs[i - 1].close - 1.0) for i in range(len(cs) - rng, len(cs) - 1) if cs[i - 1].close > 0]
-    if len(rets) < 8:
-        return None
-    mu = sum(rets) / len(rets)
-    sd = math.sqrt(sum((x - mu) ** 2 for x in rets) / len(rets))
-    if sd <= 0:
-        return None
-    r_last = cs[-1].close / cs[-2].close - 1.0 if cs[-2].close > 0 else 0.0
-    z = r_last / sd
-    vols = [max(0.0, float(c.volume or 0.0)) for c in cs[-rng:-1]]
-    vmean = sum(vols) / len(vols) if vols else 0.0
-    surge = float(cs[-1].volume or 0.0) / vmean if vmean > 0 else 0.0
-    if abs(z) < float(settings.get("impulseSigma", 3.0)) or surge < float(settings.get("impulseVolMult", 2.0)):
-        return None
-    want = "short" if z > 0 else "long"
-    extreme = cs[-1].high if want == "short" else cs[-1].low
-    strength = clamp((abs(z) - 2.5) / 3.0 + (surge - 2.0) / 8.0, 0.0, 1.0)
-    conf = clamp(0.57 + min(0.25, (abs(z) - 3.0) * 0.06) + min(0.1, (surge - 2.0) * 0.03), 0.5, 0.99)
-    if not _min_conf_ok(conf, settings):
-        return None
-    move = abs(r_last) * 100.0
-    sl = max(abs(_pct(px, extreme)) * 1.2 + move * 0.25, float(settings.get("stopLossMinPct", SL_MIN_PCT)))
-    ind = _kind_indication(
-        symbol, "impulse", want, strength, px, settings, [f"impulse:{rng}:z{z:.1f}:v{surge:.1f}:a{act:.3f}"],
-        sl_pct=sl, tp_pct=max(move * 0.5, sl * 1.1), mode=f"impulse:{rng}", conf=conf,
-    )
-    ind.exit_tactic, ind.exit_level = "impulse-fail", float(extreme)
-    return ind
-
-
-RANGE_EVALUATORS = {
-    "msi": evaluate_msi,
-    "vwap": evaluate_vwap,
-    "retest": evaluate_retest,
-    "squeeze": evaluate_squeeze,
-    "sweep": evaluate_sweep,
-    "rsi2": evaluate_rsi2,
-    "keltner": evaluate_keltner,
-    "impulse": evaluate_impulse,
-}
-
-EXIT_TACTICS = ("msi-swing-fail", "vwap-touch", "retest-fail", "squeeze-fail",
-                "sweep-fail", "ema5-cross", "keltner-mid", "impulse-fail")
-# Targets close when price reaches the level; invalidations when it trades
-# back through it by more than the buffer.
-TARGET_TACTICS = ("vwap-touch", "ema5-cross", "keltner-mid")
-
-
-def exit_tactic_hit(tactic: str, side: Any, px: float, level: float, buffer_pct: float = 0.0) -> bool:
-    """Price-only exit tactic check for an open position.
-
-    ``vwap-touch`` is a target (reached); the others are invalidations: price
-    closes back through the level that formed the setup by more than
-    ``buffer_pct`` percent (a wick-sized poke is not an invalidation)."""
-    if not tactic or level <= 0 or px <= 0:
-        return False
-    long = str(side).upper() in ("LONG", "L", "BUY", "1")
-    if tactic in TARGET_TACTICS:
-        return px >= level if long else px <= level
-    if tactic in ("msi-swing-fail", "retest-fail", "squeeze-fail", "sweep-fail", "impulse-fail"):
-        b = max(0.0, float(buffer_pct or 0.0)) / 100.0
-        return px < level * (1 - b) if long else px > level * (1 + b)
-    return False
-
-
-def tactic_should_close(tactic: str, side: Any, px: float, level: float, entry: float,
-                        buffer_pct: float = 0.1, min_gain_pct: float = 0.15) -> bool:
-    """Exit-tactic decision for an open position.
-
-    Invalidations close as soon as they hit. Targets close only once the
-    move from entry covers ``min_gain_pct`` (a target reached at a gain
-    below the round-trip cost would lock in a net loss)."""
-    if not exit_tactic_hit(tactic, side, px, level, buffer_pct):
-        return False
-    if tactic not in TARGET_TACTICS:
-        return True
-    if entry <= 0 or px <= 0:
-        return False
-    long = str(side).upper() in ("LONG", "L", "BUY", "1")
-    move = (px - entry) / entry * (1.0 if long else -1.0)
-    return move * 100.0 >= max(0.0, float(min_gain_pct or 0.0))
-
-
-def indication_ranges(values, defaults):
-    if not isinstance(values, (list, tuple)):
-        return list(defaults)
-    parsed = []
-    for value in values[:16]:
-        try:
-            n = int(value)
-            if 8 <= n <= 55 and n not in parsed:
-                parsed.append(n)
-        except (ValueError, TypeError, OverflowError):
-            pass
-    return sorted(parsed) or list(defaults)
-
-
-def evaluate_range_configs(symbol, closes, settings, frame=None):
-    """Every enabled range has its own stable identity; share cached EMAs."""
-    frame = frame or IndicationFrame([], list(closes))
-    rows = []
-    if settings.get("typeTrend", True):
-        for slow in indication_ranges(settings.get("trendRanges"), (13, 21, 34)):
-            row = evaluate_trend(symbol, closes, {**settings, "trendSlow": slow, "trendFast": round(slow * .38)}, frame)
-            if row:
-                rows.append(row)
-    if settings.get("typeBreak", True):
-        for period in indication_ranges(settings.get("breakRanges"), (8, 16, 32)):
-            row = evaluate_break(symbol, closes, {**settings, "breakRange": period}, frame)
-            if row:
-                rows.append(row)
-    for kind, (rkey, defaults, setting) in RANGE_KINDS.items():
-        if not settings.get(KIND_FLAGS[kind], True):
-            continue
-        fn = RANGE_EVALUATORS[kind]
-        for period in indication_ranges(settings.get(rkey), defaults):
-            try:
-                row = fn(symbol, closes, {**settings, setting: period}, frame)
-            except Exception:
-                row = None
-            if row:
-                rows.append(row)
-    if settings.get("typeMove", True):
-        # The primary Move range (moveFadeRange) runs through evaluate_move itself.
-        primary = max(8, min(55, int(settings.get("moveFadeRange") or 30)))
-        for period in indication_ranges(settings.get("moveRanges"), (20, 30, 40)):
-            if period == primary:
-                continue
-            row = evaluate_move(symbol, closes, {**settings, "moveFadeRange": period}, frame)
-            if row:
-                rows.append(row)
-    return rows
 
 
 def _avg_abs_move_pct(values: List[float]) -> float:
@@ -1871,16 +593,8 @@ def _range_pct(values: List[float]) -> float:
     return ((max(values) - min(values)) / values[0]) * 100.0
 
 
-def evaluate_active_range(
-    symbol: str,
-    closes: List[float],
-    rng: int,
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
+def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: Dict[str, Any]) -> Optional[Indication]:
     """CTS Active/Outbreak for one range: current window vs previous equal window."""
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
     rng = max(2, int(rng))
     need = rng * 2 + 1
     if len(closes) < need:
@@ -1891,7 +605,7 @@ def evaluate_active_range(
     newest = current[-1]
     signed = _pct(current[0], newest)
     price_chg = abs(signed)
-    threshold = max(0.01, float(settings.get("activeMovePct") or 0.5))
+    threshold = max(0.01, num(settings, "activeMovePct", 0.5))
     if price_chg + 1e-12 < threshold:
         return None
     direction = "long" if signed >= 0 else "short"
@@ -1902,13 +616,15 @@ def evaluate_active_range(
     prev_act = _avg_abs_move_pct(previous)
     cur_act = _avg_abs_move_pct(current)
     activity_ratio = cur_act / max(prev_act, 1e-6)
-    min_act = max(0.0, float(settings.get("activeThreshold") or 1.0))
+    min_act = max(0.0, num(settings, "activeThreshold", 1.0))
     if activity_ratio + 1e-12 < min_act:
         return None
     ref = sample[:-1]
     ref_hi, ref_lo = max(ref), min(ref)
     breakout = max(0.0, _pct(ref_hi, newest)) if direction == "long" else max(0.0, -_pct(ref_lo, newest))
-    noise = max(0.0, float(settings.get("activeNoise") or 0.05))
+    noise = max(0.0, num(settings, "activeNoise", 0.05))
+    if noise <= 0.02:
+        noise *= 100.0
     if breakout + 1e-12 < noise:
         return None
     agr = _dir_agree(current, direction)
@@ -1919,10 +635,10 @@ def evaluate_active_range(
     mae = _mae_pct(current, direction)
     if mae > max(noise, price_chg * 1.0):
         return None
-    vol_w = clamp(float(settings.get("activeVolatilityWeight") or 0.3), 0.0, 1.0)
-    cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
+    vol_w = clamp(num(settings, "activeVolatilityWeight", 0.3), 0.0, 1.0)
+    cost = max(0.02, float(settings.get("positionCostPct") or POSITION_COST_PCT_DEFAULT))
     vol_risk = max(cost * 2.0, cur_act * (0.75 + vol_w * 0.75))
-    sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", SL_MIN_PCT)), float(settings.get("stopLossMaxPct", 1.5)))
+    sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", 0.2)), float(settings.get("stopLossMaxPct", 1.5)))
     tp = clamp(max(cost * 3.0, price_chg * 1.25, sl * 1.1), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
     n_move = price_chg / threshold
     n_brk = breakout / max(noise, 0.01)
@@ -1952,145 +668,23 @@ def evaluate_active_range(
     )
 
 
-# Active "z" model (default). Research on 48 BingX symbols x 1 week with the
-# engine kind-tape exit model (parameters chosen on the first 4 days only):
-# * a 3-5 sigma move (sigma = the frame's own prior 1m steps) over 10-20 bars
-#   mean-reverts more often than it continues -> "fade:<range>" lanes;
-# * a >= 5 sigma move over 8-12 bars is a real outbreak -> "outbreak:<range>".
-# The legacy follow-every-0.5%-move lanes (evaluate_active_range) did barely
-# better than random entries and stay available with activeModel="legacy".
-# Every lane is an independent configuration (kind "active", mode lane:range).
-ACTIVE_FRAME_BARS = 60
-ACTIVE_MIN_PRIOR_STEPS = 20
-ACTIVE_FADE_RANGES = (10, 15, 20)
-ACTIVE_OUTBREAK_RANGES = (8, 10, 12)
-
-
-def _active_z_ranges(values: Any, defaults: Sequence[int]) -> List[int]:
-    """Parse z-lane ranges; every range must leave enough prior steps in the 60-bar frame."""
-    if not isinstance(values, (list, tuple)):
-        return list(defaults)
-    top = ACTIVE_FRAME_BARS - 1 - ACTIVE_MIN_PRIOR_STEPS
-    parsed: List[int] = []
-    for value in values[:8]:
-        try:
-            n = int(value)
-        except (ValueError, TypeError, OverflowError):
-            continue
-        if 2 <= n <= top and n not in parsed:
-            parsed.append(n)
-    return sorted(parsed) or list(defaults)
-
-
-def active_z_features(closes: Sequence[float], rng: int) -> Optional[Dict[str, float]]:
-    """Causal features for one range inside the 60-bar frame.
-
-    signed: % move over the last ``rng`` bars; sigma: population sigma (%) of
-    the 1m close steps *before* that window; z: signed / (sigma * sqrt(rng)).
-    """
-    closes = list(closes)[-ACTIVE_FRAME_BARS:]
-    rng = int(rng)
-    if rng < 2 or len(closes) < rng + 1 + ACTIVE_MIN_PRIOR_STEPS:
-        return None
-    prior = closes[:-rng]
-    steps = [_pct(prior[k - 1], prior[k]) for k in range(1, len(prior))]
-    if len(steps) < ACTIVE_MIN_PRIOR_STEPS or closes[-rng - 1] <= 0:
-        return None
-    mean = sum(steps) / len(steps)
-    sigma = max(0.0, sum(v * v for v in steps) / len(steps) - mean * mean) ** 0.5
-    signed = _pct(closes[-rng - 1], closes[-1])
-    return {"signed": signed, "sigma": sigma, "z": signed / max(sigma * (rng ** 0.5), 1e-9)}
-
-
-def evaluate_active_z(
-    symbol: str,
-    closes: List[float],
-    rng: int,
-    lane: str,
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Volatility-normalized Active lane: "fade" (3-5 sigma stretch) or "outbreak" (>= 5 sigma)."""
-    frame = frame or IndicationFrame([], list(closes))
-    feat = active_z_features(frame.closes, rng)
-    if feat is None:
-        return None
-    if feat["sigma"] + 1e-12 < max(0.0, float(settings.get("activeMinSigmaPct", 0.08))):
-        # Too quiet: fixed-% exits cannot pay the position cost.
-        return None
-    fade_z = max(0.5, float(settings.get("activeFadeZ", 3.0)))
-    out_z = max(fade_z, float(settings.get("activeOutbreakZ", 5.0)))
-    az = abs(feat["z"])
-    move_dir = "long" if feat["signed"] >= 0 else "short"
-    if lane == "fade":
-        if not fade_z <= az < out_z:
-            return None
-        direction = "short" if move_dir == "long" else "long"
-        conf = 0.58 + 0.16 * clamp((az - fade_z) / max(out_z - fade_z, 1e-9), 0.0, 1.0)
-        strength = clamp(az / out_z, 0.0, 1.0)
-    elif lane == "outbreak":
-        if az < out_z:
-            return None
-        direction = move_dir
-        conf = 0.62 + 0.04 * min(7.0, az - out_z)
-        strength = clamp(az / (out_z * 2.0), 0.0, 1.0)
-    else:
-        return None
-    conf = clamp(conf, 0.0, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.85:
-        return None
-    cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
-    sl = clamp(max(cost * 2.0, feat["sigma"] * (rng ** 0.5)), float(settings.get("stopLossMinPct", SL_MIN_PCT)), float(settings.get("stopLossMaxPct", 1.5)))
-    tp = clamp(max(cost * 3.0, sl * float(settings.get("takeProfitRewardRisk", 1.8))), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
-    return _kind_indication(
-        symbol, "active", direction, strength, frame.closes[-1], settings,
-        [f"active:{lane}:{rng}", f"z:{feat['z']:.2f}", f"sig:{feat['sigma']:.3f}"],
-        sl_pct=sl, tp_pct=tp, agreement=1.0, mode=f"{lane}:{rng}", conf=conf,
-    )
-
-
-def active_model(settings: Dict[str, Any]) -> str:
-    return "legacy" if str(settings.get("activeModel", "z") or "z").strip().lower() == "legacy" else "z"
-
-
-def evaluate_active(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """Strongest Active lane (vote summary). Live and replay trade every lane independently."""
+def evaluate_active(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+    outbreaks = settings.get("activeOutbreak") or [3, 5, 10]
     best: Optional[Indication] = None
-    for cand in evaluate_active_all(symbol, closes, settings, frame=frame):
-        if best is None or cand.confidence > best.confidence:
+    for raw in outbreaks:
+        cand = evaluate_active_range(symbol, closes, int(raw), settings)
+        if cand and (best is None or cand.confidence > best.confidence):
             best = cand
     return best
 
 
-def evaluate_active_all(
-    symbol: str,
-    closes: List[float],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> List[Indication]:
-    """Independent Active indication per configuration (mode lane:range)."""
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
+def evaluate_active_all(symbol: str, closes: List[float], settings: Dict[str, Any]) -> List[Indication]:
+    """Independent Active indication per outbreak range (3 / 5 / 10)."""
     out: List[Indication] = []
-    if active_model(settings) == "legacy":
-        for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
-            cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
-            if cand:
-                out.append(cand)
-        return out
-    for lane, key, defaults in (
-        ("fade", "activeFadeRanges", ACTIVE_FADE_RANGES),
-        ("outbreak", "activeOutbreakZRanges", ACTIVE_OUTBREAK_RANGES),
-    ):
-        for rng in _active_z_ranges(settings.get(key), defaults):
-            cand = evaluate_active_z(symbol, closes, rng, lane, settings, frame=frame)
-            if cand:
-                out.append(cand)
+    for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
+        cand = evaluate_active_range(symbol, closes, int(raw), settings)
+        if cand:
+            out.append(cand)
     return out
 
 
@@ -2104,41 +698,24 @@ def bollinger(closes: List[float], period: int = 20) -> Optional[Tuple[float, fl
     return mid + 2 * sd, mid, mid - 2 * sd
 
 
-def evaluate_common(
-    symbol: str,
-    candles: List[Candle],
-    settings: Dict[str, Any],
-    frame: Optional[IndicationFrame] = None,
-) -> Optional[Indication]:
-    """CTS Common / indication-stage, independent of State.
-
-    Default ("fade"): common EMA20/EMA50 stretch consensus in own-volatility
-    units -- (EMA20-EMA50)/sigma >= commonFadeEmaZ or (close-EMA50)/sigma >=
-    commonFadeCloseZ votes against the stretch -- confirmed by the last
-    commonFadeTurn closes already reverting. The legacy RSI + MACD + EMA +
-    Bollinger majority (mostly trend-following votes, which lost gross edge
-    on 1m) stays available as commonMode="vote".
-    """
-    frame = frame or frame_from_candles(candles)
-    candles = frame.candles
+def evaluate_common(symbol: str, candles: List[Candle], settings: Dict[str, Any]) -> Optional[Indication]:
+    """CTS Common / indication-stage: RSI + MACD + EMA + Bollinger, independent of State."""
     if len(candles) < 26:
         return None
-    closes = frame.closes
+    closes = [c.close for c in candles]
     latest = candles[-1]
-    if str(settings.get("commonMode") or "fade").lower() != "vote":
-        return _evaluate_common_fade(symbol, frame, settings)
-    r = frame.rsi(14)
-    macd_fast = frame.ema_series(12)
-    macd_slow = frame.ema_series(26)
+    r = rsi(closes, 14)
+    macd_fast = ema_series(closes, 12)
+    macd_slow = ema_series(closes, 26)
     macd_line = [a - b for a, b in zip(macd_fast, macd_slow)]
     signal_line = ema_series(macd_line, 9)
     macd = macd_line[-1]
     macd_sig = signal_line[-1] if signal_line else 0.0
     hist = macd - macd_sig
-    ema20 = frame.ema(20)
-    ema50 = frame.ema(50)
-    ema200 = frame.ema(200) if len(closes) >= 80 else ema50
-    bb = frame.bollinger(20)
+    ema20 = ema(closes, 20)
+    ema50 = ema(closes, 50)
+    ema200 = ema(closes, 200) if len(closes) >= 80 else ema50
+    bb = bollinger(closes, 20)
     buy = sell = 0
     if r < 30:
         buy += 1
@@ -2175,41 +752,6 @@ def evaluate_common(
         symbol, "common", direction, strength, latest.close, settings,
         [f"rsi:{r:.1f}", f"macd:{hist:.5f}", "ema20-50", "ema200", "bb"],
         agreement=strength, mode="rsi-macd-ema-bb", conf=conf,
-    )
-
-
-def _evaluate_common_fade(symbol: str, frame: IndicationFrame, settings: Dict[str, Any]) -> Optional[Indication]:
-    closes = frame.closes
-    last = closes[-1]
-    sigma = _frame_sigma(closes)
-    if last <= 0 or sigma <= 0:
-        return None
-    ema20 = frame.ema(20)
-    ema50 = frame.ema(50)
-    ema_z = (ema20 - ema50) / last / sigma
-    close_z = (last - ema50) / last / sigma
-    ez = float(settings.get("commonFadeEmaZ", 2.0))
-    cz = float(settings.get("commonFadeCloseZ", 4.0))
-    buy = int(ema_z <= -ez) + int(close_z <= -cz)
-    sell = int(ema_z >= ez) + int(close_z >= cz)
-    if buy == sell:
-        return None
-    direction = "long" if buy > sell else "short"
-    votes = max(buy, sell)
-    turn = max(0, int(settings.get("commonFadeTurn", 2)))
-    if not _turned(closes, direction, turn):
-        return None
-    stretch = max(abs(ema_z) / ez, abs(close_z) / cz)
-    strength = clamp(votes / 2.0 * min(1.0, stretch / 1.5), 0.0, 1.0)
-    if strength < float(settings.get("minimumStrength", 0.2)):
-        return None
-    conf = clamp(0.6 + (votes - 1) * 0.08 + min(0.1, (stretch - 1.0) * 0.1), 0.5, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
-        return None
-    return _kind_indication(
-        symbol, "common", direction, strength, last, settings,
-        [f"ema20-50z:{ema_z:.2f}", f"close-ema50z:{close_z:.2f}", f"turn{turn}"],
-        agreement=votes / 2.0, mode="ema-stretch-fade", conf=conf,
     )
 
 
@@ -2260,6 +802,49 @@ def combine_timeframes(
     return direction, winners, risk
 
 
+def aggregate_bars(rows: Sequence[Sequence[float]], minutes: int) -> List[List[float]]:
+    """Causal N-minute bars from 1m rows [o,h,l,c,v]. Blocks are aligned to the newest row, so the newest
+    candle ends on the newest row and no row after it is used. Incomplete leading rows are dropped."""
+    m = max(1, int(minutes))
+    k = len(rows) // m
+    out: List[List[float]] = []
+    n = len(rows)
+    for j in range(k):
+        hi = n - (k - 1 - j) * m
+        first = rows[hi - m]
+        h = float(first[1])
+        lo = float(first[2])
+        v = 0
+        for x in range(hi - m, hi):      # one pass per block: the same max, min and left-to-right volume sum as before
+            b = rows[x]
+            bh = float(b[1])
+            bl = float(b[2])
+            if bh > h:
+                h = bh
+            if bl < lo:
+                lo = bl
+            v = v + float(b[4])
+        out.append([float(first[0]), h, lo, float(rows[hi - 1][3]), v])
+    return out
+
+
+def timeframe_evals(tf_rows: Dict[str, Sequence[Sequence[float]]], settings: Dict[str, Any], now: float) -> List[SignalEval]:
+    """Every enabled timeframe lane through one evaluator. IndicationBook.process and the set signal both
+    call this, so a timeframe is judged by the same code wherever it is used."""
+    out: List[SignalEval] = []
+    for tf in TIMEFRAMES:
+        if not settings.get(f"tf{tf}", True):
+            continue
+        rows = tf_rows.get(tf) or []
+        if len(rows) < 20:
+            continue
+        candles = bars_to_candles(list(rows), now=now, period_s=TF_SECONDS[tf])
+        ev = evaluate_signal_candles(f"bingx-{tf}", f"BingX {tf}", candles, settings, weight=TF_WEIGHT[tf])
+        if ev:
+            out.append(ev)
+    return out
+
+
 class ExtraBook:
     """Public 1m klines from Binance / Bybit — independent Signal lanes."""
 
@@ -2267,117 +852,102 @@ class ExtraBook:
         self.cache: Dict[str, Tuple[float, List[Candle]]] = {}
         self.fail: Dict[str, int] = {}
         self.cool: Dict[str, float] = {}
-        self._lock = RLock()
-        self._inflight: set[str] = set()
-        # Exchange/indicator requests are direct service traffic.  Do not let
-        # an ambient SOCKS/HTTP proxy supplied by a hosting shell change the
-        # import/startup contract (or require the optional socksio package).
-        self.http = (
-            httpx.Client(
-                timeout=2.2,
-                headers={"User-Agent": "grok-x01-pulse/ind"},
-                trust_env=False,
-            )
-            if httpx
-            else None
-        )
+        self.http = httpx.Client(timeout=2.2, headers={"User-Agent": "grok-x01-pulse/ind"}) if httpx else None
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ind-x")
         self.cache_max = 48
+        # one fetch per key at a time: the owner registers a Future, later callers wait on it instead of refetching
+        self._lock = threading.Lock()
+        self._inflight: Dict[str, Future] = {}
 
     def prune(self, keep: Optional[set] = None, max_n: Optional[int] = None) -> int:
         now = time.time()
         drop: List[str] = []
-        with self._lock:
-            for k, (ts, _) in list(self.cache.items()):
-                sym = k.split(":", 1)[-1] if ":" in k else k
-                if keep is not None and sym not in keep:
-                    drop.append(k)
-                elif now - ts > 90:
-                    drop.append(k)
-            for k in drop:
+        for k, (ts, _) in list(self.cache.items()):
+            sym = k.split(":", 1)[-1] if ":" in k else k
+            if keep is not None and sym not in keep:
+                drop.append(k)
+            elif now - ts > 90:
+                drop.append(k)
+        for k in drop:
+            self.cache.pop(k, None)
+        cap = int(max_n if max_n is not None else self.cache_max)
+        extra = len(self.cache) - cap
+        if extra > 0:
+            oldest = sorted(self.cache.items(), key=lambda kv: kv[1][0])
+            for k, _ in oldest[:extra]:
                 self.cache.pop(k, None)
-            cap = int(max_n if max_n is not None else self.cache_max)
-            extra = len(self.cache) - cap
-            if extra > 0:
-                oldest = sorted(self.cache.items(), key=lambda kv: kv[1][0])
-                for k, _ in oldest[:extra]:
-                    self.cache.pop(k, None)
-                    drop.append(k)
-            for src in list(self.fail):
-                if self.fail.get(src, 0) <= 0:
-                    self.fail.pop(src, None)
-            for src, until in list(self.cool.items()):
-                if until < now:
-                    self.cool.pop(src, None)
+                drop.append(k)
+        for src in list(self.fail):
+            if self.fail.get(src, 0) <= 0:
+                self.fail.pop(src, None)
+        for src, until in list(self.cool.items()):
+            if until < now:
+                self.cool.pop(src, None)
         return len(drop)
 
     def prefetch(self, pairs: List[Tuple[str, str]]) -> None:
-        """Schedule optional sources without making the hot indication pass wait."""
         now = time.time()
-        want: List[Tuple[str, str]] = []
-        with self._lock:
-            for src, sym in pairs:
-                key = f"{src}:{sym}"
-                hit = self.cache.get(key)
-                if hit and now - hit[0] < 30:
-                    continue
+        want = []
+        for src, sym in pairs:
+            key = f"{src}:{sym}"
+            hit = self.cache.get(key)
+            if hit and now - hit[0] < 30:
+                continue
+            with self._lock:
                 if key in self._inflight:
                     continue
-                self._inflight.add(key)
-                want.append((src, sym))
-                if len(want) >= 8:
-                    break
-        for src, sym in want:
+            want.append((src, sym))
+        if not want:
+            return
+        futs = [self.pool.submit(self.get, src, sym) for src, sym in want[:8]]
+        deadline = time.time() + 0.40
+        for f in futs:
+            remain = deadline - time.time()
+            if remain <= 0:
+                break
             try:
-                self.pool.submit(self._prefetch_one, src, sym)
+                f.result(timeout=max(0.02, remain))
             except Exception:
-                with self._lock:
-                    self._inflight.discard(f"{src}:{sym}")
-        with self._lock:
-            over = len(self.cache) > self.cache_max
-        if over:
+                continue
+        if len(self.cache) > self.cache_max:
             self.prune(max_n=self.cache_max)
-
-    def _prefetch_one(self, source: str, symbol: str) -> None:
-        key = f"{source}:{symbol}"
-        try:
-            self.get(source, symbol)
-        finally:
-            with self._lock:
-                self._inflight.discard(key)
-
-    def peek(self, source: str, symbol: str) -> List[Candle]:
-        """Return only cached optional data; never perform network I/O."""
-        key = f"{source}:{symbol}"
-        now = time.time()
-        with self._lock:
-            hit = self.cache.get(key)
-            return hit[1] if hit and now - hit[0] < 90 else []
 
     def get(self, source: str, symbol: str) -> List[Candle]:
         key = f"{source}:{symbol}"
-        now = time.time()
+        hit = self.cache.get(key)
+        if hit and time.time() - hit[0] < 30:
+            return hit[1]
+        if self.cool.get(source, 0) > time.time():
+            return hit[1] if hit else []
         with self._lock:
-            hit = self.cache.get(key)
-            if hit and now - hit[0] < 30:
-                return hit[1]
-            cached = hit[1] if hit else []
-            cooling = self.cool.get(source, 0) > now
-        if cooling:
-            return cached
+            fut = self._inflight.get(key)
+            owner = fut is None
+            if owner:
+                fut = Future()
+                self._inflight[key] = fut
+        if not owner:
+            # the same key is already being fetched: wait for that result instead of asking the venue again
+            try:
+                return fut.result(timeout=2.5)
+            except Exception:
+                return hit[1] if hit else []
+        result: List[Candle] = hit[1] if hit else []
         try:
             bars = self._fetch(source, symbol)
-            with self._lock:
-                self.cache[key] = (time.time(), bars)
-                self.fail[source] = 0
-            return bars
+            self.cache[key] = (time.time(), bars)
+            self.fail[source] = 0
+            result = bars
         except Exception:
+            self.fail[source] = self.fail.get(source, 0) + 1
+            if self.fail[source] >= 3:
+                self.cool[source] = time.time() + 120
+        finally:
             with self._lock:
-                self.fail[source] = self.fail.get(source, 0) + 1
-                if self.fail[source] >= 3:
-                    self.cool[source] = time.time() + 120
-            return cached
+                self._inflight.pop(key, None)
+            if not fut.done():
+                fut.set_result(result)
+        return result
 
     def _fetch(self, source: str, symbol: str) -> List[Candle]:
         compact = symbol.replace("-", "")
@@ -2421,48 +991,16 @@ class IndicationBook:
         self.evals: Dict[str, List[SignalEval]] = {}
         self.cycle = 0
         self.extra_cursor = 0
-        self.counters: Dict[str, Dict[str, Any]] = {
-            kind: {
-                "kind": kind,
-                "evaluated": 0,
-                "qualified": 0,
-                "entered": 0,
-                "exited": 0,
-                "blocked": 0,
-                "rejected": 0,
-                "hits": 0,
-                "noSignal": 0,
-                "symbols": 0,
-                "long": 0,
-                "short": 0,
-                "confTotal": 0.0,
-                "strengthTotal": 0.0,
-                "slTotal": 0.0,
-            }
-            for kind in INDICATION_KINDS
-        }
-        self.lane_results: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def keep(self, symbols: Sequence[str]) -> int:
         want = set(symbols)
         n = 0
-        for store in (self.last, self.evals, self.lane_results):
+        for store in (self.last, self.evals):
             for k in list(store):
                 if k not in want:
                     store.pop(k, None)
                     n += 1
         return n
-
-    def record_outcome(self, kind: str, outcome: str, amount: int = 1) -> None:
-        """Record entry/exit/block/reject outcomes without changing lane identity."""
-        key = str(kind or "").strip().lower()
-        if key not in self.counters:
-            return
-        name = str(outcome or "").strip()
-        bucket = self.counters[key]
-        if name in bucket and isinstance(bucket.get(name), int):
-            bucket[name] += max(0, int(amount or 0))
-
 
     def load(self, overlay: Dict[str, Any]) -> None:
         s = self.settings
@@ -2471,8 +1009,8 @@ class IndicationBook:
         s["minimumAgreement"] = float(overlay.get("indMinAgreement", s["minimumAgreement"]))
         s["minimumConfidence"] = float(overlay.get("indMinConfidence", s["minimumConfidence"]))
         s["minimumStrength"] = float(overlay.get("indMinStrength", s["minimumStrength"]))
-        s["stopLossMinPct"] = max(SL_MIN_PCT, float(overlay.get("indStopMinPct", s["stopLossMinPct"])))
-        s["stopLossMaxPct"] = max(s["stopLossMinPct"], float(overlay.get("indStopMaxPct", s["stopLossMaxPct"])))
+        s["stopLossMinPct"] = float(overlay.get("indStopMinPct", s["stopLossMinPct"]))
+        s["stopLossMaxPct"] = float(overlay.get("indStopMaxPct", s["stopLossMaxPct"]))
         s["stopLossAtrMultiplier"] = float(overlay.get("indAtrMult", s["stopLossAtrMultiplier"]))
         s["takeProfitRewardRisk"] = float(overlay.get("indRewardRisk", s["takeProfitRewardRisk"]))
         s["extraSources"] = bool(overlay.get("indExtraSources", s["extraSources"]))
@@ -2488,51 +1026,16 @@ class IndicationBook:
             ("typeActive", "indTypeActive"),
             ("typeCommon", "indTypeCommon"),
             ("typeSignals", "indTypeSignals"),
-            ("typeTrend", "indTypeTrend"),
-            ("typeBreak", "indTypeBreak"),
-            ("typeMsi", "indTypeMsi"),
-            ("typeVwap", "indTypeVwap"),
-            ("typeRetest", "indTypeRetest"),
-            ("typeSqueeze", "indTypeSqueeze"),
-            ("typeSweep", "indTypeSweep"),
-            ("typeRsi2", "indTypeRsi2"),
-            ("typeKeltner", "indTypeKeltner"),
-            ("typeImpulse", "indTypeImpulse"),
         ):
             if ovk in overlay:
                 s[key] = bool(overlay.get(ovk))
         s["dirRange"] = int(overlay.get("indDirRange") or s.get("dirRange") or 10)
         s["moveRange"] = int(overlay.get("indMoveRange") or s.get("moveRange") or 10)
-        s["trendRanges"] = indication_ranges(overlay.get("indTrendRanges", s.get("trendRanges")), (13, 21, 34))
-        s["breakRanges"] = indication_ranges(overlay.get("indBreakRanges", s.get("breakRanges")), (8, 16, 32))
-        s["moveRanges"] = indication_ranges(overlay.get("indMoveRanges", s.get("moveRanges")), (20, 30, 40))
-        for kind, (rkey, defaults, _setting) in RANGE_KINDS.items():
-            ovk = "ind" + rkey[0].upper() + rkey[1:]
-            s[rkey] = indication_ranges(overlay.get(ovk, s.get(rkey)), defaults)
-        for key, ovk in (
-            ("msiMinGap", "indMsiMinGap"), ("vwapDevZ", "indVwapDevZ"), ("vwapVolMult", "indVwapVolMult"),
-            ("retestTol", "indRetestTol"), ("retestMinBreak", "indRetestMinBreak"), ("squeezePctl", "indSqueezePctl"),
-            ("sweepWickAtr", "indSweepWickAtr"), ("rsi2Low", "indRsi2Low"), ("rsi2High", "indRsi2High"),
-            ("keltnerMult", "indKeltnerMult"), ("impulseSigma", "indImpulseSigma"), ("impulseVolMult", "indImpulseVolMult"),
-            ("actSweepMin", "actSweepMin"), ("actRsi2Min", "actRsi2Min"), ("actKeltnerMin", "actKeltnerMin"),
-            ("actImpulseMin", "actImpulseMin"),
-        ):
-            try:
-                if overlay.get(ovk) is not None:
-                    s[key] = float(overlay.get(ovk))
-            except (TypeError, ValueError):
-                pass
-        if overlay.get("exitTacticMinGainPct") is not None:
-            s["exitTacticMinGainPct"] = float(overlay.get("exitTacticMinGainPct"))
-        if overlay.get("exitTacticBufferPct") is not None:
-            s["exitTacticBufferPct"] = float(overlay.get("exitTacticBufferPct"))
-        if "exitTacticOn" in overlay:
-            s["exitTacticOn"] = bool(overlay.get("exitTacticOn"))
         outbreaks = overlay.get("activeOutbreakRanges") or overlay.get("indActiveOutbreak")
         if isinstance(outbreaks, (list, tuple)) and outbreaks:
             s["activeOutbreak"] = [int(x) for x in outbreaks]
         s["activeThreshold"] = float(overlay.get("indActiveThreshold") or s.get("activeThreshold") or 1.0)
-        noise = overlay.get("noise") or overlay.get("indActiveNoise") or s.get("activeNoise") or 0.05
+        noise = overlay.get("noise") or overlay.get("indActiveNoise") or s.get("activeNoise") or 0.0005
         s["activeNoise"] = float(noise)
         s["activeMovePct"] = float(overlay.get("indActiveMovePct") or overlay.get("activeMovePct") or 0.5)
         s["activeVolatilityWeight"] = float(overlay.get("volWeight") or overlay.get("activeVolatilityWeight") or 0.3)
@@ -2555,62 +1058,31 @@ class IndicationBook:
         tf_map: Dict[str, List[List[float]]] = dict(bars_by_tf or {})
         if bars and "1m" not in tf_map:
             tf_map["1m"] = bars
-        evals: List[SignalEval] = []
-        tf_evals: List[SignalEval] = []
-        frames_by_tf: Dict[str, IndicationFrame] = {}
-        # TF evaluations have two consumers: direct signal lanes and the
-        # state/combined lane.  Do not calculate them when both consumers are
-        # disabled; filtering the resulting rows later would still pay the
-        # full candle/indicator cost on every symbol.
-        need_tf_evals = bool(self.settings.get("typeSignals", True)) or bool(
-            self.settings.get("tfCombined", True) and self.settings.get("typeState", True)
-        )
-        for tf in TIMEFRAMES if need_tf_evals else ():
-            flag = f"tf{tf}"
-            if not self.settings.get(flag, True):
-                continue
-            rows = tf_map.get(tf) or []
-            if len(rows) < 20:
-                continue
-            frame = build_indication_frame(rows, period_s=TF_SECONDS[tf])
-            frames_by_tf[tf] = frame
-            candles = frame.candles
-            # The volatility-normalized revert model is validated on 1m only;
-            # higher timeframes keep the legacy composite.
-            ev = evaluate_signal_candles(
-                f"bingx-{tf}",
-                f"BingX {tf}",
-                candles,
-                self.settings if tf == "1m" else {**self.settings, "signalsModel": "trend"},
-                weight=TF_WEIGHT[tf],
-                frame=frame,
+        now_ts = time.time()
+        tf_evals: List[SignalEval] = timeframe_evals(tf_map, self.settings, now_ts)
+        evals: List[SignalEval] = list(tf_evals)
+        one_m = tf_map.get("1m") or []
+        if self.settings.get("tf1m", True) and len(one_m) >= 20:
+            c1 = bars_to_candles(one_m, now=now_ts, period_s=TF_SECONDS["1m"])
+            loc = evaluate_pulse_local(
+                pulse_dir,
+                pulse_conf,
+                px or (c1[-1].close if c1 else 0),
+                self.settings,
+                sl_pct,
+                tp_pct,
             )
-            if ev:
-                evals.append(ev)
-                tf_evals.append(ev)
-            if tf == "1m":
-                loc = evaluate_pulse_local(
-                    pulse_dir,
-                    pulse_conf,
-                    px or (candles[-1].close if candles else 0),
-                    self.settings,
-                    sl_pct,
-                    tp_pct,
-                )
-                if loc:
-                    evals.append(loc)
+            if loc:
+                evals.append(loc)
         if self.settings.get("extraSources") and want_extra:
             for src, name in (("binance-usdm", "Binance USD-M"), ("bybit-linear", "Bybit Linear")):
-                extra = EXTRA.peek(src, symbol)
+                extra = EXTRA.get(src, symbol)
                 ev = evaluate_signal_candles(src, name, extra, self.settings)
                 if ev:
                     evals.append(ev)
-        frame_1m = frames_by_tf.get("1m")
-        if frame_1m is None:
-            frame_1m = build_indication_frame(tf_map.get("1m") or bars or [], period_s=60.0)
-        candles_1m = frame_1m.candles
+        candles_1m = bars_to_candles(tf_map.get("1m") or bars or [], period_s=60.0)
         if self.settings.get("typeState", True) and candles_1m:
-            ta = evaluate_ta_pack(candles_1m, self.settings, frame=frame_1m)
+            ta = evaluate_ta_pack(candles_1m, self.settings)
             if ta:
                 evals.append(ta)
         self.evals[symbol] = evals
@@ -2641,7 +1113,7 @@ class IndicationBook:
                 )
             )
         # Non-TF direct sources
-        others = [e for e in evals if not str(e.source_id).startswith("bingx-") and e.source_id != "ta-rsi-macd-ema"]
+        others = [e for e in evals if not str(e.source_id).startswith("bingx-")]
         ordered = sorted(others, key=lambda e: (e.stop_loss_pct, -e.confidence, -e.strength, e.source_id))
         for ev in ordered:
             indications.append(
@@ -2665,31 +1137,7 @@ class IndicationBook:
                     kind="signals",
                 )
             )
-        if self.settings.get("typeState", True):
-            ta = next((e for e in evals if e.source_id == "ta-rsi-macd-ema"), None)
-            if ta:
-                indications.append(
-                    Indication(
-                        symbol=symbol,
-                        direction=ta.direction,
-                        mode="ta_pack",
-                        confidence=ta.confidence,
-                        strength=ta.strength,
-                        agreement=1.0,
-                        stop_loss_pct=ta.stop_loss_pct,
-                        take_profit_pct=ta.take_profit_pct,
-                        reward_risk=ta.reward_risk,
-                        last_price=ta.last_price,
-                        sources=[ta.source_id],
-                        votes_long=1 if ta.direction == "long" else 0,
-                        votes_short=1 if ta.direction == "short" else 0,
-                        primary=False,
-                        t=now,
-                        timeframe="1m",
-                        kind="state",
-                    )
-                )
-        if self.settings.get("tfCombined", True) and self.settings.get("typeState", True):
+        if self.settings.get("tfCombined", True):
             comb = combine_timeframes(tf_evals, int(self.settings.get("tfMinAgree") or 2), self.settings)
             if comb:
                 direction, contrib, risk = comb
@@ -2714,7 +1162,7 @@ class IndicationBook:
                         kind="state",
                     )
                 )
-        cons = low_stop_consensus(evals, self.settings) if self.settings.get("typeState", True) else None
+        cons = low_stop_consensus(evals, self.settings)
         if cons:
             direction, contrib, risk = cons
             has_tf = any(i.mode == "tf_combined" for i in indications)
@@ -2739,66 +1187,29 @@ class IndicationBook:
                     kind="state",
                 )
             )
-        closes = frame_1m.closes
+        closes = _closes(tf_map.get("1m") or bars or [])
         if self.settings.get("typeDirection", True) and closes:
-            drow = evaluate_direction(symbol, closes, self.settings, frame=frame_1m)
+            drow = evaluate_direction(symbol, closes, self.settings)
             if drow:
                 indications.append(drow)
         if self.settings.get("typeMove", True) and closes:
-            mrow = evaluate_move(symbol, closes, self.settings, frame=frame_1m)
+            mrow = evaluate_move(symbol, closes, self.settings)
             if mrow:
                 indications.append(mrow)
         if self.settings.get("typeActive", True) and closes:
-            indications.extend(evaluate_active_all(symbol, closes, self.settings, frame=frame_1m))
-        if closes:
-            indications.extend(evaluate_range_configs(symbol, closes, self.settings, frame_1m))
+            indications.extend(evaluate_active_all(symbol, closes, self.settings))
         if self.settings.get("typeCommon", True):
-            crow = evaluate_common(symbol, candles_1m, self.settings, frame=frame_1m)
+            c1 = bars_to_candles(tf_map.get("1m") or bars or [], period_s=60.0)
+            crow = evaluate_common(symbol, c1, self.settings)
             if crow:
                 indications.append(crow)
-        off = {k for k, flag in KIND_FLAGS.items() if k not in ("direction", "move", "active") and not self.settings.get(flag, True)}
-        if off:
-            indications = [i for i in indications if i.kind not in off]
-        lane_result: Dict[str, Dict[str, Any]] = {}
-        for kind in INDICATION_KINDS:
-            bucket = self.counters[kind]
-            enabled = bool(self.settings.get(f"type{kind.title()}", True))
-            # Signals is the only plural setting key.
-            if kind == "signals":
-                enabled = bool(self.settings.get("typeSignals", True))
-            rows_kind = [item for item in indications if item.kind == kind]
-            bucket["evaluated"] += 1 if enabled else 0
-            bucket["symbols"] += 1 if enabled else 0
-            if rows_kind:
-                bucket["qualified"] += len(rows_kind)
-                bucket["hits"] += len(rows_kind)
-                bucket["long"] += sum(1 for item in rows_kind if item.direction == "long")
-                bucket["short"] += sum(1 for item in rows_kind if item.direction == "short")
-                bucket["confTotal"] += sum(float(item.confidence or 0.0) for item in rows_kind)
-                bucket["strengthTotal"] += sum(float(item.strength or 0.0) for item in rows_kind)
-                bucket["slTotal"] += sum(float(item.stop_loss_pct or 0.0) for item in rows_kind)
-                best = max(rows_kind, key=lambda item: (item.confidence, item.strength))
-                lane_result[kind] = {
-                    "status": "qualified",
-                    "direction": best.direction,
-                    "confidence": round(float(best.confidence or 0.0), 4),
-                    "strength": round(float(best.strength or 0.0), 4),
-                    "sampleCount": len(rows_kind),
-                }
-            elif enabled:
-                bucket["noSignal"] += 1
-                lane_result[kind] = {
-                    "status": "no-signal",
-                    "direction": "",
-                    "confidence": 0.0,
-                    "strength": 0.0,
-                    "sampleCount": 0,
-                }
-            else:
-                lane_result[kind] = {"status": "disabled", "direction": "", "confidence": 0.0, "strength": 0.0, "sampleCount": 0}
-        self.lane_results[symbol] = lane_result
+        if not self.settings.get("typeSignals", True):
+            indications = [i for i in indications if i.kind != "signals"]
+        if not self.settings.get("typeState", True):
+            indications = [i for i in indications if i.kind != "state"]
+        if not self.settings.get("typeCommon", True):
+            indications = [i for i in indications if i.kind != "common"]
         self.last[symbol] = indications
-        self.cycle += 1
         return indications
 
     def primary(self, symbol: str) -> Optional[Indication]:
@@ -2819,33 +1230,34 @@ class IndicationBook:
             rows = list(self.last.get(symbol) or [])
         if not rows:
             return None
-        order = KIND_ORDER
+        order = {"state": 5, "signals": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
         rows.sort(key=lambda e: (e.confidence, order.get(e.kind, 0), -e.stop_loss_pct), reverse=True)
         return rows[0]
 
     def match(self, symbol: str, reason: str) -> Optional[Indication]:
+        """The row an entry reason names. The trader writes the reason as ind:<kind>:<mode>:<agreement>:...
+
+        Exact kind and mode first; then the mode alone, because the mode carries the direction; then the kind alone;
+        then the best row. Substring matching is not used: a row of the right kind but the wrong mode is not a match.
+        """
         rows = self.last.get(symbol) or []
-        low = (reason or "").lower()
-        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", low)
-        if exact:
-            # A disappeared/reversed configuration must not be substituted by
-            # a stronger sibling between scan and exchange submission.
-            return next((i for i in rows if i.entry_key == exact.group(1)), None)
-        bits = [b for b in low.split(":") if b]
-        want_kind = ""
-        if bits and bits[0] == "ind" and len(bits) > 1:
-            cand = bits[1].strip()
-            if cand in INDICATION_KINDS:
-                want_kind = cand
-        if want_kind:
-            cands = [i for i in rows if i.kind == want_kind]
-            if not cands:
-                return None
-            cands.sort(key=lambda e: (e.confidence, -e.stop_loss_pct), reverse=True)
-            return cands[0]
-        for i in rows:
-            if i.mode and i.mode in low:
-                return i
+        parts = (reason or "").split(":")
+        named = parts[0] == "ind" and len(parts) > 2
+        kind = parts[1] if named else ""
+        mode = parts[2] if named else ""
+        srcs = ":".join(parts[5:]) if named and len(parts) > 5 else ""   # the entry reason ends with the pick's sources
+        rules = (
+            bool(kind and mode and srcs) and (lambda i: i.kind == kind and i.mode == mode and ",".join(i.sources[:3]) == srcs),
+            bool(kind and mode) and (lambda i: i.kind == kind and i.mode == mode),
+            bool(mode) and (lambda i: i.mode == mode),
+            bool(kind) and (lambda i: i.kind == kind),
+        )
+        for rule in rules:
+            if not rule:
+                continue
+            for i in rows:
+                if rule(i):
+                    return i
         return self.best(symbol)
 
     def kinds_for(self, symbol: str) -> Dict[str, "Indication"]:
@@ -2857,66 +1269,9 @@ class IndicationBook:
                 out[i.kind] = i
         return out
 
-    def pick_entries(
-        self,
-        symbol: str,
-        min_conf: float = 0.52,
-        allow: Optional[Any] = None,
-    ) -> List[Tuple["Indication", float, int]]:
-        """Return every eligible kind/mode/timeframe/direction configuration."""
-        by = {}
-        for indication in self.last.get(symbol) or []:
-            previous = by.get(indication.entry_key)
-            if previous is None or indication.confidence > previous.confidence:
-                by[indication.entry_key] = indication
-        out: List[Tuple["Indication", float, int]] = []
-        for indication in by.values():
-            kind = indication.kind
-            if callable(allow):
-                try:
-                    try:
-                        verdict = allow(kind, indication.direction, indication.mode)
-                    except TypeError:
-                        verdict = allow(kind, indication.direction)
-                    if not bool(verdict):
-                        continue
-                except TypeError:
-                    if not bool(allow(kind)):
-                        continue
-                except Exception:
-                    # Fail closed: an erroring gate never admits the lane.
-                    continue
-            confidence = float(indication.confidence or 0.0)
-            if confidence < min_conf:
-                continue
-            out.append((indication, confidence, 1))
-        out.sort(key=lambda item: (item[1], item[0].strength, item[0].kind), reverse=True)
-        return out
-
-    def pick_entry(
-        self,
-        symbol: str,
-        min_conf: float = 0.52,
-        allow: Optional[Any] = None,
-    ) -> Optional[Tuple["Indication", float, int]]:
-        """Highest independent type that is allowed, boosted when ≥2 kinds agree."""
+    def pick_entry(self, symbol: str, min_conf: float = 0.52) -> Optional[Tuple["Indication", float, int]]:
+        """Highest independent type, boosted when ≥2 kinds agree on direction."""
         by = self.kinds_for(symbol)
-        if callable(allow) and by:
-            kept: Dict[str, Indication] = {}
-            for k, i in by.items():
-                ok = True
-                try:
-                    ok = bool(allow(k, i.direction))
-                except TypeError:
-                    try:
-                        ok = bool(allow(k))
-                    except Exception:
-                        ok = True
-                except Exception:
-                    ok = True
-                if ok:
-                    kept[k] = i
-            by = kept
         if not by:
             return None
         signed = [(1.0 if i.direction == "long" else -1.0) * max(0.01, float(i.confidence)) for i in by.values()]
@@ -2927,7 +1282,7 @@ class IndicationBook:
             aligned = [i for i in cands if i.direction == selected]
             if aligned:
                 cands = aligned
-        order = KIND_ORDER
+        order = {"state": 5, "signals": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
         cands.sort(key=lambda e: (e.confidence, order.get(e.kind, 0), -e.stop_loss_pct), reverse=True)
         pick = cands[0]
         agree_n = sum(1 for i in by.values() if i.direction == pick.direction)
@@ -2939,78 +1294,40 @@ class IndicationBook:
             return None
         return pick, conf, agree_n
 
-    def kind_stats(self) -> Dict[str, Any]:
-        """Live scan evidence for every independent indication type."""
-        flags = KIND_FLAGS
-        out: Dict[str, Any] = {}
-        for kind in INDICATION_KINDS:
-            source = self.counters.get(kind) or {}
-            evaluated = int(source.get("evaluated") or 0)
-            qualified = int(source.get("qualified") or 0)
-            out[kind] = {
-                "kind": kind,
-                "enabled": bool(self.settings.get(flags[kind], True)),
-                "hits": int(source.get("hits") or 0),
-                "evaluated": evaluated,
-                "qualified": qualified,
-                "entered": int(source.get("entered") or 0),
-                "exited": int(source.get("exited") or 0),
-                "blocked": int(source.get("blocked") or 0),
-                "rejected": int(source.get("rejected") or 0),
-                "noSignal": int(source.get("noSignal") or 0),
-                "symbols": int(source.get("symbols") or 0),
-                "long": int(source.get("long") or 0),
-                "short": int(source.get("short") or 0),
-                "avgConf": round(float(source.get("confTotal") or 0.0) / max(1, qualified), 3),
-                "avgStrength": round(float(source.get("strengthTotal") or 0.0) / max(1, qualified), 3),
-                "avgSl": round(float(source.get("slTotal") or 0.0) / max(1, qualified), 3),
-                "sampleCount": qualified,
-                "insufficientSample": qualified < 8,
-                "status": "no-signal" if (bool(self.settings.get(flags[kind], True)) and not qualified) else ("building" if qualified < 8 else "ready"),
-                "processed": True,
-            }
-        # Keep current per-symbol lane status visible even when the lane is quiet.
-        for kind in INDICATION_KINDS:
-            current = [row.get(kind) for row in list(self.lane_results.values()) if isinstance(row, dict) and isinstance(row.get(kind), dict)]
-            out[kind]["currentNoSignal"] = sum(1 for row in current if row.get("status") == "no-signal")
-        return out
-
     def snapshot(self) -> Dict[str, Any]:
+        # one copy of each live dict: the warm thread writes them while a reader runs, and a dict that changes size
+        # during iteration raises. Everything below reads the copies.
+        last = dict(self.last)
+        evals = dict(self.evals)
         primaries = []
-        for s, rows in list(self.last.items()):
+        for s, rows in last.items():
             p = self.primary(s)
             if p:
                 rec = asdict(p)
                 primaries.append(rec)
         primaries.sort(key=lambda r: r["confidence"], reverse=True)
-        kinds = self.kind_stats()
-        # `types` is the configuration contract consumed by the UI and QA;
-        # hit counts belong in the separate `typeHits` field. A quiet kind
-        # must not look disabled merely because it has no current hit.
-        types = {k: bool(v.get("enabled")) for k, v in kinds.items()}
-        type_hits = {k: int(v.get("hits") or 0) for k, v in kinds.items()}
-        keys = sorted(self.last.keys())
-        eval_items = list(self.evals.items())
-        last_items = list(self.last.items())
+        types = {}
+        for rows in last.values():
+            for i in rows:
+                types[i.kind] = types.get(i.kind, 0) + 1
+        keys = sorted(last.keys())
+        eval_items = list(evals.items())
+        last_items = list(last.items())
         if len(eval_items) > 24:
             eval_items = eval_items[:24]
         if len(last_items) > 24:
             last_items = last_items[:24]
-        samples: List[Dict[str, Any]] = []
-        for s, rows in last_items:
-            by = self.kinds_for(s)
-            samples.append({
-                "symbol": s,
-                "kinds": {
-                    k: {"dir": i.direction, "conf": round(i.confidence, 3), "sl": round(i.stop_loss_pct, 3), "mode": i.mode}
-                    for k, i in by.items()
-                },
-            })
         return {
             "enabled": bool(self.settings.get("enabled")),
-            "types": {k: bool(self.settings.get(flag, True)) for k, flag in KIND_FLAGS.items()},
-            "typeHits": type_hits,
-            "kindStats": kinds,
+            "types": {
+                "state": bool(self.settings.get("typeState", True)),
+                "direction": bool(self.settings.get("typeDirection", True)),
+                "move": bool(self.settings.get("typeMove", True)),
+                "active": bool(self.settings.get("typeActive", True)),
+                "common": bool(self.settings.get("typeCommon", True)),
+                "signals": bool(self.settings.get("typeSignals", True)),
+            },
+            "typeHits": types,
             "minSources": self.settings.get("minimumSourceSignals"),
             "minAgreement": self.settings.get("minimumAgreement"),
             "minConfidence": self.settings.get("minimumConfidence"),
@@ -3022,10 +1339,9 @@ class IndicationBook:
             "tfMinAgree": int(self.settings.get("tfMinAgree") or 2),
             "symbols": len(self.last),
             "processed": keys if len(keys) <= 48 else keys[:32],
-            "evalN": sum(len(v) for v in list(self.evals.values())),
+            "evalN": sum(len(v) for v in self.evals.values()),
             "lanes": {s: [e.source_id for e in v] for s, v in eval_items},
             "primary": primaries[:24],
-            "samples": samples[:16],
             "tf": {
                 s: {
                     "independent": [i.timeframe for i in rows if i.mode == "direct_tf"],
@@ -3086,13 +1402,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # Independence: 1m-only still produces a 1m lane without combined
     rows3 = book.process("CCC-USDT", up, bars_by_tf={"1m": up, "5m": [], "15m": []})
     t6 = (any(r.mode == "direct_tf" and r.timeframe == "1m" for r in rows3) and not any(r.mode == "tf_combined" for r in rows3), f"modes={[r.mode+':'+r.timeframe for r in rows3]}")
-    # Direction: strong drop, then an early partial up-turn (qualified reversal)
+    # Direction: down then up reversal
     rev = []
-    for i in range(16):
+    for i in range(12):
         c = base * (1 - i * 0.004)
         rev.append([c, c * 1.0004, c * 0.9996, c, 800])
-    for i in range(8):
-        c = base * (0.938 + i * 0.0015)
+    for i in range(12):
+        c = base * (0.952 + i * 0.005)
         rev.append([c, c * 1.0004, c * 0.9996, c, 900])
     st2 = dict(DEFAULT_SETTINGS)
     st2["dirRange"] = 8
@@ -3100,17 +1416,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st2["minimumConfidence"] = 0.4
     drow = evaluate_direction("REV-USDT", [b[3] for b in rev], st2)
     t7 = (drow is not None and drow.direction == "long" and drow.kind == "direction", f"dir={drow.direction if drow else None} str={drow.strength if drow else 0:.3f}")
-    # Move: fade a 2-3 sigma 30-bar spike once the last bar ticks back
-    fade_px = [100.0 * (1.001 if i % 2 else 1.0) for i in range(31)]
-    fade_px += [fade_px[-1] * (1 + 0.0155 * (i + 1) / 28) for i in range(28)]
-    fade_px.append(fade_px[-1] * 0.9995)
-    mrow = evaluate_move("MOV-USDT", fade_px, st2)
-    t8 = (mrow is not None and mrow.direction == "short" and mrow.kind == "move" and mrow.mode == "move:30",
-          f"move={mrow.direction if mrow else None} mode={mrow.mode if mrow else None}")
-    # Beyond the z cap (runaway move) Move stays out
-    runaway = fade_px[:31] + [fade_px[30] * (1 + 0.04 * (i + 1) / 28) for i in range(28)]
-    runaway.append(runaway[-1] * 0.9995)
-    t8b = (evaluate_move("MOV-USDT", runaway, st2) is None, "move-z-cap")
+    # Move: persistent up
+    mrow = evaluate_move("MOV-USDT", [b[3] for b in up], st2)
+    t8 = (mrow is not None and mrow.direction == "long" and mrow.kind == "move", f"move={mrow.direction if mrow else None}")
+    # Move must not require reversal (same-dir)
+    t8b = (mrow is not None, "move-same-dir")
     # Active outbreak: quiet then sharp breakout
     act_px = [100.0] * 12
     for i in range(8):
@@ -3123,19 +1433,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st3["activeThreshold"] = 1.0
     st3["activeNoise"] = 0.05
     st3["minimumConfidence"] = 0.3
-    legacy_rows = evaluate_active_all("ACT-USDT", act_px, {**st3, "activeModel": "legacy"})
-    # Default z model: noisy tape, then a >= 5 sigma run -> outbreak lanes follow it.
-    z_px = [100.0]
-    for i in range(47):
-        z_px.append(z_px[-1] * (1.0015 if i % 2 == 0 else 0.9985))
-    for _ in range(12):
-        z_px.append(z_px[-1] * 1.004)
-    arows = evaluate_active_all("ACT-USDT", z_px, st3)
-    t9 = (
-        len(arows) >= 1 and all(r.kind == "active" and r.direction == "long" and r.mode.startswith("outbreak:") for r in arows)
-        and len(legacy_rows) >= 1 and all(r.kind == "active" and r.direction == "long" for r in legacy_rows),
-        f"n={len(arows)} modes={[r.mode for r in arows]} legacy={[r.mode for r in legacy_rows]}",
-    )
+    arows = evaluate_active_all("ACT-USDT", act_px, st3)
+    t9 = (len(arows) >= 1 and all(r.kind == "active" and r.direction == "long" for r in arows), f"n={len(arows)} dirs={[r.mode for r in arows]}")
     # Common: oversold then bounce-shaped rsi via steep drop
     drop = []
     px = 100.0
@@ -3168,7 +1467,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book.settings["minimumConfidence"] = 0.5
     book.process("PICK-USDT", up, pulse_dir=1, pulse_conf=0.8, bars_by_tf={"1m": up, "5m": up, "15m": up})
     pe = book.pick_entry("PICK-USDT", min_conf=0.5)
-    t16 = (pe is not None and pe[0].kind in INDICATION_KINDS and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
+    t16 = (pe is not None and pe[0].kind in ("state", "signals", "move", "direction", "active", "common") and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
     book.process("KEEP-USDT", up, pulse_dir=1, pulse_conf=0.7, bars_by_tf={"1m": up, "5m": up, "15m": up})
     dropped = book.keep(["PICK-USDT"])
     t17 = (dropped >= 1 and "PICK-USDT" in book.last and "KEEP-USDT" not in book.last, f"drop={dropped} keys={sorted(book.last)}")
@@ -3176,146 +1475,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     EXTRA.cache["binance-usdm:PICK-USDT"] = (time.time(), [])
     pruned = EXTRA.prune({"PICK-USDT"}, max_n=8)
     t18 = (pruned >= 1 and "binance-usdm:PICK-USDT" in EXTRA.cache, f"pruned={pruned} n={len(EXTRA.cache)}")
-    # TA pack is State, never Signals
-    book.settings["typeState"] = True
-    book.settings["typeSignals"] = True
-    book.settings["minimumConfidence"] = 0.4
-    book.settings["minimumStrength"] = 0.05
-    rows_ta = book.process("TA-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
-    # State fades a stretched EMA trend once it turns: 55 volatile up bars, 5 down.
-    fade = []
-    for i in range(60):
-        c = base * (1 + min(i, 54) * 0.004 - max(0, i - 54) * 0.004)
-        fade.append([c, c * 1.0015, c * 0.9985, c, 1000])
-    rows_fade = book.process("TAF-USDT", fade, bars_by_tf={"1m": fade})
-    ta_rows = [r for r in rows_fade if r.mode == "ta_pack"]
-    t19 = (len(ta_rows) >= 1 and all(r.kind == "state" and r.direction == "short" for r in ta_rows), f"ta={[r.kind+':'+r.mode+':'+r.direction for r in ta_rows]}")
-    t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta + rows_fade), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
-    snap = book.snapshot()
-    ks = snap.get("kindStats") or {}
-    t20 = (set(ks.keys()) == set(INDICATION_KINDS) and len(INDICATION_KINDS) == 16, f"keys={sorted(ks)}")
-    t21 = (int((ks.get("signals") or {}).get("hits") or 0) >= 1 and int((ks.get("state") or {}).get("hits") or 0) >= 1, f"hits={{k: v.get('hits') for k, v in ks.items()}}")
-    t22 = (all(bool(v.get("processed")) and "enabled" in v for v in ks.values()), str({k: v.get("enabled") for k, v in ks.items()}))
-    # Direction / move / active / common still run independently on their own tapes
-    kinds_seen = {r.kind for r in rows_ta}
-    if drow:
-        kinds_seen.add(drow.kind)
-    if mrow:
-        kinds_seen.add(mrow.kind)
-    kinds_seen |= {r.kind for r in arows}
-    if crow:
-        kinds_seen.add(crow.kind)
-    t23 = ({"state", "signals", "direction", "move", "active"} <= kinds_seen, f"seen={sorted(kinds_seen)}")
-    # Signals stay first-class: flag off drops them; match never swaps to State
-    book.settings["typeState"] = True
-    book.settings["typeSignals"] = True
-    book.settings["minimumConfidence"] = 0.5
-    book.settings["minimumStrength"] = 0.05
-    rows_sig = book.process("SIG-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
-    sig_rows = [r for r in rows_sig if r.kind == "signals"]
-    t24 = (len(sig_rows) >= 1 and all(r.kind == "signals" for r in sig_rows), f"n={len(sig_rows)} modes={[r.mode for r in sig_rows[:4]]}")
-    m_sig = book.match("SIG-USDT", "ind:signals:direct_tf:1.00:a1:bingx-1m")
-    t25 = (m_sig is not None and m_sig.kind == "signals", f"match={m_sig.kind if m_sig else None}")
-    m_miss = book.match("SIG-USDT", "ind:active:outbreak:3")
-    # active may or may not exist on a pure up-tape; if missing, must not fall back to state
-    if not any(r.kind == "active" for r in rows_sig):
-        t26 = (m_miss is None, f"miss-fallback={m_miss.kind if m_miss else None}")
-    else:
-        t26 = (m_miss is not None and m_miss.kind == "active", f"active={m_miss.kind if m_miss else None}")
-    pe_skip = book.pick_entry("SIG-USDT", min_conf=0.5, allow=lambda k, d=None: k != "state")
-    t27 = (pe_skip is not None and pe_skip[0].kind != "state", f"pick={pe_skip[0].kind if pe_skip else None}")
-    book.settings["typeSignals"] = False
-    rows_nosig = book.process("NOSIG-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
-    t28 = (not any(r.kind == "signals" for r in rows_nosig), f"kinds={sorted({r.kind for r in rows_nosig})}")
-    book.settings["typeSignals"] = True
-    six = []
-    ts0 = time.time() - 40 * 60
-    for i, b in enumerate(up):
-        six.append([ts0 + i * 60, b[0], b[1], b[2], b[3], b[4]])
-    c5 = bars_to_candles(up)
-    c6 = bars_to_candles(six)
-    t29 = (
-        len(c5) == len(c6) == 40
-        and abs(c5[-1].close - c6[-1].close) < 1e-9
-        and abs(c5[-1].open - c6[-1].open) < 1e-9
-        and c6[-1].open < 1000,
-        f"n5={len(c5)} n6={len(c6)} o6={c6[-1].open if c6 else None} c6={c6[-1].close if c6 else None}",
-    )
-    rows6 = book.process("SIX-USDT", six, bars_by_tf={"1m": six})
-    six_fade = [[ts0 + i * 60] + list(b) for i, b in enumerate(fade)]
-    rows6f = book.process("SIXF-USDT", six_fade, bars_by_tf={"1m": six_fade})
-    t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6f),
-           f"kinds={sorted({r.kind for r in rows6})} fade={sorted({r.kind for r in rows6f})}")
-    tr = evaluate_trend("TR-USDT", [b[3] for b in up], {**st, "trendMode": "follow"})
-    t31 = (tr is not None and tr.kind == "trend" and tr.direction == "long", f"tr={tr.kind if tr else None} {tr.direction if tr else None}")
-    # Reversal break: 40-bar decline, basing, then a fresh close above the base.
-    brk_px = [106.0 - 0.15 * i + (0.03 if i % 2 else -0.03) for i in range(40)]
-    brk_px += [100.0 + 0.02 * i + (0.08 if i % 2 else 0.0) for i in range(19)]
-    brk_px.append(max(brk_px[-16:]) + 0.3)
-    br = evaluate_break("BR-USDT", brk_px, st)
-    t32 = (br is not None and br.kind == "break" and br.direction == "long", f"br={br.kind if br else None} {br.direction if br else None}")
-    book.settings["typeTrend"] = True
-    book.settings["typeBreak"] = True
-    rows_tb = book.process("TB-USDT", up, bars_by_tf={"1m": up})
-    t33 = (any(r.kind == "trend" for r in rows_tb) or any(r.kind == "break" for r in rows_tb) or (tr is not None),
-           f"kinds={sorted({r.kind for r in rows_tb})}")
-    # The shared frame must be numerically identical to the uncached path.
-    frame = build_indication_frame(up, now=1234.0)
-    legacy_ev = evaluate_signal_candles("parity", "Parity", frame.candles, st)
-    cached_ev = evaluate_signal_candles("parity", "Parity", frame.candles, st, frame=frame)
-    t34 = (
-        legacy_ev is not None
-        and cached_ev is not None
-        and legacy_ev.direction == cached_ev.direction
-        and abs(legacy_ev.confidence - cached_ev.confidence) < 1e-12
-        and abs(legacy_ev.strength - cached_ev.strength) < 1e-12
-        and abs(legacy_ev.stop_loss_pct - cached_ev.stop_loss_pct) < 1e-12
-        and abs(legacy_ev.take_profit_pct - cached_ev.take_profit_pct) < 1e-12,
-        f"legacy={legacy_ev.direction if legacy_ev else None} cached={cached_ev.direction if cached_ev else None}",
-    )
-    # A cold optional-source future must never make the indication cycle wait
-    # or fall back to synchronous network I/O.  The next cycle may consume a
-    # completed cache entry normally.
-    extra_key = "binance-usdm:ASYNC-USDT"
-    missing = object()
-    old_extra_cache = EXTRA.cache.get(extra_key, missing)
-    with EXTRA._lock:
-        old_inflight = set(EXTRA._inflight)
-        EXTRA._inflight.add(extra_key)
-    old_get = EXTRA.get
-    def forbidden_get(source: str, symbol: str) -> List[Candle]:
-        raise AssertionError(f"cold optional source fetched synchronously: {source}:{symbol}")
-    EXTRA.get = forbidden_get  # type: ignore[method-assign]
-    cold_elapsed = 0.0
-    cold_error = ""
-    try:
-        started = time.perf_counter()
-        book.process("ASYNC-USDT", up, want_extra=True, bars_by_tf={"1m": up})
-        cold_elapsed = time.perf_counter() - started
-    except Exception as exc:
-        cold_error = str(exc)
-    finally:
-        EXTRA.get = old_get  # type: ignore[method-assign]
-        with EXTRA._lock:
-            EXTRA._inflight = old_inflight
-            if old_extra_cache is missing:
-                EXTRA.cache.pop(extra_key, None)
-            else:
-                EXTRA.cache[extra_key] = old_extra_cache
-    t35 = (not cold_error and cold_elapsed < 0.2, f"elapsed={cold_elapsed:.4f}s error={cold_error}")
-    old_extra_cache = EXTRA.cache.get(extra_key, missing)
-    try:
-        with EXTRA._lock:
-            EXTRA.cache[extra_key] = (time.time(), bars_to_candles(up))
-        book.process("ASYNC-USDT", up, want_extra=True, bars_by_tf={"1m": up})
-        hot = any(e.source_id == "binance-usdm" for e in book.evals.get("ASYNC-USDT", []))
-    finally:
-        with EXTRA._lock:
-            if old_extra_cache is missing:
-                EXTRA.cache.pop(extra_key, None)
-            else:
-                EXTRA.cache[extra_key] = old_extra_cache
-    t36 = (hot, f"cached-extra={hot}")
+    # R3: causal N-minute bars from 1m rows; blocks end on the newest row
+    rows10 = [[100.0 + k, 101.0 + k, 99.0 + k, 100.5 + k, 1.0] for k in range(10)]
+    agg = aggregate_bars(rows10, 5)
+    want = [[100.0, 105.0, 99.0, 104.5, 5.0], [105.0, 110.0, 104.0, 109.5, 5.0]]
+    rows13 = [[100.0 + k, 101.0 + k, 99.0 + k, 100.5 + k, 1.0] for k in range(13)]
+    agg13 = aggregate_bars(rows13, 5)
+    agg_newest = len(agg13) == 2 and agg13[-1][3] == rows13[-1][3] and agg13[0][0] == rows13[3][0]
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -3324,7 +1490,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-tf-majority", t5[0], t5[1]),
         ("ind-tf-independent", t6[0], t6[1]),
         ("ind-direction-reversal", t7[0], t7[1]),
-        ("ind-move-fade-extreme", t8[0] and t8b[0], t8[1]),
+        ("ind-move-same-dir", t8[0] and t8b[0], t8[1]),
         ("ind-active-outbreak", t9[0], t9[1]),
         ("ind-common-ta", t10[0], t10[1]),
         ("ind-type-flags", t11[0], t11[1]),
@@ -3335,24 +1501,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-pick-entry", t16[0], t16[1]),
         ("ind-keep-trim", t17[0], t17[1]),
         ("ind-extra-prune", t18[0], t18[1]),
-        ("ind-ta-is-state", t19[0] and t19b[0], f"{t19[1]} {t19b[1]}"),
-        ("ind-kind-stats-all-six", t20[0], t20[1]),
-        ("ind-kind-stats-hits", t21[0], t21[1]),
-        ("ind-kind-stats-processed", t22[0], t22[1]),
-        ("ind-all-types-evaluated", t23[0], t23[1]),
-        ("ind-signals-tf-lanes", t24[0], t24[1]),
-        ("ind-match-signals", t25[0], t25[1]),
-        ("ind-match-no-swap", t26[0], t26[1]),
-        ("ind-pick-skip-gated-state", t27[0], t27[1]),
-        ("ind-signals-flag-off", t28[0], t28[1]),
-        ("ind-ohlcv-6tuple", t29[0], t29[1]),
-        ("ind-process-6tuple-signals", t30[0], t30[1]),
-        ("ind-trend", t31[0], t31[1]),
-        ("ind-break", t32[0], t32[1]),
-        ("ind-trend-break-process", t33[0], t33[1]),
-        ("ind-frame-parity", t34[0], t34[1]),
-        ("ind-extra-cold-nonblocking", t35[0], t35[1]),
-        ("ind-extra-cache-next-cycle", t36[0], t36[1]),
+        ("agg-ohlc", agg == want, f"{agg}"),
+        ("agg-newest-aligned", agg_newest, f"n={len(agg13)} last_close={agg13[-1][3] if agg13 else None}"),
     ]
 
 
@@ -3364,3 +1514,4 @@ if __name__ == "__main__":
         bad += int(not ok)
     print("indication_engine", "ok" if not bad else f"fail={bad}")
     raise SystemExit(1 if bad else 0)
+
