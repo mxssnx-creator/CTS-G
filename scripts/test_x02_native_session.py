@@ -15,6 +15,18 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_native_admission_requires_a_native_qualified_set(self):
+        book=SimpleNamespace(progress=SimpleNamespace(ready=True),_running=False,_lookback_pending=False,
+                             by_idx=[1,2],gate_reason=lambda st:'real')
+        pulse=SimpleNamespace(sets=book)
+        self.assertFalse(session.native_admission_ready(pulse))
+        book.gate_reason=lambda st:'' if st==2 else 'main'
+        self.assertTrue(session.native_admission_ready(pulse))
+        book._lookback_pending=True
+        self.assertFalse(session.native_admission_ready(pulse))
+        book._lookback_pending=False;book._running=True
+        self.assertFalse(session.native_admission_ready(pulse))
+
     def test_current_quality_checked_replay_does_not_need_a_retained_snapshot(self):
         book = SimpleNamespace(progress=SimpleNamespace(ready=True), _running=False, _lookback_pending=False,
             _history_snapshot_symbols=set(),bars={s:[0]*2880 for s in SYMBOLS},bar_t={s:940 for s in SYMBOLS},

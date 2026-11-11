@@ -42,8 +42,8 @@ are deducted once. Acceptance round trips do not establish strategy profit.
 Native startup reads account fees in at most four parallel GETs, through the
 existing client limiter and the native fee parser. Only the main thread
 publishes measured rates. Readiness progress, deadlines and cancellation stay
-explicit. Paused startup replays the full universe before restoring the live
-load-governor policy, avoiding repeated scoring of partial pools. Large history
+explicit. The optional full-universe admission mode replays the complete
+universe before restoring the live load-governor policy. Large history
 pages whose async GET timed out get one bounded synchronous read retry;
 successful reads and explicit venue refusals are not resent. Account leverage/margin are not changed by this isolated wrapper;
 its conservative 1x margin assumption therefore triggers the native maximum-
@@ -60,6 +60,11 @@ context after the fix. Short-history and failed-page checks remain required.
 
 Install locked desk dependencies with `npm ci`, and install Python runtime
 requirements with `python3 -m pip install -r requirements.txt` in a local venv.
+The default admission policy starts observation when a Set passes the native
+Base/Main/Real and own execution gates. It adds no all-symbol sample gate.
+Use `--admission full-universe` only for the stricter frozen-universe comparison;
+that mode uses complete-universe startup replay before restoring live workload.
+Coverage and partially available histories remain reported independently.
 The wrapper is an isolated execution option for hosts without systemd/Redis;
 production Linux deployment remains under `deploy/`.
 

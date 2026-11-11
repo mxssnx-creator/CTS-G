@@ -236,6 +236,13 @@ def ready(pulse, symbols, history_bars, now):
                     for s in symbols))
 
 
+def native_admission_ready(pulse):
+    """Mirror native qualification; no additional all-symbol sample gate."""
+    book = pulse.sets
+    return (book.progress.ready and not book._running and not book._lookback_pending
+            and any(not book.gate_reason(st) for st in book.by_idx))
+
+
 def context_requirement(overlay):
     sys.path.insert(0, str(ROOT / "server/pulse"))
     from set_engine import SetBook
@@ -309,10 +316,11 @@ def collect_account_fees(pulse, symbols, stopped, deadline, progress):
                 time.sleep(1)
 
 
-def prepare_history_warmup(pulse):
+def prepare_history_warmup(pulse, full_universe=True):
     """Publish measured costs before the startup-only full-universe policy."""
     pulse.apply_live_config()
-    pulse.load.partial = False
+    if full_universe:
+        pulse.load.partial = False
 
 
 def capture(pulse, out, label):
@@ -399,6 +407,8 @@ def main(argv=None):
     ap.add_argument("--history-hours", type=int, default=18,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--admission", choices=('native', 'full-universe'), default='native',
+                    help='native: start observation on native-qualified Sets; full-universe: additionally wait for complete frozen-universe history')
     args = ap.parse_args(argv)
     if not 0 < args.minutes <= 30 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
         ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
@@ -416,6 +426,7 @@ def main(argv=None):
               "createdAt": time.time(), "requestedObservationSeconds": args.minutes * 60, "symbols": symbols,
               "complete": False, "executed": False, "overlay": overlay,
               "requiredHistoryBars": required_history,
+              "admissionPolicy": args.admission,
               "limitations": ["minute OHLC captures cannot establish tick-identical simulation fills",
                               "external Binance/Bybit indication sources disabled; BingX VST data only",
                               "cleanup closes are reported separately from natural strategy closes",
@@ -485,7 +496,9 @@ def main(argv=None):
         if pulse.ignored_foreign:
             raise SessionEnd('foreign account position detected during session')
         if journal.phase == "warming":
-            if ready(pulse, symbols, required_history, time.time()):
+            admission_ready = (native_admission_ready(pulse) if args.admission == 'native'
+                               else ready(pulse, symbols, required_history, time.time()))
+            if admission_ready:
                 require_empty_account(api)
                 capture(pulse, args.out, "ready")
                 report["activeStartedAt"] = time.time()
@@ -522,7 +535,7 @@ def main(argv=None):
         save()
         # Paused native cycles intentionally skip hot reload. Publish the fully
         # measured account cost before building any history or unpausing entries.
-        prepare_history_warmup(pulse)
+        prepare_history_warmup(pulse, full_universe=args.admission == 'full-universe')
         require_empty_account(api)
         pulse.run()
         report["stopReason"] = "native stopped before observation deadline"
