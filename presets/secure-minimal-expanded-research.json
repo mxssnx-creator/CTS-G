@@ -167,6 +167,7 @@
   "setGateMinTrades": 12,
   "stagesEnabled": true,
   "stageFullWindow": true,
+  "lastNBasis": "time",
   "setGateShortN": 25,
   "minPfBySize": true,
   "minPfMicro": 1.02,

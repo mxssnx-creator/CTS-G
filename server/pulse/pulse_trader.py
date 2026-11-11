@@ -3610,6 +3610,14 @@ class Pulse:
         chosen, _lane, blocked = self._scope_choice(pack)
         return chosen, blocked
 
+    def _evidence_s(self) -> float:
+        """Seconds of closed orders a Set's own stream may be read over: the book's bound (lookback, or the whole held history with lastNBasis count)."""
+        fn = getattr(self.sets, "evidence_bars", None)
+        try:
+            return float(fn()) * 60.0 if callable(fn) else float(self.sets.lookback) * 60.0
+        except Exception:
+            return float(self.sets.lookback) * 60.0
+
     def set_axis_floor(self, st: Any, lane: str = "pos") -> Optional[float]:
         """The minimum PF the Axis, Block and DCA-on-Axis gates ask of ONE Set's own stream: that Set's floor, the one its Base, Main and Real windows ask
         (minPfByStep: its TP step), so a stage after Real does not re-judge the Set at a pooled floor. None (the coordinator's own floor) when the gates are
@@ -3643,7 +3651,7 @@ class Pulse:
                         return False
                 source = st.neg if lane == "neg" else st.exe
                 now = st.score_at
-                cutoff = now - self.sets.lookback * 60
+                cutoff = now - self._evidence_s()
                 cf = cost_as_frac(self.position_cost_pct)
                 rows = [{"t": t, "pnl_pct": value + cf} for t, value in source
                         if cutoff <= t <= now]
@@ -5804,7 +5812,7 @@ class Pulse:
                 continue
             src = st.neg if lane == "neg" else st.exe
             cf = cost_as_frac(self.position_cost_pct)
-            evidence = [{"pnl_pct": net + cf} for t, net in src if now - lookback <= t <= now]
+            evidence = [{"pnl_pct": net + cf} for t, net in src if now - self._evidence_s() <= t <= now]
             floor = self.set_axis_floor(st, lane)
             if not self.coord.judge(evidence, self.coord.net_streak(evidence), min_pf=floor)["allow"]:
                 continue
@@ -5886,7 +5894,7 @@ class Pulse:
             cf = cost_as_frac(self.position_cost_pct)
             source = st.neg if lane == "neg" else st.exe
             rows = [{"pnl_pct": value + cf} for t, value in source
-                    if now - self.sets.lookback * 60 <= t <= now]
+                    if now - self._evidence_s() <= t <= now]
             return bool(self.coord.judge(rows, self.coord.net_streak(rows), min_pf=self.set_axis_floor(st, lane))["allow"])
         return False
 

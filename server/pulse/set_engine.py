@@ -2055,6 +2055,7 @@ class SetBook:
         self.relation_state: Dict[str, Dict[str, Any]] = {}     # lane id -> its figures at the last complete scoring pass
         self.relation_at = 0.0                                  # the event clock of that pass (0 = none yet)
         self.relation_ms = 0.0                                  # what the last pass spent on the relation lanes
+        self.window_basis = "time"           # lastNBasis: "time" (windows inside the lookback) or "count" (the newest N orders of the configuration, whatever their age)
         self.group_gate = False              # groupGate: a group opens positions only while its own executed results are profitable (see set_group / group_verdict)
         self.group_gate_n, self.group_gate_pf, self.group_gate_hours, self.group_gate_min = 10, 1.0, 12.0, 1
         self.trail_min_lock = 0.0            # trailMinLockPct: smallest arm - give (the gain the stop locks at the arm) a trailing pair may have; 0 = every pair
@@ -2112,7 +2113,7 @@ class SetBook:
                               self.min_bars, self.max_flat_share, self.max_jump, self.warmup,
                               self.max_modeled_stop_loss_pct, self.stop_cap_invalid,
                               self.hold_auto_min, self.hold_auto_max,
-                              self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol,
+                              self.window_basis, self.direction_split, self.pf_by_step, self.pf_step_auto, self.pf_step_ratio, self.pf_step_auto_n, self.pf_step_auto_min, self.pf_step_auto_tol,
                               self.pause_mode, self.pause_fixed, self.pause_candidates, self.pause_auto_min, self.pause_auto_max, sorted(self.pause_pack.items()),
                               [(st.id, st.tp_pct, self.hold_bars_for(st)) for st in self.by_idx],
                               [self.stage_params(pack) for pack in self.packs]))
@@ -2412,6 +2413,7 @@ class SetBook:
             self.trail_min_lock = 0.0
         if self.trail_min_lock > 0:
             self.trails = [t for t in self.trails if t[1] - t[2] + 1e-9 >= self.trail_min_lock]
+        self.window_basis = "count" if str(ov.get("lastNBasis") or "time").lower() == "count" else "time"
         # relation lanes read the chains and change no tape or Set verdict, so they are not part of the evaluation signature. A change of what the lanes ARE
         # (relations, windows, floor) drops the held lanes until the next scoring pass rebuilds them; ratios and the ceiling apply at once.
         rel_cfg = relation_lanes.config_of(ov.get("relationLanes"))
@@ -3185,7 +3187,7 @@ class SetBook:
                     on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
-            cutoff = now - self.lookback * BAR_S
+            cutoff = now - (self.history_bars() if self.window_basis == "count" else self.lookback) * BAR_S
             context_cutoff = now - self.history_bars() * BAR_S
             scoring_stale = False
             with self._lock:
@@ -4034,7 +4036,16 @@ class SetBook:
                     and self._history_snapshot_lookback > 0)
 
     def _evidence_lookback(self) -> int:
+        """The bars whose closed orders a last-N window may read. lastNBasis "time" (the default): the lookback, so a window is the newest N orders of the
+        last `lookback` minutes. "count" (owner 2026-11-11: windows on the basis of the last N positions per configuration, not of a period): every order
+        the book holds, so a window is the newest N orders of that configuration however old they are; only the held history (history_bars) bounds it."""
+        if self.window_basis == "count":
+            return self.history_bars()
         return self._history_snapshot_lookback if self._history_snapshot_usable() else self.lookback
+
+    def evidence_bars(self) -> int:
+        """The same bound for callers outside the book (the Axis streams, the simulators)."""
+        return self._evidence_lookback()
 
     def base_validation_reason(self, st: SetState) -> str:
         """Base PF/risk validation, independent of the minimal coordination condition."""

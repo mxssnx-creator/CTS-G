@@ -18,9 +18,9 @@ def fingerprint(data_dir, names, overlay, pulse_dir, stage_eval_path):
     files = sorted(os.path.join(pulse_dir, name) for name in os.listdir(pulse_dir) if name.endswith(".py"))
     return {"version": 1,
             "markets": {name: file_sha(os.path.join(data_dir, name + ".json")) for name in names},
-            # the profit group gate (groupGate*), the relation lanes (relationLanes) and the lane order (laneOrder) act at entry time only and change no tape:
+            # the profit group gate (groupGate*), the relation lanes (relationLanes) the lane order (laneOrder) and the basis of the last-N windows (lastNBasis) act on the scoring or at entry time and change no tape:
             # arms that differ in them share one cache
-            "settings": hashlib.sha256(json.dumps({k: v for k, v in overlay.items() if not str(k).startswith(("groupGate", "relationLanes", "laneOrder"))}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+            "settings": hashlib.sha256(json.dumps({k: v for k, v in overlay.items() if not str(k).startswith(("groupGate", "relationLanes", "laneOrder", "lastNBasis"))}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
             "engine": {os.path.basename(path): file_sha(path) for path in files},
             "simulator": file_sha(stage_eval_path)}
 

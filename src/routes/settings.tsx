@@ -862,6 +862,11 @@ function SettingsPage() {
                   on={overlay.stageFullWindow === true}
                   onChange={(v) => patch("stageFullWindow", v)}
                 />
+                <Toggle
+                  label="Last-N windows by count (on: the newest N orders of the configuration whatever their age; off, default: the newest N inside the lookback period)"
+                  on={overlay.lastNBasis === "count"}
+                  onChange={(v) => patch("lastNBasis", v ? "count" : "time")}
+                />
                 <PfWindowControls overlay={overlay} patch={patch} stats={stats} />
                 <div className="col-span-full mt-1 font-mono text-[11px] text-muted">Base · coordinations, ranges and types on their own tape · both windows must pass</div>
                 <Slider

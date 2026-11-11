@@ -419,6 +419,8 @@ export type PulseOverlay = {
   stagesEnabled: boolean;
   /** true: a stage window judges only once it holds its full N orders; false (default): the orders it has, at least one. */
   stageFullWindow: boolean;
+  /** Basis of every last-N window: "time" = the newest N orders inside the lookback, "count" = the newest N orders of the configuration whatever their age. */
+  lastNBasis: "time" | "count";
   /** Base: the second last N; both Base windows must pass (0 = off). */
   setGateShortN: number;
   /** Minimum PF by window size: every last-N window asks the PF of its class (Micro / Minimal / Short / Medium up to their bounds, Long above). */
@@ -734,6 +736,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setGateMinTrades: 0,
   stagesEnabled: true,
   stageFullWindow: false,
+  lastNBasis: "time",
   setGateShortN: 25,
   minPfBySize: true,
   ...PF_TYPE_DEFAULTS,
@@ -984,6 +987,7 @@ export type CtsSettings = {
   mainGateN?: number;
   stagesEnabled?: boolean;
   stageFullWindow?: boolean;
+  lastNBasis?: "time" | "count";
   setGateShortN?: number;
   minPfBySize?: boolean;
   minPfMicro?: number;
@@ -1492,6 +1496,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
     stagesEnabled: bool(cts.stagesEnabled, true),
     stageFullWindow: bool(cts.stageFullWindow, false),
+    lastNBasis: cts.lastNBasis === "count" ? "count" : "time",
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
     minPfBySize: bool(cts.minPfBySize, true),
     minPfMicro: pfFloor(num(cts.minPfMicro, PF_TYPE_DEFAULTS.minPfMicro)),

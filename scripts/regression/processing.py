@@ -898,6 +898,8 @@ def sim_gate_equals_the_engine_for_every_window_configuration():
             "minimal 3 beside short 2": {"setGateShortN": 2, "setGateMinN": 3, "setGateMinMode": "negative"},
             "legacy mainAuto keys": {"mainAutoWindows": [4, 6], "mainAutoMin": 4, "mainAutoMargin": 1.0},
             "stages off": {"stagesEnabled": False},
+            # owner 2026-11-11: windows on the basis of the last N positions of the configuration, not of a period
+            "last N by count": {"lastNBasis": "count"}, "last N by count, full windows": {"lastNBasis": "count", "stageFullWindow": True},
             # owner 2026-11-04: stages and last N independent per config (TP range): the minimal range its own windows, the micro range its own Real windows per lane
             "last N per range: minimal": {"lastNByRange": {"minimal": {"baseLong": 12, "baseShort": 5, "mainLong": 10, "mainShort": [3, 5], "negWindows": "1,2", "realN": 2, "realNegN": 3}}},
             "last N per range: micro + minimal": {"lastNByRange": {"micro": {"baseLong": 30, "baseShort": 12, "realN": 6}, "minimal": {"baseLong": 14, "mainLong": 12, "realNegN": 1}},
@@ -1633,6 +1635,35 @@ def effective_pf_per_entry_counts_each_entry_once():
     return ok, f"pooled {snap['base']}; shared entries {shared}; separate entries {apart}"
 
 
+def last_n_windows_by_count_read_the_newest_orders_whatever_their_age():
+    """lastNBasis. "time" (the default; an overlay without the key): a last-N window is the newest N orders inside the lookback, so orders older than the
+    lookback are not read. "count": the newest N orders of the configuration however old, bounded only by the history the book holds. A Set with 12 winning
+    orders two lookbacks ago and 3 losing ones now: by time its Base window holds the 3 (PF 0), by count the 15 (PF above the floor). The setting is part
+    of the evaluation signature (a change re-evaluates) and the Axis reads the same bound."""
+    import set_engine as se
+    out = {}
+    now = T0
+    for basis in ("time", "count", None):
+        b = se.SetBook()
+        b.load(overlay(**{**SMALL, "histLookbackBars": 240, "histLookbackAuto": False, "setGateWindow": 20, "setGateShortN": 0, "stagesEnabled": False,
+                          "mainGateEnabled": False, "holdEnabled": False, **({"lastNBasis": basis} if basis else {})}))
+        st = next(x for x in b.by_idx if x.kind == "base")
+        lb = b.lookback * 60.0
+        rows = [{"t": now - 2.2 * lb + 60.0 * k, "symbol": "S", "side": "LONG", "pnl": 0.0, "pnl_pct": 0.006, "hold_s": 60.0, "reason": "tp", "set_id": st.id} for k in range(12)]
+        rows += [{"t": now - 600.0 + 60.0 * k, "symbol": "S", "side": "LONG", "pnl": 0.0, "pnl_pct": -0.004, "hold_s": 60.0, "reason": "sl", "set_id": st.id} for k in range(3)]
+        st.hist = rows
+        b._score_one(st, now=now)
+        out[str(basis)] = (b.window_basis, st.gate_n, round(st.gate_pf, 3), b.evidence_bars(), b.gate_reason(st) == "")
+    b1, b2 = se.SetBook(), se.SetBook()
+    b1.load(overlay(**SMALL))
+    sig_time = b1._evaluation_config
+    b1.load(overlay(**SMALL, lastNBasis="count"))
+    changed = b1._evaluation_config != sig_time and b1.progress.ready is False
+    ok = (out["time"][:3] == ("time", 3, 0.0) and out["None"] == out["time"] and out["count"][0] == "count" and out["count"][1] == 15 and out["count"][2] > 3.0
+          and out["time"][3] == 240 and out["count"][3] > 240 and not out["time"][4] and out["count"][4] and changed)
+    return ok, f"basis -> (basis, Base window orders, PF, bars a window may read, valid): {out}; a change re-evaluates {changed}"
+
+
 def verdict_freshness_follows_the_replay_rotation():
     """A live Set's verdict expires after fresh_s, but never sooner than 1.5 x the measured full replay rotation (found live on x02 2026-11-03: a
     12-minute rotation against 240 s left every Base-passing Set "stale"); the rotation is capped so a stuck symbol cannot keep old verdicts forever."""
@@ -1724,6 +1755,7 @@ CHECKS = [
     ("processing.hold-adapter-uses-selected-sets-tape", hold_adapter_uses_the_selected_sets_tape),
     ("processing.live-windows-preserve-owner-and-lane-history", live_windows_preserve_owner_and_lane_history),
     ("processing.sim-gate-equals-the-engine-for-every-window-configuration", sim_gate_equals_the_engine_for_every_window_configuration),
+    ("processing.last-n-windows-by-count-read-the-newest-orders-whatever-their-age", last_n_windows_by_count_read_the_newest_orders_whatever_their_age),
     ("processing.stage-figures-average-the-valid-sets-and-report-the-validated-share", stage_figures_average_the_valid_sets_and_report_the_validated_share),
     ("processing.few-order-sets-judged-when-the-minimum-is-off", sets_with_few_orders_are_judged_when_the_minimum_is_off),
     ("processing.broken-or-flat-series-not-replayed", broken_or_flat_series_are_not_replayed),

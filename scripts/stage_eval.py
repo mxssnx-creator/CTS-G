@@ -86,6 +86,13 @@ def make_book() -> se.SetBook:
     return b
 
 
+def evidence_s(book) -> float:
+    """Seconds of closed orders a last-N window may read: the engine's own bound (SetBook.evidence_bars: the lookback, or with lastNBasis "count" the
+    whole held history, so a window is the newest N orders of the configuration whatever their age)."""
+    fn = getattr(book, "evidence_bars", None)
+    return float(fn()) * 60.0 if callable(fn) else float(book.lookback) * 60.0
+
+
 def lane_cfg(b: se.SetBook) -> Dict[str, Any]:
     return {"entry_conf": b.entry_conf, "time_bars": b.hist_time_bars, "scratch_bars": b.scratch_bars,
             "scratch_min": b.scratch_min, "cooldown": b.cooldown_bars, "cost_pct": b.cost_pct,
@@ -221,7 +228,7 @@ def gate_metrics(book, tapes: Tapes, st, now: float):
 def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     """The Base long window's numbers for (Set, now), as SetBook._score_one reads them: the newest gate_window orders closed in the lookback (gross values
     pp, net values w), their count and PF (rounded as last_n_cost_pf does), the drawdown time over them, both halves, and the rank inputs."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     wn = book.win(st)
     tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, wn.base_short, book.base_min_n, book.deact_n))
     txa = tape_source(tapes, st.idx, now, lb).by_set[st.idx][0]
@@ -366,7 +373,7 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
 
 def chain_at(book, tapes: Tapes, st, now: float):
     """Score stage membership using earlier entry-time context, then keep the current lookback window."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
     e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
@@ -418,7 +425,7 @@ def other_lanes(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[str
 def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float]]:
     """(exit t, net) of the Set's Real Set ("pos") or Real Negative Set ("neg") orders closed before now inside the lookback: the stream the engine's
     Axis judges for one Set and lane (Pulse._scope_choice reads st.exe / st.neg in [score_at - lookback, score_at])."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
     e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
@@ -431,7 +438,7 @@ def lane_stream(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[flo
 
 def lane_stream_entries(book, tapes: Tapes, st, now: float, lane: str) -> List[Tuple[float, float, float]]:
     """lane_stream with each order's entry time: (exit t, entry t, net), oldest exit first."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     tx, te, pp = tape_source(tapes, st.idx, now, lb).by_set[st.idx]
     e = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - book.history_bars() * 60.0)
@@ -464,7 +471,7 @@ def axis_judge(book, tapes: Tapes, coord, st, now: float, lane: str, cache: Opti
 def relation_rows(book, tapes: Tapes, st, now: float) -> List[Tuple[float, float, str, float]]:
     """(exit t, entry t, symbol, net) of the Set's Main-Set orders inside the lookback at now: what SetBook.set_processed hands the relation lanes
     (set_engine._chain_of(..., relation_rows=True)), from the same chain every other stage figure here reads."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     src = tape_source(tapes, st.idx, now, lb)
     tx, te, pp = src.by_set[st.idx]
     symbols = getattr(src, "symbols_by_set", {}).get(st.idx) or tapes.symbols_by_set[st.idx]
@@ -494,7 +501,7 @@ def stage_lane(book, tapes: Tapes, st, now: float) -> str:
 def processed_tail(book, tapes: Tapes, st, now: float, n: int) -> List[float]:
     """The net results of the Set's newest n processed orders closed before now: orders it opened while it passed its Base gate,
     judged on its own closes before each entry within the lookback (set_engine.processed_flag, SetBook.set_processed's rule)."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     source = tape_source(tapes, st.idx, now, lb)
     tx, te, pp = source.by_set[st.idx]
     nets, gpre, lpre = source.prefix(st.idx)
@@ -517,7 +524,7 @@ def gate_until(book, tapes: Tapes, st, now: float) -> float:
     """The last moment gate_metrics(st, now) is known to keep its verdict: the Set's next close (it joins the last N), its
     oldest order in the lookback leaving it, and an open drawdown reaching the maximum drawdown time. A walk-forward that
     re-reads a Set only after this validates every order on the Set's last N orders at that order's own minute."""
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     tx = tape_source(tapes, st.idx, now, lb).by_set[st.idx][0]
     end = bisect.bisect_left(tx, now)
     lo = bisect.bisect_left(tx, now - lb)
@@ -582,7 +589,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
         st, now = rnd.choice(book.by_idx), rnd.choice(hours)
         want_base = len(picks) % 2 == 0
         if want_base and tries < samples * 300:
-            tx, te, pp = tapes.window(st.idx, now, book.lookback * 60.0, book.win(st).base_long)
+            tx, te, pp = tapes.window(st.idx, now, evidence_s(book), book.win(st).base_long)
             g_ = sum(x - tapes.cf for x in pp if x - tapes.cf > 0)
             l_ = -sum(x - tapes.cf for x in pp if x - tapes.cf < 0)
             if len(pp) < book.gate_min or (g_ / l_ if l_ > 0 else 99.0) < book.min_pf:
@@ -594,7 +601,7 @@ def self_check(book, tapes: Tapes, hours: Sequence[float], samples: int = 40) ->
                    for a, b, x in zip(tx, te, pp)]
         st.live = []
         book._score_one(st, now=now)
-        st.n = sum(1 for t in tx if t >= now - book.lookback * 60.0)
+        st.n = sum(1 for t in tx if t >= now - evidence_s(book))
         eng_valid = book.gate_reason(st) == ""
         eng_lane = book.lane_of(st)
         valid, key, n, pf = gate_metrics(book, tapes, st, now)
@@ -705,7 +712,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
     executed: List[Dict[str, Any]] = []
     closes: List[Tuple[float, float]] = []          # (exit t, net) of executed positions, for the axes
     cf = cost_as_frac(book.cost_pct)
-    lb = book.lookback * 60.0
+    lb = evidence_s(book)
     every = max(1, int(refresh_s) // 60) if refresh_s else 1
     cache: Dict[int, Tuple[float, bool, Any]] = {}       # refresh_s 0: per order, each Set re-read only when its verdict can change
     auto = AutoFloors(book, tapes)                       # the Auto floors per TP step, re-learned at every hour from the orders closed before it

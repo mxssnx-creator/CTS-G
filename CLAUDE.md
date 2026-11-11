@@ -2,6 +2,16 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-11, owner: "windows no longer on the basis of a period, instead on the basis of the last N positions and configs" / "keep using both".** `lastNBasis`
+  (overlay, desk Settings "Last-N windows by count"): "time" (the default, unchanged, golden identical) = a last-N window is the newest N orders inside the
+  lookback; "count" = the newest N orders of the configuration whatever their age, bounded only by the held history (`SetBook.evidence_bars` = `history_bars`;
+  the stage chain, `_score_one`, the Axis streams and the simulators read the one bound; part of the evaluation signature). Engine and simulator agree on 1,008
+  sampled pairs incl. two count configurations; check `processing.last-n-windows-by-count-read-the-newest-orders-whatever-their-age`. **Measured (executed PF /
+  positions, with the overlay's Axis; time -> count): W1 dev 0.708 / 405 -> 0.763 / 405, W2 dev 0.523 / 222 -> 0.538 / 232, W1 sealed 0.977 / 204 -> 0.788 / 181,
+  W2 sealed 0.944 / 74 -> 0.766 / 74** (without the Axis 0.916 -> 0.937, 0.504 -> 0.517, 0.775 -> 0.626, 0.865 -> 0.963). Better on both development windows, worse on
+  both sealed ones: the ship rule is not met, so "time" stays the shipped basis and "count" is one key. Reports: `lane_axis_study.py` prints every arm also on the
+  newest 25 / 50 / 100 / 200 positions it closed and on the newest 25 of each configuration group (pack / type / lane), next to the period figure.
+
 - **2026-11-11, owner: "Make Block fully effectively working with high PF as without ... try different coordinations completely until its working" / "check the
   Block structure ... independent for each block count with ratios and correct stacking, for each Set and Overall".** Record: `docs/verification/block-coordinations-20261111.md`.
   Nine windows (W5 10-29 .. W4 11-11, the same 20 symbols, x01 overlay, 24 h pre-history, parents admitted by the overlay's Axis); no connection started.

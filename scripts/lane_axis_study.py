@@ -4,7 +4,8 @@ position per symbol) once per arm, each arm reported whole and per lane, so "wit
 
 Arms: laneOrder pos-neg (shipped) / neg-pos / neg / pos, each without Axis and with the overlay's Axis rules. laneOrder acts at entry time only (it changes
 which valid Set a signal opens under, never a tape), so every arm reads one shadow cache. At most three days of 1m history; the development window (the
-first two thirds) unless --sealed.
+first two thirds) unless --sealed. Next to the window figure every arm is also read on the newest N positions it closed (25 / 50 / 100 / 200) and on
+the newest 25 of each configuration group (pack / type / lane): the last N positions, not a period.
 
 usage: lane_axis_study.py --data DIR --cache FILE [--symbols 20] [--jobs 3] [--patch JSON] [--sealed] [--orders pos-neg,neg-pos,neg,pos] [--out FILE]
 """
@@ -85,12 +86,20 @@ def main() -> int:
             rows = sg.execute(book, names, bars, times, shadow, tapes, run_hours, refresh_s=0, axis_coord=axis_coord)
             trades = sorted((r for r in rows if "net" in r and lo <= r["t_in"] < hi), key=lambda r: r["t"])
             valid = [r["valid"] for r in rows if "hour" in r]
-            res = {"all": figures([r["net"] for r in trades]), "pos": figures([r["net"] for r in trades if r["lane"] != "neg"]),
+            by_close = [r["net"] for r in trades]                       # ordered by close: the newest N positions, not a period
+            groups = {}
+            for r in trades:
+                groups.setdefault(f"{r['pack']}/{r['kind']}/{r['lane']}", []).append(r["net"])
+            res = {"lastN": {str(n): figures(by_close[-n:]) for n in (25, 50, 100, 200) if len(by_close) >= n},
+                   "lastNByConfig": {k: figures(v[-25:]) for k, v in sorted(groups.items()) if len(v) >= 10},
+                   "all": figures([r["net"] for r in trades]), "pos": figures([r["net"] for r in trades if r["lane"] != "neg"]),
                    "neg": figures([r["net"] for r in trades if r["lane"] == "neg"]),
                    "byKind": {k: figures([r["net"] for r in trades if r["kind"] == k]) for k in ("base", "exit", "trail")},
                    "validSetsPerHour": round(sum(valid) / len(valid), 1) if valid else 0.0}
             out["arms"][f"{order} | {axis_label}"] = res
             print(f"{order:8s} {axis_label:8s} all {json.dumps(res['all'])}  pos {json.dumps(res['pos'])}  neg {json.dumps(res['neg'])}  valid Sets/h {res['validSetsPerHour']}  [{time.time() - t1:.0f}s]", flush=True)
+            print("         last N positions: " + "  ".join(f"N{n} PF {v['pf']} net {v['netPct']}" for n, v in res["lastN"].items())
+                  + " | last 25 per configuration group: " + "  ".join(f"{k} {v['pf']}/{v['n']}" for k, v in res["lastNByConfig"].items()), flush=True)
             if a.out:
                 json.dump(out, open(a.out, "w"), indent=1)
     return 0
