@@ -217,3 +217,28 @@ included), `block_structure.block-rounds-every-count-runs-its-own-procedure-by-t
 count's multiples are the same with the other five counts observing; six counts sum; overlapping positions),
 `block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without`, `selftest.block_rounds`; mutants `block rounds:`.
 
+## 7. Axis: what the other projects run, and the disjoint rule measured here
+
+Read: CTS-C (`core/engine.ts` `axisAllows`, `docs/VALIDATION.md`), CTS-A-O and CTS-X (the same code base; `docs/main-processing-audit-20261029`),
+CTS-A (`src/lib/desk/stable02.ts`, `bots.ts`). None records an Axis result above PF 1: CTS-A-O's audit lists Axis at PF 0.2206 on 564 closes;
+CTS-C reports its selected candidates at 0.716 / 0.706 on holdout and no positive Axis figure; in CTS-A "axis" is a price level a tactic trades
+around, not an admission rule. So there is no working Axis to copy. The one rule that differs in structure from this engine's is CTS-C's:
+**disjoint windows** - the previous window is the closes before the last window (here the two overlap), the previous PF must reach the floor
+itself, and the last window is judged by the sign of its net (any / positive / negative), not by a PF of three or four closes.
+
+Built as an option (`axisDisjoint`, `axisLastOutcome`; `coord_engine.Coordinator.judge`; the simulator calls the same function) and measured
+with `scripts/lane_axis_study.py` (x01 overlay, 24 h pre-history, 20 symbols, lane order pos-neg; the two reference rows reproduce the
+2026-11-10 figures to the digit). Executed PF (positions):
+
+| | W1 dev | W1 sealed | W2 dev | W2 sealed |
+|---|---|---|---|---|
+| no Axis | 0.916 (390) | 0.775 (221) | 0.504 (226) | 0.865 (76) |
+| shipped Axis | 0.708 (405) | 0.977 (204) | 0.523 (222) | 0.944 (74) |
+| disjoint, last any | 0.872 (387) | 0.782 (226) | 0.507 (216) | 0.914 (75) |
+| disjoint, last positive | 0.732 (401) | 1.008 (191) | 0.485 (208) | 1.002 (73) |
+| disjoint, last negative | 0.920 (390) | 0.663 (193) | 0.444 (232) | 0.624 (62) |
+
+No row is at or above "no Axis" on all four, and no row is at or above the shipped Axis on all four. Disjoint + last positive is the only rule
+that reaches 1.0 anywhere (both sealed parts) and it is the weakest or second weakest on both development parts. The sign of every Axis rule
+flips between the two parts of the same three days, as it did on 2026-11-10. Nothing changed in the defaults; the option is two overlay keys.
+

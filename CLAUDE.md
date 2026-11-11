@@ -2,6 +2,28 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-11, owner: "Frage 1 JA ... prozessiere alle block counts unabhängig, keine restrictions" / "Liste welche block besser als ohne und stelle default settings so das diese in wirkung" /
+  "Teste selbst welche [Axis] funktionieren" / "Axis ergebnisse müssen auf jeden fall hohen PF haben".** Record: `docs/verification/block-coordinations-20261111.md` sections 6 and 7. No connection started.
+  (a) **Block rounds are in the engine** (`server/pulse/block_rounds.py`, overlay `blockRounds`, desk Settings "Block rounds", state `block-state-<conn>.json.rounds.json`, stats `execution.blockRounds`):
+  a procedure = (relation, group key, block count N); the group's positions form blocks of N; a losing block raises the group's next entries by ratio x level of the ORIGINAL volume until the
+  volume-weighted net since that block is back at zero; step = one more level per further losing block; pause after a positive block or a recovery. All six counts of every selected relation always
+  form their own blocks and keep their own record; only a switched-on count raises; multiple = 1 + the sum over the raising procedures, at most `maxMult`. `Pulse.place` applies it like the relation
+  raise (best effort, rounded down, never cancels an entry); the close hands over the base position's own net; an unscored close teaches nothing. The study (`scripts/block_rounds_study.py`) drives the same book.
+  (b) **Better than without** (nine windows, 1,859 positions, without = PF 0.6475 / net -495.1; rule: weighted PF at or above the unit PF on all nine windows AND net not below): of 3,456 single
+  procedures **18 pass, all relation step x block count 5 with step on** (ratio 0.1 .. 1.0: PF 0.661 .. 0.750, net -494.6 .. -480.2). Every other count's best is 9 / 9 on the PF with a lower net
+  (N1-N3 0.650 / -538.8, N4 0.658 / -503.2, N6 0.659 / -496.7); all six counts raising at once lowers the net in all 90 arms.
+  (c) **Shipped by the owner's instruction** (overlays, the three Block presets, desk; engine absent-key default off): relation step, **count 5, ratio 1.0, step to level 2, no pause, ceiling x 3**;
+  counts 1-4 and 6 observe. Weighted PF 0.750 against 0.648, net -480.2 against -495.1: still under 1, chosen on the windows it is reported on, and the earlier forward check held for no setting.
+  A raised entry is up to 3 x its base size on the live account. Revert: `blockRounds.enabled` false.
+  (d) **Axis in the other projects** (read: CTS-C, CTS-A-O, CTS-X, CTS-A): none records an Axis result above 1 (CTS-A-O: Axis PF 0.22 on 564 closes; CTS-C: selected-candidate holdout 0.72 - 0.75, no positive
+  Axis figure; CTS-A's "axis" is a price level, another thing). The one structural difference is CTS-C's rule: disjoint windows (the previous window is the closes BEFORE the last window and must reach
+  the floor; the last window is judged by the sign of its net). Built here as an option: `axisDisjoint`, `axisLastOutcome` any / positive / negative (`coord_engine.judge`, default off, golden unchanged).
+  **Measured (executed PF; W1 dev / W1 sealed / W2 dev / W2 sealed): no Axis 0.916 / 0.775 / 0.504 / 0.865; shipped Axis 0.708 / 0.977 / 0.523 / 0.944; disjoint any 0.872 / 0.782 / 0.507 / 0.914;
+  disjoint + last positive 0.732 / 1.008 / 0.485 / 1.002; disjoint + last negative 0.920 / 0.663 / 0.444 / 0.624** (62 - 405 positions per cell). Disjoint + positive reaches 1.0 on both sealed parts and is
+  under no Axis on both development parts, and against the shipped Axis it is better on three and worse on one: the ship rule is not met, **no Axis default changed**. A high Axis PF cannot be ordered:
+  the parents it admits are under PF 1 on these windows whatever rule admits them; `axisDisjoint: true` + `axisLastOutcome: "positive"` is two keys for the owner.
+  Checks `trader.block-rounds-*`, `block_structure.block-rounds-*`, `selftest.block_rounds`, `lane_rank.the-disjoint-axis-*`; mutants `block rounds:` (13), `axis disjoint:` (3), all caught. Regression 705 pass.
+
 - **2026-11-11, owner: "windows no longer on the basis of a period, instead on the basis of the last N positions and configs" / "keep using both".** `lastNBasis`
   (overlay, desk Settings "Last-N windows by count"): "time" (the default, unchanged, golden identical) = a last-N window is the newest N orders inside the
   lookback; "count" = the newest N orders of the configuration whatever their age, bounded only by the held history (`SetBook.evidence_bars` = `history_bars`;

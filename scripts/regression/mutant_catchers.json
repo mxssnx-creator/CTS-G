@@ -1,5 +1,8 @@
 {
  "DCA switched on": "selftest.dca_engine",
+ "axis disjoint: the last window's outcome is never asked": "lane_rank.the-disjoint-axis-reads-no-close-twice-and-judges-the-last-window-by-its-sign",
+ "axis disjoint: the previous window reads the last window's closes again": "lane_rank.the-disjoint-axis-reads-no-close-twice-and-judges-the-last-window-by-its-sign",
+ "axis disjoint: the rule is on without its key": "trader.entry-selection-keeps-packs-and-axis-lanes-independent",
  "axis floor: Block's candidate gate is judged at the pooled floor": "lane_rank.a-block-add-on-a-set-parent-is-admitted-at-that-sets-floor",
  "axis floor: DCA on Axis judges the pooled floor": "lane_rank.the-axis-block-and-dca-gates-judge-a-sets-stream-at-that-sets-floor",
  "axis floor: a Block group's threshold ignores the parent's floor": "lane_rank.the-axis-block-and-dca-gates-judge-a-sets-stream-at-that-sets-floor",
@@ -30,6 +33,7 @@
  "block rounds: a raise is dropped after one block whatever its net": "block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule",
  "block rounds: a winning block raises the group": "trader.block-rounds-raise-the-group-after-a-losing-block-until-it-is-recovered",
  "block rounds: an unscored close is a block result": "selftest.block_rounds",
+ "block rounds: an unscored close teaches the rounds": "trader.block-rounds-raise-the-group-after-a-losing-block-until-it-is-recovered",
  "block rounds: every count shares the blocks of count 1": "trader.block-rounds-raise-the-group-after-a-losing-block-until-it-is-recovered",
  "block rounds: step raises past the top level": "block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule",
  "block rounds: the multiple ignores its ceiling": "block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule",
