@@ -41,6 +41,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "server", "pulse"))
 
 
 def pf(vals: Sequence[float]) -> Optional[float]:
+    if vals and not any(vals):
+        return 1.0
     gp = sum(v for v in vals if v > 0)
     gl = -sum(v for v in vals if v < 0)
     return round(gp / gl, 3) if gl > 0 else (99.0 if gp > 0 else None)

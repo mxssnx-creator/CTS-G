@@ -36,7 +36,9 @@ class AuditReporting(unittest.TestCase):
                 self.assertEqual(bounded.window(0,now,count),expected)
         self.assertFalse(hasattr(bounded,'cache'),'does not retain a complete future tape per Set')
     def test_strategy_hours_match_parent_settlement_at_every_boundary(self):
-        from stack_eval import summarize
+        from stack_eval import summarize, pf
+        self.assertEqual(pf([0.0,0.0]),1.0)
+        self.assertIsNone(pf([]))
         from trade_sim import settlement_hours
         clocks=[3600.0,3660.0,7200.0,10800.0]
         vals=[.01,-.02,.03,-.04];hours=[0.0,3600.0,7200.0]
