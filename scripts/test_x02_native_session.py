@@ -15,6 +15,99 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_watchdog_does_not_count_a_stale_cycle_as_completed_observation(self):
+        self.assertEqual(session.end_reason('active',200,50,150,100,60),'main cycle heartbeat deadline')
+        self.assertEqual(session.end_reason('active',200,50,150,199,60),'observation complete')
+        self.assertEqual(session.end_reason('warming',200,150,None,0,60),'readiness deadline')
+        self.assertIsNone(session.end_reason('warming',100,150,None,0,60))
+        self.assertIsNone(session.end_reason('cleanup',200,50,150,0,60,True))
+
+    def test_native_cycle_cannot_hide_a_stall_when_watcher_thread_does_not_run(self):
+        clock = [0.0]
+        def get(path, *args):
+            if path.endswith('/balance'): return {'code':0,'data':[{'asset':'VST'}]}
+            if path.endswith('/positions'): return {'code':0,'data':[]}
+            if path.endswith('/openOrders'): return {'code':0,'data':{'orders':[]}}
+            raise AssertionError(path)
+        api = SimpleNamespace(base=session.HOST,get=get,_req=lambda *a:None)
+        class Pulse:
+            def __init__(self, api, contracts):
+                self.load=SimpleNamespace(partial=True)
+                self.ignored_foreign=False
+                self.pool=SimpleNamespace(shutdown=lambda **kw:None)
+            def _one_cycle(self): clock[0] += 20
+            def run(self): self._one_cycle()
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(session.os.environ,{}))
+            prior_umask=session.os.umask(0o077)
+            stack.callback(session.os.umask,prior_umask)
+            root=Path(td)
+            credentials=root/'credentials.json'
+            credentials.write_text('{"api_key":"fixture","api_secret":"fixture","is_testnet":true}')
+            credentials.chmod(0o600)
+            overlay=root/'overlay.json';overlay.write_text('{}')
+            symbols=root/'symbols.json';symbols.write_text(json.dumps(SYMBOLS))
+            native=SimpleNamespace(DIR=str(root/'native'),PAUSE_PATH=str(root/'native/PAUSE'),
+                STOP_PATH=str(root/'native/STOP'),CONN_SHORT=session.CONN,IS_BYBIT=False,BASE=session.HOST,
+                make_api=lambda *a:api,load_contracts=lambda ss:{s:None for s in ss},Pulse=Pulse)
+            stack.enter_context(patch.dict(sys.modules,{'pulse_trader':native}))
+            for name,replacement in {
+                'context_requirement':lambda ov:60,'shared_account_protection_verified':lambda:True,
+                'freeze_account_settings':lambda p:None,'install_history_cancellation':lambda p:None,
+                'collect_account_fees':lambda *a:None,'prepare_history_warmup':lambda *a,**kw:None,
+                'native_admission_ready':lambda p:True,'capture':lambda *a,**kw:None,
+                'cleanup':lambda *a:{'confirmedFlat':True},
+            }.items():stack.enter_context(patch.object(session,name,replacement))
+            stack.enter_context(patch.object(session.time,'monotonic',lambda:clock[0]))
+            stack.enter_context(patch.object(session.time,'time',lambda:1_700_000_000+clock[0]))
+            stack.enter_context(patch.object(session.signal,'signal'))
+            stack.enter_context(patch.object(session.threading,'Thread',return_value=SimpleNamespace(start=lambda:None)))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            result=session.main(['--overlay',str(overlay),'--symbols',str(symbols),'--out',str(root/'run'),
+                '--credentials',str(credentials),'--execute','--minutes','30','--heartbeat-seconds','15'])
+            report=json.loads((root/'run/session.json').read_text())
+            self.assertEqual(result,1)
+            self.assertEqual(report['stopReason'],'main cycle heartbeat deadline')
+            self.assertFalse(report['complete'])
+            self.assertTrue(report['cleanup']['confirmedFlat'])
+
+    def test_periodic_capture_skips_history_and_full_capture_releases_lock_before_io(self):
+        import threading
+        class Pulse:
+            def write_stats(self, **kwargs): pass
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'stats.json';path.write_text('{"openCount":0}')
+            pulse=Pulse();pulse.sets=None
+            with patch.object(sys.modules[Pulse.__module__],'STATS_PATH',str(path),create=True):
+                session.capture(pulse,td,'periodic',include_candles=False)
+                self.assertFalse((Path(td)/'periodic-candles.json').exists())
+                book=SimpleNamespace(_lock=threading.RLock(),bars={'X':[[1,2,1,2,3]]},bar_t={'X':60})
+                pulse.sets,pulse.contracts=book,{'X':None}
+                native=session.atomic_json
+                entered=[]
+                def write(target,value):
+                    if str(target).endswith('-candles.json'):
+                        def reader():
+                            with book._lock:entered.append(True)
+                        thread=threading.Thread(target=reader);thread.start();thread.join(1)
+                        self.assertEqual(entered,[True],'snapshot IO retained the trading lock')
+                    native(target,value)
+                with patch.object(session,'atomic_json',write):session.capture(pulse,td,'ready')
+                self.assertEqual(json.loads((Path(td)/'ready-candles.json').read_text())['symbols']['X']['bars'],book.bars['X'])
+
+    def test_history_shutdown_cancellation_leaves_main_close_scoring_available(self):
+        calls=[]
+        book=SimpleNamespace(_score_one=lambda st:calls.append(st))
+        def replay(**kwargs):book._score_one('history')
+        book.replay_all=replay
+        pulse=SimpleNamespace(sets=book,_hist_stop=False)
+        session.install_history_cancellation(pulse)
+        book.replay_all()
+        pulse._hist_stop=True
+        with self.assertRaises(SystemExit):book.replay_all()
+        book._score_one('live-close')
+        self.assertEqual(calls,['history','live-close'])
+
     def test_native_admission_requires_a_native_qualified_set(self):
         book=SimpleNamespace(progress=SimpleNamespace(ready=True),_running=False,_lookback_pending=False,
                              by_idx=[1,2],gate_reason=lambda st:'real')

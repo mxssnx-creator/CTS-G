@@ -323,17 +323,61 @@ def prepare_history_warmup(pulse, full_universe=True):
         pulse.load.partial = False
 
 
-def capture(pulse, out, label):
+def end_reason(phase, now, warm_deadline, active_deadline, last_cycle, heartbeat_seconds, stop_requested=False):
+    if phase not in ('warming', 'active'):
+        return None
+    if stop_requested:
+        return 'requested session stop'
+    if phase == 'warming':
+        return 'readiness deadline' if now >= warm_deadline else None
+    # A stale loop must not become a successful observation merely because
+    # wall time reached the requested deadline.
+    if now - last_cycle > heartbeat_seconds:
+        return 'main cycle heartbeat deadline'
+    return 'observation complete' if active_deadline is not None and now >= active_deadline else None
+
+
+def install_history_cancellation(pulse):
+    """Let shutdown release a replay lock without interrupting live-close accounting."""
+    book = pulse.sets
+    original_replay, original_score = book.replay_all, book._score_one
+    local = threading.local()
+    def score(*args, **kwargs):
+        if getattr(local, 'replaying', False) and pulse._hist_stop:
+            raise SystemExit('session history stopped')
+        return original_score(*args, **kwargs)
+    def replay(*args, **kwargs):
+        before = getattr(local, 'replaying', False)
+        local.replaying = True
+        source_step = kwargs.get('on_step')
+        def step():
+            if pulse._hist_stop:
+                raise SystemExit('session history stopped')
+            if source_step:
+                source_step()
+        kwargs['on_step'] = step
+        try:
+            return original_replay(*args, **kwargs)
+        finally:
+            local.replaying = before
+    book._score_one, book.replay_all = score, replay
+
+
+def capture(pulse, out, label, include_candles=True):
     pulse.write_stats(force=True)
     stats_path = Path(sys.modules[pulse.__class__.__module__].STATS_PATH)
     atomic_json(Path(out) / (label + "-stats.json"), json.loads(stats_path.read_text()))
+    if not include_candles:
+        return
     book = pulse.sets
     with book._lock:
-        atomic_json(Path(out) / (label + "-candles.json"), {
+        candles = {
             "capturedAt": time.time(), "barSeconds": 60,
             "symbols": {s: {"lastClosedBarAt": book.bar_t.get(s), "bars": list(book.bars.get(s, ()))}
                         for s in pulse.contracts},
-        })
+        }
+    # Disk serialization/fsync never holds the shared trading/replay lock.
+    atomic_json(Path(out) / (label + "-candles.json"), candles)
 
 
 def cleanup(pulse, journal, seconds):
@@ -404,6 +448,7 @@ def main(argv=None):
     ap.add_argument("--minutes", type=float, default=30)
     ap.add_argument("--warmup-minutes", type=float, default=30)
     ap.add_argument("--cleanup-seconds", type=float, default=180)
+    ap.add_argument("--heartbeat-seconds", type=float, default=60)
     ap.add_argument("--history-hours", type=int, default=18,
                     help="evaluation hours; earlier stage context and warmup must fit the 72h test budget")
     ap.add_argument("--execute", action="store_true")
@@ -412,6 +457,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not 0 < args.minutes <= 30 or not 0 < args.warmup_minutes <= 60 or not 0 < args.cleanup_seconds <= 600:
         ap.error("observation<=30min, warmup<=60min and cleanup<=600s must be positive")
+    if not 15 <= args.heartbeat_seconds <= 300:
+        ap.error('heartbeat must be between15 and300 seconds')
     if args.out.exists():
         ap.error("choose a new private output directory; sessions cannot overwrite prior evidence")
     symbols = json.loads(args.symbols.read_text())
@@ -483,16 +530,23 @@ def main(argv=None):
         raise RuntimeError("selected symbol contract coverage is incomplete")
     pulse = pt.Pulse(api, contracts)
     freeze_account_settings(pulse)
+    install_history_cancellation(pulse)
     original_cycle = pulse._one_cycle
     # No position exists during admission-locked warmup. Process the complete
     # frozen universe once instead of re-scoring its growing pool after every
     # tiny load-governor chunk. Restore the configured live policy at admission.
     warming_since = time.monotonic()
+    last_cycle = [warming_since]
+    watchdog_stop = threading.Event()
+    watchdog_reason = [None]
     next_capture = [0.0]
     def cycle():
         now = time.monotonic()
-        if (args.out / 'STOP_SESSION').exists():
-            raise SessionEnd('requested session stop')
+        reason = end_reason(journal.phase, now, warming_since + args.warmup_minutes*60,
+                            journal.deadline, last_cycle[0], args.heartbeat_seconds,
+                            (args.out / 'STOP_SESSION').exists())
+        if reason:
+            raise SessionEnd(reason)
         if pulse.ignored_foreign:
             raise SessionEnd('foreign account position detected during session')
         if journal.phase == "warming":
@@ -504,23 +558,46 @@ def main(argv=None):
                 report["activeStartedAt"] = time.time()
                 journal.deadline = time.monotonic() + args.minutes * 60
                 journal.phase = "active"
+                last_cycle[0] = time.monotonic()
                 pulse.load.partial = bool(overlay.get('loadPartial', True))
                 Path(pt.PAUSE_PATH).unlink(missing_ok=True)
                 save()
             elif now - warming_since >= args.warmup_minutes * 60:
                 raise SessionEnd("readiness deadline")
-        elif now >= journal.deadline:
-            raise SessionEnd("observation complete")
         original_cycle()
+        finished = time.monotonic()
+        # Also check synchronously: a long GIL-holding operation may delay the
+        # watcher thread. It must not erase its own stale heartbeat on return.
+        reason = end_reason(journal.phase, finished, warming_since + args.warmup_minutes*60,
+                            journal.deadline, last_cycle[0], args.heartbeat_seconds,
+                            (args.out / 'STOP_SESSION').exists())
+        if reason:
+            raise SessionEnd(reason)
+        last_cycle[0] = finished
+        report['lastCycleCompletedAt'] = time.time()
         if time.monotonic() >= next_capture[0]:
             elapsed = int(time.time() - report.get("activeStartedAt", report["createdAt"]))
-            capture(pulse, args.out, f"{journal.phase}-{elapsed:05d}")
+            capture(pulse, args.out, f"{journal.phase}-{elapsed:05d}", include_candles=False)
+            save()
             next_capture[0] = time.monotonic() + 60
     pulse._one_cycle = cycle
     def interrupt(_sig, _frame):
-        raise SessionEnd("operator interrupt")
+        reason = watchdog_reason[0] or end_reason(journal.phase, time.monotonic(),
+            warming_since + args.warmup_minutes*60, journal.deadline, last_cycle[0],
+            args.heartbeat_seconds, (args.out/'STOP_SESSION').exists())
+        raise SessionEnd(reason or "operator interrupt")
     signal.signal(signal.SIGINT, interrupt)
     signal.signal(signal.SIGTERM, interrupt)
+    def watch():
+        while not watchdog_stop.wait(.25):
+            reason = end_reason(journal.phase, time.monotonic(), warming_since + args.warmup_minutes*60,
+                                journal.deadline, last_cycle[0], args.heartbeat_seconds,
+                                (args.out/'STOP_SESSION').exists())
+            if reason:
+                watchdog_reason[0] = reason
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+    threading.Thread(target=watch, name='session-watch', daemon=True).start()
     report["executed"] = True
     save()
     try:
@@ -545,14 +622,21 @@ def main(argv=None):
         report["stopReason"] = "runtime failure"
         report["errorType"] = type(exc).__name__
     finally:
+        watchdog_stop.set()
         report["activeEndedAt"] = time.time()
+        report['watchdogReason'] = watchdog_reason[0]
+        pulse._hist_stop = pulse._warm_stop = True
         Path(pt.STOP_PATH).touch()
         try:
-            capture(pulse, args.out, "before-cleanup")
             report["cleanup"] = cleanup(pulse, journal, args.cleanup_seconds)
-            capture(pulse, args.out, "final")
         except BaseException as exc:
             report["cleanup"] = {"confirmedFlat": False, "errorType": type(exc).__name__, "protectionsRetained": True}
+        pulse.halted = True
+        pulse.halt_reason = 'bounded session stopped: ' + str(report.get('stopReason') or 'unknown')
+        try:
+            capture(pulse, args.out, "final")
+        except BaseException as exc:
+            report['finalCaptureError'] = type(exc).__name__
         report["observationSeconds"] = max(0, report["activeEndedAt"] - report.get("activeStartedAt", report["activeEndedAt"]))
         report["complete"] = (report.get("stopReason") == "observation complete"
                               and report["observationSeconds"] >= args.minutes * 60
