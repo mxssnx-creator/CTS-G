@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 scripts/test_regression_scheduling.py
           python3 scripts/test_regression_progress.py
+          python3 scripts/test_regression_memo.py
       - name: Run offline engine tests
         run: python3 scripts/regression/run.py --jobs 4
       - name: Check VST transport and accounting offline
