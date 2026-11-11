@@ -82,6 +82,36 @@
       "maxSlRatio": 0.5
     }
   ],
+  "relationLanes": {
+    "enabled": false,
+    "relations": {
+      "overall": {
+        "on": true,
+        "ratio": 0.25
+      },
+      "indication": {
+        "on": true,
+        "ratio": 0.25
+      },
+      "type": {
+        "on": true,
+        "ratio": 0.25
+      },
+      "range": {
+        "on": true,
+        "ratio": 0
+      },
+      "step": {
+        "on": true,
+        "ratio": 0
+      }
+    },
+    "mainN": 25,
+    "realN": 15,
+    "minPf": 1.1,
+    "maxMult": 2,
+    "fullWindow": false
+  },
   "blockVolumeRatio": 1,
   "blockRiskPctOfBalance": 0,
   "manualCloseRestMin": 240,
