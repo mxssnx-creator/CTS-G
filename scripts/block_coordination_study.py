@@ -157,13 +157,17 @@ def first_reach(extremes, level: float):
     return None
 
 
-def simulate(window: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
+def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The engine's Block rules over a window's parents in time order (a close before an open before a decision at one instant, as stack_eval.block_sim2).
     cand: block_rules overlay keys (blockCounts, blockRelations, ...) plus the coordination's own switches:
       mode       "all" (every selected relation must agree, the engine's rule) or "any" (one agreeing relation is enough)
       kinds / lanes / ranges   the parents an add may go to (Set type, lane, TP range); observations are still collected from every parent
       room       an add on a fixed-target parent needs at least this many PositionCosts left to its target (0: only positive room, the engine's rule)
-      net_gate   an add needs every selected relation's cumulative parent result to be at or above zero"""
+      share      an add on a fixed-target parent only while its level is at most this share of the target distance (0: no rule)
+      net_gate   an add needs every selected relation's cumulative parent result to be at or above zero
+      guard      the book's own executed adds must not be in deficit: while their cumulative net is below zero no add is sent; the adds that would
+                 have been sent are followed on paper, and adding resumes once those paper adds have earned the deficit back (then both restart at zero)
+    state: a dict carried from one window to the next (the evidence ledgers and the guard), as the live book carries them; None = a fresh book."""
     import block_rules as br
     cfg = br.clean_cfg(cand)
     cf = float(window["meta"]["cost_frac"])
@@ -171,6 +175,7 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
     mode = cand.get("mode", "all")
     kinds, lanes, ranges = cand.get("kinds"), cand.get("lanes"), cand.get("ranges")
     room, net_gate = float(cand.get("room", 0.0)), bool(cand.get("net_gate", False))
+    share = float(cand.get("share", 0.0))
     ps = window["parents"]
     ev: List[Tuple[float, int, int, int]] = []
     meta: List[Dict[str, Any]] = []
@@ -189,7 +194,10 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
         for n, now_t, _lv, _ok, _fl in hits:
             ev.append((now_t, 2, i, n))
     ev.sort()
-    ledgers: Dict[str, Dict[str, Any]] = {}
+    state = state if state is not None else {}
+    ledgers: Dict[str, Dict[str, Any]] = state.setdefault("ledgers", {})
+    guard = bool(cand.get("guard", False))
+    gs = state.setdefault("guard", {"net": 0.0, "shadow": 0.0})      # executed adds' cumulative net and, while in deficit, the paper adds' net since
 
     def led(k):
         return ledgers.setdefault(k, {"paper": {}, "executed": {}, "life": br.new_life()})
@@ -224,7 +232,13 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
                     continue
                 if room > 0 and (target / lvl - 1) * r["side"] + 1e-12 < room * cf:   # the coordination's own: at least `room` PositionCosts to the target
                     continue
-            m["fired"][n] = (r["exit"] - lvl) / lvl * r["side"] - cf
+                if share > 0 and lv > share * r["tp_costs"] + 1e-9:                    # ... and the level at most this share of the way to the target
+                    continue
+            add_net_ = (r["exit"] - lvl) / lvl * r["side"] - cf
+            if guard and gs["net"] < -1e-12:
+                m.setdefault("shadow", {})[n] = add_net_          # in deficit: followed on paper, not sent
+            else:
+                m["fired"][n] = add_net_
             continue
         # close: the parent, its adds, then the evidence and the lifecycle
         net = r["net"]
@@ -247,6 +261,13 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any]) -> Dict[str, Any]:
             elif v < 0:
                 wl -= v
                 al -= v
+        if guard:
+            gs["net"] += add_part
+            for n, add_net in (m.get("shadow") or {}).items():
+                lv = m["hits"][n - 1][2]
+                gs["shadow"] += add_net * br.base_return_contribution(1.0, r["entry"] * (1 + r["side"] * lv * cf), cfg.target_ratio(n), r["entry"])
+            if gs["net"] < -1e-12 and gs["net"] + gs["shadow"] >= 0:
+                gs["net"], gs["shadow"] = 0.0, 0.0                 # the paper adds earned the deficit back: adding resumes
         highest = max(m["fired"]) if m["fired"] else 0
         for k in m["rk"]:
             b = led(k)
@@ -297,6 +318,10 @@ def label(c: Dict[str, Any]) -> str:
         parts.append("netgate")
     if c.get("room"):
         parts.append(f"room{c['room']:g}")
+    if c.get("share"):
+        parts.append(f"share{c['share']:g}")
+    if c.get("guard"):
+        parts.append("guard")
     return " ".join(parts)
 
 
