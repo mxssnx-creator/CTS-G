@@ -542,8 +542,11 @@ def main(argv=None):
     next_capture = [0.0]
     def cycle():
         now = time.monotonic()
-        if (args.out / 'STOP_SESSION').exists():
-            raise SessionEnd('requested session stop')
+        reason = end_reason(journal.phase, now, warming_since + args.warmup_minutes*60,
+                            journal.deadline, last_cycle[0], args.heartbeat_seconds,
+                            (args.out / 'STOP_SESSION').exists())
+        if reason:
+            raise SessionEnd(reason)
         if pulse.ignored_foreign:
             raise SessionEnd('foreign account position detected during session')
         if journal.phase == "warming":
@@ -561,10 +564,16 @@ def main(argv=None):
                 save()
             elif now - warming_since >= args.warmup_minutes * 60:
                 raise SessionEnd("readiness deadline")
-        elif now >= journal.deadline:
-            raise SessionEnd("observation complete")
         original_cycle()
-        last_cycle[0] = time.monotonic()
+        finished = time.monotonic()
+        # Also check synchronously: a long GIL-holding operation may delay the
+        # watcher thread. It must not erase its own stale heartbeat on return.
+        reason = end_reason(journal.phase, finished, warming_since + args.warmup_minutes*60,
+                            journal.deadline, last_cycle[0], args.heartbeat_seconds,
+                            (args.out / 'STOP_SESSION').exists())
+        if reason:
+            raise SessionEnd(reason)
+        last_cycle[0] = finished
         report['lastCycleCompletedAt'] = time.time()
         if time.monotonic() >= next_capture[0]:
             elapsed = int(time.time() - report.get("activeStartedAt", report["createdAt"]))

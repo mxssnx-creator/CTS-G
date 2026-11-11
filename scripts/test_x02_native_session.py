@@ -22,6 +22,55 @@ class NativeSessionTests(unittest.TestCase):
         self.assertIsNone(session.end_reason('warming',100,150,None,0,60))
         self.assertIsNone(session.end_reason('cleanup',200,50,150,0,60,True))
 
+    def test_native_cycle_cannot_hide_a_stall_when_watcher_thread_does_not_run(self):
+        clock = [0.0]
+        def get(path, *args):
+            if path.endswith('/balance'): return {'code':0,'data':[{'asset':'VST'}]}
+            if path.endswith('/positions'): return {'code':0,'data':[]}
+            if path.endswith('/openOrders'): return {'code':0,'data':{'orders':[]}}
+            raise AssertionError(path)
+        api = SimpleNamespace(base=session.HOST,get=get,_req=lambda *a:None)
+        class Pulse:
+            def __init__(self, api, contracts):
+                self.load=SimpleNamespace(partial=True)
+                self.ignored_foreign=False
+                self.pool=SimpleNamespace(shutdown=lambda **kw:None)
+            def _one_cycle(self): clock[0] += 20
+            def run(self): self._one_cycle()
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(session.os.environ,{}))
+            prior_umask=session.os.umask(0o077)
+            stack.callback(session.os.umask,prior_umask)
+            root=Path(td)
+            credentials=root/'credentials.json'
+            credentials.write_text('{"api_key":"fixture","api_secret":"fixture","is_testnet":true}')
+            credentials.chmod(0o600)
+            overlay=root/'overlay.json';overlay.write_text('{}')
+            symbols=root/'symbols.json';symbols.write_text(json.dumps(SYMBOLS))
+            native=SimpleNamespace(DIR=str(root/'native'),PAUSE_PATH=str(root/'native/PAUSE'),
+                STOP_PATH=str(root/'native/STOP'),CONN_SHORT=session.CONN,IS_BYBIT=False,BASE=session.HOST,
+                make_api=lambda *a:api,load_contracts=lambda ss:{s:None for s in ss},Pulse=Pulse)
+            stack.enter_context(patch.dict(sys.modules,{'pulse_trader':native}))
+            for name,replacement in {
+                'context_requirement':lambda ov:60,'shared_account_protection_verified':lambda:True,
+                'freeze_account_settings':lambda p:None,'install_history_cancellation':lambda p:None,
+                'collect_account_fees':lambda *a:None,'prepare_history_warmup':lambda *a,**kw:None,
+                'native_admission_ready':lambda p:True,'capture':lambda *a,**kw:None,
+                'cleanup':lambda *a:{'confirmedFlat':True},
+            }.items():stack.enter_context(patch.object(session,name,replacement))
+            stack.enter_context(patch.object(session.time,'monotonic',lambda:clock[0]))
+            stack.enter_context(patch.object(session.time,'time',lambda:1_700_000_000+clock[0]))
+            stack.enter_context(patch.object(session.signal,'signal'))
+            stack.enter_context(patch.object(session.threading,'Thread',return_value=SimpleNamespace(start=lambda:None)))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            result=session.main(['--overlay',str(overlay),'--symbols',str(symbols),'--out',str(root/'run'),
+                '--credentials',str(credentials),'--execute','--minutes','30','--heartbeat-seconds','15'])
+            report=json.loads((root/'run/session.json').read_text())
+            self.assertEqual(result,1)
+            self.assertEqual(report['stopReason'],'main cycle heartbeat deadline')
+            self.assertFalse(report['complete'])
+            self.assertTrue(report['cleanup']['confirmedFlat'])
+
     def test_periodic_capture_skips_history_and_full_capture_releases_lock_before_io(self):
         import threading
         class Pulse:
