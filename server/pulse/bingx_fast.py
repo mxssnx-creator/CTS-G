@@ -446,6 +446,14 @@ class FastBingX:
     def get(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._req("GET", path, extra)
 
+    def reported_fill_fee(self, leg, opened_at):
+        """Read exact own-order commissions only after position settlement."""
+        from venue_fill_fees import verified_bingx_fee
+        reply = self.get("/openApi/swap/v2/trade/allFillOrders", {
+            "tradingUnit": "COIN", "orderId": leg["orderId"],
+            "startTs": int(max(0, opened_at-60)*1000), "endTs": int(time.time()*1000)})
+        return verified_bingx_fee(reply, leg)
+
     def post(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._req("POST", path, extra)
 

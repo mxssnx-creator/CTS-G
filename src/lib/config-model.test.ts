@@ -133,9 +133,13 @@ test("the earlier mainAuto keys still load, and the new key wins when both are g
   assert.deepEqual(both.mainShortWindows, [5]);
 });
 
-test("the Main minimal window is held to 0..3 and to a mode of positive or negative", () => {
-  assert.equal(overlayFromCts(cts({ mainMinN: 9 })).mainMinN, 3);
+test("the Main minimal window is held to 0..5 and to a mode of positive or negative", () => {
+  assert.equal(overlayFromCts(cts({ mainMinN: 9 })).mainMinN, 5);
   assert.equal(overlayFromCts(cts({ mainMinN: -2 })).mainMinN, 0);
+  for (const n of [1,2,3,4,5]) {
+    const loaded = overlayFromCts(cts({mainMinN:n}));
+    assert.equal(overlayFromCts(cts(), syncOverlayFlags(loaded)).mainMinN, n);
+  }
   assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "NEGATIVE" })).mainMinMode, "negative");
   assert.equal(overlayFromCts(cts({ mainMinMode: "sideways" })).mainMinMode, "positive");
   assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "Both" })).mainMinMode, "both");
