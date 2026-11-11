@@ -327,6 +327,154 @@ def block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule():
     return ok, f"{cases} single-count books against the plain reading, mismatches {bad[:4]}; six counts sum {summed}; overlap before / after the block completed x{early} / x{late}"
 
 
+def _replayed_rounds(history, n, c):
+    """One procedure's (level, pause) recomputed from nothing: `history` is the group's positions in the order they opened, each
+    {"mult", "net" (None = no result), "closed" (close sequence number or None)}. Blocks are the consecutive chunks of n; they settle in the order they
+    were formed, a block only when every one of its positions has left; results are added in the order the positions closed."""
+    level, deficit, rest = 0, 0.0, 0
+    for i in range(0, len(history) - len(history) % n, n):
+        block = history[i:i + n]
+        if any(p["closed"] is None for p in block):
+            break
+        unit = weighted = 0.0
+        scored = 0
+        for p in sorted(block, key=lambda p: p["closed"]):
+            if p["net"] is not None:
+                unit += p["net"]
+                weighted += p["net"] * p["mult"]
+                scored += 1
+        if not scored:
+            continue
+        if rest > 0:
+            rest -= 1
+        elif level == 0:
+            if unit < 0:
+                level, deficit = 1, weighted
+            elif c["pause"]:
+                rest = c["pause"]
+        else:
+            deficit += weighted
+            if deficit >= 0:
+                level, deficit, rest = 0, 0.0, c["pause"]
+            elif c["step"] and unit < 0:
+                level = min(c["maxLevel"], level + 1)
+    return level, rest
+
+
+def block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions():
+    """Intensive: (1) worked cases in plain numbers - the ratio is always from the ORIGINAL volume (levels 1, 2, 3 give 1 + r, 1 + 2r, 1 + 3r, never
+    compounded), step climbs one level per further losing block up to the top level and stops there, the raise is HELD over winning blocks that do not yet
+    earn the deficit back, it ends on the block that brings the weighted net to zero or above (the boundary counts as recovered), a pause of P holds exactly P
+    blocks at base volume (a losing block inside it starts nothing) and the first losing block after it raises again, a pause also follows a positive block
+    at base volume. (2) 300 random books: up to 5 positions open at once, three relations, several groups, all six counts raising with their own random
+    ratio / step / top level / pause, unscored closes and positions released without a close - every position's multiple equals 1 + the sum over the six
+    counts of ratio x level, each level recomputed from nothing by a replay of the group's history; a released position never stalls its group; every
+    count settles exactly the blocks whose positions have all left."""
+    import random
+    import block_rounds as rounds
+    k = rounds.keys_of("A-USDT", 1, "general", "base", 5, "pos", "s1")
+
+    def walk(counts, nets, cap=5.0):
+        b = rounds.RoundsBook(cfg=rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": cap, "counts": counts}))
+        out = []
+        for i, net in enumerate(nets):
+            m = b.ask(k)[0]
+            b.opened(f"p{i}", k, m)
+            b.closed(f"p{i}", net)
+            out.append(round(m, 6))
+        return out, b
+
+    worked = {}
+    # count 1, ratio 0.5, step to 3: losses climb 1.5 / 2.0 / 2.5 and stay at the top; +1 at x 2.5 leaves the deficit (-1 -1.5 -2 -2.5 -2.5 +2.5 = -7): held
+    worked["step"], _b = walk({"1": {"on": True, "ratio": 0.5, "step": True, "maxLevel": 3}}, [-1, -1, -1, -1, -1, 1, 1, 6, -1, -1])
+    # after the 6 (x 2.5 = +15, net +10.5 with the +2.5 before) the group is recovered: base volume again, the next loss starts at level 1
+    want_step = [1.0, 1.5, 2.0, 2.5, 2.5, 2.5, 2.5, 2.5, 1.0, 1.5]
+    # no step: one level only, held through a win that does not recover (-1, then -1.5, +0.75 -> -1.75), ended exactly at zero by the boundary block
+    worked["hold"], _b = walk({"1": {"on": True, "ratio": 0.5}}, [-1, -1, 0.5, -0.5, 1.0, 1.0, 0.5, -1])
+    #   deficit: -1 | -2.5 | -1.75 | -2.5 | -1.0 | +0.5 recovered ... then base, a win at base, a loss -> next raised
+    want_hold = [1.0, 1.5, 1.5, 1.5, 1.5, 1.5, 1.0, 1.0]
+    worked["boundary"], bb = walk({"1": {"on": True, "ratio": 1.0}}, [-1, 0.5, -1])      # -1 then +0.5 x 2 = exactly 0: recovered
+    want_boundary = [1.0, 2.0, 1.0]
+    # pause 2 after a recovery: two blocks at base whatever they do (both lose: nothing starts), the third losing block raises
+    worked["pause"], _b = walk({"1": {"on": True, "ratio": 1.0, "pause": 2}}, [-1, 2, -1, -1, -1, -1, 5, 1, -1, -1, -1])
+    #   L0 lose -> L1 | x2 +4: recovered, pause 2 | paused | paused | lose -> L1 | x2 -2 held | x2 +10 recovered, pause 2 | paused (win) | paused | lose -> L1 | x 2
+    want_pause = [1.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0]
+    # a pause also follows a positive block at base volume: win, then one paused block (a loss that starts nothing), then a loss that raises
+    worked["pause after a win"], _b = walk({"1": {"on": True, "ratio": 1.0, "pause": 1}}, [1, -1, -1, -1])
+    want_pw = [1.0, 1.0, 1.0, 2.0]
+    # blocks of 3: nothing moves inside a block; all three of the next block are raised; step 2 after a second losing block
+    worked["blocks of 3"], _b = walk({"3": {"on": True, "ratio": 0.25, "step": True, "maxLevel": 2}}, [-1, 1, -1, 1, -1, -1, 0, 0, 0, 9, 9, 9, 0])
+    want_b3 = [1.0, 1.0, 1.0, 1.25, 1.25, 1.25, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.0]
+    # two counts stack from the original volume and the ceiling binds: count 1 ratio 1.0 step to 4, count 2 ratio 0.5, ceiling x 3
+    worked["stack"], _b = walk({"1": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 4}, "2": {"on": True, "ratio": 0.5}}, [-1, -1, -1, -1], cap=3.0)
+    want_stack = [1.0, 2.0, 3.0, 3.0]        # 1 | 1 + 1 | 1 + 2 + 0.5 capped at 3 | 1 + 3 + 0.5 capped
+    plain_ok = (worked["step"] == want_step and worked["hold"] == want_hold and worked["boundary"] == want_boundary and worked["pause"] == want_pause
+                and worked["pause after a win"] == want_pw and worked["blocks of 3"] == want_b3 and worked["stack"] == want_stack)
+
+    rng = random.Random(20261111)
+    bad, books, positions, raised, top = [], 0, 0, 0, 1.0
+    for _case in range(300):
+        counts = {str(n): {"on": rng.random() < 0.8, "ratio": rng.choice((0.1, 0.25, 0.5, 1.0, 2.0)), "step": rng.random() < 0.6,
+                           "maxLevel": rng.randint(1, 6), "pause": rng.choice((0, 0, 1, 2, 6))} for n in rounds.COUNTS}
+        rels = rng.sample(("overall", "symbol", "type", "set", "step", "direction"), 3)
+        cap = rng.choice((2.0, 3.0, 5.0))
+        cfg = rounds.config_of({"enabled": True, "relations": rels, "maxMult": cap, "counts": counts})
+        b = rounds.RoundsBook(cfg=cfg)
+        hist = {}                                # (relation, key) -> the group's positions in open order
+        live, seq = [], 0
+        for i in range(rng.randint(40, 160)):
+            while live and (len(live) >= 5 or rng.random() < 0.45):          # close (or release) a random open position
+                pid, rows = live.pop(rng.randrange(len(live)))
+                seq += 1
+                how = rng.random()
+                net = None if how < 0.08 else rng.choice((-1.2, -0.7, -0.3, 0.2, 0.6, 1.4, 2.5))
+                for row in rows:
+                    row["closed"], row["net"] = seq, net
+                if how < 0.04:
+                    b.forget({p for p, _ in live})                           # left the book with no close record
+                else:
+                    b.closed(pid, net, scored=net is not None)
+            keys = rounds.keys_of(rng.choice(("A", "B", "C")), rng.choice((1, -1)), rng.choice(("general", "indications")), rng.choice(("base", "trail")),
+                                  rng.choice((5, 9)), "pos", rng.choice(("s1", "s2")))
+            want = 1.0
+            for rel in cfg.relations:
+                h = hist.setdefault((rel, keys[rel]), [])
+                for n in rounds.COUNTS:
+                    c = counts[str(n)]
+                    if c["on"]:
+                        want += c["ratio"] * _replayed_rounds(h, n, c)[0]
+            want = min(cap, want)
+            got = b.ask(keys)[0]
+            if abs(got - want) > 1e-9:
+                bad.append((_case, i, round(got, 6), round(want, 6)))
+                break
+            b.opened(f"p{i}", keys, got)
+            rows = []
+            for rel in cfg.relations:
+                row = {"mult": got, "net": None, "closed": None}
+                hist[(rel, keys[rel])].append(row)
+                rows.append(row)
+            live.append((f"p{i}", rows))
+            positions += 1
+            raised += got > 1.0 + 1e-9
+            top = max(top, got)
+        for (rel, key), h in hist.items():       # every count settled exactly its complete blocks, in order
+            for n in rounds.COUNTS:
+                g = b.groups[b.gid(rel, key, n)]
+                done = 0
+                for j in range(0, len(h) - len(h) % n, n):
+                    if any(p["closed"] is None for p in h[j:j + n]):
+                        break
+                    done += 1
+                pending = sum(1 for _ in range(done * n, len(h), n))
+                if len(g["open"]) != pending or (g["level"], g["pause"]) != _replayed_rounds(h, n, counts[str(n)]):
+                    bad.append((_case, rel, key, n, "state"))
+        books += 1
+    ok = plain_ok and not bad and raised > 1000 and top >= 5.0 - 1e-9
+    return ok, (f"worked cases {worked if not plain_ok else 'all equal the hand calculation'}; {books} random books, {positions} positions ({raised} raised, "
+                f"largest multiple x{top:.2f}), mismatches {bad[:3]}")
+
+
 def block_rounds_ship_the_procedure_measured_at_or_above_without():
     """The shipped overlays, the three presets that carry Block and the desk default hold the same blockRounds object, and it is the measured one: relation
     step, block count 5 raising (ratio 1.0, step to level 2, no pause), the other five counts forming their blocks without raising, ceiling x 3. The engine's
@@ -355,5 +503,6 @@ CHECKS = [
     ("block_structure.an-add-needs-room-to-the-target-and-an-allowed-parent-type", an_add_needs_room_to_the_target_and_an_allowed_parent_type),
     ("block_structure.the-simulator-and-the-study-apply-the-same-rules-as-the-engine", the_simulator_and_the_study_apply_the_same_rules_as_the_engine),
     ("block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule", block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule),
+    ("block_structure.block-rounds-hold-step-pause-and-stack-by-the-rule-on-overlapping-positions", block_rounds_hold_step_pause_and_stack_by_the_rule_on_overlapping_positions),
     ("block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without", block_rounds_ship_the_procedure_measured_at_or_above_without),
 ]

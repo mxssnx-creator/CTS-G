@@ -22,7 +22,10 @@
   disjoint + last positive 0.732 / 1.008 / 0.485 / 1.002; disjoint + last negative 0.920 / 0.663 / 0.444 / 0.624** (62 - 405 positions per cell). Disjoint + positive reaches 1.0 on both sealed parts and is
   under no Axis on both development parts, and against the shipped Axis it is better on three and worse on one: the ship rule is not met, **no Axis default changed**. A high Axis PF cannot be ordered:
   the parents it admits are under PF 1 on these windows whatever rule admits them; `axisDisjoint: true` + `axisLastOutcome: "positive"` is two keys for the owner.
-  Checks `trader.block-rounds-*`, `block_structure.block-rounds-*`, `selftest.block_rounds`, `lane_rank.the-disjoint-axis-*`; mutants `block rounds:` (13), `axis disjoint:` (3), all caught. Regression 705 pass.
+  (e) **Intensive test and one defect fixed (later the same day):** hand-calculated cases (ratio from the original volume, step to the top level, hold, recovery at exactly zero, pause of exactly P blocks,
+  blocks of 3, stacking under the ceiling) and 300 random books of 30,318 overlapping positions with all six counts raising, each multiple recomputed from nothing: 0 mismatches. Found: a position leaving
+  the book with no close record kept its block waiting and would have stopped its group's procedure for good (`Pulse.rounds_release` at every drop site; a restart forgets members the book no longer holds).
+  Checks `trader.block-rounds-*`, `block_structure.block-rounds-*` (3), `selftest.block_rounds`, `lane_rank.the-disjoint-axis-*`; mutants `block rounds:` (21), `axis disjoint:` (3), all caught. Regression 706 pass.
 
 - **2026-11-11, owner: "windows no longer on the basis of a period, instead on the basis of the last N positions and configs" / "keep using both".** `lastNBasis`
   (overlay, desk Settings "Last-N windows by count"): "time" (the default, unchanged, golden identical) = a last-N window is the newest N orders inside the

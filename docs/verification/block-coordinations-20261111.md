@@ -242,3 +242,25 @@ No row is at or above "no Axis" on all four, and no row is at or above the shipp
 that reaches 1.0 anywhere (both sealed parts) and it is the weakest or second weakest on both development parts. The sign of every Axis rule
 flips between the two parts of the same three days, as it did on 2026-11-10. Nothing changed in the defaults; the option is two overlay keys.
 
+## 8. Block rounds tested intensively (owner: "every count independent, ratios, stacking, higher steps, raised, held, paused correctly")
+
+`block_structure.block-rounds-hold-step-pause-and-stack-by-the-rule-on-overlapping-positions`:
+- **Worked cases, calculated by hand:** ratio always from the original volume (levels 1 / 2 / 3 = 1 + r / 1 + 2r / 1 + 3r, never compounded);
+  step climbs one level per further losing block and stops at the top level; the raise is held over winning blocks that do not yet earn the
+  deficit back and ends on the block that brings the weighted net to zero or above (exactly zero counts); a pause of P holds exactly P blocks
+  at base volume (a losing block inside it starts nothing), the first losing block after it raises again; a pause also follows a positive
+  block at base volume; in blocks of 3 nothing moves inside a block and all three positions of the next block are raised; two counts stack
+  and the ceiling binds.
+- **300 random books, 30,318 positions (25,009 raised, up to x 5):** up to five positions open at once, three relations, several groups, all
+  six counts raising with their own random ratio (0.1 - 2.0), step, top level (1 - 6) and pause (0 - 6), unscored closes and positions
+  released without a close. Every position's multiple equals 1 + the sum over the six counts of ratio x level, each level recomputed from
+  nothing by a replay of the group's history (no shared code with the book); every procedure's level, pause and pending blocks equal that
+  replay at the end. 0 mismatches.
+
+**Defect found by this work and fixed:** a position that left the book with no close record (the venue no longer holds it, a stale local row,
+a banned symbol, a restart whose book lost it) stayed a member of its blocks, and since blocks settle in the order they were formed, one such
+position would have stopped its group's procedure for good. `Pulse.rounds_release` now takes it out at every such site and a restart drops
+the membership of positions the restored book no longer holds; the block completes on its other positions (no result is invented).
+Mutants `block rounds:` now 21, all caught (compounding ratio, pause one block short, zero not a recovery, a win in deficit ends the raise,
+step on a winning block, blocks settling out of order, both release paths, ...). Regression 706 pass.
+

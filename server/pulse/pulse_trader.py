@@ -1182,6 +1182,12 @@ class Pulse:
         })
         self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
         self.rounds = block_rounds.RoundsBook(BLOCK_PATH + ".rounds.json")
+        try:
+            # a restart: positions the restored book no longer holds leave their blocks without a result (a block never waits for a position that is gone)
+            if self.rounds.forget({p.client_id for p in self.open.values() if p.client_id}):
+                self.rounds.save()
+        except Exception:
+            self.rounds.error = "Block rounds restore failed; raises disabled"
         self.relate = RelateBook(path=BLOCK_PATH + ".relate.json")
         self.coord = Coordinator()
         self.indications = IndicationBook()
@@ -1647,9 +1653,23 @@ class Pulse:
             return 0.0
         return q
 
+    def rounds_release(self, pos: Optional["Position"]) -> None:
+        """A position that leaves the book with no close record (the venue no longer holds it, a stale local row) leaves its Block-round blocks without a
+        result: a block must never wait for a position that will not close, or its group's procedure would stand still for good."""
+        rb = getattr(self, "rounds", None)
+        cid = str(getattr(pos, "client_id", "") or "") if pos is not None else ""
+        if rb is None or not cid or cid not in rb.members:
+            return
+        try:
+            rb.closed(cid, None, scored=False)
+            rb.save()
+        except Exception:
+            rb.error = "Block rounds release failed; raises disabled"
+
     def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
         self.ignore_syms[sym] = time.time() + sec
         self.owned_syms.discard(sym)
+        self.rounds_release(self.open.get(sym))
         self.open.pop(sym, None)
 
     def flatten_untracked(self, symbol: str, side: str, qty: float, px: float) -> bool:
@@ -4451,6 +4471,7 @@ class Pulse:
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.note_manual_close(pos, "restored position gone from the venue")
             self.cancel_controls(pos.symbol, side=pos.side)
+            self.rounds_release(pos)
             self.open.pop(pos.symbol, None)
             self.cooldown[pos.symbol] = time.time() + 90.0
         self.save_open_book()
@@ -6491,6 +6512,7 @@ class Pulse:
                     log(f"DROP stale local {sym} (exchange flat)")
                     self._exec_inc("dropped")       # left the book with no close record: counted, never lost
                     self.cancel_controls(sym, side=pos.side)
+                    self.rounds_release(pos)
                     self.open.pop(sym, None)
                     self.cooldown[sym] = time.time() + 90.0
                 self.save_open_book()
@@ -6670,6 +6692,7 @@ class Pulse:
             log(f"DROP stale local {sym} age={age:.0f}s")
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(sym, side=pos.side)
+            self.rounds_release(pos)
             self.open.pop(sym, None)
             self.cooldown[sym] = time.time() + 90.0
         self.ignored_foreign = len(foreign)

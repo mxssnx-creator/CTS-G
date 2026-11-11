@@ -861,6 +861,17 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
             _n, upos = enter(u, uapi, syms[1])
             u.close_pos(upos, 99.0, "test")
             out["unscored then scored loss"] = (after_unscored, u.rounds.ask(ukeys)[0])
+            _n, gpos = enter(u, uapi, syms[2])                                  # a position that leaves the book with no close record ...
+            held = len(u.rounds.members)
+            u.ban_sym(syms[2])
+            _n, gpos2 = enter(u, uapi, syms[3])
+            u.close_pos(gpos2, 99.0, "test")                                    # ... must not stall its group: the next block settles
+            g1 = u.rounds.groups[u.rounds.gid("step", ukeys["step"], 1)]
+            out["released"] = (held, len(u.rounds.members), len(g1["open"]), g1["blocks"])
+            _n, gpos3 = enter(u, uapi, syms[4])
+            os.remove(pt.OPEN_PATH)                                             # a restart whose book no longer holds the position
+            u2, _a2 = make(td, "unscored")
+            out["restart without the position"] = (len(u.rounds.members), len(u2.rounds.members), len(u2.rounds.groups[u2.rounds.gid("step", ukeys["step"], 1)]["open"]))
             q, _api = make(td, "off")
             notional, pos = enter(q, _api, syms[0])
             q.close_pos(pos, 99.0, "test")
@@ -875,6 +886,7 @@ def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
           and out["counts"][2] == (1, 2, 1, 1) and out["counts"][1][1] == 4 and out["counts"][3][1] == 1 and out["counts"][4][1] == 1
           and out["count 3 (off, its own blocks) level"] == 0
           and out["unscored then scored loss"] == ((1.0, 0, 0), 2.0)
+          and out["released"] == (1, 0, 0, 2) and out["restart without the position"] == (1, 0, 0)
           and out["off"] == (base, 0, (1.0, [])))
     return ok, f"entries and multiples: first block {seq}; {out}"
 
