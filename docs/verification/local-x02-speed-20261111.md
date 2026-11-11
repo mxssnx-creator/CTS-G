@@ -42,7 +42,10 @@ are deducted once. Acceptance round trips do not establish strategy profit.
 Native startup reads account fees in at most four parallel GETs, through the
 existing client limiter and the native fee parser. Only the main thread
 publishes measured rates. Readiness progress, deadlines and cancellation stay
-explicit. Account leverage/margin are not changed by this isolated wrapper;
+explicit. Paused startup replays the full universe before restoring the live
+load-governor policy, avoiding repeated scoring of partial pools. Large history
+pages whose async GET timed out get one bounded synchronous read retry;
+successful reads and explicit venue refusals are not resent. Account leverage/margin are not changed by this isolated wrapper;
 its conservative 1x margin assumption therefore triggers the native maximum-
 leverage self-check as an expected diagnostic, not a verified venue fault.
 

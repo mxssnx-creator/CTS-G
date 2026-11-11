@@ -455,6 +455,10 @@ def main(argv=None):
     pulse = pt.Pulse(api, contracts)
     freeze_account_settings(pulse)
     original_cycle = pulse._one_cycle
+    # No position exists during admission-locked warmup. Process the complete
+    # frozen universe once instead of re-scoring its growing pool after every
+    # tiny load-governor chunk. Restore the configured live policy at admission.
+    pulse.load.partial = False
     warming_since = time.monotonic()
     next_capture = [0.0]
     def cycle():
@@ -470,6 +474,7 @@ def main(argv=None):
                 report["activeStartedAt"] = time.time()
                 journal.deadline = time.monotonic() + args.minutes * 60
                 journal.phase = "active"
+                pulse.load.partial = bool(overlay.get('loadPartial', True))
                 Path(pt.PAUSE_PATH).unlink(missing_ok=True)
                 save()
             elif now - warming_since >= args.warmup_minutes * 60:

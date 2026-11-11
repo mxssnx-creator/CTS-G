@@ -1258,6 +1258,34 @@ class _PagedKlines:
 
 
 @_frozen_clock
+def history_retries_only_uncertain_reads_without_resending_successes():
+    import set_engine as se
+    class SlowPage(_PagedKlines):
+        def __init__(self):
+            super().__init__(n=10000)
+            self.retries = []
+        def gather_public(self, reqs, timeout=4.2):
+            return [(path, extra, {'error':True,'msg':'read timed out'} if extra['symbol']=='A-USDT'
+                     else row[2]) for (path, extra), row in zip(reqs, super().gather_public(reqs, timeout))]
+        def public(self, path, extra):
+            self.retries.append(dict(extra))
+            return super().gather_public([(path, extra)])[0][2]
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ['A-USDT', 'B-USDT']
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = SlowPage(), se.SetBook()
+        p.sets.lookback = 1080
+        refreshed = p._hist_fetch()
+        return (refreshed == set(pt.SYMBOLS) and p.api.retries
+                and all(r['symbol']=='A-USDT' for r in p.api.retries)
+                and all(len(p.sets.bars[s])==p.sets.history_bars() for s in pt.SYMBOLS)), f'complete={sorted(refreshed)}; read-only retries={len(p.api.retries)}; successful B pages not resent'
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
+@_frozen_clock
 def history_page_overlap_cannot_shorten_stage_context():
     import set_engine as se
     class Overlap(_PagedKlines):
@@ -3512,6 +3540,7 @@ CHECKS = [
     ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),
     ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
     ("trader.history-overlap-counts-distinct-minutes", history_page_overlap_cannot_shorten_stage_context),
+    ("trader.history-timeout-retries-only-uncertain-reads", history_retries_only_uncertain_reads_without_resending_successes),
     ("trader.history-growth-fetches-three-days", grown_history_fetches_the_full_target_up_to_three_days),
     ("trader.history-growth-retries-failed-pages", history_growth_retries_failed_or_missing_pages),
     ("trader.short-history-backfill-bounded", short_history_backfill_is_temporarily_bounded),

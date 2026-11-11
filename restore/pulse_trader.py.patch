@@ -4600,12 +4600,12 @@
                  continue
 -            n = abs(float(c.qty) * float(c.entry or 0))
 -            if n > cap:
-+            if not_scored_close({"reason": c.reason, "t": c.t}, down_iv):
-                 continue
+-                continue
 -            if "ctrl-no-position" in str(c.reason or "").lower() or str(c.reason or "") in ("no-ctrl",):
 -                continue
 -            if "oversized" in str(c.reason or "").lower():
--                continue
++            if not_scored_close({"reason": c.reason, "t": c.t}, down_iv):
+                 continue
 -            if n > self.max_book_notional() * 1.05:
 +            if not all(math.isfinite(float(v)) for v in (c.qty, c.entry, c.exit, c.pnl, c.pnl_pct)) or c.qty <= 0 or c.entry <= 0 or c.exit <= 0:
                  continue
@@ -5514,7 +5514,7 @@
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4786,81 +7604,205 @@
+@@ -4786,81 +7604,226 @@
              bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
              f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
          )
@@ -5534,15 +5534,15 @@
 +        tr_g = self.parse_track(self.cid("o", set_id=real_g.id, pack=real_g.pack, set_idx=real_g.idx)) if real_g is not None else None
 +        self.record_test("qa-cid-parse", real_g is None or bool(tr_g and tr_g.get("set_id") == real_g.id), str(tr_g))
 +        self.record_test("qa-cid-idx", real_g is None or (int((tr_g or {}).get("idx", -1)) == real_g.idx and int((tr_g or {}).get("step", 0)) == 8), str(tr_g))
-+
+ 
+-    def _hist_fetch(self) -> None:
 +    @staticmethod
 +    def _kline_time(row: Any) -> int:
 +        try:
 +            return int(row["time"] if isinstance(row, dict) else row[0])
 +        except Exception:
 +            return 0
- 
--    def _hist_fetch(self) -> None:
++
 +    def _hist_fetch(self, symbols: Optional[Sequence[str]] = None) -> set[str]:
 +        """Fill every Set history from the exchange. One klines request is capped at 1000 bars by the venue (a larger
 +        limit is refused with code 109400 and returns nothing), so a symbol that is short of its lookback gets the
@@ -5584,7 +5584,28 @@
 -            for _path, extra, body in rows:
 -                s = extra.get("symbol")
 -                bars = self._parse_klines((body or {}).get("data"))
-+                return self.api.gather_public(batch, timeout=6.0)
++                replies = self.api.gather_public(batch, timeout=6.0)
++                # Large history pages can exceed the fast async client's
++                # three-second timeout. Retry only uncertain GET reads once
++                # through the bounded sync transport, in this history thread.
++                # Live order handling and explicit venue refusals are untouched.
++                if hasattr(self.api, "public"):
++                    def identity(path, extra):
++                        return path, tuple(sorted((k, str(v)) for k, v in extra.items()))
++                    by_request = {identity(path, extra): body for path, extra, body in replies}
++                    retry = [(path, extra) for path, extra in batch
++                             if (identity(path, extra) not in by_request or
++                                 (by_request[identity(path, extra)].get("error") and
++                                  not by_request[identity(path, extra)].get("cooled") and
++                                  str(by_request[identity(path, extra)].get("code")) in ("None", "-1")))]
++                    if retry:
++                        log(f"HIST retry {len(retry)}/{len(batch)} timed-out public reads", every=30, key="hist-read-retry")
++                        with ThreadPoolExecutor(max_workers=min(4, len(retry))) as pool:
++                            futures = [(path, extra, pool.submit(self.api.public, path, extra)) for path, extra in retry]
++                            for path, extra, future in futures:
++                                by_request[identity(path, extra)] = future.result()
++                        replies = [(path, extra, by_request[identity(path, extra)]) for path, extra in batch]
++                return replies
 +            return [(path, extra, self.api.public(path, extra)) for path, extra in batch]
 +
 +        def _ok_page(body: Any) -> bool:
@@ -5782,7 +5803,7 @@
              except Exception:
                  self.hist_busy = False
                  self.sets.progress.phase = "error"
-@@ -4876,6 +7818,7 @@
+@@ -4876,6 +7839,7 @@
          while not self._warm_stop:
              t0 = time.time()
              try:
@@ -5790,7 +5811,7 @@
                  if time.time() - self.last_bal > BALANCE_EVERY:
                      self.refresh_balance()
                  self.refresh_klines()
-@@ -4888,11 +7831,26 @@
+@@ -4888,11 +7852,26 @@
                  if hasattr(self.api, "err"):
                      self.api.err.write("warm", msg=self.last_error[:220])
              self.warm_ms = (time.time() - t0) * 1000
@@ -5818,7 +5839,7 @@
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4902,9 +7860,13 @@
+@@ -4902,9 +7881,13 @@
                  self._pre_pause_halt = self.halt_reason
              self.halted = True
              self.halt_reason = "stopped"
@@ -5833,7 +5854,7 @@
              return
          if paused:
              self.halted = True
-@@ -4916,18 +7878,24 @@
+@@ -4916,18 +7899,24 @@
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -5860,7 +5881,7 @@
                  self.halted = True
                  self.halt_reason = "drawdown halt"
              else:
-@@ -4965,12 +7933,14 @@
+@@ -4965,12 +7954,14 @@
  
      def run(self) -> None:
          log(f"pulse start {CONN_SHORT} {BASE}")
@@ -5875,7 +5896,7 @@
          sd_notify("WATCHDOG=1")
          self.refresh_tickers()
          sd_notify("WATCHDOG=1")
-@@ -4984,6 +7954,14 @@
+@@ -4984,6 +7975,14 @@
          except Exception:
              pass
          sd_notify("WATCHDOG=1")
@@ -5890,7 +5911,7 @@
          self.adopt_exchange_positions()
          sd_notify("WATCHDOG=1")
          try:
-@@ -5001,6 +7979,8 @@
+@@ -5001,6 +8000,8 @@
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -5899,7 +5920,7 @@
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5029,17 +8009,30 @@
+@@ -5029,17 +8030,30 @@
                  pass
              sd_notify("WATCHDOG=1")
              wall = time.perf_counter() - t0
@@ -5935,7 +5956,7 @@
      url = BASE + "/openApi/swap/v2/quote/contracts"
      with urllib.request.urlopen(url, timeout=15) as r:
          data = json.loads(r.read().decode()).get("data") or []
-@@ -5070,6 +8063,7 @@
+@@ -5070,6 +8084,7 @@
              int(c.get("pricePrecision") or 4),
              float(c.get("tradeMinUSDT") or 2),
              int(c.get("maxLongLeverage") or c.get("maxLeverage") or c.get("maxleverage") or 150),
@@ -5943,7 +5964,7 @@
          )
      return out
  
-@@ -5086,20 +8080,27 @@
+@@ -5086,20 +8101,27 @@
              pass
  
  

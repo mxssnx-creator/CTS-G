@@ -7640,7 +7640,28 @@ class Pulse:
 
         def _gather(batch: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
             if hasattr(self.api, "gather_public"):
-                return self.api.gather_public(batch, timeout=6.0)
+                replies = self.api.gather_public(batch, timeout=6.0)
+                # Large history pages can exceed the fast async client's
+                # three-second timeout. Retry only uncertain GET reads once
+                # through the bounded sync transport, in this history thread.
+                # Live order handling and explicit venue refusals are untouched.
+                if hasattr(self.api, "public"):
+                    def identity(path, extra):
+                        return path, tuple(sorted((k, str(v)) for k, v in extra.items()))
+                    by_request = {identity(path, extra): body for path, extra, body in replies}
+                    retry = [(path, extra) for path, extra in batch
+                             if (identity(path, extra) not in by_request or
+                                 (by_request[identity(path, extra)].get("error") and
+                                  not by_request[identity(path, extra)].get("cooled") and
+                                  str(by_request[identity(path, extra)].get("code")) in ("None", "-1")))]
+                    if retry:
+                        log(f"HIST retry {len(retry)}/{len(batch)} timed-out public reads", every=30, key="hist-read-retry")
+                        with ThreadPoolExecutor(max_workers=min(4, len(retry))) as pool:
+                            futures = [(path, extra, pool.submit(self.api.public, path, extra)) for path, extra in retry]
+                            for path, extra, future in futures:
+                                by_request[identity(path, extra)] = future.result()
+                        replies = [(path, extra, by_request[identity(path, extra)]) for path, extra in batch]
+                return replies
             return [(path, extra, self.api.public(path, extra)) for path, extra in batch]
 
         def _ok_page(body: Any) -> bool:
