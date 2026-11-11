@@ -49,19 +49,23 @@ class ReplayMemoTests(unittest.TestCase):
         self.assertEqual((memo.STATS['miss'], memo.STATS['hit'], memo.STATS['verified']), (4, 4, 4))
         self.assertEqual(len(memo._CACHE), 4)
 
-    def test_changed_cost_floor_candle_and_global_minimum_are_not_reused(self):
+    def test_changed_cost_floor_and_candle_are_not_reused(self):
         book = fixture()
         replay(book)
         symbol = next(iter(book.bars))
         for change in [lambda:setattr(book,'cost_pct',.2),
                        lambda:setattr(book,'min_sl_distance_pct',.4),
-                       lambda:book.bars[symbol][-1].__setitem__(3,book.bars[symbol][-1][3]*1.01),
-                       lambda:position_cost.configure_min_steps(trail=5)]:
+                       lambda:book.bars[symbol][-1].__setitem__(3,book.bars[symbol][-1][3]*1.01)]:
             change()
             actual = replay(book)
             self.assertEqual(actual, replay(book, cached=False))
         self.assertEqual(memo.STATS['hit'], 0)
-        self.assertEqual(memo.STATS['miss'], 5)
+        self.assertEqual(memo.STATS['miss'], 4)
+        # Raw lanes receive explicit per-book geometry. An unrelated legacy
+        # global floor cannot change the existing book or invalidate its rows.
+        position_cost.configure_min_steps(trail=5)
+        self.assertEqual(replay(book),replay(book,cached=False))
+        self.assertEqual(memo.STATS['hit'],1)
 
     def test_mutating_copied_history_cannot_poison_retained_columns(self):
         book = fixture()
@@ -71,25 +75,25 @@ class ReplayMemoTests(unittest.TestCase):
         self.assertEqual(replay(fixture()), expected)
         self.assertEqual(memo.STATS['hit'], 1)
 
-    def test_row_budget_evicts_and_oversized_tapes_are_not_retained(self):
-        with patch.object(memo, 'MAX_CACHED_ROWS', 100):
+    def test_byte_budget_evicts_and_oversized_tapes_are_not_retained(self):
+        with patch.object(memo, 'MAX_CACHE_BYTES', 10000):
             expected = replay(fixture(4), cached=False)
             self.assertEqual(replay(fixture(4)), expected)
-            self.assertLessEqual(sum(item[2] for item in memo._CACHE.values()), 100)
+            self.assertLessEqual(sum(map(len,memo._CACHE.values())),10000)
         memo.clear()
-        with patch.object(memo, 'MAX_CACHED_ROWS', 1):
+        with patch.object(memo, 'MAX_CACHE_BYTES', 1):
             replay(fixture())
             self.assertFalse(memo._CACHE)
 
-    def test_peer_and_pause_dependent_replays_use_the_native_path(self):
+    def test_automatic_pause_closures_use_native_replay_without_retention(self):
         book = fixture()
+        book.pause_mode='auto'
+        book.pause_candidates=(2,3)
+        book.pause_auto_min=2
+        book.pause_auto_max=8
         expected = replay(book, cached=False)
-        with patch.object(memo, '_ported_pack_sources', return_value={'general':'fixture-peer'}):
-            self.assertEqual(replay(book), expected)
-        book.pause_mode = 'fixed'
-        book.pause_fixed = 0
-        self.assertEqual(replay(book), replay(book,cached=False))
-        self.assertEqual(memo.STATS['bypass'], 2)
+        self.assertEqual(replay(book),expected)
+        self.assertGreater(memo.STATS['uncacheable'],0)
         self.assertFalse(memo._CACHE)
 
 

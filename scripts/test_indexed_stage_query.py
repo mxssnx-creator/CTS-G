@@ -62,7 +62,7 @@ class IndexedQuery(unittest.TestCase):
             native,nets=adapter.native['chain_at'](book,tapes,st,now)
             actual,used=adapter.chain_at(book,tapes,st,now)
             self.assertEqual(actual,native,(now,native,actual))
-            self.assertEqual(used,nets)
+            self.assertEqual(list(used),nets)
             for lane in ['pos','neg']:
                 for name in ['lane_stream','lane_stream_entries']:
                     self.assertEqual(getattr(adapter,name)(book,tapes,st,now,lane),
@@ -91,6 +91,20 @@ class IndexedQuery(unittest.TestCase):
         self.assert_queries(book,tapes,st,adapter)
         self.assertEqual(adapter.builds,0)
         self.assertGreater(adapter.fallbacks,0)
+
+    def test_indexed_prefix_is_readonly_and_cannot_expose_a_future_close(self):
+        book,tapes,st,_=self.fixture()
+        adapter=IndexedStages(sg)
+        tx=tapes.by_set[st.idx][0]
+        now=tx[len(tx)//2]
+        _,prefix=adapter.chain_at(book,tapes,st,now)
+        self.assertTrue(prefix.readonly)
+        self.assertEqual(len(prefix),sum(t<now for t in tx))
+        with self.assertRaises(TypeError): prefix[0]=1000
+        with self.assertRaises(IndexError): _=prefix[len(prefix)]
+        before=list(prefix)
+        adapter.chain_at(book,tapes,st,tx[-1]+1)
+        self.assertEqual(list(prefix),before)
 
     def test_changed_parameters_and_cost_rebuild_and_expired_context_falls_back(self):
         book,tapes,st,params=self.fixture()

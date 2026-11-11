@@ -9,6 +9,7 @@ on; 0 = off, the default), max drawdown time below setMaxDdtHours, and a fresh e
 keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
+import copy
 
 import re
 import bisect
@@ -3205,6 +3206,17 @@ class SetBook:
             with self._lock:
                 gen0 = self._topo_gen
                 lookback0 = self.lookback
+                # Feed refreshes replace bars and clocks while this pass is
+                # running. Keep one coherent frame for every requested symbol
+                # and every peer indication; later symbols must not read bars
+                # that closed after the pass's decision clock. Arrays are
+                # shared read-only, so this does not copy the market history.
+                replay_book = copy.copy(self)
+                replay_book.bars = market
+                replay_book.bar_t = dated
+            prefetch = getattr(self, '_prefetch_replay', None)
+            if prefetch is not None:
+                prefetch(replay_book, names, now)
             sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
@@ -3219,7 +3231,7 @@ class SetBook:
                 per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 replay_bar_at = dated.get(symbol)
                 try:
-                    inputs = self._replay_symbol(symbol, per_set, now, on_step=on_step)
+                    inputs = replay_book._replay_symbol(symbol, per_set, now, on_step=on_step)
                 except Exception as exc:  # one symbol never stops the others
                     sym_failed += 1
                     errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
