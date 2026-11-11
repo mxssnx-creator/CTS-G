@@ -512,6 +512,7 @@ def main() -> int:
                 ev.append((now_t, 2, i, n))
         ev.sort()
         ledgers: Dict[str, Dict[str, Any]] = {}
+        guard = br.new_guard()                    # the book's deficit guard (block_rules): executed adds' net and, in deficit, the paper adds' net
 
         def led(k):
             return ledgers.setdefault(k, {"paper": {}, "executed": {}, "life": br.new_life()})
@@ -526,7 +527,7 @@ def main() -> int:
                     m["scale"] = max([br.carried_scale(cfg, led(k)["life"]) for k in m["rk"]] or [1.0])
                 continue
             if order == 2:
-                if not cfg.active(n):
+                if not cfg.active(n) or not br.kind_allowed(cfg, m["st"].kind):
                     continue
                 books = [led(k) for k in m["rk"]]
                 if any(int(b["life"].get("pause", 0)) > 0 for b in books):
@@ -550,10 +551,13 @@ def main() -> int:
                 honor_tp = bool(getattr(book, "hist_honor_tp", True)) if honor_tp is None else honor_tp
                 if honor_tp:
                     target = m["entry"] * (1 + m["side"] * book.lane_fracs(m["st"])[1])
-                    if not br.target_covers_cost(lvl, target, m["side"], cf):
+                    if not br.target_covers_cost(lvl, target, m["side"], cf) or not br.share_allows(cfg, m["entry"], lvl, target, m["side"]):
                         continue
                 net = (m["exit"] - lvl) / lvl * m["side"] - cf
-                m["fired"][n] = net
+                if br.guard_holds(cfg, guard):
+                    m.setdefault("shadow", {})[n] = net      # in deficit: followed on paper, not sent
+                else:
+                    m["fired"][n] = net
                 continue
             # close
             add_part = 0.0
@@ -564,6 +568,8 @@ def main() -> int:
                 add_nets.append(net * weight * m["scale"])
                 adds += 1
                 add_part += weight * net
+            shadow_part = sum(net * br.base_return_contribution(1.0, m["hits"][n - 1][2], cfg.target_ratio(n), m["entry"]) for n, net in (m.get("shadow") or {}).items())
+            guard.update(br.guard_after_close(cfg, guard, add_part, shadow_part))
             events.append((float(r["t"]), float(r["net"]), m["scale"]))
             parent_net = float(r["net"]) + add_part
             highest = max(m["fired"]) if m["fired"] else 0

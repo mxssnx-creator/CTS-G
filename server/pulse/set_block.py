@@ -36,6 +36,7 @@ class SetBlockBook:
         self.ledgers: Dict[str, Any] = {}       # relation key -> {"paper": {n: [obs, gains, losses]}, "executed": {...}, "life": {...}, "updated": t}
         self.cfg: Optional[br.BlockCfg] = None   # set by Pulse from the overlay (clean_cfg); None = the legacy table built from the BlockBook's own numbers
         self.scope = "set"                       # kept for callers that still set it; the relations (cfg.relations) decide the evidence keys now
+        self.guard: Dict[str, float] = br.new_guard()   # the book's executed adds' cumulative net and, in deficit, the paper adds' net since (block_rules deficit guard)
         self.error = ""
         self._prune_at = 0.0
         if os.path.exists(path):
@@ -51,6 +52,15 @@ class SetBlockBook:
         ver = data.get("version")
         if ver == STATE_VERSION and isinstance(data.get("parents"), dict) and isinstance(data.get("ledgers"), dict):
             self.parents, self.ledgers = data["parents"], data["ledgers"]
+            g = data.get("guard")
+            if isinstance(g, dict):
+                try:
+                    net, shadow = float(g.get("net", 0.0)), float(g.get("shadow", 0.0))
+                except (TypeError, ValueError):
+                    raise ValueError("unreadable Block guard")
+                if not (math.isfinite(net) and math.isfinite(shadow)):
+                    raise ValueError("unreadable Block guard")
+                self.guard = {"net": net, "shadow": shadow}
             return
         if ver == 1 and isinstance(data.get("lanes"), dict):
             for key, lane in data["lanes"].items():
@@ -70,7 +80,7 @@ class SetBlockBook:
     def save(self) -> None:
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"version": STATE_VERSION, "parents": self.parents, "ledgers": self.ledgers}, f)
+            json.dump({"version": STATE_VERSION, "parents": self.parents, "ledgers": self.ledgers, "guard": self.guard}, f)
         os.replace(tmp, self.path)
 
     # ---- configuration -----------------------------------------------------------------------------------------------------------------------------
@@ -119,7 +129,7 @@ class SetBlockBook:
             return None
         dirty = False
         if lane.get("parent") != parent:
-            lane.update(parent=parent, entries={})
+            lane.update(parent=parent, entries={}, shadow={})
             dirty = True
         cf = cost_as_frac(cost_pct)
         move = (price / pos.base_entry - 1) * (1 if pos.side == "LONG" else -1)
@@ -146,10 +156,13 @@ class SetBlockBook:
         if honor_tp and not br.target_covers_cost(price, pos.tp, 1 if pos.side == "LONG" else -1, cost_as_frac(cost_pct)):
             return None
         cfg = self.config(block)
+        if not br.kind_allowed(cfg, br.kind_of_set(pos.set_id)):           # this parent's Set type receives no adds; its observations still collect
+            return None
         rkeys = self.rel_keys(cfg, pos)
         books = [self.ledger(k) or {"paper": {}, "executed": {}, "life": br.new_life()} for k in rkeys]
         if any(int(b["life"].get("pause", 0)) > 0 for b in books):        # a relation in its pause adds nothing; its evidence still collects
             return None
+        shadow = lane.setdefault("shadow", {})
         filled: Dict[int, float] = {}
         for item in pos.block_fills:
             filled[int(item["group"])] = filled.get(int(item["group"]), 0.0) + float(item["qty"])
@@ -174,6 +187,16 @@ class SetBlockBook:
             other_ratio = fired_ratio - (cfg.target_ratio(n) if filled.get(n, 0.0) > 0 else 0.0)
             if not br.count_passes(cfg, n, recs, execs, base_pf, other_ratio):
                 continue
+            if honor_tp and not br.share_allows(cfg, pos.base_entry, price, pos.tp, 1 if pos.side == "LONG" else -1):
+                continue                       # past its share of the way to the target: little room left, the whole way back below
+            if br.guard_holds(cfg, self.guard):
+                # the book's executed adds are in deficit: this add is not sent. It is followed on paper from the price it would have had, once
+                if str(n) not in shadow and filled.get(n, 0.0) <= 0:
+                    shadow[str(n)] = [now, price]
+                    self.save()
+                continue
+            if str(n) in shadow:
+                continue                       # this count of this parent is already followed on paper: one result per count, never both
             return {"group": n, "qty": remaining, "minPf": br.threshold(cfg, base_pf, other_ratio + cfg.target_ratio(n)),
                     "paper": self.stats(recs[0]), "executed": self.stats(execs[0])}
         return None
@@ -187,7 +210,7 @@ class SetBlockBook:
         if not score or not math.isfinite(price) or price <= 0:
             # Unverified/downtime closes retire the parent but cannot recover a
             # deficit, consume a pause or alter paper/executed qualification.
-            lane.update(parent="", closed=parent, entries={}, updated=now)
+            lane.update(parent="", closed=parent, entries={}, shadow={}, updated=now)
             self.save()
             return
         cfg = self.config(block)
@@ -195,7 +218,14 @@ class SetBlockBook:
         cf = cost_as_frac(cost_pct)
         rkeys = self.rel_keys(cfg, pos)
         books = [self.ledger(k, create=True) for k in rkeys]
-        add_part, highest = 0.0, 0
+        add_part, highest, shadow_part = 0.0, 0, 0.0
+        for n, item in (lane.get("shadow") or {}).items():
+            try:
+                s_t, s_px = float(item[0]), float(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if s_t < now and s_px > 0 and pos.base_entry > 0:
+                shadow_part += br.base_return_contribution((price / s_px - 1) * side - cf, s_px, cfg.target_ratio(int(n)), pos.base_entry)
         groups: Dict[str, List[Any]] = {}
         for item in pos.block_fills:
             groups.setdefault(str(item["group"]), []).append(item)
@@ -227,7 +257,8 @@ class SetBlockBook:
         for b in books:
             b["life"] = br.life_after_close(cfg, b["life"], parent_net, highest)
             b["updated"] = now
-        lane.update(parent="", closed=parent, entries={}, updated=now)
+        self.guard = br.guard_after_close(cfg, self.guard, add_part, shadow_part)
+        lane.update(parent="", closed=parent, entries={}, shadow={}, updated=now)
         self.save()
 
     # ---- carried size ------------------------------------------------------------------------------------------------------------------------------
@@ -257,4 +288,7 @@ class SetBlockBook:
         cfg = self.config(block)
         return {"lanes": rows, "minObservations": cfg.min_obs, "stackType": cfg.stack_type, "relations": list(cfg.relations),
                 "counts": [{"n": i + 1, "step": c["step"], "ratio": c["ratio"], "on": c.get("on", True)} for i, c in enumerate(cfg.counts)],
-                "carry": cfg.carry, "pauseSteps": cfg.pause_steps, "skipFirst": cfg.skip_first, "error": self.error}
+                "carry": cfg.carry, "pauseSteps": cfg.pause_steps, "skipFirst": cfg.skip_first, "error": self.error,
+                "guard": {"on": cfg.guard, "holding": br.guard_holds(cfg, self.guard), "net": round(float(self.guard.get("net", 0.0)), 6),
+                          "shadow": round(float(self.guard.get("shadow", 0.0)), 6)},
+                "targetShare": cfg.target_share, "kinds": list(cfg.kinds) or list(br.KINDS)}

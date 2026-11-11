@@ -355,6 +355,12 @@
   "blockCarry": false,
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
+  "blockGuard": true,
+  "blockTargetShare": 0.5,
+  "blockKinds": [
+    "base",
+    "trail"
+  ],
   "minPfStepAutoHigh": 2,
   "manualCloseRestMin": 240,
   "transferAdjust": true,

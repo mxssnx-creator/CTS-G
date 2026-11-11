@@ -1,0 +1,129 @@
+# Block coordinations: what an add is worth, and what was changed — 11 November 2026
+
+Owner: "Make Block fully effectively working with high PF as without and change, try different coordinations completely until its working" /
+"Check the Block structure in general ... independent for each block count with ratios and correct stacking, for each Set and Overall, for the
+active orders".
+
+No account, no connection. Walk-forward replays on public 1m candles (read-only), at most three days per run, the x01 overlay with a 24 h
+pre-history, parents admitted by the overlay's Axis, one position per symbol. The same 20 symbols throughout (chosen on 10 November's volume: a
+retrospective universe). Volume-weighted figures: a parent counts 1, an add its ratio.
+
+## Result in one paragraph
+
+No Block coordination makes the adds pay out of sample. 11,704 coordinations were swept on four windows; 25 were at or above "without" on all
+four; on three windows no rule had been chosen on, 24 of them failed and the one that "held" made 3 adds. The reason is structural and was
+measured directly: an add's result follows its parent's. Adds on a type of parent paid in exactly the windows where that type of parent was
+itself profitable, and the executed parents were below PF 1 on all nine windows. Block is leverage on the parents plus a second cost; it cannot
+earn what the parents do not. What was changed therefore does not make Block profitable: it stops Block from costing more than one losing
+episode. Over 13 days with the book carried from window to window the earlier Block lost 22.1 net points on 17 adds (PF 0.639 against 0.648
+without); the Block as shipped now lost 0.7 on 1 add (0.6472 against 0.6475) and is holding, because the adds it would have sent kept losing
+(another 19 points on paper).
+
+## Windows
+
+| name | span (UTC) | report hours | parents | PF without Block |
+|---|---|---:|---:|---:|
+| W5 dev / sealed | 10-29 18:00 .. 11-01 18:00 | 32 / 16 | 196 / 107 | 0.302 / 0.788 |
+| W3 dev / sealed | 11-01 18:00 .. 11-04 18:00 | 32 / 16 | 233 / 228 | 0.538 / 0.912 |
+| W2 dev / sealed | 11-04 18:00 .. 11-07 18:00 | 32 / 16 | 222 / 74 | 0.523 / 0.944 |
+| W1 dev / sealed | 11-07 18:00 .. 11-10 18:00 | 32 / 16 | 405 / 204 | 0.708 / 0.978 |
+| W4 | 11-09 18:00 .. 11-11 11:00 | 17 | 190 | 0.495 |
+
+W1 and W2 (four windows) were the development set. W3 and W4 (three windows) were fetched for confirmation and read once, after the finalists
+were fixed. W5 (two windows) was fetched last and used only in the final before / now table.
+
+## 1. What an add is worth before any evidence rule
+
+Every parent that reached a level, an add there to the parent's exit, one PositionCost. Adds' PF / count / net % of one base position at 3
+PositionCosts in favour, by the parent's Set type:
+
+| window | trailing parents (their own PF) | base parents (their own PF) | Exit parents |
+|---|---|---|---|
+| W1 dev | 2.01 / 49 / +30 (1.10) | 0.72 / 120 / −27 (0.62) | 0.35 / 11 / −11 |
+| W1 sealed | 1.21 / 19 / +2 (0.91) | 1.27 / 83 / +14 (1.27) | 0.25 / 14 / −14 |
+| W2 dev | 0.53 / 17 / −4 (0.46) | 0.49 / 106 / −51 (0.55) | 0 / 4 / −5 |
+| W2 sealed | 4.32 / 19 / +9 (9.48) | 0.92 / 15 / −1 (0.61) | 0.06 / 10 / −10 |
+| W3 dev | no trailing parent | 0.44 / 99 / −34 (0.58) | 0.18 / 15 / −18 |
+| W3 sealed | 0 / 2 / −3 (0) | 1.44 / 98 / +21 (1.11) | 0.02 / 13 / −16 |
+| W4 | 1.17 / 14 / +1 (0.68) | 0.56 / 69 / −37 (0.52) | 0.08 / 13 / −20 |
+
+- The adds are positive where the parents of that type are (trailing on W1 dev and W2 sealed, base on W1 sealed and W3 sealed) and negative where
+  they are not. Which type wins changes from one 16–32 h window to the next.
+- Adds on Exit-Set parents (no target) lost on seven of seven windows.
+- Adds past the middle of the way to a fixed target lost on seven of seven windows (0 of 7 positive at 2 and at 4 PositionCosts, −40 and −48 net
+  points in all): little room is left and the whole way back to the stop is below.
+- No other state of an add had a stable sign over the seven windows: how fast the level was reached (within 3 min, 4–15, after 15, after 60),
+  the room left in PositionCosts, long / short, the lane, the level itself, or whether the parent's Set was still valid with its Axis allowing
+  (the engine's precondition; the adds it lets through read no better than those it refuses).
+
+## 2. The sweep and its confirmation
+
+`scripts/block_coordination_study.py sweep`: relations (each alone, pairs, all four; every-relation-must-agree and any-relation-agrees), eleven
+count tables (1–6 counts, steps of 1–6 PositionCosts), the first 0 / 1 counts observing, minimum observations 1 / 3, parents filtered by Set
+type, lane and TP range, with and without "the relation's own parent net at or above zero": 11,704 coordinations. The shipped one reproduces
+`stack_eval.py` to the digit on all four development windows.
+
+- Development: 9,533 coordinations make at least one add; 2,264 have a positive pooled add net; **25** are at or above "without" on each of the
+  four windows with at least 20 adds. The best family (any of symbol / step agrees, three counts one PositionCost apart, Long / Wide / trailing
+  parents) reads +49 to +56 net points on 200–289 adds, adds' PF 1.25.
+- Confirmation on W3 dev, W3 sealed and W4: that family reads **−44 to −49** on 160–190 adds. 24 of the 25 fail; the one that holds made 3 adds
+  (+1.7). The shipped Block is below "without" on all three as well.
+- The development result was selection among thousands of settings. Nothing was shipped from the sweep.
+
+## 3. What was changed: three rules that only remove adds
+
+All three live in `server/pulse/block_rules.py`, the module the engine book (`set_block.SetBlockBook`) and both simulators call, so none of them
+re-implements a rule. None can create an add.
+
+- **Deficit guard** (`blockGuard`, shipped on): the book's own executed adds must not be in deficit. While their cumulative net is below zero no
+  add is sent; the add that would have gone is followed on paper from its price (once per count and parent); when the paper adds have earned the
+  deficit back both restart at zero and adding resumes. It reads no window and needs no minimum count. The record is in the Block state file
+  and survives a restart. A relation's own executed record already stopped that relation after a losing add; the guard is the book's.
+- **Target share** (`blockTargetShare`, shipped 0.5): a count of a fixed-target parent adds only up to that share of the way from the base
+  entry to the target. A parent that ignores its target is not bound.
+- **Parent types** (`blockKinds`, shipped base + trailing): Exit-Set parents receive no add; their observations still collect.
+
+Before / now, the book carried chronologically over the nine windows (13 days, 1,859 parents); adds and the adds' net % per window:
+
+| | W5d | W5s | W3d | W3s | W2d | W2s | W1d | W1s | W4 | adds | net | PF with / without |
+|---|---|---|---|---|---|---|---|---|---|---:|---:|---|
+| Block before (2026-11-05) | 1 +0.9 | 1 −0.7 | 2 −3.5 | 4 −12.3 | 2 −2.8 | 1 0.0 | 6 −3.6 | 0 | 0 | 17 | −22.1 | 0.6392 / 0.6475 |
+| + target share 0.5 | 0 | 1 −0.7 | 1 −1.5 | 2 −5.1 | 2 −2.8 | 1 0.0 | 6 −3.6 | 0 | 0 | 13 | −13.8 | 0.6427 / 0.6475 |
+| + deficit guard | 1 +0.9 | 1 −0.7 | 2 −3.5 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | −3.4 | 0.6462 / 0.6475 |
+| **Block now (all three)** | 0 | 1 −0.7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | −0.7 | **0.6472 / 0.6475** |
+
+With a fresh book in every window (the worst case for the guard, it pays its first loss nine times): before 41 adds −24.9, now 19 adds −14.9.
+
+Read this for what it is: the Block now sits at "without" because it almost stopped adding, and it stopped because its own adds lost. It resumes
+by itself when the adds it follows on paper have earned the deficit back; over these 13 days they lost a further 19 points instead.
+
+## 4. Structure checked
+
+`scripts/regression/block_structure.py`, through the engine's own book:
+
+- Every count is independent: its own step (levels 1 / 3 / 6 PositionCosts for steps 1 + 2 + 3), its own ratio, its own evidence record. With
+  count 2's record losing, counts 1 and 3 add and count 2 does not.
+- Stacking is from the parent's ORIGINAL volume: ratios 0.5 and 0.25 on a base volume 10 add 5.0 and 2.5 (final 17.5), never a share of the
+  grown position; a count adds once; Shared splits one budget over the counts that are on.
+- Relations for the open parents: "set" is taught only by that Set's own parents; "step" (Overall) by every Set of the pack and TP step on that
+  lane and direction, not by another step or direction; with both selected both must agree. A parent that gets no add still observes, each
+  count once, from the price an add would have had when the count was first seen reached.
+- The guard, the target share and the parent types as described above; the Set type is read correctly from the id of all 2,280 x01 Sets.
+
+No structural defect was found in the counts, ratios, stacking or relations.
+
+## Reproduce
+
+```bash
+python3 scripts/block_coordination_study.py parents --data DATA --cache stack.pkl --out parents.pkl --window dev --patch '{"histLookbackBars":1440}'
+```
+
+```bash
+python3 scripts/block_coordination_study.py explore --parents parents.pkl
+```
+
+```bash
+python3 scripts/block_coordination_study.py sweep --parents dev1.pkl dev2.pkl --confirm fresh1.pkl fresh2.pkl
+```
+
+Revert to the earlier Block: `blockGuard: false`, `blockTargetShare: 0`, `blockKinds: ["base", "exit", "trail"]`.

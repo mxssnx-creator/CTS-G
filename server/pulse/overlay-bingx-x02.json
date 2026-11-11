@@ -308,6 +308,12 @@
   "blockCarry": false,
   "blockPauseSteps": 1,
   "blockSkipFirst": 1,
+  "blockGuard": true,
+  "blockTargetShare": 0.5,
+  "blockKinds": [
+    "base",
+    "trail"
+  ],
   "stratTrend": true,
   "stratBreakout": true,
   "blockRiskPctOfBalance": 0,

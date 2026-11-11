@@ -31,6 +31,20 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("block guard: adds are sent while the book's executed adds are in deficit",
+     "set_block.py", "            if br.guard_holds(cfg, self.guard):", "            if False:"),
+    ("block guard: paper adds never earn the deficit back",
+     "block_rules.py", "        if out[\"net\"] + out[\"shadow\"] >= 0:", "        if False:"),
+    ("block guard: the executed adds' result never reaches the guard",
+     "set_block.py", "        self.guard = br.guard_after_close(cfg, self.guard, add_part, shadow_part)", "        self.guard = br.guard_after_close(cfg, self.guard, 0.0, shadow_part)"),
+    ("block guard: the record is lost at a restart",
+     "set_block.py", "                self.guard = {\"net\": net, \"shadow\": shadow}", "                self.guard = br.new_guard()"),
+    ("block share: a count adds past its share of the way to the target",
+     "block_rules.py", "    return way > 0 and done <= cfg.target_share * way + 1e-12", "    return way > 0"),
+    ("block kinds: every parent type receives adds whatever the list says",
+     "block_rules.py", "    return not cfg.kinds or str(kind) in cfg.kinds", "    return True"),
+    ("block kinds: a trailing Set is read as a base Set",
+     "block_rules.py", "    return \"trail\" if _TRAIL_PART.search(sid) and not _STEP_PART.search(sid) else \"base\"", "    return \"base\""),
     ("lane: a Set open on both lanes is named positive whatever the lane order",
      "set_engine.py", "        return next((lane for lane in self.lane_order if lane in lanes), lanes[0] if lanes else \"\")", "        return lanes[0] if lanes else \"\""),
     ("lane: lane_in ignores which lanes may open",

@@ -15,6 +15,16 @@ Owner 2026-11-03 ("make Block fully work ... dont use windows ... each block cou
 - Lifecycle per relation (opt-in carry): a parent that closes net negative keeps the highest count it fired as the relation's `level` (the next parent is sized
   at V0 x (1 + the ratios up to that level)); when the relation's net is back at or above zero the level resets and the relation pauses `pause_steps` parents
   before it starts again. `skip_first` counts are never added (they still collect evidence). Without carry nothing is inherited between parents.
+
+Owner 2026-11-11 ("make Block ... working with high PF as without"; measured on seven windows, docs/verification/block-coordinations-20261111.md): an add's
+result follows its parent's, so no evidence rule made the adds pay out of sample. Three rules keep Block from costing what it cannot earn; each only ever
+removes adds, none creates one:
+- Deficit guard (`guard`): the book's own executed adds must not be in deficit. While their cumulative net (in units of base notional) is below zero no add
+  is sent; the adds that would have been sent are followed on paper, and adding resumes when those paper adds have earned the deficit back (both restart
+  at zero). Block so pays for one losing episode and then waits until adds would have paid again; it reads no window and needs no count.
+- Target share (`target_share`): on a fixed-target parent a count adds only while its level is at most this share of the way from the parent's base entry to
+  its target. Adds past the middle of the way lost on seven of seven windows (little room left, the whole way back to the stop below).
+- Parent types (`kinds`): the Set types (base / exit / trail) that may receive adds. Adds on Exit-Set parents (no target) lost on seven of seven windows.
 """
 from __future__ import annotations
 
@@ -22,12 +32,19 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import re
+
 from block_engine import calculate_block_minimum_profit_factor
+
+_TRAIL_PART = re.compile(r"(?:^|:)tr\d")       # a trailing pair segment "tr<arm>:<give>" (a pack named "trend" is not one)
+_STEP_PART = re.compile(r":st\d")
 
 RATIO_MIN, RATIO_MAX = 0.1, 1.0
 STEP_MIN, STEP_MAX = 0.5, 20.0
 COUNTS_MAX = 12
 RELATIONS = ("symbol", "indication", "set", "step")
+KINDS = ("base", "exit", "trail")
+GUARD_EPS = 1e-12
 STACK_TYPES = ("additive", "shared")
 PF_RATIO_MIN, PF_RATIO_MAX = 0.2, 5.0
 
@@ -43,6 +60,9 @@ class BlockCfg:
     carry: bool = False
     pause_steps: int = 1
     skip_first: int = 1
+    guard: bool = False                 # deficit guard on the book's own executed adds (blockGuard)
+    target_share: float = 0.0           # largest share of the way to a fixed target a count may add at (blockTargetShare; 0 = no rule)
+    kinds: Tuple[str, ...] = ()         # parent Set types that may receive adds (blockKinds; empty = every type)
 
     def levels(self) -> List[float]:
         """The cumulative trigger of every count in PositionCosts (the sum of the steps up to it)."""
@@ -97,10 +117,15 @@ def clean_cfg(raw: Any = None, **legacy: Any) -> BlockCfg:
         except (TypeError, ValueError):
             v = default
         return max(lo, min(hi, v)) if math.isfinite(v) else default
+    raw_kinds = ov.get("blockKinds")
+    kinds = tuple(k for k in KINDS if k in {str(x).lower() for x in raw_kinds}) if isinstance(raw_kinds, (list, tuple)) else ()
+    if len(kinds) == len(KINDS):
+        kinds = ()                      # every type = no rule
     return BlockCfg(counts=counts, stack_type=st if st in STACK_TYPES else "additive", shared_total=round(num("blockSharedTotal", 1.0, 0.1, 3.0), 4),
                     min_obs=int(num("blockMinObservations", 1, 1, 200)), pf_ratio=num("blockProfitFactorRatio", 0.8, PF_RATIO_MIN, PF_RATIO_MAX),
                     relations=rel, carry=bool(ov.get("blockCarry", False)), pause_steps=int(num("blockPauseSteps", 1, 0, 20)),
-                    skip_first=int(num("blockSkipFirst", 1, 0, COUNTS_MAX)))
+                    skip_first=int(num("blockSkipFirst", 1, 0, COUNTS_MAX)),
+                    guard=ov.get("blockGuard") is True, target_share=round(num("blockTargetShare", 0.0, 0.0, 1.0), 4), kinds=kinds)
 
 
 # ---- evidence ---------------------------------------------------------------------------------------------------------------------------------------
@@ -168,6 +193,60 @@ def count_passes(cfg: BlockCfg, n: int, records: Iterable[Optional[Sequence[floa
         if rec is not None and int(rec[0]) >= cfg.min_obs and record_pf(rec) + 1e-9 < thr:
             return False
     return seen
+
+
+# ---- rules that only remove adds: parent type, share of the way to the target, deficit guard ------------------------------------------------------------
+
+def kind_of_set(set_id: str) -> str:
+    """The Set type from its id: "...:xt" an Exit Set, "...:tr<arm>:<give>" a trailing Set, else a base Set (set_engine.make_exit_id / make_trail_id)."""
+    sid = str(set_id or "")
+    if sid.endswith(":xt"):
+        return "exit"
+    return "trail" if _TRAIL_PART.search(sid) and not _STEP_PART.search(sid) else "base"
+
+
+def kind_allowed(cfg: BlockCfg, kind: str) -> bool:
+    """The parent's Set type may receive adds (no list = every type)."""
+    return not cfg.kinds or str(kind) in cfg.kinds
+
+
+def share_allows(cfg: BlockCfg, base_entry: float, add_price: float, target: float, side: int) -> bool:
+    """A count on a fixed-target parent adds only while its price is at most target_share of the way from the base entry to the target. 0 = no rule;
+    a target that is not beyond the entry (unreadable) allows nothing when the rule is on. Never use this for a parent that ignores its target."""
+    if cfg.target_share <= 0:
+        return True
+    if not all(math.isfinite(v) for v in (base_entry, add_price, target)) or base_entry <= 0:
+        return False
+    way = (target / base_entry - 1) * side
+    done = (add_price / base_entry - 1) * side
+    return way > 0 and done <= cfg.target_share * way + 1e-12
+
+
+def new_guard() -> Dict[str, float]:
+    """{net, shadow}: the cumulative net of the book's executed adds (per unit of base notional) and, while that is in deficit, of the adds followed on paper."""
+    return {"net": 0.0, "shadow": 0.0}
+
+
+def guard_holds(cfg: BlockCfg, guard: Optional[Dict[str, Any]]) -> bool:
+    """Adds are held: the guard is on and the executed adds are in deficit."""
+    return bool(cfg.guard) and guard is not None and float(guard.get("net", 0.0)) < -GUARD_EPS
+
+
+def guard_after_close(cfg: BlockCfg, guard: Optional[Dict[str, Any]], executed_part: float, shadow_part: float) -> Dict[str, float]:
+    """The guard after a parent's close: its executed adds' net joins `net`, its paper adds' net (the adds held back while in deficit) joins `shadow`; once
+    the paper adds have earned the deficit back both restart at zero and adding resumes. The record is kept with the guard off too (switching it on later
+    starts from what the adds really did); unreadable parts change nothing."""
+    out = {"net": float((guard or {}).get("net", 0.0)), "shadow": float((guard or {}).get("shadow", 0.0))}
+    if math.isfinite(executed_part):
+        out["net"] += executed_part
+    if out["net"] < -GUARD_EPS:
+        if math.isfinite(shadow_part):
+            out["shadow"] += shadow_part
+        if out["net"] + out["shadow"] >= 0:
+            out = new_guard()
+    else:
+        out["shadow"] = 0.0             # not in deficit: nothing is being earned back
+    return out
 
 
 # ---- relations --------------------------------------------------------------------------------------------------------------------------------------

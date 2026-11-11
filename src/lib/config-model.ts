@@ -251,6 +251,12 @@ export type PulseOverlay = {
   blockCarry: boolean;
   blockPauseSteps: number;
   blockSkipFirst: number;
+  /** Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back. */
+  blockGuard: boolean;
+  /** A count of a fixed-target parent adds only up to this share of the way to the target (0 = no rule). */
+  blockTargetShare: number;
+  /** Parent Set types that may receive adds. */
+  blockKinds: string[];
   maxOpen: number;
   maxPerGroup: number;
   symbolsAll: boolean;
@@ -561,6 +567,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockCarry: false,
   blockPauseSteps: 1,
   blockSkipFirst: 1,
+  blockGuard: true,
+  blockTargetShare: 0.5,
+  blockKinds: ["base", "trail"],
   maxOpen: 0,
   maxPerGroup: 0,
   symbolsAll: false,
@@ -857,6 +866,9 @@ export type CtsSettings = {
   blockCarry?: boolean;
   blockPauseSteps?: number;
   blockSkipFirst?: number;
+  blockGuard?: boolean;
+  blockTargetShare?: number;
+  blockKinds?: string[];
   blockWindow?: number;
   exitMinSamples?: number;
   relateConfigs?: RelateConfig[];
@@ -1232,6 +1244,14 @@ export const LAST_N_FIELDS: { key: keyof LastNOverride; label: string; lo: numbe
   { key: "realNegN", label: "Real Neg", lo: 1, hi: 200 },
 ];
 
+export const BLOCK_KINDS = ["base", "exit", "trail"] as const;
+/** blockKinds from a settings file: the known Set types in their fixed order; missing or unreadable = the shipped base + trailing (Exit-Set parents get no add). */
+export function blockKindsOf(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return ["base", "trail"];
+  const names = new Set(raw.map((x) => String(x).toLowerCase()));
+  return BLOCK_KINDS.filter((k) => names.has(k));
+}
+
 /** lastNByRange from a settings file: only known ranges and keys, each bounded (server: set_engine.last_n_by_range_of). */
 export function lastNByRangeOf(raw: unknown): Record<string, LastNOverride> {
   if (!raw || typeof raw !== "object") return {};
@@ -1348,6 +1368,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockCarry: bool(cts.blockCarry, false),
     blockPauseSteps: Math.max(0, Math.min(20, Math.round(num(cts.blockPauseSteps, 1)))),
     blockSkipFirst: Math.max(0, Math.min(12, Math.round(num(cts.blockSkipFirst, 1)))),
+    blockGuard: bool(cts.blockGuard, true),
+    blockTargetShare: Math.max(0, Math.min(1, num(cts.blockTargetShare, 0.5))),
+    blockKinds: blockKindsOf(cts.blockKinds),
     blockWindow: Math.max(1, Math.round(num(cts.blockWindow, 25))),
     mainEvalPosCount: Math.max(3, Math.round(num(cts.mainEvalPosCount, 20))),
     realEvalPosCount: Math.max(3, Math.round(num(cts.realEvalPosCount, 15))),

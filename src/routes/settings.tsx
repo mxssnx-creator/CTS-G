@@ -58,6 +58,8 @@ import {
   TP_RANGES,
   LAST_N_FIELDS,
   lastNByRangeOf,
+  BLOCK_KINDS,
+  blockKindsOf,
   TP_STEP_MAX,
   TP_STEP_DEFAULT_MAX,
   TP_STEP_MIN,
@@ -1385,6 +1387,13 @@ function SettingsPage() {
                   onChange={(v) => patch("blockPauseSteps", Math.max(0, Math.round(v)))} />
                 <Num label="Skip the first x counts" value={overlay.blockSkipFirst} min={0} max={12} step={1} hint="Those counts never add; they still collect evidence."
                   onChange={(v) => patch("blockSkipFirst", Math.max(0, Math.round(v)))} />
+                <Toggle label="Deficit guard: no add while the book's executed adds are net negative; adding resumes when the adds followed on paper have earned the deficit back" on={overlay.blockGuard !== false} onChange={(v) => patch("blockGuard", v)} />
+                <Num label="Add only up to this share of the way to the target" value={overlay.blockTargetShare ?? 0.5} min={0} max={1} step={0.05} hint="Fixed-target parents. 0 = no rule; 0.5 = no add past the middle of the way."
+                  onChange={(v) => patch("blockTargetShare", Math.max(0, Math.min(1, v)))} />
+                {BLOCK_KINDS.map((kind) => (
+                  <Toggle key={kind} label={`Adds on ${kind === "base" ? "base (target)" : kind === "exit" ? "Exit" : "trailing"} Set parents`} on={(overlay.blockKinds ?? ["base", "trail"]).includes(kind)}
+                    onChange={(on) => patch("blockKinds", blockKindsOf(on ? [...(overlay.blockKinds ?? []), kind] : (overlay.blockKinds ?? []).filter((k) => k !== kind)))} />
+                ))}
                 <Num
                   label="Block min samples"
                   value={overlay.blockMinSamples}

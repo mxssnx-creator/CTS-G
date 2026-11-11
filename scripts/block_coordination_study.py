@@ -169,13 +169,15 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                  have been sent are followed on paper, and adding resumes once those paper adds have earned the deficit back (then both restart at zero)
     state: a dict carried from one window to the next (the evidence ledgers and the guard), as the live book carries them; None = a fresh book."""
     import block_rules as br
+    # the three add-removing rules are the engine's own (block_rules): the study's short keys are their overlay keys
+    cand = {**cand, **({"blockTargetShare": cand["share"]} if "share" in cand else {}), **({"blockGuard": bool(cand["guard"])} if "guard" in cand else {}),
+            **({"blockKinds": cand["kinds"]} if cand.get("kinds") else {})}
     cfg = br.clean_cfg(cand)
     cf = float(window["meta"]["cost_frac"])
     levels = cfg.levels()
     mode = cand.get("mode", "all")
-    kinds, lanes, ranges = cand.get("kinds"), cand.get("lanes"), cand.get("ranges")
+    lanes, ranges = cand.get("lanes"), cand.get("ranges")
     room, net_gate = float(cand.get("room", 0.0)), bool(cand.get("net_gate", False))
-    share = float(cand.get("share", 0.0))
     ps = window["parents"]
     ev: List[Tuple[float, int, int, int]] = []
     meta: List[Dict[str, Any]] = []
@@ -187,7 +189,7 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                 break
             hits.append((n, e[0], lv, e[2], e[3]))
         rk = br.relation_keys(cfg, r["set"], r["lane"], "LONG" if r["side"] > 0 else "SHORT", r["symbol"], r["pack"], 0 if r["kind"] == "trail" else r["step"])
-        eligible = (kinds is None or r["kind"] in kinds) and (lanes is None or r["lane"] in lanes) and (ranges is None or r["range"] in ranges)
+        eligible = br.kind_allowed(cfg, r["kind"]) and (lanes is None or r["lane"] in lanes) and (ranges is None or r["range"] in ranges)
         meta.append({"hits": hits, "rk": rk, "fired": {}, "eligible": eligible})
         ev.append((r["t"], 0, i, 0))
         ev.append((r["t_in"], 1, i, 0))
@@ -196,8 +198,7 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
     ev.sort()
     state = state if state is not None else {}
     ledgers: Dict[str, Dict[str, Any]] = state.setdefault("ledgers", {})
-    guard = bool(cand.get("guard", False))
-    gs = state.setdefault("guard", {"net": 0.0, "shadow": 0.0})      # executed adds' cumulative net and, while in deficit, the paper adds' net since
+    gs = state.setdefault("guard", br.new_guard())      # executed adds' cumulative net and, while in deficit, the paper adds' net since
 
     def led(k):
         return ledgers.setdefault(k, {"paper": {}, "executed": {}, "life": br.new_life()})
@@ -232,10 +233,10 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
                     continue
                 if room > 0 and (target / lvl - 1) * r["side"] + 1e-12 < room * cf:   # the coordination's own: at least `room` PositionCosts to the target
                     continue
-                if share > 0 and lv > share * r["tp_costs"] + 1e-9:                    # ... and the level at most this share of the way to the target
+                if not br.share_allows(cfg, r["entry"], lvl, target, r["side"]):       # the level at most its share of the way to the target
                     continue
             add_net_ = (r["exit"] - lvl) / lvl * r["side"] - cf
-            if guard and gs["net"] < -1e-12:
+            if br.guard_holds(cfg, gs):
                 m.setdefault("shadow", {})[n] = add_net_          # in deficit: followed on paper, not sent
             else:
                 m["fired"][n] = add_net_
@@ -261,13 +262,11 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
             elif v < 0:
                 wl -= v
                 al -= v
-        if guard:
-            gs["net"] += add_part
-            for n, add_net in (m.get("shadow") or {}).items():
-                lv = m["hits"][n - 1][2]
-                gs["shadow"] += add_net * br.base_return_contribution(1.0, r["entry"] * (1 + r["side"] * lv * cf), cfg.target_ratio(n), r["entry"])
-            if gs["net"] < -1e-12 and gs["net"] + gs["shadow"] >= 0:
-                gs["net"], gs["shadow"] = 0.0, 0.0                 # the paper adds earned the deficit back: adding resumes
+        shadow_part = 0.0
+        for n, add_net in (m.get("shadow") or {}).items():
+            lv = m["hits"][n - 1][2]
+            shadow_part += add_net * br.base_return_contribution(1.0, r["entry"] * (1 + r["side"] * lv * cf), cfg.target_ratio(n), r["entry"])
+        gs.update(br.guard_after_close(cfg, gs, add_part, shadow_part))      # the paper adds earning the deficit back lets adding resume
         highest = max(m["fired"]) if m["fired"] else 0
         for k in m["rk"]:
             b = led(k)
@@ -307,10 +306,26 @@ def grid(kind: str) -> List[Dict[str, Any]]:
     return out
 
 
+def structure_grid() -> List[Dict[str, Any]]:
+    """Every structural setting of Block v2 crossed, no parent filter: relations and their mode, count tables, volume ratios, Additive and Shared
+    stacking, how many counts only observe, minimum observations and the PF threshold ratio."""
+    rel_sets = [[r] for r in RELATIONS] + [["symbol", "step"], ["symbol", "indication"], ["indication", "step"], ["set", "symbol"], list(RELATIONS)]
+    tables = [(1, 2.0), (1, 4.0), (2, 2.0), (2, 4.0), (3, 1.0), (3, 2.0), (3, 3.0), (4, 2.0), (6, 1.0), (6, 2.0), (12, 1.0)]
+    stacks = [("additive", 0.25, 1.0), ("additive", 0.5, 1.0), ("additive", 1.0, 1.0), ("shared", 1.0, 1.0), ("shared", 1.0, 2.0)]
+    out = []
+    for rel, (n, step), (stack, ratio, total), skip, mo, pr in itertools.product(rel_sets, tables, stacks, [0, 1, 2], [1, 5, 10], [0.2, 0.8, 2.0, 5.0]):
+        if skip >= n:
+            continue
+        for mode in (("all", "any") if len(rel) > 1 else ("all",)):
+            out.append({"blockCounts": counts_table(n, step, ratio), "blockRelations": rel, "blockSkipFirst": skip, "blockMinObservations": mo,
+                        "blockProfitFactorRatio": pr, "blockStackType": stack, "blockSharedTotal": total, "blockCarry": False, "mode": mode})
+    return out
+
+
 def label(c: Dict[str, Any]) -> str:
     t = c["blockCounts"]
     parts = [("+".join(c["blockRelations"]) + ("/any" if c.get("mode") == "any" and len(c["blockRelations"]) > 1 else "")),
-             f"{len(t)}x{t[0]['step']:g}c r{t[0]['ratio']:g} skip{c['blockSkipFirst']}", f"obs{c['blockMinObservations']} pfr{c['blockProfitFactorRatio']:g}"]
+             f"{len(t)}x{t[0]['step']:g}c r{t[0]['ratio']:g} skip{c['blockSkipFirst']}" + (f" shared{c.get('blockSharedTotal', 1):g}" if c.get("blockStackType") == "shared" else ""), f"obs{c['blockMinObservations']} pfr{c['blockProfitFactorRatio']:g}"]
     for k in ("kinds", "lanes", "ranges"):
         if c.get(k):
             parts.append(k[0] + ":" + ",".join(c[k]))
@@ -335,7 +350,7 @@ def works(res: Dict[str, Any]) -> bool:
 def sweep(a) -> int:
     dev = load_parents(a.parents)
     confirm = load_parents(a.confirm or [])
-    cands = grid(a.grid)
+    cands = structure_grid() if a.grid == "structure" else grid(a.grid)
     shipped = {"blockCounts": counts_table(3, 3.0, 1.0), "blockRelations": ["symbol", "step"], "blockSkipFirst": 1, "blockMinObservations": 1,
                "blockProfitFactorRatio": 0.8, "blockStackType": "additive", "blockCarry": False, "mode": "all"}
     t0 = time.time()
@@ -457,7 +472,7 @@ def main() -> int:
     s = sub.add_parser("sweep")
     s.add_argument("--parents", nargs="+", required=True)
     s.add_argument("--confirm", nargs="*", default=[])
-    s.add_argument("--grid", choices=("quick", "full"), default="quick")
+    s.add_argument("--grid", choices=("quick", "full", "structure"), default="quick")
     s.add_argument("--top", type=int, default=25)
     s.add_argument("--min-adds", type=int, default=20)
     s.add_argument("--out", default="")
