@@ -117,27 +117,52 @@ class FutureEntryTapes:
 
     def __init__(self, names, times, shadow, cost):
         self.names, self.times, self.shadow, self.cost = sorted(names), times, shadow, cost
-        self.checked = set()
+        # Values contain only optional per-symbol integer permutations, never
+        # materialized future clocks/returns. Keep the existing cache surface
+        # for callers, with explicit entry and byte caps.
+        self.cache = collections.OrderedDict()
+        self.cache_bytes = 0
+        self.cache_max_bytes = 8*1024*1024
+
+    def _views(self, idx):
+        if idx in self.cache:
+            self.cache.move_to_end(idx)
+            return self.cache[idx][0]
+        views={};size=0
+        for name in self.names:
+            entries=self.shadow[name][3][idx][0]
+            if any(b<a for a,b in zip(entries,entries[1:])):
+                order=array('I',sorted(range(len(entries)),key=lambda k:(entries[k],k)))
+                clocks=array('i',(entries[k]for k in order))
+                views[name]=(order,clocks);size+=order.itemsize*len(order)+clocks.itemsize*len(clocks)
+            else:views[name]=None
+        if size<=self.cache_max_bytes:
+            self.cache[idx]=(views,size);self.cache_bytes+=size
+            while len(self.cache)>256 or self.cache_bytes>self.cache_max_bytes:
+                _,(_,old_size)=self.cache.popitem(last=False);self.cache_bytes-=old_size
+        return views
 
     def window(self, idx, now, count):
         if count <= 0:
             return []
-        pending=[]
+        pending=[];views=self._views(idx)
         for order, name in enumerate(self.names):
             entries, _exits, _returns=self.shadow[name][3][idx]
-            if idx not in self.checked and any(b<a for a,b in zip(entries,entries[1:])):
-                raise ValueError('Future-entry merge requires a single ordered lane per symbol')
+            view=views[name];ordered_entries=view[1]if view else entries
             first_bar=bisect.bisect_left(self.times[name],now-60)
-            k=bisect.bisect_left(entries,first_bar)
-            if k<len(entries):heapq.heappush(pending,(self.times[name][entries[k]]+60,order,k))
-        self.checked.add(idx)
+            k=bisect.bisect_left(ordered_entries,first_bar)
+            if k<len(entries):
+                original=view[0][k]if view else k
+                heapq.heappush(pending,(self.times[name][entries[original]]+60,order,original,k))
         values=[]
         while pending and len(values)<count:
-            _entry,order,k=heapq.heappop(pending);name=self.names[order]
+            _entry,order,original,k=heapq.heappop(pending);name=self.names[order]
             entries,_exits,returns=self.shadow[name][3][idx]
-            values.append(returns[k]-self.cost)
+            values.append(returns[original]-self.cost)
             k+=1
-            if k<len(entries):heapq.heappush(pending,(self.times[name][entries[k]]+60,order,k))
+            if k<len(entries):
+                view=views[name];original=view[0][k]if view else k
+                heapq.heappush(pending,(self.times[name][entries[original]]+60,order,original,k))
         return values
 
 

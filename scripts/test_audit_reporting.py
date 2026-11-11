@@ -48,7 +48,16 @@ class AuditReporting(unittest.TestCase):
             for count in [0,1,3,8,50]:
                 expected=[row[3]-.00176 for row in rows if row[0]>=now][:count]
                 self.assertEqual(bounded.window(0,now,count),expected)
-        self.assertFalse(hasattr(bounded,'cache'),'does not retain a complete future tape per Set')
+        self.assertEqual(len(bounded.cache),1)
+        self.assertEqual(bounded.cache_bytes,0,'ordered native tapes retain metadata, not future clock/return arrays')
+
+    def test_future_entry_metadata_stays_bounded_across_many_configurations(self):
+        from trade_sim import FutureEntryTapes
+        shadow={'A':(0,{}, {},{i:([1],[2],[.01])for i in range(300)})}
+        index=FutureEntryTapes(['A'],{'A':[0,60,120]},shadow,0)
+        for i in range(300):self.assertEqual(index.window(i,0,1),[.01])
+        self.assertEqual(len(index.cache),256)
+        self.assertEqual(index.cache_bytes,0)
     def test_strategy_hours_match_parent_settlement_at_every_boundary(self):
         from stack_eval import summarize, pf
         self.assertEqual(pf([0.0,0.0]),1.0)
