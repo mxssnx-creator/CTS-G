@@ -139,3 +139,30 @@ python3 scripts/block_coordination_study.py sweep --parents dev1.pkl dev2.pkl --
 ```
 
 Revert to the earlier Block: `blockGuard: false`, `blockTargetShare: 0`, `blockKinds: ["base", "exit", "trail"]`.
+
+## 5. Block rounds: Block as volume control over rounds of N positions (owner definition, later the same day)
+
+The owner's definition of Block is not the add into an open parent measured above. It is sizing over rounds: a group's positions form blocks of
+N; a losing block raises the next blocks by the ratio from the original base volume; the raise is kept until the volume-weighted net since
+the losing block is back at or above zero; with Step every further losing block raises one more level; after a positive block or a recovery
+the next `pause` blocks run at base volume. Every group (relation key) runs its own procedure.
+
+`scripts/block_rounds_study.py` simulates exactly that on the stored executions (sizing changes no entry; a position's volume is decided at
+its open from the blocks completed before it). Nine windows in time order, one carried book, 1,859 positions, unit PF 0.6475, net −495.1 %.
+
+- 2,304 settings (8 relations x N 1–6 x ratio 0.25 / 0.5 / 1 / 2 x one level / step to 3 / step to 6 x pause 0–3, ceiling x 5): the
+  volume-weighted PF is above the unit PF for **2,262** of them, the net per unit of volume is better for 2,244, and 434 are at or above the
+  unit PF on all nine windows. This is broad, not a handful of lucky settings: on these 13 days the positions opened after a losing block were
+  better than the average position (the same anti-persistence the relation lanes and the Axis `last` rule showed from the other side).
+- The absolute net is another matter. The base is under PF 1, so more volume loses more: the weighted net is above the unit net for only
+  **144** of the 2,304. By relation (mean weighted PF / mean net): step (Overall: pack + TP step) 0.689 / −616, Set 0.665 / −498, type 0.685 /
+  −1,161, overall 0.656 / −1,472. A higher ratio raises the PF and the loss together (0.25: 0.663 / −724; 2.0: 0.680 / −1,473).
+- With a ceiling of x 2 or x 3 (864 settings) 16 are at or above the unit PF on all nine windows with a net not below the unit net, all of
+  them relation step with N 5: e.g. ratio 0.5, step to 2, ceiling x 2: PF 0.706 against 0.648, net −488.4 against −495.1, 587 positions
+  raised; ratio 1, ceiling x 3: 0.750, −480.2.
+- Forward check: 65 settings pass that rule on the first five windows; on the last four, with a fresh book, **none** is at or above the unit
+  PF on all four. And 15 finalists chosen on W1 + W2 by the same rule: 0 hold on W5 + W3 + W4 (PF about equal, net 9 to 56 points worse).
+
+So Block rounds does what it is meant to do to the PF (with above without, widely), does not make the result positive (no window reaches
+PF 1 through it), and no setting chosen on earlier windows kept "better on every window" on later ones. It is not in the engine yet: it
+changes the size of real positions by up to the ceiling on a base that loses, which is the owner's call.
