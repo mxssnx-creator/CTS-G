@@ -166,3 +166,54 @@ its open from the blocks completed before it). Nine windows in time order, one c
 So Block rounds does what it is meant to do to the PF (with above without, widely), does not make the result positive (no window reaches
 PF 1 through it), and no setting chosen on earlier windows kept "better on every window" on later ones. It is not in the engine yet: it
 changes the size of real positions by up to the ceiling on a base that loses, which is the owner's call.
+
+## 6. Block rounds in the engine (owner: "yes ... process all block counts independently, no restrictions"; "list which are better than without and set the defaults so that these take effect")
+
+**Built.** `server/pulse/block_rounds.py` is the rule of section 5 as one book (`RoundsBook`): a procedure is one (relation, group key,
+block count N) with its own blocks, level, weighted net and pause. All six counts of every selected relation always form their blocks and
+keep their record; a count raises only when it is switched on with a ratio. A position's multiple is 1 + the sum of ratio x level over its
+raising procedures, at most `maxMult`, decided at its open from blocks completed before it. `Pulse.place` applies it like the relation raise
+(best effort, rounded down to the lot step, under the size ceiling, the book room, the margin and `VOLUME_MULT_MAX`; it never cancels an
+entry), the position joins its blocks at the multiple it really got, the close hands over the base position's own net (adds are Block's),
+and a close that is not scored (unverified, made while the engine was down) teaches nothing. State: `block-state-<conn>.json.rounds.json`
+(levels and the open positions' membership survive a restart). Statistics: `execution.blockRounds` (per count: groups, blocks, lost
+blocks, raises, recoveries, raised now; the raised groups). Overlay key `blockRounds`; desk Settings "Block rounds". The study drives the
+same book (`scripts/block_rounds_study.py`), and reproduces its earlier figures to the digit (0.7063 / −488.4 / 587 raised).
+
+**Which are better than without** (nine windows in time order, the book carried, 1,859 positions, without = PF 0.6475 / net −495.1 points;
+"better" = volume-weighted PF at or above the unit PF on every one of the nine windows AND the weighted net not below the unit net).
+3,456 single procedures (8 relations x counts 1-6 x ratio 0.1 / 0.25 / 0.5 / 1.0 x one level / step to 2 / step to 3 x pause 0 / 1 / 2 x
+ceiling 2 / 3): **18 pass, all of them relation step (indication x TP step x lane x direction) with block count 5 and step on**:
+
+| ratio | step to | pause | ceiling | weighted PF | net | raised |
+|---|---|---|---|---|---|---|
+| 1.0 | 2 or 3 | 0 | x 3 | 0.7496 | −480.2 | 582 |
+| 0.5 | 2 | 0 | x 2 or x 3 | 0.7063 | −488.4 | 587 |
+| 0.5 | 3 | 0 | x 2 | 0.7063 | −488.4 | 587 |
+| 1.0 | 2 or 3 | 1 | x 3 | 0.7367 | −490.9 | 523 |
+| 0.5 | 3 | 0 | x 3 | 0.7123 | −492.0 | 587 |
+| 0.25 | 2 | 0 | x 2 or x 3 | 0.6794 | −492.7 | 598 |
+| 0.5 | 2 or 3 | 1 | x 2 | 0.6984 | −493.6 | 529 |
+| 0.5 | 2 | 1 | x 3 | 0.6984 | −493.6 | 529 |
+| 0.25 | 3 | 0 | x 2 or x 3 | 0.6832 | −494.4 | 598 |
+| 0.1 | 2 | 0 | x 2 or x 3 | 0.6610 | −494.6 | 605 |
+| 0.5 | 3 | 1 | x 3 | 0.7055 | −495.1 | 529 |
+
+Every other count's best procedure is at or above the unit PF on nine of nine windows too, with a lower net: N1 / N2 / N3 (indication,
+ratio 0.1) 0.6496 / −538.8, N4 (step, 0.1, step to 2) 0.658 / −503.2, N6 (step, 0.1, step to 3) 0.6589 / −496.7. All six counts raising at
+once (one ratio for all, 90 arms over five relations): the PF rises (step 0.67 - 0.72, Set 0.66 - 0.72) and the net is below "without" in
+every arm (the closest: Set, ratio 0.25, step to 3, −495.6 against −495.1).
+
+**Shipped** (the four overlays, the three presets that carry Block, the desk default; the engine's absent-key default stays off):
+relation step, **block count 5 raising at ratio 1.0, step to level 2, no pause, ceiling x 3**; counts 1 - 4 and 6 form their blocks and
+keep their record without raising. What that is and is not: it is the best of the one family that passes on these nine windows, and the
+family is monotone in the ratio (0.1 -> 1.0: PF 0.661 -> 0.750, net −494.6 -> −480.2), which a chance hit usually is not. It is still a
+choice made on the windows it is reported on; the forward check of section 5 (chosen on earlier windows, read on later ones) held for no
+setting; and the PF stays under 1: a raise weights results, it does not create an edge. A raised entry is up to 3 x its base size on the
+live account. Revert: `blockRounds.enabled` false (hot reload; the book keeps its state).
+
+Checks: `trader.block-rounds-raise-the-group-after-a-losing-block-until-it-is-recovered` (through `Pulse.place` / `close_pos`, restart
+included), `block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule` (48 books against a plain reading; a
+count's multiples are the same with the other five counts observing; six counts sum; overlapping positions),
+`block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without`, `selftest.block_rounds`; mutants `block rounds:`.
+

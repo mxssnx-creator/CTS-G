@@ -24,6 +24,7 @@ from dataclasses import dataclass, asdict, field, replace as dc_replace
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
 from set_block import SetBlockBook
+import block_rounds
 from block_rules import clean_cfg as clean_block_cfg
 from fee_policy import cost_policy
 from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
@@ -942,6 +943,8 @@ class Position:
     relate_origin_qty: float = 0.0
     rel_mult: float = 1.0            # the volume multiple the relation lanes asked at entry (relationLanes; 1 = none) and the relations behind it
     rel_why: str = ""
+    rounds_mult: float = 1.0         # the volume multiple the Block rounds gave this entry (blockRounds; 1 = none) and the procedures behind it
+    rounds_why: str = ""
 
 
 @dataclass
@@ -979,6 +982,8 @@ class Closed:
     relate_receipt: dict = field(default_factory=dict)
     rel_mult: float = 1.0
     rel_why: str = ""
+    rounds_mult: float = 1.0
+    rounds_why: str = ""
 
 
 def new_lift() -> Dict[str, float]:
@@ -1176,6 +1181,7 @@ class Pulse:
             "blockWindow": 25,
         })
         self.set_block = SetBlockBook(BLOCK_PATH + ".sets.json")
+        self.rounds = block_rounds.RoundsBook(BLOCK_PATH + ".rounds.json")
         self.relate = RelateBook(path=BLOCK_PATH + ".relate.json")
         self.coord = Coordinator()
         self.indications = IndicationBook()
@@ -3804,6 +3810,7 @@ class Pulse:
         order_side = "BUY" if direction > 0 else "SELL"
         chosen, chosen_lane, blocked_by = self._scope_choice(pack, direction, symbol=sym)   # keep the exact lane approved by its own Axis
         rel_mult, rel_why = 1.0, []
+        rounds_mult, rounds_why, rounds_keys = 1.0, [], None
         if chosen is None and blocked_by:
             self.exec_n["scopeBlocked"] = int(self.exec_n.get("scopeBlocked", 0)) + 1
             if time.time() - self.skip_log.get("scope", 0) > 40:
@@ -3918,9 +3925,36 @@ class Pulse:
                     n_["relationRaised"] = int(n_.get("relationRaised", 0)) + 1
             if rel_mult <= 1.0:
                 rel_why = []
+            # Block rounds (blockRounds): the procedures of this Set's groups (relation x block count 1..6, each on its own blocks of N positions) whose
+            # last block lost raise this entry by their ratio x level of the ORIGINAL volume, until their weighted net is back at zero. Best effort like the
+            # relation raise: rounded DOWN to the lot step, under the size ceiling, the book room, the margin and VOLUME_MULT_MAX; never cancels an entry.
+            rb_ = getattr(self, "rounds", None)
+            if rb_ is not None and rb_.cfg.enabled:
+                try:
+                    rounds_keys = block_rounds.keys_of(sym, direction, chosen.pack, chosen.kind, int(getattr(chosen, "step", 0) or 0), lane, chosen.id)
+                    r_ask, rounds_why = rb_.ask(rounds_keys)
+                except Exception:
+                    r_ask, rounds_why = 1.0, []
+                if isinstance(r_ask, (int, float)) and not isinstance(r_ask, bool) and math.isfinite(r_ask) and r_ask > 1.0 + 1e-9:
+                    r_ask = min(float(r_ask), max(1.0, VOLUME_MULT_MAX / max(vm * rel_mult, 1e-9)))
+                    n_ = self.__dict__.setdefault("exec_n", {})
+                    n_["roundsAsked"] = int(n_.get("roundsAsked", 0)) + 1
+                    cap_r = min(float(getattr(self, "size_max", 25.0) or 25.0), self.max_book_notional(), self.avail_notional(c))
+                    if strict_budget is not None:
+                        cap_r = min(cap_r, strict_budget * max(1.0, rel_mult) * r_ask)
+                    q5 = self.round_qty(c, min(qty * r_ask, cap_r / px))
+                    if q5 > qty * (1.0 + 1e-9) and q5 * px / max(1, lev) <= float(self.available or 0) * 0.95:
+                        rounds_mult = q5 / qty
+                        log(f"ROUNDS {sym} {chosen.id} x{r_ask:.2f} ({'+'.join(rounds_why)}) qty {qty} -> {q5}", every=30.0, key=f"rounds:{sym}", quiet=True)
+                        qty = q5
+                        notional = qty * px
+                        margin = notional / max(1, lev)
+                        n_["roundsRaised"] = int(n_.get("roundsRaised", 0)) + 1
+            if rounds_mult <= 1.0:
+                rounds_why = []
         # cap_order_qty permits a venue-minimum tolerance for legacy overlays;
         # a strict parent budget must also hold after every scaling path.
-        if strict_budget is not None and (strict_budget <= 0 or qty * px > strict_budget * max(1.0, rel_mult) + 1e-9):
+        if strict_budget is not None and (strict_budget <= 0 or qty * px > strict_budget * max(1.0, rel_mult) * max(1.0, rounds_mult) + 1e-9):
             return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
@@ -4058,6 +4092,7 @@ class Pulse:
                     if viable and self.book_allows(sym, direction, retry_qty, px, sl_check)[0]:
                         qty, notional, margin = retry_qty, retry_notional, retry_margin
                         rel_mult, rel_why = 1.0, []          # the venue's minimum lot sized this entry, not a relation raise
+                        rounds_mult, rounds_why = 1.0, []
                         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx, lane=lane)
                         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                         self.did_io = True
@@ -4156,7 +4191,14 @@ class Pulse:
             set_hold_bars=(int(getattr(chosen, "hold_bars", 0) or self.sets.hist_time_bars) if chosen else 0),
             relate_origin_qty=relate_origin_qty if relate_receipt else 0.0,
             rel_mult=float(rel_mult), rel_why="+".join(rel_why),
+            rounds_mult=float(rounds_mult), rounds_why="+".join(rounds_why),
         )
+        if rounds_keys is not None and getattr(self, "rounds", None) is not None:
+            try:
+                self.rounds.opened(cid, rounds_keys, rounds_mult)      # the position joins the newest block of each of its procedures
+                self.rounds.save()
+            except Exception:
+                self.rounds.error = "Block rounds membership failed; raises disabled"
         if relate_receipt:
             try:
                 pos.relate_receipt = relate.resized(relate_receipt, filled / relate_origin_qty)
@@ -4548,7 +4590,16 @@ class Pulse:
             entry_slippage=pos.entry_slippage, exit_slippage=pos.exit_slippage,
             relate_receipt=pos.relate_receipt,
             rel_mult=float(getattr(pos, "rel_mult", 1.0) or 1.0), rel_why=str(getattr(pos, "rel_why", "") or ""),
+            rounds_mult=float(getattr(pos, "rounds_mult", 1.0) or 1.0), rounds_why=str(getattr(pos, "rounds_why", "") or ""),
         )
+        if pos.set_id and pos.client_id and getattr(self, "rounds", None) is not None:
+            try:
+                # one result per position at volume 1 (the base position's own net; adds are Block's, not a round's); an unscored close teaches nothing
+                r_net = base_net if base_net is not None else (accounted["net_pct"] if accounted else None)
+                self.rounds.closed(pos.client_id, None if skip_eval else r_net, scored=not skip_eval)
+                self.rounds.save()
+            except Exception:
+                self.rounds.error = "Block rounds result failed; raises disabled"
         if pos.relate_receipt and getattr(self, "relate", None) is not None:
             try:
                 # Exactly one settled parent; partial closes and Block/DCA legs do not
@@ -4885,7 +4936,7 @@ class Pulse:
                             block_fills=list(rec.get("block_fills") or []),
                             net_pnl_pct=number(rec.get("net_pnl_pct")), base_net_pnl_pct=number(rec.get("base_net_pnl_pct")),
                             base_entry=number(rec.get("base_entry")) or 0.0, base_qty=number(rec.get("base_qty")) or 0.0,
-                            rel_mult=number(rec.get("rel_mult")) or 1.0, rel_why=str(rec.get("rel_why") or ""),
+                            rel_mult=number(rec.get("rel_mult")) or 1.0, rel_why=str(rec.get("rel_why") or ""), rounds_mult=number(rec.get("rounds_mult")) or 1.0, rounds_why=str(rec.get("rounds_why") or ""),
                             fee_source=str(rec.get("fee_source") or "unknown")))
                     except (ValueError, TypeError, AttributeError):
                         continue
@@ -5023,6 +5074,7 @@ class Pulse:
             # entries never sent: the venue's book was too far from the decision price or too thin (book_allows), or a Real scope blocked
             "entriesSkipped": {"thinBook": int(n.get("skippedThinBook", 0)), "scopeBlocked": int(n.get("scopeBlocked", 0))},
             # what the stack types made on the settled Set parents, next to the same parents without them
+            "blockRounds": (self.rounds.snapshot() if getattr(self, "rounds", None) is not None else None),
             "lift": {**lift_report(self.__dict__.get("exec_lift") or new_lift()),
                      "relationAsked": int(n.get("relationAsked", 0)), "relationRaised": int(n.get("relationRaised", 0))},
         }
@@ -5062,7 +5114,7 @@ class Pulse:
                     base_qty=float(rec.get("base_qty") or 0),
                     block_fills=list(rec.get("block_fills") or []),
                     net_pnl_pct=rec.get("net_pnl_pct"), base_net_pnl_pct=rec.get("base_net_pnl_pct"),
-                    rel_mult=number(rec.get("rel_mult")) or 1.0, rel_why=str(rec.get("rel_why") or ""),
+                    rel_mult=number(rec.get("rel_mult")) or 1.0, rel_why=str(rec.get("rel_why") or ""), rounds_mult=number(rec.get("rounds_mult")) or 1.0, rounds_why=str(rec.get("rounds_why") or ""),
                     fees_usdt=rec.get("fees_usdt"), fee_source=str(rec.get("fee_source") or "configured-estimate"),
                     entry_slippage=float(rec.get("entry_slippage") or 0), exit_slippage=float(rec.get("exit_slippage") or 0),
                 )
@@ -5311,6 +5363,9 @@ class Pulse:
         self.block.window = max(self.block.min_samples, int(ov.get("blockWindow") or 25))
         # Block v2 (block_rules): per-count steps and ratios, Additive / Shared, relations, lifecycle; no window
         self.block_cfg = clean_block_cfg(ov, max_stack=int(self.block.max_stack or 3), volume_ratio=float(self.block.volume_ratio or 0.5))
+        if getattr(self, "rounds", None) is None:
+            self.rounds = block_rounds.RoundsBook(BLOCK_PATH + ".rounds.json")
+        self.rounds.cfg = block_rounds.config_of(ov.get("blockRounds"))      # hot reload: the procedures keep their state, the ratios are read anew
         if getattr(self, "set_block", None) is not None:
             self.set_block.cfg = self.block_cfg
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))

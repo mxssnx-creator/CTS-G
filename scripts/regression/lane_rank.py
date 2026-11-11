@@ -486,7 +486,34 @@ def linked_axes_use_the_exact_positive_or_negative_window():
     assert {p.set_axis_floor(st,lane) for lane in ("pos","neg")} == {1.9}
     return True,"own Real5=1.02 and RealNegative50=1.50 reach native/simulator/DCA; explicit1.90 survives Auto cap1.05"
 
+def the_disjoint_axis_reads_no_close_twice_and_judges_the_last_window_by_its_sign():
+    """axisDisjoint (off by default; the rule CTS-C runs): the previous window is the closes BEFORE the last window, never the same closes again, and must
+    reach the floor itself; the last window is judged by the sign of its net (axisLastOutcome any / positive / negative), not by a PF of a handful of
+    closes. With the key absent the verdict is the earlier one (overlapping windows), on the same streams."""
+    from coord_engine import Coordinator
+    def coord(**ov):
+        c = Coordinator()
+        c.load({}, {"axisPrevEnabled": True, "axisLastEnabled": True, "axisContEnabled": False, "axisPauseEnabled": False, "axisPrevMaxWindow": 8,
+                    "axisLastMaxWindow": 3, "prevPosMinCount": 1, "minPf": 1.25, "minPfLinked": False, "positionCostPct": 0.12, **ov})
+        return c
+    def rows(*nets):
+        return [{"t": 1000.0 + i, "pnl_pct": n + 0.0012} for i, n in enumerate(nets)]
+    good_then_bad = rows(*([0.01, 0.01, -0.004, 0.01] * 2 + [-0.01, -0.01, -0.01]))       # previous 8 strong, last 3 all losses
+    bad_then_good = rows(*([-0.01, -0.01, 0.004, -0.01] * 2 + [0.01, 0.01, 0.01]))        # previous 8 weak, last 3 all wins
+    out = {}
+    for label, ov in (("old", {}), ("any", {"axisDisjoint": True}), ("positive", {"axisDisjoint": True, "axisLastOutcome": "positive"}),
+                      ("negative", {"axisDisjoint": True, "axisLastOutcome": "negative"})):
+        c = coord(**ov)
+        out[label] = tuple(bool(c.judge(r, 0)["allow"]) for r in (good_then_bad, bad_then_good))
+    prev_pf = coord(axisDisjoint=True).judge(good_then_bad, 0)["metrics"]["prevPf"]
+    ok = (out["old"] == (False, False)            # the overlapping rule: 3 losses block by the last PF; 3 wins do not lift a window that still reads the weak closes
+          and out["any"] == (True, False)         # disjoint: only the 8 closes before the last 3 count
+          and out["positive"] == (False, False) and out["negative"] == (True, False) and prev_pf > 1.25)
+    return ok, f"allow (strong then 3 losses, weak then 3 wins) by rule: {out}; previous PF of the first stream without its last 3: {prev_pf}"
+
+
 CHECKS = [("lane_rank." + fn.__name__.replace("_", "-"), fn) for fn in (
+    the_disjoint_axis_reads_no_close_twice_and_judges_the_last_window_by_its_sign,
     lane_order_decides_which_lane_a_signal_tries_first, a_set_open_on_both_lanes_executes_on_the_lane_it_was_picked_for, trail_pick_decides_how_trailing_sets_compete, trail_pick_by_pack_reaches_only_its_packs,
     hold_auto_is_off_by_default_and_never_on_trailing_sets,
     set_lanes_do_not_scratch_unless_asked,

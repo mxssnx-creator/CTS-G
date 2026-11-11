@@ -1,5 +1,6 @@
 import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
+import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
 import { RELATIONS, RELATION_LABEL, RELATION_MULT_MAX, RELATION_PF_FLOOR, RELATION_RATIO_MAX, RELATION_ROLE, relationLanesOf, relationMultiple } from "@/lib/relation-lanes";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "@/lib/lane-policy";
 import { SetsOverview } from "@/components/sets-overview";
@@ -1275,6 +1276,67 @@ function SettingsPage() {
                       With every built relation passing an entry opens at ×{relationMultiple({ ...cfg, enabled: true }, all).toFixed(2)} the volume factor's size; with none at ×1.00.
                       Ratio 0 = the lane is built and shown, and raises nothing. The Real Negative lane is never raised. The raise is rounded down to the lot step and stays under the size ceiling,
                       the book room and the available margin; when it does not fit, the entry opens at its base size. A larger volume weights results, it does not change a per-order PF.
+                    </p>
+                  </div>
+                );
+              })()}
+            </Card>
+          )}
+
+          {section === "block" && (
+            <Card
+              title="Block rounds"
+              hint="A group's positions form blocks of N. A losing block raises the group's next entries by ratio × level of the original volume, until the volume-weighted net since that block is back at zero. Every block count 1–6 runs its own procedure on its own blocks."
+            >
+              {(() => {
+                const cfg = blockRoundsOf(overlay.blockRounds);
+                const update = (change: Partial<typeof cfg>) => patch("blockRounds", blockRoundsOf({ ...cfg, ...change }));
+                const setCount = (n: number, change: Partial<(typeof cfg.counts)[string]>) => update({ counts: { ...cfg.counts, [String(n)]: { ...cfg.counts[String(n)], ...change } } });
+                return (
+                  <div data-testid="block-rounds-settings">
+                    <Grid>
+                      <Toggle label="Block rounds" on={cfg.enabled} onChange={(enabled) => update({ enabled })} />
+                      <Num label="Volume multiple ceiling" value={cfg.maxMult} min={1} max={ROUND_MULT_MAX} step={0.25} hint="1 + the raised procedures' ratio × level, never above this" onChange={(maxMult) => update({ maxMult })} />
+                    </Grid>
+                    <div className="mt-3 flex flex-wrap gap-3">
+                      {ROUND_RELATIONS.map((name) => (
+                        <Toggle key={name} label={ROUND_RELATION_LABEL[name]} on={cfg.relations.includes(name)}
+                          onChange={(on) => update({ relations: ROUND_RELATIONS.filter((r) => (r === name ? on : cfg.relations.includes(r))) })} />
+                      ))}
+                    </div>
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="w-full min-w-[620px] text-left text-sm">
+                        <thead className="font-mono text-[11px] text-muted">
+                          <tr>
+                            <th className="pb-2 font-medium">Block count</th>
+                            <th className="pb-2 font-medium">Raises</th>
+                            <th className="pb-2 font-medium">Volume ratio</th>
+                            <th className="pb-2 font-medium">Step</th>
+                            <th className="pb-2 font-medium">Top level</th>
+                            <th className="pb-2 font-medium">Pause (blocks)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ROUND_COUNTS.map((n) => {
+                            const c = cfg.counts[String(n)];
+                            return (
+                              <tr key={n} className="border-t border-border">
+                                <td className="py-1.5 font-mono">{n}</td>
+                                <td className="py-1.5"><Toggle label={`Count ${n} raises`} on={c.on} onChange={(on) => setCount(n, { on })} /></td>
+                                <td className="py-1.5"><Num label={`Count ${n} ratio`} value={c.ratio} min={0} max={ROUND_RATIO_MAX} step={0.05} onChange={(ratio) => setCount(n, { ratio })} /></td>
+                                <td className="py-1.5"><Toggle label={`Count ${n} step`} on={c.step} onChange={(step) => setCount(n, { step })} /></td>
+                                <td className="py-1.5"><Num label={`Count ${n} top level`} value={c.maxLevel} min={1} max={ROUND_LEVEL_MAX} step={1} onChange={(maxLevel) => setCount(n, { maxLevel })} /></td>
+                                <td className="py-1.5"><Num label={`Count ${n} pause`} value={c.pause} min={0} max={ROUND_PAUSE_MAX} step={1} onChange={(pause) => setCount(n, { pause })} /></td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-3 text-xs opacity-70">
+                      Largest multiple of one entry with these settings: ×{blockRoundsMax(cfg).toFixed(2)}. A count that does not raise still forms its blocks and keeps its record.
+                      Shipped: relation Step, block count 5, ratio 1.0, step to level 2, ceiling ×3 — the only procedure measured at or above “without” on all nine windows
+                      (volume-weighted PF 0.750 against 0.648, net −480.2 against −495.1 points; both below 1). A raise weights results; it does not change a per-order PF.
                     </p>
                   </div>
                 );

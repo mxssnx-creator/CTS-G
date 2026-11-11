@@ -29,6 +29,7 @@ const files = [
   "src/lib/auth/gate-identity.test.ts",
   "src/lib/analytics.test.ts",
   "src/lib/relation-lanes.test.ts",
+  "src/lib/block-rounds.test.ts",
   "src/lib/base-progress.test.ts",
   "src/lib/execution-scope.test.ts",
   "src/lib/evidence-view.test.ts",

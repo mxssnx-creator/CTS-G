@@ -501,6 +501,57 @@
     "base",
     "trail"
   ],
+  "blockRounds": {
+    "enabled": true,
+    "relations": [
+      "step"
+    ],
+    "maxMult": 3,
+    "counts": {
+      "1": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "2": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "3": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "4": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "5": {
+        "on": true,
+        "ratio": 1,
+        "step": true,
+        "maxLevel": 2,
+        "pause": 0
+      },
+      "6": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      }
+    }
+  },
   "minPfStepAutoHigh": 2,
   "manualCloseRestMin": 240,
   "transferAdjust": true,

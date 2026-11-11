@@ -239,6 +239,114 @@ def the_simulator_and_the_study_apply_the_same_rules_as_the_engine():
     return all(calls.values()) and steps == want and not br.guard_holds(br.clean_cfg({}), {"net": -1.0, "shadow": 0.0}), f"rule calls {calls}; guard walk {steps}"
 
 
+def _naive_rounds(nets, n, ratio, step, max_level, pause, cap, others=0.0):
+    """A plain reading of the owner's rule for ONE block count on positions that open and close one after another: returns each position's multiple."""
+    level, deficit, rest, out, block = 0, 0.0, 0, [], []
+    for net in nets:
+        m = min(cap, 1.0 + ratio * level + others)
+        out.append(m)
+        block.append((net, m))
+        if len(block) < n:
+            continue
+        unit = weighted = 0.0
+        for x, w in block:                                   # added one by one, as a book adds each close (sum() rounds differently)
+            unit += x
+            weighted += x * w
+        block = []
+        if rest > 0:
+            rest -= 1
+        elif level == 0:
+            if unit < 0:
+                level, deficit = 1, weighted
+            elif pause:
+                rest = pause
+        else:
+            deficit += weighted
+            if deficit >= 0:
+                level, deficit, rest = 0, 0.0, pause
+            elif step and unit < 0:
+                level = min(max_level, level + 1)
+    return out
+
+
+def block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule():
+    """Block rounds (owner 2026-11-11): for every block count 1..6, ratio, step and pause the engine's book gives each position the multiple a plain reading
+    of the rule gives (blocks of N, a losing block raises, kept until the weighted net is back at zero, step raises once more per further losing block, pause
+    after a positive block or a recovery). Independence: with the other five counts observing (off) a count's multiples are exactly those of that count
+    alone, and every count keeps its own blocks (count N settles len // N blocks); two groups of one relation never read each other; with all six on, the
+    multiple is 1 + the sum of the six procedures' own ratio x level under the ceiling; overlapping positions decide from completed blocks only."""
+    import random
+    import block_rounds as rounds
+    rng = random.Random(7)
+    k = rounds.keys_of("A-USDT", 1, "general", "base", 5, "pos", "s1")
+    k2 = rounds.keys_of("B-USDT", -1, "general", "base", 9, "pos", "s2")
+    bad, cases = [], 0
+    for n in rounds.COUNTS:
+        for ratio, step, ml, pause in ((0.5, False, 1, 0), (1.0, True, 2, 0), (0.25, True, 6, 2), (2.0, True, 3, 1)):
+            nets = [rng.choice((-1.0, -0.4, 0.3, 0.9, 1.5)) for _ in range(240)]
+            want = _naive_rounds(nets, n, ratio, step, ml, pause, 5.0)
+            for others_observe in (False, True):
+                counts = {str(n): {"on": True, "ratio": ratio, "step": step, "maxLevel": ml, "pause": pause}}
+                if others_observe:
+                    counts.update({str(o): {"on": False, "ratio": 1.0, "step": True, "maxLevel": 6} for o in rounds.COUNTS if o != n})
+                b = rounds.RoundsBook(cfg=rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 5, "counts": counts}))
+                got = []
+                for i, net in enumerate(nets):
+                    m, _ = b.ask(k)
+                    b.opened(f"p{i}", k, m)
+                    b.opened(f"q{i}", k2, b.ask(k2)[0])          # another group of the same relation, always losing
+                    b.closed(f"q{i}", -1.0)
+                    b.closed(f"p{i}", net)
+                    got.append(m)
+                cases += 1
+                if got != want:
+                    bad.append((n, ratio, step, pause, others_observe, "multiples"))
+                blocks = {o: b.groups[b.gid("step", k["step"], o)]["blocks"] for o in rounds.COUNTS}
+                if blocks != {o: len(nets) // o for o in rounds.COUNTS}:
+                    bad.append((n, "blocks", blocks))
+    # all six on: the sum of the six procedures, each by its own reading of the same results (the multiple feeds every count's weighted net)
+    nets = [rng.choice((-1.0, -0.4, 0.3, 0.9, 1.5)) for _ in range(300)]
+    cfg = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 4, "counts": {str(o): {"on": True, "ratio": 0.1 * o, "step": o % 2 == 0, "maxLevel": 3, "pause": o % 3} for o in rounds.COUNTS}})
+    b = rounds.RoundsBook(cfg=cfg)
+    summed = True
+    for i, net in enumerate(nets):
+        m, why = b.ask(k)
+        lv = sum(cfg.counts[o].ratio * b.groups.get(b.gid("step", k["step"], o), {"level": 0})["level"] for o in rounds.COUNTS)
+        summed = summed and abs(m - min(4.0, 1.0 + lv)) < 1e-12 and len(why) == sum(1 for o in rounds.COUNTS if b.groups.get(b.gid("step", k["step"], o), {"level": 0})["level"] > 0)
+        b.opened(f"p{i}", k, m)
+        b.closed(f"p{i}", net)
+    # overlapping positions: three open at once, the block of 2 lost only when BOTH are closed; the third opened before that and is not raised
+    o = rounds.RoundsBook(cfg=rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 5, "counts": {"2": {"on": True, "ratio": 1.0}}}))
+    for pid in ("a", "b", "c"):
+        o.opened(pid, k, o.ask(k)[0])
+    o.closed("a", -1.0)
+    early = o.ask(k)[0]
+    o.closed("b", -1.0)
+    late = o.ask(k)[0]
+    ok = not bad and summed and early == 1.0 and late == 2.0 and o.members["c"]["mult"] == 1.0
+    return ok, f"{cases} single-count books against the plain reading, mismatches {bad[:4]}; six counts sum {summed}; overlap before / after the block completed x{early} / x{late}"
+
+
+def block_rounds_ship_the_procedure_measured_at_or_above_without():
+    """The shipped overlays, the three presets that carry Block and the desk default hold the same blockRounds object, and it is the measured one: relation
+    step, block count 5 raising (ratio 1.0, step to level 2, no pause), the other five counts forming their blocks without raising, ceiling x 3. The engine's
+    absent-key default is off (fixtures and older overlays raise nothing)."""
+    import json
+    import re
+    import block_rounds as rounds
+    from common import ROOT
+    pulse = os.path.join(ROOT, "server", "pulse")
+    files = [os.path.join(pulse, f) for f in sorted(os.listdir(pulse)) if f.startswith("overlay-") and f.endswith(".json")]
+    files += [os.path.join(ROOT, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json", "low-steps-coordination-research.json")]
+    carried = {os.path.basename(f): json.load(open(f)).get("blockRounds") for f in files}
+    want = rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"5": {"on": True, "ratio": 1.0, "step": True, "maxLevel": 2, "pause": 0}}}).to_json()
+    same = {name: (isinstance(v, dict) and rounds.config_of(v).to_json() == want and v == want) for name, v in carried.items()}
+    desk = open(os.path.join(ROOT, "src", "lib", "block-rounds.ts")).read()
+    desk_ok = bool(re.search(r'enabled: true,\s*relations: \["step"\],\s*maxMult: 3,', desk)) and '"5": { on: true, ratio: 1, step: true, maxLevel: 2, pause: 0 }' in desk
+    off = rounds.config_of(None)
+    return all(same.values()) and len(same) == 7 and desk_ok and not off.enabled and not any(c.on for c in off.counts.values()), f"carried equal to the measured object: {same}; desk {desk_ok}; absent key enabled {off.enabled}"
+
+
 CHECKS = [
     ("block_structure.every-count-is-independent-and-stacks-from-the-original-volume", every_count_is_independent_and_stacks_from_the_original_volume),
     ("block_structure.six-counts-one-step-apart-run-six-independent-procedures", six_counts_one_step_apart_run_six_independent_procedures),
@@ -246,4 +354,6 @@ CHECKS = [
     ("block_structure.the-deficit-guard-holds-adds-until-paper-adds-earn-the-deficit-back", the_deficit_guard_holds_adds_until_paper_adds_earn_the_deficit_back),
     ("block_structure.an-add-needs-room-to-the-target-and-an-allowed-parent-type", an_add_needs_room_to_the_target_and_an_allowed_parent_type),
     ("block_structure.the-simulator-and-the-study-apply-the-same-rules-as-the-engine", the_simulator_and_the_study_apply_the_same_rules_as_the_engine),
+    ("block_structure.block-rounds-every-count-runs-its-own-procedure-by-the-owners-rule", block_rounds_every_count_runs_its_own_procedure_by_the_owners_rule),
+    ("block_structure.block-rounds-ship-the-procedure-measured-at-or-above-without", block_rounds_ship_the_procedure_measured_at_or_above_without),
 ]

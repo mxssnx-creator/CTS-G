@@ -118,6 +118,11 @@ class Coordinator:
         if isinstance(raw_ob, str):
             raw_ob = [int(x) for x in raw_ob.replace("[", "").replace("]", "").split(",") if x.strip().isdigit()]
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
+        # Disjoint Axis windows (axisDisjoint, off by default; the rule CTS-C runs): the previous window is the closes BEFORE the last window, so one close is
+        # never read by both; the previous PF must reach the floor itself, and the last window is judged by the sign of its net (axisLastOutcome: "any" = not
+        # at all, "positive" = the newest closes must be net positive, "negative" = net negative) instead of by a PF of a handful of closes.
+        self.disjoint = ov.get("axisDisjoint") is True
+        self.last_outcome = ov.get("axisLastOutcome") if ov.get("axisLastOutcome") in ("positive", "negative") else "any"
         self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 8)
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
         self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 20)
@@ -261,13 +266,27 @@ class Coordinator:
         if intern_ok:
             metrics["internOpen"] = 1.0
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
-        if self.axes["last"].enabled and last_n_ok:
+        if getattr(self, "disjoint", False):
+            before = list(closed_rows)[:-last_w] if last_w > 0 else list(closed_rows)
+            prev_n = self.axes["prev"].max_window
+            prev_cost = last_n_cost_pf(before, prev_n, self.position_cost_pct)
+            metrics["prevPf"] = round(float(prev_cost["pf"]), 3)
+            if self.axes["prev"].enabled and int(prev_cost["count"]) >= min(prev_n, max(1, self.prev_min_count)) and prev_cost["pf"] + 1e-9 < mp:
+                allow = False
+                reasons.append(f"prev {int(prev_cost['count'])} PF {prev_cost['pf']:.2f}<{mp:.2f}")
+            outcome = getattr(self, "last_outcome", "any")
+            if self.axes["last"].enabled and outcome != "any" and int(last_cost["count"]) >= 1:
+                net = float(last_cost["avgR"])
+                if (outcome == "positive" and not net > 0) or (outcome == "negative" and not net < 0):
+                    allow = False
+                    reasons.append(f"last {int(last_cost['count'])} net not {outcome}")
+        elif self.axes["last"].enabled and last_n_ok:
             if last_cost["pf"] + 1e-9 < mp:
                 allow = False
                 reasons.append(
                     f"last {int(last_cost['count'])} PF {last_cost['pf']:.2f}<{mp:.2f}"
                 )
-        if self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
+        if not getattr(self, "disjoint", False) and self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
             floor = mp * 0.85
             if prev_cost["pf"] + 1e-9 < floor and cost["pf"] + 1e-9 < floor:
                 allow = False

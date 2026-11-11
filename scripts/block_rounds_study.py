@@ -26,41 +26,23 @@ import pickle
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-RELATIONS = ("overall", "direction", "symbol", "indication", "type", "set", "step", "symbol+direction")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server", "pulse"))
+import block_rounds  # noqa: E402  (the engine's own rule: the study drives the same book)
+
+RELATIONS = block_rounds.RELATIONS
 
 
 def pf_of(g: float, l_: float) -> Optional[float]:
     return round(g / l_, 4) if l_ > 0 else (99.0 if g > 0 else None)
 
 
-def group_key(relation: str, r: Dict[str, Any]) -> str:
-    side = "L" if r["side"] > 0 else "S"
-    return {"overall": "all", "direction": side, "symbol": r["symbol"], "indication": f"{r['pack']}|{side}", "type": f"{r['pack']}|{r['kind']}|{side}",
-            "set": f"{r['set']}|{r['lane']}", "step": f"{r['pack']}|{0 if r['kind'] == 'trail' else r['step']}|{r['lane']}|{side}",
-            "symbol+direction": f"{r['symbol']}|{side}"}[relation]
-
-
-def new_group() -> Dict[str, Any]:
-    return {"level": 0, "net": 0.0, "pause": 0, "open": [], "blocks": []}
-
-
-def block_done(g: Dict[str, Any], block: Dict[str, Any], cfg: Dict[str, Any]) -> None:
-    """A completed block's result into its group's procedure (the rule above)."""
-    unit, weighted = block["unit"], block["weighted"]
-    if g["pause"] > 0:
-        g["pause"] -= 1
-        return
-    if g["level"] == 0:
-        if unit < 0:
-            g["level"], g["net"] = 1, weighted          # the losing block starts the deficit the raise has to earn back
-        elif cfg["pause"]:
-            g["pause"] = cfg["pause"]
-        return
-    g["net"] += weighted
-    if g["net"] >= 0:
-        g["level"], g["net"], g["pause"] = 0, 0.0, cfg["pause"]
-    elif cfg["step"] and unit < 0:
-        g["level"] = min(cfg["max_level"], g["level"] + 1)
+def rounds_cfg(cfg: Dict[str, Any]) -> block_rounds.RoundsCfg:
+    """A study setting as the engine's configuration: {"relation", "n", "ratio", "step", "max_level", "pause", "cap"} (one count) or
+    {"relations": [...], "counts": {n: {...}}, "cap"} (several procedures at once)."""
+    if "counts" in cfg:
+        return block_rounds.config_of({"enabled": True, "relations": list(cfg["relations"]), "maxMult": cfg["cap"], "counts": cfg["counts"]})
+    return block_rounds.config_of({"enabled": True, "relations": [cfg["relation"]], "maxMult": cfg["cap"],
+                                   "counts": {str(cfg["n"]): {"on": True, "ratio": cfg["ratio"], "step": cfg["step"], "maxLevel": cfg["max_level"], "pause": cfg["pause"]}}})
 
 
 def simulate(window: Dict[str, Any], cfg: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
@@ -70,28 +52,20 @@ def simulate(window: Dict[str, Any], cfg: Dict[str, Any], state: Dict[str, Any])
         events.append((r["t_in"], 1, i))
         events.append((r["t"], 0, i))
     events.sort()
-    groups: Dict[str, Dict[str, Any]] = state.setdefault("groups", {})
+    book = state.get("book")
+    if book is None:
+        book = state["book"] = block_rounds.RoundsBook(cfg=rounds_cfg(cfg))
+    name = window.get("name", "")
     mult: Dict[int, float] = {}
-    place: Dict[int, Tuple[str, Dict[str, Any]]] = {}
     for _t, what, i in events:
         r = ps[i]
         if what == 1:
-            g = groups.setdefault(group_key(cfg["relation"], r), new_group())
-            m = min(cfg["cap"], 1.0 + cfg["ratio"] * g["level"])
-            mult[i] = m
-            if not g["open"] or g["open"][-1]["n"] >= cfg["n"]:
-                g["open"].append({"n": 0, "closed": 0, "unit": 0.0, "weighted": 0.0})
-            blk = g["open"][-1]
-            blk["n"] += 1
-            place[i] = (group_key(cfg["relation"], r), blk)
-            continue
-        key, blk = place[i]
-        g = groups[key]
-        blk["closed"] += 1
-        blk["unit"] += r["net"]
-        blk["weighted"] += r["net"] * mult[i]
-        while g["open"] and g["open"][0]["n"] >= cfg["n"] and g["open"][0]["closed"] >= g["open"][0]["n"]:
-            block_done(g, g["open"].pop(0), cfg)         # blocks settle in the order they were formed
+            keys = block_rounds.keys_of(r["symbol"], r["side"], r["pack"], r["kind"], r["step"], r["lane"], r["set"])
+            mult[i] = book.ask(keys)[0]
+            book.opened(f"{name}:{i}", keys, mult[i])
+        else:
+            book.closed(f"{name}:{i}", r["net"])
+    book.forget(())                                      # a window's last open positions never close: their blocks stay without them
     ug = sum(r["net"] for r in ps if r["net"] > 0)
     ul = -sum(r["net"] for r in ps if r["net"] < 0)
     wg = sum(r["net"] * mult[i] for i, r in enumerate(ps) if r["net"] > 0)

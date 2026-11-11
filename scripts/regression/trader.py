@@ -784,6 +784,101 @@ def relation_lanes_raise_a_set_entry_and_never_cancel_it():
     return ok, f"entry notional and recorded multiple by case: {out}; lanes handed over {lanes_seen}"
 
 
+def block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered():
+    """blockRounds (owner definition 2026-11-11): the positions of a group form blocks of N; when a block's net is negative the group's next entries open at
+    1 + ratio x level of the original volume (rounded down to the lot step), and stay raised until the volume-weighted net since that block is back at zero.
+    Driven through Pulse.place and close_pos: nothing is raised before a block lost, both positions of the next block are raised, a recovered group is back at
+    the base volume, the position and close record carry the multiple, the state survives a restart, a count that is off raises nothing but keeps its record,
+    and with blockRounds off nothing is raised or tracked."""
+    import types
+    import block_rounds
+    syms = [f"S{i}-USDT" for i in range(8)]
+    st = types.SimpleNamespace(id="indications:L:1m:sl1.00:st15", pack="indications", kind="base", step=15, idx=0, sl_ratio=1.0, trail_key="",
+                               trail_arm=0.0, trail_give=0.0, hold_bars=0)
+    saved = (pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH)
+    raw = {"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"2": {"on": True, "ratio": 0.5}, "3": {"on": False, "ratio": 1.0}}}
+    out = {}
+
+    def make(td, label):
+        for name in ("BLOCK_PATH", "LEV_PATH", "OPEN_PATH", "TRADES_PATH"):
+            setattr(pt, name, os.path.join(td, f"{label}-{name.lower()}.json"))
+        api = _BookVenue({"askPrice": 100.0, "askQty": 1e6, "bidPrice": 99.99, "bidQty": 1e6})
+        contracts = {sym: pt.Contract(symbol=sym, min_qty=0.001, step=0.001, qprec=3, pprec=2, min_usdt=0.1, max_lev=150) for sym in syms}
+        p = pt.Pulse(api, contracts)
+        p.boot_ts, p.halted, p.available = 0.0, False, 1e6
+        p.entry_sense = lambda *a, **k: None
+        p.volume_factor, p.size_pct, p.size_max = 1.0, 0.0, 25.0
+        p._scope_choice = lambda pack, side=0, symbol="": (st, "pos", "")
+        p.sets.lane_fracs = lambda s_: (0.01, 0.015)
+        for sym in syms:
+            p.px[sym] = 100.0
+        return p, api
+
+    def enter(p, api, sym):
+        n0 = len(api.posts)
+        p.place(sym, 1, "set:indications:x", 0.9)
+        orders = [b for path, b in api.posts[n0:] if path.endswith("/trade/order") and str(b.get("type")) == "MARKET"]
+        pos = p.open.get(sym)
+        return (round(float(orders[0]["quantity"]) * 100.0, 4) if orders else None), pos
+
+    with tempfile.TemporaryDirectory() as td:
+        pt.dump_cts_settings = lambda: {}
+        try:
+            p, api = make(td, "on")
+            p.rounds.cfg = block_rounds.config_of(raw)
+            seq = []
+            for sym, exit_px in ((syms[0], 99.0), (syms[1], 99.0)):            # block 1 of the count-2 procedure: two losses
+                notional, pos = enter(p, api, sym)
+                seq.append((notional, round(float(pos.rounds_mult), 4)))
+                p.close_pos(pos, exit_px, "test")
+            base = seq[0][0]
+            n3, pos3 = enter(p, api, syms[2])                                   # block 2: both positions raised by 0.5
+            n4, pos4 = enter(p, api, syms[3])
+            out["raised"] = (n3, n4, round(float(pos3.rounds_mult), 4), pos3.rounds_why)
+            p2, api2 = make(td, "on")                                           # a restart on the same files: the level and the membership are read back
+            p2.rounds.cfg = block_rounds.config_of(raw)
+            out["restart"] = (round(p2.rounds.ask(block_rounds.keys_of(syms[4], 1, "indications", "base", 15, "pos", st.id))[0], 4), len(p2.rounds.members))
+            for w in (pos3, pos4):                                              # the stub venue fills every close at 100: a win is an entry below it
+                w.entry = w.base_entry = 95.0
+            p.close_pos(pos3, 103.0, "test")
+            rec = p.closed[-1]
+            out["closed"] = (round(float(rec.rounds_mult), 4), rec.rounds_why)
+            p.close_pos(pos4, 103.0, "test")                                    # block 2 won more than block 1 lost: recovered
+            n5, pos5 = enter(p, api, syms[4])
+            out["recovered"] = (n5, round(float(pos5.rounds_mult), 4))
+            snap = p.rounds.snapshot()
+            out["counts"] = {r["count"]: (r["groups"], r["blocks"], r["raises"], r["recovered"]) for r in snap["byCount"]}
+            p.close_pos(pos5, 99.0, "test")
+            g3 = p.rounds.groups.get(p.rounds.gid("step", "indications|15|pos|L", 3)) or {}
+            out["count 3 (off, its own blocks) level"] = g3.get("level")
+            u, uapi = make(td, "unscored")                                     # a close made while the engine was down is recorded and teaches nothing
+            u.rounds.cfg = block_rounds.config_of({"enabled": True, "relations": ["step"], "maxMult": 3, "counts": {"1": {"on": True, "ratio": 1.0}}})
+            ukeys = block_rounds.keys_of(syms[5], 1, "indications", "base", 15, "pos", st.id)
+            _n, upos = enter(u, uapi, syms[0])
+            upos.downtime_close = True
+            u.close_pos(upos, 99.0, "test")
+            after_unscored = (u.rounds.ask(ukeys)[0], u.rounds.groups[u.rounds.gid("step", ukeys["step"], 1)]["blocks"], len(u.rounds.members))
+            _n, upos = enter(u, uapi, syms[1])
+            u.close_pos(upos, 99.0, "test")
+            out["unscored then scored loss"] = (after_unscored, u.rounds.ask(ukeys)[0])
+            q, _api = make(td, "off")
+            notional, pos = enter(q, _api, syms[0])
+            q.close_pos(pos, 99.0, "test")
+            out["off"] = (notional, len(q.rounds.groups), q.rounds.ask(block_rounds.keys_of(syms[1], 1, "indications", "base", 15, "pos", st.id)))
+        finally:
+            pt.BLOCK_PATH, pt.LEV_PATH, pt.OPEN_PATH, pt.dump_cts_settings, pt.TRADES_PATH = saved
+    ok = (base is not None and seq == [(base, 1.0), (base, 1.0)]
+          and out["raised"][0] is not None and abs(out["raised"][0] - 1.5 * base) < 0.11 and out["raised"][0] <= 1.5 * base + 1e-9 and out["raised"][1] == out["raised"][0]
+          and abs(out["raised"][2] - out["raised"][0] / base) < 1e-3 and out["raised"][3] == "step:N2:L1"
+          and out["restart"] == (1.5, 2) and out["closed"] == (out["raised"][2], "step:N2:L1")
+          and out["recovered"] == (base, 1.0)
+          and out["counts"][2] == (1, 2, 1, 1) and out["counts"][1][1] == 4 and out["counts"][3][1] == 1 and out["counts"][4][1] == 1
+          and out["count 3 (off, its own blocks) level"] == 0
+          and out["unscored then scored loss"] == ((1.0, 0, 0), 2.0)
+          and out["off"] == (base, 0, (1.0, [])))
+    return ok, f"entries and multiples: first block {seq}; {out}"
+
+
 def lift_figures_compare_the_same_parents_with_and_without():
     """execution.lift ("PF related to without"): the settled Set parents once without and once with each stack type, on the parent's original base notional.
     Block: a parent without an add is its base result on both sides; a parent with adds is its base result against ALL its cash over the base notional, so
@@ -3397,6 +3492,7 @@ CHECKS = [
     ("trader.set-volume-multiples-size-by-pack-type-and-range", set_volume_multiples_size_by_pack_type_and_range),
     ("trader.indications-trailing-volume-is-not-multiplied", indications_trailing_volume_is_not_multiplied),
     ("trader.relation-lanes-raise-a-set-entry-and-never-cancel-it", relation_lanes_raise_a_set_entry_and_never_cancel_it),
+    ("trader.block-rounds-raise-the-group-after-a-losing-block-until-it-is-recovered", block_rounds_raise_the_group_after_a_losing_block_until_it_is_recovered),
     ("trader.lift-figures-compare-the-same-parents-with-and-without", lift_figures_compare_the_same_parents_with_and_without),
     ("trader.start-records-whether-the-previous-run-crashed", start_records_whether_the_previous_run_crashed),
     ("trader.failed-close-keeps-position-protected", failed_close_keeps_the_position_protected),

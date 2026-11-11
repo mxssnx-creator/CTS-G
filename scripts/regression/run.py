@@ -40,7 +40,7 @@ def selftests():
     out = []
     import common  # noqa: F401  (sets sys.path to the engine)
     for mod in ("set_engine", "indication_engine", "dca_engine", "position_cost", "exit_engine",
-                "risk_variants", "stats_report", "coord_engine", "relation_lanes"):
+                "risk_variants", "stats_report", "coord_engine", "relation_lanes", "block_rounds"):
         m = importlib.import_module(mod)
         fn = getattr(m, "self_test", None)
         if fn is None:
