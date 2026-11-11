@@ -162,7 +162,7 @@ class Journal:
             if str(order.get('closePosition', '')).lower() in ('true', '1') or order.get('positionId'):
                 raise RuntimeError('session forbids aggregate position-closing orders')
             if is_entry(order) and (self.phase != "active" or self.deadline is None or time.monotonic() >= self.deadline):
-                return {"code": 101209, "error": True, "msg": "session admission paused or deadline reached"}
+                return {"code": 101209, "error": True, "cooled": True, "msg": "session admission paused or deadline reached"}
         with self.lock:
             identities = [(str(order['symbol']), str(order.get('clientOrderID') or order.get('clientOrderId')).lower()) for order in bodies]
             if len(set(identities)) != len(identities) or any(identity in self.owned_clients for identity in identities):
@@ -295,6 +295,12 @@ def collect_account_fees(pulse, symbols, stopped, deadline, progress):
                     raise SessionEnd('requested session stop' if stopped() else 'account fee readiness deadline')
             if any(s not in pulse.fee_schedule.account for s in pending):
                 time.sleep(1)
+
+
+def prepare_history_warmup(pulse):
+    """Publish measured costs before the startup-only full-universe policy."""
+    pulse.apply_live_config()
+    pulse.load.partial = False
 
 
 def capture(pulse, out, label):
@@ -458,7 +464,6 @@ def main(argv=None):
     # No position exists during admission-locked warmup. Process the complete
     # frozen universe once instead of re-scoring its growing pool after every
     # tiny load-governor chunk. Restore the configured live policy at admission.
-    pulse.load.partial = False
     warming_since = time.monotonic()
     next_capture = [0.0]
     def cycle():
@@ -505,7 +510,7 @@ def main(argv=None):
         save()
         # Paused native cycles intentionally skip hot reload. Publish the fully
         # measured account cost before building any history or unpausing entries.
-        pulse.apply_live_config()
+        prepare_history_warmup(pulse)
         require_empty_account(api)
         pulse.run()
         report["stopReason"] = "native stopped before observation deadline"

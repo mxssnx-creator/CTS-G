@@ -15,6 +15,19 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_full_universe_warmup_survives_the_measured_cost_reload(self):
+        sys.path.insert(0, str(session.ROOT / 'server/pulse'))
+        from load_engine import LoadGovernor
+        governor = LoadGovernor()
+        pulse = SimpleNamespace(load=governor,apply_live_config=lambda:governor.configure({'loadPartial':True}))
+        session.prepare_history_warmup(pulse)
+        self.assertFalse(governor.partial)
+        selected, _ = governor.history_window(SYMBOLS, 3, 0)
+        self.assertEqual(selected,SYMBOLS)
+        governor.configure({'loadPartial':True})
+        selected, _ = governor.history_window(SYMBOLS, 3, 0)
+        self.assertEqual(len(selected),3)
+
     def test_batch_ack_binds_exact_clients_before_first_rest_order_poll(self):
         orders = [{'symbol':'S0-USDT','clientOrderID':'G1234sl','orderId':'91'},
                   {'symbol':'S0-USDT','clientOrderID':'G1234tp','orderId':'92'}]
