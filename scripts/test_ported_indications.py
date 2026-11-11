@@ -67,4 +67,11 @@ class Ported(unittest.TestCase):
   for n in range(1,51):self.assertAlmostEqual(factor(dict(indicationTypes=dict(tactic=n/10)),c),n/10)
   raw=dict(indicationTypes=dict(tactic=2),strategies=dict(axis=.5),ranges=dict(micro=1.5))
   self.assertEqual(factor(raw,c),1.5);self.assertEqual(factor(raw,{**c,'range':'short'}),1)
+ def test_axis_is_an_independent_strategy_weight_not_a_normal_weight_stack(self):
+  from types import SimpleNamespace
+  st=SimpleNamespace(pack='extra.ao__inverse-known-ema-9-21__t1',kind='base',step=3)
+  raw=dict(indicationTypes=dict(inverse=2),strategies=dict(normal=5,axis=.5))
+  self.assertEqual(set_factor(raw,st),10)
+  self.assertEqual(set_factor(raw,st,strategy='axis'),1)
+  self.assertEqual(factor(dict(ranges=dict(short=2,atr=.5)),dict(range=['short','atr','short'])),1)
 if __name__=='__main__':unittest.main()

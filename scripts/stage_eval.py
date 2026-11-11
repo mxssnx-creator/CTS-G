@@ -275,12 +275,13 @@ def base_eval(book, tapes: Tapes, st, now: float) -> Dict[str, Any]:
     pp, net values w), their count and PF (rounded as last_n_cost_pf does), the drawdown time over them, both halves, and the rank inputs."""
     lb = evidence_s(book)
     wn = book.win(st)
-    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long, wn.base_short, book.base_min_n, book.deact_n))
+    tx, te, pp = tapes.window(st.idx, now, lb, max(wn.base_long+wn.base_short+book.base_min_n if book.disjoint else max(wn.base_long,wn.base_short,book.base_min_n),book.deact_n))
     txa = tape_source(tapes, st.idx, now, lb).by_set[st.idx][0]
     n_all = bisect.bisect_left(txa, now) - bisect.bisect_left(txa, now - lb)     # SetState.n: every order in the lookback
     cf = tapes.cf
-    w = pp[-wn.base_long:]
-    wt = tx[-wn.base_long:]
+    end = max(0,len(pp)-wn.base_short-book.base_min_n) if book.disjoint else len(pp)
+    w = pp[max(0,end-wn.base_long):end]
+    wt = tx[max(0,end-wn.base_long):end]
     gp = sum(x - cf for x in w if x - cf > 0)
     gl = -sum(x - cf for x in w if x - cf < 0)
     n = len(w)
@@ -328,7 +329,9 @@ def _long_ok(book, e: Dict[str, Any]) -> bool:
 
 def _short_ok(book, e: Dict[str, Any]) -> bool:
     bs = e.get("base_short", book.base_short)
-    sw = [x - e["cf"] for x in e.get("coord", e["w"])[-bs:]]
+    values=e.get("coord",e["w"]); end=max(0,len(values)-book.base_min_n) if book.disjoint else len(values)
+    sw = [x-e["cf"] for x in values[max(0,end-bs):end]]
+    if not book.base_short_positive: return len(sw)>=bs and sum(sw)<0
     return len(sw) >= (bs if getattr(book, "stage_full", False) else 1) and round(se.pf_of(sum(x for x in sw if x > 0), -sum(x for x in sw if x < 0)), 4) + 1e-9 >= e["floor_short"]
 
 

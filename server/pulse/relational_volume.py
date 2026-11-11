@@ -24,9 +24,10 @@ def factor(raw,context):
  result=s['overall']
  for bucket,key in (('indicationTypes','indicationType'),('indications','indication'),('strategies','strategy'),('ranges','range'),('symbols','symbol')):
   value=context.get(key)
-  if value is not None:result*=s[bucket].get(str(value).strip().lower(),1.0)
+  if value is not None:
+   for k in dict.fromkeys(str(v).strip().lower() for v in (value if isinstance(value,(list,tuple)) else [value])):result*=s[bucket].get(k,1.0)
  return min(s['maxMultiplier'],max(.000001,result))
-def set_factor(raw,st,symbol=''):
+def set_factor(raw,st,symbol='',strategy=None):
  from set_engine import pack_group, SetBook
  from indication_config import source_name
  pack=str(getattr(st,'pack','') or '')
@@ -35,7 +36,7 @@ def set_factor(raw,st,symbol=''):
  indication=source
  if source.startswith('ao__'):indication=source[4:].rsplit('__t',1)[0]
  indication_type='inverse' if indication.startswith('inverse-') else 'tactic' if indication.startswith('tactic-') else pack_group(pack) or pack
- return factor(raw,dict(indicationType=indication_type,indication=indication,strategy={'base':'normal','trail':'trailing'}.get(kind,kind),range=SetBook.processing_range(st),symbol=symbol))
+ return factor(raw,dict(indicationType=indication_type,indication=indication,strategy=strategy or {'base':'normal','trail':'trailing'}.get(kind,kind),range=SetBook.processing_range(st),symbol=symbol))
 
 def strategy_weight(raw,strategy):
  s=settings(raw)

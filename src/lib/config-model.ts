@@ -424,6 +424,9 @@ export type PulseOverlay = {
   /** Stages Base -> Main -> Real (off: the Base long window alone). */
   stagesEnabled: boolean;
   /** true: a stage window judges only once it holds its full N orders; false (default): the orders it has, at least one. */
+  lastNDisjoint: boolean;
+  setGateShortMode: "positive"|"negative";
+  mainShortMode: "positive"|"negative";
   stageFullWindow: boolean;
   /** Basis of every last-N window: "time" = the newest N orders inside the lookback, "count" = the newest N orders of the configuration whatever their age. */
   lastNBasis: "time" | "count";
@@ -744,6 +747,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setGateWindow: 50,
   setGateMinTrades: 0,
   stagesEnabled: true,
+  lastNDisjoint: false, setGateShortMode: "positive", mainShortMode: "positive",
   stageFullWindow: false,
   lastNBasis: "time",
   setGateShortN: 25,
@@ -998,6 +1002,9 @@ export type CtsSettings = {
   mainGateEnabled?: boolean;
   mainGateN?: number;
   stagesEnabled?: boolean;
+  lastNDisjoint?: boolean;
+  setGateShortMode?: "positive"|"negative";
+  mainShortMode?: "positive"|"negative";
   stageFullWindow?: boolean;
   lastNBasis?: "time" | "count";
   setGateShortN?: number;
@@ -1510,6 +1517,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateWindow: Math.max(1, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
     setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
     stagesEnabled: bool(cts.stagesEnabled, true),
+    lastNDisjoint: bool(cts.lastNDisjoint,false),
+    setGateShortMode: cts.setGateShortMode==="negative"?"negative":"positive",
+    mainShortMode: cts.mainShortMode==="negative"?"negative":"positive",
     stageFullWindow: bool(cts.stageFullWindow, false),
     lastNBasis: cts.lastNBasis === "count" ? "count" : "time",
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
@@ -1525,7 +1535,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
     minPfMediumN: Math.max(1, Math.round(num(cts.minPfMediumN, 35))),
     setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
-    setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
+    setGateMinN: Math.max(0, Math.min(5, Math.round(num(cts.setGateMinN, 0)))),
     setGateMinMode: minMode(cts.setGateMinMode),
     mainGateEnabled: bool(cts.mainGateEnabled, true),
     mainGateN: Math.max(1, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
@@ -1534,7 +1544,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),
     mainShortMin: Math.max(1, Math.min(200, Math.round(num(cts.mainShortMin ?? cts.mainAutoMin, 1)))),
     mainShortMargin: Math.max(1, Math.min(2, num(cts.mainShortMargin ?? cts.mainAutoMargin, 1.02))),
-    mainMinN: Math.max(0, Math.min(3, Math.round(num(cts.mainMinN, 0)))),
+    mainMinN: Math.max(0, Math.min(5, Math.round(num(cts.mainMinN, 0)))),
     mainMinMode: minMode(cts.mainMinMode),
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
