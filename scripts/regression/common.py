@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+os.environ.setdefault("CTSG_PROJECT_ROOT",ROOT)
 PULSE = os.path.abspath(os.environ.get("CTSG_PULSE_DIR") or os.path.join(ROOT, "server", "pulse"))
 if PULSE not in sys.path:
     sys.path.insert(0, PULSE)

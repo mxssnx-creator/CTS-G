@@ -32,7 +32,7 @@ def evaluate(args):
     from position_cost import tp_range_of
     from stack_eval import summarize
     label, windows, minimum = arm
-    ov = {**json.loads(Path(sg.OVERLAY).read_text()), **patch}
+    ov = sg.replay_overlay()
     names, bars, times = sg.load_bars(data, 12)
     shadow = replay_cache.load(cache, replay_cache.fingerprint(data, names, ov, sg.PULSE, sg.__file__))
     b = sg.make_book()

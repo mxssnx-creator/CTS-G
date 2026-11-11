@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent BingX X01 live pulse scalper with exchange control orders."""
 from __future__ import annotations
+from relational_volume import set_factor as relational_set_factor, strategy_weight as relational_strategy_weight
 
 import hmac
 import hashlib
@@ -3891,7 +3892,7 @@ class Pulse:
             # own volume per indication, type and range: the volume factor's size x that multiple, never over the hard size ceiling or what the
             # balance carries; the venue minimum lot still applies
             vm = set_volume_mult(chosen, getattr(self, "volume_by_pack", {}), getattr(self, "volume_by_kind", {}), getattr(self, "volume_by_range", {}),
-                                 getattr(self, "volume_by_pack_kind", {}))
+                                 getattr(self, "volume_by_pack_kind", {}))*relational_set_factor(getattr(self,"relational_volume_ratios",None),chosen,sym)*(relational_strategy_weight(getattr(self,"relational_volume_ratios",None),"axis") if any(ax.enabled for ax in self.coord.axes.values()) else 1)
             # Block v2 carry (blockCarry, off by default): a Set parent opens at V0 x (1 + the ratios up to the level its relation carries), never above the book
             # room or the hard size ceiling; its adds stay fractions of that parent's own (original) volume
             sb_ = getattr(self, "set_block", None)
@@ -4747,6 +4748,11 @@ class Pulse:
         n = fails[sym] = int(fails.get(sym, 0)) + 1
         return min(1800.0, COOLDOWN_S * (4 ** (n - 1)))
 
+    def trailing_allowed_for(self, pos) -> bool:
+        st = getattr(self.sets, "sets", {}).get(getattr(pos, "set_id", "")) or getattr(self.sets,"retired",{}).get(getattr(pos,"set_id",""))
+        scope = self.sets.processing_range(st) if st is not None else "normal"
+        return getattr(self, "strat_trail", True) and trailing_enabled(getattr(self.sets, "processing_overlay", {}), scope)
+
     def lane_honors_tp(self, pos: Optional[Position] = None) -> bool:
         """Whether this Set position's lane exits on its TP, by its Set's kind as the replay decided it (set_engine.SetLane):
         a base Set takes its TP, an Exit Set never does, a trailing Set follows the book's setting."""
@@ -4779,7 +4785,7 @@ class Pulse:
         arm = float(pos.trail_arm or 0.0)
         give = float(pos.trail_give or 0.0)
         # Off stops new adjustments, never removes an already protective stop.
-        if (getattr(self, "strat_trail", True) and pos.trail_set_id
+        if (self.trailing_allowed_for(pos) and pos.trail_set_id
                 and pos.trail_set_id == pos.set_id and arm > 0 and give > 0):
             fav = (pos.peak - e) / e if side > 0 else (e - pos.peak) / e
             if fav >= arm:
@@ -4890,7 +4896,7 @@ class Pulse:
                         if not self.replace_sl(pos, dec.sl):
                             pos.trail = prev
                     continue
-            if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM) and (now - pos.opened_at) >= self.coord.trailing_min_step:
+            if self.trailing_allowed_for(pos) and pnl_pct >= (pos.trail_arm or TRAIL_ARM) and (now - pos.opened_at) >= self.coord.trailing_min_step:
                 pos.trail_armed = True
                 give = pos.trail_give or TRAIL_GIVE
                 if pos.side == "LONG":
@@ -5217,6 +5223,7 @@ class Pulse:
             TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
         self.volume_factor = volume_factor_of(ov.get("volumeFactor"))
         # own volume multiples per indication (pack), Set type and TP range (owner 2026-11-03), on top of the volume factor; 1 = as before
+        self.relational_volume_ratios = ov.get("relationalVolumeRatios")
         self.volume_by_pack = volume_mults_of(ov.get("volumeByPack"))
         self.volume_by_kind = volume_mults_of(ov.get("volumeByKind"))
         self.volume_by_range = volume_mults_of(ov.get("volumeByRange"))
@@ -5742,7 +5749,7 @@ class Pulse:
             px = self.px.get(pos.symbol) or pos.entry
             if not c or px <= 0:
                 continue
-            raw = row["requestedAddQty"]
+            raw = row["requestedAddQty"]*relational_strategy_weight(getattr(self,"relational_volume_ratios",None),"block")
             # (Block's evaluation already limits one order to one partial: ratio x V0)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
             add_cap = min(self.notional_cap() * max(1.0, float(self.block.volume_ratio)), room)
@@ -5902,7 +5909,7 @@ class Pulse:
             # Total parent loss at its existing stop, fees included, when a risk budget is set; 0 (owner 2026-11-04) = no cap: the add is its count's ratio x
             # the parent's ORIGINAL base volume. Adds never move that stop, and a minimum lot cannot override a budget.
             risk_qty = block_risk_qty(self.block_risk_pct, self.equity, pos.side, px, pos.sl, pos.entry, pos.qty, cf)
-            qty = self.round_qty(c, min(row["qty"], room / px, risk_qty))
+            qty = self.round_qty(c, min(row["qty"]*relational_strategy_weight(getattr(self,"relational_volume_ratios",None),"block"), room / px, risk_qty))
             # No minimum-lot bump beyond the independent group's planned volume.
             if qty < self.min_order_qty(c, px) or qty <= 0:
                 continue
@@ -6017,7 +6024,7 @@ class Pulse:
                 continue
             room = max(0.0, self.max_book_notional() - pos.qty * px)
             add_cap = min(self.notional_cap() * max(1.0, float(row.get("mult") or 1)), room)
-            qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
+            qty = self.cap_order_qty(c, px, float(row["qty"])*relational_strategy_weight(getattr(self,"relational_volume_ratios",None),"dca"), add_cap)
             floor = self.min_order_qty(c, px)
             if qty < floor:
                 # the exchange minimum is larger than the partial: the auto plan rounds up to it while the whole position
@@ -6268,7 +6275,8 @@ class Pulse:
                 continue
             bar_t = minute - 60.0
             hit = memo.get(s)
-            if hit is None or hit[0] != bar_t:
+            pending = getattr(self.sets, "entry_signals_pending", lambda *_: False)(s, bar_t)
+            if hit is None or hit[0] != bar_t or pending:
                 if getattr(self.sets, "bar_t", {}).get(s) != bar_t:
                     continue                          # that minute is not in the Set history yet
                 if budget <= 0:

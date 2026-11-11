@@ -242,3 +242,11 @@ test("TP-step PF ratio decimal midpoints match native half-up normalization", ()
   assert.equal(stepPfRatio(1e300),1.5);
   assert.equal(stepPfRatio(-1e300),.1);
 });
+
+test("Normal and Trailing range processing survives save/reload without enabling a sibling", () => {
+  const value = {micro:{normal:false,trailing:false},short:{normal:true,trailing:true}};
+  const loaded=overlayFromCts(cts(),{stratNormal:false,stratTrailing:true,strategyProcessingByRange:value});
+  const saved=overlayFromCts(cts(),syncOverlayFlags(loaded));
+  assert.deepEqual(saved.strategyProcessingByRange,value);
+  assert.equal(saved.stratNormal,false);
+});

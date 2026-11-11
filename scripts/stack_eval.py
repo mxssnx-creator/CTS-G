@@ -29,6 +29,7 @@ import argparse
 import bisect
 import heapq
 import json
+import math
 import os
 import sys
 import time
@@ -40,9 +41,18 @@ sys.path.insert(0, os.path.join(HERE, "..", "server", "pulse"))
 
 
 def pf(vals: Sequence[float]) -> Optional[float]:
+    if vals and not any(vals):
+        return 1.0
     gp = sum(v for v in vals if v > 0)
     gl = -sum(v for v in vals if v < 0)
     return round(gp / gl, 3) if gl > 0 else (99.0 if gp > 0 else None)
+
+
+def add_notional_weight(parent_entry: float, add_price: float, quantity_multiple: float) -> float:
+    """A quantity add's own notional, expressed in original-parent notional units."""
+    if parent_entry <= 0 or add_price <= 0 or quantity_multiple < 0:
+        raise ValueError("invalid add notional")
+    return quantity_multiple * add_price / parent_entry
 
 
 def qualified_parent_lanes(book, tapes, st, now: float) -> Tuple[str, ...]:
@@ -67,14 +77,15 @@ def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int,
     """events: (exit t, net fraction, weight). PF, net and max drawdown of the weighted results; hours with a positive net."""
     vals = [n * w for _, n, w in events]
     eq = peak = mdd = 0.0
-    for _t, n, w in sorted(events):
+    for _t, n, w in sorted(events, key=lambda row: row[0]):
         eq += n * w
         peak = max(peak, eq)
         mdd = max(mdd, peak - eq)
     def bucket(t):
-        # The final candle closes exactly at the report end. Keep that settled
-        # fill in the last hour so hourly totals reconcile to the portfolio.
-        return float(hours[-1]) if hours and t == hours[-1] + 3600 else float(int(t // 3600) * 3600)
+        # An exit is a completed candle's END: h < exit <= h+1h.
+        # Every exact hour boundary belongs to the preceding hour, not just
+        # the final boundary. This matches the parent replay's settlement.
+        return float((math.ceil(t / 3600.0)-1)*3600)
     by_h: Dict[float, float] = {}
     for t, n, w in events:
         h = bucket(t)
@@ -83,9 +94,17 @@ def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int,
     hourly = [{"t": h, "net_pct": round(100 * by_h.get(h, 0), 6),
                "fills": sum(1 for t, _, _ in events if bucket(t) == h),
                "pf": pf([n * w for t, n, w in events if bucket(t) == h])} for h in hours]
-    return {"pf": pf(vals), "parents": parents, "adds": adds, "net_pct": round(100 * net, 2), "max_dd_pct": round(100 * mdd, 2),
+    return {"pf": pf(vals), "gain_pct":100*sum(v for v in vals if v>0), "loss_pct":-100*sum(v for v in vals if v<0),
+            "parents": parents, "adds": adds, "net_pct": round(100 * net, 2), "max_dd_pct": round(100 * mdd, 2),
             "hourly": hourly,
             "net_per_dd": round(net / mdd, 3) if mdd > 0 else None, "hours_positive": f"{sum(1 for v in by_h.values() if v > 0)}/{len(hours)}"}
+
+
+def plain_first_hit(highs, lows, i0, i1, level, side):
+    """The same half-open price-hit query without an optional NumPy install."""
+    column=highs if side>0 else lows
+    return next((i for i in range(i0,min(i1,len(column)))
+                 if (column[i]>=level if side>0 else column[i]<=level)),-1)
 
 
 def dca_rungs(side: int, entry: float, exit_px: float, sl_f: float, e_i: int, i_end: int, cfg: Dict[str, Any], cf: float, hit, ind_ok=None, allow=None
@@ -175,11 +194,15 @@ def main() -> int:
     from coord_engine import Coordinator  # noqa: E402
     from block_engine import calculate_block_minimum_profit_factor, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX  # noqa: E402
     from position_cost import cost_as_frac, gate_min_pf  # noqa: E402
-    import numpy as np  # noqa: E402
+    try:
+        import numpy as np  # noqa: E402
+    except ImportError:
+        np=None
 
     t0 = time.time()
-    overlay = json.load(open(sg.OVERLAY, encoding="utf-8"))
-    overlay.update(json.loads(a.patch or "{}"))
+    # Use the same account/fallback fee and percentage-of-fee slippage budget
+    # as the SetBook and trade_sim. The raw overlay may hold a stale cost.
+    overlay = sg.replay_overlay()
     names = sorted(f[:-5] for f in os.listdir(a.data) if f.endswith("-USDT.json"))[:a.symbols]
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     names, bars, times = sg.load_bars(a.data, a.symbols)
@@ -359,13 +382,17 @@ def main() -> int:
             return True
         return sg.axis_judge(book, tapes, coord, st, now, r["lane"])[0]
 
-    arrays = {s: (np.array([b[1] for b in bars[s]]), np.array([b[2] for b in bars[s]])) for s in names}
+    from array import array
+    packed=lambda values:np.array(values)if np is not None else array('d',values)
+    arrays = {s: (packed([b[1] for b in bars[s]]), packed([b[2] for b in bars[s]])) for s in names}
 
     def first_hit(s: str, i0: int, i1: int, level: float, side: int) -> int:
         """First bar index j with i0 <= j < i1 whose high (long) / low (short) reaches level; -1 if none."""
         if i1 <= i0:
             return -1
         hi_, lo_ = arrays[s]
+        if np is None:
+            return plain_first_hit(hi_,lo_,i0,i1,level,side)
         seg = hi_[i0:i1] >= level if side > 0 else lo_[i0:i1] <= level
         k = int(np.argmax(seg)) if seg.size else 0
         return i0 + k if seg.size and seg[k] else -1
@@ -510,7 +537,7 @@ def main() -> int:
             ev.append((float(r["t_in"]), 1, i, 0))
             for n, now_t, _lvl in hits:
                 ev.append((now_t, 2, i, n))
-        ev.sort()
+        ev.sort(key=lambda event: (event[0], {1: 0, 2: 1, 0: 2}[event[1]], event[2], event[3]))
         ledgers: Dict[str, Dict[str, Any]] = {}
         guard = br.new_guard()                    # the book's deficit guard (block_rules): executed adds' net and, in deficit, the paper adds' net
 
@@ -622,16 +649,19 @@ def main() -> int:
             sl_f = float(r["fracs"][0])
             d = min(max(frac * sl_f, cf), 0.9 * sl_f)
             lvl = entry * (1 - side * d)
-            j = first_hit(s, e_i + 1, x_i + 1, lvl, -side)
+            # A winner cannot assume the adverse add happened before its TP
+            # in the exit candle. Include that candle on losers pessimistically.
+            j = first_hit(s, e_i + 1, x_i + 1 if r["net"] < 0 else x_i, lvl, -side)
             if j < 0:
                 continue
             now = float(times[s][j])
             net = (exit_px - lvl) / lvl * side - cf
             candidates.append({'now': now, 'close': float(r['t']), 'net': net, 'rung': 0,
+                               'weight': add_notional_weight(entry, lvl, mult),
                                'symbol': s, 'parent_key': parent_no, 'parent': r})
         admitted = admit_dca_candidates(candidates, dca_min_pf, deact=deact,
                    allow=(lambda c: parent_ok(c['parent'], c['now'], coord)) if gate == 'axis' else None)
-        events.extend((c['close'], c['net'], mult) for c in admitted)
+        events.extend((c['close'], c['net'], c['weight']) for c in admitted)
         return events, len(admitted), [c['net'] for c in admitted]
 
     if "dca" in parts:
@@ -697,8 +727,11 @@ def main() -> int:
                                   lambda i0, i1, lvl, d, s=s: first_hit(s, i0, i1, lvl, d),
                                   (lambda j, s=s, side=side: dca_prior_bar_indication(ind_dir, s, j, side, gate)) if gate else None)
                 for j, k, m, net in fills:
+                    distance = min(max((float(cfg['f0']) + k * float(cfg['fs'])) * float(r['fracs'][0]), cf), .9 * float(r['fracs'][0]))
+                    level = float(tr['entry_px']) * (1 - side * distance)
                     candidates.append({'now': float(times[s][j]), 'close': float(r['t']), 'net': net,
-                                       'rung': k, 'weight': m, 'symbol': s, 'parent_key': parent_no, 'parent': r})
+                                       'rung': k, 'weight': add_notional_weight(float(tr['entry_px']), level, m),
+                                       'symbol': s, 'parent_key': parent_no, 'parent': r})
             admitted = admit_dca_candidates(candidates, dca_min_pf, check_average=False, stop_parent=True)
             per_rung = [0] * cfg['n']
             for c in admitted:

@@ -30,7 +30,7 @@ def main():
     from position_cost import tp_range_of
     from stack_eval import summarize
     began = time.perf_counter()
-    ov = {**json.loads(Path(sg.OVERLAY).read_text()), **patch}
+    ov = sg.replay_overlay()
     names, bars, times = sg.load_bars(a.data, 12)
     shadow = replay_cache.load(a.cache, replay_cache.fingerprint(a.data, names, ov, sg.PULSE, sg.__file__))
     b = sg.make_book()

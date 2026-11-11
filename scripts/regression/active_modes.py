@@ -81,7 +81,9 @@ def normal_off_keeps_processing_the_base_sets_in_both_directions_and_never_execu
         b = se.SetBook()
         b.load(overlay(**{**SMALL, "setStepMax": 5, "stratIndications": False, "stratShortRange": False, "stratGeneral": True,
                           "stratNormal": False, "directionMode": mode, "pauseMode": "off", "minPfByStep": False, "setMinPf": 1.05,
-                          "stagesEnabled": False, "mainGateEnabled": False}))
+                          "stagesEnabled": False, "mainGateEnabled": False,
+                          "blockEnabled": False, "dcaEnabled": False,
+                          **{"axis" + name + "Enabled": False for name in ("Prev", "Last", "Cont", "Pause")}}))
         b.bars["S0-USDT"] = synth_bars(81, 900, vol=0.004)
         b.replay_all(now=T0)
         base = [s for s in b.by_idx if s.kind == "base"]

@@ -4,6 +4,7 @@ import json
 import os
 import pickle
 import tempfile
+from pathlib import Path
 
 
 def file_sha(path):
@@ -16,12 +17,18 @@ def file_sha(path):
 
 def fingerprint(data_dir, names, overlay, pulse_dir, stage_eval_path):
     files = sorted(os.path.join(pulse_dir, name) for name in os.listdir(pulse_dir) if name.endswith(".py"))
+    assets = Path(pulse_dir).resolve().parents[1] / "shared" / "cts-indications"
+    if not assets.is_dir():
+        assets = Path(pulse_dir) / "shared" / "cts-indications"
+    source_assets = {str(path.relative_to(assets)): file_sha(path) for path in sorted(assets.rglob("*"))
+                     if path.is_file() and path.suffix in (".ts", ".json")}
     return {"version": 1,
             "markets": {name: file_sha(os.path.join(data_dir, name + ".json")) for name in names},
             # the profit group gate (groupGate*), the relation lanes (relationLanes) the lane order (laneOrder) the basis of the last-N windows (lastNBasis), the Block rounds (blockRounds) and the disjoint Axis rule (axisDisjoint, axisLastOutcome) act on the scoring or at entry time and change no tape:
             # arms that differ in them share one cache
             "settings": hashlib.sha256(json.dumps({k: v for k, v in overlay.items() if not str(k).startswith(("groupGate", "relationLanes", "laneOrder", "lastNBasis", "blockRounds", "axisDisjoint", "axisLastOutcome"))}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
             "engine": {os.path.basename(path): file_sha(path) for path in files},
+            "sourceAssets": source_assets,
             "simulator": file_sha(stage_eval_path)}
 
 

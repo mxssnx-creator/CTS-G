@@ -34,10 +34,34 @@ DEFAULT_FLAGS = {
 }
 
 
-def trailing_enabled(overlay: Dict[str, Any]) -> bool:
-    """Both controls authorize trailing; an explicit disable always wins."""
+def _enabled(value: Any, default: bool = True) -> bool:
+    if value in (False, 0, "false", "0", "off"):
+        return False
+    if value in (True, 1, "true", "1", "on"):
+        return True
+    return default
+
+
+def range_processing(overlay: Dict[str, Any], range_name: str = "") -> Dict[str, bool]:
+    ranges = overlay.get("strategyProcessingByRange")
+    own = ranges.get(range_name, {}) if isinstance(ranges, dict) else {}
+    own = own if isinstance(own, dict) else {}
     mods = overlay.get("modules") if isinstance(overlay.get("modules"), dict) else {}
-    return bool(overlay.get("stratTrailing", True)) and bool(mods.get("strategy.trailing", True))
+    return {"normal": _enabled(overlay.get("stratNormal")) and _enabled(own.get("normal")),
+            "trailing": _enabled(overlay.get("stratTrailing")) and _enabled(mods.get("strategy.trailing")) and _enabled(own.get("trailing"))}
+
+
+def trailing_enabled(overlay: Dict[str, Any], range_name: str = "") -> bool:
+    """An overall or exact-range disable always wins."""
+    return range_processing(overlay, range_name)["trailing"]
+
+
+def additional_processing_enabled(overlay: Dict[str, Any]) -> bool:
+    """Configured adjustments retain their parent's calculated evidence with Normal off."""
+    mods=overlay.get("modules") if isinstance(overlay.get("modules"),dict) else {}
+    axis=_enabled(mods.get("strategy.coord")) and any(_enabled(overlay.get("axis"+name+"Enabled")) for name in ("Prev","Last","Cont","Pause"))
+    return (axis or _enabled(mods.get("strategy.block")) and _enabled(overlay.get("blockEnabled"),False) and _enabled(overlay.get("stratBlock"))
+            or _enabled(mods.get("strategy.dca")) and _enabled(overlay.get("dcaEnabled"),False) and _enabled(overlay.get("stratDca")) and (_enabled(overlay.get("dcaOnSets"),False) or axis and _enabled(overlay.get("dcaOnAxis"),False)))
 
 
 def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
