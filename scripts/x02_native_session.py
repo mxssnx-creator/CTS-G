@@ -216,10 +216,22 @@ def ready(pulse, symbols, history_bars, now):
     book = pulse.sets
     usable = getattr(book, 'usable', None)
     expected = {s for s in symbols if not callable(usable) or usable(s)}
+    age_of = getattr(book, '_snapshot_max_age', None)
+    age = max(150.0, float(age_of())) if callable(age_of) else 150.0
+    replay_keys = getattr(book, '_hist_replay_key', None)
+    if replay_keys is not None:
+        # Retained snapshot metadata deliberately requires an entirely usable
+        # requested universe. It is not the completion marker for a normal
+        # first replay when the native quality check excludes a symbol.
+        scope_ready = all(replay_keys.get(s) == (book.lookback, book._topo_gen)
+                          and 0 <= now-book._hist_replay_at.get(s, 0) <= age
+                          for s in expected)
+    else:
+        scope_ready = set(getattr(book, '_history_snapshot_symbols', ())) == expected
     return (book.progress.ready and not book._running and not book._lookback_pending
-            and bool(expected) and set(getattr(book, "_history_snapshot_symbols", ())) == expected
+            and bool(expected) and scope_ready
             and all(len(book.bars.get(s, ())) >= history_bars - 1
-                    and 0 <= now - book.bar_t.get(s, 0) <= 150
+                    and 0 <= now - book.bar_t.get(s, 0) <= age
                     and pulse.fee_schedule.rates(s, pulse.contracts.get(s), now)[2] == "account-rate"
                     for s in symbols))
 

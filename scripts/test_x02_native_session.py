@@ -15,6 +15,20 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_current_quality_checked_replay_does_not_need_a_retained_snapshot(self):
+        book = SimpleNamespace(progress=SimpleNamespace(ready=True), _running=False, _lookback_pending=False,
+            _history_snapshot_symbols=set(),bars={s:[0]*2880 for s in SYMBOLS},bar_t={s:940 for s in SYMBOLS},
+            usable=lambda s:s!=SYMBOLS[0],lookback=1080,_topo_gen=7,
+            _hist_replay_key={s:(1080,7)for s in SYMBOLS[1:]},_hist_replay_at={s:990 for s in SYMBOLS[1:]},
+            _snapshot_max_age=lambda:300)
+        pulse = SimpleNamespace(sets=book,contracts={},fee_schedule=SimpleNamespace(rates=lambda *args:(.0002,.0005,'account-rate')))
+        self.assertTrue(session.ready(pulse,SYMBOLS,2880,1000))
+        book._hist_replay_key[SYMBOLS[-1]]=(1080,6)
+        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
+        book._hist_replay_key[SYMBOLS[-1]]=(1080,7)
+        book._hist_replay_at[SYMBOLS[-1]]=100
+        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
+
     def test_full_universe_warmup_survives_the_measured_cost_reload(self):
         sys.path.insert(0, str(session.ROOT / 'server/pulse'))
         from load_engine import LoadGovernor
