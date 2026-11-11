@@ -68,6 +68,51 @@ def every_count_is_independent_and_stacks_from_the_original_volume():
     return ok, f"levels {levels}; adds (count, qty of a base volume 10) {seen}; final volume {pos.qty}; shared ratios {[shared.target_ratio(n) for n in (1, 2, 3)]}"
 
 
+def six_counts_one_step_apart_run_six_independent_procedures():
+    """Counts 1..6, each one PositionCost after the one before (levels 1..6), ratios 0.1 / 0.2 / 0.3 / 0.4 / 0.5 / 1.0. Earlier parents (the previous
+    positions of the group) taught every count its own record: counts 1, 3, 4 and 6 won, counts 2 and 5 lost. A new parent that runs through all six levels
+    then gets exactly the adds of counts 1, 3, 4 and 6, in order, each its own ratio x the ORIGINAL volume (1, 3, 4, 10 of a base 10), whatever the position
+    has grown to; the stack ends at V0 x (1 + 0.1 + 0.3 + 0.4 + 1.0). The threshold a count must clear rises with the volume already stacked (its own
+    ratio on top), never with another count's record. The statistics list every count of the group with its own observations and PF, and the close of
+    the parent adds one observation to each count it reached and one executed result to each count it added, in that group only. Shared stacking gives
+    the six counts one budget in equal parts."""
+    ratios = [0.1, 0.2, 0.3, 0.4, 0.5, 1.0]
+    table = [{"step": 1, "ratio": r, "on": True} for r in ratios]
+    with tempfile.TemporaryDirectory() as td:
+        b = _book(td, blockCounts=table, blockRelations=["set", "step"])
+        cfg = b.cfg
+        keys = ["set|general:L:1m:sl1.00:st20|pos|LONG", "step|general|20|pos|LONG"]
+        for k in keys:                                          # what the group's previous positions left behind, count by count
+            b.ledgers[k] = {"paper": {str(n): ([4, 0.03, 0.002] if n in (1, 3, 4, 6) else [4, 0.002, 0.03]) for n in range(1, 7)}, "executed": {},
+                            "life": br.new_life(), "updated": 0.0}
+        other = "step|general|12|pos|LONG"
+        b.ledgers[other] = {"paper": {str(n): [9, 0.0, 0.09] for n in range(1, 7)}, "executed": {}, "life": br.new_life(), "updated": 0.0}   # another group: must not matter
+        pos = _pos(cid="six", tp=103.0)
+        adds, thresholds = [], []
+        for step_no, price in enumerate([100.11, 100.21, 100.31, 100.41, 100.51, 100.61, 100.75], start=1):
+            while True:
+                row = b.candidate(pos, price, 3000.0 + step_no, BLOCK, COST, 3600.0, floor=1.1)
+                if row is None:
+                    break
+                adds.append((row["group"], round(row["qty"], 9), price))
+                thresholds.append(round(row["minPf"], 4))
+                _fill(pos, row, price)
+        snap = b.snapshot(4000.0, BLOCK, COST, 3600.0)
+        rows = {(r["lane"], r["group"]): r for r in snap["lanes"]}
+        before = {k: {n: list(v) for n, v in b.ledgers[k]["paper"].items()} for k in keys}
+        b.close(pos, 100.9, 4100.0, BLOCK, COST)
+        after = {k: b.ledgers[k] for k in keys}
+        shared = br.clean_cfg({"blockCounts": table, "blockStackType": "shared", "blockSharedTotal": 1.5})
+    want_adds = [(1, 1.0, 100.11), (3, 3.0, 100.31), (4, 4.0, 100.41), (6, 10.0, 100.61)]
+    obs_ok = all(after[k]["paper"][str(n)][0] == before[k][str(n)][0] + 1 for k in keys for n in range(1, 7))
+    exec_ok = all(sorted(after[k]["executed"]) == ["1", "3", "4", "6"] and all(v[0] == 1 for v in after[k]["executed"].values()) for k in keys)
+    stats_ok = all(rows[(k, n)]["paper"]["n"] == 4 and (rows[(k, n)]["paper"]["pf"] > 1.1) == (n in (1, 3, 4, 6)) for k in keys for n in range(1, 7))
+    ok = (cfg.levels() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] and adds == want_adds and abs(pos.qty - 10.0 * (1 + 0.1 + 0.3 + 0.4 + 1.0)) < 1e-9
+          and thresholds == sorted(thresholds) and thresholds[0] >= 1.1 and obs_ok and exec_ok and stats_ok and b.ledgers[other]["paper"]["1"][0] == 9
+          and all(abs(shared.target_ratio(n) - 0.25) < 1e-12 for n in range(1, 7)) and snap["counts"] == [{"n": i + 1, "step": 1.0, "ratio": r, "on": True} for i, r in enumerate(ratios)])
+    return ok, f"levels {cfg.levels()}; adds (count, qty, price) {adds}; thresholds {thresholds}; final volume {pos.qty}; observations +1 per count {obs_ok}; executed only for the added counts {exec_ok}"
+
+
 def evidence_is_kept_per_set_and_overall_for_the_open_parents():
     """Relations. "set": only this Set's own parents teach it; another Set of the same pack and TP step does not. "step" (Overall): every Set of the pack and
     step, lane and direction teaches one record, another step or direction does not. Both selected: both must agree. Observations come from every open parent
@@ -196,6 +241,7 @@ def the_simulator_and_the_study_apply_the_same_rules_as_the_engine():
 
 CHECKS = [
     ("block_structure.every-count-is-independent-and-stacks-from-the-original-volume", every_count_is_independent_and_stacks_from_the_original_volume),
+    ("block_structure.six-counts-one-step-apart-run-six-independent-procedures", six_counts_one_step_apart_run_six_independent_procedures),
     ("block_structure.evidence-is-kept-per-set-and-overall-for-the-open-parents", evidence_is_kept_per_set_and_overall_for_the_open_parents),
     ("block_structure.the-deficit-guard-holds-adds-until-paper-adds-earn-the-deficit-back", the_deficit_guard_holds_adds_until_paper_adds_earn_the_deficit_back),
     ("block_structure.an-add-needs-room-to-the-target-and-an-allowed-parent-type", an_add_needs_room_to_the_target_and_an_allowed_parent_type),

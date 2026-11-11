@@ -2,6 +2,30 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-11, owner: "Make Block fully effectively working with high PF as without ... try different coordinations completely until its working" / "check the
+  Block structure ... independent for each block count with ratios and correct stacking, for each Set and Overall".** Record: `docs/verification/block-coordinations-20261111.md`.
+  Nine windows (W5 10-29 .. W4 11-11, the same 20 symbols, x01 overlay, 24 h pre-history, parents admitted by the overlay's Axis); no connection started.
+  (a) **An add's result follows its parent's.** Unconditional adds by the parent's Set type paid exactly in the windows where that type of parent was itself
+  profitable (trailing on W1 dev / W2 sealed, base on W1 sealed / W3 sealed) and lost elsewhere; the executed parents were under PF 1 on all nine windows. Adds on
+  Exit-Set parents and adds past the middle of the way to a fixed target lost on seven of seven windows; no other state of an add (speed, room, side, lane, level,
+  the parent still valid with its Axis allowing) had a stable sign.
+  (b) **Sweeps** (`scripts/block_coordination_study.py`: stored executed parents, then thousands of coordinations in seconds; the shipped one reproduces
+  `stack_eval.py` to the digit): 11,704 coordinations with parent filters -> 25 at or above "without" on the four development windows -> on three windows no rule
+  was chosen on 24 fail (the best family +49 .. +56 net points in development, -44 .. -49 in confirmation) and the one that holds made 3 adds. 22,680 structural
+  coordinations (relations x mode x count tables x ratios x Additive / Shared x skip x observations x PF ratio) -> none passes the development windows. Nothing was
+  shipped from a sweep; a development winner among thousands of settings is selection.
+  (c) **Changed: three rules that only remove adds** (`block_rules.py`, called by `set_block.SetBlockBook`, `stack_eval.block_sim2` and the study; shipped in the
+  overlays, presets and desk): `blockGuard` true (the book's own executed adds must not be in deficit; the add that would have gone is followed on paper, and adding
+  resumes when the paper adds have earned the deficit back; no window, no count; kept in the Block state file), `blockTargetShare` 0.5 (a count of a fixed-target parent
+  adds only up to the middle of the way to the target), `blockKinds` ["base", "trail"] (no add on Exit-Set parents). The engine's absent-key defaults stay off / 0 / every
+  type. **13 days, the book carried chronologically, 1,859 parents: before -22.1 net points on 17 adds (PF 0.6392 against 0.6475 without), now -0.7 on 1 add (0.6472
+  against 0.6475)**; the guard is holding because the adds it follows on paper lost another 19 points. Block is at "without", not above it, and it is there because it
+  almost stopped adding. Revert: `blockGuard` false, `blockTargetShare` 0, `blockKinds` all three.
+  (d) **Structure checked, no defect** (`block_structure.*`): every count its own step, ratio and evidence record; six counts one PositionCost apart with ratios
+  0.1 .. 1.0 run six independent procedures (counts whose own record wins add their own ratio x the ORIGINAL volume, the others do not); Shared splits one budget;
+  "set" is taught only by that Set's parents, "step" (Overall) by every Set of the pack, TP step, lane and direction; observations are one per count and parent, from
+  the price an add would have had. Mutants `block guard:`, `block share:`, `block kinds:`.
+
 - **2026-11-10 / 11, owner: "make indications work also by type and additionally by step ... use ratios for higher volume factors ... for the overall and major
   lanes types ... Set it optimally" / "Test, Fix Axis, Block .. make fully work with correct high PF related to without".** Full record and tables:
   `docs/verification/relation-lanes-axis-block-20261110.md`. Two three-day datasets of 20 symbols (W1 11-07 18:00 .. 11-10 18:00, W2 11-04 18:00 .. 11-07 18:00

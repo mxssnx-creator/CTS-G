@@ -70,6 +70,14 @@ type, lane and TP range, with and without "the relation's own parent net at or a
   (+1.7). The shipped Block is below "without" on all three as well.
 - The development result was selection among thousands of settings. Nothing was shipped from the sweep.
 
+### The structural sweep (counts, volume ratios, stacking)
+
+`--grid structure`: every structural setting crossed without any parent filter: the nine relation sets in both modes, eleven count tables (1 to
+12 counts, steps of 1 to 4 PositionCosts), ratios 0.25 / 0.5 / 1.0 Additive and Shared with a budget of 1 and 2, the first 0 / 1 / 2 counts
+observing, minimum observations 1 / 5 / 10, PF threshold ratio 0.2 / 0.8 / 2 / 5: **22,680 coordinations**. 19,982 make at least one add,
+2,448 have a positive pooled add net, and **none** is at or above "without" on all four development windows (W2 dev is negative for every one of
+them). A volume ratio scales the adds' result, it cannot change its sign; Shared against Additive changes how the same adds are sized.
+
 ## 3. What was changed: three rules that only remove adds
 
 All three live in `server/pulse/block_rules.py`, the module the engine book (`set_block.SetBlockBook`) and both simulators call, so none of them
@@ -103,6 +111,10 @@ by itself when the adds it follows on paper have earned the deficit back; over t
 
 - Every count is independent: its own step (levels 1 / 3 / 6 PositionCosts for steps 1 + 2 + 3), its own ratio, its own evidence record. With
   count 2's record losing, counts 1 and 3 add and count 2 does not.
+- Six counts one PositionCost apart (levels 1..6) with ratios 0.1 / 0.2 / 0.3 / 0.4 / 0.5 / 1.0 run six independent procedures: with the group's
+  previous positions having taught counts 1, 3, 4, 6 a winning record and counts 2, 5 a losing one, a new parent gets exactly the adds of counts
+  1, 3, 4 and 6, each its own ratio of the original volume (1, 3, 4 and 10 of a base 10; final 28), the threshold rising only with the volume
+  already stacked; its close adds one observation to each count reached and one executed result to each count added, in its own groups only.
 - Stacking is from the parent's ORIGINAL volume: ratios 0.5 and 0.25 on a base volume 10 add 5.0 and 2.5 (final 17.5), never a share of the
   grown position; a count adds once; Shared splits one budget over the counts that are on.
 - Relations for the open parents: "set" is taught only by that Set's own parents; "step" (Overall) by every Set of the pack and TP step on that
