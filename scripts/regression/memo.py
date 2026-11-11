@@ -30,12 +30,13 @@ STATS = {"hit": 0, "miss": 0, "verified": 0}
 
 
 def _key(b: SetBook, symbol: str, now: float):
-    bars = b.bars[symbol]
+    market, dated = b._replay_market()
+    bars = market[symbol]
     digest = hashlib.blake2b(repr(bars).encode(), digest_size=16).hexdigest()
     settings = json.dumps(b.ind_settings, sort_keys=True, default=str)
     sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, st.tp_pct, st.sl_ratio,
                   st.hold_bars, b.auto_holds(st)) for st in b.by_idx)
-    return (symbol, digest, float(now), b.bar_t.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
+    return (symbol, digest, float(now), dated.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
             b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, b.min_sl_distance_pct,
             bool(getattr(b, "hist_honor_tp", True)), sets)
 
@@ -76,7 +77,7 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
             self.progress.set_id = last[-1].id
     # Replay inputs are read-only in the engine. Use this book's equal bars,
     # while retaining the candidate arrays and index paired with cached rows.
-    return {**cached_inputs, "bars": self.bars[symbol]}
+    return {**cached_inputs, "bars": self._replay_market()[0][symbol]}
 
 
 SetBook._replay_symbol = _replay

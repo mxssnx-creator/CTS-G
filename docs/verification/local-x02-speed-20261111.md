@@ -56,6 +56,14 @@ cap, and refuses a page making no backwards progress. A frozen mock reproduces
 the defect on the previous implementation and supplies the full contiguous
 context after the fix. Short-history and failed-page checks remain required.
 
+A long native warmup also reproduced a replay-clock race: incoming candles
+advanced later symbols past the pass decision time, causing future-bar errors.
+Each replay now freezes an atomic market view, trims candles after its decision
+clock, and uses the same view for peer indications. Incoming history remains
+available to the next replay and live entries. Deterministic ingestion-during-
+replay and explicit-cutoff oracles preserve the exact reference rows; direct
+single-symbol future-bar rejection remains intact.
+
 ## Local reproduction
 
 Install locked desk dependencies with `npm ci`, and install Python runtime
