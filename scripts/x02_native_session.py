@@ -622,6 +622,8 @@ def main(argv=None):
             report["cleanup"] = cleanup(pulse, journal, args.cleanup_seconds)
         except BaseException as exc:
             report["cleanup"] = {"confirmedFlat": False, "errorType": type(exc).__name__, "protectionsRetained": True}
+        pulse.halted = True
+        pulse.halt_reason = 'bounded session stopped: ' + str(report.get('stopReason') or 'unknown')
         try:
             capture(pulse, args.out, "final")
         except BaseException as exc:
