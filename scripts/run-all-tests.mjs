@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 
 const jobs = [
-  {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py"},
+  {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py"},
   {label:"Tactic/Inverse/volume",cmd:"python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts"},
   { label: "node", cmd: "node --test scripts/*.test.mjs" },
   { label: "ts", cmd: "node scripts/run-ts-tests.mjs" },

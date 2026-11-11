@@ -164,6 +164,7 @@ def main() -> int:
     ap.add_argument("--stage-details", action="store_true", help="export each hourly last-N stage by type and TP range")
     ap.add_argument("--execution-cache", default="", help="trusted local detailed executed parents, for independent strategy comparisons")
     ap.add_argument("--axis-current", action="store_true", help="apply the overlay's Axis rules to every entry, as live")
+    ap.add_argument("--indexed-stage", action="store_true", help="exact causal prefix index for immutable tapes; native fallback on context expiry")
     ap.add_argument("--next", default="", help="extra next-N order windows after a validation, e.g. 15,25 (next_pf in the JSON)")
     a = ap.parse_args()
     args_refresh = max(60, min(3600, int(a.eval_every)))
@@ -197,6 +198,10 @@ def main() -> int:
         print(f"cache holds {held} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")
         return 2
     tapes = sg.Tapes(book, names, times, shadow)
+    stage_index = None
+    if a.indexed_stage:
+        from indexed_stage_query import IndexedStages
+        stage_index = IndexedStages(sg).install()
     cf = cost_as_frac(book.cost_pct)
     future_tapes = FutureEntryTapes(names, times, shadow, cf)
     start = max(times[s][0] for s in names) + book.lookback * 60
@@ -386,6 +391,7 @@ def main() -> int:
            "validation_scope": "Base only; executable_pct is the separate full Base/Main/Real gate",
            "forward_cohort_scope": "earliest entries at or after each validation, ties by symbol; completed shadow trades only; overlapping and potentially incomplete cohorts",
            "execution_axis": "overlay settings" if a.axis_current else "off (parent control)",
+           "stage_query": stage_index.provenance() if stage_index else {"implementation": "native"},
            "start_utc": lo, "end_utc": hi, "replay_fingerprint": manifest,
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "real_n": book.realst_n, "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},

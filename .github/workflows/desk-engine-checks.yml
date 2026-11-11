@@ -35,3 +35,11 @@ jobs:
         run: |
           python3 scripts/test_x02_native_session.py
           python3 scripts/test_control_coverage.py
+          python3 scripts/test_demo_acceptance_ownership.py
+      - name: Check independent replay and imported sources
+        run: |
+          python3 scripts/test_audit_reporting.py
+          python3 scripts/test_strategy_switches.py
+          python3 scripts/test_indexed_stage_query.py
+          python3 scripts/test_ported_indications.py
+          node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts

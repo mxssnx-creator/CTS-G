@@ -23,6 +23,7 @@ def main():
     ap=argparse.ArgumentParser()
     for name in ['data','cache','parents','patch-file','out']:ap.add_argument('--'+name,required=True)
     ap.add_argument('--compare-axis',action='store_true')
+    ap.add_argument('--indexed-stage',action='store_true')
     args=ap.parse_args()
     os.environ['STAGE_OVERLAY_PATCH']=Path(args.patch_file).read_text()
     import stage_eval as sg
@@ -38,6 +39,10 @@ def main():
     if saved['fingerprint']!=manifest or saved['axis']!='overlay':raise ValueError('parents differ from current verified replay')
     hours=saved['hours'];parents=[r for r in saved['rows']if 'net'in r]
     shadow=replay_cache.load(args.cache,manifest);tapes=sg.Tapes(book,names,times,shadow)
+    index=None
+    if args.indexed_stage:
+        from indexed_stage_query import IndexedStages
+        index=IndexedStages(sg).install()
     by_id={st.id:st for st in book.by_idx};cf=book.cost_pct/100
     def metric(values,adds=0):
         events=[(r['t'],v,1.0)for r,v in zip(parents,values)]
@@ -134,6 +139,7 @@ def main():
         for c in admitted:values[c['parent_key']]+=c['net']*c['weight'];counts[c['parent_key']]+=1
         out['dca'][label]=metric(values,len(admitted));record('DCA · '+label,values,counts)
     out['seconds']=time.monotonic()-t0
+    out['stage_query']=index.provenance()if index else {'implementation':'native'}
     Path(args.out).write_text(json.dumps(out,indent=1,allow_nan=False))
     print(json.dumps({key:{k:v['pf']for k,v in out[key].items()}for key in ['axis','block','rounds','dca']}),flush=True)
 
