@@ -538,7 +538,8 @@ def main() -> int:
                 if fk not in floor_memo:           # the Auto floor of a Set at an hour never changes between candidates: learn it once
                     auto.apply(book, hr)
                     wn_ = book.win(m["st"])
-                    floor_memo[fk] = (float(book.floor_for(wn_.real_n, m["st"].pack, m["st"])), float(book.floor_for(wn_.real_neg_n, m["st"].pack, m["st"])))
+                    floor_memo[fk] = (float(book.floor_for(wn_.real_n, m["st"].pack, m["st"])),
+                                      float(book.floor_for(getattr(wn_, "real_neg_n", wn_.real_n), m["st"].pack, m["st"])))
                 floor = floor_memo[fk][1 if r["lane"] == "neg" else 0]       # the parent's own lane window, as Pulse.set_axis_floor
                 fired_ratio = sum(cfg.target_ratio(k) for k in m["fired"])
                 if not br.count_passes(cfg, n, [b["paper"].get(str(n)) for b in books], [b["executed"].get(str(n)) for b in books], floor, fired_ratio):

@@ -31,6 +31,18 @@ _catchers: dict = {}
 _catchers_lock = threading.Lock()
 
 MUTATIONS = [
+    ("lane: a Set open on both lanes is named positive whatever the lane order",
+     "set_engine.py", "        return next((lane for lane in self.lane_order if lane in lanes), lanes[0] if lanes else \"\")", "        return lanes[0] if lanes else \"\""),
+    ("lane: lane_in ignores which lanes may open",
+     "set_engine.py", "        return next((lane for lane in self.lane_order if lane in lanes and lane in allowed), \"\")", "        return next((lane for lane in self.lane_order if lane in lanes), \"\")"),
+    ("lane: a closed positive scope drops a Set that is also open on the negative lane",
+     "pulse_trader.py", "                        alt_lane = str(lane_in(alternative, allowed) or \"\") if callable(lane_in) else \"\"", "                        alt_lane = \"\""),
+    ("lift: a parent with Block adds reads its base result on the with side",
+     "pulse_trader.py", "    with_ret = cash / notional if fills else base", "    with_ret = base"),
+    ("lift: the relation multiple does not weight the with side",
+     "pulse_trader.py", "    put(\"rel\", base, mult)", "    put(\"rel\", base)"),
+    ("lift: a parent with an unknown base result enters the sums as zero",
+     "pulse_trader.py", "    if base is None or (fills and (cash is None or not (notional > 0 and math.isfinite(notional)))):\n        agg[\"unknown\"] += 1\n        return", "    if base is None:\n        base = 0.0\n    if fills and (cash is None or not (notional > 0 and math.isfinite(notional))):\n        agg[\"unknown\"] += 1\n        return"),
     ("relation lanes: an entry counts once per member order (no mean per entry)",
      "relation_lanes.py", "    for s, c in islice(reversed(groups.values()), n):\n        v = s / c", "    for s, c in islice(reversed(groups.values()), n):\n        v = s"),
     ("relation lanes: a close stamped at the entry instant is read by that entry",
