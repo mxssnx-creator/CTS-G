@@ -45,6 +45,13 @@ def pf(vals: Sequence[float]) -> Optional[float]:
     return round(gp / gl, 3) if gl > 0 else (99.0 if gp > 0 else None)
 
 
+def add_notional_weight(parent_entry: float, add_price: float, quantity_multiple: float) -> float:
+    """A quantity add's own notional, expressed in original-parent notional units."""
+    if parent_entry <= 0 or add_price <= 0 or quantity_multiple < 0:
+        raise ValueError("invalid add notional")
+    return quantity_multiple * add_price / parent_entry
+
+
 def qualified_parent_lanes(book, tapes, st, now: float) -> Tuple[str, ...]:
     """All currently qualified paper lanes of this parent, not the preferred one.
 
@@ -178,8 +185,9 @@ def main() -> int:
     import numpy as np  # noqa: E402
 
     t0 = time.time()
-    overlay = json.load(open(sg.OVERLAY, encoding="utf-8"))
-    overlay.update(json.loads(a.patch or "{}"))
+    # Use the same account/fallback fee and percentage-of-fee slippage budget
+    # as the SetBook and trade_sim. The raw overlay may hold a stale cost.
+    overlay = sg.replay_overlay()
     names = sorted(f[:-5] for f in os.listdir(a.data) if f.endswith("-USDT.json"))[:a.symbols]
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     names, bars, times = sg.load_bars(a.data, a.symbols)
@@ -510,7 +518,7 @@ def main() -> int:
             ev.append((float(r["t_in"]), 1, i, 0))
             for n, now_t, _lvl in hits:
                 ev.append((now_t, 2, i, n))
-        ev.sort()
+        ev.sort(key=lambda event: (event[0], {1: 0, 2: 1, 0: 2}[event[1]], event[2], event[3]))
         ledgers: Dict[str, Dict[str, Any]] = {}
         guard = br.new_guard()                    # the book's deficit guard (block_rules): executed adds' net and, in deficit, the paper adds' net
 
@@ -622,16 +630,19 @@ def main() -> int:
             sl_f = float(r["fracs"][0])
             d = min(max(frac * sl_f, cf), 0.9 * sl_f)
             lvl = entry * (1 - side * d)
-            j = first_hit(s, e_i + 1, x_i + 1, lvl, -side)
+            # A winner cannot assume the adverse add happened before its TP
+            # in the exit candle. Include that candle on losers pessimistically.
+            j = first_hit(s, e_i + 1, x_i + 1 if r["net"] < 0 else x_i, lvl, -side)
             if j < 0:
                 continue
             now = float(times[s][j])
             net = (exit_px - lvl) / lvl * side - cf
             candidates.append({'now': now, 'close': float(r['t']), 'net': net, 'rung': 0,
+                               'weight': add_notional_weight(entry, lvl, mult),
                                'symbol': s, 'parent_key': parent_no, 'parent': r})
         admitted = admit_dca_candidates(candidates, dca_min_pf, deact=deact,
                    allow=(lambda c: parent_ok(c['parent'], c['now'], coord)) if gate == 'axis' else None)
-        events.extend((c['close'], c['net'], mult) for c in admitted)
+        events.extend((c['close'], c['net'], c['weight']) for c in admitted)
         return events, len(admitted), [c['net'] for c in admitted]
 
     if "dca" in parts:
@@ -697,8 +708,11 @@ def main() -> int:
                                   lambda i0, i1, lvl, d, s=s: first_hit(s, i0, i1, lvl, d),
                                   (lambda j, s=s, side=side: dca_prior_bar_indication(ind_dir, s, j, side, gate)) if gate else None)
                 for j, k, m, net in fills:
+                    distance = min(max((float(cfg['f0']) + k * float(cfg['fs'])) * float(r['fracs'][0]), cf), .9 * float(r['fracs'][0]))
+                    level = float(tr['entry_px']) * (1 - side * distance)
                     candidates.append({'now': float(times[s][j]), 'close': float(r['t']), 'net': net,
-                                       'rung': k, 'weight': m, 'symbol': s, 'parent_key': parent_no, 'parent': r})
+                                       'rung': k, 'weight': add_notional_weight(float(tr['entry_px']), level, m),
+                                       'symbol': s, 'parent_key': parent_no, 'parent': r})
             admitted = admit_dca_candidates(candidates, dca_min_pf, check_average=False, stop_parent=True)
             per_rung = [0] * cfg['n']
             for c in admitted:

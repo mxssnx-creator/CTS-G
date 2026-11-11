@@ -49,8 +49,9 @@ def simulate(window: Dict[str, Any], cfg: Dict[str, Any], state: Dict[str, Any])
     ps = window["parents"]
     events: List[Tuple[float, int, int]] = []
     for i, r in enumerate(ps):
-        events.append((r["t_in"], 1, i))
-        events.append((r["t"], 0, i))
+        # Entries at a clock cannot learn an OHLC close at that same clock.
+        events.append((r["t_in"], 0, i))
+        events.append((r["t"], 1, i))
     events.sort()
     book = state.get("book")
     if book is None:
@@ -59,7 +60,7 @@ def simulate(window: Dict[str, Any], cfg: Dict[str, Any], state: Dict[str, Any])
     mult: Dict[int, float] = {}
     for _t, what, i in events:
         r = ps[i]
-        if what == 1:
+        if what == 0:
             keys = block_rounds.keys_of(r["symbol"], r["side"], r["pack"], r["kind"], r["step"], r["lane"], r["set"])
             mult[i] = book.ask(keys)[0]
             book.opened(f"{name}:{i}", keys, mult[i])

@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from config_num import num
 from lane_policy import expand_entries, negative_filter_ok
 import relation_lanes
-from modules import trailing_enabled
+from modules import trailing_enabled, range_processing, additional_processing_enabled
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
     PF_BY_SIZE_DEFAULTS,
@@ -1031,17 +1031,36 @@ def signal_window(packs: Sequence[str], ind_settings: Dict[str, Any]) -> int:
     return max([w, EXTRA_WINDOW if names else 0] + [window_of(source_name(str(n))) for n in names])
 
 
+def _ported_pack_sources(packs):
+    from ported_indications import known
+    return {p: source_name(p[len(EXTRA_INDICATOR_PREFIX):]) for p in packs if p.startswith(EXTRA_INDICATOR_PREFIX) and known(source_name(p[len(EXTRA_INDICATOR_PREFIX):]))}
+
+
+def _ported_peer_symbols(packs):
+    from ported_indications import NAMES
+    ids=[NAMES[name][0] for name in _ported_pack_sources(packs).values()]
+    if any("market-" in source for source in ids):return None
+    return {match.group(1).upper()+"-USDT" for source in ids if (match:=re.match(r"inverse-pair-(btc|eth)-",source))}
+
+
 def bar_signal(
     bars: Sequence[Sequence[float]],
     i: int,
     packs: Sequence[str],
     ind_settings: Dict[str, Any],
     ts: float,
+    ported_async: bool = False,
 ) -> Dict[str, Tuple[int, float, str]]:
     """The signal of every pack on bar i, read from the closed bars up to and including i (each pack its own window).
     The one per-bar rule: the replay (pack_signals) and the live entries (SetBook.entry_signal) both call it, so a live
     entry is taken on exactly the bar and direction the Sets were validated on."""
-    row: Dict[str, Tuple[int, float, str]] = {}
+    imported = _ported_pack_sources(packs)
+    if imported:
+        from ported_indications import batch
+        result=batch(bars[:i+1],list(imported.values()),ts-i*BAR_S,
+                     str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or (),asynchronous=ported_async)
+        ind_settings["_portedPending"] = any(series.pending for series in result.values())
+    row: Dict[str, Tuple[int, float, str]] = {p:result[name][-1] for p,name in imported.items()}
     hw = signal_window(packs, ind_settings)
     hist = bars[max(0, i + 1 - hw) : i + 1]          # the longest window: the extra indicators slice their own from it
     if "general" in packs:
@@ -1056,7 +1075,7 @@ def bar_signal(
         if pk in packs:
             row[pk] = _variant_signal(hist, ind_settings.get(vkey) or list(default))
     for pk in packs:
-        if pk.startswith(EXTRA_INDICATOR_PREFIX):
+        if pk.startswith(EXTRA_INDICATOR_PREFIX) and pk not in imported:
             row[pk] = _variant_signal(hist, [source_name(pk[len(EXTRA_INDICATOR_PREFIX):])])
     return row
 
@@ -1078,6 +1097,13 @@ def pack_signals(
     A signal is a pure function of those bars: candle timestamps are labels only. Identical windows
     therefore give identical signals in every refresh and replay. Entries this call did not use are dropped.
     """
+    imported = _ported_pack_sources(packs)
+    if imported:
+        from ported_indications import batch
+        native=pack_signals(bars,[p for p in packs if p not in imported],ind_settings,base_ts,warmup,on_step,cache,salt) if len(imported)<len(packs) else {}
+        calculated=batch(bars,list(imported.values()),base_ts,str(ind_settings.get("portedSymbol") or "ASSET-USDT"),ind_settings.get("portedPeers") or ())
+        native.update({p:[(0,0.0,"")]*min(warmup,len(bars))+calculated[name][warmup:] for p,name in imported.items()})
+        return native
     n = len(bars)
     signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
     hs = [hash(tuple(b)) for b in bars] if cache is not None else None
@@ -2161,7 +2187,8 @@ class SetBook:
 
     def _load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
-        self.normal_entries = bool(ov.get("stratNormal", True))
+        self.normal_entries = range_processing(ov)["normal"]
+        self.processing_overlay = dict(ov)
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback_cfg = max(120, min(LOOKBACK_MAX, int(num(ov, "histLookbackBars", LOOKBACK_DEFAULT))))
         # Collection grows for sparse scored Sets independently of the admission gate.
@@ -2434,8 +2461,7 @@ class SetBook:
         self.group_gate_pf = _num("groupGatePf", 1.0, 0.5, 3.0)
         self.group_gate_hours = _num("groupGateHours", 12.0, 1.0, 72.0)
         self.group_gate_min = int(_num("groupGateMin", 1, 1, 50))
-        if not trailing_enabled(ov):
-            self.trails = []
+        self.trails = [t for t in self.trails if trailing_enabled(ov, tp_range_of(int(round(t[1] / TP_UNIT_PCT))))]
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
         except Exception:
@@ -2913,15 +2939,25 @@ class SetBook:
             bars = list(self.bars.get(symbol) or [])
             packs = list(self.packs)
             settings = dict(self.ind_settings)
+            settings["portedSymbol"]=symbol
+            if _ported_pack_sources(packs):
+                peer_symbols=_ported_peer_symbols(packs)
+                settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<=bar_open_t]} for s,rs in self.bars.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=self.bar_t.get(s)) is not None]
         if len(bars) < max(self.min_bars, self.warmup + 1):
             return []
-        row = bar_signal(bars, len(bars) - 1, packs, settings, float(bar_open_t) + BAR_S)
+        row = bar_signal(bars, len(bars) - 1, packs, settings, float(bar_open_t) + BAR_S,ported_async=True)
+        self.__dict__.setdefault("_entry_pending", {})[symbol] = (
+            float(bar_open_t) if settings.get("_portedPending") else None)
         hits: List[Tuple[str, int, float, str]] = []
         for p in packs:
             d, c, why = row.get(p, (0, 0.0, ""))
             if d != 0 and c >= self.entry_conf:
                 hits.append((p, int(d), float(c), str(why)))
         return sorted(hits, key=lambda hit: -hit[2])
+
+    def entry_signals_pending(self, symbol: str, bar_open_t: float) -> bool:
+        """An asynchronous source has not decided this completed minute yet."""
+        return self.__dict__.get("_entry_pending", {}).get(symbol) == float(bar_open_t)
 
     def entry_signal(self, symbol: str, bar_open_t: float) -> Optional[Tuple[str, int, float, str]]:
         """The strongest qualifying completed-bar signal (compatibility with single-signal callers)."""
@@ -3369,7 +3405,12 @@ class SetBook:
         base_ts = latest_close - (n - 1) * BAR_S
         salt = hash((json.dumps(self.ind_settings, sort_keys=True, default=str), tuple(sorted(self.packs))))   # a memo entry holds only its packs
         cache = self._sig_cache.setdefault(symbol, {})
-        signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step, cache=cache, salt=salt)
+        settings=dict(self.ind_settings)
+        settings["portedSymbol"]=symbol
+        if _ported_pack_sources(self.packs):
+            peer_symbols=_ported_peer_symbols(self.packs)
+            settings["portedPeers"]=[{"symbol":s,"bars":[{"timestamp":round((float(t)-(len(rs)-1-j)*BAR_S)*1000),"open":r[0],"high":r[1],"low":r[2],"close":r[3],"volume":r[4]} for j,r in enumerate(rs) if float(t)-(len(rs)-1-j)*BAR_S<latest_close]} for s,rs in self.bars.items() if s!=symbol and (peer_symbols is None or s in peer_symbols) and (t:=self.bar_t.get(s)) is not None]
+        signals = pack_signals(bars, self.packs, settings, base_ts, warmup, on_step, cache=cache, salt=salt)
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
@@ -3824,7 +3865,11 @@ class SetBook:
             elif evidence is not None:
                 # Preserve older entry-time evidence when evaluating each candidate;
                 # only the final vote is limited to the current window.
-                records = sorted((t, e, value) for t, e, value in zip(*evidence) if t <= upper)
+                # Keep the tape's stable symbol order at tied closes. Sorting
+                # by entry time or settled return changes which last-N rows
+                # a candidate reads and disagrees with stage_chain.
+                records = sorted(((t, e, value) for t, e, value in zip(*evidence) if t <= upper),
+                                 key=lambda row: row[0])
                 ts = [x[0] for x in records]
                 entries = [x[1] for x in records]
                 nets = [x[2] for x in records]
@@ -4095,10 +4140,22 @@ class SetBook:
             return "real"
         return ""
 
+    @staticmethod
+    def processing_range(st: SetState) -> str:
+        if st.kind == "exit":
+            return "exit"
+        if is_signal_pack(st.pack):
+            return "signals"
+        step = int(round(st.trail_arm / TP_UNIT_PCT)) if st.kind == "trail" else st.step
+        return tp_range_of(step)
+
     def gate_reason(self, st: SetState) -> str:
         """Entry readiness: PF/risk validation plus the Set's own minimal coordination."""
-        if st.kind == "base" and not self.normal_entries:
-            return "type-disabled"  # internal paper processing continues; only Normal entries are disabled
+        policy = range_processing(getattr(self, "processing_overlay", {}), self.processing_range(st))
+        if st.kind == "trail" and not policy["trailing"]:
+            return "type-disabled"
+        if st.kind == "base" and not policy["normal"] and not additional_processing_enabled(getattr(self, "processing_overlay", {})):
+            return "type-disabled"  # calculation remains available to independently enabled adjustments
         reason = self.base_validation_reason(st)
         if reason:
             return reason
@@ -4985,6 +5042,7 @@ class SetBook:
                                     if self._history_snapshot_usable() and self._history_snapshot_oldest_at > 0 else None),
             "stageContextBars": self.history_bars(),
             "normalEntriesEnabled": self.normal_entries,
+            "portedSources": __import__("ported_indications").status() if _ported_pack_sources(self.packs) else {},
             "lastNMode": "independent-configured-profiles" if any(r.get("lanePolicy") for r in self.pack_ranges.values()) else "adaptive-candidate-selection",
             "independentLastNLanes": any(r.get("lanePolicy") for r in self.pack_ranges.values()),
             "independentLastNSetCount": sum(bool(self.pack_ranges.get(st.pack, {}).get("lanePolicy")) for st in self.by_idx),

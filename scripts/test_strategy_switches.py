@@ -27,13 +27,31 @@ SMALL = {"setSlRatios": [1], "setMinStep": 3, "setStepMax": 3,
 class StrategySwitches(unittest.TestCase):
     def test_normal_entries_off_preserves_internal_sets_and_additional_types(self):
         book = SetBook(); book.load({**SMALL, "stratNormal": False, "stratTrend": True,
-                                    "stagesEnabled": False, "setGateMinTrades": 0})
+                                    "stagesEnabled": False, "setGateMinTrades": 0, "blockEnabled": False,
+                                    **{"axis" + a + "Enabled": False for a in ("Prev", "Last", "Cont", "Pause")}})
         for st in book.by_idx:
             st.gate_n, st.gate_pf, st.max_dd_s = 50, 3, 0
             self.assertEqual(book.base_validation_reason(st), "")
             self.assertEqual(book.gate_reason(st), "type-disabled" if st.kind == "base" else "")
         self.assertEqual({st.kind for st in book.by_idx}, {"base", "exit", "trail"})
         self.assertIn("trend", book.packs)
+
+    def test_ranges_are_independent_and_adjustments_keep_their_calculated_parent(self):
+        from modules import range_processing
+        for normal in (False, True):
+            for trailing in (False, True):
+                ov = {**SMALL, "stratNormal": normal, "stratTrailing": trailing,
+                      "strategyProcessingByRange": {"micro": {"normal": False, "trailing": False},
+                                                    "short": {"normal": True, "trailing": True}}}
+                self.assertEqual(range_processing(ov, "micro"), {"normal": False, "trailing": False})
+                self.assertEqual(range_processing(ov, "short"), {"normal": normal, "trailing": trailing})
+        book = SetBook(); book.load({**SMALL, "stratNormal": False, "blockEnabled": True,
+                                    "stagesEnabled": False, "setGateMinTrades": 0})
+        for st in book.by_idx:
+            st.gate_n, st.gate_pf, st.max_dd_s = 50, 3, 0
+            self.assertEqual(book.gate_reason(st), "", st.id)
+        book.load({**SMALL, "strategyProcessingByRange": {"short": {"trailing": False}}})
+        self.assertTrue(all(st.kind != "trail" or book.processing_range(st) != "short" for st in book.by_idx))
 
     def test_either_trailing_switch_disables_all_new_trailing_sets(self):
         for flag, module in ((False, True), (True, False), (False, False), (True, True)):

@@ -1,0 +1,3 @@
+export const START=1_700_006_400_000;
+export function waveBars(n=720){return Array.from({length:n},(_,i)=>{const close=100+4*Math.sin(i/11)+2*Math.sin(i/43),open=100+4*Math.sin((i-1)/11)+2*Math.sin((i-1)/43);return {timestamp:START+i*60000,open,high:Math.max(open,close)+.12,low:Math.min(open,close)-.12,close,volume:100+i%17};});}
+export function declineBars(mirror=false){const values=[...Array(8).fill(98.5),101,100.8,100.5,100.2,100,100,100,100,100.6];return values.map((v,i)=>{const c=mirror?200-v:v;return {timestamp:START+i*60000,open:i===16?100:c,close:c,high:i===16&&mirror?100.1:c+.05,low:i===16&&!mirror?99.9:c-.05,volume:10};});}

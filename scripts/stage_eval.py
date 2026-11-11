@@ -33,7 +33,8 @@ import pickle
 import sys
 import time
 from array import array
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import hashlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -101,11 +102,29 @@ def lane_cfg(b: se.SetBook) -> Dict[str, Any]:
 
 # ---- phase 1: shadow tapes and signals, one worker per symbol ---------------------------------------------------------
 
+_REPLAY_MARKET = ({}, {})
+
+
+def _init_replay_market(bars, times):
+    global _REPLAY_MARKET
+    _REPLAY_MARKET = (bars, times)
+
+
 def _symbol_job(args):
     s, bars, t0 = args
     b = make_book()
     warm = min(b.warmup, max(16, len(bars) // 5))
-    sig = se.pack_signals(bars, b.packs, b.ind_settings, float(t0) + 60.0, warm)
+    settings = dict(b.ind_settings)
+    settings["portedSymbol"] = s
+    if se._ported_pack_sources(b.packs):
+        wanted = se._ported_peer_symbols(b.packs)
+        markets, clocks = _REPLAY_MARKET
+        settings["portedPeers"] = [
+            {"symbol": peer, "bars": [dict(timestamp=clocks[peer][i]*1000,
+             open=r[0], high=r[1], low=r[2], close=r[3], volume=r[4])
+             for i, r in enumerate(rows)]}
+            for peer, rows in markets.items() if peer != s and (wanted is None or peer in wanted)]
+    sig = se.pack_signals(bars, b.packs, settings, float(t0) + 60.0, warm)
     dirs = {p: [x[0] for x in sig[p]] for p in b.packs}
     confs = {p: [float(x[1]) for x in sig[p]] for p in b.packs}
     cfg = lane_cfg(b)
@@ -134,9 +153,35 @@ def _symbol_job(args):
 
 
 def build(names, bars, times, jobs: int):
-    with ProcessPoolExecutor(max_workers=jobs) as pool:
-        res = list(pool.map(_symbol_job, [(s, bars[s], times[s][0]) for s in names]))
-    return {s: (w, d, c, o) for s, w, d, c, o in res}
+    out = {}
+    checkpoints = os.environ.get("STAGE_SYMBOL_CHECKPOINT_DIR")
+    identity = None
+    if checkpoints:
+        # Peers can influence imported signals: bind the entire universe, not
+        # just this symbol. Code, assets and settings invalidate every part.
+        import replay_cache
+        from pathlib import Path
+        engine = {p.name: replay_cache.file_sha(p) for p in sorted(Path(PULSE).glob('*.py'))}
+        assets = Path(PULSE).resolve().parents[1]/'shared/cts-indications'
+        identity = dict(input=hashlib.sha256(pickle.dumps((names,bars,times),protocol=5)).hexdigest(),
+                        settings=replay_overlay(),engine=engine,simulator=replay_cache.file_sha(__file__),
+                        assets={str(p.relative_to(assets)):replay_cache.file_sha(p) for p in sorted(assets.rglob('*'))
+                                if p.is_file() and p.suffix in ('.ts','.json')})
+        os.makedirs(checkpoints,exist_ok=True)
+        for symbol in names:
+            path=os.path.join(checkpoints,symbol+'.pkl')
+            if os.path.isfile(path):
+                out[symbol]=replay_cache.load(path,identity)
+                print(f"shadow checkpoint {len(out)}/{len(names)} {symbol}",flush=True)
+    with ProcessPoolExecutor(max_workers=jobs, initializer=_init_replay_market, initargs=(bars, times)) as pool:
+        work={pool.submit(_symbol_job,(s,bars[s],times[s][0])):s for s in names if s not in out}
+        for future in as_completed(work):
+            s,w,d,c,o=future.result()
+            out[s] = (w, d, c, o)
+            if checkpoints:
+                replay_cache.save(os.path.join(checkpoints,s+'.pkl'),out[s],identity)
+            print(f"shadow {len(out)}/{len(names)} {s}", flush=True)
+    return out
 
 
 def build_hold_auto(names, bars, times, shadow):
@@ -322,7 +367,7 @@ def validation_lane(book, tapes: Tapes, st, now: float) -> str:
     return "neg" if v["negl"] else ""
 
 
-def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tuple[bool, float, float, int]]]:
+def window_figures(book, tapes: Tapes, st, now: float, samples=None) -> Dict[str, Optional[Tuple[bool, float, float, int]]]:
     """Every last-N window on its own for (Set, now), as pfBase.windows counts them: {window: (passes, gains, losses, orders)} of the orders the window reads
     (net after PositionCost), None for a window the Set is not judged by (the Main windows, the Negative and the Real windows judge only the Sets that passed
     Base; Real judges the ones that passed Main; Real Negative the ones in a dip). The engine's SetState fields are the check (self_check)."""
@@ -334,6 +379,13 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
     out: Dict[str, Optional[Tuple[bool, float, float, int]]] = {k: None for k in ("baseLong", "baseShort", "baseMinimal", "mainLong", "mainShort", "mainMinimal", "negative", "real", "realNeg")}
     nets_w = [x - cf for x in e["w"]]
     nets_coord = [x - cf for x in e["coord"]]
+    wn = book.win(st)
+    def sample(key, available, requested):
+        if samples is not None and requested > 0:
+            samples[key] = {"available": available, "requested": requested, "full": available >= requested}
+    sample("baseLong", e["n_all"], wn.base_long)
+    sample("baseShort", e["n_all"], wn.base_short)
+    sample("baseMinimal", e["n_all"], book.base_min_n)
     out["baseLong"] = (_long_ok(book, e),) + sums(nets_w) + (len(nets_w),)
     if e.get("base_short", book.base_short):
         sw = nets_coord[-e.get("base_short", book.base_short):]
@@ -349,6 +401,10 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
     mn, rn, qn = [nets[k] for k in ch["main"]], [nets[k] for k in ch["real"]], [nets[k] for k in ch["realneg"]]
     v = se.stage_verdicts(mn, rn, qn, ch["short_n"], P)
     if book.main_on:
+        sample("mainLong", len(mn), wn.main_n)
+        if book.short_on:
+            sample("mainShort", len(mn), ch["short_n"])
+        sample("mainMinimal", len(mn), book.main_min_n)
         wn = book.win(st)
         w_ = mn[-wn.main_n:]
         out["mainLong"] = (bool(v["main"]),) + sums(w_) + (len(w_),)
@@ -359,13 +415,16 @@ def window_figures(book, tapes: Tapes, st, now: float) -> Dict[str, Optional[Tup
             w_ = mn[-book.main_min_n:]
             out["mainMinimal"] = (bool(v["minimal"]),) + sums(w_) + (len(w_),)
     if book.neg_on:
+        sample("negative", len(mn), max(wn.neg_windows, default=0))
         nw = next((x for x in sorted(book.win(st).neg_windows) if len(mn) >= x and sum(mn[-x:]) < -se.NEG_EPS), 0)
         out["negative"] = (bool(v["neg"]),) + (sums(mn[-nw:]) if nw else (0.0, 0.0)) + (nw,)
     main_pass = (not book.main_on) or bool(v["main"] and (v["short"] or not book.short_on))
     if book.realst_on and main_pass:
+        sample("real", len(rn), wn.real_n)
         w_ = rn[-book.win(st).real_n:]
         out["real"] = (bool(v["real"]),) + sums(w_) + (len(w_),)
     if book.realst_on and book.neg_on and v["neg"]:
+        sample("realNeg", len(qn), wn.real_neg_n)
         w_ = qn[-book.win(st).real_neg_n:]
         out["realNeg"] = (bool(v["realneg"]),) + sums(w_) + (len(w_),)
     return out
@@ -887,9 +946,12 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                         rest = max(rest, int(pz[tr["exit_i"]]))
                 busy[s] = tr["exit_i"] + rest
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
+                from relational_volume import set_factor, strategy_weight
+                weights = getattr(book, "processing_overlay", {}).get("relationalVolumeRatios")
+                axis_weight = strategy_weight(weights, "axis") if axis_coord is not None and any(a.enabled for a in axis_coord.axes.values()) else 1.0
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
                        "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
-                       "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick}
+                       "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick * set_factor(weights, st, s) * axis_weight}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))

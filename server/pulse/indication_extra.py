@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import math
 import re
+import threading
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 LOOKBACK = 160
@@ -40,7 +42,11 @@ def _true_ranges(rows: Sequence[Row]) -> List[float]:
 
 
 def _atr(rows: Sequence[Row], period: int = 14) -> float:
-    trs = _true_ranges(rows)[-period:]
+    # Only these true ranges contribute. Retain the preceding close for the
+    # first included range; computing thousands of discarded ranges was hot
+    # in every Trend/Break replay. This preserves the original arithmetic.
+    used = rows[-(period + 1):] if period > 0 else rows
+    trs = _true_ranges(used)[-period:]
     return sum(trs) / len(trs) if trs else 0.0
 
 
@@ -831,9 +837,30 @@ def _rows_for_tf(tf: int) -> int:
     return max(FAMILY_WINDOW, rows_for(tf))
 
 
+_aggregate_local = threading.local()
+
+
 def _agg(rows: Sequence[Row], minutes: int) -> List[List[float]]:
     """Causal N-minute bars aligned to the newest row (the newest bar ends on the newest row), as indication_engine does."""
     m = max(1, int(minutes))
+    cache = getattr(_aggregate_local, "cache", None)
+    if cache is None:
+        cache = _aggregate_local.cache = OrderedDict()
+    # Exact content, including interior corrections, is part of the key.
+    # Callers treat these internal shared aggregates as read-only. Sixteen
+    # windows bound retention independently of symbols or replay length.
+    key = (m, tuple(tuple(row[:5]) for row in rows))
+    if key in cache:
+        cache.move_to_end(key)
+        return cache[key]
+    out = _aggregate_rows(rows, m)
+    cache[key] = out
+    while len(cache) > 16:
+        cache.popitem(last=False)
+    return out
+
+
+def _aggregate_rows(rows: Sequence[Row], m: int) -> List[List[float]]:
     if m == 1:
         return [list(r[:5]) for r in rows]
     k = len(rows) // m
@@ -959,6 +986,7 @@ def resolve(name: str) -> Optional[Callable[[Sequence[Row]], Signal]]:
     if "@" in name:
         import indication_rel
         return indication_rel.resolve(name)
+    if _ported_known(name):return lambda rows:_ported_direct(name,rows)
     return INDICATORS.get(name)
 
 
@@ -1048,3 +1076,7 @@ def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, fl
         if sig:
             out.append((int(sig[0]), float(sig[1]), str(name)))
     return out
+
+# Independent imported sources never enter the existing group votes.
+from ported_indications import NAMES as _PORTED_NAMES, direct as _ported_direct, known as _ported_known
+WINDOWS.update({name:4320 for name in _PORTED_NAMES})

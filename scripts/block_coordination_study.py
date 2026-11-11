@@ -55,8 +55,7 @@ def build_parents(a) -> int:
     from coord_engine import Coordinator
     from position_cost import cost_as_frac, tp_range_of
     t0 = time.time()
-    overlay = json.load(open(sg.OVERLAY, encoding="utf-8"))
-    overlay.update(json.loads(a.patch or "{}"))
+    overlay = sg.replay_overlay()
     names = sorted(f[:-5] for f in os.listdir(a.data) if f.endswith("-USDT.json"))[:a.symbols]
     manifest = replay_cache.fingerprint(a.data, names, overlay, sg.PULSE, sg.__file__)
     names, bars, times = sg.load_bars(a.data, a.symbols)
@@ -157,8 +156,9 @@ def first_reach(extremes, level: float):
     return None
 
 
-def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The engine's Block rules over a window's parents in time order (a close before an open before a decision at one instant, as stack_eval.block_sim2).
+def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
+             capture: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """The engine's Block rules over a window's parents, with decisions before tied closes, as stack_eval.block_sim2.
     cand: block_rules overlay keys (blockCounts, blockRelations, ...) plus the coordination's own switches:
       mode       "all" (every selected relation must agree, the engine's rule) or "any" (one agreeing relation is enough)
       kinds / lanes / ranges   the parents an add may go to (Set type, lane, TP range); observations are still collected from every parent
@@ -195,7 +195,7 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
         ev.append((r["t_in"], 1, i, 0))
         for n, now_t, _lv, _ok, _fl in hits:
             ev.append((now_t, 2, i, n))
-    ev.sort()
+    ev.sort(key=lambda event: (event[0], {1: 0, 2: 1, 0: 2}[event[1]], event[2], event[3]))
     state = state if state is not None else {}
     ledgers: Dict[str, Dict[str, Any]] = state.setdefault("ledgers", {})
     gs = state.setdefault("guard", br.new_guard())      # executed adds' cumulative net and, while in deficit, the paper adds' net since
@@ -267,6 +267,9 @@ def simulate(window: Dict[str, Any], cand: Dict[str, Any], state: Optional[Dict[
             lv = m["hits"][n - 1][2]
             shadow_part += add_net * br.base_return_contribution(1.0, r["entry"] * (1 + r["side"] * lv * cf), cfg.target_ratio(n), r["entry"])
         gs.update(br.guard_after_close(cfg, gs, add_part, shadow_part))      # the paper adds earning the deficit back lets adding resume
+        if capture is not None:
+            capture.append({"parent": i, "t": t, "without": net,
+                            "with": net + add_part, "adds": len(m["fired"])})
         highest = max(m["fired"]) if m["fired"] else 0
         for k in m["rk"]:
             b = led(k)

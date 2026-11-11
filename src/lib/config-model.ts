@@ -1,3 +1,4 @@
+import {relationalVolumeSettings,type RelationalVolumeRatios} from "../../shared/cts-volume/ratios.ts";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "./lane-policy.ts";
 import { relateConfigs, type RelateConfig } from "./relate-config.ts";
 import { relationLanesOf, type RelationLanesConfig } from "./relation-lanes.ts";
@@ -358,6 +359,8 @@ export type PulseOverlay = {
   stratBlock: boolean;
   stratTrailing: boolean;
   stratNormal: boolean;
+  relationalVolumeRatios: RelationalVolumeRatios;
+  strategyProcessingByRange: Record<string, { normal?: boolean; trailing?: boolean }>;
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
@@ -684,6 +687,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratNormal: true,
+  relationalVolumeRatios: relationalVolumeSettings(undefined),
+  strategyProcessingByRange: {},
   stratGeneral: true,
   stratShortRange: true,
   stratTrend: false,
@@ -947,6 +952,8 @@ export type CtsSettings = {
   stratBlock?: boolean;
   stratTrailing?: boolean;
   stratNormal?: boolean;
+  relationalVolumeRatios?: RelationalVolumeRatios;
+  strategyProcessingByRange?: Record<string, { normal?: boolean; trailing?: boolean }>;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
   stratTrend?: boolean;
@@ -1456,6 +1463,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
     stratNormal: bool(cts.stratNormal, true),
+    relationalVolumeRatios: relationalVolumeSettings(cts.relationalVolumeRatios),
+    strategyProcessingByRange: processingByRangeOf(cts.strategyProcessingByRange),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
     stratTrend: bool(cts.stratTrend, false),
@@ -1608,6 +1617,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
   };
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
+  out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
+  out.strategyProcessingByRange = processingByRangeOf(out.strategyProcessingByRange);
   out.minPfByRange = pfRangeFloorsOf(out.minPfByRange);
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
     out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
@@ -1800,4 +1811,18 @@ export function loadLocalOverlay(conn = ""): Partial<PulseOverlay> | null {
   } catch {
     return null;
   }
+}
+
+/** Only exact independent ranges and literal booleans are persisted. */
+export function processingByRangeOf(raw: unknown): Record<string, {normal?:boolean;trailing?:boolean}> {
+  const result: Record<string, {normal?:boolean;trailing?:boolean}> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return result;
+  for (const key of [...TP_RANGES.map(r=>r.id), "signals", "exit"]) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const own: {normal?:boolean;trailing?:boolean} = {};
+    for (const field of ["normal", "trailing"] as const) if (typeof (value as Record<string, unknown>)[field] === "boolean") own[field] = (value as Record<string, boolean>)[field];
+    result[key] = own;
+  }
+  return result;
 }

@@ -125,7 +125,7 @@ class ExitBook:
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
         self.best_of = bool(ov.get("exitBestOf", True))
         self.lock_on = bool(ov.get("exitLockOn", True))
-        self.peak_on = trailing_enabled(ov) and bool(ov.get("exitPeakOn", True))
+        self.peak_on = trailing_enabled(ov, "exit") and bool(ov.get("exitPeakOn", True))
         self.rev_on = bool(ov.get("exitRevOn", False))
         self.time_on = bool(ov.get("exitTimeOn", False))
         self.lock_pct = pct_to_frac(num(ov, "exitLockPct", 0.15))
