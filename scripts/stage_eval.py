@@ -889,7 +889,7 @@ def execute(book, names, bars, times, shadow, tapes, hours, axis=None, set_axis=
                 legs = block_legs(bars[s], tr, block, book.cost_pct) if block else []
                 rec = {"t": float(times[s][tr["exit_i"]] + 60), "t_in": float(t + 60), "symbol": s, "set": st.id,
                        "pack": pack, "kind": st.kind, "lane": lane_pick, "reason": tr["reason"], "net": tr["pnl_pct"] - cf, "legs": legs,
-                       "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick}
+                       "tr": tr, "fracs": book.lane_fracs(st), "vol": vol_pick * __import__("relational_volume").set_factor(getattr(book,"processing_overlay",{}).get("relationalVolumeRatios"),st,s)}
                 executed.append(rec)
                 closes.append((rec["t"], rec["net"]))
                 opened.append((rec["t"], st.id, lane_pick))

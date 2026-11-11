@@ -1,3 +1,5 @@
+import {VolumeRatioSliders} from "../../shared/cts-volume/sliders.tsx";
+import {PORTED_CATALOG,DEFAULT_TACTIC_SOURCES,DEFAULT_INVERSE_SOURCES} from "../../shared/cts-indications/catalog.ts";
 import { stepPfRows } from "../lib/step-pf-view.ts";
 import { DEFAULT_RELATE_CONFIG, RELATE_SOURCES, type RelateConfig } from "@/lib/relate-config";
 import { ROUND_COUNTS, ROUND_LEVEL_MAX, ROUND_MULT_MAX, ROUND_PAUSE_MAX, ROUND_RATIO_MAX, ROUND_RELATIONS, ROUND_RELATION_LABEL, blockRoundsMax, blockRoundsOf } from "@/lib/block-rounds";
@@ -275,6 +277,7 @@ function SettingsPage() {
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="Normal Set entries" on={overlay.stratNormal} hint="Off disables new Normal entries; internal paper Sets and enabled additional strategy types continue processing." onChange={(v) => patch("stratNormal", v)} />
+                <StrategyRangeProcessing value={overlay.strategyProcessingByRange} onChange={v=>patch("strategyProcessingByRange",v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Short Range" on={overlay.stratShortRange} onChange={(v) => patch("stratShortRange", v)} />
                 <EnableSlider label="Trend (Sets and Base evaluation)" on={overlay.stratTrend} onChange={(v) => patch("stratTrend", v)} />
@@ -508,6 +511,8 @@ function SettingsPage() {
             </Card>
           )}
 
+          {section === "packs" && <Card title="Relational volume · Indication types"><VolumeRatioSliders overall value={overlay.relationalVolumeRatios} onChange={v=>patch("relationalVolumeRatios",v)} buckets={{indicationTypes:["general","indications","trend","break","revert","volume","price","tactic","inverse"]}}/></Card>}
+          {section === "packs" && <Card title="Tactic / Inverse" hint="Independent CTS-A-O source calculations. Decline level, spacing, recovery and tactic are separate source identities. Every source keeps its own strategy configurations and Base/Main/Real qualification after costs."><PortedIndicationEditor value={overlay.indicationConfigs} onChange={v=>patch("indicationConfigs",v)}/></Card>}
           {section === "packs" && (
             <Card
               title="Indications by range"
@@ -521,6 +526,10 @@ function SettingsPage() {
             </Card>
           )}
 
+          {section === "sets" && <Card title="Strategy processing · overall and by range" hint="Normal off retains calculation for the configured additional strategies. Trailing off disables trailing throughout the selected scope.">
+            <Grid><EnableSlider label="Normal" on={overlay.stratNormal} onChange={v=>patch("stratNormal",v)} /><EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={v=>patch("stratTrailing",v)} /><StrategyRangeProcessing value={overlay.strategyProcessingByRange} onChange={v=>patch("strategyProcessingByRange",v)} /></Grid>
+          </Card>}
+          {section === "sets" && <Card title="Relational volume · Strategy types & Ranges"><VolumeRatioSliders value={overlay.relationalVolumeRatios} onChange={v=>patch("relationalVolumeRatios",v)} buckets={{strategies:["normal","trailing","exit","axis","block","dca"],ranges:["micro","minimal","short","normal","long","wide","signals","exit"]}}/></Card>}
           {section === "sets" && <SetsOverview stats={stats} />}
           {section === "sets" && (
             <Card
@@ -3264,4 +3273,31 @@ function LiveApplied({
       )}
     </div>
   );
+}
+
+function StrategyRangeProcessing({value,onChange}:{value:PulseOverlay["strategyProcessingByRange"];onChange:(value:PulseOverlay["strategyProcessingByRange"])=>void}) {
+  return <div className="col-span-full space-y-2">
+    <p className="text-sm text-muted">Coordination / Range · overall and range switches both apply. Plain Normal and Trailing entries require Normal; configured Axis, Block and DCA processing stays independent.</p>
+    {[...TP_RANGES.map(r=>({id:r.id as string,label:r.label})),{id:"signals",label:"Signals"},{id:"exit",label:"Exit"}].map(r=><div key={r.id} className="grid gap-2 sm:grid-cols-3"><span>{r.label}</span>{(["normal","trailing"] as const).map(key=><Toggle key={key} label={`${r.label} ${key} processing`} on={value?.[r.id]?.[key] !== false} onChange={v=>onChange({...value,[r.id]:{...value?.[r.id],[key]:v}})} />)}</div>)}
+  </div>;
+}
+
+function PortedIndicationEditor({value,onChange}:{value:IndicationConfig[];onChange:(value:IndicationConfig[])=>void}){
+ const label="Tactic / Inverse sources",entry=value.find(e=>e.label===label);
+ const selected=[...new Set((entry?.names??[]).map(n=>/^ao__(.+)__t(?:1|5|15|30)$/.exec(n)?.[1]).filter((n):n is string=>Boolean(n)))];
+ const [newFrames,setFrames]=useState<number[]>([1,5,15]);
+ const frames=entry?.names.length?[...new Set(entry.names.map(n=>Number(/__t(1|5|15|30)$/.exec(n)?.[1])).filter(n=>Number.isFinite(n)))]:newFrames;
+ const save=(ids:string[],tfs=frames)=>{
+  const names=ids.flatMap(id=>tfs.filter(tf=>tf!==30||!id.startsWith("inverse-")).map(tf=>`ao__${id}__t${tf}`));
+  if(names.length>128)return;
+  const next={...(entry??structuredClone(DEFAULT_INDICATION_CONFIG)),label,enabled:true,names};
+  onChange(entry?value.map(e=>e===entry?next:e):[...value,next]);
+ };
+ return <div className="space-y-3" data-testid="ported-indications">
+  <p className="text-sm text-muted">{PORTED_CATALOG.filter(s=>s.kind==='tactic').length} Tactic and {PORTED_CATALOG.filter(s=>s.kind==='inverse').length} Inverse sources. Pair and market sources require matching reference candles. No entry is produced when those data are unavailable.</p>
+  <button type="button" className="rounded border border-border px-3 py-2 text-sm" onClick={()=>save([...DEFAULT_TACTIC_SOURCES,...DEFAULT_INVERSE_SOURCES])}>Add Tactic / Inverse examples</button>
+  <div className="flex gap-4">{[1,5,15,30].map(tf=><label key={tf} className="text-sm"><input type="checkbox" checked={frames.includes(tf)} onChange={ev=>{const next=ev.target.checked?[...frames,tf]:frames.filter(x=>x!==tf);if(!next.length||selected.length*next.length>128)return;setFrames(next);if(entry)save(selected,next);}}/> {tf}m</label>)}</div>
+  <label className="block text-sm">Source configurations (up to 128 timeframe lanes)<select multiple size={8} className="mt-2 w-full rounded border border-border bg-bg p-2 font-mono text-xs" value={selected} onChange={ev=>save(Array.from(ev.target.selectedOptions,o=>o.value))}>{PORTED_CATALOG.map(source=><option key={source.id} value={source.id}>{source.label}</option>)}</select></label>
+  <p className="text-xs text-muted">{entry?.names.length??0}/128 source lanes. Distances, ratios, strategy types, last N and pause are editable in the matching entry below.</p>
+ </div>;
 }

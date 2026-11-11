@@ -959,6 +959,7 @@ def resolve(name: str) -> Optional[Callable[[Sequence[Row]], Signal]]:
     if "@" in name:
         import indication_rel
         return indication_rel.resolve(name)
+    if _ported_known(name):return lambda rows:_ported_direct(name,rows)
     return INDICATORS.get(name)
 
 
@@ -1048,3 +1049,7 @@ def extra_votes(rows: Sequence[Row], names: Sequence[str]) -> List[Tuple[int, fl
         if sig:
             out.append((int(sig[0]), float(sig[1]), str(name)))
     return out
+
+# Independent imported sources never enter the existing group votes.
+from ported_indications import NAMES as _PORTED_NAMES, direct as _ported_direct, known as _ported_known
+WINDOWS.update({name:4320 for name in _PORTED_NAMES})
