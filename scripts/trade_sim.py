@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import collections
+import heapq
 from array import array
 import json
 import os
@@ -112,26 +113,32 @@ def future_entries(txa, tea, ppa, now, count, cost, symbols=None):
 
 
 class FutureEntryTapes:
-    """Lazily index each Set by entry time and stable symbol, not exit time."""
+    """Merge only the next N entries from sorted symbol tapes; bounded memory."""
 
     def __init__(self, names, times, shadow, cost):
         self.names, self.times, self.shadow, self.cost = sorted(names), times, shadow, cost
-        self.cache = {}
+        self.checked = set()
 
     def window(self, idx, now, count):
         if count <= 0:
             return []
-        if idx not in self.cache:
-            rows = []
-            for symbol_order, name in enumerate(self.names):
-                ent, ex, pp = self.shadow[name][3][idx]
-                ts = self.times[name]
-                rows.extend((ts[ent[i]] + 60, symbol_order, i, pp[i]) for i in range(len(ent)))
-            rows.sort(key=lambda row: (row[0], row[1], row[2]))
-            self.cache[idx] = (array("d", (row[0] for row in rows)), array("d", (row[3] for row in rows)))
-        starts, returns = self.cache[idx]
-        start = bisect.bisect_left(starts, now)
-        return [value - self.cost for value in returns[start:start + count]]
+        pending=[]
+        for order, name in enumerate(self.names):
+            entries, _exits, _returns=self.shadow[name][3][idx]
+            if idx not in self.checked and any(b<a for a,b in zip(entries,entries[1:])):
+                raise ValueError('Future-entry merge requires a single ordered lane per symbol')
+            first_bar=bisect.bisect_left(self.times[name],now-60)
+            k=bisect.bisect_left(entries,first_bar)
+            if k<len(entries):heapq.heappush(pending,(self.times[name][entries[k]]+60,order,k))
+        self.checked.add(idx)
+        values=[]
+        while pending and len(values)<count:
+            _entry,order,k=heapq.heappop(pending);name=self.names[order]
+            entries,_exits,returns=self.shadow[name][3][idx]
+            values.append(returns[k]-self.cost)
+            k+=1
+            if k<len(entries):heapq.heappush(pending,(self.times[name][entries[k]]+60,order,k))
+        return values
 
 
 def range_of(st):
@@ -196,6 +203,8 @@ def main() -> int:
             raise ValueError("replay inputs changed during cache generation")
         replay_cache.save(a.cache, shadow, manifest)
     shadow = sg.build_hold_auto(names, bars, times, shadow)      # hold Auto on: each Set's tape is the engine's own lane with the causally chosen hold
+    from replay_storage import compact_shadow
+    compact_shadow(shadow)
     held = sum(1 for k in shadow[names[0]][3] if isinstance(k, int) and k >= 0)       # Set entries only: key -1 holds the per-bar pause arrays, not a Set
     if held != len(book.by_idx):
         print(f"cache holds {held} Sets, the book {len(book.by_idx)}: rebuild the cache for this grid")

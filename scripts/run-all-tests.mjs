@@ -6,6 +6,10 @@
  * nonzero if any of them fails, and each one's output is printed under its own label.
  */
 import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const logDirectory = mkdtempSync(join(tmpdir(), "cts-g-tests-"));
 
 const jobs = [
   {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py"},
@@ -23,12 +27,17 @@ function run({ label, cmd }) {
     const child = spawn(cmd, { shell: true, stdio: ["ignore", "pipe", "pipe"] });
     const lines = [];
     const collect = (chunk) => {
-      for (const line of chunk.toString().split("\n")) if (line) lines.push(line);
+      for (const line of chunk.toString().split("\n")) if (line) {
+        lines.push(line);
+        if (/regression (early failure|progress):/.test(line)) console.log(`${label}: ${line}`);
+      }
     };
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
     child.on("close", (code) => {
-      console.log(`Finished ${label}: ${code === 0 ? "ok" : "FAILED"} (${Math.round((Date.now()-started)/1000)}s)`);
+      const path = join(logDirectory, label.replace(/[^a-z0-9-]+/gi,"-")+".log");
+      writeFileSync(path,lines.join("\n")+"\n");
+      console.log(`Finished ${label}: ${code === 0 ? "ok" : "FAILED"} (${Math.round((Date.now()-started)/1000)}s); full output ${path}`);
       resolve({ label, code: code ?? 1, lines });
     });
     child.on("error", (err) => resolve({ label, code: 1, lines: [String(err)] }));
@@ -40,7 +49,11 @@ let failed = 0;
 for (const r of results) {
   const status = r.code === 0 ? "ok" : `FAILED (exit ${r.code})`;
   console.log(`\n=== ${r.label}: ${status}`);
-  for (const line of r.lines.slice(-12)) console.log(`    ${line}`);
+  const tail = r.lines.slice(-12);
+  if (r.code !== 0) for (const line of r.lines.filter(line=>/^(FAIL\b|regression early failure:)/.test(line))) {
+    if (!tail.includes(line)) console.log(`    ${line}`);
+  }
+  for (const line of tail) console.log(`    ${line}`);
   if (r.code !== 0) failed += 1;
 }
 process.exit(failed ? 1 : 0);

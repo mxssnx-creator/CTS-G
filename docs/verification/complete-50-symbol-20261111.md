@@ -59,6 +59,43 @@ results separately, stage full-N sufficiency, each configured indication and
 strategy type, ranges, direction, all symbols, held marks and the closed-order
 ledger. Structural/script checks do not constitute a browser-render check.
 
-Fresh VST connectivity timed out during this session. No new exchange fill is
-claimed from that attempt. Execution, partial-fill, ownership, restart and
-accounting coverage must be reported separately from a successful venue run.
+The original-grid native replay closed 364 positions at PF 0.296, while its
+selected Base windows reported PF 2.908. The populations differ; selected PF
+does not prove later profitability. The breadth arm changes its configured universe and grid, so the comparison
+does not isolate a single bug or strategy. Both runs use 0.176% paper cost.
+
+An optional immutable-tape prefix index caches native causal stage membership
+per configuration and parameter snapshot. It recomputes the current short
+vote from earlier closes only, and uses the native implementation when context
+expires or a dynamic tape adapter is present. All baseline output fields,
+including every one of the 364 executed positions, exactly matched the full
+native replay. Cached replay runtime fell from 2,593 to 616 seconds (4.209x on
+this case). Synthetic oracles cover ties, cutoffs, changed costs and parameters,
+negative vetoes, dynamic sources and identical portfolio orders.
+
+Large replay signals now use lossless signed-integer and binary64 columns.
+Next-entry cohorts merge only the requested entries from each ordered symbol
+lane, instead of materializing every configuration's complete future history.
+Large comparison arms run sequentially to avoid concurrent memory peaks.
+The stored shadow bytes and their provenance are unchanged by packing in RAM.
+
+Every exit-hour comparison uses h < close <= h+1h, including all intermediate
+hour boundaries. Equal-clock drawdown events retain source order rather than
+sorting by their result. The HTML distinguishes hour-end drawdown from an
+intrahour maximum. It includes every configuration, 11 charts, all strategy
+hourly arms and the independent actual-fill cash reconciliation. No-loss
+strategy windows are labeled explicitly rather than promoted as finite PF 99.
+
+VST connectivity subsequently recovered. A bounded x02 acceptance run passed
+30 checks: two directions, eight market fills, two position increases, four
+overall protections, partial remainders and final closes. All test positions
+ended flat, with no own pending orders. The first attempt's minimum-lot
+rejection was recovered and cleaned before retry. Explicit rejection is now
+distinguished from an uncertain write, client-ID case is preserved, and cleanup
+requires the exact journaled remainder rather than a maximum-size bound.
+
+An independent Decimal cash ledger from venue fill history agrees with
+execution_result within 1e-10 VST for both completed cases. Reported commission
+is deducted once on each fill. The observed account rates were taker 0.05% and
+maker 0.02%, separately labeled from paper fallback assumptions. This run
+verifies bounded exchange acceptance, not engine qualification or profitability.

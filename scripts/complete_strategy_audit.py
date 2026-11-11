@@ -38,7 +38,8 @@ def main():
     saved=pickle.load(open(args.parents,'rb'))
     if saved['fingerprint']!=manifest or saved['axis']!='overlay':raise ValueError('parents differ from current verified replay')
     hours=saved['hours'];parents=[r for r in saved['rows']if 'net'in r]
-    shadow=replay_cache.load(args.cache,manifest);tapes=sg.Tapes(book,names,times,shadow)
+    from replay_storage import compact_shadow
+    shadow=compact_shadow(replay_cache.load(args.cache,manifest));tapes=sg.Tapes(book,names,times,shadow)
     index=None
     if args.indexed_stage:
         from indexed_stage_query import IndexedStages

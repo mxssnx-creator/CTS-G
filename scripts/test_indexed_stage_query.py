@@ -114,6 +114,10 @@ class IndexedQuery(unittest.TestCase):
         tapes=sg.Tapes(book,names,times,shadow);hours=[21600.0,25200.0,28800.0]
         native=sg.execute(book,names,bars,times,shadow,tapes,hours,refresh_s=0,include_open=True)
         adapter=IndexedStages(sg).install()
+        from replay_storage import compact_shadow
+        before=[(list(v),list(shadow[s][2][p]))for s in names for p,v in shadow[s][1].items()]
+        compact_shadow(shadow)
+        self.assertEqual(before,[(list(v),list(shadow[s][2][p]))for s in names for p,v in shadow[s][1].items()])
         try:
             indexed=sg.execute(book,names,bars,times,shadow,tapes,hours,refresh_s=0,include_open=True)
         finally:

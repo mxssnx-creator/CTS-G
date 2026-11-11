@@ -25,7 +25,8 @@ def main():
     from stack_eval import summarize
     names,bars,times=sg.load_bars(args.data,50);book=sg.make_book()
     fp=replay_cache.fingerprint(args.data,names,sg.replay_overlay(),sg.PULSE,sg.__file__)
-    shadow=replay_cache.load(args.cache,fp);tapes=sg.Tapes(book,names,times,shadow)
+    from replay_storage import compact_shadow
+    shadow=compact_shadow(replay_cache.load(args.cache,fp));tapes=sg.Tapes(book,names,times,shadow)
     index=None
     if args.indexed_stage:
         from indexed_stage_query import IndexedStages

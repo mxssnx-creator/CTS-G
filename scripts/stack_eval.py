@@ -92,9 +92,17 @@ def summarize(events: List[Tuple[float, float, float]], parents: int, adds: int,
     hourly = [{"t": h, "net_pct": round(100 * by_h.get(h, 0), 6),
                "fills": sum(1 for t, _, _ in events if bucket(t) == h),
                "pf": pf([n * w for t, n, w in events if bucket(t) == h])} for h in hours]
-    return {"pf": pf(vals), "parents": parents, "adds": adds, "net_pct": round(100 * net, 2), "max_dd_pct": round(100 * mdd, 2),
+    return {"pf": pf(vals), "gain_pct":100*sum(v for v in vals if v>0), "loss_pct":-100*sum(v for v in vals if v<0),
+            "parents": parents, "adds": adds, "net_pct": round(100 * net, 2), "max_dd_pct": round(100 * mdd, 2),
             "hourly": hourly,
             "net_per_dd": round(net / mdd, 3) if mdd > 0 else None, "hours_positive": f"{sum(1 for v in by_h.values() if v > 0)}/{len(hours)}"}
+
+
+def plain_first_hit(highs, lows, i0, i1, level, side):
+    """The same half-open price-hit query without an optional NumPy install."""
+    column=highs if side>0 else lows
+    return next((i for i in range(i0,min(i1,len(column)))
+                 if (column[i]>=level if side>0 else column[i]<=level)),-1)
 
 
 def dca_rungs(side: int, entry: float, exit_px: float, sl_f: float, e_i: int, i_end: int, cfg: Dict[str, Any], cf: float, hit, ind_ok=None, allow=None
@@ -184,7 +192,10 @@ def main() -> int:
     from coord_engine import Coordinator  # noqa: E402
     from block_engine import calculate_block_minimum_profit_factor, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX  # noqa: E402
     from position_cost import cost_as_frac, gate_min_pf  # noqa: E402
-    import numpy as np  # noqa: E402
+    try:
+        import numpy as np  # noqa: E402
+    except ImportError:
+        np=None
 
     t0 = time.time()
     # Use the same account/fallback fee and percentage-of-fee slippage budget
@@ -369,13 +380,17 @@ def main() -> int:
             return True
         return sg.axis_judge(book, tapes, coord, st, now, r["lane"])[0]
 
-    arrays = {s: (np.array([b[1] for b in bars[s]]), np.array([b[2] for b in bars[s]])) for s in names}
+    from array import array
+    packed=lambda values:np.array(values)if np is not None else array('d',values)
+    arrays = {s: (packed([b[1] for b in bars[s]]), packed([b[2] for b in bars[s]])) for s in names}
 
     def first_hit(s: str, i0: int, i1: int, level: float, side: int) -> int:
         """First bar index j with i0 <= j < i1 whose high (long) / low (short) reaches level; -1 if none."""
         if i1 <= i0:
             return -1
         hi_, lo_ = arrays[s]
+        if np is None:
+            return plain_first_hit(hi_,lo_,i0,i1,level,side)
         seg = hi_[i0:i1] >= level if side > 0 else lo_[i0:i1] <= level
         k = int(np.argmax(seg)) if seg.size else 0
         return i0 + k if seg.size and seg[k] else -1

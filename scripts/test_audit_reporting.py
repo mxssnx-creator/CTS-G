@@ -17,6 +17,24 @@ from fee_policy import cost_policy, paper_cost_pct
 
 
 class AuditReporting(unittest.TestCase):
+    def test_optional_numpy_fallback_keeps_first_fill_and_excludes_exit_boundary(self):
+        from stack_eval import plain_first_hit
+        high,low=[100,101,103,104],[99,98,97,96]
+        self.assertEqual(plain_first_hit(high,low,1,3,103,1),2)
+        self.assertEqual(plain_first_hit(high,low,1,2,103,1),-1)
+        self.assertEqual(plain_first_hit(high,low,1,4,97,-1),2)
+        self.assertEqual(plain_first_hit(high,low,3,3,97,-1),-1)
+    def test_bounded_future_entry_merge_matches_full_sort_at_ties_and_cutoffs(self):
+        from trade_sim import FutureEntryTapes
+        names=['B','A'];times={s:[i*60 for i in range(80)]for s in names}
+        shadow={s:(0,{}, {},{0:([1,3,5,20,40],[2,4,7,22,42],[.01+j*.001+i for i in range(5)])})for j,s in enumerate(names)}
+        bounded=FutureEntryTapes(names,times,shadow,.00176)
+        rows=sorted((times[s][ent]+60,s,i,shadow[s][3][0][2][i])for s in names for i,ent in enumerate(shadow[s][3][0][0]))
+        for now in [0,120,121,240,300,1260,3000]:
+            for count in [0,1,3,8,50]:
+                expected=[row[3]-.00176 for row in rows if row[0]>=now][:count]
+                self.assertEqual(bounded.window(0,now,count),expected)
+        self.assertFalse(hasattr(bounded,'cache'),'does not retain a complete future tape per Set')
     def test_strategy_hours_match_parent_settlement_at_every_boundary(self):
         from stack_eval import summarize
         from trade_sim import settlement_hours
@@ -144,7 +162,7 @@ class AuditReporting(unittest.TestCase):
                     '--cache',cache,'--symbols','1','--jobs','1','--last-hours','1','--patch',json.dumps(patch)]
             first = subprocess.run(base,capture_output=True,text=True,timeout=90)
             self.assertEqual(first.returncode,0,first.stderr[-1000:])
-            second = subprocess.run([sys.executable,'-B',str(ROOT/'scripts/stack_eval.py'),
+            second = subprocess.run([sys.executable,'-S','-B',str(ROOT/'scripts/stack_eval.py'),
                 '--data',tmp,'--cache',cache,'--symbols','1','--jobs','1','--last-hours','1',
                 '--part','none','--patch',json.dumps(patch),'--out',str(root/'stack.json')],
                 capture_output=True,text=True,timeout=90)
