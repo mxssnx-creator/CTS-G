@@ -320,7 +320,7 @@ def hold_auto_is_off_by_default_and_never_on_trailing_sets():
     import glob
     import json as _j
     files = sorted(glob.glob(_os.path.join(_os.path.dirname(se.__file__), "overlay-*.json")))
-    root = _os.path.abspath(_os.path.join(_os.path.dirname(se.__file__), "..", ".."))
+    from common import ROOT as root      # the repository, not two levels above the engine copy under test (a fault-injection copy lives elsewhere)
     files += [_os.path.join(root, "presets", f) for f in ("secure-minimal.json", "secure-minimal-expanded-research.json")]
     shipped = {_os.path.basename(f): _j.load(open(f)).get("holdAuto") for f in files}
     bare = se.SetBook()
