@@ -12,7 +12,7 @@ import { join } from "node:path";
 const logDirectory = mkdtempSync(join(tmpdir(), "cts-g-tests-"));
 
 const jobs = [
-  {label:"local x02 and scheduling",cmd:"python3 -B scripts/test_regression_scheduling.py && python3 -B scripts/test_regression_progress.py && python3 -B scripts/test_regression_memo.py && python3 -B scripts/test_control_coverage.py && python3 -B scripts/test_x02_native_session.py"},
+  {label:"local x02 and scheduling",cmd:"python3 -B scripts/test_regression_scheduling.py && python3 -B scripts/test_regression_progress.py && python3 -B scripts/test_regression_memo.py && python3 -B scripts/test_bounded_replay_build.py && python3 -B scripts/test_control_coverage.py && python3 -B scripts/test_x02_native_session.py"},
   {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py"},
   {label:"Tactic/Inverse/volume",cmd:"python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts"},
   { label: "node", cmd: "node --test scripts/*.test.mjs" },

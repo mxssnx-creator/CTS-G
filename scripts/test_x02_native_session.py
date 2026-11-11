@@ -15,6 +15,50 @@ SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 
 
 class NativeSessionTests(unittest.TestCase):
+    def test_watchdog_does_not_count_a_stale_cycle_as_completed_observation(self):
+        self.assertEqual(session.end_reason('active',200,50,150,100,60),'main cycle heartbeat deadline')
+        self.assertEqual(session.end_reason('active',200,50,150,199,60),'observation complete')
+        self.assertEqual(session.end_reason('warming',200,150,None,0,60),'readiness deadline')
+        self.assertIsNone(session.end_reason('warming',100,150,None,0,60))
+        self.assertIsNone(session.end_reason('cleanup',200,50,150,0,60,True))
+
+    def test_periodic_capture_skips_history_and_full_capture_releases_lock_before_io(self):
+        import threading
+        class Pulse:
+            def write_stats(self, **kwargs): pass
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'stats.json';path.write_text('{"openCount":0}')
+            pulse=Pulse();pulse.sets=None
+            with patch.object(sys.modules[Pulse.__module__],'STATS_PATH',str(path),create=True):
+                session.capture(pulse,td,'periodic',include_candles=False)
+                self.assertFalse((Path(td)/'periodic-candles.json').exists())
+                book=SimpleNamespace(_lock=threading.RLock(),bars={'X':[[1,2,1,2,3]]},bar_t={'X':60})
+                pulse.sets,pulse.contracts=book,{'X':None}
+                native=session.atomic_json
+                entered=[]
+                def write(target,value):
+                    if str(target).endswith('-candles.json'):
+                        def reader():
+                            with book._lock:entered.append(True)
+                        thread=threading.Thread(target=reader);thread.start();thread.join(1)
+                        self.assertEqual(entered,[True],'snapshot IO retained the trading lock')
+                    native(target,value)
+                with patch.object(session,'atomic_json',write):session.capture(pulse,td,'ready')
+                self.assertEqual(json.loads((Path(td)/'ready-candles.json').read_text())['symbols']['X']['bars'],book.bars['X'])
+
+    def test_history_shutdown_cancellation_leaves_main_close_scoring_available(self):
+        calls=[]
+        book=SimpleNamespace(_score_one=lambda st:calls.append(st))
+        def replay(**kwargs):book._score_one('history')
+        book.replay_all=replay
+        pulse=SimpleNamespace(sets=book,_hist_stop=False)
+        session.install_history_cancellation(pulse)
+        book.replay_all()
+        pulse._hist_stop=True
+        with self.assertRaises(SystemExit):book.replay_all()
+        book._score_one('live-close')
+        self.assertEqual(calls,['history','live-close'])
+
     def test_native_admission_requires_a_native_qualified_set(self):
         book=SimpleNamespace(progress=SimpleNamespace(ready=True),_running=False,_lookback_pending=False,
                              by_idx=[1,2],gate_reason=lambda st:'real')
