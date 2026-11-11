@@ -867,6 +867,8 @@ function SettingsPage() {
                   Main dip). Execution uses Sets that pass Real; their orders mirror to the exchange.
                 </p>
                 <Toggle label="Stages after Base (off: the Base long window alone)" on={overlay.stagesEnabled !== false} onChange={(v) => patch("stagesEnabled", v)} />
+                <label><input type="checkbox" checked={overlay.lastNDisjoint} onChange={e=>patch("lastNDisjoint",e.target.checked)}/> Separate long + short + minimal blocks (20 + 10 + 3 requires 33 closes)</label>
+                {(["setGateShortMode","mainShortMode"] as const).map(key=><label key={key}>{key==="setGateShortMode"?"Base":"Main"} short condition<select value={overlay[key]} onChange={e=>patch(key,e.target.value as "positive"|"negative")}><option value="positive">Positive PF</option><option value="negative">Negative net</option></select></label>)}
                 <Toggle
                   label="Stage windows need their full N orders (off, default: a window judges the orders it has, at least one; on: a Set with fewer never passes Main or Real)"
                   on={overlay.stageFullWindow === true}
@@ -890,9 +892,9 @@ function SettingsPage() {
                 />
                 <Slider
                   label="Base · short window (last N orders)"
-                  value={Math.min(overlay.setGateShortN, Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)))}
+                  value={Math.min(overlay.setGateShortN, overlay.lastNDisjoint ? 200 : Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9)))}
                   min={0}
-                  max={Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
+                  max={overlay.lastNDisjoint ? 200 : Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))}
                   step={1}
                   hint={`the second Base window, 0 = off · at most ${Math.max(1, Math.floor(overlay.setGateWindow * overlay.setGateShortMaxRatio + 1e-9))} with the long window ${overlay.setGateWindow} and the ratio below · default 25: best of the 24 h grid (scripts/base_window_grid.py)`}
                   onChange={(v) => patch("setGateShortN", v)}
@@ -901,9 +903,9 @@ function SettingsPage() {
                   label="Base · minimal window (newest results)"
                   value={overlay.setGateMinN}
                   min={0}
-                  max={3}
+                  max={5}
                   step={1}
-                  hint="0 = off · newest 1–3 Base results coordinate entry using the selected sign or average below; this does not change PF validation"
+                  hint="0 = off · newest 1–5 Base results coordinate entry using the selected sign or average below; this does not change PF validation"
                   onChange={(v) => patch("setGateMinN", v)}
                 />
                 <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
@@ -963,8 +965,8 @@ function SettingsPage() {
                 <WindowChips
                   label="Main · short candidates"
                   value={overlay.mainShortWindows}
-                  options={[5, 10, 15, 20, 25]}
-                  hint={`Candidate selection, not simultaneous independent lanes. Effective candidates: ${overlay.mainShortWindows.filter(n => n <= Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}; excluded by ratio: ${overlay.mainShortWindows.filter(n => n > Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}. Long reference ${overlay.mainGateN} remains if none qualify.`}
+                  options={[5, 8, 10, 11, 14, 15, 17, 20, 25]}
+                  hint={overlay.lastNDisjoint ? "Short grid 5, 8, 11, 14, 17, 20; selected short follows the independent long block. Causal candidate selection is preserved." : `Candidate selection, not simultaneous independent lanes. Effective candidates: ${overlay.mainShortWindows.filter(n => n <= Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}; excluded by ratio: ${overlay.mainShortWindows.filter(n => n > Math.floor(overlay.mainGateN * overlay.mainShortMaxRatio + 1e-9)).join(", ") || "none"}. Long reference ${overlay.mainGateN} remains if none qualify.`}
                   onChange={(v) => patch("mainShortWindows", v)}
                 />
                 <Slider
@@ -989,9 +991,9 @@ function SettingsPage() {
                   label="Main · minimal window (newest results)"
                   value={overlay.mainMinN}
                   min={0}
-                  max={3}
+                  max={5}
                   step={1}
-                  hint="0 = off · newest 1–3 Main results coordinate entry using the selected sign or average below; this does not change PF validation"
+                  hint="0 = off · newest 1–5 Main results coordinate entry using the selected sign or average below; this does not change PF validation"
                   onChange={(v) => patch("mainMinN", v)}
                 />
                 <label className="rounded-lg border border-border bg-bg2 px-3 py-3">

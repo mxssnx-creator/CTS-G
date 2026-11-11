@@ -87,7 +87,7 @@ def normal_off_keeps_processing_the_base_sets_in_both_directions_and_never_execu
         b.bars["S0-USDT"] = synth_bars(81, 900, vol=0.004)
         b.replay_all(now=T0)
         base = [s for s in b.by_idx if s.kind == "base"]
-        other = [s for s in b.by_idx if s.kind != "base"]
+        other = [s for s in b.by_idx if s.kind == "exit"]
         scored = sum(1 for s in base if s.n > 0)
         # force every Set to look perfect: still, no base Set may be eligible or picked
         for s in b.by_idx:

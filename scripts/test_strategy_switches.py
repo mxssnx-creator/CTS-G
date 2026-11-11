@@ -32,7 +32,7 @@ class StrategySwitches(unittest.TestCase):
         for st in book.by_idx:
             st.gate_n, st.gate_pf, st.max_dd_s = 50, 3, 0
             self.assertEqual(book.base_validation_reason(st), "")
-            self.assertEqual(book.gate_reason(st), "type-disabled" if st.kind == "base" else "")
+            self.assertEqual(book.gate_reason(st), "type-disabled" if st.kind in ("base", "trail") else "")
         self.assertEqual({st.kind for st in book.by_idx}, {"base", "exit", "trail"})
         self.assertIn("trend", book.packs)
 
