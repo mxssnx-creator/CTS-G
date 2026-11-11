@@ -22,3 +22,10 @@ threshold does not establish profitable subsequent executions.
 Read `CLAUDE.md` for the project's execution, stage, accounting and history
 contracts. Distinguish simulations and paper-stage figures from confirmed
 exchange fills and actual executed profit factor.
+
+2026-11-10 / 11: relation lanes (`relationLanes`: overall / indication / type / range / step lanes of the
+post-Base orders, volume ratios for passing lanes) exist and ship **off**; the raise did not help on the two
+development windows. Axis has no stable sign across four windows and is unchanged. The shipped Block lowered
+the replay on four of four windows and is left on by the owner's choice. The statistics now show executed
+parents with against without Block adds and relation raises. See
+`docs/verification/relation-lanes-axis-block-20261110.md`. None of this is evidence from an account.

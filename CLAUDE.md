@@ -2,6 +2,39 @@
 
 ## Standing owner rules (newest first)
 
+- **2026-11-10 / 11, owner: "make indications work also by type and additionally by step ... use ratios for higher volume factors ... for the overall and major
+  lanes types ... Set it optimally" / "Test, Fix Axis, Block .. make fully work with correct high PF related to without".** Full record and tables:
+  `docs/verification/relation-lanes-axis-block-20261110.md`. Two three-day datasets of 20 symbols (W1 11-07 18:00 .. 11-10 18:00, W2 11-04 18:00 .. 11-07 18:00
+  UTC), x01 overlay, 24 h pre-history, development 32 h + sealed 16 h each; no connection started.
+  (a) **Relation lanes** (`relationLanes`, `server/pulse/relation_lanes.py`, **shipped OFF**): next to every configuration's own lane, last-N lanes of the post-Base
+  orders by relation: overall (every Set of a direction), indication and type (major), TP range and step / distance (minor). A lane is a chain of new Sets built
+  only from orders valid after Base: the Relation Set (the members' Main-Set orders, ONE observation per entry = the mean net of its closed member orders) with a
+  Main window, and the Relation Real Set (the entries opened while that window passed, read from the closes before each entry) with a Real window. A passing lane
+  adds its ratio to the volume of a member Set's positive-lane entry (1 + the passing ratios, at most `maxMult`; rounded down to the lot step; never cancels an
+  entry; never opens, blocks, closes or scores anything; the Real Negative lane is not raised). Defaults when enabled: Main 25, Real 15, floor 1.1, ratios overall
+  / indication / type 0.25, range / step 0, ceiling x 2. **Measured (unit PF / volume-weighted PF, executed positions): W1 0.708 / 0.661 on 405 (the 77 raised
+  positions 0.265 against 0.847), W2 0.522 / 0.526 on 219 (13 raised).** Seven window / floor arms: all worse on W1, all within 0.025 on W2. The sign is not stable,
+  so no ratio above 0 is supported and the ship rule is not met. Checks `relations.*`, `trader.relation-lanes-raise-a-set-entry-and-never-cancel-it`,
+  `selftest.relation_lanes`; mutants `relation lanes:`. Study: `scripts/relation_lane_study.py`.
+  (b) **Axis against no Axis** (PF, positions; W1 dev / W1 sealed / W2 dev / W2 sealed): none 0.916 / 0.775 / 0.504 / 0.865; x01 all four **0.708 / 0.977 / 0.523 /
+  0.944** (pooled 0.728 against 0.759 on about 910); `last` 4 alone 0.759 / 0.920 / 0.519 / 0.944; `prev` 12, `cont` 8 inside the noise; `pause` 8 never binds. Better
+  on three windows, worse on one, and the sign of `last` flips between the development and sealed part of the same three days. **No Axis setting changed.**
+  (c) **Block against the same parents without it** (shipped: symbol + step, 3 counts x 3 costs, ratio 1.0): 0.693 / 0.969 / 0.516 / 0.909 against 0.708 / 0.977 /
+  0.523 / 0.944: lower on four of four windows, 23 adds, -17.4 net points, the adds' PF 0.48 / 0.81 / 0 / 0; no candidate's adds are net positive (step only -4.3).
+  **Block is left as the owner switched it on (2026-11-05) and is not profitable on this evidence**; `blockEnabled: false` is one key and the owner's decision.
+  (d) **Lane order**: pos-neg / neg-pos / neg / pos read 0.916 / 0.884 / 0.936 / 0.804 (W1 dev) and 0.504 / 0.532 / 0.533 / 0.495 (W2 dev) without the Axis: no change.
+  (e) **Defects fixed.** A Set open on BOTH lanes was always named positive (`lane_of` ignored `laneOrder`): with neg-pos / neg and no Axis its position was opened
+  and scored on the wrong lane, and a closed positive scope dropped it instead of taking it on the negative lane (`lane_of` follows the order, `lane_in`; check
+  `lane_rank.a-set-open-on-both-lanes-executes-on-the-lane-it-was-picked-for`). Simulator: a Set is a candidate of every lane it passes under the Axis; the Block
+  floor reads the parent's own lane window; `stack_eval.py` starts at the same hour as `trade_sim.py`. A check that located `presets/` from the engine copy failed
+  on every fault-injection copy and was the false catcher of new mutants (reads `common.ROOT` now).
+  (f) **Statistics.** `execution.lift` (desk "Executed - with against without"): the settled Set parents without and with Block adds, and at volume 1 against their
+  relation multiple, on the original base notional, rebuilt from the trades file (`pulse_trader.lift_note` / `lift_report`, check
+  `trader.lift-figures-compare-the-same-parents-with-and-without`). Relation lanes table; "Stage and lane progress" chart (the share passing Base / Main / Real /
+  Real Negative per pass, each on its own line, and the relation lanes passing: `pfBase.history[].stages` / `.relations`).
+  (g) Rule kept: a stack type or gate is enabled or removed only when the counterfactual replay agrees on every window; a weighted PF is never quoted as a unit PF.
+  Caches of `stack_eval.py` and of `trade_sim.py` / `relation_lane_study.py` / `lane_axis_study.py` are not interchangeable (different cost resolution): one file each.
+
 - **2026-11-09, post-Base / Block follow-up:** preserve actual later losses even
   when qualification PF was high. Block now honors explicit range floors,
   counts partial targets once, weights add cash by entry notional, includes
