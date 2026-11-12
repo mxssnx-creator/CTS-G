@@ -546,7 +546,11 @@ def cleanup(pulse, journal, seconds):
         with journal.lock:
             intents = list(journal.intents)
         from native_cleanup_evidence import terminal_intents, resolve_bound_intents
-        unresolved = terminal_intents(pulse.api, intents, end, order_bodies, getattr(journal, 'remember_order', None))
+        # A slow archive must not consume the entire cleanup budget before
+        # exact receipt-bound order IDs have a chance to resolve controls.
+        receipt_now = time.monotonic()
+        archive_end = min(end, receipt_now + min(10.0, max(0.0, (end-receipt_now)/2)))
+        unresolved = terminal_intents(pulse.api, intents, archive_end, order_bodies, getattr(journal, 'remember_order', None))
         if time.monotonic() >= end:
             break
         with journal.lock:
@@ -562,6 +566,35 @@ def cleanup(pulse, journal, seconds):
         orders = rows(pulse.api, "/openApi/swap/v2/trade/openOrders", "orders")
         own = [o for o in orders if journal.owns_order(o.get('symbol'), o.get('orderId') or o.get('orderID'))]
         inventory_flat=all(abs(qty)<=Decimal('1e-12') for qty in getattr(journal,'inventory',{}).values())
+        # Exclusive admission can be interrupted by another session. Its
+        # positions/orders must not block cancellation of our proven-flat
+        # controls. Require the actual exact-fill journal, not a local-book
+        # absence or symbol/prefix heuristic; unknown writes still block this.
+        if (isinstance(journal, Journal) and journal.intents and not unresolved
+                and not pulse.open and inventory_flat and (exposed or len(orders)>len(own))):
+            for order in own:
+                if time.monotonic() >= end:break
+                pulse.api.delete('/openApi/swap/v2/trade/order',
+                                 {'symbol':order['symbol'],'orderId':str(order['orderId'])})
+            final = rows(pulse.api, '/openApi/swap/v2/trade/openOrders', 'orders')
+            final_own = [o for o in final if journal.owns_order(o.get('symbol'),o.get('orderId')or o.get('orderID'))]
+            # A protection may fill while its cancellation is in flight.
+            # Refresh exact terminal receipts before claiming zero inventory.
+            receipt_now = time.monotonic()
+            archive_end = min(end, receipt_now + min(10.0, max(0.0, (end-receipt_now)/2)))
+            unresolved = terminal_intents(pulse.api, intents, archive_end, order_bodies, journal.remember_order)
+            if time.monotonic() >= end:break
+            unresolved = resolve_bound_intents(pulse.api,intents,unresolved,end,order_bodies,
+                                               dict(journal.order_bodies),journal.remember_order)
+            final_positions = checked_positions(pulse.api)
+            if (time.monotonic()<end and not final_own and not unresolved and not pulse.open
+                    and all(abs(qty)<=Decimal('1e-12')for qty in journal.inventory.values())):
+                return {'confirmedFlat':True,'scope':'owned session','positions':0,'orders':0,
+                        'unresolvedOrderIntents':0,'selectedScopeFlat':not any(
+                            abs(float(p['positionAmt']))>1e-12 and (selected is None or p['symbol']in selected)
+                            for p in final_positions),
+                        'foreignPositionsPreserved':sum(abs(float(p['positionAmt']))>1e-12 for p in final_positions),
+                        'foreignOrdersPreserved':len(final)}
         if not exposed and not unresolved and not pulse.open and inventory_flat:
             for order in own:
                 pulse.api.delete("/openApi/swap/v2/trade/order", {"symbol": order["symbol"], "orderId": str(order["orderId"])})
