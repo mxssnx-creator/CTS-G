@@ -5,6 +5,11 @@ import time
 TERMINAL = {'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED'}
 
 
+def definite_refusal(reply):
+    return reply.get('cooled') is True or (str(reply.get('code')) in ('101400','109420')
+        and not reply.get('error') and not reply.get('data'))
+
+
 def terminal_intents(api, intents, deadline, order_bodies, remember=None):
     required = []
     starts = {}
@@ -12,8 +17,7 @@ def terminal_intents(api, intents, deadline, order_bodies, remember=None):
         if intent['method'] != 'POST':
             continue
         ack = intent.get('response') or {}
-        if ack.get('cooled') is True or (str(ack.get('code')) in ('101400','109420')
-                and not ack.get('error') and not ack.get('data')):
+        if definite_refusal(ack):
             continue
         data = ack.get('data') or {}
         candidates = data.get('orders', [data.get('order', data)]) if isinstance(data, dict) else []

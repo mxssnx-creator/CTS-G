@@ -95,7 +95,8 @@ def audit(run,credentials):
             if body.get('symbol')not in symbols or not cid.startswith(tag):
                 raise ValueError('native intent escaped its exact ownership scope')
         reply=intent.get('response',{});code=str(reply.get('code',''))
-        if code not in ('0','','-1')and not reply.get('error'):
+        from native_cleanup_evidence import definite_refusal
+        if definite_refusal(reply):
             refused.append(dict(index=intent['index'],code=code,message=str(reply.get('msg',''))[:200]))
             continue
         data=reply.get('data')or{}
@@ -135,14 +136,6 @@ def audit(run,credentials):
         (symbol,cid),body=item
         identity={'orderId':body['_venueOrderId']}if body.get('_venueOrderId')else{'clientOrderId':cid}
         reply=api.call('GET','/openApi/swap/v2/trade/order',{'symbol':symbol,**identity})
-        if (not body.get('_venueOrderId') and body['type']=='MARKET'
-                and time.time()-report['activeEndedAt']>20):
-            misses=0
-            for _ in range(3):
-                if str(reply.get('code'))=='109421'and'order not exist'in str(reply.get('msg','')).lower():misses+=1
-                else:break
-                reply=api.call('GET','/openApi/swap/v2/trade/order',{'symbol':symbol,**identity})
-            if misses==3:return body,{'status':'NOT_ACCEPTED','orderId':'missing:'+cid},[],True
         data=reply.get('data')or{};order=data.get('order',data)
         found=str(order.get('clientOrderID')or order.get('clientOrderId')or'').lower()
         exact=found==cid or (body.get('_venueOrderId')and str(order.get('orderId'))==body['_venueOrderId'])
@@ -173,7 +166,7 @@ def audit(run,credentials):
     receipts=[];pending=[]
     for identity,body in requested.items():
         row=cached.get(identity)
-        if row and row['terminal'] and row['request']==body:
+        if row and row['terminal'] and row['request']==body and row['order'].get('status')!='NOT_ACCEPTED':
             order=row['order'];cid=str(order.get('clientOrderId')or order.get('clientOrderID')or'').lower()
             if order.get('status')!='NOT_ACCEPTED'and(cid!=identity[1]or order.get('symbol')!=identity[0]):
                 raise ValueError('terminal receipt identity differs from its journal')

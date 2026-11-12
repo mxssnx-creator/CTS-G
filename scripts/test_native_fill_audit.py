@@ -1,5 +1,9 @@
 """Independent cash examples for native fills, partials and fee units."""
-import unittest
+import json,tempfile,time,unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+import audit_native_x02 as native_audit
 from audit_native_x02 import cash_group,position_cash
 
 
@@ -9,6 +13,36 @@ def fill(side,qty,price,commission,position='LONG'):
 
 
 class NativeCash(unittest.TestCase):
+    def test_missing_order_never_proves_an_uncertain_submission_was_not_accepted(self):
+        for reply,legacy_cache in [({'code':109421,'msg':'order not exist'},False),
+                                   ({'code':-1,'error':True},False),
+                                   ({'code':-1,'error':True},True)]:
+            with self.subTest(reply=reply,legacy_cache=legacy_cache),tempfile.TemporaryDirectory()as tmp:
+                root=Path(tmp);now=time.time()
+                body={'symbol':'A-USDT','side':'BUY','positionSide':'LONG','type':'MARKET',
+                      'quantity':'1','clientOrderID':'Gtestentry'}
+                report={'host':native_audit.HOST,'connection':native_audit.CONN,'createdAt':now-120,
+                        'activeEndedAt':now-100,'tag':'Gtest','symbols':['A-USDT'],'cleanup':{}}
+                (root/'session.json').write_text(json.dumps(report))
+                events=[{'index':0,'result':'pending','method':'POST','path':'/openApi/swap/v2/trade/order','body':body},
+                        {'index':0,'result':'response','response':reply}]
+                (root/'mutation-journal.jsonl').write_text('\n'.join(json.dumps(r)for r in events))
+                credentials=root/'test.json';credentials.write_text(json.dumps({'api_key':'fixture','api_secret':'fixture','base_url':native_audit.HOST}))
+                if legacy_cache:
+                    (root/'native-order-receipts.json').write_text(json.dumps([{'request':body,'order':
+                        {'status':'NOT_ACCEPTED','orderId':'missing:gtestentry'},'fills':[],'terminal':True}]))
+                calls=[]
+                def get(path,params):
+                    calls.append(path)
+                    if path.endswith('/order'):return {'code':109421,'msg':'order not exist'}
+                    return {'code':0,'data':{'orders':[]}if path.endswith('/openOrders')else[]}
+                api=SimpleNamespace(get=get,http=SimpleNamespace(close=lambda:None))
+                with patch.object(native_audit,'FastBingX',return_value=api):
+                    with self.assertRaisesRegex(ValueError,'exact submitted identity'):
+                        native_audit.audit(root,credentials)
+                self.assertIn('/openApi/swap/v2/trade/order',calls)
+                self.assertFalse((root/'native-fill-audit.json').exists())
+
     def test_long_partial_exits_pay_each_reported_commission_once(self):
         result=cash_group([fill('BUY',1,100,-.1),fill('SELL',.4,110,-.044),fill('SELL',.6,90,-.054)])
         self.assertEqual(result['gross'],-2)
