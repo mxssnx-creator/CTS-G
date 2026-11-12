@@ -3146,6 +3146,17 @@ def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():
     return got == [1800.0, 45.0, 12.0, 12.0] and wired, f"cooldowns {got}; entry path uses it: {wired}"
 
 
+def max_leverage_is_the_default_everywhere():
+    """Owner 2026-11-12: always the exchange maximum leverage, and as the default. The engine's absent-key default, every shipped overlay (leverageStopCap off, so no cap lowers it)
+    and the desk default all say max leverage on."""
+    ov = {n: json.load(open(os.path.join(PULSE, f"overlay-{n}.json"))) for n in ("bingx-x01", "bingx-x02", "bybit-x01", "bybit-x02")}
+    on = {n: (o.get("useMaxLeverage") is True and o.get("leverageStopCap") is False) for n, o in ov.items()}
+    engine_default = pt.leverage_settings({})[0] is True
+    desk = open(os.path.join(PULSE, "..", "..", "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    desk_default = "  useMaxLeverage: true,\n" in desk
+    return all(on.values()) and engine_default and desk_default, f"overlays {on}, engine default {engine_default}, desk default {desk_default}"
+
+
 def a_manual_close_rests_only_that_symbol_and_direction():
     """Owner 2026-11-04: closing a position by hand must not make the engine reopen the exact same position, and must not stop trading. A position the venue no
     longer holds and that left no stop / target fill of ours (drop_ghost, a restored position gone) puts (symbol, side) to rest for manualCloseRestMin; the other
@@ -3493,6 +3504,7 @@ CHECKS = [
     ("trader.group-gate-blocks-a-losing-group-and-only-that-group", the_group_gate_blocks_a_losing_group_and_only_that_group),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
+    ("trader.max-leverage-is-the-default-everywhere", max_leverage_is_the_default_everywhere),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),
     ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
