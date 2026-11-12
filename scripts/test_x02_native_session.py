@@ -322,6 +322,76 @@ class NativeSessionTests(unittest.TestCase):
         self.assertTrue(result['confirmedFlat'])
         self.assertGreaterEqual(calls.count('/openApi/swap/v2/user/positions'),2)
 
+    def owned_cleanup_fixture(self, root, closed_qty='1', unknown_exit=False):
+        orders={};deletes=[]
+        foreign={'symbol':'S0-USDT','orderId':'99','clientOrderID':'G1234foreign',
+                 'side':'SELL','positionSide':'LONG','type':'STOP_MARKET','status':'NEW','executedQty':'0'}
+        def request(method,path,body=None):
+            body=body or{}
+            if method=='POST':
+                oid=str(len(orders)+1);control=body['type']!='MARKET'
+                row={**body,'orderId':oid,'status':'NEW'if control else'FILLED',
+                     'executedQty':'0'if control else body['quantity']}
+                orders[oid]=row;return {'code':0,'data':{'order':dict(row)}}
+            if method=='DELETE':
+                deletes.append(dict(body));orders[body['orderId']]['status']='CANCELED'
+                return {'code':0}
+            if path.endswith('/positions'):
+                return {'code':0,'data':[{'symbol':'S0-USDT','positionSide':'LONG','positionAmt':'7'}]}
+            if path.endswith('/openOrders'):
+                return {'code':0,'data':{'orders':[dict(r)for r in orders.values()if r['status']=='NEW']+[foreign]}}
+            if path.endswith('/allOrders'):
+                return {'code':0,'data':{'orders':[dict(r)for r in orders.values()
+                    if not(unknown_exit and r['clientOrderID']=='G1234close')]}}
+            if path.endswith('/order'):
+                if unknown_exit and str(body.get('orderId'))=='3':return {'code':-1,'error':True}
+                return {'code':0,'data':{'order':dict(orders[str(body['orderId'])])}}
+            raise AssertionError((method,path))
+        api=SimpleNamespace(base=session.HOST,_req=request)
+        journal=session.Journal(api,root,'G1234');journal.phase='active';journal.deadline=session.time.monotonic()+10
+        api.get=lambda path,body=None:api._req('GET',path,body)
+        api.delete=lambda path,body:api._req('DELETE',path,body)
+        entry=dict(symbol='S0-USDT',clientOrderID='G1234entry',side='BUY',positionSide='LONG',type='MARKET',quantity='1')
+        api._req('POST','/openApi/swap/v2/trade/order',entry)
+        api._req('POST','/openApi/swap/v2/trade/order',{**entry,'side':'SELL','type':'STOP_MARKET','clientOrderID':'G1234sl'})
+        journal.phase='cleanup'
+        api._req('POST','/openApi/swap/v2/trade/order',{**entry,'side':'SELL','clientOrderID':'G1234close','quantity':closed_qty})
+        pulse=SimpleNamespace(api=api,open={},sync_own_fills=lambda:None,adopt_exchange_positions=lambda:None)
+        return pulse,journal,orders,deletes
+
+    def test_cleanup_after_exclusive_abort_preserves_same_symbol_foreign_inventory(self):
+        with tempfile.TemporaryDirectory()as root:
+            pulse,journal,orders,deletes=self.owned_cleanup_fixture(root)
+            result=session.cleanup(pulse,journal,2)
+        self.assertTrue(result['confirmedFlat']);self.assertEqual(result['scope'],'owned session')
+        self.assertFalse(result['selectedScopeFlat'])
+        self.assertEqual(result['foreignPositionsPreserved'],1);self.assertEqual(result['foreignOrdersPreserved'],1)
+        self.assertEqual(deletes,[{'symbol':'S0-USDT','orderId':'2'}])
+        self.assertEqual(journal.inventory[('S0-USDT','LONG')],0)
+
+    def test_owned_cleanup_still_blocks_unknown_submissions_and_nonzero_fill_inventory(self):
+        for quantity,unknown in [('1',True),('0.5',False)]:
+            with self.subTest(quantity=quantity,unknown=unknown),tempfile.TemporaryDirectory()as root:
+                pulse,journal,orders,deletes=self.owned_cleanup_fixture(root,quantity,unknown)
+                result=session.cleanup(pulse,journal,.02)
+                self.assertFalse(result['confirmedFlat']);self.assertEqual(deletes,[])
+
+    def test_cleanup_reserves_archive_budget_for_exact_bound_receipts(self):
+        import native_cleanup_evidence as evidence
+        seen=[];bound=[]
+        with tempfile.TemporaryDirectory()as root:
+            pulse,journal,orders,deletes=self.owned_cleanup_fixture(root)
+            original=evidence.terminal_intents;original_bound=evidence.resolve_bound_intents
+            def archive(api,intents,deadline,*args):
+                seen.append(deadline);return original(api,intents,deadline,*args)
+            def resolve(api,intents,pending,deadline,*args):
+                bound.append(deadline);return original_bound(api,intents,pending,deadline,*args)
+            with patch.object(evidence,'terminal_intents',archive),patch.object(evidence,'resolve_bound_intents',resolve):
+                result=session.cleanup(pulse,journal,30)
+        self.assertTrue(result['confirmedFlat']);self.assertGreaterEqual(len(seen),2)
+        self.assertEqual(len(seen),len(bound))
+        self.assertTrue(all(archive+10<exact for archive,exact in zip(seen,bound)))
+
     def test_mutations_require_exact_journaled_order_ids_and_never_change_account_settings(self):
         calls = []
         def request(method, path, body):

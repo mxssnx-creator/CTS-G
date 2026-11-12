@@ -67,6 +67,19 @@ class CleanupEvidence(unittest.TestCase):
         self.assertEqual(calls[0][1],{'symbol':body['symbol'],'orderId':row['orderId']})
         self.assertEqual(len(remembered),1)
 
+    def test_post_cancel_proof_requires_terminal_controls_in_archive_and_bound_receipts(self):
+        body,row,intent=self.fixture();body.update(type='STOP_MARKET',side='SELL')
+        row.update(type='STOP_MARKET',side='SELL',executedQty='0')
+        intent={**intent,'body':body,'response':{'code':0,'data':{'order':row}}}
+        bindings={(body['symbol'],row['orderId']):body}
+        for status in ['NEW','PENDING','TRIGGERED','CANCELED','FILLED']:
+            with self.subTest(status=status):
+                current={**row,'status':status}
+                api=SimpleNamespace(get=lambda path,*a:{'code':0,'data':{'orders':[current]}if path.endswith('/allOrders')else{'order':current}})
+                expected=[body['clientOrderID']]if status in ['NEW','PENDING','TRIGGERED']else[]
+                self.assertEqual(terminal_intents(api,[intent],time.monotonic()+2,order_bodies,None,False),expected)
+                self.assertEqual(resolve_bound_intents(api,[intent],[body['clientOrderID']],time.monotonic()+2,order_bodies,bindings,None,False),expected)
+
     def test_bound_lookup_rejects_wrong_identity_and_unfinished_market(self):
         body,row,intent=self.fixture();binding={(body['symbol'],row['orderId']):body}
         for key,value in [('orderId','88'),('symbol','OTHER-USDT'),('positionSide','SHORT'),
