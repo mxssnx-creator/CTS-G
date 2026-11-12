@@ -236,6 +236,15 @@ export type Execution = {
   closed: { orders: number; setLane: number; exitLane: number; wins: number; losses: number; skippedNotScored: number; droppedNoRecord: number; setsThatTraded: number; blockAddFills?: number };
   /** The settled Set parents once without and once with each stack type (server: pulse_trader.lift_report), returns on the original base notional. */
   lift?: ExecutionLift;
+  /** The replay's result next to the exchange's result of the same settled Set closes (server: sim_diff.diff_report). */
+  simDiff?: SimDiff;
+};
+export type SimDiffRow = { n: number; livePf: number | null; simPf: number | null; liveNetPct: number; simNetPct: number; fillGapPct: number; costGapPct: number; netGapPct: number; netGapPerClosePct: number | null };
+export type SimDiff = {
+  closes: number; unknown: number; total: SimDiffRow; byExit: Record<string, SimDiffRow>; byPack: Record<string, SimDiffRow>;
+  stopFactor: { n: number; median: number | null; mean: number | null; p90: number | null };
+  targetFactor: { n: number; median: number | null; mean: number | null; p10: number | null };
+  basis?: string;
 };
 export type LiftPair = { pf: number | null; netPct: number };
 export type ExecutionLift = {

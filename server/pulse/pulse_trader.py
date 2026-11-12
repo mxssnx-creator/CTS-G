@@ -27,6 +27,7 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from set_block import SetBlockBook
 import block_rounds
 from block_rules import clean_cfg as clean_block_cfg
+from sim_diff import diff_note as sim_diff_note, diff_report as sim_diff_report, new_diff as new_sim_diff
 from fee_policy import cost_policy
 from execution_cost import FeeSchedule, fill_fee, fee_rate, execution_result, adverse_slippage, number
 from position_cost import row_net_pnl_pct
@@ -5225,6 +5226,7 @@ class Pulse:
             self._exec_inc("blockAddFills", len(getattr(rec, "block_fills", []) or []))
             if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
                 lift_note(self.__dict__.setdefault("exec_lift", new_lift()), rec)      # the same parents without / with Block adds and relation raises
+                sim_diff_note(self.__dict__.setdefault("exec_sim_diff", new_sim_diff()), rec, cost_as_frac(self.position_cost_pct))   # replay result against the exchange result of the same close
                 lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
                 key = "laneNeg" if lane == "neg" else "lanePos"
                 self._exec_inc(key)
@@ -5335,6 +5337,7 @@ class Pulse:
             "entriesSkipped": {"thinBook": int(n.get("skippedThinBook", 0)), "scopeBlocked": int(n.get("scopeBlocked", 0))},
             # what the stack types made on the settled Set parents, next to the same parents without them
             "blockRounds": (self.rounds.snapshot() if getattr(self, "rounds", None) is not None else None),
+            "simDiff": sim_diff_report(self.__dict__.get("exec_sim_diff") or new_sim_diff()),
             "lift": {**lift_report(self.__dict__.get("exec_lift") or new_lift()),
                      "relationAsked": int(n.get("relationAsked", 0)), "relationRaised": int(n.get("relationRaised", 0))},
         }
@@ -6935,6 +6938,7 @@ class Pulse:
                 self.cooldown[sym] = time.time() + 90.0
                 continue
             log(f"DROP stale local {sym} age={age:.0f}s")
+            self.note_manual_close(pos, "stale local position gone from the venue")   # a manual close (no stop / target fill of ours): this symbol and direction rest, nothing else
             self._exec_inc("dropped")       # left the book with no close record: counted, never lost
             self.cancel_controls(sym, side=pos.side)
             self.rounds_release(pos)

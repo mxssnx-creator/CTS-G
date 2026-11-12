@@ -3170,7 +3170,8 @@ def a_manual_close_rests_only_that_symbol_and_direction():
             pt.MANUAL_REST_PATH = old
     src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
     wired = ("manual_rest_active(getattr(self, \"manual_rest\", {}), sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
-             and src.count("self.note_manual_close(pos,") >= 2)
+             and src.count("self.note_manual_close(pos,") >= 3
+             and "DROP stale local {sym} age={age:.0f}s\")\n            self.note_manual_close(pos," in src)
     ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired
     return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
 
