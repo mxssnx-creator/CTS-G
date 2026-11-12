@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import math
 import threading
+from array import array
+from collections import OrderedDict
+from functools import wraps
+from operator import mul
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 Row = Sequence[float]
@@ -41,12 +45,70 @@ HISTORY = rows_for(max(TFS_EXT))   # the most 1m rows any library name reads (it
 
 _tls = threading.local()
 
+VECTOR_MEMO_BYTES = 2 * 1024 * 1024
+VECTOR_MEMO_ENTRIES = 128
+VECTOR_MEMO_LENGTH = 512
+
+
+def clear_vector_memo():
+    _tls.vectors = [OrderedDict(), 0, 0, 0]
+
+
+def vector_memo_info():
+    state = getattr(_tls, 'vectors', None)
+    return dict(entries=len(state[0]) if state else 0, estimatedBytes=state[1] if state else 0,
+                hits=state[2] if state else 0, misses=state[3] if state else 0,
+                maxBytes=VECTOR_MEMO_BYTES, maxEntries=VECTOR_MEMO_ENTRIES)
+
+
+def _vector_memo(fn):
+    """Reuse exact float vectors across indicator families; never share mutable results.
+
+    IEEE bytes preserve signed zero and NaN payloads. Non-float inputs retain
+    the original arithmetic, including integer differences before RSI division.
+    Each thread owns a bounded cache; settings, symbols and lanes share no state.
+    """
+    @wraps(fn)
+    def cached(values, n):
+        if len(values) > VECTOR_MEMO_LENGTH or type(n) is not int or set(map(type, values)) != {float}:
+            return fn(values, n)
+        state = getattr(_tls, 'vectors', None)
+        if state is None:
+            clear_vector_memo()
+            state = _tls.vectors
+        memo = state[0]
+        key = (fn, n, array('d', values).tobytes())
+        hit = memo.get(key)
+        if hit is not None:
+            state[2] += 1
+            memo.move_to_end(key)
+            return list(hit[0])
+        state[3] += 1
+        result = fn(values, n)
+        weight = (len(values) + len(result)) * 40 + 256
+        if weight <= VECTOR_MEMO_BYTES:
+            while memo and (len(memo) >= VECTOR_MEMO_ENTRIES or state[1] + weight > VECTOR_MEMO_BYTES):
+                _old_key, (_old_values, old_weight) = memo.popitem(last=False)
+                state[1] -= old_weight
+            memo[key] = (tuple(result), weight)
+            state[1] += weight
+        return result
+    return cached
+
 
 def _conf(base: float, extra: float, cap: float = 0.93) -> float:
     return max(0.5, min(cap, base + max(0.0, extra)))
 
 
 MEMO_CAP = 4096                 # entries of the per-thread memo before it is cleared (bars and single results; bounded memory)
+
+
+class _AggregatedBars(list):
+    """Owned, read-only indicator input; derived features share its lifetime."""
+    __slots__ = ('true_ranges',)
+    def __init__(self,values):
+        super().__init__(values)
+        self.true_ranges = None
 
 
 def _memo() -> Dict:
@@ -89,23 +151,33 @@ def _agg(rows: Sequence[Row], tf: int) -> List[List[float]]:
             blk = rows[hi - tf : hi]
             out.append([float(blk[0][0]), max(float(b[1]) for b in blk), min(float(b[2]) for b in blk), float(blk[-1][3]),
                         sum(float(b[4]) for b in blk)])
+    out = _AggregatedBars(out)
     m[k] = (rows[0] if len(rows) else None, rows[-1] if len(rows) else None, out)
     return out
 
 
 def _tr(b: Sequence[Row]) -> List[float]:
+    if isinstance(b,_AggregatedBars) and b.true_ranges is not None:
+        return b.true_ranges
     out = [float(b[0][1]) - float(b[0][2])]
     for i in range(1, len(b)):
         h, lo, pc = float(b[i][1]), float(b[i][2]), float(b[i - 1][3])
         out.append(max(h - lo, abs(h - pc), abs(lo - pc)))
+    if isinstance(b,_AggregatedBars):b.true_ranges = out
     return out
 
 
 def _atr(b: Sequence[Row], n: int) -> float:
-    t = _tr(b)[-n:]
+    # Only the newest n ranges enter the average. Keep one predecessor so a
+    # gap on the first retained bar uses the identical previous close.
+    if isinstance(b, _AggregatedBars):
+        t = _tr(b)[-n:]
+    else:
+        t = _tr(b[-n - 1:])[1:] if isinstance(n, int) and 0 < n < len(b) else _tr(b)[-n:]
     return sum(t) / len(t) if t else 0.0
 
 
+@_vector_memo
 def _ema(vals: Sequence[float], n: int) -> List[float]:
     k = 2.0 / (n + 1.0)
     e = float(vals[0])
@@ -122,10 +194,11 @@ def _wma(vals: Sequence[float], n: int) -> List[float]:
         lo = max(0, i - n + 1)
         w = vals[lo : i + 1]
         den = len(w) * (len(w) + 1) / 2.0
-        out.append(sum((j + 1) * v for j, v in enumerate(w)) / den)
+        out.append(sum(map(mul, range(1, len(w) + 1), w)) / den)
     return out
 
 
+@_vector_memo
 def _rsi(c: Sequence[float], n: int) -> List[float]:
     out = [50.0] * len(c)
     if len(c) <= n:
@@ -274,11 +347,12 @@ def f_kama(b, n):
         return None
     c = _cl(b)
     fast, slow = 2.0 / 3.0, 2.0 / 31.0
+    changes = [abs(c[i] - c[i - 1]) for i in range(1, len(c))]
     k = c[0]
     ks = []
     for i in range(len(c)):
         if i >= n:
-            path = sum(abs(c[j] - c[j - 1]) for j in range(i - n + 1, i + 1))
+            path = sum(changes[i - n:i])
             er = abs(c[i] - c[i - n]) / path if path > 0 else 0.0
             sc = (er * (fast - slow) + slow) ** 2
             k = k + sc * (c[i] - k)
