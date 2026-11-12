@@ -1,0 +1,3 @@
+# Native local x02 runtime. SOCKS support is required on proxy-backed hosts.
+httpx[socks]>=0.28,<0.29
+websocket-client>=1.8,<2

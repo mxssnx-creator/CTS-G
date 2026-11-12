@@ -430,6 +430,45 @@ def replay_uses_each_symbols_last_completed_bar():
     return ok, f"{len(rows)} replayed closes match the actual bar time; future bar rejected={rejected}; bounded rows={len(boundary)}"
 
 
+def replay_freezes_market_before_ingestion_advances_its_clock():
+    """A live refresh between symbols cannot advance this pass's candle clock."""
+    reference = _book(n_syms=2, bars=300, **SMALL)
+    actual = _book(n_syms=2, bars=300, **SMALL)
+    for book in (reference, actual):
+        book.bar_t = {s: T0 - BAR_S for s in book.bars}
+    reference.replay_all(now=T0)
+    refreshed = []
+    def incoming():
+        if not refreshed:
+            refreshed.append(True)
+            for symbol, rows in list(actual.bars.items()):
+                actual.ingest_bars(symbol, rows + synth_bars(123, 2, start=rows[-1][3]),
+                                   last_t=T0 + BAR_S)
+    actual.replay_all(now=T0, on_step=incoming)
+    same = all(x.hist == y.hist and x.n == y.n for x, y in zip(actual.by_idx, reference.by_idx))
+    frozen = all(actual._hist_replay_bar_at[s] == T0 - BAR_S
+                 and actual._hist_inputs[s]['bars'] == reference._hist_inputs[s]['bars']
+                 for s in reference.bars)
+    released = not hasattr(actual._replay_local, 'market')
+    ok = bool(refreshed) and same and frozen and released and actual.progress.errors == 0
+    return ok, f"incoming refresh={bool(refreshed)}; native rows identical={same}; frozen inputs={frozen}; released={released}; errors={actual.progress.errors}"
+
+
+def replay_asof_excludes_candles_newer_than_its_decision():
+    reference = _book(n_syms=1, bars=300, **SMALL)
+    actual = _book(n_syms=1, bars=300, **SMALL)
+    symbol = 'S0-USDT'
+    reference.bar_t[symbol] = T0 - BAR_S
+    actual.bars[symbol] += synth_bars(123, 2, start=actual.bars[symbol][-1][3])
+    actual.bar_t[symbol] = T0 + BAR_S
+    reference.replay_all(now=T0)
+    actual.replay_all(now=T0)
+    same = all(x.hist == y.hist and x.n == y.n for x, y in zip(actual.by_idx, reference.by_idx))
+    ok = (same and actual.progress.errors == 0 and actual._hist_replay_bar_at[symbol] == T0 - BAR_S
+          and actual.bar_t[symbol] == T0 + BAR_S and len(actual.bars[symbol]) == 302)
+    return ok, f"bounded rows identical={same}; source remains current={actual.bar_t[symbol] == T0 + BAR_S}; errors={actual.progress.errors}"
+
+
 def hold_adapter_uses_the_selected_sets_tape():
     """Walk-forward hold adapters support the same Set-specific lookups as direct tapes, including cache hits."""
     import os, sys
@@ -1739,6 +1778,8 @@ def simulator_applies_the_group_gate_as_the_engine_does():
 
 
 CHECKS = [
+    ("processing.replay-freezes-market-before-concurrent-ingestion", replay_freezes_market_before_ingestion_advances_its_clock),
+    ("processing.replay-asof-excludes-newer-candles", replay_asof_excludes_candles_newer_than_its_decision),
     ("processing.verdict-freshness-follows-the-replay-rotation", verdict_freshness_follows_the_replay_rotation),
     ("processing.untimed-live-closes-are-skipped", untimed_live_closes_are_skipped),
     ("processing.small-results-keep-pf-precision", small_results_keep_pf_precision),

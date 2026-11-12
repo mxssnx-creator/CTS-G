@@ -21,7 +21,9 @@
     "check:auth": "node scripts/check-auth-invariant.mjs",
     "test": "node scripts/run-all-tests.mjs",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "test:strategy-features": "python3 scripts/test_strategy_switches.py && python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts",
+    "test:lastn-blocks": "node --experimental-strip-types --test shared/cts-lastn/blocks.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

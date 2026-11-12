@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
-import { liftRows, relationFigures, type LiveStats } from "@/lib/live-stats";
+import { liftRows, relationFigures, type LiveStats, type SimDiffRow } from "@/lib/live-stats";
 import { formatPf, stageFigures, windowFigures } from "@/lib/sets-view";
 import { executionScopeText, scopeStatus } from "@/lib/execution-scope";
 import { evidencePfText } from "@/lib/evidence-view";
@@ -106,6 +106,7 @@ export function StatsOverview({
 
       <StagesCard live={live} />
       <LiftCard live={live} />
+      <SimDiffCard live={live} />
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Profit factor after costs">
@@ -250,6 +251,61 @@ function LiftCard({ live }: { live: LiveStats | null | undefined }) {
         Settled Set parents only, every return on the parent's original base notional (per-order figures, not USDT).{lift.unknown ? ` ${lift.unknown} parents with an unknown base result or cash are in no sum.` : ""}
         {" "}A stack type that lowers the PF of the same parents is costing money, however its own selection window reads.
         {live?.execution?.overall?.blocked ? ` Axis held ${live.execution.overall.blocked} entries; what those would have made is measured in the walk-forward study, not here.` : ""}
+      </p>
+    </Card>
+  );
+}
+
+function pfText(v: number | null | undefined, noLoss?: boolean): string {
+  if (noLoss || (noLoss === undefined && v === 99)) return "no loss";
+  return v === null || v === undefined ? "—" : v.toFixed(2);
+}
+
+/** Replay against exchange: the same settled closes booked once at the planned stop / target level (the simulator's rule) and once as the exchange filled them. */
+function SimDiffCard({ live }: { live: LiveStats | null | undefined }) {
+  const d = live?.execution?.simDiff;
+  if (!d || !d.closes) return null;
+  const rows: Array<[string, SimDiffRow]> = [["All settled closes", d.total], ...Object.entries(d.byExit).map(([k, v]) => [k === "tp" ? "Target exits" : k === "sl" ? "Stop exits" : "Other exits", v] as [string, SimDiffRow]), ...Object.entries(d.byPack).map(([k, v]) => [`Pack · ${k}`, v] as [string, SimDiffRow])];
+  const gapClass = (v: number) => (v < 0 ? "text-danger" : v > 0 ? "text-primary" : "");
+  return (
+    <Card title="Simulated against live">
+      <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Simulated against live results">
+      <table className="w-full text-sm" data-testid="sim-diff-figures">
+        <thead className="font-mono text-[11px] text-muted">
+          <tr>
+            <th className="pb-2 text-left font-medium">Group</th>
+            <th className="pb-2 text-right font-medium">Closes</th>
+            <th className="pb-2 text-right font-medium">PF sim</th>
+            <th className="pb-2 text-right font-medium">PF live</th>
+            <th className="pb-2 text-right font-medium" title="Sum of net returns, percent of one position">Net sim %</th>
+            <th className="pb-2 text-right font-medium">Net live %</th>
+            <th className="pb-2 text-right font-medium" title="Live fill against the planned stop / target level">Fill gap %</th>
+            <th className="pb-2 text-right font-medium" title="Configured PositionCost against the fees actually paid">Cost gap %</th>
+            <th className="pb-2 text-right font-medium">Net gap %</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, r]) => (
+            <tr key={label} className="border-t border-border font-mono text-xs">
+              <td className="py-1.5">{label}</td>
+              <td className="py-1.5 text-right">{r.n}</td>
+              <td className="py-1.5 text-right">{pfText(r.simPf, r.simNoLoss)}</td>
+              <td className="py-1.5 text-right">{pfText(r.livePf, r.liveNoLoss)}</td>
+              <td className="py-1.5 text-right">{r.simNetPct.toFixed(3)}</td>
+              <td className="py-1.5 text-right">{r.liveNetPct.toFixed(3)}</td>
+              <td className={`py-1.5 text-right ${gapClass(r.fillGapPct)}`}>{r.fillGapPct.toFixed(3)}</td>
+              <td className={`py-1.5 text-right ${gapClass(r.costGapPct)}`}>{r.costGapPct.toFixed(3)}</td>
+              <td className={`py-1.5 text-right ${gapClass(r.netGapPct)}`}>{r.netGapPct.toFixed(3)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      </div>
+      <p className="mt-2 text-xs text-muted" data-testid="sim-diff-factors">
+        Stop fill factor (live loss over planned stop; the replay assumes 1.00): median {d.stopFactor.median ?? "—"}, mean {d.stopFactor.mean ?? "—"}, 90th percentile {d.stopFactor.p90 ?? "—"} on {d.stopFactor.n} stops.
+        {" "}Target fill factor: median {d.targetFactor.median ?? "—"} on {d.targetFactor.n} targets.
+        {" "}A stop factor well above 1 means live stops cost more than the replay shows: raise the minimum stop distance or drop thin symbols rather than trust the simulated PF.
+        {d.unknown ? ` ${d.unknown} closes without a verified exit or net result are in no sum.` : ""}
       </p>
     </Card>
   );

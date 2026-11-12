@@ -1,3 +1,4 @@
+import {relationalVolumeSettings,type RelationalVolumeRatios} from "../../shared/cts-volume/ratios.ts";
 import { DEFAULT_LAST_N_LANES, lastNLanes, type LastNLane } from "./lane-policy.ts";
 import { relateConfigs, type RelateConfig } from "./relate-config.ts";
 import { relationLanesOf, type RelationLanesConfig } from "./relation-lanes.ts";
@@ -358,6 +359,8 @@ export type PulseOverlay = {
   stratBlock: boolean;
   stratTrailing: boolean;
   stratNormal: boolean;
+  relationalVolumeRatios: RelationalVolumeRatios;
+  strategyProcessingByRange: Record<string, { normal?: boolean; trailing?: boolean }>;
   stratGeneral: boolean;
   /** Short Range strategy: the Low-Range signals, TP steps shortRangeStepMin..Max (default 2-6). */
   stratShortRange: boolean;
@@ -372,6 +375,8 @@ export type PulseOverlay = {
   shortRangeMinPf: number;
   /** Minimum initial SL = modeled round-trip cost + this net price percent. */
   minSlDistancePct: number;
+  microMinSlDistancePct: number;
+  microMinTrailDistancePct: number;
   /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
   trailMinSteps: number;
   /** Smallest arm - give (percent) a trailing pair may have; pairs under it build no Set. 0 = every pair. */
@@ -421,6 +426,9 @@ export type PulseOverlay = {
   /** Stages Base -> Main -> Real (off: the Base long window alone). */
   stagesEnabled: boolean;
   /** true: a stage window judges only once it holds its full N orders; false (default): the orders it has, at least one. */
+  lastNDisjoint: boolean;
+  setGateShortMode: "positive"|"negative";
+  mainShortMode: "positive"|"negative";
   stageFullWindow: boolean;
   /** Basis of every last-N window: "time" = the newest N orders inside the lookback, "count" = the newest N orders of the configuration whatever their age. */
   lastNBasis: "time" | "count";
@@ -684,6 +692,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratNormal: true,
+  relationalVolumeRatios: relationalVolumeSettings(undefined),
+  strategyProcessingByRange: {},
   stratGeneral: true,
   stratShortRange: true,
   stratTrend: false,
@@ -695,6 +705,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   shortRangeStepMax: 6,
   shortRangeMinPf: 1.1,
   minSlDistancePct: protectionPolicy.minSlDistancePct.default,
+  microMinSlDistancePct: .1, microMinTrailDistancePct: .05,
   trailMinSteps: 2,
   trailMinLockPct: 0,
   groupGate: false,
@@ -739,6 +750,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setGateWindow: 50,
   setGateMinTrades: 0,
   stagesEnabled: true,
+  lastNDisjoint: false, setGateShortMode: "positive", mainShortMode: "positive",
   stageFullWindow: false,
   lastNBasis: "time",
   setGateShortN: 25,
@@ -947,6 +959,8 @@ export type CtsSettings = {
   stratBlock?: boolean;
   stratTrailing?: boolean;
   stratNormal?: boolean;
+  relationalVolumeRatios?: RelationalVolumeRatios;
+  strategyProcessingByRange?: Record<string, { normal?: boolean; trailing?: boolean }>;
   stratGeneral?: boolean;
   stratShortRange?: boolean;
   stratTrend?: boolean;
@@ -958,6 +972,8 @@ export type CtsSettings = {
   shortRangeStepMax?: number;
   shortRangeMinPf?: number;
   minSlDistancePct?: number;
+  microMinSlDistancePct?: number;
+  microMinTrailDistancePct?: number;
   trailMinSteps?: number;
   trailMinLockPct?: number;
   groupGate?: boolean;
@@ -991,6 +1007,9 @@ export type CtsSettings = {
   mainGateEnabled?: boolean;
   mainGateN?: number;
   stagesEnabled?: boolean;
+  lastNDisjoint?: boolean;
+  setGateShortMode?: "positive"|"negative";
+  mainShortMode?: "positive"|"negative";
   stageFullWindow?: boolean;
   lastNBasis?: "time" | "count";
   setGateShortN?: number;
@@ -1456,6 +1475,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
     stratNormal: bool(cts.stratNormal, true),
+    relationalVolumeRatios: relationalVolumeSettings(cts.relationalVolumeRatios),
+    strategyProcessingByRange: processingByRangeOf(cts.strategyProcessingByRange),
     stratGeneral: bool(cts.stratGeneral, true),
     stratShortRange: bool(cts.stratShortRange, false),
     stratTrend: bool(cts.stratTrend, false),
@@ -1467,6 +1488,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
     shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.1)),
     minSlDistancePct: Math.max(protectionPolicy.minSlDistancePct.min, Math.min(protectionPolicy.minSlDistancePct.max, num(cts.minSlDistancePct, protectionPolicy.minSlDistancePct.default))),
+    microMinSlDistancePct: Math.max(0, Math.min(10, num(cts.microMinSlDistancePct, .1))),
+    microMinTrailDistancePct: Math.max(0, Math.min(10, num(cts.microMinTrailDistancePct, .05))),
     trailMinSteps: num(cts.trailMinSteps, 2),
     trailMinLockPct: Math.max(0, Math.min(3, num(cts.trailMinLockPct, 0))),
     groupGate: bool(cts.groupGate, false),
@@ -1501,6 +1524,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setGateWindow: Math.max(1, Math.min(200, Math.round(num(cts.setGateWindow, 50)))),
     setGateMinTrades: Math.max(0, Math.min(200, Math.round(num(cts.setGateMinTrades, 0)))),
     stagesEnabled: bool(cts.stagesEnabled, true),
+    lastNDisjoint: bool(cts.lastNDisjoint,false),
+    setGateShortMode: cts.setGateShortMode==="negative"?"negative":"positive",
+    mainShortMode: cts.mainShortMode==="negative"?"negative":"positive",
     stageFullWindow: bool(cts.stageFullWindow, false),
     lastNBasis: cts.lastNBasis === "count" ? "count" : "time",
     setGateShortN: Math.max(0, Math.min(200, Math.round(num(cts.setGateShortN, 25)))),
@@ -1516,7 +1542,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minPfShortN: Math.max(1, Math.round(num(cts.minPfShortN, 20))),
     minPfMediumN: Math.max(1, Math.round(num(cts.minPfMediumN, 35))),
     setGateShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.setGateShortMaxRatio, 0.5))),
-    setGateMinN: Math.max(0, Math.min(3, Math.round(num(cts.setGateMinN, 0)))),
+    setGateMinN: Math.max(0, Math.min(5, Math.round(num(cts.setGateMinN, 0)))),
     setGateMinMode: minMode(cts.setGateMinMode),
     mainGateEnabled: bool(cts.mainGateEnabled, true),
     mainGateN: Math.max(1, Math.min(200, Math.round(num(cts.mainGateN, 25)))),
@@ -1525,7 +1551,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     mainShortMaxRatio: Math.max(0.1, Math.min(1, num(cts.mainShortMaxRatio ?? cts.mainAutoMaxRatio, 0.5))),
     mainShortMin: Math.max(1, Math.min(200, Math.round(num(cts.mainShortMin ?? cts.mainAutoMin, 1)))),
     mainShortMargin: Math.max(1, Math.min(2, num(cts.mainShortMargin ?? cts.mainAutoMargin, 1.02))),
-    mainMinN: Math.max(0, Math.min(3, Math.round(num(cts.mainMinN, 0)))),
+    mainMinN: Math.max(0, Math.min(5, Math.round(num(cts.mainMinN, 0)))),
     mainMinMode: minMode(cts.mainMinMode),
     mainNegEnabled: bool(cts.mainNegEnabled, true),
     mainNegWindows: windows(cts.mainNegWindows, [5, 10]),
@@ -1608,6 +1634,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
   };
   out.histLookbackBars = Math.max(120, Math.min(4320, Math.round(num(out.histLookbackBars, 4320))));
+  out.relationalVolumeRatios = relationalVolumeSettings(out.relationalVolumeRatios);
+  out.strategyProcessingByRange = processingByRangeOf(out.strategyProcessingByRange);
   out.minPfByRange = pfRangeFloorsOf(out.minPfByRange);
   for (const key of Object.keys(PF_TYPE_DEFAULTS) as (keyof typeof PF_TYPE_DEFAULTS)[]) {
     out[key] = pfFloor(out[key] == null ? PF_TYPE_DEFAULTS[key] : num(out[key], PF_TYPE_DEFAULTS[key]));
@@ -1800,4 +1828,18 @@ export function loadLocalOverlay(conn = ""): Partial<PulseOverlay> | null {
   } catch {
     return null;
   }
+}
+
+/** Only exact independent ranges and literal booleans are persisted. */
+export function processingByRangeOf(raw: unknown): Record<string, {normal?:boolean;trailing?:boolean}> {
+  const result: Record<string, {normal?:boolean;trailing?:boolean}> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return result;
+  for (const key of [...TP_RANGES.map(r=>r.id), "signals", "exit"]) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const own: {normal?:boolean;trailing?:boolean} = {};
+    for (const field of ["normal", "trailing"] as const) if (typeof (value as Record<string, unknown>)[field] === "boolean") own[field] = (value as Record<string, boolean>)[field];
+    result[key] = own;
+  }
+  return result;
 }

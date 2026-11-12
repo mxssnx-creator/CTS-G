@@ -12,7 +12,7 @@
 by its cheapest failing check instead of after every slower check before it (mutate.py runs this way).
 
 Parallel layout: the memoized processing checks form one group, run in order in one process so the replay memo
-stays warm. Every other check is independent and is spread over the remaining workers. Results print in the
+stays warm. Other checks are balanced by their measured duration over the remaining workers. Results print in the
 original order. Checks are forked from this process, so the registry is shared and nothing is pickled.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ sys.path.insert(0, HERE)
 from common import Skip  # noqa: E402
 
 # logistics is static and fails in well under a second: it runs first so a broken pin or config fails fast
-SUITES = ["logistics", "exchange", "demo_endpoints", "relate", "lane_logistics", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "hold_causal", "pause", "ranges", "step_pf", "direction", "speed", "active_modes", "lane_rank", "golden", "correctness", "cost_accounting", "replay_provenance", "replay_runtime", "monitoring", "history_snapshot", "signals", "dca_replay", "protection_policy", "sample_coverage", "relations", "block_structure"]
+SUITES = ["logistics", "exchange", "demo_endpoints", "relate", "lane_logistics", "sidecar", "contract", "bybit", "trader", "lanes", "grid_and_units", "exits_and_gate", "gates", "lifecycle", "indication", "extra_indicators", "report", "calc", "processing", "stages", "hold_causal", "pause", "ranges", "step_pf", "direction", "speed", "active_modes", "lane_rank", "golden", "correctness", "cost_accounting", "replay_provenance", "replay_runtime", "monitoring", "history_snapshot", "signals", "dca_replay", "protection_policy", "sample_coverage", "relations", "block_structure", "simdiff_checks"]
 
 
 def selftests():
@@ -81,23 +81,51 @@ def _worker(indices, checks, q):
     try:
         for i in indices:
             cname, fn = checks[i]
+            q.put((i, {"state": "running", "started": time.monotonic()}))
             q.put((i, _run_one(cname, fn)))
     finally:
         q.put(None)
 
 
-def _groups(checks, jobs):
-    """Memoized processing checks form one ordered group. The rest are dealt round-robin to the other workers."""
+def _groups(checks, jobs, durations=None):
+    """Keep the warm replay chain together and balance remaining work by cost.
+
+    Durations are scheduling hints only: every check still runs exactly once,
+    and the parent emits results in registry order. Unknown checks cost one
+    second; corrupt timing data must never drop a check or break a run.
+    """
+    if not checks:
+        return []
+    if durations is None:
+        try:
+            with open(DURATIONS_PATH, encoding="utf-8") as stream:
+                durations = json.load(stream)
+        except (OSError, ValueError):
+            durations = {}
+    if not isinstance(durations, dict):
+        durations = {}
+
+    def cost(i):
+        import math
+        try:
+            value = float(durations.get(checks[i][0], 1.0))
+            return value if math.isfinite(value) and value > 0 else 1.0
+        except (ValueError, TypeError, OverflowError):
+            return 1.0
+
     chain = [i for i, (_n, fn) in enumerate(checks) if getattr(fn, "__memoized__", False)]
     chain_set = set(chain)
     rest = [i for i in range(len(checks)) if i not in chain_set]
-    spare = max(1, jobs - 1) if chain else jobs
-    groups = [chain] if chain else []
-    buckets = [[] for _ in range(max(1, min(spare, len(rest))))]
-    for k, i in enumerate(rest):
-        buckets[k % len(buckets)].append(i)
-    groups.extend(b for b in buckets if b)
-    return groups
+    buckets = [[] for _ in range(max(1, min(jobs, len(rest) + bool(chain))))]
+    loads = [0.0] * len(buckets)
+    if chain:
+        buckets[0] = chain
+        loads[0] = sum(cost(i) for i in chain)
+    for i in sorted(rest, key=lambda i: -cost(i)):
+        target = min(range(len(buckets)), key=lambda k: (loads[k], k))
+        buckets[target].append(i)
+        loads[target] += cost(i)
+    return [bucket for bucket in buckets if bucket]
 
 
 def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
@@ -108,6 +136,7 @@ def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
     for p in procs:
         p.start()
     results = {}
+    active = {}
     finished = 0
     started = last_progress = time.monotonic()
 
@@ -116,8 +145,10 @@ def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
         now = time.monotonic()
         if progress_interval_s > 0 and now - last_progress >= progress_interval_s:
             alive = sum(p.is_alive() for p in procs)
+            longest=sorted(active,key=lambda i:active[i])[:2]
+            detail='; running '+', '.join(f'{checks[i][0]} ({now-active[i]:.0f}s)' for i in longest) if longest else ''
             print(f"regression progress: {len(results)}/{len(checks)} checks reported; "
-                  f"{alive} workers active; {now - started:.0f}s elapsed", file=sys.stderr, flush=True)
+                  f"{alive} workers active; {now - started:.0f}s elapsed{detail}", file=sys.stderr, flush=True)
             last_progress = now
 
     while finished < len(groups):
@@ -133,6 +164,11 @@ def _run_parallel(checks, jobs, progress_interval_s=30.0, queue_timeout_s=5.0):
             progress()
             continue
         i, res = item
+        if res.get('state') == 'running':
+            active[i]=res['started']
+            progress()
+            continue
+        active.pop(i,None)
         results[i] = res
         if res["status"] == "FAIL":
             print(f"regression early failure: {res['name']}: {res['detail']}", file=sys.stderr, flush=True)

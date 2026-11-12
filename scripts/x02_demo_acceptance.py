@@ -29,6 +29,10 @@ HOST='https://open-api-vst.bingx.com'
 ORDER='/openApi/swap/v2/trade/order'
 
 
+class VenueReject(RuntimeError):
+    """An explicit invalid-parameter response, before an order is accepted."""
+
+
 class Client:
     def __init__(self, credentials):
         lines=[x.strip() for x in credentials.read_text().splitlines() if x.strip()]
@@ -61,7 +65,8 @@ class Client:
         if not isinstance(data,dict):raise RuntimeError('VST invalid response shape')
         if data.get('code')!=0:
             msg=str(data.get('msg','')).replace(self.key,'[redacted]').replace(self.secret,'[redacted]')
-            raise RuntimeError(f'VST API {data.get("code")}: {msg[:220]}')
+            error=VenueReject if int(data.get('code',-1))==101400 else RuntimeError
+            raise error(f'VST API {data.get("code")}: {msg[:220]}')
         return data
 
     def rows(self,path,params=None,key=None):
@@ -84,7 +89,9 @@ class Client:
                    str(r.get('clientOrderID') or r.get('clientOrderId') or '').lower()==cid.lower()]
             if len(found)!=1:raise RuntimeError('VST pending control unconfirmed')
             return found[0]
-        params={'symbol':symbol,'orderId':oid} if oid else {'symbol':symbol,'clientOrderID':cid.lower()}
+        # The venue's client-ID lookup is case-sensitive. Preserve the exact
+        # submitted identity, including when recovering an older mixed ID.
+        params={'symbol':symbol,'orderId':oid} if oid else {'symbol':symbol,'clientOrderID':cid}
         data=self.call('GET',ORDER,params)['data']
         if isinstance(data,dict) and isinstance(data.get('order'),dict):data=data['order']
         if not isinstance(data,dict) or not data.get('orderId'):raise RuntimeError('VST order unconfirmed')
@@ -92,10 +99,12 @@ class Client:
 
 
 class Acceptance:
-    def __init__(self,client,out):
+    def __init__(self,client,out,quantity_controls=False):
         self.api=client;self.out=out;self.prefix='Gx02qa'+uuid.uuid4().hex[:12]
+        self.quantity_controls=quantity_controls
         self.seq=0;self.log=[];self.report={'environment':'bingx-x02 VST demo','host':HOST,'runId':self.prefix,
-            'startedUtcMs':int(time.time()*1000),'checks':[],'cases':[],'complete':False}
+            'startedUtcMs':int(time.time()*1000),'checks':[],'cases':[],'complete':False,
+            'protectionMode':'quantity' if quantity_controls else 'aggregate'}
 
     def save(self):
         self.out.mkdir(parents=True,exist_ok=True)
@@ -111,16 +120,19 @@ class Acceptance:
         intent={'method':method,'path':path,'body':dict(body),'t':int(time.time()*1000),'result':'pending'}
         self.log.append(intent);self.save()
         try:r=self.api.call(method,path,body)
+        except VenueReject as exc:
+            intent['result']='rejected';intent['error']=str(exc);self.save();raise
         except Exception as exc:
             intent['result']='unconfirmed-or-rejected';intent['error']=str(exc);self.save();raise
         intent['result']='accepted';intent['response']=r;self.save();return r
 
     def cid(self):
-        self.seq+=1;return self.prefix+str(self.seq)
+        self.seq+=1;return (self.prefix+str(self.seq)).lower()
 
     def market(self,symbol,position_side,side,qty):
         cid=self.cid();body=dict(symbol=symbol,positionSide=position_side,side=side,type='MARKET',quantity=str(qty),clientOrderID=cid)
         try:response=self.write('POST',ORDER,body)
+        except VenueReject:raise
         except RuntimeError:
             # Query the original identity after an uncertain response; never
             # retry a market order under a new ID while its result is unknown.
@@ -143,7 +155,8 @@ class Acceptance:
         close_side='SELL' if side=='LONG' else 'BUY';sd=1 if side=='LONG' else -1
         for kind,factor in [('sl',1-sd*.05),('tp',1+sd*.08)]:
             px=f'{entry*factor:.{precision}f}';cid=self.cid()
-            body=ctrl_payload(symbol,side,kind,px,str(qty),cid,close_pos=True)
+            body=ctrl_payload(symbol,side,kind,px,str(qty),cid,
+                              close_pos=not self.quantity_controls,with_qty=self.quantity_controls)
             try:response=self.write('POST',ORDER,body)
             except RuntimeError as exc:
                 # A documented missing-quantity rejection is safe to retry with
@@ -155,7 +168,10 @@ class Acceptance:
             case['controls'].append({'cid':cid,'orderId':oid,'kind':kind,'requested':body})
             self.save()
             order=self.api.order(symbol,cid,oid,pending_control=True)
-            self.check('overall-control',str(order.get('closePosition')).lower() in ('true','1') and
+            scope_ok=(str(order.get('closePosition')).lower() not in ('true','1') and
+                      abs(float(order.get('origQty',order.get('quantity',0)))-float(qty))<1e-9
+                      if self.quantity_controls else str(order.get('closePosition')).lower() in ('true','1'))
+            self.check('quantity-control' if self.quantity_controls else 'overall-control',scope_ok and
                 order.get('positionSide')==side and abs(float(order.get('stopPrice',0))-float(px))<10**-precision,
                 symbol=symbol,side=side,kind=kind,orderId=str(order['orderId']),stopPrice=float(order.get('stopPrice',0)),
                 closePosition=order.get('closePosition'),reportedQuantity=order.get('origQty',order.get('quantity')))
@@ -166,7 +182,13 @@ class Acceptance:
         # as final. An order with a lost response can still fill afterwards.
         submitted=[r for r in self.log if r['method']=='POST' and r['body'].get('symbol')==symbol
                    and r['body'].get('positionSide')==side and r['body'].get('type')=='MARKET']
+        owned_qty=0.0;seen_orders=set()
         for intent in submitted:
+            # Older journals combined rejections with uncertain transport. A
+            # recorded explicit minimum-order validation rejection has no fill.
+            if intent.get('result')=='rejected' or (str(intent.get('error','')).startswith('VST API 101400:')
+                    and 'minimum order' in str(intent.get('error','')).lower()):
+                continue
             ack=intent.get('response',{}).get('data',{});ack=ack.get('order',ack)
             order=ack if intent['result']=='accepted' and ack.get('status')=='FILLED' else self.api.order(symbol,intent['body']['clientOrderID'])
             if order.get('status') not in ('FILLED','CANCELED','CANCELLED','EXPIRED','REJECTED'):
@@ -174,12 +196,20 @@ class Acceptance:
                 order=self.api.order(symbol,intent['body']['clientOrderID'])
                 if order.get('status') not in ('FILLED','CANCELED','CANCELLED','EXPIRED','REJECTED'):
                     raise RuntimeError('Unresolved test market order; protective orders retained')
+            identity=str(order.get('orderId') or intent['body']['clientOrderID']).lower()
+            if identity not in seen_orders:
+                filled=float(order.get('executedQty') or 0)
+                if not math.isfinite(filled) or filled<0:raise RuntimeError('Unknown owned fill quantity')
+                opening=intent['body'].get('side')==('BUY' if side=='LONG' else 'SELL')
+                owned_qty+=filled if opening else -filled
+                seen_orders.add(identity)
         # The empty preflight plus this run's journal establishes the test
         # exposure. Reject a concurrently enlarged position rather than close
         # another writer's amount. Keep controls while exposure is uncertain.
         qty,_=self.api.position(symbol,side)
-        if qty>case['maxQty']+1e-9:raise RuntimeError('Concurrent exposure: own controls retained')
-        if qty:self.market(symbol,side,'SELL' if side=='LONG' else 'BUY',qty)
+        if qty>case['maxQty']+1e-9 or abs(qty-owned_qty)>1e-9:
+            raise RuntimeError('Concurrent or unaccounted exposure: own controls retained')
+        if owned_qty:self.market(symbol,side,'SELL' if side=='LONG' else 'BUY',owned_qty)
         left,_=self.api.position(symbol,side);self.check('flat-after-close',left<=1e-12,symbol=symbol,side=side,remaining=left)
         orders=self.api.rows('/openApi/swap/v2/trade/openOrders',{'symbol':symbol},'orders')
         own={x['cid'].lower() for x in case['controls']}
@@ -200,29 +230,34 @@ class Acceptance:
         row=data[0] if isinstance(data,list) else data;price=float(row['lastPrice'])
         step=Decimal(10)**-int(contract['quantityPrecision'])
         need=max(Decimal(str(contract['tradeMinQuantity'])),Decimal(str(contract['tradeMinUSDT']))/Decimal(str(price)))
-        qty=need.quantize(step,rounding=ROUND_CEILING)
+        # One extra lot keeps a tiny ticker move from putting the next partial
+        # just below the venue's minimum-notional quantity. The cap is checked.
+        qty=need.quantize(step,rounding=ROUND_CEILING)+step
         self.check('bounded-demo-notional',float(qty)*price*3<=25,symbol=symbol,maximumNotional=float(qty)*price*3)
         case={'symbol':symbol,'side':side,'maxQty':float(qty*3),'controls':[],'fills':[],'cleaned':False}
         self.report['cases'].append(case);self.save()
         try:
             order=self.market(symbol,side,'BUY' if side=='LONG' else 'SELL',qty*2);case['fills'].append(order);self.save()
             self.controls(symbol,side,float(order['avgPrice']),qty*2,int(contract['pricePrecision']),case)
-            order=self.market(symbol,side,'BUY' if side=='LONG' else 'SELL',qty);case['fills'].append(order);self.save()
-            total,_=self.api.position(symbol,side);self.check('stack-total',abs(total-float(qty*3))<1e-9,symbol=symbol,side=side,qty=total)
-            for ctrl in case['controls']:
-                control=self.api.order(symbol,ctrl['cid'],ctrl['orderId'],pending_control=True)
-                self.check('overall-covers-growing-position',str(control.get('closePosition')).lower() in ('true','1') and control.get('status')=='NEW',symbol=symbol,side=side,orderId=ctrl['orderId'])
+            if not self.quantity_controls:
+                order=self.market(symbol,side,'BUY' if side=='LONG' else 'SELL',qty);case['fills'].append(order);self.save()
+                total,_=self.api.position(symbol,side);self.check('stack-total',abs(total-float(qty*3))<1e-9,symbol=symbol,side=side,qty=total)
+                for ctrl in case['controls']:
+                    control=self.api.order(symbol,ctrl['cid'],ctrl['orderId'],pending_control=True)
+                    self.check('overall-covers-growing-position',str(control.get('closePosition')).lower() in ('true','1') and control.get('status')=='NEW',symbol=symbol,side=side,orderId=ctrl['orderId'])
             order=self.market(symbol,side,'SELL' if side=='LONG' else 'BUY',qty);case['fills'].append(order);self.save()
             remaining,_=self.api.position(symbol,side)
-            self.check('partial-remainder',abs(remaining-float(qty*2))<1e-9,symbol=symbol,side=side,remaining=remaining)
+            self.check('partial-remainder',abs(remaining-float(qty*(1 if self.quantity_controls else 2)))<1e-9,symbol=symbol,side=side,remaining=remaining)
         finally:self.cleanup(case)
 
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--credentials',type=Path,required=True)
-    ap.add_argument('--out',type=Path,required=True);ap.add_argument('--execute',action='store_true');args=ap.parse_args()
+    ap.add_argument('--out',type=Path,required=True);ap.add_argument('--execute',action='store_true')
+    ap.add_argument('--quantity-controls',action='store_true',help='verify size-bounded protection and partial/final closes, without aggregate closePosition')
+    args=ap.parse_args()
     if args.out.exists():ap.error('preserve the existing journal; choose a new run directory')
-    run=Acceptance(Client(args.credentials),args.out);run.save()
+    run=Acceptance(Client(args.credentials),args.out,args.quantity_controls);run.save()
     try:
         positions=run.api.rows('/openApi/swap/v2/user/positions');orders=run.api.rows('/openApi/swap/v2/trade/openOrders',key='orders')
         run.check('authenticated-demo-read',True,positionRows=len(positions),openOrderRows=len(orders))

@@ -10,6 +10,34 @@ from set_engine import SetBook
 NAMES = ("A-USDT", "B-USDT")
 
 
+def live_feed_cannot_advance_a_later_symbol_inside_a_replay_pass():
+    def make():
+        book=SetBook()
+        book.load({'histLookbackBars':240,'histMinBars':60,'histWarmup':16,'holdEnabled':False,
+                   'setStepAdapt':False,'setMinStep':2,'setStepMax':3,'setSlRatios':[1],
+                   'stratGeneral':True,'stratIndications':False,'stratTrailing':False,
+                   'pauseMode':'off','directionMode':'both','positionCostPct':.12})
+        book.bars={s:synth_bars(i+1,200)for i,s in enumerate(NAMES)}
+        book.bar_t={s:T0-60 for s in NAMES}
+        return book
+    reference,live=make(),make()
+    reference.replay_all(now=T0)
+    advanced=[]
+    def advance_feed():
+        if not advanced:
+            rows=live.bars[NAMES[1]]
+            last=rows[-1]
+            live.ingest_bars(NAMES[1],rows[-15:]+[list(last)],last_t=T0,tail=True)
+            advanced.append(True)
+    live.replay_all(now=T0,on_step=advance_feed)
+    rows=lambda b:{s:{k:list(v)for k,v in tapes.items()}for s,tapes in b._hist_rows.items()}
+    ok=(bool(advanced) and live.progress.errors==0 and rows(live)==rows(reference)
+        and live.bar_t[NAMES[1]]==T0 and len(live.bars[NAMES[1]])==201
+        and live._hist_replay_bar_at[NAMES[1]]==T0-60
+        and len(live._hist_inputs[NAMES[1]]['bars'])==200)
+    return ok,f'feed advanced={bool(advanced)}; replay errors={live.progress.errors}; all symbol tapes match frozen reference={rows(live)==rows(reference)}'
+
+
 def _book(opt_in=True, live_clock=False, stages=False):
     book = SetBook()
     book.load({"histKeepLastComplete": opt_in, "histLookbackBars": 240, "histLookbackMax": 480,
@@ -271,6 +299,7 @@ def evidence_expiring_during_scoring_cannot_promote():
 
 
 CHECKS = [
+    ("history_snapshot.live-feed-during-multi-symbol-replay", live_feed_cannot_advance_a_later_symbol_inside_a_replay_pass),
     ("history_snapshot.default-blocks", default_still_blocks),
     ("history_snapshot.atomic-promotion", complete_snapshot_and_atomic_promotion),
     ("history_snapshot.live-close-isolated", live_close_restricts_only_its_own_set),

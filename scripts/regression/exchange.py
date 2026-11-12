@@ -178,20 +178,27 @@ def batch_orders_carry_numbers_not_numeric_strings():
 
 
 def gather_without_the_async_bridge_runs_in_parallel_threads():
-    """httpx missing: the bridge is offline. A batched public GET must still return every response, in request order,
-    fetched in parallel (four 0.3 s requests well under 1.2 s), not an empty "async-offline" row per request."""
+    """Every request enters before any leaves; this also fails a serial implementation
+    under a loaded CI host without mistaking scheduler delay for lost concurrency."""
     import types
+    import threading
     c = _client("/tmp/unused-err3.jsonl")
     c.bridge = types.SimpleNamespace(ok=False)
+    rendezvous = threading.Barrier(4)
+    all_concurrent = []
     def slow_public(path, extra=None):
-        time.sleep(0.3)
+        try:
+            rendezvous.wait(timeout=10)
+            all_concurrent.append(extra['symbol'])
+        except threading.BrokenBarrierError:
+            pass
         return {"code": 0, "data": [extra["symbol"]]}
     c.public = slow_public
     reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s}) for s in ("A", "B", "C", "D")]
     t0 = time.monotonic()
-    rows = c.gather_public(reqs, timeout=2.0)
+    rows = c.gather_public(reqs, timeout=15.0)
     dt = time.monotonic() - t0
-    ok = [r[2].get("data") for r in rows] == [["A"], ["B"], ["C"], ["D"]] and dt < 0.9
+    ok = [r[2].get("data") for r in rows] == [["A"], ["B"], ["C"], ["D"]] and sorted(all_concurrent) == ['A','B','C','D']
     return ok, f"rows={[r[2].get('data') for r in rows]} took {dt:.2f}s"
 
 

@@ -44,57 +44,6 @@
     "base",
     "trail"
   ],
-  "blockRounds": {
-    "enabled": true,
-    "relations": [
-      "step"
-    ],
-    "maxMult": 3,
-    "counts": {
-      "1": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
-        "pause": 0
-      },
-      "2": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
-        "pause": 0
-      },
-      "3": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
-        "pause": 0
-      },
-      "4": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
-        "pause": 0
-      },
-      "5": {
-        "on": true,
-        "ratio": 1,
-        "step": true,
-        "maxLevel": 2,
-        "pause": 0
-      },
-      "6": {
-        "on": false,
-        "ratio": 0,
-        "step": false,
-        "maxLevel": 1,
-        "pause": 0
-      }
-    }
-  },
   "maxOpen": 2,
   "maxPerGroup": 1,
   "symbolsAll": true,
@@ -168,6 +117,57 @@
     "minPf": 1.1,
     "maxMult": 2,
     "fullWindow": false
+  },
+  "blockRounds": {
+    "enabled": true,
+    "relations": [
+      "step"
+    ],
+    "maxMult": 3,
+    "counts": {
+      "1": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "2": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "3": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "4": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      },
+      "5": {
+        "on": true,
+        "ratio": 1,
+        "step": true,
+        "maxLevel": 2,
+        "pause": 0
+      },
+      "6": {
+        "on": false,
+        "ratio": 0,
+        "step": false,
+        "maxLevel": 1,
+        "pause": 0
+      }
+    }
   },
   "blockVolumeRatio": 1,
   "blockRiskPctOfBalance": 0,
@@ -248,6 +248,17 @@
   "stratBlock": false,
   "stratTrailing": true,
   "stratNormal": true,
+  "relationalVolumeRatios": {
+    "enabled": true,
+    "overall": 1,
+    "maxMultiplier": 25,
+    "indicationTypes": {},
+    "indications": {},
+    "strategies": {},
+    "ranges": {},
+    "symbols": {}
+  },
+  "strategyProcessingByRange": {},
   "stratGeneral": true,
   "stratShortRange": true,
   "stratTrend": false,
@@ -259,6 +270,8 @@
   "shortRangeStepMax": 6,
   "shortRangeMinPf": 1.1,
   "minSlDistancePct": 0.1,
+  "microMinSlDistancePct": 0.1,
+  "microMinTrailDistancePct": 0.05,
   "trailMinSteps": 2,
   "trailMinLockPct": 0,
   "groupGate": false,
@@ -303,6 +316,9 @@
   "setGateWindow": 50,
   "setGateMinTrades": 12,
   "stagesEnabled": true,
+  "lastNDisjoint": false,
+  "setGateShortMode": "positive",
+  "mainShortMode": "positive",
   "stageFullWindow": true,
   "lastNBasis": "time",
   "setGateShortN": 25,
@@ -492,5 +508,19 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  }
+  },
+  "strategyProcessingByRange": {},
+  "relationalVolumeRatios": {
+    "enabled": true,
+    "overall": 1,
+    "maxMultiplier": 25,
+    "indicationTypes": {},
+    "indications": {},
+    "strategies": {},
+    "ranges": {},
+    "symbols": {}
+  },
+  "lastNDisjoint": false,
+  "setGateShortMode": "positive",
+  "mainShortMode": "positive"
 }

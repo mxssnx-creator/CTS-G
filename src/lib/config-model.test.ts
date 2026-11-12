@@ -133,9 +133,13 @@ test("the earlier mainAuto keys still load, and the new key wins when both are g
   assert.deepEqual(both.mainShortWindows, [5]);
 });
 
-test("the Main minimal window is held to 0..3 and to a mode of positive or negative", () => {
-  assert.equal(overlayFromCts(cts({ mainMinN: 9 })).mainMinN, 3);
+test("the Main minimal window is held to 0..5 and to a mode of positive or negative", () => {
+  assert.equal(overlayFromCts(cts({ mainMinN: 9 })).mainMinN, 5);
   assert.equal(overlayFromCts(cts({ mainMinN: -2 })).mainMinN, 0);
+  for (const n of [1,2,3,4,5]) {
+    const loaded = overlayFromCts(cts({mainMinN:n}));
+    assert.equal(overlayFromCts(cts(), syncOverlayFlags(loaded)).mainMinN, n);
+  }
   assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "NEGATIVE" })).mainMinMode, "negative");
   assert.equal(overlayFromCts(cts({ mainMinMode: "sideways" })).mainMinMode, "positive");
   assert.equal(overlayFromCts(cts({ mainMinN: 2, mainMinMode: "Both" })).mainMinMode, "both");
@@ -241,4 +245,12 @@ test("TP-step PF ratio decimal midpoints match native half-up normalization", ()
   for(let k=0;k<28;k++) assert.equal(stepPfRatio(.125+.05*k), Math.round((.15+.05*k)*100)/100);
   assert.equal(stepPfRatio(1e300),1.5);
   assert.equal(stepPfRatio(-1e300),.1);
+});
+
+test("Normal and Trailing range processing survives save/reload without enabling a sibling", () => {
+  const value = {micro:{normal:false,trailing:false},short:{normal:true,trailing:true}};
+  const loaded=overlayFromCts(cts(),{stratNormal:false,stratTrailing:true,strategyProcessingByRange:value});
+  const saved=overlayFromCts(cts(),syncOverlayFlags(loaded));
+  assert.deepEqual(saved.strategyProcessingByRange,value);
+  assert.equal(saved.stratNormal,false);
 });

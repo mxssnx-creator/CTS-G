@@ -1258,6 +1258,61 @@ class _PagedKlines:
 
 
 @_frozen_clock
+def history_retries_only_uncertain_reads_without_resending_successes():
+    import set_engine as se
+    class SlowPage(_PagedKlines):
+        def __init__(self):
+            super().__init__(n=10000)
+            self.retries = []
+        def gather_public(self, reqs, timeout=4.2):
+            return [(path, extra, {'error':True,'msg':'read timed out'} if extra['symbol']=='A-USDT'
+                     else row[2]) for (path, extra), row in zip(reqs, super().gather_public(reqs, timeout))]
+        def public(self, path, extra):
+            self.retries.append(dict(extra))
+            return super().gather_public([(path, extra)])[0][2]
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ['A-USDT', 'B-USDT']
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = SlowPage(), se.SetBook()
+        p.sets.lookback = 1080
+        refreshed = p._hist_fetch()
+        return (refreshed == set(pt.SYMBOLS) and p.api.retries
+                and all(r['symbol']=='A-USDT' for r in p.api.retries)
+                and all(len(p.sets.bars[s])==p.sets.history_bars() for s in pt.SYMBOLS)), f'complete={sorted(refreshed)}; read-only retries={len(p.api.retries)}; successful B pages not resent'
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
+@_frozen_clock
+def history_page_overlap_cannot_shorten_stage_context():
+    import set_engine as se
+    class Overlap(_PagedKlines):
+        def gather_public(self, reqs, timeout=4.2):
+            # VST rounds an endTime one millisecond before the old candle up
+            # to that same candle, so consecutive pages overlap by one row.
+            adjusted = [(path, {**extra, **({'endTime': str(int(extra['endTime'])+1)}
+                         if 'endTime' in extra else {})}) for path, extra in reqs]
+            result = super().gather_public(adjusted, timeout)
+            return [(path, original, row[2]) for (path, original), row in zip(reqs, result)]
+    saved, sleep = list(pt.SYMBOLS), pt.time.sleep
+    try:
+        pt.SYMBOLS[:] = ['A-USDT']
+        pt.time.sleep = lambda _s: None
+        p = _bare_pulse()
+        p.api, p.sets = Overlap(n=10000), se.SetBook()
+        p.sets.lookback = 1080
+        target = p.sets.history_bars()
+        refreshed = p._hist_fetch()
+        closes = [b[3] for b in p.sets.bars['A-USDT']]
+        wanted = [float(i) for i in range(9999-target, 9999)]
+        return closes == wanted and refreshed == {'A-USDT'}, f'{len(closes)}/{target} completed distinct minutes; contiguous={closes == wanted}'
+    finally:
+        pt.SYMBOLS[:], pt.time.sleep = saved, sleep
+
+
+@_frozen_clock
 def history_is_fetched_in_pages_within_the_venue_limit():
     """The Set history asks for 1920 bars, which the venue refuses in one request. The fetch pages backwards with
     endTime, so the series arrives whole, in order and without a gap; once a symbol holds its history, the next refresh
@@ -3091,6 +3146,17 @@ def a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry():
     return got == [1800.0, 45.0, 12.0, 12.0] and wired, f"cooldowns {got}; entry path uses it: {wired}"
 
 
+def max_leverage_is_the_default_everywhere():
+    """Owner 2026-11-12: always the exchange maximum leverage, and as the default. The engine's absent-key default, every shipped overlay (leverageStopCap off, so no cap lowers it)
+    and the desk default all say max leverage on."""
+    ov = {n: json.load(open(os.path.join(PULSE, f"overlay-{n}.json"))) for n in ("bingx-x01", "bingx-x02", "bybit-x01", "bybit-x02")}
+    on = {n: (o.get("useMaxLeverage") is True and o.get("leverageStopCap") is False) for n, o in ov.items()}
+    engine_default = pt.leverage_settings({})[0] is True
+    desk = open(os.path.join(PULSE, "..", "..", "src", "lib", "config-model.ts"), encoding="utf-8").read()
+    desk_default = "  useMaxLeverage: true,\n" in desk
+    return all(on.values()) and engine_default and desk_default, f"overlays {on}, engine default {engine_default}, desk default {desk_default}"
+
+
 def a_manual_close_rests_only_that_symbol_and_direction():
     """Owner 2026-11-04: closing a position by hand must not make the engine reopen the exact same position, and must not stop trading. A position the venue no
     longer holds and that left no stop / target fill of ours (drop_ghost, a restored position gone) puts (symbol, side) to rest for manualCloseRestMin; the other
@@ -3115,7 +3181,8 @@ def a_manual_close_rests_only_that_symbol_and_direction():
             pt.MANUAL_REST_PATH = old
     src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
     wired = ("manual_rest_active(getattr(self, \"manual_rest\", {}), sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
-             and src.count("self.note_manual_close(pos,") >= 2)
+             and src.count("self.note_manual_close(pos,") >= 3
+             and "DROP stale local {sym} age={age:.0f}s\")\n            self.note_manual_close(pos," in src)
     ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired
     return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
 
@@ -3437,6 +3504,7 @@ CHECKS = [
     ("trader.group-gate-blocks-a-losing-group-and-only-that-group", the_group_gate_blocks_a_losing_group_and_only_that_group),
     ("trader.transfers-move-the-drawdown-basis-not-the-drawdown", transfers_move_the_drawdown_basis_not_the_drawdown),
     ("trader.a-manual-close-rests-only-that-symbol-and-direction", a_manual_close_rests_only_that_symbol_and_direction),
+    ("trader.max-leverage-is-the-default-everywhere", max_leverage_is_the_default_everywhere),
     ("trader.a-venue-restricted-symbol-rests-thirty-minutes-after-a-refused-entry", a_venue_restricted_symbol_rests_thirty_minutes_after_a_refused_entry),
     ("trader.volume-factor-is-bounded-and-defaults-to-the-minimum", volume_factor_is_bounded_and_defaults_to_the_minimum),
     ("trader.strongest-ready-symbol-can-take-first-slot", strongest_ready_symbol_can_take_the_first_slot),
@@ -3484,6 +3552,8 @@ CHECKS = [
     ("trader.set-fill-keeps-its-sl-and-tp", a_set_fill_keeps_the_sets_own_sl_and_tp),
     ("trader.slpct-tppct-are-percent", overlay_slpct_and_tppct_are_percent_without_guessing),
     ("trader.history-fetched-in-pages", history_is_fetched_in_pages_within_the_venue_limit),
+    ("trader.history-overlap-counts-distinct-minutes", history_page_overlap_cannot_shorten_stage_context),
+    ("trader.history-timeout-retries-only-uncertain-reads", history_retries_only_uncertain_reads_without_resending_successes),
     ("trader.history-growth-fetches-three-days", grown_history_fetches_the_full_target_up_to_three_days),
     ("trader.history-growth-retries-failed-pages", history_growth_retries_failed_or_missing_pages),
     ("trader.short-history-backfill-bounded", short_history_backfill_is_temporarily_bounded),

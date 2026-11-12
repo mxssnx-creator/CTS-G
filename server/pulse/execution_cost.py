@@ -29,31 +29,45 @@ class FeeSchedule:
         self.retry_at = {}
 
     def refresh(self, api, symbols, now):
-        """One read-only request per second; each symbol cached for an hour."""
+        """Read BingX account commissions once; keep symbol adapters independent.
+
+        One measured account response covers the requested symbols. Keep the
+        existing per-symbol representation for held histories and persistence.
+        https://github.com/BingX-API/api-ai-skills/blob/main/skills/swap-account/api-reference.md
+        """
+        symbols = list(dict.fromkeys(symbols))
         if now < self.next_query:
             return False
         wanted = set(symbols)
         self.account = {s: row for s, row in self.account.items() if s in wanted or now - row["t"] <= 7200}
+        account_wide = getattr(api, "commission_scope", "symbol") == "account"
         self.retry_at = {s: t for s, t in self.retry_at.items() if s in wanted and t > now}
-        symbol = next((s for s in symbols if s not in self.retry_at and now - self.account.get(s, {}).get("t", 0) >= 3600), None)
-        if symbol is None:
+        pending = [s for s in symbols if (s not in self.retry_at or account_wide) and
+                   not 0 <= now - self.account.get(s, {}).get("t", float("-inf")) < 3600]
+        if not pending:
             return False
         self.next_query = now + 1
         try:
-            reply = api.get("/openApi/swap/v2/user/commissionRate", {"symbol": symbol})
+            reply = api.get("/openApi/swap/v2/user/commissionRate", {} if account_wide else {"symbol": pending[0]})
             data = reply.get("data") or {}
             row = data.get("commission") or data
             taker, maker = fee_rate(row.get("takerCommissionRate")), fee_rate(row.get("makerCommissionRate"))
             if number(reply.get("code")) != 0 or taker is None or maker is None:
                 self.error = f"commission rate unavailable ({reply.get('code')})"
-                self.retry_at[symbol] = now + 60
+                if account_wide:self.next_query = now + 60
+                else:self.retry_at[pending[0]] = now + 60
                 return False
-            self.account[symbol] = {"taker": taker, "maker": maker, "t": now}
+            measured = {"taker": taker, "maker": maker, "t": now,
+                        "scope": "account" if account_wide else "symbol"}
+            for symbol in (symbols if account_wide else pending[:1]):
+                self.account[symbol] = dict(measured)
+                self.retry_at.pop(symbol, None)
             self.error = ""
             return True
         except Exception:
             self.error = "commission rate request failed"
-            self.next_query = now + 60
+            if account_wide:self.next_query = now + 60
+            else:self.retry_at[pending[0]] = now + 60
             return False
 
     def rates(self, symbol, contract=None, now=None):

@@ -17,27 +17,42 @@ import contextlib
 import hashlib
 import json
 import os
+import pickle
+import zlib
 from collections import OrderedDict
 
+import set_engine as se
 from set_engine import SetBook
 
 _ORIG = SetBook._replay_symbol
 _CACHE: dict = OrderedDict()
-MAX_CACHED_SYMBOLS = 2  # bound regression memory even when many distinct full-grid fixtures run
+MAX_CACHED_SYMBOLS = 32
+MAX_CACHE_BYTES = 64 * 1024 * 1024
+_CACHE_BYTES = 0
 _ACTIVE = False
 MODE = os.environ.get("CTSG_MEMO", "on").lower()
-STATS = {"hit": 0, "miss": 0, "verified": 0}
+STATS = {"hit": 0, "miss": 0, "verified": 0, "uncacheable": 0}
 
 
 def _key(b: SetBook, symbol: str, now: float):
-    bars = b.bars[symbol]
+    market, dated = b._replay_market()
+    bars = market[symbol]
     digest = hashlib.blake2b(repr(bars).encode(), digest_size=16).hexdigest()
     settings = json.dumps(b.ind_settings, sort_keys=True, default=str)
-    sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, st.tp_pct, st.sl_ratio,
-                  st.hold_bars, b.auto_holds(st)) for st in b.by_idx)
-    return (symbol, digest, float(now), b.bar_t.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
-            b.scratch_s, b.scratch_min, b.cooldown_bars, b.cost_pct, b.min_sl_distance_pct,
-            bool(getattr(b, "hist_honor_tp", True)), sets)
+    sets = tuple((st.id, st.pack, st.kind, st.trail_arm, st.trail_give, getattr(st, 'trail_sl', 0), st.step, st.tp_pct, st.sl_ratio,
+                  st.hold_bars, st.side, getattr(st, 'pause_bars', 0), b.auto_holds(st),
+                  b.symbol_allows(st.pack, symbol)) for st in b.by_idx)
+    # Mutants and scoped monkeypatches must never borrow a replay performed
+    # by a different implementation. Admission-only PF/window settings are
+    # deliberately absent: every check still runs its own native scoring.
+    implementation = (se.pack_signals, se.SetLane.scan, se.SetLane.step, se.hit_exit)
+    peers = tuple((s, dated.get(s), hashlib.blake2b(repr(rows).encode(), digest_size=16).digest())
+                  for s, rows in sorted(market.items()) if s != symbol) if se._ported_pack_sources(b.packs) else ()
+    return (symbol, digest, float(now), dated.get(symbol), b.warmup, tuple(b.packs), settings, b.entry_conf, b.hist_time_bars,
+            b.scratch_s, b.scratch_bars, b.scratch_min, b.cooldown_bars, b.cost_pct, b.min_sl_distance_pct,
+            b.pause_mode, b.pause_fixed, tuple(b.pause_candidates), b.pause_auto_min, b.pause_auto_max,
+            tuple(sorted(b.pause_pack.items())),
+            bool(getattr(b, "hist_honor_tp", True)), b.direction_split, implementation, peers, sets)
 
 
 def _rows_of(hist: dict) -> dict:
@@ -45,6 +60,7 @@ def _rows_of(hist: dict) -> dict:
 
 
 def _replay(self: SetBook, symbol, hist, now, on_step=None):
+    global _CACHE_BYTES
     if not _ACTIVE or MODE == "off":
         return _ORIG(self, symbol, hist, now, on_step=on_step)
     key = _key(self, symbol, now)
@@ -52,14 +68,26 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
     if cached is None:
         fresh = {sid: [] for sid in hist}
         inputs = _ORIG(self, symbol, fresh, now, on_step=on_step)
-        _CACHE[key] = (_rows_of(fresh), inputs)
-        while len(_CACHE) > MAX_CACHED_SYMBOLS:
-            _CACHE.popitem(last=False)
+        # Immutable compressed snapshots avoid four-symbol fixtures thrashing
+        # a two-symbol cache, without retaining millions of Python row dicts.
+        # Unpickle on hits so a check cannot poison a later check's inputs.
+        try:
+            snapshot = zlib.compress(pickle.dumps((_rows_of(fresh), inputs), protocol=5), level=1)
+        except (TypeError, AttributeError, pickle.PicklingError):
+            snapshot = None  # Automatic pause plans may contain live closures.
+        if snapshot is not None and len(snapshot) <= MAX_CACHE_BYTES:
+            _CACHE[key] = snapshot
+            _CACHE_BYTES += len(snapshot)
+            while len(_CACHE) > MAX_CACHED_SYMBOLS or _CACHE_BYTES > MAX_CACHE_BYTES:
+                _, evicted = _CACHE.popitem(last=False)
+                _CACHE_BYTES -= len(evicted)
+        else:
+            STATS['uncacheable'] += 1
         STATS["miss"] += 1
         for sid, rows in fresh.items():
             hist.setdefault(sid, []).extend(dict(r) for r in rows)
         return inputs
-    cached_rows, cached_inputs = cached
+    cached_rows, cached_inputs = pickle.loads(zlib.decompress(cached))
     if MODE == "verify":
         check = {sid: [] for sid in hist}
         check_inputs = _ORIG(self, symbol, check, now, on_step=on_step)
@@ -76,7 +104,7 @@ def _replay(self: SetBook, symbol, hist, now, on_step=None):
             self.progress.set_id = last[-1].id
     # Replay inputs are read-only in the engine. Use this book's equal bars,
     # while retaining the candidate arrays and index paired with cached rows.
-    return {**cached_inputs, "bars": self.bars[symbol]}
+    return {**cached_inputs, "bars": self._replay_market()[0][symbol]}
 
 
 SetBook._replay_symbol = _replay
@@ -105,6 +133,8 @@ def memoized(fn):
 
 
 def clear() -> None:
+    global _CACHE_BYTES
     _CACHE.clear()
+    _CACHE_BYTES = 0
     for k in STATS:
         STATS[k] = 0

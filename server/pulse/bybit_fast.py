@@ -335,6 +335,7 @@ ORDER_PATHS = ("/v5/order/create", "/v5/order/create-batch", "/v5/order/cancel",
 
 
 class FastBybit:
+    commission_scope = 'symbol'
     def __init__(self, key: str, secret: str, err: ErrorLog, base: str = BASE, ws_url: str = WS_URL,
                  public_base: str = "", transport: Optional[Transport] = None, hedge: bool = True,
                  trigger_by: str = "MarkPrice", sleep: Optional[Callable[[float], None]] = None,

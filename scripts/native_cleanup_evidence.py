@@ -1,0 +1,69 @@
+"""Bounded, read-only terminal evidence for exact journaled VST orders."""
+from concurrent.futures import ThreadPoolExecutor, wait
+import time
+
+TERMINAL = {'FILLED', 'CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED'}
+
+
+def definite_refusal(reply):
+    return reply.get('cooled') is True or (str(reply.get('code')) in ('101400','109420')
+        and not reply.get('error') and not reply.get('data'))
+
+
+def terminal_intents(api, intents, deadline, order_bodies, remember=None):
+    required = []
+    starts = {}
+    for intent in intents:
+        if intent['method'] != 'POST':
+            continue
+        ack = intent.get('response') or {}
+        if definite_refusal(ack):
+            continue
+        data = ack.get('data') or {}
+        candidates = data.get('orders', [data.get('order', data)]) if isinstance(data, dict) else []
+        for body in order_bodies(intent['path'], intent['body']):
+            cid = body['clientOrderID']
+            matches = [r for r in candidates if isinstance(r, dict) and
+                       str(r.get('clientOrderID') or r.get('clientOrderId') or '').lower() == cid.lower()]
+            oid = str(matches[0].get('orderId') or matches[0].get('orderID') or '') if len(matches) == 1 else ''
+            required.append((body, oid))
+            starts[body['symbol']] = min(starts.get(body['symbol'], float('inf')), intent['at'])
+    if not required:
+        return []
+    histories = {}
+    pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='cleanup-evidence')
+    futures = {}
+    try:
+        for symbol, start in starts.items():
+            if time.monotonic() >= deadline:
+                break
+            futures[pool.submit(api.get, '/openApi/swap/v2/trade/allOrders',
+                {'symbol': symbol, 'startTime': int(max(0, start - 60)*1000),
+                 'endTime': int(time.time()*1000), 'limit': 1000})] = symbol
+        done, _ = wait(futures, timeout=max(0, deadline - time.monotonic()))
+        for future in done:
+            try:
+                reply = future.result()
+                data = reply.get('data') or {}
+                rows = data.get('orders') if isinstance(data, dict) else None
+                if str(reply.get('code')) == '0' and not reply.get('error') and isinstance(rows, list):
+                    histories[futures[future]] = rows
+            except Exception:
+                pass  # Missing terminal evidence remains unresolved, never an empty success.
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    unresolved = []
+    for body, oid in required:
+        cid = body['clientOrderID']
+        rows = [row for row in histories.get(body['symbol'], []) if isinstance(row, dict) and
+                str(row.get('clientOrderID') or row.get('clientOrderId') or '').lower() == cid.lower() and
+                (not oid or str(row.get('orderId') or row.get('orderID') or '') == oid)]
+        row = rows[0] if len(rows) == 1 else None
+        matched = row is not None and all(row.get(k) == body.get(k) for k in ('symbol', 'side', 'positionSide', 'type'))
+        final = matched and (str(row.get('status')).upper() in TERMINAL or
+            (body.get('type') != 'MARKET' and str(row.get('status')).upper() in ('NEW', 'PENDING', 'TRIGGERED')))
+        if not final:
+            unresolved.append(cid)
+        elif remember is not None:
+            remember(row, body)
+    return unresolved
