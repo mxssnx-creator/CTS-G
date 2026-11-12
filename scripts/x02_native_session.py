@@ -517,7 +517,8 @@ def cleanup(pulse, journal, seconds):
     unresolved = []
     # A foreign position arriving during paused warmup is not session-owned exposure.
     # With no journaled writes or local holdings there is no possible owned order to cancel or close.
-    if (hasattr(journal, 'intents') and not journal.intents and not journal.owned_clients
+    if (all(hasattr(journal, name) for name in ('intents', 'owned_clients', 'owned_orders', 'inventory'))
+            and not journal.intents and not journal.owned_clients
             and not journal.owned_orders and not pulse.open and not any(journal.inventory.values())):
         positions = checked_positions(pulse.api)
         orders = rows(pulse.api, "/openApi/swap/v2/trade/openOrders", "orders")
