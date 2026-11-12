@@ -1,0 +1,8 @@
+{
+  "description": "32h historic default, paper-historic Base validation, stages/Real paper, positive pack bias",
+  "apply": ["python3 scripts/apply_all_20261112.py"],
+  "lookback_default_bars": 1920,
+  "lookback_hours": 32,
+  "paper_historic": "Base validates from simulated closes once gate_n>=1; stages and Real paper remain logical; Real-to-Live mirrors valid sets only",
+  "x01": {"symbolCap": 30, "volumeFactor": 0.01, "histLookbackBars": 1920}
+}
