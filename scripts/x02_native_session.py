@@ -582,10 +582,10 @@ def cleanup(pulse, journal, seconds):
             # Refresh exact terminal receipts before claiming zero inventory.
             receipt_now = time.monotonic()
             archive_end = min(end, receipt_now + min(10.0, max(0.0, (end-receipt_now)/2)))
-            unresolved = terminal_intents(pulse.api, intents, archive_end, order_bodies, journal.remember_order)
+            unresolved = terminal_intents(pulse.api, intents, archive_end, order_bodies, journal.remember_order, False)
             if time.monotonic() >= end:break
             unresolved = resolve_bound_intents(pulse.api,intents,unresolved,end,order_bodies,
-                                               dict(journal.order_bodies),journal.remember_order)
+                                               dict(journal.order_bodies),journal.remember_order,False)
             final_positions = checked_positions(pulse.api)
             if (time.monotonic()<end and not final_own and not unresolved and not pulse.open
                     and all(abs(qty)<=Decimal('1e-12')for qty in journal.inventory.values())):
