@@ -3169,9 +3169,15 @@ def a_manual_close_rests_only_that_symbol_and_direction():
         finally:
             pt.MANUAL_REST_PATH = old
     src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    import ast
+    pulse=next(n for n in ast.parse(src).body if isinstance(n,ast.ClassDef)and n.name=='Pulse')
+    methods={n.name:n for n in pulse.body if isinstance(n,ast.FunctionDef)}
+    def calls(method,name):
+        return any(isinstance(n,ast.Call)and isinstance(n.func,ast.Attribute)and n.func.attr==name
+                   for n in ast.walk(methods[method]))
     wired = ("manual_rest_active(getattr(self, \"manual_rest\", {}), sym, \"LONG\" if direction > 0 else \"SHORT\", time.time())" in src
-             and src.count("self.note_manual_close(pos,") >= 3
-             and "DROP stale local {sym} age={age:.0f}s\")\n            self.note_manual_close(pos," in src)
+             and calls('adopt_exchange_positions','drop_ghost')and calls('drop_ghost','note_manual_close')
+             and calls('reconcile_restored_book','note_manual_close'))
     ok = active == [True, False, False] and not later and off and pruned == 1 and list(expired) == ["Y:LONG"] and list(saved) == ["AAA-USDT:LONG"] and wired
     return ok, f"rest active (AAA long, AAA short, BBB long) {active}, after 241 min {later}, 0 = off {off}, persisted {list(saved)}, pruned {pruned}, wired into place() and both drop paths {wired}"
 

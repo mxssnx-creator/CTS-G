@@ -12,7 +12,8 @@ def terminal_intents(api, intents, deadline, order_bodies, remember=None):
         if intent['method'] != 'POST':
             continue
         ack = intent.get('response') or {}
-        if ack.get('cooled') is True or (str(ack.get('code')) == '101400' and not ack.get('data')):
+        if ack.get('cooled') is True or (str(ack.get('code')) not in ('0','None','-1')
+                and not ack.get('error') and not ack.get('data')):
             continue
         data = ack.get('data') or {}
         candidates = data.get('orders', [data.get('order', data)]) if isinstance(data, dict) else []

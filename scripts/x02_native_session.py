@@ -536,6 +536,37 @@ def cleanup(pulse, journal, seconds):
         unresolved = terminal_intents(pulse.api, intents, end, order_bodies, getattr(journal, 'remember_order', None))
         if time.monotonic() >= end:
             break
+        archive_unresolved=set(unresolved)
+        unresolved=list(archive_unresolved)
+        for intent in intents:
+            if time.monotonic()>=end:break
+            if intent["method"] != "POST":
+                continue
+            ack = intent.get("response") or {}
+            if ack.get("cooled") is True or (str(ack.get("code")) not in ("0", "None", "-1")
+                    and not ack.get("error") and not ack.get("data")):
+                continue  # Native transport explicitly did not dispatch.
+            for body in order_bodies(intent["path"], intent["body"]):
+                cid = body["clientOrderID"]
+                if cid not in archive_unresolved:continue
+                ack_data = ack.get("data") or {}
+                ack_order = ack_data.get("order", ack_data) if isinstance(ack_data, dict) else {}
+                oid = ack_order.get("orderId")
+                # Conditional orders are not indexed by client ID. Their batch
+                # receipts are already bound to this exact submitted identity.
+                with journal.lock:
+                    known = [order_id for (symbol, order_id), submitted in getattr(journal,'order_bodies',{}).items()
+                             if symbol==body['symbol'] and str(submitted.get('clientOrderID')or submitted.get('clientOrderId')or'').lower()==cid.lower()]
+                if len(known)==1:oid=known[0]
+                query = {"symbol": body["symbol"], **({"orderId": str(oid)} if oid else {"clientOrderId": cid.lower()})}
+                reply = pulse.api.get("/openApi/swap/v2/trade/order", query)
+                data = reply.get("data") or {}
+                order = data.get("order", data) if isinstance(data, dict) else {}
+                found = str(order.get("clientOrderID") or order.get("clientOrderId") or "")
+                own = found.lower() == cid.lower() or (oid and str(order.get("orderId")) == str(oid))
+                terminal_or_control = order.get("status") in TERMINAL or (body.get("type") != "MARKET" and order.get("status") in ("NEW", "PENDING", "TRIGGERED"))
+                if not reply.get("error") and str(reply.get("code")) == "0" and own and terminal_or_control:
+                    unresolved.remove(cid)
         positions = checked_positions(pulse.api)
         selected=getattr(journal,'symbols',None)
         exposed = [p for p in positions if abs(float(p["positionAmt"])) > 1e-12

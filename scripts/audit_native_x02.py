@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -75,6 +76,22 @@ def position_cash(entry, rows):
                 entryValue=float(quantity*price),exitValue=float(quantity*exit_price),
                 gross=float(gross),commission=float(commission),net=float(gross+commission),
                 funding=float(dec(row.get('totalFunding')or 0)),closedAt=float(ended))
+
+
+def record_difference(record,position):
+    """Opposing parent errors must never disappear in a portfolio sum."""
+    try:
+        notional=position['entryValue']
+        differences=dict(cash=record['pnl']-position['net'],
+            netReturn=record['net_pnl_pct']-position['net']/notional,
+            grossReturn=record['pnl_pct']-position['gross']/notional,
+            fees=record['fees_usdt']+position['commission'],
+            entry=record['entry']-position['entry'],exit=record['exit']-position['exit'])
+        limits=dict(cash=1e-8,netReturn=1e-10,grossReturn=1e-10,fees=1e-8,
+                    entry=max(1e-12,position['entry']*1e-10),exit=max(1e-12,position['exit']*1e-10))
+        passed=all(math.isfinite(value)and abs(value)<=limits[key]for key,value in differences.items())
+        return dict(differences,passed=passed)
+    except (KeyError,TypeError,ValueError,ZeroDivisionError):return dict(passed=False)
 
 
 def audit(run,credentials):
@@ -204,12 +221,20 @@ def audit(run,credentials):
     comparisons=[];histories={}
     history_path=run/'native-position-history.json'
     old_histories=json.loads(history_path.read_text())if history_path.exists()else{}
+    def read_history(item):
+        pid,entry=item
+        reply=api.call('GET','/openApi/swap/v1/trade/positionHistory',
+            {'symbol':entry['symbol'],'positionId':pid,'startTs':start_ms,'endTs':end_ms,'pageSize':100})
+        return pid,reply
+    missing=[(pid,entry)for pid,entry in entries.items()if pid not in old_histories]
+    # Independent exact-ID reads share the native endpoint's 4/s nonbursting
+    # limiter. Network latency need not serialize every settled position.
+    with ThreadPoolExecutor(max_workers=4,thread_name_prefix='own-position-audit')as pool:
+        for pid,response in pool.map(read_history,missing):
+            old_histories[pid]=response
+            atomic_json(history_path,old_histories)
     for pid,entry in entries.items():
         response=old_histories.get(pid)
-        if response is None:
-            time.sleep(.25) # documented history endpoint: 5/s, no startup burst
-            response=api.call('GET','/openApi/swap/v1/trade/positionHistory',
-                {'symbol':entry['symbol'],'positionId':pid,'startTs':start_ms,'endTs':end_ms,'pageSize':100})
         if str(response.get('code'))!='0':raise ValueError('position history unavailable')
         histories[pid]=response
         data=response.get('data')or{}
@@ -253,11 +278,12 @@ def audit(run,credentials):
     verified=[r for r in closed.values()if 'unverified'not in r.get('reason','')and not r.get('exit_price_estimated')]
     by_client={r['client_id'].lower():r for r in verified}
     if len(by_client)!=len(verified):raise ValueError('duplicate or partial parent settlements need explicit allocation')
-    financial=[]
+    financial=[];record_checks=[]
     for group in comparisons:
         row=by_client.get(group['client_id'])
         original=next((r for r in closed.values()if r['client_id'].lower()==group['client_id']),{})
         if row and abs(float(row['qty'])-group['quantity'])>1e-10:raise ValueError('stored close quantity differs from position ledger')
+        if row:record_checks.append(dict(symbol=group['symbol'],client_id=group['client_id'],**record_difference(row,group)))
         financial.append(dict(original,client_id=group['client_id'],symbol=group['symbol'],side=group['side'],
             qty=group['quantity'],entry=group['entry'],exit=group['exit'],t=group['closedAt'],pnl=group['net'],
             pnl_pct=group['gross']/group['entryValue'],net_pnl_pct=group['net']/group['entryValue'],
@@ -277,7 +303,7 @@ def audit(run,credentials):
     active_orders=[r for r in (open_orders['data'].get('orders')or[])if r['symbol']in symbols]
     verified_flat=not active_positions and not active_orders and not unterminated
     result=dict(schema='cts-g-native-fill-audit-v2',environment='BingX VST x02',
-                passed=verified_flat and engine_complete and abs(difference)<1e-8,
+                passed=verified_flat and engine_complete and all(r['passed']for r in record_checks)and abs(difference)<1e-8,
                 ledgerPassed=verified_flat,engineComplete=engine_complete,verifiedFlat=verified_flat,
                 method='exact own order/fill receipts and exclusively owned position history; independent Decimal cash; full-precision position commissions once; no extra slippage debit',
                 orders=orders,comparisons=comparisons,financialCloses=financial,closedRecords=len(verified),
@@ -286,6 +312,8 @@ def audit(run,credentials):
                 actualFills=len(all_fills),actualFilledOrders=sum(bool(row['fills'])for row in orders),
                 storedEngineNet=stored,actualFillNet=measured,storedNetDifference=difference,
                 matchedEngineNetDifference=matched_difference,
+                individualRecordChecks=record_checks,
+                maxAbsoluteCashDifference=max((abs(r['cash'])for r in record_checks if 'cash'in r),default=0),
                 nonterminalOwnOrders=unterminated,definiteRefusals=refused,
                 accountBalanceUsedForAttribution=False,cleanup=report['cleanup'])
     atomic_json(run/'native-fill-details.json',all_fills)

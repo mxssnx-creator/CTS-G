@@ -1,6 +1,6 @@
 """Independent cash examples for native fills, partials and fee units."""
 import unittest
-from audit_native_x02 import cash_group,position_cash
+from audit_native_x02 import cash_group,position_cash,record_difference
 
 
 def fill(side,qty,price,commission,position='LONG'):
@@ -9,6 +9,13 @@ def fill(side,qty,price,commission,position='LONG'):
 
 
 class NativeCash(unittest.TestCase):
+    def test_opposing_parent_errors_cannot_cancel_into_a_passing_audit(self):
+        position=dict(entryValue=100,entry=100,exit=102,gross=2,commission=-.202,net=1.798)
+        record=dict(pnl=1.798,entry=100,exit=102,pnl_pct=.02,net_pnl_pct=.01798,fees_usdt=.202)
+        self.assertTrue(record_difference(record,position)['passed'])
+        checks=[record_difference(dict(record,pnl=record['pnl']+error),position)for error in(.01,-.01)]
+        self.assertAlmostEqual(sum(r['cash']for r in checks),0)
+        self.assertFalse(any(r['passed']for r in checks))
     def test_long_partial_exits_pay_each_reported_commission_once(self):
         result=cash_group([fill('BUY',1,100,-.1),fill('SELL',.4,110,-.044),fill('SELL',.6,90,-.054)])
         self.assertEqual(result['gross'],-2)

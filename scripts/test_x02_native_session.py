@@ -181,6 +181,7 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS))
         self.assertTrue(all(path == '/openApi/swap/v2/user/commissionRate' for path, _ in calls))
         self.assertEqual(progress[-1][:2], (50, 50))
+        self.assertTrue(all(measured<=required for measured,required,_error in progress))
         for symbol in SYMBOLS:
             self.assertEqual(pulse.fee_schedule.rates(symbol)[:2], (.0002, .0005))
         with self.assertRaises(session.SessionEnd):
@@ -697,6 +698,7 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(len({r['t']for r in pulse.fee_schedule.account.values()}),1)
         session.collect_account_fees(pulse,SYMBOLS,lambda:False,float('inf'),lambda *row:progress.append(row))
         self.assertEqual(len(calls),1)
+
 
     def test_invalid_account_fee_response_cannot_populate_any_symbol(self):
         sys.path.insert(0,str(session.ROOT/'server/pulse'))
