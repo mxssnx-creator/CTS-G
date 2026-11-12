@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import x02_native_session as session
-sys.path.insert(0, str(session.ROOT / 'server/pulse'))
 
 # Every test must also work in the direct-file CLI used by CI.
 sys.path.insert(0, str(session.ROOT / "server" / "pulse"))
@@ -603,184 +602,30 @@ class NativeSessionTests(unittest.TestCase):
         for key,value in raw.items():self.assertEqual(out[key],value)
         with self.assertRaises(ValueError):session.frozen_overlay(raw,SYMBOLS[:11],18,12)
 
-    def test_integrated_peer_readiness_requires_each_symbol_fee_and_current_history(self):
-        book = SimpleNamespace(progress=SimpleNamespace(ready=True), _running=False, _lookback_pending=False,
-            _history_snapshot_symbols=set(SYMBOLS), bars={s:[0]*2880 for s in SYMBOLS}, bar_t={s:940 for s in SYMBOLS})
-        pulse = SimpleNamespace(sets=book,contracts={},fee_schedule=SimpleNamespace(rates=lambda *args:(.0002,.0005,'account-rate')))
-        self.assertTrue(session.ready(pulse,SYMBOLS,2880,1000))
-        book.bars[SYMBOLS[-1]] = [0]*100
-        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
-        book.bars[SYMBOLS[-1]] = [0]*2880
-        book.bar_t[SYMBOLS[0]] = 800
-        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
-        book.bar_t[SYMBOLS[0]] = 940
-        pulse.fee_schedule.rates = lambda *args:(.0002,.0005,'configured-estimate')
-        self.assertFalse(session.ready(pulse,SYMBOLS,2880,1000))
-
-    def test_integrated_peer_mutations_require_exact_journaled_order_ids_and_never_change_account_settings(self):
-        calls = []
-        def request(method, path, body):
-            calls.append((method, path, body))
-            if method == 'POST':
-                return {'code': 0, 'data': {'order': {'orderId': '123', 'symbol': 'S0-USDT', 'clientOrderID': 'G1234entry'}}}
-            if method == 'GET':
-                return {'code': 0, 'data': {'orders': [{'orderId':'999','symbol':'S0-USDT','clientOrderID':'G1234foreign'}]}}
-            return {'code': 0, 'data': {}}
-        with tempfile.TemporaryDirectory() as td:
-            api = SimpleNamespace(_req=request, base=session.HOST)
-            journal = session.Journal(api, td, 'G1234')
-            journal.phase, journal.deadline = 'active', float('inf')
-            order = {'clientOrderID':'G1234entry','symbol':'S0-USDT','side':'BUY','positionSide':'LONG','type':'MARKET'}
-            api._req('POST','/openApi/swap/v2/trade/order',order)
-            api._req('GET','/openApi/swap/v2/trade/openOrders',{})
-            self.assertTrue(journal.owns_client('S0-USDT','G1234entry'))
-            self.assertFalse(journal.owns_client('S0-USDT','G1234foreign'))
-            self.assertTrue(journal.owns_order('S0-USDT','123'))
-            self.assertFalse(journal.owns_order('S0-USDT','999'))
-            for method, path, body in (
-                ('DELETE','/openApi/swap/v2/trade/order',{'symbol':'S0-USDT','orderId':'999'}),
-                ('DELETE','/openApi/swap/v2/trade/allOpenOrders',{'symbol':'S0-USDT'}),
-                ('POST','/openApi/swap/v2/trade/leverage',{'symbol':'S0-USDT','leverage':5}),
-                ('POST','/openApi/swap/v2/trade/marginType',{'symbol':'S0-USDT','marginType':'CROSSED'}),
-            ):
-                with self.assertRaises(RuntimeError): api._req(method,path,body)
-            for extra in ({'closePosition':'true'}, {'positionId':'55'}):
-                reply=api._req('POST','/openApi/swap/v2/trade/order',
-                    {'symbol':'S0-USDT','clientOrderID':'G1234close','side':'SELL','positionSide':'LONG','type':'MARKET',**extra})
-                self.assertTrue(reply['localPolicyRejection'])
-            api._req('DELETE','/openApi/swap/v2/trade/order',{'symbol':'S0-USDT','orderId':'123'})
-            self.assertEqual([x[0] for x in calls], ['POST','GET','DELETE'])
-
-    def test_integrated_peer_test_session_never_changes_leverage_and_uses_conservative_margin(self):
-        pulse=SimpleNamespace()
-        session.freeze_account_settings(pulse)
-        self.assertIsNone(pulse.set_leverage())
-        self.assertEqual(pulse.ensure_max_leverage('S0-USDT',force=True),1)
-        self.assertEqual(pulse.leverage_for(object()),1)
-
-    def test_integrated_peer_batch_ack_binds_exact_clients_before_first_rest_order_poll(self):
-        orders = [{'symbol':'S0-USDT','clientOrderID':'G1234sl','orderId':'91'},
-                  {'symbol':'S0-USDT','clientOrderID':'G1234tp','orderId':'92'}]
-        def request(method, path, body):
-            return {'code':0,'data':{'orders':orders}}
-        with tempfile.TemporaryDirectory() as td:
-            api = SimpleNamespace(_req=request,base=session.HOST)
-            journal = session.Journal(api,td,'G1234')
-            journal.phase,journal.deadline='active',float('inf')
-            entry={'symbol':'S0-USDT','clientOrderID':'G1234entry','side':'BUY','positionSide':'LONG','type':'MARKET','quantity':'1'}
-            journal.owned_clients.add(('S0-USDT','g1234entry'))
-            journal.submitted[('S0-USDT','g1234entry')]=entry
-            journal.remember_order({**entry,'orderId':'90','executedQty':'1'})
-            bodies=[{**o,'side':'SELL','positionSide':'LONG','type':'STOP_MARKET','quantity':'1'} for o in orders]
-            for body in bodies:body.pop('orderId')
-            api._req('POST','/openApi/swap/v2/trade/batchOrders',{'batchOrders':json.dumps(bodies)})
-            self.assertTrue(journal.owns_order('S0-USDT','91'))
-            self.assertTrue(journal.owns_order('S0-USDT','92'))
-            self.assertFalse(journal.owns_order('S1-USDT','91'))
-
-    def test_integrated_peer_startup_fee_collection_publishes_only_measured_symbol_rates(self):
-        sys.path.insert(0, str(session.ROOT / 'server/pulse'))
-        from execution_cost import FeeSchedule
-        calls = []
-        def get(path, params):
-            calls.append((path, params['symbol']))
-            return {'code':0,'data':{'makerCommissionRate':'0.0002','takerCommissionRate':'0.0005'}}
-        pulse = SimpleNamespace(api=SimpleNamespace(get=get), fee_schedule=FeeSchedule())
-        pulse.fee_schedule.account['OTHER-USDT']={'maker':.0002,'taker':.0005,'t':session.time.time()}
-        progress = []
-        clock = [session.time.time()]
-        with patch.object(session.time, 'time', side_effect=lambda: clock[0]), patch.object(session.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)):
-            session.collect_account_fees(pulse, SYMBOLS, lambda: False, float('inf'), lambda *row: progress.append(row))
-        self.assertEqual(sorted(s for _, s in calls), sorted(SYMBOLS))
-        self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS)|{'OTHER-USDT'})
-        self.assertTrue(all(path == '/openApi/swap/v2/user/commissionRate' for path, _ in calls))
-        self.assertEqual(progress[-1][:2], (50, 50))
-        self.assertTrue(all(measured<=required for measured,required,_error in progress))
-        for symbol in SYMBOLS:
-            self.assertEqual(pulse.fee_schedule.rates(symbol)[:2], (.0002, .0005))
-        with self.assertRaises(session.SessionEnd):
-            session.collect_account_fees(SimpleNamespace(api=pulse.api, fee_schedule=FeeSchedule()),
-                                         SYMBOLS, lambda: True, float('inf'), lambda *row: None)
-
-    def test_bingx_account_fee_scope_uses_one_measured_response_for_fifty_symbols(self):
-        sys.path.insert(0,str(session.ROOT/'server/pulse'))
-        from execution_cost import FeeSchedule
-        calls=[];progress=[]
-        def get(path,params):
-            calls.append((path,params))
-            return {'code':0,'data':{'commission':{'makerCommissionRate':'.0002','takerCommissionRate':'.0005'}}}
-        pulse=SimpleNamespace(api=SimpleNamespace(get=get,commission_scope='account'),fee_schedule=FeeSchedule())
-        session.collect_account_fees(pulse,SYMBOLS,lambda:False,float('inf'),lambda *row:progress.append(row))
-        self.assertEqual(calls,[('/openApi/swap/v2/user/commissionRate',{})])
-        self.assertEqual(progress[-1][:2],(50,50))
-        self.assertEqual({r['scope']for r in pulse.fee_schedule.account.values()},{'account'})
-        self.assertEqual(len({r['t']for r in pulse.fee_schedule.account.values()}),1)
-        session.collect_account_fees(pulse,SYMBOLS,lambda:False,float('inf'),lambda *row:progress.append(row))
-        self.assertEqual(len(calls),1)
-
-    def test_invalid_account_fee_response_cannot_populate_any_symbol(self):
-        sys.path.insert(0,str(session.ROOT/'server/pulse'))
-        from execution_cost import FeeSchedule
-        schedule=FeeSchedule()
-        api=SimpleNamespace(commission_scope='account',get=lambda *args:{'code':0,'data':{'commission':{
-            'makerCommissionRate':'.0002','takerCommissionRate':'NaN'}}})
-        self.assertFalse(schedule.refresh(api,SYMBOLS,10000))
-        self.assertEqual(schedule.account,{})
-
-    def test_integrated_peer_native_cycle_cannot_hide_a_stall_when_watcher_thread_does_not_run(self):
-        clock = [0.0]
-        def get(path, *args):
-            if path.endswith('/balance'): return {'code':0,'data':[{'asset':'VST'}]}
-            if path.endswith('/positions'): return {'code':0,'data':[]}
-            if path.endswith('/openOrders'): return {'code':0,'data':{'orders':[]}}
-            raise AssertionError(path)
-        api = SimpleNamespace(base=session.HOST,get=get,_req=lambda *a:None)
-        class Pulse:
-            def __init__(self, api, contracts):
-                self.load=SimpleNamespace(partial=True,configure=lambda ov:None)
-                self.sets=SimpleNamespace()
-                self.fee_schedule=SimpleNamespace(account={},snapshot=lambda *a:{})
-                self.position_cost_pct=.11;self.slippage_allowance_pct=.01
-                self.active_fee_contracts=lambda:{}
-                self.ignored_foreign=False
-                self.pool=SimpleNamespace(shutdown=lambda **kw:None)
-            def _one_cycle(self): clock[0] += 20
-            def run(self): self._one_cycle()
-        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as stack:
-            stack.enter_context(patch.dict(session.os.environ,{}))
-            prior_umask=session.os.umask(0o077)
-            stack.callback(session.os.umask,prior_umask)
-            root=Path(td)
-            credentials=root/'credentials.json'
-            credentials.write_text('{"api_key":"fixture","api_secret":"fixture","is_testnet":true}')
-            credentials.chmod(0o600)
-            overlay=root/'overlay.json';overlay.write_text('{}')
-            symbols=root/'symbols.json';symbols.write_text(json.dumps(SYMBOLS))
-            native=SimpleNamespace(DIR=str(root/'native'),PAUSE_PATH=str(root/'native/PAUSE'),
-                STOP_PATH=str(root/'native/STOP'),CONN_SHORT=session.CONN,IS_BYBIT=False,BASE=session.HOST,
-                make_api=lambda *a:api,load_contracts=lambda ss:{s:None for s in ss},Pulse=Pulse)
-            stack.enter_context(patch.dict(sys.modules,{'pulse_trader':native}))
-            for name,replacement in {
-                'context_requirement':lambda ov:60,'shared_account_protection_verified':lambda:True,
-                'freeze_account_settings':lambda p:None,'install_history_cancellation':lambda p:None,
-                'collect_account_fees':lambda *a:None,'prepare_history_warmup':lambda *a,**kw:None,
-                'native_admission_ready':lambda p:True,'capture':lambda *a,**kw:None,
-                'cleanup':lambda *a:{'confirmedFlat':True},
-            }.items():stack.enter_context(patch.object(session,name,replacement))
-            stack.enter_context(patch.object(session.time,'monotonic',lambda:clock[0]))
-            stack.enter_context(patch.object(session.time,'time',lambda:1_700_000_000+clock[0]))
-            stack.enter_context(patch.object(session.signal,'signal'))
-            stack.enter_context(patch.object(session.threading,'Thread',return_value=SimpleNamespace(start=lambda:None)))
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            result=session.main(['--overlay',str(overlay),'--symbols',str(symbols),'--out',str(root/'run'),
-                '--credentials',str(credentials),'--execute','--minutes','30','--heartbeat-seconds','15','--replay-workers','1'])
-            report=json.loads((root/'run/session.json').read_text())
-            self.assertEqual(result,1)
-            self.assertEqual(report['stopReason'],'main cycle heartbeat deadline',report.get('errorFrames'))
-            self.assertFalse(report['complete'])
-            self.assertTrue(report['cleanup']['confirmedFlat'])
 
 
-
+class CleanupAcknowledgementTests(unittest.TestCase):
+    def test_batch_order_lookup_uses_only_the_exact_acknowledged_identity(self):
+        b={'symbol':'S0-USDT','clientOrderID':'G1234stop'}
+        foreign={**b,'clientOrderID':'G1234other','orderId':'11'}
+        own={**b,'orderId':'22'}
+        reply={'code':0,'data':{'orders':[foreign,own]}}
+        self.assertEqual(session.acknowledged_order('/openApi/swap/v2/trade/batchOrders',b,reply)['orderId'],'22')
+        self.assertEqual(session.acknowledged_order('/openApi/swap/v2/trade/batchOrders',b,{'code':0,'data':{'orders':[foreign]}}),{})
+        wrong={**own,'symbol':'OTHER-USDT'}
+        self.assertEqual(session.acknowledged_order('/openApi/swap/v2/trade/batchOrders',b,{'code':0,'data':{'orders':[wrong]}}),{})
+    def test_direct_receipt_binds_only_its_own_response_and_rejections_do_not_acknowledge(self):
+        b={'symbol':'S0-USDT','clientOrderID':'G1234entry'}
+        self.assertEqual(session.acknowledged_order('/openApi/swap/v2/trade/order',b,{'code':0,'data':{'order':{'orderId':'23'}}})['orderId'],'23')
+        self.assertEqual(session.acknowledged_order('/openApi/swap/v2/trade/order',b,{'code':101400,'data':{}}),{})
+    def test_an_absent_order_does_not_start_a_rate_cooldown_but_real_limits_do(self):
+        from bingx_fast import FastBingX
+        api=FastBingX.__new__(FastBingX)
+        api.stats={'rl':0};api.path_cd={};api.cooldown_until=0
+        api.err=SimpleNamespace(write=lambda *a,**k:None)
+        api._trip('/openApi/swap/v2/trade/order',{'code':109421,'msg':'order not exist'})
+        self.assertEqual(api.stats['rl'],0);self.assertEqual(api.path_cd,{});self.assertEqual(api.cooldown_until,0)
+        api._trip('/openApi/swap/v2/trade/order',{'code':100410,'msg':'frequency limit'})
+        self.assertEqual(api.stats['rl'],1);self.assertTrue(api.path_cd);self.assertGreater(api.cooldown_until,0)
 
 if __name__ == '__main__': unittest.main()

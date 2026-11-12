@@ -508,6 +508,28 @@ def capture(pulse, out, label, include_candles=True):
     atomic_json(Path(out) / (label + "-candles.json"), candles)
 
 
+def acknowledged_order(path, body, reply):
+    """Resolve batch acknowledgements by exact symbol/client identity, never by array order."""
+    if not isinstance(reply, dict) or str(reply.get('code')) != '0':
+        return {}
+    data = reply.get('data') or {}
+    batch = path.endswith('/batchOrders')
+    candidates = (data.get('orders', []) if isinstance(data, dict) else data) if batch else [data.get('order', data) if isinstance(data, dict) else {}]
+    if not isinstance(candidates, list):
+        return {}
+    requested = str(body.get('clientOrderID') or body.get('clientOrderId') or '').lower()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cid = str(candidate.get('clientOrderID') or candidate.get('clientOrderId') or '').lower()
+        if (candidate.get('symbol') and candidate['symbol'] != body.get('symbol')) or (cid and cid != requested):
+            continue
+        if batch and (not cid or cid != requested):
+            continue
+        return candidate
+    return {}
+
+
 def cleanup(pulse, journal, seconds):
     """Use native pending-safe closes only; never account-wide flatten/cancel."""
     journal.phase = "cleanup"
@@ -534,8 +556,6 @@ def cleanup(pulse, journal, seconds):
         pulse.sync_own_fills()
         pulse.adopt_exchange_positions()
         for pos in list(pulse.open.values()):
-            if time.monotonic() >= end:
-                break
             if not journal.owns_client(pos.symbol, pos.client_id):
                 raise RuntimeError("foreign local position prevents owned cleanup")
             pulse.close_pos(pos, pulse.px.get(pos.symbol) or pos.entry, "bounded-session-cleanup")
@@ -545,10 +565,25 @@ def cleanup(pulse, journal, seconds):
         # not yet added to the native local book and delayed protective orders.
         with journal.lock:
             intents = list(journal.intents)
-        from native_cleanup_evidence import terminal_intents
-        unresolved = terminal_intents(pulse.api, intents, end, order_bodies, getattr(journal, 'remember_order', None))
-        if time.monotonic() >= end:
-            break
+        for intent in intents:
+            if intent["method"] != "POST":
+                continue
+            ack = intent.get("response") or {}
+            if ack.get("cooled") is True or (str(ack.get("code")) == "101400" and not ack.get("data")):
+                continue  # Native transport explicitly did not dispatch.
+            for body in order_bodies(intent["path"], intent["body"]):
+                cid = body["clientOrderID"]
+                ack_order = acknowledged_order(intent["path"], body, ack)
+                oid = ack_order.get("orderId")
+                query = {"symbol": body["symbol"], **({"orderId": str(oid)} if oid else {"clientOrderID": cid})}
+                reply = pulse.api.get("/openApi/swap/v2/trade/order", query)
+                data = reply.get("data") or {}
+                order = data.get("order", data) if isinstance(data, dict) else {}
+                found = str(order.get("clientOrderID") or order.get("clientOrderId") or "")
+                own = found.lower() == cid.lower() or (oid and str(order.get("orderId")) == str(oid))
+                terminal_or_control = order.get("status") in TERMINAL or (body.get("type") != "MARKET" and order.get("status") in ("NEW", "PENDING", "TRIGGERED"))
+                if reply.get("error") or str(reply.get("code")) != "0" or not own or not terminal_or_control:
+                    unresolved.append(cid)
         positions = checked_positions(pulse.api)
         selected=getattr(journal,'symbols',None)
         exposed = [p for p in positions if abs(float(p["positionAmt"])) > 1e-12
@@ -754,7 +789,6 @@ def main(argv=None):
         prepare_history_warmup(pulse,full_universe=False)
         report['accountRates']=pulse.fee_schedule.snapshot(time.time(),pulse.active_fee_contracts(),
                                                          pulse.position_cost_pct,pulse.slippage_allowance_pct)
-        report['accountRates']['measurementScope']=getattr(api,'commission_scope','symbol')
         save()
         require_empty_account(api,account_scope)
         if args.replay_workers>1:
