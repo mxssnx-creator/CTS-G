@@ -37,21 +37,35 @@ test("a kick during a request never runs two requests in parallel", async () => 
 test("a failed response is not published: the last good value stays", async () => {
   const values: number[] = [];
   let failures = 0;
-  const { fetch } = slowFetch(1, (n) => (n === 2 ? null : n * 10));
+  let calls = 0;
+  let settled = () => {};
+  const nextResult = (action: () => void) => new Promise<void>((resolve) => {
+    settled = resolve;
+    action();
+  });
   const p = createPoller<number>({
-    fetch,
-    onData: (v) => values.push(v),
-    intervalMs: 2,
+    fetch: async () => [10, null, 30][calls++],
+    onData: (v) => {
+      values.push(v);
+      settled();
+    },
+    intervalMs: 60_000,
     onFailure: (count) => {
       failures = count;
+      settled();
     },
   });
-  p.start();
-  await sleep(60);
-  p.stop();
-  assert.ok(values.length >= 2, "good responses were published");
-  assert.ok(!values.includes(0), "a null response never reached the view");
-  assert.equal(failures, 1, "the failure was counted once");
+  try {
+    await nextResult(() => p.start());
+    assert.deepEqual(values, [10]);
+    await nextResult(() => p.kick());
+    assert.deepEqual(values, [10], "a failed response preserves the last good value");
+    assert.equal(failures, 1, "the failure was counted once");
+    await nextResult(() => p.kick());
+    assert.deepEqual(values, [10, 30], "successful polling resumes after the failure");
+  } finally {
+    p.stop();
+  }
 });
 
 test("stop aborts the request in flight and drops its late result", async () => {
