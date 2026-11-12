@@ -256,8 +256,9 @@ function LiftCard({ live }: { live: LiveStats | null | undefined }) {
   );
 }
 
-function pfText(v: number | null | undefined): string {
-  return v === null || v === undefined ? "—" : v >= 99 ? "no loss" : v.toFixed(2);
+function pfText(v: number | null | undefined, noLoss?: boolean): string {
+  if (noLoss || (noLoss === undefined && v === 99)) return "no loss";
+  return v === null || v === undefined ? "—" : v.toFixed(2);
 }
 
 /** Replay against exchange: the same settled closes booked once at the planned stop / target level (the simulator's rule) and once as the exchange filled them. */
@@ -268,6 +269,7 @@ function SimDiffCard({ live }: { live: LiveStats | null | undefined }) {
   const gapClass = (v: number) => (v < 0 ? "text-danger" : v > 0 ? "text-primary" : "");
   return (
     <Card title="Simulated against live">
+      <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Simulated against live results">
       <table className="w-full text-sm" data-testid="sim-diff-figures">
         <thead className="font-mono text-[11px] text-muted">
           <tr>
@@ -287,8 +289,8 @@ function SimDiffCard({ live }: { live: LiveStats | null | undefined }) {
             <tr key={label} className="border-t border-border font-mono text-xs">
               <td className="py-1.5">{label}</td>
               <td className="py-1.5 text-right">{r.n}</td>
-              <td className="py-1.5 text-right">{pfText(r.simPf)}</td>
-              <td className="py-1.5 text-right">{pfText(r.livePf)}</td>
+              <td className="py-1.5 text-right">{pfText(r.simPf, r.simNoLoss)}</td>
+              <td className="py-1.5 text-right">{pfText(r.livePf, r.liveNoLoss)}</td>
               <td className="py-1.5 text-right">{r.simNetPct.toFixed(3)}</td>
               <td className="py-1.5 text-right">{r.liveNetPct.toFixed(3)}</td>
               <td className={`py-1.5 text-right ${gapClass(r.fillGapPct)}`}>{r.fillGapPct.toFixed(3)}</td>
@@ -298,6 +300,7 @@ function SimDiffCard({ live }: { live: LiveStats | null | undefined }) {
           ))}
         </tbody>
       </table>
+      </div>
       <p className="mt-2 text-xs text-muted" data-testid="sim-diff-factors">
         Stop fill factor (live loss over planned stop; the replay assumes 1.00): median {d.stopFactor.median ?? "—"}, mean {d.stopFactor.mean ?? "—"}, 90th percentile {d.stopFactor.p90 ?? "—"} on {d.stopFactor.n} stops.
         {" "}Target fill factor: median {d.targetFactor.median ?? "—"} on {d.targetFactor.n} targets.

@@ -55,6 +55,20 @@ class CleanupEvidence(unittest.TestCase):
         self.assertEqual(terminal_intents(api,[intent],time.monotonic()-1,order_bodies),[body['clientOrderID']])
         self.assertEqual(calls,[])
 
+    def test_definite_refusal_needs_no_fill_lookup_but_unknown_dispatch_does(self):
+        body,row,intent=self.fixture();calls=[]
+        api=SimpleNamespace(get=lambda *args:calls.append(args)or {'code':0,'data':{'orders':[]}})
+        refused={**intent,'response':{'code':109420,'msg':'position not exist'}}
+        self.assertEqual(terminal_intents(api,[refused],time.monotonic()+2,order_bodies),[])
+        self.assertEqual(calls,[])
+        unknown={**intent,'response':{'code':-1,'error':True}}
+        self.assertEqual(terminal_intents(api,[unknown],time.monotonic()+2,order_bodies),[body['clientOrderID']])
+        self.assertEqual(len(calls),1)
+        # An arbitrary nonzero response is not evidence that no order was sent.
+        uncertain={**intent,'response':{'code':109421,'msg':'order unavailable'}}
+        self.assertEqual(terminal_intents(api,[uncertain],time.monotonic()+2,order_bodies),[body['clientOrderID']])
+        self.assertEqual(len(calls),2)
+
     def test_slow_placements_yield_and_all_eligible_entries_still_progress(self):
         p=pt.Pulse.__new__(pt.Pulse);p.halted=False;p.real_stage_paper=False
         p.sets=SimpleNamespace(enabled=True,packs={},use_historic_gate=False)

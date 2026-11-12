@@ -38,5 +38,20 @@ def unscored_rows_stay_out():
     return True, "unverified, downtime and incomplete rows are in no sum"
 
 
+def finite_pf_above_99_has_losses():
+    a = new_diff()
+    diff_note(a, row("time", .0101, .01), .0001)
+    diff_note(a, row("time", 0, -.0001), .0001)
+    t = diff_report(a)["total"]
+    assert t["livePf"] == 100 and t["simPf"] == 100, t
+    assert t["liveNoLoss"] is False and t["simNoLoss"] is False, t
+    b = new_diff()
+    diff_note(b, row("time", .0101, .01), .0001)
+    t = diff_report(b)["total"]
+    assert t["liveNoLoss"] is True and t["simNoLoss"] is True, t
+    return True, "finite PF 100 retains its loss; loss-free results have an explicit state"
+
+
 CHECKS = [("simdiff.gap-adds-up-and-factors-read-the-planned-level", gap_adds_up),
-          ("simdiff.unscored-rows-stay-out", unscored_rows_stay_out)]
+          ("simdiff.unscored-rows-stay-out", unscored_rows_stay_out),
+          ("simdiff.finite-pf-above-99-has-losses", finite_pf_above_99_has_losses)]

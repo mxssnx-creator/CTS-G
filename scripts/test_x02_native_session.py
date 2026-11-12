@@ -11,6 +11,9 @@ from unittest.mock import patch
 import x02_native_session as session
 sys.path.insert(0, str(session.ROOT / 'server/pulse'))
 
+# Every test must also work in the direct-file CLI used by CI.
+sys.path.insert(0, str(session.ROOT / "server" / "pulse"))
+
 
 SYMBOLS = [f'S{i}-USDT' for i in range(50)]
 

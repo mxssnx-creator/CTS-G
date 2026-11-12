@@ -2,7 +2,7 @@ name: Desk and engine checks
 
 on:
   pull_request:
-    branches: [Stable-02-01]
+    branches: [Stable-02-01, main]
 
 permissions:
   contents: read
