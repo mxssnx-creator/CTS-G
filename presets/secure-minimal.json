@@ -508,5 +508,19 @@
     "feed.tfCombined": true,
     "risk.slTpRatios": true,
     "exec.controls": true
-  }
+  },
+  "strategyProcessingByRange": {},
+  "relationalVolumeRatios": {
+    "enabled": true,
+    "overall": 1,
+    "maxMultiplier": 25,
+    "indicationTypes": {},
+    "indications": {},
+    "strategies": {},
+    "ranges": {},
+    "symbols": {}
+  },
+  "lastNDisjoint": false,
+  "setGateShortMode": "positive",
+  "mainShortMode": "positive"
 }

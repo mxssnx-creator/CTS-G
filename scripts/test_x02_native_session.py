@@ -552,4 +552,5 @@ class NativeSessionTests(unittest.TestCase):
         with self.assertRaises(ValueError):session.frozen_overlay(raw,SYMBOLS[:11],18,12)
 
 
+
 if __name__ == '__main__': unittest.main()
