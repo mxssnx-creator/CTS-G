@@ -43,18 +43,18 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
-def frozen_overlay(raw, symbols, history_hours=18):
-    if len(symbols) != 50 or len(set(symbols)) != 50 or any(
+def frozen_overlay(raw, symbols, history_hours=18, symbol_count=50):
+    if not isinstance(symbol_count, int) or not 1 <= symbol_count <= 50 or len(symbols) != symbol_count or len(set(symbols)) != symbol_count or any(
         not isinstance(s, str) or not s.endswith("-USDT") or not s.replace("-", "").isalnum() for s in symbols
     ):
-        raise ValueError("exactly 50 distinct explicit USDT symbols required")
+        raise ValueError(f"exactly {symbol_count} distinct explicit USDT symbols required")
     if not 1 <= history_hours <= 72:
         raise ValueError("history hours must be between 1 and 72")
     ov = json.loads(json.dumps(raw))
     ranges = {"micro": True, "minimal": True, "short": True, "normal": False, "long": False, "wide": False}
-    ov.update(symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=50,
+    ov.update(symbols=symbols, symbolsAll=False, symbolsDynamic=False, symbolCap=symbol_count,
               volumeFactor=.05, sizePctOfBalance=0, targetNotional=2.15, sizeMaxNotional=25,
-              maxOpen=50, setMinStep=2, setStepMax=7, setStepAdapt=False,
+              maxOpen=symbol_count, setMinStep=2, setStepMax=7, setStepAdapt=False,
               shortRangeStepMin=2, shortRangeStepMax=7, tpRanges=ranges, trailRanges=ranges,
               minSlDistancePct=.1, slippageFeeRatio=.1, histLookbackBars=int(history_hours * 60),
               histLookbackMax=int(history_hours * 60), histLookbackAuto=False, histKeepLastComplete=True,
@@ -572,7 +572,8 @@ def cleanup(pulse, journal, seconds):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--overlay", type=Path, required=True)
-    ap.add_argument("--symbols", type=Path, required=True, help="JSON array of exactly50 explicit symbols")
+    ap.add_argument("--symbols", type=Path, required=True, help="JSON array of the exact requested explicit symbols")
+    ap.add_argument("--symbol-count", type=int, default=50)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--credentials", type=Path)
     ap.add_argument("--fee-cache",type=Path,help="private account-bound cache of measured rates, refreshed after one hour")
@@ -597,7 +598,7 @@ def main(argv=None):
     if args.out.exists():
         ap.error("choose a new private output directory; sessions cannot overwrite prior evidence")
     symbols = json.loads(args.symbols.read_text())
-    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours)
+    overlay = frozen_overlay(json.loads(args.overlay.read_text()), symbols, args.history_hours, args.symbol_count)
     required_history = context_requirement(overlay)
     os.umask(0o077)
     args.out.mkdir(parents=True, mode=0o700)
@@ -658,7 +659,7 @@ def main(argv=None):
     if set(contracts) != set(symbols):
         raise RuntimeError("selected symbol contract coverage is incomplete")
     pulse = pt.Pulse(api, contracts)
-    report['seededHistorySymbols']=seed_history(pulse.sets,args.history_seed,symbols,time.time())
+    report['seededHistorySymbols']=seed_history(pulse.sets,args.history_seed,symbols,time.time()) if args.history_seed else 0
     if args.admission=='full-universe':bulk_warmup(pulse,journal)
     if args.fee_cache:
         try:pulse.fee_schedule.account.update(load_fee_cache(args.fee_cache,credentials,time.time()))
@@ -710,8 +711,8 @@ def main(argv=None):
             elapsed = int(time.time() - report.get("activeStartedAt", report["createdAt"]))
             capture(pulse, args.out, f"{journal.phase}-{elapsed:05d}", include_candles=False)
             if replay_workers:
-                report["replayWorkers"]={"configured":args.replay_workers,"completed":replay_workers.completed,
-                    "fallbacks":replay_workers.fallbacks,"pending":len(replay_workers.pending)}
+                report['replayWorkers']={'configured':args.replay_workers,'completed':replay_workers.completed,
+                                         'fallbacks':replay_workers.fallbacks,'pending':len(replay_workers.pending)}
             save()
             next_capture[0] = time.monotonic() + 60
     pulse._one_cycle = cycle
