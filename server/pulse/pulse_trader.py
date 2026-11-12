@@ -5226,7 +5226,10 @@ class Pulse:
             self._exec_inc("blockAddFills", len(getattr(rec, "block_fills", []) or []))
             if rec.set_id:                        # closes per lane: Real (positive) and Real Negative
                 lift_note(self.__dict__.setdefault("exec_lift", new_lift()), rec)      # the same parents without / with Block adds and relation raises
-                sim_diff_note(self.__dict__.setdefault("exec_sim_diff", new_sim_diff()), rec, cost_as_frac(self.position_cost_pct))   # replay result against the exchange result of the same close
+                try:      # replay result against the exchange result of the same close; a statistic never blocks the close accounting
+                    sim_diff_note(self.__dict__.setdefault("exec_sim_diff", new_sim_diff()), rec, cost_as_frac(getattr(self, "position_cost_pct", POSITION_COST_PCT_DEFAULT)))
+                except Exception:
+                    pass
                 lane = "neg" if str(getattr(rec, "lane", "") or "") == "neg" else "pos"
                 key = "laneNeg" if lane == "neg" else "lanePos"
                 self._exec_inc(key)
