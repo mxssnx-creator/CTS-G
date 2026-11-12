@@ -1,6 +1,6 @@
 {
   "targetNotional": 0.2,
-  "volumeFactor": 5.0,
+  "volumeFactor": 0.05,
   "sizePctOfBalance": 5,
   "sizeMaxNotional": 25,
   "maxEntrySlipPct": 0.75,
@@ -11,7 +11,7 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 200,
+  "symbolCap": 20,
   "slPct": 0.48,
   "tpPct": 0.75,
   "trailArmPct": 0.3,
