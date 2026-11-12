@@ -41,6 +41,7 @@ jobs:
       - name: Check x02 ownership and protection offline
         run: |
           python3 scripts/test_x02_native_session.py
+          python3 scripts/test_native_cleanup_evidence.py
           python3 scripts/test_venue_fill_fees.py
           python3 scripts/test_disjoint_lastn.py
           python3 scripts/test_trailing_control_pacing.py

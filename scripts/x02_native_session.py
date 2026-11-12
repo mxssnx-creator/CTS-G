@@ -532,6 +532,8 @@ def cleanup(pulse, journal, seconds):
         pulse.sync_own_fills()
         pulse.adopt_exchange_positions()
         for pos in list(pulse.open.values()):
+            if time.monotonic() >= end:
+                break
             if not journal.owns_client(pos.symbol, pos.client_id):
                 raise RuntimeError("foreign local position prevents owned cleanup")
             pulse.close_pos(pos, pulse.px.get(pos.symbol) or pos.entry, "bounded-session-cleanup")
@@ -541,26 +543,10 @@ def cleanup(pulse, journal, seconds):
         # not yet added to the native local book and delayed protective orders.
         with journal.lock:
             intents = list(journal.intents)
-        for intent in intents:
-            if intent["method"] != "POST":
-                continue
-            ack = intent.get("response") or {}
-            if ack.get("cooled") is True or (str(ack.get("code")) == "101400" and not ack.get("data")):
-                continue  # Native transport explicitly did not dispatch.
-            for body in order_bodies(intent["path"], intent["body"]):
-                cid = body["clientOrderID"]
-                ack_data = ack.get("data") or {}
-                ack_order = ack_data.get("order", ack_data) if isinstance(ack_data, dict) else {}
-                oid = ack_order.get("orderId")
-                query = {"symbol": body["symbol"], **({"orderId": str(oid)} if oid else {"clientOrderID": cid})}
-                reply = pulse.api.get("/openApi/swap/v2/trade/order", query)
-                data = reply.get("data") or {}
-                order = data.get("order", data) if isinstance(data, dict) else {}
-                found = str(order.get("clientOrderID") or order.get("clientOrderId") or "")
-                own = found.lower() == cid.lower() or (oid and str(order.get("orderId")) == str(oid))
-                terminal_or_control = order.get("status") in TERMINAL or (body.get("type") != "MARKET" and order.get("status") in ("NEW", "PENDING", "TRIGGERED"))
-                if reply.get("error") or str(reply.get("code")) != "0" or not own or not terminal_or_control:
-                    unresolved.append(cid)
+        from native_cleanup_evidence import terminal_intents
+        unresolved = terminal_intents(pulse.api, intents, end, order_bodies, getattr(journal, 'remember_order', None))
+        if time.monotonic() >= end:
+            break
         positions = checked_positions(pulse.api)
         selected=getattr(journal,'symbols',None)
         exposed = [p for p in positions if abs(float(p["positionAmt"])) > 1e-12
