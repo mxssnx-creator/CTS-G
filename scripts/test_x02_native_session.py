@@ -171,12 +171,12 @@ class NativeSessionTests(unittest.TestCase):
         from execution_cost import FeeSchedule
         calls = []
         def get(path, params):
-            calls.append((path, params['symbol']))
+            calls.append((path, params))
             return {'code':0,'data':{'makerCommissionRate':'0.0002','takerCommissionRate':'0.0005'}}
-        pulse = SimpleNamespace(api=SimpleNamespace(get=get), fee_schedule=FeeSchedule())
+        pulse = SimpleNamespace(api=SimpleNamespace(get=get,commission_scope='account'), fee_schedule=FeeSchedule())
         progress = []
         session.collect_account_fees(pulse, SYMBOLS, lambda: False, float('inf'), lambda *row: progress.append(row))
-        self.assertEqual(sorted(s for _, s in calls), sorted(SYMBOLS))
+        self.assertEqual(calls, [('/openApi/swap/v2/user/commissionRate', {})])
         self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS))
         self.assertTrue(all(path == '/openApi/swap/v2/user/commissionRate' for path, _ in calls))
         self.assertEqual(progress[-1][:2], (50, 50))
@@ -185,6 +185,37 @@ class NativeSessionTests(unittest.TestCase):
         with self.assertRaises(session.SessionEnd):
             session.collect_account_fees(SimpleNamespace(api=pulse.api, fee_schedule=FeeSchedule()),
                                          SYMBOLS, lambda: True, float('inf'), lambda *row: None)
+
+    def test_commission_scope_keeps_bybit_symbol_rates_separate_and_bingx_reads_once(self):
+        from execution_cost import FeeSchedule
+        from bingx_fast import FastBingX
+        from bybit_fast import FastBybit
+        self.assertEqual(FastBingX.commission_scope,'account')
+        self.assertEqual(FastBybit.commission_scope,'symbol')
+        calls=[]
+        def get(path, params):
+            calls.append(params)
+            return {'code':0,'data':{'commission':{'makerCommissionRate':0,'takerCommissionRate':.0002 if params.get('symbol')=='A' else .0005}}}
+        per_symbol=FeeSchedule();api=SimpleNamespace(get=get,commission_scope='symbol')
+        per_symbol.refresh(api,['A','B'],10_000)
+        per_symbol.refresh(api,['A','B'],10_002)
+        self.assertEqual(calls,[{'symbol':'A'},{'symbol':'B'}])
+        self.assertEqual(per_symbol.rates('A')[1],.0002)
+        self.assertEqual(per_symbol.rates('B')[1],.0005)
+        calls.clear();account=FeeSchedule();api.commission_scope='account'
+        account.refresh(api,['A','B'],10_000)
+        self.assertEqual(calls,[{}])
+        self.assertEqual(account.rates('A'),account.rates('B'))
+        self.assertEqual(account.rates('A')[0],0)
+
+    def test_twelve_symbol_profile_has_independent_micro_defaults_and_preserves_custom_values(self):
+        own=SYMBOLS[:12]
+        base=session.frozen_overlay({},own,symbol_count=12)
+        self.assertEqual((base['microMinSlDistancePct'],base['microMinTrailDistancePct']),(.1,.05))
+        custom=session.frozen_overlay({'microMinSlDistancePct':.07,'microMinTrailDistancePct':.03},own,symbol_count=12)
+        self.assertEqual((custom['microMinSlDistancePct'],custom['microMinTrailDistancePct']),(.07,.03))
+        for bad in (-1,11,float('nan'),True,'0.1'):
+            with self.assertRaises(ValueError):session.frozen_overlay({'microMinSlDistancePct':bad},own,symbol_count=12)
 
     def test_overlay_preserves_admission_and_requires_explicit_universe(self):
         raw = {'setMinPf': 1.37, 'stageFullWindow': True, 'lastNByRange': {'micro': {'baseLong': 30}}, 'blockEnabled': False}
