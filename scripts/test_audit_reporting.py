@@ -17,6 +17,13 @@ from fee_policy import cost_policy, paper_cost_pct
 
 
 class AuditReporting(unittest.TestCase):
+    def test_partial_last_market_hour_is_not_reported_as_a_complete_hour(self):
+        from trade_sim import complete_report_hours
+        self.assertEqual(complete_report_hours(0,2*3600+25*60),[0.,3600.])
+        self.assertEqual(complete_report_hours(0,2*3600-60),[0.,3600.])
+        self.assertEqual(complete_report_hours(10,2*3600-60),[3600.])
+        self.assertEqual(complete_report_hours(0,59*60),[0.])
+        self.assertEqual(complete_report_hours(0,58*60),[])
     def test_display_projection_keeps_all_used_rows_and_original_evidence(self):
         from complete_report import display_payload
         rows=[dict(dimension=d,group='g',enough_samples_pct=80)

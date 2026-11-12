@@ -427,6 +427,19 @@ def collect_account_fees(pulse, symbols, stopped, deadline, progress):
     only the main thread publishes validated rates to the runtime.
     """
     from execution_cost import FeeSchedule
+    if getattr(pulse.api,'commission_scope','symbol')=='account':
+        # BingX documents one user commission schedule, with no symbol input.
+        # One measured response covers this selected universe. Do not turn a
+        # faster connection pool into fifty duplicate account-fee requests.
+        while True:
+            measured=sum(pulse.fee_schedule.rates(s,None,time.time())[2]=='account-rate'for s in symbols)
+            if measured==len(symbols):return
+            if stopped()or time.monotonic()>=deadline:
+                raise SessionEnd('requested session stop'if stopped()else'account fee readiness deadline')
+            pulse.fee_schedule.refresh(pulse.api,symbols,time.time())
+            measured=sum(pulse.fee_schedule.rates(s,None,time.time())[2]=='account-rate'for s in symbols)
+            progress(measured,len(symbols),pulse.fee_schedule.error)
+            if measured<len(symbols):time.sleep(1)
     def fetch(symbol):
         schedule = FeeSchedule()
         schedule.refresh(pulse.api, [symbol], time.time())
@@ -446,7 +459,8 @@ def collect_account_fees(pulse, symbols, stopped, deadline, progress):
                 symbol, row, error = future.result()
                 if row is not None:
                     pulse.fee_schedule.account[symbol] = row
-                progress(len(pulse.fee_schedule.account), len(symbols), error)
+                measured=sum(pulse.fee_schedule.rates(s,None,time.time())[2]=='account-rate' for s in symbols)
+                progress(measured, len(symbols), error)
                 if stopped() or time.monotonic() >= deadline:
                     for item in futures:
                         item.cancel()
@@ -545,14 +559,21 @@ def cleanup(pulse, journal, seconds):
             if intent["method"] != "POST":
                 continue
             ack = intent.get("response") or {}
-            if ack.get("cooled") is True or (str(ack.get("code")) == "101400" and not ack.get("data")):
+            if ack.get("cooled") is True or (str(ack.get("code")) not in ("0", "None", "-1")
+                    and not ack.get("error") and not ack.get("data")):
                 continue  # Native transport explicitly did not dispatch.
             for body in order_bodies(intent["path"], intent["body"]):
                 cid = body["clientOrderID"]
                 ack_data = ack.get("data") or {}
                 ack_order = ack_data.get("order", ack_data) if isinstance(ack_data, dict) else {}
                 oid = ack_order.get("orderId")
-                query = {"symbol": body["symbol"], **({"orderId": str(oid)} if oid else {"clientOrderID": cid})}
+                # Conditional orders are not indexed by client ID. Their batch
+                # receipts are already bound to this exact submitted identity.
+                with journal.lock:
+                    known = [order_id for (symbol, order_id), submitted in getattr(journal,'order_bodies',{}).items()
+                             if symbol==body['symbol'] and str(submitted.get('clientOrderID')or submitted.get('clientOrderId')or'').lower()==cid.lower()]
+                if len(known)==1:oid=known[0]
+                query = {"symbol": body["symbol"], **({"orderId": str(oid)} if oid else {"clientOrderId": cid.lower()})}
                 reply = pulse.api.get("/openApi/swap/v2/trade/order", query)
                 data = reply.get("data") or {}
                 order = data.get("order", data) if isinstance(data, dict) else {}
@@ -765,6 +786,7 @@ def main(argv=None):
         prepare_history_warmup(pulse,full_universe=False)
         report['accountRates']=pulse.fee_schedule.snapshot(time.time(),pulse.active_fee_contracts(),
                                                          pulse.position_cost_pct,pulse.slippage_allowance_pct)
+        report['accountRates']['measurementScope']=getattr(api,'commission_scope','symbol')
         save()
         require_empty_account(api,account_scope)
         if args.replay_workers>1:

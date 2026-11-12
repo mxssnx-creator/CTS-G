@@ -14,7 +14,7 @@ const jobs = [
   {label:"local x02 and scheduling",cmd:"python3 -B scripts/test_regression_scheduling.py && python3 -B scripts/test_regression_progress.py && python3 -B scripts/test_regression_memo.py && python3 -B scripts/test_bounded_replay_build.py && python3 -B scripts/test_x02_universe.py && python3 -B scripts/test_replay_memo.py && python3 -B scripts/test_control_coverage.py && python3 -B scripts/test_x02_native_session.py"},
   {label:"replay report",cmd:"python3 -B scripts/test_audit_reporting.py && python3 -B scripts/test_strategy_switches.py && python3 -B scripts/test_demo_acceptance_ownership.py && python3 -B scripts/test_indexed_stage_query.py"},
   {label:"Tactic/Inverse/volume",cmd:"python3 -B scripts/test_venue_fill_fees.py && python3 scripts/test_ported_indications.py && node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts"},
-  {label:"native process replay",cmd:"python3 -B scripts/test_parallel_native_replay.py && python3 -B scripts/test_regression_memo.py"},
+  {label:"native process replay",cmd:"python3 -B scripts/test_parallel_native_replay.py && python3 -B scripts/test_bingx_signed_pool.py && python3 -B scripts/test_native_fill_audit.py && python3 -B scripts/test_position_settlement.py && python3 -B scripts/test_compact_replay_memory.py"},
   { label: "node", cmd: "node --test scripts/*.test.mjs" },
   { label: "ts", cmd: "node scripts/run-ts-tests.mjs" },
   { label: "python", cmd: "python3 scripts/regression/run.py" },

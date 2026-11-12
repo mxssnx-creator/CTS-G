@@ -434,18 +434,45 @@ class NativeSessionTests(unittest.TestCase):
             calls.append((path, params['symbol']))
             return {'code':0,'data':{'makerCommissionRate':'0.0002','takerCommissionRate':'0.0005'}}
         pulse = SimpleNamespace(api=SimpleNamespace(get=get), fee_schedule=FeeSchedule())
+        pulse.fee_schedule.account['OTHER-USDT']={'maker':.0002,'taker':.0005,'t':session.time.time()}
         progress = []
         session.collect_account_fees(pulse, SYMBOLS, lambda: False, float('inf'), lambda *row: progress.append(row))
         self.assertEqual(sorted(s for _, s in calls), sorted(SYMBOLS))
-        self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS))
+        self.assertEqual(set(pulse.fee_schedule.account), set(SYMBOLS)|{'OTHER-USDT'})
         self.assertTrue(all(path == '/openApi/swap/v2/user/commissionRate' for path, _ in calls))
         self.assertEqual(progress[-1][:2], (50, 50))
+        self.assertTrue(all(measured<=required for measured,required,_error in progress))
         for symbol in SYMBOLS:
             self.assertEqual(pulse.fee_schedule.rates(symbol)[:2], (.0002, .0005))
         with self.assertRaises(session.SessionEnd):
             session.collect_account_fees(SimpleNamespace(api=pulse.api, fee_schedule=FeeSchedule()),
                                          SYMBOLS, lambda: True, float('inf'), lambda *row: None)
 
+
+    def test_bingx_account_fee_scope_uses_one_measured_response_for_fifty_symbols(self):
+        sys.path.insert(0,str(session.ROOT/'server/pulse'))
+        from execution_cost import FeeSchedule
+        calls=[];progress=[]
+        def get(path,params):
+            calls.append((path,params))
+            return {'code':0,'data':{'commission':{'makerCommissionRate':'.0002','takerCommissionRate':'.0005'}}}
+        pulse=SimpleNamespace(api=SimpleNamespace(get=get,commission_scope='account'),fee_schedule=FeeSchedule())
+        session.collect_account_fees(pulse,SYMBOLS,lambda:False,float('inf'),lambda *row:progress.append(row))
+        self.assertEqual(calls,[('/openApi/swap/v2/user/commissionRate',{})])
+        self.assertEqual(progress[-1][:2],(50,50))
+        self.assertEqual({r['scope']for r in pulse.fee_schedule.account.values()},{'account'})
+        self.assertEqual(len({r['t']for r in pulse.fee_schedule.account.values()}),1)
+        session.collect_account_fees(pulse,SYMBOLS,lambda:False,float('inf'),lambda *row:progress.append(row))
+        self.assertEqual(len(calls),1)
+
+    def test_invalid_account_fee_response_cannot_populate_any_symbol(self):
+        sys.path.insert(0,str(session.ROOT/'server/pulse'))
+        from execution_cost import FeeSchedule
+        schedule=FeeSchedule()
+        api=SimpleNamespace(commission_scope='account',get=lambda *args:{'code':0,'data':{'commission':{
+            'makerCommissionRate':'.0002','takerCommissionRate':'NaN'}}})
+        self.assertFalse(schedule.refresh(api,SYMBOLS,10000))
+        self.assertEqual(schedule.account,{})
 
     def test_unbounded_native_protection_blocks_execution_before_credentials(self):
         with tempfile.TemporaryDirectory() as td:

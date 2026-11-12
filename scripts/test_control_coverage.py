@@ -3,6 +3,7 @@ import sys
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import asdict
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"server/pulse"))
@@ -24,6 +25,7 @@ def fixture(side="LONG"):
     p.cancelled, p.placed = [], []
     p.cancel_order = lambda symbol,oid,cid="": p.cancelled.append(oid) or True
     p.open = {}
+    p.save_open_book = lambda: True
     pos = pt.Position("A",side,10,100,1,99 if side=="LONG" else 101,102 if side=="LONG" else 98,100)
     p.open["A"] = pos
     return p,pos
@@ -36,6 +38,89 @@ def row(side,kind,oid,price,qty=10,close_all=True):
 
 
 class Controls(unittest.TestCase):
+    def test_unknown_single_control_is_persisted_and_recovered_without_resubmission(self):
+        p,pos=fixture();p.errors=0;calls=[]
+        def post(path,body):
+            calls.append(body);return {'code':-1,'error':True,'msg':'reply lost'}
+        p.api.post=post
+        self.assertEqual(p.place_ctrl(pos,'sec-sl',95),'')
+        self.assertIn('sl',pos.control_pending)
+        restored=pt.Position(**asdict(pos));body=calls[0]
+        p.api.get=lambda *args:{'code':0,'data':{'orders':[{**body,'orderId':'100','status':'NEW','executedQty':'0'}]}}
+        self.assertEqual(p.place_ctrl(restored,'sec-sl',95),'100')
+        self.assertEqual(len(calls),1)
+        self.assertFalse(restored.control_pending)
+
+    def test_missing_unknown_control_cannot_be_replaced_by_a_different_identity(self):
+        p,pos=fixture();calls=[]
+        p.api.post=lambda path,body:calls.append(body)or{'code':-1,'error':True}
+        p.api.get=lambda *args:{'code':0,'data':{'orders':[]}}
+        p.place_ctrl(pos,'sec-sl',95)
+        pos.control_pending['sl']['at']-=3600
+        for _ in range(4):
+            pos.control_pending['sl']['nextRead']=0
+            p.place_ctrl(pos,'sec-sl',95)
+        self.assertEqual(len(calls),1)
+        self.assertTrue(p.missing_controls(pos))
+
+    def test_lost_batch_reply_never_falls_back_to_two_new_single_orders(self):
+        p,pos=fixture();batches=[]
+        p.api.batch_place=lambda bodies:batches.append(bodies)or{'code':-1,'error':True}
+        p.api.post=lambda *args:self.fail('unknown batch was resent as singles')
+        p.place_ctrl_pair(pos)
+        self.assertEqual(len(pos.control_pending),2)
+        rows=[{**body,'orderId':str(100+i),'status':'NEW','executedQty':'0'}for i,body in enumerate(batches[0])]
+        p.api.get=lambda *args:{'code':0,'data':{'orders':rows}}
+        p.place_ctrl_pair(pos)
+        self.assertEqual(len(batches),1)
+        self.assertEqual((pos.sl_oid,pos.tp_oid),('100','101'))
+        self.assertFalse(pos.control_pending)
+
+    def test_missing_batch_ids_remain_unknown_instead_of_becoming_refusals(self):
+        p,pos=fixture();p.api.batch_place=lambda bodies:{'code':0,'data':{'orders':[]}}
+        p.api.post=lambda *args:self.fail('unconfirmed acknowledgement resent')
+        p.place_ctrl_pair(pos)
+        self.assertEqual(len(pos.control_pending),2)
+        self.assertFalse(pos.controls_ok)
+
+    def test_failed_intent_persistence_prevents_protective_dispatch(self):
+        p,pos=fixture();p.save_open_book=lambda:False
+        p.api.post=lambda *args:self.fail('unpersisted protective intent dispatched')
+        self.assertEqual(p.place_ctrl(pos,'sec-sl',95),'')
+        self.assertFalse(pos.control_pending)
+
+    def test_recovered_cancelled_partial_control_uses_native_cumulative_accounting_once(self):
+        p,pos=fixture();posts=[]
+        p.api.post=lambda path,body:posts.append(body)or{'code':-1,'error':True}
+        p.place_ctrl(pos,'sec-sl',95)
+        receipt={**posts[0],'orderId':'100','status':'CANCELLED','executedQty':'4','avgPrice':'101'}
+        p.api.get=lambda *args:{'code':0,'data':{'orders':[receipt]}}
+        p.fill_cost=lambda data,qty,price,*args:(qty*price*.0005,'reported-fee')
+        p.note_fee_source=lambda *args:None;pos.entry_fee_usdt=0
+        p.place_ctrl(pos,'sec-sl',95)
+        self.assertIsNone(p.venue_exit(pos))
+        self.assertEqual(pos.qty,6)
+        self.assertAlmostEqual(pos.exit_fee_usdt,.202)
+        self.assertEqual(pos.close_filled_qty,4)
+        self.assertIsNone(p.venue_exit(pos))
+        self.assertEqual(pos.qty,6)
+        self.assertEqual(pos.close_filled_qty,4)
+        self.assertFalse(pos.control_pending)
+
+    def test_flat_venue_refusal_stops_control_variants_and_reconciles_once(self):
+        for side in ('LONG','SHORT'):
+            for kind in ('sec-sl','sec-tp'):
+                p,pos=fixture(side);p.overlay={'ownedQuantityControls':True};p.errors=0
+                calls=[];confirmed=[];dropped=[]
+                p.api.post=lambda path,body:calls.append(body)or{'code':109420,'msg':'position not exist'}
+                p._exchange_flat=lambda candidate:confirmed.append(candidate)or False
+                p.drop_ghost=lambda *args:dropped.append(args)
+                self.assertEqual(p.place_ctrl(pos,kind,95 if side=='LONG'else 105),'')
+                self.assertEqual(len(calls),1,'an already-flat response cannot be fixed by another order form or price')
+                self.assertEqual(confirmed,[pos])
+                self.assertEqual(dropped,[],'a refusal alone cannot erase a position')
+                self.assertEqual(p.errors,0)
+
     def test_quantity_only_pair_covers_owned_size_without_aggregate_close(self):
         for side in ("LONG", "SHORT"):
             p, pos = fixture(side)

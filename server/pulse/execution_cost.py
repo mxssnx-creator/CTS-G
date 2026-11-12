@@ -29,7 +29,7 @@ class FeeSchedule:
         self.retry_at = {}
 
     def refresh(self, api, symbols, now):
-        """One read-only request per second; each symbol cached for an hour."""
+        """Cache measured rates for an hour; respect the venue's fee scope."""
         if now < self.next_query:
             return False
         wanted = set(symbols)
@@ -40,7 +40,8 @@ class FeeSchedule:
             return False
         self.next_query = now + 1
         try:
-            reply = api.get("/openApi/swap/v2/user/commissionRate", {"symbol": symbol})
+            account_scope = getattr(api, 'commission_scope', 'symbol') == 'account'
+            reply = api.get("/openApi/swap/v2/user/commissionRate", {} if account_scope else {"symbol": symbol})
             data = reply.get("data") or {}
             row = data.get("commission") or data
             taker, maker = fee_rate(row.get("takerCommissionRate")), fee_rate(row.get("makerCommissionRate"))
@@ -48,7 +49,9 @@ class FeeSchedule:
                 self.error = f"commission rate unavailable ({reply.get('code')})"
                 self.retry_at[symbol] = now + 60
                 return False
-            self.account[symbol] = {"taker": taker, "maker": maker, "t": now}
+            for target in symbols if account_scope else [symbol]:
+                self.account[target] = {"taker": taker, "maker": maker, "t": now,
+                                        "scope": "account" if account_scope else "symbol"}
             self.error = ""
             return True
         except Exception:

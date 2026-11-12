@@ -98,6 +98,13 @@ def settlement_hours(trades, open_at_end, hours):
     return out
 
 
+def complete_report_hours(start, last_open):
+    """Only whole hours whose closing minute exists in every input symbol."""
+    first=((int(start)+3599)//3600)*3600
+    last_end=((int(last_open)+60)//3600)*3600
+    return [float(h)for h in range(first,last_end,3600)]
+
+
 def future_entries(txa, tea, ppa, now, count, cost, symbols=None):
     """Reference next-entry cohort from an exit-ordered tape.
 
@@ -197,6 +204,7 @@ def main() -> int:
     ap.add_argument("--stage-details", action="store_true", help="export each hourly last-N stage by type and TP range")
     ap.add_argument("--execution-cache", default="", help="trusted local detailed executed parents, for independent strategy comparisons")
     ap.add_argument("--axis-current", action="store_true", help="apply the overlay's Axis rules to every entry, as live")
+    ap.add_argument('--native-memory',action='store_true',help='use the original unpacked consumers as a reference')
     query_mode = ap.add_mutually_exclusive_group()
     query_mode.add_argument("--indexed-stage", dest="indexed_stage", action="store_true", default=True,
                            help="use exact causal prefix indexing (default); native fallback on context expiry")
@@ -239,6 +247,10 @@ def main() -> int:
             raise ValueError("replay inputs changed during cache generation")
         replay_cache.save(a.cache, shadow, manifest)
     shadow = sg.build_hold_auto(names, bars, times, shadow)      # hold Auto on: each Set's tape is the engine's own lane with the causally chosen hold
+    memory_accelerator=None
+    if not a.native_memory:
+        from compact_replay_memory import CompactMemory
+        memory_accelerator=CompactMemory(sg).install()
     from replay_storage import compact_shadow
     compact_shadow(shadow)
     held = sum(1 for k in shadow[names[0]][3] if isinstance(k, int) and k >= 0)       # Set entries only: key -1 holds the per-bar pause arrays, not a Set
@@ -255,7 +267,7 @@ def main() -> int:
     future_tapes = FutureEntryTapes(names, times, shadow, cf)
     start = max(times[s][0] for s in names) + book.lookback * 60
     end = min(times[s][-1] for s in names)
-    hours = [float(h) for h in range(((int(start) + 3599) // 3600) * 3600, int(end), 3600)]
+    hours = complete_report_hours(start,end)
     if not hours:
         raise ValueError("No complete report hour remains after prehistory")
     split = hours[len(hours) * 2 // 3]
@@ -376,6 +388,7 @@ def main() -> int:
                                 "gain": sr["gp"], "loss": sr["gl"]})
         print(f"evaluation {len(evals)}/{len(slots)} Base={int(hv['valid'])} Real={int(hv['executable'])}", flush=True)
     print(f"gate pass done [{time.time() - t0:.0f}s]", flush=True)
+    del auto  # release the completed reporting learner before execution creates its own
 
     coordinator = None
     if a.axis_current:
@@ -445,6 +458,10 @@ def main() -> int:
            "execution_axis": "overlay settings" if a.axis_current else "off (parent control)",
            "stage_query": stage_index.provenance() if stage_index else {"implementation": "native"},
            "start_utc": lo, "end_utc": hi, "replay_fingerprint": manifest,
+           'memory_storage':memory_accelerator.provenance() if memory_accelerator else {'implementation':'native unpacked reference'},
+           "data_coverage": {"common_last_open": end, "common_last_close": end+60,
+                             "complete_hour_end": hours[-1]+3600,
+                             "partial_tail_seconds": end+60-(hours[-1]+3600)},
            "hours": len(run_hours), "gate": {"window": book.gate_window, "short": book.base_short, "main_n": book.main_n, "min": book.gate_min, "min_pf": book.min_pf,
                                               "real_n": book.realst_n, "max_ddt_h": book.max_ddt_h, "lookback_bars": book.lookback},
            "config": {"honor_tp_trail": book.hist_honor_tp, "exit_sets": book.exit_sets, "time_bars": book.hist_time_bars,
