@@ -67,5 +67,6 @@ jobs:
           python3 scripts/test_strategy_switches.py
           python3 scripts/test_indexed_stage_query.py
           python3 scripts/test_parallel_native_replay.py
+          python3 scripts/test_indication_primitives.py
           python3 scripts/test_ported_indications.py
           node --experimental-strip-types --test shared/cts-indications/ported.test.ts shared/cts-volume/ratios.test.ts
