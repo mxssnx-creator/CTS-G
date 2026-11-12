@@ -204,12 +204,20 @@ def audit(run,credentials):
     comparisons=[];histories={}
     history_path=run/'native-position-history.json'
     old_histories=json.loads(history_path.read_text())if history_path.exists()else{}
+    def read_history(item):
+        pid,entry=item
+        reply=api.call('GET','/openApi/swap/v1/trade/positionHistory',
+            {'symbol':entry['symbol'],'positionId':pid,'startTs':start_ms,'endTs':end_ms,'pageSize':100})
+        return pid,reply
+    missing=[(pid,entry)for pid,entry in entries.items()if pid not in old_histories]
+    # Independent exact-ID reads share the native endpoint's 4/s nonbursting
+    # limiter. Network latency need not serialize every settled position.
+    with ThreadPoolExecutor(max_workers=4,thread_name_prefix='own-position-audit')as pool:
+        for pid,response in pool.map(read_history,missing):
+            old_histories[pid]=response
+            atomic_json(history_path,old_histories)
     for pid,entry in entries.items():
         response=old_histories.get(pid)
-        if response is None:
-            time.sleep(.25) # documented history endpoint: 5/s, no startup burst
-            response=api.call('GET','/openApi/swap/v1/trade/positionHistory',
-                {'symbol':entry['symbol'],'positionId':pid,'startTs':start_ms,'endTs':end_ms,'pageSize':100})
         if str(response.get('code'))!='0':raise ValueError('position history unavailable')
         histories[pid]=response
         data=response.get('data')or{}
