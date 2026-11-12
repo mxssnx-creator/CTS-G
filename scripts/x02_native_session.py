@@ -515,6 +515,18 @@ def cleanup(pulse, journal, seconds):
     pulse._hist_stop = True
     pulse._warm_stop = True
     unresolved = []
+    # A foreign position arriving during paused warmup is not session-owned exposure.
+    # With no journaled writes or local holdings there is no possible owned order to cancel or close.
+    if (hasattr(journal, 'intents') and not journal.intents and not journal.owned_clients
+            and not journal.owned_orders and not pulse.open and not any(journal.inventory.values())):
+        positions = checked_positions(pulse.api)
+        orders = rows(pulse.api, "/openApi/swap/v2/trade/openOrders", "orders")
+        selected = journal.symbols
+        selected_open = any(abs(float(p['positionAmt'])) > 1e-12 and (selected is None or p['symbol'] in selected) for p in positions)
+        return {"confirmedFlat": True, "scope": "owned session", "selectedScopeFlat": not selected_open,
+                "ordersSubmitted": 0, "unresolvedOrderIntents": 0,
+                "foreignPositionsPreserved": sum(abs(float(p['positionAmt'])) > 1e-12 for p in positions),
+                "foreignOrdersPreserved": len(orders)}
     while time.monotonic() < end:
         # A dispatched entry can become visible after its original reply was
         # lost. Recover only this native tag before attempting owned closes.
