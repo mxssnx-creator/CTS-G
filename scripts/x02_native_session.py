@@ -545,8 +545,14 @@ def cleanup(pulse, journal, seconds):
         # not yet added to the native local book and delayed protective orders.
         with journal.lock:
             intents = list(journal.intents)
-        from native_cleanup_evidence import terminal_intents
+        from native_cleanup_evidence import terminal_intents, resolve_bound_intents
         unresolved = terminal_intents(pulse.api, intents, end, order_bodies, getattr(journal, 'remember_order', None))
+        if time.monotonic() >= end:
+            break
+        with journal.lock:
+            bindings = dict(getattr(journal, 'order_bodies', {}))
+        unresolved = resolve_bound_intents(pulse.api, intents, unresolved, end, order_bodies,
+                                            bindings, getattr(journal, 'remember_order', None))
         if time.monotonic() >= end:
             break
         positions = checked_positions(pulse.api)

@@ -49,6 +49,14 @@ def _conf(base: float, extra: float, cap: float = 0.93) -> float:
 MEMO_CAP = 4096                 # entries of the per-thread memo before it is cleared (bars and single results; bounded memory)
 
 
+class _AggregatedBars(list):
+    """Owned, read-only indicator input; derived features share its lifetime."""
+    __slots__ = ('true_ranges',)
+    def __init__(self,values):
+        super().__init__(values)
+        self.true_ranges = None
+
+
 def _memo() -> Dict:
     m = getattr(_tls, "memo", None)
     if m is None or len(m) > MEMO_CAP:
@@ -89,15 +97,19 @@ def _agg(rows: Sequence[Row], tf: int) -> List[List[float]]:
             blk = rows[hi - tf : hi]
             out.append([float(blk[0][0]), max(float(b[1]) for b in blk), min(float(b[2]) for b in blk), float(blk[-1][3]),
                         sum(float(b[4]) for b in blk)])
+    out = _AggregatedBars(out)
     m[k] = (rows[0] if len(rows) else None, rows[-1] if len(rows) else None, out)
     return out
 
 
 def _tr(b: Sequence[Row]) -> List[float]:
+    if isinstance(b,_AggregatedBars) and b.true_ranges is not None:
+        return b.true_ranges
     out = [float(b[0][1]) - float(b[0][2])]
     for i in range(1, len(b)):
         h, lo, pc = float(b[i][1]), float(b[i][2]), float(b[i - 1][3])
         out.append(max(h - lo, abs(h - pc), abs(lo - pc)))
+    if isinstance(b,_AggregatedBars):b.true_ranges = out
     return out
 
 
