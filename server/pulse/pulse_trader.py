@@ -4727,6 +4727,7 @@ class Pulse:
             pos.entry_fee_usdt=entry_fee
             pos.base_entry_fee_usdt=entry_fee
             pos.entry=pos.base_entry=result['entry']
+            pos.notional=pos.qty*pos.entry
             pos.exit_fee_usdt=max(0.0,result['fees']-entry_fee)
             pos.exit_fee_qty=pos.qty
             pos.fee_source='reported-fee'
@@ -6985,12 +6986,7 @@ class Pulse:
             if self.close_from_venue(pos, "stale"):
                 self.cooldown[sym] = time.time() + 90.0
                 continue
-            log(f"DROP stale local {sym} age={age:.0f}s")
-            self.note_manual_close(pos, "stale local position gone from the venue")   # a manual close (no stop / target fill of ours): this symbol and direction rest, nothing else
-            self._exec_inc("dropped")       # left the book with no close record: counted, never lost
-            self.cancel_controls(sym, side=pos.side)
-            self.rounds_release(pos)
-            self.open.pop(sym, None)
+            self.drop_ghost(pos,'stale')
             self.cooldown[sym] = time.time() + 90.0
         self.ignored_foreign = len(foreign)
         ours_live = {k.split(":")[0] for k in live if k not in {x.split(":")[0] for x in foreign}}
