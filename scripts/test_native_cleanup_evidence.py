@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server/pulse'))
 import pulse_trader as pt
-from native_cleanup_evidence import terminal_intents, resolve_bound_intents
+from native_cleanup_evidence import terminal_intents, resolve_bound_intents, definite_refusal
 from x02_native_session import order_bodies
 
 
@@ -99,6 +99,16 @@ class CleanupEvidence(unittest.TestCase):
         uncertain={**intent,'response':{'code':109421,'msg':'order unavailable'}}
         self.assertEqual(terminal_intents(api,[uncertain],time.monotonic()+2,order_bodies),[body['clientOrderID']])
         self.assertEqual(len(calls),2)
+
+    def test_explicit_no_position_close_refusal_is_narrowly_identified(self):
+        rejected={'code':101205,'msg':'No position to close','data':{}}
+        self.assertTrue(definite_refusal(rejected))
+        for changed in [{'msg':'order unavailable'},{'error':True},{'data':{'orderId':'123'}},{'code':109421}]:
+            self.assertFalse(definite_refusal({**rejected,**changed}))
+        body,row,intent=self.fixture();calls=[]
+        api=SimpleNamespace(get=lambda *args:calls.append(args))
+        self.assertEqual(terminal_intents(api,[{**intent,'response':rejected}],time.monotonic()+2,order_bodies),[])
+        self.assertEqual(calls,[])
 
     def test_slow_placements_yield_and_all_eligible_entries_still_progress(self):
         p=pt.Pulse.__new__(pt.Pulse);p.halted=False;p.real_stage_paper=False
