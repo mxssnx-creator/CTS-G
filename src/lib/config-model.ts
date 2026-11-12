@@ -375,6 +375,8 @@ export type PulseOverlay = {
   shortRangeMinPf: number;
   /** Minimum initial SL = modeled round-trip cost + this net price percent. */
   minSlDistancePct: number;
+  microMinSlDistancePct: number;
+  microMinTrailDistancePct: number;
   /** Minimum trailing distance = PositionCost + trailMinSteps steps. */
   trailMinSteps: number;
   /** Smallest arm - give (percent) a trailing pair may have; pairs under it build no Set. 0 = every pair. */
@@ -703,6 +705,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   shortRangeStepMax: 6,
   shortRangeMinPf: 1.1,
   minSlDistancePct: protectionPolicy.minSlDistancePct.default,
+  microMinSlDistancePct: .1, microMinTrailDistancePct: .05,
   trailMinSteps: 2,
   trailMinLockPct: 0,
   groupGate: false,
@@ -969,6 +972,8 @@ export type CtsSettings = {
   shortRangeStepMax?: number;
   shortRangeMinPf?: number;
   minSlDistancePct?: number;
+  microMinSlDistancePct?: number;
+  microMinTrailDistancePct?: number;
   trailMinSteps?: number;
   trailMinLockPct?: number;
   groupGate?: boolean;
@@ -1483,6 +1488,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     shortRangeStepMax: num(cts.shortRangeStepMax, 6),
     shortRangeMinPf: pfFloor(num(cts.shortRangeMinPf, 1.1)),
     minSlDistancePct: Math.max(protectionPolicy.minSlDistancePct.min, Math.min(protectionPolicy.minSlDistancePct.max, num(cts.minSlDistancePct, protectionPolicy.minSlDistancePct.default))),
+    microMinSlDistancePct: Math.max(0, Math.min(10, num(cts.microMinSlDistancePct, .1))),
+    microMinTrailDistancePct: Math.max(0, Math.min(10, num(cts.microMinTrailDistancePct, .05))),
     trailMinSteps: num(cts.trailMinSteps, 2),
     trailMinLockPct: Math.max(0, Math.min(3, num(cts.trailMinLockPct, 0))),
     groupGate: bool(cts.groupGate, false),

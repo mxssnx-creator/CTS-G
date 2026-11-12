@@ -6435,6 +6435,9 @@ class Pulse:
             ranked = sorted(ranked, key=_min_n)
         placed = 0
         skipped = 0
+        # Yield between slow synchronous venue placements so the next cycle can
+        # manage held positions. Eligible candidates remain available next cycle.
+        entry_deadline = time.monotonic() + max(0.05, SCAN_S)
         for conf, s, d, why in ranked:
             if self.entries_blocked():
                 break
@@ -6451,7 +6454,8 @@ class Pulse:
             burst = 16 if MAX_OPEN <= 0 else 6  # unlimited: no order-count throttle
             if room < 8:
                 burst = 1
-            if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
+            if (time.monotonic() >= entry_deadline or placed >= burst
+                    or (slot_cap > 0 and len(self.open) >= slot_cap)):
                 break
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
